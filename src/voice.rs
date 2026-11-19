@@ -11,10 +11,18 @@ pub enum CloudProvider {
 
 impl CloudProvider {
     pub fn as_str(self) -> &'static str {
-        match self { Self::Openai => "openai", Self::Xai => "xai", Self::Openrouter => "openrouter" }
+        match self {
+            Self::Openai => "openai",
+            Self::Xai => "xai",
+            Self::Openrouter => "openrouter",
+        }
     }
     pub fn display_name(self) -> &'static str {
-        match self { Self::Openai => "OpenAI", Self::Xai => "Grok Voice Transcribe", Self::Openrouter => "OpenRouter" }
+        match self {
+            Self::Openai => "OpenAI",
+            Self::Xai => "Grok Voice Transcribe",
+            Self::Openrouter => "OpenRouter",
+        }
     }
 }
 
@@ -26,7 +34,10 @@ pub struct VoiceService {
 
 impl VoiceService {
     pub fn new() -> Self {
-        Self { keys: [false, false, false], models: Vec::new() }
+        Self {
+            keys: [false, false, false],
+            models: Vec::new(),
+        }
     }
     pub fn set_key_configured(&mut self, provider: CloudProvider, configured: bool) {
         self.keys[index(provider)] = configured;
@@ -40,7 +51,11 @@ impl VoiceService {
     pub fn cloud_models(&self) -> Value {
         json!({"models":self.models.iter().map(|(id,name)| json!({"id":id,"name":name})).collect::<Vec<_>>()})
     }
-    pub fn validate_provider_model(&self, provider: CloudProvider, model: Option<&str>) -> Result<(), Value> {
+    pub fn validate_provider_model(
+        &self,
+        provider: CloudProvider,
+        model: Option<&str>,
+    ) -> Result<(), Value> {
         if !self.keys[index(provider)] {
             return Err(cloud_error(provider, "missing-key"));
         }
@@ -66,25 +81,72 @@ impl VoiceService {
     }
 }
 
-fn index(provider: CloudProvider) -> usize { match provider { CloudProvider::Openai => 0, CloudProvider::Xai => 1, CloudProvider::Openrouter => 2 } }
+fn index(provider: CloudProvider) -> usize {
+    match provider {
+        CloudProvider::Openai => 0,
+        CloudProvider::Xai => 1,
+        CloudProvider::Openrouter => 2,
+    }
+}
 
 fn cloud_error(provider: CloudProvider, reason: &str) -> Value {
     let message = match reason {
-        "missing-key" => format!("Add your {} API key in Settings → Voice.", provider.display_name()),
-        "model-unavailable" => format!("The chosen model isn’t available on {}. Choose another model in Settings → Voice.", provider.display_name()),
-        "unavailable" => format!("{} couldn’t transcribe this recording. Try again later.", provider.display_name()),
+        "missing-key" => format!(
+            "Add your {} API key in Settings → Voice.",
+            provider.display_name()
+        ),
+        "model-unavailable" => format!(
+            "The chosen model isn’t available on {}. Choose another model in Settings → Voice.",
+            provider.display_name()
+        ),
+        "unavailable" => format!(
+            "{} couldn’t transcribe this recording. Try again later.",
+            provider.display_name()
+        ),
         _ => format!("{} speech request failed.", provider.display_name()),
     };
     json!({"_tag":"CloudSpeechError","provider":provider.as_str(),"reason":reason,"message":message})
 }
 
 fn remove_word(input: &str, word: &str) -> String {
-    input.split_whitespace().filter(|part| part.trim_matches(|c: char| !c.is_alphanumeric()).eq_ignore_ascii_case(word)).fold(String::new(), |mut output, part| { if !output.is_empty() { output.push(' '); } if !part.trim_matches(|c: char| !c.is_alphanumeric()).eq_ignore_ascii_case(word) { output.push_str(part); } output })
+    input
+        .split_whitespace()
+        .filter(|part| {
+            !part
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .eq_ignore_ascii_case(word)
+        })
+        .fold(String::new(), |mut output, part| {
+            if !output.is_empty() {
+                output.push(' ');
+            }
+            if !part
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .eq_ignore_ascii_case(word)
+            {
+                output.push_str(part);
+            }
+            output
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn reports_missing_key() { let service = VoiceService::new(); let error = service.validate_provider_model(CloudProvider::Openai, None).unwrap_err(); assert_eq!(error["reason"], "missing-key"); }
-    #[test] fn filters_fillers_and_custom_words() { let service = VoiceService::new(); assert_eq!(service.post_process("um hello, uh world", &["world".into()]), "hello,"); }
+    #[test]
+    fn reports_missing_key() {
+        let service = VoiceService::new();
+        let error = service
+            .validate_provider_model(CloudProvider::Openai, None)
+            .unwrap_err();
+        assert_eq!(error["reason"], "missing-key");
+    }
+    #[test]
+    fn filters_fillers_and_custom_words() {
+        let service = VoiceService::new();
+        assert_eq!(
+            service.post_process("um hello, uh world", &["world".into()]),
+            "hello,"
+        );
+    }
 }
