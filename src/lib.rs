@@ -386,6 +386,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/ws", get(websocket))
         .fallback(any(contract_fallback))
+        .layer(axum::middleware::from_fn(access_http::contextualize))
         .with_state(state)
 }
 
@@ -814,8 +815,26 @@ pub fn trace_id(headers: &HeaderMap) -> String {
 }
 pub fn auth_error(headers: &HeaderMap, reason: &str) -> Response {
     let trace_id = trace_id(headers);
-    (StatusCode::UNAUTHORIZED, [("vary","Accept-Encoding"),("access-control-allow-origin","*")],
-        Json(serde_json::json!({"_tag":"EnvironmentAuthInvalidError","code":"auth_invalid","reason":reason,"traceId":trace_id}))).into_response()
+    let mut body = serde_json::json!({"_tag":"EnvironmentAuthInvalidError","code":"auth_invalid","reason":if access_http::proof_failure(reason){"invalid_credential"}else{reason}});
+    if access_http::proof_failure(reason) {
+        body["dpopFailureReason"] = serde_json::json!(reason);
+    }
+    body["traceId"] = serde_json::json!(trace_id);
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        [
+            ("vary", "Accept-Encoding"),
+            ("access-control-allow-origin", "*"),
+        ],
+        Json(body),
+    )
+        .into_response();
+    if access_http::uses_proof(headers) {
+        response
+            .headers_mut()
+            .insert("www-authenticate", "DPoP".parse().unwrap());
+    }
+    response
 }
 
 async fn require_session(
@@ -865,10 +884,7 @@ pub async fn authorize_upgrade(
         .last()
         .map(|(_, value)| value);
     if let Some(ticket) = ticket.filter(|v| !v.trim().is_empty()) {
-        state
-            .auth
-            .ticket_principal(&ticket, audience)
-            .ok_or("invalid_credential")
+        access_http::authenticate_ticket(state, headers, uri, &ticket, audience)
     } else {
         access_http::principal(state, headers)
     }

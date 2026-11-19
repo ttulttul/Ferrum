@@ -528,16 +528,42 @@ async fn signed_request(state: &Arc<AppState>, input: &Value, health: bool) -> R
             internal()
         };
     }
-    if !health {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not issue cloud connection credential.",
-        );
-    }
     let key = match service.key() {
         Some(k) => k,
         None => return internal(),
     };
+    if !health {
+        let settings = match tokio::fs::read(state.data_dir.join("settings.json")).await {
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(v) => v,
+                Err(_) => return internal(),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+            Err(_) => return internal(),
+        };
+        let binding = v["clientProofKeyThumbprint"]
+            .as_str()
+            .expect("validated thumbprint");
+        let Ok((credential, expiry)) = state.auth.issue_connect(
+            binding,
+            settings["requireConnectDeviceApproval"]
+                .as_bool()
+                .unwrap_or(false),
+        ) else {
+            return internal();
+        };
+        let id = &state.environment_id;
+        let jwt = sign(
+            &key,
+            "t3-env-mint+jwt",
+            json!({"iss":aud,"aud":c.issuer(),"sub":id,"jti":Uuid::new_v4(),"iat":at,"exp":expiry/1000,"environmentId":id,"clientProofKeyThumbprint":binding,"requestNonce":nonce,"credential":credential}),
+        );
+        return (
+            SECRET_HEADERS,
+            Json(json!({"credential":credential,"expiresAt":iso(expiry),"proof":jwt})),
+        )
+            .into_response();
+    }
     let Json(descriptor) = environment_http::descriptor(State(state.clone())).await;
     let checked = iso(now());
     let id = &state.environment_id;

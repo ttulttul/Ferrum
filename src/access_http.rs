@@ -16,7 +16,9 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 
 pub(crate) mod connect;
+mod dpop;
 mod guest;
+pub(crate) use dpop::{contextualize, reason as proof_failure, uses_proof};
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .merge(guest::routes())
@@ -56,14 +58,32 @@ fn credential<'a>(state: &AppState, h: &'a HeaderMap) -> Result<&'a str, &'stati
                 return Err("invalid_credential");
             }
         }
+        if state
+            .auth
+            .principal(token)
+            .is_some_and(|s| s.proof_key.is_some())
+        {
+            return Err("invalid_proof");
+        }
         return Ok(token);
     }
     let authorization = header(h, "authorization").ok_or("missing_credential")?;
     let (scheme, value) = authorization.split_once(' ').ok_or("missing_credential")?;
     if scheme.eq_ignore_ascii_case("DPoP") {
-        return Err("invalid_credential");
+        let t = value.trim();
+        let holder = state.auth.principal(t).ok_or("invalid_credential")?;
+        let binding = holder.proof_key.as_deref().ok_or("invalid_proof")?;
+        dpop::authenticate(&state.auth, header(h, "dpop").unwrap_or(""), binding, t)?;
+        return Ok(t);
     }
     if scheme.eq_ignore_ascii_case("Bearer") && !value.trim().is_empty() {
+        if state
+            .auth
+            .principal(value.trim())
+            .is_some_and(|s| s.proof_key.is_some())
+        {
+            return Err("invalid_proof");
+        }
         Ok(value.trim())
     } else {
         Err("missing_credential")
@@ -92,6 +112,9 @@ pub fn scope_error(headers: &HeaderMap, scope: &str) -> Response {
     (StatusCode::FORBIDDEN,Json(json!({"_tag":"EnvironmentScopeRequiredError","code":"insufficient_scope","requiredScope":legacy,"requiredPermission":scope,"traceId":trace_id(headers)}))).into_response()
 }
 fn auth_failure(h: &HeaderMap, e: &str) -> Response {
+    if e == "connect_approval_pending" {
+        return (StatusCode::FORBIDDEN,Json(json!({"_tag":"EnvironmentConnectApprovalPendingError","code":e,"traceId":trace_id(h)}))).into_response();
+    }
     let (status, tag, code) = match e {
         "invalid_scope" => (
             StatusCode::BAD_REQUEST,
@@ -168,12 +191,6 @@ async fn exchange(
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    if h.contains_key("dpop") || field("subject_token_type") == ACCESS {
-        let mut r = auth_error(&h, "invalid_credential");
-        r.headers_mut()
-            .insert("www-authenticate", "DPoP".parse().unwrap());
-        return r;
-    }
     let scopes = input
         .get("scope")
         .map(|v| v.split_whitespace().map(str::to_owned).collect::<Vec<_>>());
@@ -182,7 +199,23 @@ async fn exchange(
     }) {
         return auth_failure(&h, "invalid_scope");
     }
-    match s.auth.exchange(field("subject_token"), scopes) {
+    let renew = field("subject_token_type") == ACCESS;
+    let result = if let Some(token) = header(&h, "dpop") {
+        match dpop::check(token, None) {
+            Ok(checked) => s
+                .auth
+                .exchange_bound(field("subject_token"), scopes, &checked, renew),
+            Err(e) => return auth_failure(&h, e),
+        }
+    } else if renew {
+        let mut r = auth_error(&h, "invalid_credential");
+        r.headers_mut()
+            .insert("www-authenticate", "DPoP".parse().unwrap());
+        return r;
+    } else {
+        s.auth.exchange(field("subject_token"), scopes)
+    };
+    match result {
         Ok(v) => (SECRET_HEADERS, Json(v)).into_response(),
         Err(e) => auth_failure(&h, e),
     }
@@ -195,8 +228,8 @@ async fn ticket_for(
     h: HeaderMap,
     Path(kind): Path<String>,
 ) -> Response {
-    if principal(&s, &h).is_err() {
-        return auth_error(&h, credential(&s, &h).err().unwrap_or("invalid_credential"));
+    if let Err(e) = principal(&s, &h) {
+        return auth_error(&h, e);
     }
     if !matches!(kind.as_str(), "rpc" | "media") {
         return StatusCode::BAD_REQUEST.into_response();
@@ -255,16 +288,36 @@ async fn admin(State(state): State<Arc<AppState>>, req: Request) -> Response {
                 .map(|v| json!({"revoked":v})),
             None => return StatusCode::BAD_REQUEST.into_response(),
         },
-        "/api/auth/connect-devices/approve" if field("pairingLinkId").is_some() => {
-            Ok(json!({"approved":false}))
-        }
-        "/api/auth/connect-devices/revoke" if field("proofKeyThumbprint").is_some() => {
-            Ok(json!({"revoked":false}))
-        }
+        "/api/auth/connect-devices/approve" => match field("pairingLinkId") {
+            Some(id) => state.auth.approve_device(id).map(|v| json!({"approved":v})),
+            None => return StatusCode::BAD_REQUEST.into_response(),
+        },
+        "/api/auth/connect-devices/revoke" => match field("proofKeyThumbprint") {
+            Some(id) => state.auth.revoke_device(id).map(|v| json!({"revoked":v})),
+            None => return StatusCode::BAD_REQUEST.into_response(),
+        },
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
     match result {
         Ok(v) => Json(v).into_response(),
         Err(e) => auth_failure(&parts.headers, e),
     }
+}
+
+pub(crate) fn authenticate_ticket(
+    s: &AppState,
+    h: &HeaderMap,
+    uri: &axum::http::Uri,
+    ticket: &str,
+    kind: &str,
+) -> Result<Session, &'static str> {
+    s.auth.check_ticket(ticket, kind, |binding| {
+        let query = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
+            .find(|(k, _)| k == "dpop")
+            .map(|(_, v)| v);
+        let proof = header(h, "dpop")
+            .or(query.as_deref())
+            .ok_or("invalid_proof")?;
+        dpop::authenticate(&s.auth, proof, binding, ticket)
+    })
 }

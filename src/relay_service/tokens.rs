@@ -110,58 +110,76 @@ impl RelayService {
         path: &str,
         binding: Option<(&str, &str)>,
     ) -> Result<String, &'static str> {
-        let invalid = "invalid_proof";
-        let header = decode_header(token).map_err(|_| invalid)?;
-        if header.typ.as_deref() != Some("dpop+jwt") || header.alg != Algorithm::ES256 {
-            return Err(invalid);
-        }
-        let raw = segment(token, 0).ok_or(invalid)?;
-        let k = &raw["jwk"];
-        if k["kty"] != "EC" || k["crv"] != "P-256" || k.get("d").is_some() {
-            return Err(invalid);
-        }
-        let (x, y) = (field(k, "x").ok_or(invalid)?, field(k, "y").ok_or(invalid)?);
-        for component in [x, y] {
-            if URL_SAFE_NO_PAD
-                .decode(component)
-                .map_err(|_| invalid)?
-                .len()
-                != 32
-            {
-                return Err(invalid);
-            }
-        }
-        let thumb = hash(&json!({"crv":"P-256","kty":"EC","x":x,"y":y}).to_string());
-        let key = DecodingKey::from_ec_components(x, y).map_err(|_| invalid)?;
-        let mut val = Validation::new(Algorithm::ES256);
-        val.required_spec_claims.clear();
-        val.validate_exp = false;
-        val.validate_aud = false;
-        let claims = decode::<Value>(token, &key, &val)
-            .map_err(|_| invalid)?
-            .claims;
-        let jti = field(&claims, "jti").ok_or(invalid)?;
-        let iat = claims["iat"].as_i64().ok_or(invalid)?;
-        if !field(&claims, "htm").is_some_and(|m| m.eq_ignore_ascii_case(method))
-            || claims["htu"] != format!("{}{path}", self.issuer)
-        {
-            return Err("request_mismatch");
-        }
-        if let Some((expected, access)) = binding {
-            if thumb != expected {
-                return Err("key_mismatch");
-            }
-            if claims["ath"] != hash(access) {
-                return Err("token_mismatch");
-            }
-        }
-        if OffsetDateTime::now_utc().unix_timestamp().abs_diff(iat) > 300 {
-            return Err("time_window");
-        }
-        match self.consume(&thumb, jti, iat + 301) {
-            Ok(true) => Ok(thumb),
+        let checked = verify_proof(token, method, &format!("{}{path}", self.issuer), binding)?;
+        match self.consume(&checked.thumbprint, &checked.jti, checked.expires) {
+            Ok(true) => Ok(checked.thumbprint),
             Ok(false) => Err("replay"),
             Err(_) => Err("persistence_failed"),
         }
     }
+}
+pub(crate) struct CheckedProof {
+    pub thumbprint: String,
+    pub jti: String,
+    pub expires: i64,
+}
+pub(crate) fn verify_proof(
+    token: &str,
+    method: &str,
+    url: &str,
+    binding: Option<(&str, &str)>,
+) -> Result<CheckedProof, &'static str> {
+    let invalid = "invalid_proof";
+    let header = decode_header(token).map_err(|_| invalid)?;
+    if header.typ.as_deref() != Some("dpop+jwt") || header.alg != Algorithm::ES256 {
+        return Err(invalid);
+    }
+    let raw = segment(token, 0).ok_or(invalid)?;
+    let k = &raw["jwk"];
+    if k["kty"] != "EC" || k["crv"] != "P-256" || k.get("d").is_some() {
+        return Err(invalid);
+    }
+    let (x, y) = (field(k, "x").ok_or(invalid)?, field(k, "y").ok_or(invalid)?);
+    for component in [x, y] {
+        if URL_SAFE_NO_PAD
+            .decode(component)
+            .map_err(|_| invalid)?
+            .len()
+            != 32
+        {
+            return Err(invalid);
+        }
+    }
+    let thumb = hash(&json!({"crv":"P-256","kty":"EC","x":x,"y":y}).to_string());
+    let key = DecodingKey::from_ec_components(x, y).map_err(|_| invalid)?;
+    let mut val = Validation::new(Algorithm::ES256);
+    val.required_spec_claims.clear();
+    val.validate_exp = false;
+    val.validate_aud = false;
+    let claims = decode::<Value>(token, &key, &val)
+        .map_err(|_| invalid)?
+        .claims;
+    let jti = field(&claims, "jti").ok_or(invalid)?;
+    let iat = claims["iat"].as_i64().ok_or(invalid)?;
+    if !field(&claims, "htm").is_some_and(|m| m.eq_ignore_ascii_case(method))
+        || claims["htu"] != url
+    {
+        return Err("request_mismatch");
+    }
+    if let Some((expected, access)) = binding {
+        if thumb != expected {
+            return Err("key_mismatch");
+        }
+        if claims["ath"] != hash(access) {
+            return Err("token_mismatch");
+        }
+    }
+    if OffsetDateTime::now_utc().unix_timestamp().abs_diff(iat) > 300 {
+        return Err("time_window");
+    }
+    Ok(CheckedProof {
+        thumbprint: thumb,
+        jti: jti.to_owned(),
+        expires: iat.saturating_add(301),
+    })
 }

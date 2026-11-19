@@ -1,3 +1,4 @@
+mod connect;
 pub(crate) mod permissions;
 pub(crate) mod storage;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -82,6 +83,12 @@ pub struct Session {
     pub method: String,
     pub expires: i64,
     pub owner: bool,
+    #[serde(default)]
+    pub proof_key: Option<String>,
+    #[serde(default)]
+    renewable_until: Option<i64>,
+    #[serde(default)]
+    connect: bool,
 }
 impl Session {
     pub fn has(&self, scope: &str) -> bool {
@@ -103,10 +110,18 @@ struct Grant {
     expires: i64,
     purpose: Option<String>,
     access: Option<String>,
+    #[serde(default)]
+    binding: Option<String>,
+    #[serde(default)]
+    pending_code: Option<String>,
 }
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct Credentials {
     sessions: HashMap<String, Session>,
+    #[serde(default)]
+    devices: std::collections::HashSet<String>,
+    #[serde(default)]
+    used_proofs: HashMap<String, i64>,
     links: HashMap<String, Grant>,
     #[serde(default)]
     signing_key: Option<[u8; 32]>,
@@ -170,23 +185,19 @@ impl AuthService {
     pub async fn invalidated(&self, session: &Session) {
         let mut changes = self.invalidations.subscribe();
         loop {
-            let active = self.records.read(|r| {
+            let expiry = self.records.read(|r| {
                 r.sessions
                     .values()
-                    .any(|s| s.id == session.id && s.expires > now())
+                    .filter(|s| s.id == session.id)
+                    .map(|s| s.expires)
+                    .max()
             });
-            if !active {
+            let at = now();
+            let Some(expires) = expiry.filter(|t| *t > at) else {
                 return;
-            }
-            let until_expiry = std::time::Duration::from_millis(
-                session.expires.saturating_sub(now()).max(0) as u64,
-            );
-            if tokio::time::timeout(until_expiry, changes.changed())
-                .await
-                .is_err()
-            {
-                return;
-            }
+            };
+            let timeout = std::time::Duration::from_millis((expires - at) as u64);
+            let _ = tokio::time::timeout(timeout, changes.changed()).await;
         }
     }
     pub fn principal(&self, token: &str) -> Option<Session> {
@@ -215,14 +226,14 @@ impl AuthService {
         &self,
         credential: &str,
     ) -> Result<(Value, String), &'static str> {
-        self.issue(credential, BROWSER, None, None)
+        self.issue(credential, BROWSER, None, None, None)
     }
     pub fn browser_session(
         &self,
         credential: &str,
         previous: Option<&str>,
     ) -> Result<(Value, String), &'static str> {
-        self.issue(credential, BROWSER, None, previous)
+        self.issue(credential, BROWSER, None, previous, None)
     }
     fn issue(
         &self,
@@ -230,37 +241,62 @@ impl AuthService {
         method: &str,
         requested: Option<Vec<String>>,
         replace: Option<&str>,
+        proof: Option<&str>,
     ) -> Result<(Value, String), &'static str> {
         let at = now();
         let owner = !credential.is_empty()
             && self.bootstrap_expires > at
             && key(&self.bootstrap) == key(credential);
-        let result=self.records.update(|records| {
+        let result = self.records.update(|records| {
+            let mut connect = false;
             let mut permissions = if owner {
-                STANDARD.iter().map(|s|s.to_string()).collect()
+                STANDARD.iter().map(|s| s.to_string()).collect()
             } else {
-                records.links.remove(&key(&credential.to_ascii_uppercase()))
-                    .filter(|g|g.expires>at && g.purpose.is_none() && g.access.is_none())
-                    .ok_or("invalid_credential")?.scopes
+                let grant = records
+                    .links
+                    .remove(&key(&credential.to_ascii_uppercase()))
+                    .filter(|g| g.expires > at && g.purpose.is_none() && g.access.is_none())
+                    .ok_or("invalid_credential")?;
+                if let Some(binding) = &grant.binding {
+                    if Some(binding.as_str()) != proof {
+                        return Err("invalid_credential");
+                    }
+                    if grant.pending_code.is_some() && !records.devices.contains(binding) {
+                        return Err("connect_approval_pending");
+                    }
+                    records.devices.insert(binding.clone());
+                    connect = true;
+                }
+                grant.scopes
             };
-            if let Some(requested)=requested {
-                if requested.is_empty() || requested.iter().any(|s|!permissions.contains(s)){return Err("invalid_scope")}
-                permissions=requested;
+            if let Some(requested) = requested {
+                if requested.is_empty() || requested.iter().any(|s| !permissions.contains(s)) {
+                    return Err("invalid_scope");
+                }
+                permissions = requested;
             }
-            let session=Session {
-                id:Uuid::new_v4().to_string(), owner, method:method.into(), expires:at+30*DAY, permissions
+            let ttl = if proof.is_some() { 3_600_000 } else { 30 * DAY };
+            let session = Session {
+                id: Uuid::new_v4().to_string(),
+                owner,
+                method: method.into(),
+                expires: at + ttl,
+                permissions,
+                proof_key: proof.map(str::to_owned),
+                renewable_until: (proof.is_some() && !connect && !owner).then_some(at + 30 * DAY),
+                connect,
             };
-            if let Some(previous)=replace {
-                let k=key(previous);
-                if records.sessions.get(&k).is_some_and(|s|s.method==BROWSER){records.sessions.remove(&k);}
+            if let Some(previous) = replace {
+                let k = key(previous);
+                if records
+                    .sessions
+                    .get(&k)
+                    .is_some_and(|s| s.method == BROWSER)
+                {
+                    records.sessions.remove(&k);
+                }
             }
-            let claims=json!({"v":1,"kind":"session","sid":session.id,"sub":if owner{"desktop-bootstrap"}else{"one-time-token"},"scopes":session.permissions,"method":method,"iat":at,"exp":session.expires});
-            let token=signed(records.signing_key.get_or_insert_with(random_key),&claims);
-            let response=if method==BROWSER {session.metadata()}else{
-                json!({"access_token":token,"issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":30*86400,"scope":session.permissions.join(" ")})
-            };
-            records.sessions.insert(key(&token),session);
-            Ok((response,token))
+            Ok(Self::save_session(records, session, at))
         });
         if replace.is_some() && result.is_ok() {
             self.invalidations.send_replace(());
@@ -293,7 +329,8 @@ impl AuthService {
                 ],
                 _ => return Err("insufficient_scope"),
             };
-            if grant.purpose.as_deref().is_some_and(|_| !peer_link)
+            if grant.binding.is_some()
+                || grant.purpose.as_deref().is_some_and(|_| !peer_link)
                 || (grant.access.is_some() && grant.purpose.is_none() && peer_link)
                 || grant.access.as_deref().is_some_and(|bound| bound != access)
                 || needed
@@ -312,7 +349,8 @@ impl AuthService {
         credential: &str,
         requested: Option<Vec<String>>,
     ) -> Result<Value, &'static str> {
-        self.issue(credential, BEARER, requested, None).map(|v| v.0)
+        self.issue(credential, BEARER, requested, None, None)
+            .map(|v| v.0)
     }
     pub fn pair(&self, session: &Session, input: &Value) -> Result<Value, &'static str> {
         let access = input
@@ -401,6 +439,8 @@ impl AuthService {
                     scopes: permissions,
                     purpose: purpose.map(String::from),
                     access: access.map(String::from),
+                    binding: None,
+                    pending_code: None,
                 },
             );
             Ok(response)
@@ -419,6 +459,14 @@ impl AuthService {
         }
         let result = self.records.update(|r| {
             let n = r.sessions.len();
+            let bound = r
+                .sessions
+                .values()
+                .find(|s| s.id == id)
+                .and_then(|s| s.proof_key.clone());
+            if let Some(bound) = bound.filter(|b| Some(b) != current.proof_key.as_ref()) {
+                Self::remove_device(r, &bound);
+            }
             r.sessions.retain(|_, s| s.id != id);
             Ok(n != r.sessions.len())
         });
@@ -427,23 +475,27 @@ impl AuthService {
     }
     pub fn revoke_others(&self, current: &Session) -> Result<usize, &'static str> {
         let result = self.records.update(|r| {
-            let mut n = 0;
+            let mut n = std::collections::HashSet::new();
+            r.devices
+                .retain(|key| Some(key) == current.proof_key.as_ref());
+            r.links
+                .retain(|_, g| g.binding.is_none() || g.binding == current.proof_key);
             r.sessions.retain(|_, s| {
                 if s.id == current.id {
                     return true;
                 }
                 if s.expires > now() {
-                    n += 1
+                    n.insert(s.id.clone());
                 }
                 false
             });
-            Ok(n)
+            Ok(n.len())
         });
         self.invalidations.send_replace(());
         result
     }
     pub async fn authenticate_bearer(&self, token: &str) -> bool {
-        self.principal(token).is_some()
+        self.principal(token).is_some_and(|s| s.proof_key.is_none())
     }
     pub async fn revoke_session(&self, token: &str) -> bool {
         let result = self
@@ -487,21 +539,37 @@ impl AuthService {
         Ok(json!({"ticket":ticket,"expiresAt":iso(expires)}))
     }
     pub fn ticket_principal(&self, token: &str, kind: &str) -> Option<Session> {
+        self.check_ticket(token, kind, |_| Err("invalid_credential"))
+            .ok()
+    }
+    pub(crate) fn check_ticket(
+        &self,
+        token: &str,
+        kind: &str,
+        validate: impl FnOnce(&str) -> Result<(), &'static str>,
+    ) -> Result<Session, &'static str> {
         let k = key(token);
         let mut tickets = self.tickets.lock().unwrap();
         let t = tickets
             .get(&k)
-            .filter(|t| t.expires > now() && (t.audience == "any" || t.audience == kind))?;
+            .filter(|t| t.expires > now() && (t.audience == "any" || t.audience == kind))
+            .ok_or("invalid_credential")?;
         let s = self.records.read(|r| {
             r.sessions
                 .get(&t.session)
                 .filter(|s| s.expires > now())
                 .cloned()
         });
+        let session = s.ok_or("invalid_credential")?;
+        if t.audience == "rpc" {
+            if let Some(binding) = session.proof_key.as_deref() {
+                validate(binding)?;
+            }
+        }
         if kind == "rpc" {
             tickets.remove(&k);
         }
-        s
+        Ok(session)
     }
     pub async fn consume_ticket(&self, token: &str, kind: &str) -> bool {
         self.ticket_principal(token, kind)

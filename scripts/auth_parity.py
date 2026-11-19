@@ -3,19 +3,23 @@
 import argparse
 import base64
 from contextlib import ExitStack
+import hashlib
 import json
 from pathlib import Path
 import secrets
 import shlex
 import tempfile
 import time
-from urllib.parse import quote, urlsplit
+import uuid
+from urllib.parse import quote, urlencode, urlsplit
 
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from websockets.sync.client import connect
 
 import parity_harness as harness
+from relay_parity import b64 as base64url, token as signed_jwt
 
 
 def exercise(stack, url, owner_cookie, relay_key):
@@ -87,6 +91,67 @@ def exercise(stack, url, owner_cookie, relay_key):
     assert result["requestNonce"] == "health-nonce" and health["status"] == "online"
     assert result["environmentId"] == env_id and result["checkedAt"] == health["checkedAt"]
     record("reject replayed health proof", post("/api/t3-connect/health", proof, ""))
+    device = ec.generate_private_key(ec.SECP256R1())
+    coords = device.public_key().public_numbers()
+    jwk = {"crv":"P-256","kty":"EC","x":base64url(coords.x.to_bytes(32,"big")),"y":base64url(coords.y.to_bytes(32,"big"))}
+    thumb = base64url(hashlib.sha256(harness.encode(jwk)).digest())
+    mint = signed_jwt(relay_key, {"alg":"EdDSA","typ":"t3-cloud-mint+jwt"}, {
+        **claims, "scope":["environment:connect"],"clientProofKeyThumbprint":thumb,"cnf":{"jkt":thumb}})
+    status, _, data = post("/api/t3-connect/mint-credential", {"proof":mint}, "")
+    assert status == 200, data
+    issued = json.loads(data)
+    result, message, signature = jwt_parts(issued["proof"])
+    environment_key.verify(signature, message)
+    grant = issued["credential"]
+    assert result["credential"] == grant and result["clientProofKeyThumbprint"] == thumb
+    def device_proof(method, path, access=None):
+        claims = {"htm":method,"htu":url+path,"jti":str(uuid.uuid4()),"iat":int(time.time())}
+        if access:
+            claims["ath"]=base64url(hashlib.sha256(access.encode()).digest())
+        return signed_jwt(device, {"alg":"ES256","typ":"dpop+jwt","jwk":jwk}, claims)
+
+    access_type = "urn:ietf:params:oauth:token-type:access_token"
+    bootstrap_type = "urn:t3:params:oauth:token-type:environment-bootstrap"
+    def exchange(credential, kind, proof=None):
+        headers={"content-type":"application/x-www-form-urlencoded","traceparent":harness.TRACE}
+        if proof:
+            headers["dpop"]=proof
+        return harness.http(url, "POST", "/oauth/token", urlencode({
+            "grant_type":"urn:ietf:params:oauth:grant-type:token-exchange",
+            "subject_token":credential, "subject_token_type":kind, "requested_token_type":access_type
+        }).encode(), headers)
+    record("bound Connect grant refuses browser bootstrap",post("/api/auth/browser-session",{"credential":grant},""))
+    record("bound Connect grant refuses bearer exchange",exchange(grant,bootstrap_type))
+    status, _, data = exchange(grant,bootstrap_type,device_proof("POST","/oauth/token"))
+    assert status == 200 and json.loads(data)["token_type"]=="DPoP", data
+    access = json.loads(data)["access_token"]
+    def protected(method, path, proof, scheme="DPoP"):
+        return harness.http(url,method,path,headers={"authorization":scheme+" "+access,
+            "dpop":proof,"traceparent":harness.TRACE})
+    path = "/api/auth/websocket-ticket/rpc"
+    record("DPoP session refuses Bearer presentation",protected("POST",path,device_proof("POST",path,access),"Bearer"))
+    record("DPoP token hash is mandatory",protected("POST",path,device_proof("POST",path)))
+    record("DPoP proof URL must match",protected("POST",path,device_proof("POST","/different",access)))
+    proof_header = device_proof("POST",path,access)
+    status, _, data = protected("POST",path,proof_header)
+    assert status == 200, data
+    rpc_ticket = json.loads(data)["ticket"]
+    ws_query = urlencode({"orchestrationProtocol":"2","wsTicket":rpc_ticket,"dpop":device_proof("GET","/ws",rpc_ticket)})
+    with connect(url.replace("http:","ws:")+"/ws?"+ws_query, compression=None, proxy=None) as sock:
+        sock.send(harness.encode({"_tag":"Request","id":"bound","tag":"server.probe","payload":{},"headers":[]}).decode())
+        observations["bound DPoP RPC probe"] = sock.recv(timeout=5)
+    record("refuse replay of authenticated HTTP proof",protected("POST",path,proof_header))
+    record("Connect session cannot renew",exchange(access,access_type,device_proof("POST","/oauth/token")))
+    record("revoke trusted Connect device",post("/api/auth/connect-devices/revoke",{"proofKeyThumbprint":thumb}))
+    record("revoked Connect access token",protected("POST",path,device_proof("POST",path,access)))
+    status, _, data = exchange(issue(),bootstrap_type,device_proof("POST","/oauth/token"))
+    assert status == 200, data
+    access = json.loads(data)["access_token"]
+    renew_proof = device_proof("POST","/oauth/token")
+    status, _, data = exchange(access,access_type,renew_proof)
+    assert status == 200 and json.loads(data)["token_type"]=="DPoP", data
+    record("refuse replay of DPoP renewal",exchange(access,access_type,renew_proof))
+
     record("unlink manual environment", post("/api/connect/unlink",{}))
 
     code = issue()
