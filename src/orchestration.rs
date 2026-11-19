@@ -1107,17 +1107,20 @@ async fn apply_command(
                 let next = queued.first().cloned();
                 (queued, next, active)
             };
+            let held = queued
+                .iter()
+                .filter(|run| run.queue_held)
+                .cloned()
+                .collect::<Vec<_>>();
             let mut sequence = None;
-            for mut run in queued {
-                if !run.queue_held {
-                    continue;
-                }
+            for (index, mut run) in held.into_iter().enumerate() {
                 run.queue_held = false;
                 sequence = Some(
                     state
                         .commit_receipted(
                             Event::RunUpdated(run),
-                            (sequence.is_none()).then(|| receipt.clone()),
+                            (index + 1 == queued.iter().filter(|run| run.queue_held).count())
+                                .then(|| receipt.clone()),
                         )
                         .await?
                         .id,
@@ -1125,7 +1128,7 @@ async fn apply_command(
             }
             if !active {
                 if let Some(run) = next {
-                    if sequence.is_none() {
+                    if queued.iter().all(|run| !run.queue_held) {
                         sequence = Some(
                             state
                                 .commit_receipted(
