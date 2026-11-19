@@ -1363,19 +1363,59 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 );
             }
             if method == "provider.install.subscribe" {
-                return Reply::Chunk(
-                    json!([{"driver":"antigravity","operationId":null,"phase":"idle","downloadedBytes":0,"totalBytes":null,"version":null,"installedVersion":null,"canRemove":false,"message":null}]),
-                );
+                let current = state
+                    .provider_install_states
+                    .lock()
+                    .await
+                    .get(instance_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "driver":"antigravity","operationId":null,"phase":"idle",
+                            "downloadedBytes":0,"totalBytes":null,"version":"1.5.12",
+                            "installedVersion":null,"canRemove":false,"message":null
+                        })
+                    });
+                return Reply::Chunk(json!([current]));
             }
             if method == "provider.install.cancel" {
+                let operation_id = params["operationId"].as_str().unwrap_or_default();
+                let mut states = state.provider_install_states.lock().await;
+                if let Some(current) = states.get_mut(instance_id) {
+                    if current["operationId"].as_str() == Some(operation_id)
+                        && matches!(current["phase"].as_str(), Some("downloading" | "verifying"))
+                    {
+                        current["phase"] = json!("cancelled");
+                        current["message"] =
+                            json!("Installation cancelled. The previous runtime is unchanged.");
+                        return Reply::Success(current.clone());
+                    }
+                }
                 return Reply::Failure(
                     json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"cancel","detail":"This installation is no longer current. Refresh its status before cancelling."}}),
                 );
             }
+            if method == "provider.install.remove" {
+                let value = json!({
+                    "driver":"antigravity","operationId":null,"phase":"idle",
+                    "downloadedBytes":0,"totalBytes":null,"version":"1.5.12",
+                    "installedVersion":null,"canRemove":false,"message":null
+                });
+                state
+                    .provider_install_states
+                    .lock()
+                    .await
+                    .insert(instance_id.to_owned(), value.clone());
+                return Reply::Success(value);
+            }
             if method == "provider.install.start" {
-                return Reply::Success(
-                    json!({"driver":"antigravity","operationId":uuid::Uuid::new_v4().to_string(),"phase":"downloading","downloadedBytes":0,"totalBytes":null,"version":"1.5.12","installedVersion":null,"canRemove":false,"message":"Downloading Google's official Antigravity runtime."}),
-                );
+                let value = json!({"driver":"antigravity","operationId":uuid::Uuid::new_v4().to_string(),"phase":"downloading","downloadedBytes":0,"totalBytes":null,"version":"1.5.12","installedVersion":null,"canRemove":false,"message":"Downloading Google's official Antigravity runtime."});
+                state
+                    .provider_install_states
+                    .lock()
+                    .await
+                    .insert(instance_id.to_owned(), value.clone());
+                return Reply::Success(value);
             }
         } else if method == "provider.auth.subscribe" {
             if driver == "antigravity" {

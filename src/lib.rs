@@ -1,6 +1,7 @@
 #![recursion_limit = "512"]
 
 use axum::{
+    body::Bytes,
     extract::{FromRequest, Path, Request, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -373,6 +374,7 @@ pub struct AppState {
     pub(crate) scheduled_webhook_deliveries_path: PathBuf,
     pub(crate) scheduled_task_events: broadcast::Sender<()>,
     pub(crate) prompt_suggestion_events: broadcast::Sender<serde_json::Value>,
+    pub(crate) provider_install_states: Mutex<HashMap<String, serde_json::Value>>,
 }
 impl AppState {
     pub async fn new(
@@ -502,6 +504,7 @@ impl AppState {
             scheduled_webhook_deliveries_path,
             scheduled_task_events,
             prompt_suggestion_events,
+            provider_install_states: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -568,6 +571,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/projects", get(projects::snapshot))
         .route("/api/projects/mutate", post(projects::mutate_http))
         .route("/api/hooks/:hook_id/:token", any(webhook_handler))
+        .route("/api/observability/v1/traces", post(otlp_traces_proxy))
         .route(
             "/api/orchestration/shell",
             get(environment_http::shell_snapshot),
@@ -604,6 +608,55 @@ pub fn router(state: Arc<AppState>) -> Router {
         .fallback(any(contract_fallback))
         .layer(axum::middleware::from_fn(access_http::contextualize))
         .with_state(state)
+}
+
+async fn otlp_traces_proxy(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match access_http::principal(&state, &headers) {
+        Ok(session) => session,
+        Err(reason) => return auth_error(&headers, reason),
+    };
+    if !session.has("orchestration:operate") {
+        return access_http::scope_error(&headers, "orchestration:operate");
+    }
+    let endpoint = std::env::var("T3CODE_OTLP_TRACES_URL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| {
+            state
+                .settings
+                .internal()
+                .ok()
+                .and_then(|settings| {
+                    settings["observability"]["otlpTracesUrl"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .filter(|value| !value.trim().is_empty())
+        });
+    let Some(endpoint) = endpoint else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await;
+    match response {
+        Ok(response) if response.status().is_success() => StatusCode::NO_CONTENT.into_response(),
+        _ => (StatusCode::BAD_GATEWAY, "Trace export failed.").into_response(),
+    }
 }
 
 async fn webhook_handler(
