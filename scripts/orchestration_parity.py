@@ -41,8 +41,17 @@ def main():
         ("orchestration.getThreadProjection",{"threadId":first}),("orchestration.getThreadFamily",{"threadId":first}),
         *[("HTTP",path) for path in ["/api/orchestration/shell",f"/api/orchestration/threads/{first}",
           f"/api/orchestration/threads/{first}/bounded",f"/api/orchestration/threads/{first}/transcript"]]]
+    edge_reads = [
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": 0}),
+        ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": 0}),
+        ("orchestration.getTurnItem", {"threadId": first, "itemId": "item:missing"}),
+        ("orchestration.getNativeChildWork", {"threadId": first}),
+        ("orchestration.getWorkflowScript", {"threadId": first, "scriptPath": "relative.js"}),
+        ("orchestration.stopWorkflow", {"threadId": first, "subagentId": "subagent:missing"}),
+        ("orchestration.forceStopThread", {"threadId": first}),
+    ]
     sessions = [
-        [create, titles, metadata, *snapshots, issue_threads,pr_threads,link_issue,link_pr,issue_threads,pr_threads,*snapshots, command("thread.mark-unread","no-run"),
+        [create, *edge_reads, titles, metadata, *snapshots, issue_threads,pr_threads,link_issue,link_pr,issue_threads,pr_threads,*snapshots, command("thread.mark-unread","no-run"),
          command("thread.unarchive","active"),archive, archive, command("thread.archive","archived"), command("thread.archive", "archive-1", other),
          command("thread.pin", "pin-archived")],
         [create, archive, titles, *([issue_threads,pr_threads] if args.faketime_lib else []), command("thread.unarchive", "unarchive-1"),
