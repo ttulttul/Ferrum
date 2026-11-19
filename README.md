@@ -45,7 +45,8 @@ python3 scripts/parity_harness.py \
   --rust-command 'cargo run -- --listen 127.0.0.1:43773'
 ```
 
-Add deterministic requests to `tests/parity-fixtures.json`. Requests involving
+Add deterministic requests to `tests/parity-fixtures.json`. The initial fixtures
+cover the exact protocol-negotiation failure returned by both servers. Requests involving
 generated IDs or timestamps should be tested only after the corresponding
 protocol contract is made deterministic, since this harness intentionally does
 not normalize output before comparing it.

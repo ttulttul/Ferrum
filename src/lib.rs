@@ -1,8 +1,8 @@
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use axum::{
-    extract::{Path, State, WebSocketUpgrade},
+    extract::{FromRequest, Path, Request, State, WebSocketUpgrade},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -17,12 +17,12 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    sync::{broadcast, oneshot, Mutex, RwLock},
+    sync::{broadcast, mpsc, oneshot, Mutex, RwLock},
 };
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -500,23 +500,71 @@ async fn execute_run(
     Ok(())
 }
 
-async fn websocket(
-    State(state): State<Arc<AppState>>,
-    upgrade: WebSocketUpgrade,
-) -> impl IntoResponse {
-    upgrade.on_upgrade(move |socket| websocket_session(state, socket))
+async fn websocket(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let compatible = request
+        .uri()
+        .query()
+        .and_then(|query| {
+            query.split('&').find_map(|part| {
+                let (key, value) = part.split_once('=')?;
+                (key == "orchestrationProtocol").then_some(value == "2")
+            })
+        })
+        .unwrap_or(false);
+    if !compatible {
+        let body = serde_json::json!({
+            "code": "orchestration_protocol_incompatible",
+            "message": "Update this client to one that supports orchestration protocol 2.",
+            "orchestrationProtocolVersion": 2
+        });
+        return Response::builder()
+            .status(StatusCode::UPGRADE_REQUIRED)
+            .header("content-type", "application/json")
+            .header("vary", "Accept-Encoding")
+            .header("access-control-allow-origin", "*")
+            .body(body.to_string().into())
+            .expect("valid response");
+    }
+    if request.headers().get("authorization").is_none() && request.headers().get("cookie").is_none()
+    {
+        let body = serde_json::json!({
+            "_tag": "EnvironmentAuthInvalidError",
+            "code": "auth_invalid",
+            "reason": "missing_credential",
+            "traceId": format!("{:032x}", Uuid::new_v4().as_u128()),
+        });
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("content-type", "application/json")
+            .header("vary", "Accept-Encoding")
+            .header("access-control-allow-origin", "*")
+            .body(body.to_string().into())
+            .expect("valid response");
+    }
+    match WebSocketUpgrade::from_request(request, &state).await {
+        Ok(upgrade) => upgrade
+            .on_upgrade(move |socket| websocket_session(state, socket))
+            .into_response(),
+        Err(rejection) => rejection.into_response(),
+    }
 }
 async fn websocket_session(state: Arc<AppState>, socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
     let mut events = state.events.subscribe();
+    let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<String>();
+    let outbound_for_events = outbound.clone();
     let writer = tokio::spawn(async move {
-        while let Ok(event) = events.recv().await {
-            let Ok(text) = serde_json::to_string(&serde_json::json!({"type":"event","data":event}))
-            else {
-                break;
-            };
-            if sender.send(WsMessage::Text(text)).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                event = events.recv() => {
+                    let Ok(event) = event else { break };
+                    let Ok(text) = serde_json::to_string(&serde_json::json!({"type":"event","data":event})) else { break; };
+                    if sender.send(WsMessage::Text(text)).await.is_err() { break; }
+                }
+                text = outbound_rx.recv() => {
+                    let Some(text) = text else { break; };
+                    if sender.send(WsMessage::Text(text)).await.is_err() { break; }
+                }
             }
         }
     });
@@ -524,6 +572,12 @@ async fn websocket_session(state: Arc<AppState>, socket: WebSocket) {
         let WsMessage::Text(text) = message else {
             continue;
         };
+        if let Ok(rpc) = serde_json::from_str::<serde_json::Value>(&text) {
+            if rpc.get("jsonrpc").and_then(serde_json::Value::as_str) == Some("2.0") {
+                handle_rpc_message(&state, &outbound_for_events, rpc).await;
+                continue;
+            }
+        }
         match serde_json::from_str::<ClientCommand>(&text) {
             Ok(ClientCommand::Subscribe) => {
                 let snapshot = state.store.read().await;
@@ -574,6 +628,42 @@ async fn websocket_session(state: Arc<AppState>, socket: WebSocket) {
         }
     }
     writer.abort();
+}
+
+async fn handle_rpc_message(
+    state: &Arc<AppState>,
+    outbound: &mpsc::UnboundedSender<String>,
+    message: serde_json::Value,
+) {
+    let Some(id) = message.get("id").cloned() else {
+        return;
+    };
+    let method = message
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if method == "@effect/rpc/Ping" {
+        let _ = outbound
+            .send(serde_json::json!({"jsonrpc":"2.0","method":"@effect/rpc/Pong"}).to_string());
+        return;
+    }
+    match method {
+        "server.probe" => {
+            let _ =
+                outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}}).to_string());
+        }
+        "orchestration.subscribeShell" => {
+            let store = state.store.read().await;
+            let snapshot = serde_json::json!({"kind":"snapshot","snapshot":{"schemaVersion":1,"snapshotSequence":0,"projects":store.projects.values().collect::<Vec<_>>(),"threads":store.threads.values().collect::<Vec<_>>(),"archivedThreads":[]}});
+            let _ = outbound.send(
+                serde_json::json!({"jsonrpc":"2.0","chunk":true,"id":id,"result":[snapshot]})
+                    .to_string(),
+            );
+        }
+        _ => {
+            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"_tag":"Cause","code":0,"message":format!("Unknown RPC method: {method}"),"data":[]}}).to_string());
+        }
+    }
 }
 pub async fn run_server(state: Arc<AppState>, listen: std::net::SocketAddr) -> anyhow::Result<()> {
     let app = router(state);

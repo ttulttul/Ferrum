@@ -1,8 +1,14 @@
 [
   {
-    "name": "health",
+    "name": "unsupported protocol",
     "method": "GET",
-    "path": "/health",
+    "path": "/ws",
+    "body": null
+  },
+  {
+    "name": "unsupported protocol version",
+    "method": "GET",
+    "path": "/ws?orchestrationProtocol=1",
     "body": null
   }
 ]
