@@ -464,6 +464,10 @@ async fn stream(
     let mut pending_downloads = HashMap::<String, String>::new();
     let mut chooser_updates = page.chooser_updates.subscribe();
     let mut pending = None;
+    let mut initial_load_pending = false;
+    let mut initial_ack_pending = false;
+    let mut initial_capture_id = None;
+    let mut initial_capture_ready = false;
     loop {
         tokio::select! {
             _=gone.changed()=>{let _=socket.send(Message::Close(Some(CloseFrame{code:4404,reason:Cow::Borrowed("tab closed")}))).await;break;}
@@ -481,6 +485,19 @@ async fn stream(
                 if e["id"]==document{
                     if let Some(doc)=e["result"]["result"]["value"].as_str().and_then(|s|serde_json::from_str::<Value>(s).ok()){
                         if let Some(url)=doc["url"].as_str().filter(|u|*u!="about:blank"){state.previews.page_status(&page.thread,&page.tab,json!({"_tag":if doc["ready"]=="complete"{"Success"}else{"Loading"},"url":url,"title":doc["title"].as_str().unwrap_or("")}));}
+                    }
+                }
+                if initial_capture_id == e["id"].as_u64() {
+                    initial_capture_id = None;
+                    initial_capture_ready = true;
+                    if let Some(bytes) = e["result"]["data"].as_str().and_then(|s| STANDARD.decode(s).ok()) {
+                        socket.send(Message::Binary(bytes)).await.map_err(|_| ())?;
+                    }
+                    if initial_ack_pending {
+                        if let Some(id) = pending.take() { command(&mut cdp, &mut sequence, "Page.screencastFrameAck", json!({"sessionId": id})).await?; }
+                        initial_ack_pending = false;
+                        initial_load_pending = false;
+                        initial_capture_ready = false;
                     }
                 }
                 match e["method"].as_str(){
@@ -505,17 +522,18 @@ async fn stream(
                     }
                     Some("Page.screencastFrame")=>{let data=&e["params"];if pending.is_none(){if let Some(bytes)=data["data"].as_str().and_then(|s|STANDARD.decode(s).ok()){
                         let url=page.initial_url.lock().unwrap().take();
-                        if let Some(url)=url{command(&mut cdp,&mut sequence,"Page.navigate",json!({"url":url})).await?;}
+                        if let Some(url)=url{initial_load_pending=true;command(&mut cdp,&mut sequence,"Page.navigate",json!({"url":url})).await?;}
                         socket.send(Message::Binary(bytes)).await.map_err(|_|())?;pending=data["sessionId"].as_u64();
                     }}else{command(&mut cdp,&mut sequence,"Page.screencastFrameAck",json!({"sessionId":data["sessionId"]})).await?;}}
-                    Some("Page.loadEventFired"|"Page.frameNavigated")=>{document=command(&mut cdp,&mut sequence,"Runtime.evaluate",info()).await?;}
+                    Some("Page.loadEventFired")=>{document=command(&mut cdp,&mut sequence,"Runtime.evaluate",info()).await?;if initial_load_pending{initial_capture_id=Some(command(&mut cdp,&mut sequence,"Page.captureScreenshot",json!({"format":"jpeg","quality":70})).await?);}}
+                    Some("Page.frameNavigated")=>{document=command(&mut cdp,&mut sequence,"Runtime.evaluate",info()).await?;}
                     _=>{}
                 }
             }
             msg=socket.recv()=>{
                 let Some(Ok(Message::Text(raw)))=msg else{break};let Ok(m)=serde_json::from_str::<Value>(&raw)else{continue};
                 match m["type"].as_str(){
-                    Some("ack")=>{if let Some(id)=pending.take(){command(&mut cdp,&mut sequence,"Page.screencastFrameAck",json!({"sessionId":id})).await?;}}
+                    Some("ack")=>{if let Some(id)=pending.take(){if initial_load_pending && !initial_capture_ready{initial_ack_pending=true;pending=Some(id);}else{command(&mut cdp,&mut sequence,"Page.screencastFrameAck",json!({"sessionId":id})).await?;initial_load_pending=false;initial_capture_ready=false;}}}
                     Some("takeControl") if can_operate=>page.set_controller(viewer,true),
                     Some("releaseControl") if can_operate=>page.set_controller(viewer,false),
                     _ if page.control.lock().unwrap().owner==Some(viewer)=>{if let Some((method,p))=user_command(&m){command(&mut cdp,&mut sequence,method,p).await?;}}
