@@ -447,7 +447,7 @@ pub struct AppState {
     pub(crate) provider_auth_states: Mutex<HashMap<String, serde_json::Value>>,
     pub(crate) project_clone_states: Mutex<HashMap<String, serde_json::Value>>,
     pub(crate) project_clone_events: broadcast::Sender<()>,
-    pub(crate) project_clone_cancellations: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    pub(crate) project_clone_cancellations: Mutex<HashMap<String, (u64, oneshot::Sender<()>)>>,
     pub(crate) project_clone_sequence: Mutex<u64>,
 }
 impl AppState {

@@ -121,6 +121,173 @@ impl Reply {
     }
 }
 
+async fn project_clone_snapshots(state: &Arc<AppState>) -> Vec<Value> {
+    let mut snapshots = state
+        .project_clone_states
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left["projectId"].as_str().cmp(&right["projectId"].as_str()));
+    snapshots
+}
+
+async fn next_project_clone_sequence(state: &Arc<AppState>) -> u64 {
+    let mut sequence = state.project_clone_sequence.lock().await;
+    *sequence = sequence.saturating_add(1);
+    *sequence
+}
+
+async fn publish_project_clone_change(state: &Arc<AppState>) {
+    let _ = state.project_clone_events.send(());
+}
+
+async fn update_project_clone_snapshot(
+    state: &Arc<AppState>,
+    project_id: &str,
+    expected_sequence: Option<u64>,
+    update: impl FnOnce(&mut Value),
+) -> Option<Value> {
+    let sequence = next_project_clone_sequence(state).await;
+    let snapshot = {
+        let mut states = state.project_clone_states.lock().await;
+        let snapshot = states.get_mut(project_id)?;
+        if expected_sequence.is_some_and(|expected| snapshot["sequence"].as_u64() != Some(expected))
+        {
+            return None;
+        }
+        update(snapshot);
+        snapshot["sequence"] = json!(sequence);
+        snapshot.clone()
+    };
+    publish_project_clone_change(state).await;
+    Some(snapshot)
+}
+
+async fn launch_project_clone(
+    state: Arc<AppState>,
+    project_id: String,
+    remote: String,
+    destination: String,
+) {
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let attempt_sequence = state
+        .project_clone_states
+        .lock()
+        .await
+        .get(&project_id)
+        .and_then(|snapshot| snapshot["sequence"].as_u64())
+        .unwrap_or_default();
+    state
+        .project_clone_cancellations
+        .lock()
+        .await
+        .insert(project_id.clone(), (attempt_sequence, cancel_tx));
+    tokio::spawn(async move {
+        let command = tokio::process::Command::new("git")
+            .args(["clone", "--", remote.as_str(), destination.as_str()])
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        let outcome = match command {
+            Err(error) => Err(format!("Git could not be started: {error}")),
+            Ok(mut child) => {
+                tokio::select! {
+                    status = child.wait() => {
+                        let detail = if let Some(mut stderr) = child.stderr.take() {
+                            use tokio::io::AsyncReadExt;
+                            let mut bytes = Vec::new();
+                            let _ = stderr.read_to_end(&mut bytes).await;
+                            String::from_utf8_lossy(&bytes).trim().to_owned()
+                        } else {
+                            String::new()
+                        };
+                        match status {
+                            Ok(status) if status.success() => Ok(()),
+                            Ok(_) if detail.is_empty() => Err("Git clone failed.".to_owned()),
+                            Ok(_) => Err(detail),
+                            Err(error) => Err(error.to_string()),
+                        }
+                    }
+                    _ = cancel_rx => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        let _ = tokio::fs::remove_dir_all(&destination).await;
+                        Err("__cancelled__".to_owned())
+                    }
+                }
+            }
+        };
+        match outcome {
+            Ok(()) => {
+                let _ = update_project_clone_snapshot(
+                    &state,
+                    &project_id,
+                    Some(attempt_sequence),
+                    |snapshot| {
+                        snapshot["phase"] = json!("done");
+                        snapshot["stage"] = json!("checkout");
+                        snapshot["percent"] = json!(100);
+                        snapshot["detail"] = json!("Checking out files");
+                        snapshot["stalled"] = json!(false);
+                        snapshot["error"] = Value::Null;
+                        snapshot["endedAt"] =
+                            json!(crate::auth_service::iso(crate::auth_service::now()));
+                    },
+                )
+                .await;
+            }
+            Err(error) if error == "__cancelled__" => {
+                let _ = update_project_clone_snapshot(
+                    &state,
+                    &project_id,
+                    Some(attempt_sequence),
+                    |snapshot| {
+                        if snapshot["phase"] == "running"
+                            && snapshot["sequence"].as_u64() == Some(attempt_sequence)
+                        {
+                            snapshot["phase"] = json!("cancelled");
+                            snapshot["stalled"] = json!(false);
+                            snapshot["endedAt"] =
+                                json!(crate::auth_service::iso(crate::auth_service::now()));
+                        }
+                    },
+                )
+                .await;
+            }
+            Err(error) => {
+                let detail = if error.len() > 1_000 {
+                    let prefix = error.chars().take(999).collect::<String>();
+                    format!("{prefix}…")
+                } else {
+                    error
+                };
+                let _ = update_project_clone_snapshot(
+                    &state,
+                    &project_id,
+                    Some(attempt_sequence),
+                    |snapshot| {
+                        snapshot["phase"] = json!("failed");
+                        snapshot["stage"] = json!("checkout");
+                        snapshot["stalled"] = json!(false);
+                        snapshot["error"] = json!(detail);
+                        snapshot["endedAt"] =
+                            json!(crate::auth_service::iso(crate::auth_service::now()));
+                    },
+                )
+                .await;
+            }
+        }
+        let mut cancellations = state.project_clone_cancellations.lock().await;
+        if cancellations
+            .get(&project_id)
+            .is_some_and(|(sequence, _)| *sequence == attempt_sequence)
+        {
+            cancellations.remove(&project_id);
+        }
+    });
+}
+
 struct PendingCall {
     interrupt: oneshot::Sender<()>,
     window: Arc<Semaphore>,
@@ -535,6 +702,17 @@ async fn run_call(
             }
         }
     }
+    if method == "subscribeProjectClones" {
+        let mut events = state.project_clone_events.subscribe();
+        send(json!([project_clone_snapshots(state).await])).await;
+        loop {
+            match events.recv().await {
+                Ok(()) => send(json!([project_clone_snapshots(state).await])).await,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return Reply::Success(Value::Null),
+            }
+        }
+    }
     if method == "server.getConfig" {
         return match crate::config_rpc::snapshot(state, references, &Value::Null).await {
             Ok(v) => Reply::Success(v),
@@ -906,37 +1084,25 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 "_tag":"OrchestrationDispatchCommandError","message":format!("Project {project_id} already exists.")
             }}));
         }
+        {
+            let states = state.project_clone_states.lock().await;
+            if states.values().any(|snapshot| {
+                snapshot["projectId"].as_str() == Some(project_id)
+                    || snapshot["destinationPath"].as_str() == Some(destination)
+            }) {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"SourceControlRepositoryError","provider":params["provider"],
+                    "operation":"clone","detail":"A clone into this destination is already in progress."
+                }}));
+            }
+        }
         let started_at = crate::auth_service::iso(crate::auth_service::now());
+        let sequence = next_project_clone_sequence(state).await;
         state.project_clone_states.lock().await.insert(
             project_id.to_owned(),
-            json!({"projectId":project_id,"remoteUrl":remote,"destinationPath":destination,"repository":null,"phase":"running","stage":"connecting","percent":null,"detail":"Connecting","stalled":false,"error":null,"startedAt":started_at,"endedAt":null,"sequence":0}),
+            json!({"projectId":project_id,"remoteUrl":remote,"destinationPath":destination,"repository":null,"phase":"running","stage":"connecting","percent":null,"detail":null,"stalled":false,"error":null,"startedAt":started_at,"endedAt":null,"sequence":sequence}),
         );
-        let output = tokio::process::Command::new("git")
-            .args(["clone", "--", remote, destination])
-            .output()
-            .await;
-        let Ok(output) = output else {
-            if let Some(snapshot) = state.project_clone_states.lock().await.get_mut(project_id) {
-                snapshot["phase"] = json!("failed");
-                snapshot["error"] = json!("Git could not be started.");
-                snapshot["endedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
-            }
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":params["provider"],"operation":"clone","detail":"Git could not be started."}}),
-            );
-        };
-        if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            if let Some(snapshot) = state.project_clone_states.lock().await.get_mut(project_id) {
-                snapshot["phase"] = json!("failed");
-                snapshot["stage"] = json!("checkout");
-                snapshot["error"] = json!(detail);
-                snapshot["endedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
-            }
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":params["provider"],"operation":"clone","detail":detail}}),
-            );
-        }
+        publish_project_clone_change(state).await;
         let project = crate::Project {
             id: project_id.to_owned(),
             name: title.to_owned(),
@@ -954,35 +1120,89 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             })
             .await
         {
+            state.project_clone_states.lock().await.remove(project_id);
+            publish_project_clone_change(state).await;
             return Reply::Failure(
                 json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
             );
         }
-        if let Some(snapshot) = state.project_clone_states.lock().await.get_mut(project_id) {
-            snapshot["phase"] = json!("done");
-            snapshot["stage"] = json!("checkout");
-            snapshot["percent"] = json!(100);
-            snapshot["detail"] = json!("Checking out files");
-            snapshot["endedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
-            snapshot["sequence"] = json!(*state.next_event_id.lock().await);
-        }
+        launch_project_clone(
+            state.clone(),
+            project_id.to_owned(),
+            remote.to_owned(),
+            destination.to_owned(),
+        )
+        .await;
         return Reply::Success(
             json!({"projectId":project_id,"cwd":destination,"remoteUrl":remote,"repository":null}),
         );
     }
-    if method == "projectClone.cancel" || method == "projectClone.retry" {
-        if method == "projectClone.cancel" {
-            let project_id = params["projectId"].as_str().unwrap_or_default();
-            if let Some(snapshot) = state.project_clone_states.lock().await.get_mut(project_id) {
-                if snapshot["phase"] == "running" {
-                    snapshot["phase"] = json!("cancelled");
-                    snapshot["endedAt"] =
-                        json!(crate::auth_service::iso(crate::auth_service::now()));
-                    return Reply::Success(json!({"applied":true}));
-                }
+    if method == "projectClone.cancel" {
+        let project_id = params["projectId"].as_str().unwrap_or_default();
+        let sequence = next_project_clone_sequence(state).await;
+        let destination = {
+            let mut states = state.project_clone_states.lock().await;
+            let Some(snapshot) = states.get_mut(project_id) else {
+                return Reply::Success(json!({"applied":false}));
+            };
+            if snapshot["phase"] != "running" {
+                return Reply::Success(json!({"applied":false}));
             }
+            snapshot["phase"] = json!("cancelled");
+            snapshot["stalled"] = json!(false);
+            snapshot["endedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+            snapshot["sequence"] = json!(sequence);
+            snapshot["destinationPath"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        if let Some((_, cancel)) = state
+            .project_clone_cancellations
+            .lock()
+            .await
+            .remove(project_id)
+        {
+            let _ = cancel.send(());
         }
-        return Reply::Success(json!({"applied":false}));
+        let _ = tokio::fs::remove_dir_all(destination).await;
+        publish_project_clone_change(state).await;
+        return Reply::Success(json!({"applied":true}));
+    }
+    if method == "projectClone.retry" {
+        let project_id = params["projectId"].as_str().unwrap_or_default();
+        let sequence = next_project_clone_sequence(state).await;
+        let (remote, destination) = {
+            let mut states = state.project_clone_states.lock().await;
+            let Some(snapshot) = states.get_mut(project_id) else {
+                return Reply::Success(json!({"applied":false}));
+            };
+            if !matches!(snapshot["phase"].as_str(), Some("failed" | "cancelled")) {
+                return Reply::Success(json!({"applied":false}));
+            }
+            let remote = snapshot["remoteUrl"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let destination = snapshot["destinationPath"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            snapshot["phase"] = json!("running");
+            snapshot["stage"] = json!("connecting");
+            snapshot["percent"] = Value::Null;
+            snapshot["detail"] = Value::Null;
+            snapshot["stalled"] = json!(false);
+            snapshot["error"] = Value::Null;
+            snapshot["startedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+            snapshot["endedAt"] = Value::Null;
+            snapshot["sequence"] = json!(sequence);
+            (remote, destination)
+        };
+        let _ = tokio::fs::remove_dir_all(&destination).await;
+        publish_project_clone_change(state).await;
+        launch_project_clone(state.clone(), project_id.to_owned(), remote, destination).await;
+        return Reply::Success(json!({"applied":true}));
     }
     if method == "orchestration.searchThreadStream" {
         let thread_id = params["threadId"].as_str().unwrap_or_default();
@@ -2538,14 +2758,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Chunk(json!([revision]));
     }
     if method == "subscribeProjectClones" {
-        let snapshots = state
-            .project_clone_states
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        return Reply::Chunk(json!([snapshots]));
+        return Reply::Chunk(json!([project_clone_snapshots(state).await]));
     }
     if method == "subscribeServerLifecycle" {
         let environment = crate::environment_http::descriptor(axum::extract::State(state.clone()))
