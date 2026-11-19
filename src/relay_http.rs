@@ -17,6 +17,7 @@ use axum::{
     routing::{on, MethodFilter},
     Json, Router,
 };
+use jsonwebtoken::DecodingKey;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use time::{Duration, OffsetDateTime};
@@ -391,14 +392,25 @@ impl Call {
             .ok_or(Error::Auth("not_authorized"))?;
         match self.contract.name {
             "registerManagedEndpointRecovery" => {
-                // Rust relay does not own a Cloudflare provider. Preserve the
-                // server contract and let callers retry provisioning through a
-                // compatible relay implementation.
-                let _ = self.json()?;
+                let body = self.json()?;
+                validate_recovery_proof(
+                    &body,
+                    "register",
+                    id,
+                    &key,
+                    &s.issuer,
+                    body.get("tunnelId").and_then(Value::as_str),
+                )?;
+                // Provisioning is deliberately delegated to the configured
+                // managed-endpoint provider. The standalone relay has no
+                // provider credentials, but it must authenticate and validate
+                // recovery requests before returning the same upstream error
+                // as the TypeScript relay when provisioning is unavailable.
                 Err(Error::Internal("upstream_unavailable"))
             }
             "recoverManagedEndpoint" => {
-                let _ = self.json()?;
+                let body = self.json()?;
+                validate_recovery_proof(&body, "recover", id, &key, &s.issuer, None)?;
                 Err(Error::Internal("upstream_unavailable"))
             }
             "wakeHeldHooks" => Ok(json!({"pending":false})),
@@ -414,6 +426,79 @@ impl Call {
             _ => Err(Error::Internal("upstream_unavailable")),
         }
     }
+}
+
+/// Validate the environment-signed proof used by managed tunnel recovery.
+///
+/// The provider operation itself is optional in the standalone relay, but the
+/// proof gate is part of the public API contract. Checking it here keeps an
+/// invalid request at the authentication boundary instead of leaking the
+/// provider-unavailable response used for an otherwise valid request.
+fn validate_recovery_proof(
+    body: &Value,
+    action: &str,
+    environment_id: &str,
+    environment_public_key: &str,
+    relay_issuer: &str,
+    expected_tunnel_id: Option<&str>,
+) -> Result<(), Error> {
+    let proof = body
+        .get("proof")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+        .ok_or(Error::Auth("not_authorized"))?;
+    let cloud_user_id = body
+        .get("cloudUserId")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+        .ok_or(Error::Auth("not_authorized"))?;
+    let origin = body
+        .get("origin")
+        .and_then(Value::as_object)
+        .ok_or(Error::Auth("not_authorized"))?;
+    let host = origin
+        .get("localHttpHost")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+        .ok_or(Error::Auth("not_authorized"))?;
+    let port = origin
+        .get("localHttpPort")
+        .and_then(Value::as_u64)
+        .filter(|p| (1..=65535).contains(p))
+        .ok_or(Error::Auth("not_authorized"))?;
+
+    let key = DecodingKey::from_ed_pem(environment_public_key.as_bytes())
+        .map_err(|_| Error::Auth("not_authorized"))?;
+    let claims = verified(
+        proof,
+        &key,
+        "t3-env-managed-tunnel-recovery+jwt",
+        &format!("t3-env:{environment_id}"),
+        relay_issuer,
+    )
+    .ok_or(Error::Auth("not_authorized"))?;
+    if claims.get("environmentId").and_then(Value::as_str) != Some(environment_id)
+        || claims.get("sub").and_then(Value::as_str) != Some(environment_id)
+        || claims.get("cloudUserId").and_then(Value::as_str) != Some(cloud_user_id)
+        || claims.get("action").and_then(Value::as_str) != Some(action)
+        || claims
+            .get("origin")
+            .and_then(|v| v.get("localHttpHost"))
+            .and_then(Value::as_str)
+            != Some(host)
+        || claims
+            .get("origin")
+            .and_then(|v| v.get("localHttpPort"))
+            .and_then(Value::as_u64)
+            != Some(port)
+    {
+        return Err(Error::Auth("not_authorized"));
+    }
+    if action == "register" && claims.get("tunnelId").and_then(Value::as_str) != expected_tunnel_id
+    {
+        return Err(Error::Auth("not_authorized"));
+    }
+    Ok(())
 }
 fn validate_device(v: &Value) -> Result<(), Error> {
     required(v, "label")?;
