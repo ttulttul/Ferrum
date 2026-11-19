@@ -257,15 +257,23 @@ pub(crate) fn watch_patch(thread: &Thread, cmd: &Value, at: &str) -> Value {
             && link["number"] == number
             && link["source"] != "stack-dismissed"
     };
-    let index = links.iter().position(matches);
+    let key_matches = |link: &Value| {
+        field(link, "host").eq_ignore_ascii_case(host)
+            && field(link, "repository").eq_ignore_ascii_case(repository)
+            && link["number"] == number
+    };
+    let mut index = links.iter().position(matches);
     if cmd["watching"] == true {
-        let index = if let Some(index) = index {
-            index
-        } else {
+        if index.is_none() {
             let Some(link) = cmd.get("link").cloned() else {
                 return json!({});
             };
-            links.push(json!({
+            let ended_watch = links
+                .iter()
+                .find(|candidate| key_matches(candidate) && candidate["source"] == "stack-dismissed")
+                .and_then(|candidate| candidate.get("endedWatch").cloned());
+            links.retain(|candidate| !key_matches(candidate));
+            let mut created = json!({
                 "host": host.to_lowercase(),
                 "repository": repository.to_lowercase(),
                 "number": number,
@@ -274,25 +282,52 @@ pub(crate) fn watch_patch(thread: &Thread, cmd: &Value, at: &str) -> Value {
                 "linkedAt": at,
                 "snapshot": Value::Null,
                 "stack": Value::Null
-            }));
-            links.len() - 1
-        };
-        links[index]["watch"] = json!({
-            "startedAt": at,
-            "headSha": Value::Null,
-            "failedChecks": [],
-            "passed": false,
-            "passedChecks": [],
-            "remarksThrough": at,
-            "remarkIds": [],
-            "conflicting": false,
-            "wakes": 0,
-            "awaitingBaseline": "all"
-        });
-    } else if let Some(index) = index {
-        if let Some(link) = links[index].as_object_mut() {
-            link.remove("watch");
+            });
+            if let Some(repository_web_url) = link.get("repositoryWebUrl") {
+                created["repositoryWebUrl"] = repository_web_url.clone();
+            }
+            if let Some(ended_watch) = ended_watch {
+                created["endedWatch"] = ended_watch;
+            }
+            links.push(created);
+            index = Some(links.len() - 1);
         }
+        let index = index.expect("watch link index exists");
+        if links[index].get("watch").is_some() {
+            return json!({});
+        }
+        let previous = links[index].get("endedWatch").cloned();
+        let mut watch = previous.unwrap_or_else(|| {
+            json!({
+                "startedAt": at,
+                "headSha": Value::Null,
+                "failedChecks": [],
+                "passed": false,
+                "passedChecks": [],
+                "remarksThrough": at,
+                "remarkIds": [],
+                "conflicting": false,
+                "wakes": 0
+            })
+        });
+        watch["startedAt"] = json!(at);
+        watch["remarksThrough"] = json!(at);
+        watch["remarkIds"] = json!([]);
+        watch["wakes"] = json!(0);
+        if let Some(object) = links[index].as_object_mut() {
+            object.remove("endedWatch");
+            object.insert("watch".into(), watch);
+        }
+    } else if let Some(index) = index {
+        let Some(link) = links[index].as_object_mut() else {
+            return json!({});
+        };
+        let Some(previous) = link.remove("watch") else {
+            return json!({});
+        };
+        link.insert("endedWatch".into(), previous);
+    } else {
+        return json!({});
     }
     json!({"pullRequests":links,"updatedAt":at})
 }
