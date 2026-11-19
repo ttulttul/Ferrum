@@ -718,6 +718,43 @@ async fn apply_command(
                                 row[field] = value.clone();
                                 if field == "linkedPullRequest" {
                                     patch.insert(field.into(), value.clone());
+                                    let mut links = existing_row["pullRequests"]
+                                        .as_array()
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    if value.is_null() {
+                                        if let Some(previous) =
+                                            existing_row["linkedPullRequest"].as_object()
+                                        {
+                                            let repository =
+                                                previous["repository"].as_str().unwrap_or_default();
+                                            let number =
+                                                previous["number"].as_i64().unwrap_or_default();
+                                            links.retain(|link| {
+                                                link["repository"] != repository
+                                                    || link["number"] != number
+                                            });
+                                        }
+                                    } else if let Some(linked) = value.as_object() {
+                                        let repository =
+                                            linked["repository"].as_str().unwrap_or_default();
+                                        let number = linked["number"].as_i64().unwrap_or_default();
+                                        links.retain(|link| {
+                                            link["repository"] != repository
+                                                || link["number"] != number
+                                        });
+                                        let host = linked["url"]
+                                            .as_str()
+                                            .and_then(|url| url::Url::parse(url).ok())
+                                            .and_then(|url| url.host_str().map(str::to_owned))
+                                            .unwrap_or_else(|| "github.com".into());
+                                        links.push(json!({
+                                            "host":host,"repository":repository,"number":number,
+                                            "url":linked["url"],"source":"manual","linkedAt":at,
+                                            "snapshot":null,"stack":null
+                                        }));
+                                    }
+                                    row["pullRequests"] = json!(links);
                                 }
                             }
                         }
