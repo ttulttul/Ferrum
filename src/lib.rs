@@ -451,6 +451,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(provider_http::routes())
         .route("/api/projects", get(projects::snapshot))
         .route("/api/projects/mutate", post(projects::mutate_http))
+        .route("/api/hooks/:hook_id/:token", any(webhook_not_found))
         .route(
             "/api/orchestration/shell",
             get(environment_http::shell_snapshot),
@@ -487,6 +488,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .fallback(any(contract_fallback))
         .layer(axum::middleware::from_fn(access_http::contextualize))
         .with_state(state)
+}
+
+async fn webhook_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error":"hook_not_found"})),
+    )
+        .into_response()
 }
 
 async fn contract_fallback(State(state): State<Arc<AppState>>, request: Request) -> Response {

@@ -64,7 +64,7 @@ async fn local_models(
 }
 
 async fn prepare_model(State(s): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Response {
-    if body.is_empty() {
+    if !body.is_empty() {
         return response(&h, Err(SpeechError::Invalid("invalid_command")));
     }
     match s.voice.prepare_local() {
@@ -246,6 +246,12 @@ async fn post_process(
     response(&h, voice::post_process(&input, &s.provider_command).await)
 }
 async fn diff(State(s): State<Arc<AppState>>, Json(input): Json<Value>) -> Response {
+    if input["projectId"].as_str().is_none()
+        || input["repository"].as_str().is_none()
+        || input["number"].as_u64().is_none()
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let cli = s.issues.lock().await.gh.clone();
     match pull_requests::read(&s, &cli, "diff", &input).await {
         Ok(v) => Json(v).into_response(),
