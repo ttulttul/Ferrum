@@ -10,6 +10,7 @@ repository = "https://github.com/ttulttul/t3code-rust"
 anyhow = "1"
 base64 = "0.22"
 hostname = "0.4"
+if-addrs = "0.15"
 hmac = "0.12"
 jsonwebtoken = "9.3"
 rusqlite = { version = "0.38", features = ["bundled"] }
@@ -28,15 +29,20 @@ futures-util = "0.3"
 indexmap = "=2.7.0"
 serde_yaml = "0.9"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value", "float_roundtrip"] }
 tokio = { version = "=1.42.0", features = ["full"] }
 time = { version = "=0.3.36", features = ["formatting", "macros", "parsing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "=1.11.0", features = ["serde", "v4"] }
+unicode-normalization = "0.1"
+ryu-js = "1.0.2"
 
 [build-dependencies]
 serde_json = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.10.1"

@@ -188,9 +188,29 @@ impl AuthService {
         self.port = port;
         self
     }
+    pub fn with_desktop(mut self, desktop: bool) -> Self {
+        self.desktop = desktop;
+        self
+    }
     pub fn open(mut self, dir: &Path) -> anyhow::Result<Self> {
         self.records = Arc::new(Storage::open(&dir.join("environment-auth.json"))?);
         Ok(self)
+    }
+    pub(crate) fn desktop(&self) -> bool {
+        self.desktop
+    }
+    pub(crate) fn revoke_disallowed(&self, remote: bool, connect: bool) -> anyhow::Result<()> {
+        if !remote || !connect {
+            self.update(|r| {
+                r.sessions
+                    .retain(|_, s| s.owner || if s.connect { connect } else { remote });
+                r.links
+                    .retain(|_, g| if g.binding.is_some() { connect } else { remote });
+                Ok(())
+            })
+            .map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
     }
     pub(crate) fn port(&self) -> u16 {
         self.port
@@ -198,7 +218,7 @@ impl AuthService {
     pub fn session_cookie_name(&self) -> String {
         format!("t3_session_{}", self.port)
     }
-    fn descriptor(&self) -> Value {
+    pub(crate) fn descriptor(&self) -> Value {
         json!({"policy":if self.desktop {"desktop-managed-local"}else{"loopback-browser"},"bootstrapMethods":[if self.desktop {"desktop-bootstrap"}else{"one-time-token"}],"sessionMethods":[BROWSER,BEARER,"dpop-access-token"],"sessionCookieName":self.session_cookie_name(),"serverUpdateScope":"environment:maintain"})
     }
     pub async fn invalidated(&self, session: &Session) {

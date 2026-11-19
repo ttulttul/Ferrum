@@ -36,6 +36,7 @@ pub async fn session(
     state: Arc<AppState>,
     mut socket: WebSocket,
     principal: crate::auth_service::Session,
+    references: bool,
 ) {
     let principal = Arc::new(principal);
     state.auth.socket_presence(&principal.id, true);
@@ -91,7 +92,7 @@ pub async fn session(
                         let chunks=chunks.clone();
                         calls.push(async move {
                             let reply = tokio::select! {
-                                reply = run_call(&state,&principal,&method,&request["payload"], &id, chunks, window) => reply,
+                                reply = run_call(&state,(&principal,references),&method,&request["payload"], &id, chunks, window) => reply,
                                 _ = rx => Reply::Failure(json!({"_tag":"Interrupt"})),
                             };
                             (id, reply)
@@ -103,7 +104,7 @@ pub async fn session(
             }
         };
         if socket
-            .send(Message::Text(response.to_string()))
+            .send(Message::Text(crate::wire_json::compact(&response)))
             .await
             .is_err()
         {
@@ -116,13 +117,29 @@ pub async fn session(
 // Subscribe before reading the initial snapshot so updates during the read are queued.
 async fn run_call(
     state: &Arc<AppState>,
-    principal: &crate::auth_service::Session,
+    client: (&crate::auth_service::Session, bool),
     method: &str,
     params: &Value,
     id: &str,
     chunks: mpsc::Sender<(String, Value)>,
     window: Arc<Semaphore>,
 ) -> Reply {
+    let (principal, references) = client;
+    let decoded;
+    let params = if matches!(method, "server.updateSettings" | "server.checkSecretSource") {
+        let result = if method == "server.updateSettings" {
+            crate::settings::schema::request(params)
+        } else {
+            crate::settings::schema::secret_check(params)
+        };
+        decoded = match result {
+            Ok(v) => v,
+            Err(message) => return Reply::defect(message),
+        };
+        &decoded
+    } else {
+        params
+    };
     if let Some(contract) = RPC_CONTRACTS.iter().find(|c| c.tag == method) {
         let command_fields = (method == "orchestration.dispatchCommand")
             .then(|| {
@@ -148,12 +165,66 @@ async fn run_call(
             );
         }
     }
+    if method == "server.checkSecretSource" {
+        let settings = state.settings.internal().unwrap_or_default();
+        let source = &params["source"];
+        let answer = state
+            .settings
+            .resolver
+            .resolve(&settings, source, crate::settings::secrets::ReadMode::Check)
+            .await;
+        let result = if answer.is_some() {
+            json!({"_tag":"Resolved"})
+        } else {
+            let label = crate::settings::secrets::provider_label(&settings, source);
+            json!({"_tag":"Failed","detail":format!("Could not read this secret from \"{label}\". Check the provider's settings and that its store is unlocked.")})
+        };
+        return Reply::Success(result);
+    }
+    if matches!(method, "server.getSettings" | "server.updateSettings") {
+        let reply = if method == "server.getSettings" {
+            state.settings.client(references)
+        } else {
+            let mut input = params.clone();
+            if let Some(hosts) = input
+                .get_mut("patch")
+                .and_then(|patch| patch.get_mut("deviceHosts"))
+                .and_then(Value::as_array_mut)
+            {
+                crate::local_services::local_ssh::retain_remote(hosts).await;
+            }
+            state.settings.update(&input, references)
+        };
+        return match reply {
+            Ok(value) => Reply::Success(value),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+        };
+    }
     let send = |values| async {
         if let Ok(permit) = window.acquire().await {
             permit.forget();
             let _ = chunks.send((id.to_owned(), values)).await;
         }
     };
+    if method == "server.getConfig" {
+        return match crate::config_rpc::snapshot(state, references, &Value::Null).await {
+            Ok(v) => Reply::Success(v),
+            Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e})),
+        };
+    }
+    if method == "subscribeServerConfig" {
+        let mut sub = match crate::config_rpc::Subscription::open(state, references, params).await {
+            Ok(sub) => sub,
+            Err(e) => return Reply::Failure(json!({"_tag":"Fail","error":e})),
+        };
+        send(json!([{"version":1,"type":"snapshot","config":sub.config}])).await;
+        loop {
+            match sub.next(state, references, params).await {
+                Ok(event) => send(json!([event])).await,
+                Err(e) => return Reply::Failure(json!({"_tag":"Fail","error":e})),
+            }
+        }
+    }
     if method == "subscribeAuthAccess" {
         let (mut change, mut changes) = state.auth.subscribe_access();
         let mut revision = 1;
@@ -297,32 +368,6 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             Ok(row) => Reply::Success(row),
             Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e})),
         };
-    }
-    if method == "server.getSettings" {
-        return Reply::Success(state.settings.read().await.clone());
-    }
-    if method == "server.updateSettings" {
-        let Some(patch) = params["patch"].as_object() else {
-            return Reply::defect("Missing key\n  at [\"patch\"]".into());
-        };
-        let mut settings = state.settings.write().await;
-        let Some(current) = settings.as_object_mut() else {
-            *settings = serde_json::json!({});
-            return Reply::defect("Invalid settings object".into());
-        };
-        for (key, value) in patch {
-            if value.is_null() {
-                current.remove(key);
-            } else {
-                current.insert(key.clone(), value.clone());
-            }
-        }
-        if let Err(error) = crate::config::write_settings(&state.paths, &settings) {
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"ServerSettingsError","message":error.to_string()}}),
-            );
-        }
-        return Reply::Success(settings.clone());
     }
     if matches!(
         method,

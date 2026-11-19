@@ -69,6 +69,10 @@ def launch(command, url, **kwargs):
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
+        # Provider discovery can leave children running after the server exits.
+        # Reap this test's process group before disposing of its temporary home.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
 
 
 def free_port():

@@ -15,6 +15,8 @@ struct Bootstrap {
     port: u16,
     t3_home: Option<PathBuf>,
     desktop_bootstrap_token: String,
+    tailscale_serve_enabled: Option<bool>,
+    tailscale_serve_port: Option<u16>,
 }
 
 fn read_bootstrap(fd: u32) -> anyhow::Result<Bootstrap> {
@@ -53,12 +55,26 @@ struct Args {
     mode: Option<String>,
     #[arg(long, env = "T3CODE_NO_BROWSER")]
     no_browser: Option<bool>,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    tailscale_serve: Option<bool>,
+    #[arg(long)]
+    tailscale_serve_port: Option<u16>,
     #[arg(long, env = "T3_PROVIDER_COMMAND", value_delimiter = ' ')]
     provider_command: Option<Vec<String>>,
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+    match serve().await {
+        Err(error) if error.is::<t3code_server::ManagedPolicyFileError>() => {
+            eprintln!("{error}");
+            std::process::exit(77)
+        }
+        result => result,
+    }
+}
+
+async fn serve() -> anyhow::Result<()> {
     let args = Args::parse();
     let bootstrap = args.bootstrap_fd.map(read_bootstrap).transpose()?;
     let listen = args.listen.unwrap_or_else(|| {
@@ -88,14 +104,38 @@ async fn main() -> anyhow::Result<()> {
         axum::serve(listener, t3code_server::relay_http::router(relay)).await?;
         return Ok(());
     }
+    let mut config = config::RuntimeConfig::load()?;
+    config.mode = args.mode.unwrap_or_else(|| {
+        if bootstrap.is_some() {
+            "desktop"
+        } else {
+            "web"
+        }
+        .into()
+    });
+    config.host = Some(listen.ip());
+    config.port = Some(listen.port());
+    config.no_browser = args.no_browser.or(config.no_browser);
+    config.tailscale_serve = args
+        .tailscale_serve
+        .or(config.tailscale_serve)
+        .or_else(|| bootstrap.as_ref().and_then(|b| b.tailscale_serve_enabled));
+    config.tailscale_serve_port = args
+        .tailscale_serve_port
+        .or(config.tailscale_serve_port)
+        .or_else(|| bootstrap.as_ref().and_then(|b| b.tailscale_serve_port));
     let auth = bootstrap
         .map(|b| AuthService::with_bootstrap(b.desktop_bootstrap_token))
         .unwrap_or_default();
-    let state = AppState::with_auth(
+    let auth = auth
+        .with_desktop(config.mode == "desktop")
+        .with_port(listen.port());
+    let state = AppState::with_config(
         dir,
         args.provider_command
             .unwrap_or_else(default_provider_command),
-        auth.with_port(listen.port()),
+        auth,
+        config,
     )
     .await?;
     run_server(state, listen).await

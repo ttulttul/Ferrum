@@ -79,6 +79,50 @@ pub(crate) async fn dispatch_orchestration_command(
             return Err(dispatch_error(format!("Thread {id} is archived.")));
         }
     }
+    if let Some(summary) = state.settings.policy.summary() {
+        let row = store
+            .threads
+            .get(id)
+            .map(Thread::stored_row)
+            .unwrap_or(Value::Null);
+        let starts_work = kind == "message.dispatch";
+        let sets_mode = matches!(kind, "thread.create" | "thread.runtime-mode.set");
+        if sets_mode || starts_work {
+            let mode = if sets_mode {
+                &command["runtimeMode"]
+            } else {
+                &row["runtimeMode"]
+            };
+            if let Some(mut message) = mode
+                .as_str()
+                .and_then(|mode| state.settings.policy.runtime_denial(mode))
+            {
+                if starts_work {
+                    message.push_str(" Switch this thread's mode to continue.");
+                }
+                return Err(error(
+                    message.clone(),
+                    json!({"name":"OrchestratorRuntimeModeAboveCeilingError","message":message}),
+                ));
+            }
+        }
+        if starts_work && summary["limits"]["providers"]["allowedDrivers"].is_array() {
+            let id = command["modelSelection"]["instanceId"]
+                .as_str()
+                .or(row["providerInstanceId"].as_str())
+                .unwrap_or("codex");
+            let settings = state
+                .settings
+                .internal()
+                .map_err(|e| dispatch_error(e.to_string()))?;
+            let driver = settings["providerInstances"][id]["driver"]
+                .as_str()
+                .unwrap_or(id);
+            if let Some(reason) = state.settings.policy.provider_denial(driver) {
+                return Err(dispatch_error(reason));
+            }
+        }
+    }
     drop(store);
     let receipt = CommandReceipt {
         command_id: command_id.to_string(),
