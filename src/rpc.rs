@@ -1,4 +1,6 @@
-use crate::{dispatch_orchestration_command, host_rpc, provider_rpc, AppState, RPC_CONTRACTS};
+use crate::{
+    auth_service, dispatch_orchestration_command, host_rpc, provider_rpc, AppState, RPC_CONTRACTS,
+};
 use axum::extract::ws::{Message, WebSocket};
 use base64::Engine;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
@@ -2083,35 +2085,70 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         }
         "orchestration.searchThreads" => {
             let query = params["query"].as_str().unwrap_or_default().to_lowercase();
-            let project_ids = params["projectIds"].as_array();
-            let mut threads: Vec<&crate::Thread> = store
+            let limit = params["limit"].as_u64().unwrap_or(50).clamp(1, 50) as usize;
+            let project_id = params["projectId"].as_str();
+            let mut title_matches: Vec<&crate::Thread> = store
                 .threads
                 .values()
                 .filter(|thread| {
-                    project_ids.is_none_or(|ids| {
-                        ids.iter()
-                            .any(|id| id.as_str() == Some(thread.project_id.as_str()))
-                    })
+                    store.projects.contains_key(&thread.project_id)
+                        && project_id.is_none_or(|id| id == thread.project_id)
                 })
-                .filter(|thread| {
-                    if query.is_empty() {
-                        return true;
-                    }
-                    thread.title.to_lowercase().contains(&query)
-                        || thread
-                            .messages
-                            .iter()
-                            .any(|message| message.content.to_lowercase().contains(&query))
-                })
+                .filter(|thread| thread.title.to_lowercase().contains(&query))
                 .collect();
-            threads.sort_by(|a, b| {
+            title_matches.sort_by(|a, b| {
                 b.row["updatedAt"]
                     .as_str()
                     .unwrap_or_default()
                     .cmp(a.row["updatedAt"].as_str().unwrap_or_default())
                     .then_with(|| a.id.cmp(&b.id))
             });
-            json!({"snapshotSequence":sequence,"threads":threads.into_iter().map(|thread|thread.shell()).collect::<Vec<_>>(),"complete":true})
+            let title_matches = title_matches.into_iter().take(limit).collect::<Vec<_>>();
+            let title_ids = title_matches
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let mut message_matches = Vec::new();
+            for thread in store.threads.values().filter(|thread| {
+                store.projects.contains_key(&thread.project_id)
+                    && project_id.is_none_or(|id| id == thread.project_id)
+                    && !title_ids.contains(thread.id.as_str())
+            }) {
+                let Some(message) = thread
+                    .messages
+                    .iter()
+                    .find(|message| message.content.to_lowercase().contains(&query))
+                else {
+                    continue;
+                };
+                let folded = message.content.to_lowercase();
+                let offset = folded.find(&query).unwrap_or_default();
+                let start = offset.saturating_sub(24);
+                let end = (start + 240).min(message.content.len());
+                let snippet = message
+                    .content
+                    .get(start..end)
+                    .unwrap_or(&message.content)
+                    .to_owned();
+                message_matches.push(json!({
+                    "threadId":thread.id,
+                    "projectId":thread.project_id,
+                    "source":if message.role == "assistant" {"assistant"} else {"user"},
+                    "snippet":snippet,
+                    "messageCreatedAt":auth_service::iso((message.created_at as i64).saturating_mul(1000)),
+                    "title":thread.title,
+                }));
+            }
+            let message_slots = message_matches.len().min(limit / 5);
+            let mut matches = title_matches
+                .into_iter()
+                .take(limit.saturating_sub(message_slots))
+                .map(|thread| {
+                    json!({"threadId":thread.id,"projectId":thread.project_id,"title":thread.title,"source":"title"})
+                })
+                .collect::<Vec<_>>();
+            matches.extend(message_matches.into_iter().take(message_slots));
+            json!({"matches":matches})
         }
         "orchestration.searchThread" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default();
