@@ -368,6 +368,10 @@ impl Store {
                     if let Some(value) = patch.get("title").and_then(serde_json::Value::as_str) {
                         thread.title = value.to_owned();
                     }
+                    if let Some(value) = patch.get("project_id").and_then(serde_json::Value::as_str)
+                    {
+                        thread.project_id = value.to_owned();
+                    }
                     if let Some(value) = patch.get("archived").and_then(serde_json::Value::as_bool)
                     {
                         thread.archived = value;
@@ -442,6 +446,9 @@ pub struct AppState {
     pub(crate) provider_install_states: Mutex<HashMap<String, serde_json::Value>>,
     pub(crate) provider_auth_states: Mutex<HashMap<String, serde_json::Value>>,
     pub(crate) project_clone_states: Mutex<HashMap<String, serde_json::Value>>,
+    pub(crate) project_clone_events: broadcast::Sender<()>,
+    pub(crate) project_clone_cancellations: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    pub(crate) project_clone_sequence: Mutex<u64>,
 }
 impl AppState {
     pub async fn new(
@@ -506,6 +513,7 @@ impl AppState {
         let (pull_request_linked_events, _) = broadcast::channel(64);
         let (scheduled_task_events, _) = broadcast::channel(64);
         let (prompt_suggestion_events, _) = broadcast::channel(64);
+        let (project_clone_events, _) = broadcast::channel(64);
         let scheduled_tasks_path = dir.join("scheduled-tasks.json");
         let scheduled_tasks = tokio::fs::read(&scheduled_tasks_path)
             .await
@@ -574,6 +582,9 @@ impl AppState {
             provider_install_states: Mutex::new(HashMap::new()),
             provider_auth_states: Mutex::new(HashMap::new()),
             project_clone_states: Mutex::new(HashMap::new()),
+            project_clone_events,
+            project_clone_cancellations: Mutex::new(HashMap::new()),
+            project_clone_sequence: Mutex::new(0),
         }))
     }
 
