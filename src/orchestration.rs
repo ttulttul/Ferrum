@@ -264,6 +264,16 @@ async fn start_queued_run(
     thread_id: &str,
     run_id: &str,
 ) -> anyhow::Result<u64> {
+    start_existing_run(state, receipt, thread_id, run_id, "running").await
+}
+
+async fn start_existing_run(
+    state: Arc<AppState>,
+    receipt: &CommandReceipt,
+    thread_id: &str,
+    run_id: &str,
+    start_status: &str,
+) -> anyhow::Result<u64> {
     let (mut run, cwd, text) = {
         let store = state.store.read().await;
         let thread = store
@@ -273,7 +283,10 @@ async fn start_queued_run(
         let run = thread
             .runs
             .iter()
-            .find(|candidate| candidate.id.to_string() == run_id && candidate.status == "queued")
+            .find(|candidate| {
+                candidate.id.to_string() == run_id
+                    && (candidate.status == "queued" || candidate.status == "preparing")
+            })
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} is not queued.")))?;
         if thread
@@ -297,7 +310,7 @@ async fn start_queued_run(
             .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} has no queued message.")))?;
         (run, thread.cwd.clone(), text)
     };
-    run.status = "running".into();
+    run.status = start_status.into();
     run.queue_held = false;
     let sequence = state
         .commit_receipted(Event::RunStarted(run.clone()), Some(receipt.clone()))
@@ -865,14 +878,115 @@ async fn apply_command(
                     .id);
             }
         }
-        "prepared-run.release"
-        | "prepared-run.progress"
-        | "prepared-run.fail"
-        | "prepared-run.retry" => {
+        "prepared-run.progress" => {
             let run_id = command["runId"].as_str().unwrap_or_default();
-            return Err(anyhow::anyhow!(format!(
-                "Run {run_id} is not awaiting workspace preparation."
-            )));
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id.unwrap_or_default())
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .is_some_and(|run| run.status == "preparing");
+            if !valid {
+                return Err(anyhow::anyhow!(format!(
+                    "Run {run_id} is not awaiting workspace preparation."
+                )));
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::CommandDispatched {
+                        command_id: receipt.command_id.clone(),
+                        command_type: command_type.into(),
+                        thread_id: Some(thread_id.unwrap_or_default().to_owned()),
+                        payload: command.clone(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "prepared-run.release" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id.unwrap_or_default())
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .is_some_and(|run| run.status == "preparing");
+            if !valid {
+                return Err(anyhow::anyhow!(format!(
+                    "Run {run_id} is not awaiting workspace preparation."
+                )));
+            }
+            return start_existing_run(
+                state,
+                receipt,
+                thread_id.unwrap_or_default(),
+                run_id,
+                "starting",
+            )
+            .await;
+        }
+        "prepared-run.fail" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let thread_id = thread_id.unwrap_or_default();
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .is_some_and(|run| run.status == "preparing");
+            if !valid {
+                return Err(anyhow::anyhow!(format!(
+                    "Run {run_id} is not awaiting workspace preparation."
+                )));
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::RunFinished {
+                        run_id: Uuid::parse_str(run_id)?,
+                        thread_id: thread_id.to_owned(),
+                        status: "failed".into(),
+                        error: command["failure"]["message"].as_str().map(str::to_owned),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "prepared-run.retry" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let thread_id = thread_id.unwrap_or_default();
+            let current = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .cloned();
+            let Some(mut run) = current else {
+                return Err(anyhow::anyhow!(format!(
+                    "Run {run_id} has no failed workspace preparation to retry."
+                )));
+            };
+            if run.status != "failed" {
+                return Err(anyhow::anyhow!(format!(
+                    "Run {run_id} has no failed workspace preparation to retry."
+                )));
+            }
+            run.status = "preparing".into();
+            run.finished_at = None;
+            run.error = None;
+            return Ok(state
+                .commit_receipted(Event::RunStarted(run), Some(receipt.clone()))
+                .await?
+                .id);
         }
         "provider-session.detach" => {
             let provider_session_id = command["providerSessionId"].as_str().unwrap_or_default();
