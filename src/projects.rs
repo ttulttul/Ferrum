@@ -58,7 +58,7 @@ pub(super) async fn mutate(state: &AppState, input: &Value) -> Result<Value, Val
         .threads
         .values()
         .filter(|t| t.project_id == id && kind == "project.delete")
-        .map(|t| t.id)
+        .map(|t| t.id.clone())
         .collect();
     if !removed_threads.is_empty() && input["force"] != true {
         return Err(error(&format!("Project {id} is not empty.")));

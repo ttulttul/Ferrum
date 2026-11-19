@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate contracts/http.json and contracts/rpc.json from upstream T3 Code."""
+"""Regenerate the HTTP, RPC and command inventories from upstream T3 Code."""
 import json
 import os
 import subprocess
@@ -34,3 +34,4 @@ for entry in rpc:
     entry["scope"] = scope_by_method[entry["name"]]
 Path("contracts/http.json").write_text(json.dumps(http, indent=2) + "\n")
 Path("contracts/rpc.json").write_text(json.dumps(rpc, indent=2) + "\n")
+Path("contracts/commands.json").write_text(json.dumps(registered["commands"], indent=2) + "\n")

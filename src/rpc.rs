@@ -4,7 +4,6 @@ use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Strea
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
-use uuid::Uuid;
 
 enum Reply {
     Success(Value),
@@ -123,8 +122,15 @@ async fn run_call(
     window: Arc<Semaphore>,
 ) -> Reply {
     if let Some(contract) = RPC_CONTRACTS.iter().find(|c| c.tag == method) {
-        if let Some(key) = contract
-            .required
+        let command_fields = (method == "orchestration.dispatchCommand")
+            .then(|| {
+                params["type"]
+                    .as_str()
+                    .and_then(crate::contracts::command_fields)
+            })
+            .flatten();
+        if let Some(key) = command_fields
+            .or(contract.required)
             .into_iter()
             .flatten()
             .find(|key| params.get(**key).is_none())
@@ -269,16 +275,8 @@ async fn run_call(
 }
 
 async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply {
-    let Some(contract) = RPC_CONTRACTS.iter().find(|contract| contract.tag == method) else {
+    if !crate::rpc_known(method) {
         return Reply::defect(format!("Unknown request tag: {method}"));
-    };
-    if let Some(field) = contract
-        .required
-        .into_iter()
-        .flatten()
-        .find(|key| params.get(**key).is_none())
-    {
-        return Reply::defect(format!("Missing key\n  at [{field:?}]"));
     }
     if method == "projects.mutate" {
         return match crate::projects::mutate(state, params).await {
@@ -303,7 +301,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     if method == "orchestration.dispatchCommand" {
         return match dispatch_orchestration_command(state.clone(), params.clone()).await {
             Ok(sequence) => Reply::Success(json!({"sequence":sequence})),
-            Err(e) => Reply::defect(e.to_string()),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
         };
     }
     if method == "guestShare.create" {
@@ -315,12 +313,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
 
     let store = state.store.read().await;
     let sequence = *state.next_event_id.lock().await;
-    let thread = |value: &Value| {
-        value
-            .as_str()
-            .and_then(|s| Uuid::parse_str(s).ok())
-            .and_then(|id| store.threads.get(&id))
-    };
+    let thread = |value: &Value| value.as_str().and_then(|id| store.threads.get(id));
     let result = match method {
         "orchestration.getThreadTitles" | "orchestration.getThreadLinkMetadata" => {
             let mut items = serde_json::Map::new();
@@ -345,7 +338,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"snapshotSequence":sequence,"threads":thread(&params["threadId"]).into_iter().collect::<Vec<_>>()})
         }
         "orchestration.getWorktreeThreadIds" => {
-            json!({"threadIds":store.threads.values().filter(|t| Some(t.cwd.as_str()) == params["worktreePath"].as_str()).map(|t|t.id).collect::<Vec<_>>()})
+            json!({"threadIds":store.threads.values().filter(|t| Some(t.cwd.as_str()) == params["worktreePath"].as_str()).map(|t|&t.id).collect::<Vec<_>>()})
         }
         "orchestration.getArchivedShellSnapshot" => {
             json!({"schemaVersion":2,"snapshotSequence":sequence,"projects":[],"threads":store.threads.values().filter(|t|t.archived).collect::<Vec<_>>()})

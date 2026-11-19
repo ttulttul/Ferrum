@@ -17,7 +17,7 @@ use tokio::{
     process::Command,
     sync::{broadcast, oneshot, Mutex, RwLock},
 };
-use tracing::{error, info};
+use tracing::info;
 use uuid::Uuid;
 
 pub mod access_http;
@@ -29,7 +29,9 @@ pub mod host_rpc;
 pub mod issues;
 pub mod local_services;
 pub mod mcp_oauth;
+mod orchestration;
 mod projects;
+use orchestration::dispatch_orchestration_command;
 pub mod provider_http;
 pub mod provider_rpc;
 pub mod pull_requests;
@@ -57,7 +59,7 @@ pub struct Project {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConversationMessage {
-    pub id: Uuid,
+    pub id: String,
     pub role: String,
     pub content: String,
     pub created_at: u64,
@@ -65,7 +67,7 @@ pub struct ConversationMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Run {
     pub id: Uuid,
-    pub thread_id: Uuid,
+    pub thread_id: String,
     pub provider: String,
     pub status: String,
     pub started_at: u64,
@@ -74,7 +76,7 @@ pub struct Run {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Thread {
-    pub id: Uuid,
+    pub id: String,
     pub project_id: String,
     pub title: String,
     pub cwd: String,
@@ -99,38 +101,42 @@ pub enum Event {
         row: serde_json::Value,
         command_id: String,
         command_type: String,
-        removed_threads: Vec<Uuid>,
+        removed_threads: Vec<String>,
     },
     ThreadCreated(Thread),
     MessageAdded {
-        thread_id: Uuid,
+        thread_id: String,
         message: ConversationMessage,
     },
     RunStarted(Run),
+    RunQueued {
+        message: ConversationMessage,
+        run: Run,
+    },
     RunOutput {
         run_id: Uuid,
-        thread_id: Uuid,
+        thread_id: String,
         stream: String,
         text: String,
     },
     RunFinished {
         run_id: Uuid,
-        thread_id: Uuid,
+        thread_id: String,
         status: String,
         error: Option<String>,
     },
     CommandDispatched {
         command_id: String,
         command_type: String,
-        thread_id: Option<Uuid>,
+        thread_id: Option<String>,
         payload: serde_json::Value,
     },
     ThreadPatched {
-        thread_id: Uuid,
+        thread_id: String,
         patch: serde_json::Value,
     },
     ThreadDeleted {
-        thread_id: Uuid,
+        thread_id: String,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -138,6 +144,14 @@ pub struct ServerEvent {
     pub id: u64,
     pub at: u64,
     pub event: Event,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    receipt: Option<CommandReceipt>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CommandReceipt {
+    command_id: String,
+    thread_id: String,
 }
 
 #[derive(Default)]
@@ -145,9 +159,21 @@ pub struct Store {
     pub projects: HashMap<String, Project>,
     project_rows: indexmap::IndexMap<String, serde_json::Value>,
     project_receipts: HashMap<String, (String, String)>,
-    pub threads: HashMap<Uuid, Thread>,
+    deleted_thread_ids: std::collections::HashSet<String>,
+    command_receipts: HashMap<String, (String, u64)>,
+    pub threads: HashMap<String, Thread>,
 }
 impl Store {
+    fn apply_record(&mut self, record: &ServerEvent) {
+        self.apply(&record.event);
+        if let Some(receipt) = &record.receipt {
+            self.command_receipts.insert(
+                receipt.command_id.clone(),
+                (receipt.thread_id.clone(), record.id),
+            );
+        }
+    }
+
     fn apply(&mut self, event: &Event) {
         match event {
             Event::ProjectCreated(p) => {
@@ -173,14 +199,22 @@ impl Store {
                 }
                 for id in removed_threads {
                     self.threads.remove(id);
+                    self.deleted_thread_ids.insert(id.clone());
                 }
             }
             Event::ThreadCreated(t) => {
-                self.threads.insert(t.id, t.clone());
+                self.threads.insert(t.id.clone(), t.clone());
             }
             Event::MessageAdded { thread_id, message } => {
                 if let Some(t) = self.threads.get_mut(thread_id) {
                     t.messages.push(message.clone());
+                }
+            }
+            Event::RunQueued { message, run } => {
+                if let Some(thread) = self.threads.get_mut(&run.thread_id) {
+                    thread.messages.push(message.clone());
+                    thread.status = "running".into();
+                    thread.runs.push(run.clone());
                 }
             }
             Event::RunStarted(run) => {
@@ -245,6 +279,7 @@ impl Store {
             }
             Event::ThreadDeleted { thread_id } => {
                 self.threads.remove(thread_id);
+                self.deleted_thread_ids.insert(thread_id.clone());
             }
         }
     }
@@ -294,7 +329,7 @@ impl AppState {
             for line in contents.lines() {
                 if let Ok(record) = serde_json::from_str::<ServerEvent>(line) {
                     next_event_id = next_event_id.max(record.id);
-                    store.apply(&record.event);
+                    store.apply_record(&record);
                 }
             }
         }
@@ -328,21 +363,30 @@ impl AppState {
         }))
     }
     async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {
+        self.commit_receipted(event, None).await
+    }
+
+    async fn commit_receipted(
+        &self,
+        event: Event,
+        receipt: Option<CommandReceipt>,
+    ) -> anyhow::Result<ServerEvent> {
         let mut store = self.store.write().await;
         let mut next_event_id = self.next_event_id.lock().await;
         let record = ServerEvent {
             id: *next_event_id + 1,
             at: now(),
             event,
+            receipt,
         };
         let mut log = self.log.lock().await;
         use tokio::io::AsyncWriteExt;
-        log.write_all(serde_json::to_string(&record)?.as_bytes())
-            .await?;
-        log.write_all(b"\n").await?;
+        let mut bytes = serde_json::to_vec(&record)?;
+        bytes.push(b'\n');
+        log.write_all(&bytes).await?;
         log.flush().await?;
         *next_event_id = record.id;
-        store.apply(&record.event);
+        store.apply_record(&record);
         let _ = self.events.send(record.clone());
         Ok(record)
     }
@@ -421,300 +465,12 @@ async fn contract_fallback(State(state): State<Arc<AppState>>, request: Request)
         .body(body.to_string().into())
         .expect("valid response")
 }
-async fn start_run(
-    state: Arc<AppState>,
-    thread_id: Uuid,
-    content: String,
-    provider: String,
-) -> Result<Run, (StatusCode, String)> {
-    let thread = state
-        .store
-        .read()
-        .await
-        .threads
-        .get(&thread_id)
-        .cloned()
-        .ok_or((StatusCode::NOT_FOUND, "thread not found".into()))?;
-    let message = ConversationMessage {
-        id: Uuid::new_v4(),
-        role: "user".into(),
-        content: content.clone(),
-        created_at: now(),
-    };
-    state
-        .commit(Event::MessageAdded { thread_id, message })
-        .await
-        .map_err(internal)?;
-    let run = Run {
-        id: Uuid::new_v4(),
-        thread_id,
-        provider,
-        status: "running".into(),
-        started_at: now(),
-        finished_at: None,
-        error: None,
-    };
-    state
-        .commit(Event::RunStarted(run.clone()))
-        .await
-        .map_err(internal)?;
-    let state_for_task = state.clone();
-    let run_for_task = run.clone();
-    tokio::spawn(async move {
-        if let Err(e) = execute_run(state_for_task, run_for_task, thread.cwd, content).await {
-            error!(%e, "run failed");
-        }
-    });
-    Ok(run)
-}
-
-async fn dispatch_orchestration_command(
-    state: Arc<AppState>,
-    command: serde_json::Value,
-) -> anyhow::Result<u64> {
-    let command_type = command
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let thread_id = command
-        .get("threadId")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok());
-    match command_type {
-        "thread.create" => {
-            let project_id = command
-                .get("projectId")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("thread.create requires projectId"))?;
-            let project = state
-                .store
-                .read()
-                .await
-                .projects
-                .get(&project_id)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("project not found"))?;
-            let id = thread_id.unwrap_or_else(Uuid::new_v4);
-            let thread = Thread {
-                id,
-                project_id,
-                title: command
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("New thread")
-                    .to_owned(),
-                cwd: command
-                    .get("worktreePath")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(&project.path)
-                    .to_owned(),
-                status: "idle".into(),
-                messages: vec![],
-                runs: vec![],
-                created_at: now(),
-                archived: false,
-                settled: false,
-                snoozed_until: None,
-                pinned: false,
-                unread: false,
-                tags: vec![],
-            };
-            return Ok(state.commit(Event::ThreadCreated(thread)).await?.id);
-        }
-        "message.dispatch" => {
-            let thread_id =
-                thread_id.ok_or_else(|| anyhow::anyhow!("message.dispatch requires threadId"))?;
-            let text = command
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            start_run(state.clone(), thread_id, text, "default".into())
-                .await
-                .map_err(|(_, error)| anyhow::anyhow!(error))?;
-            return Ok(state
-                .commit(Event::CommandDispatched {
-                    command_id: command_id(&command),
-                    command_type: command_type.into(),
-                    thread_id: Some(thread_id),
-                    payload: command,
-                })
-                .await?
-                .id);
-        }
-        "thread.stop" | "run.interrupt" | "subagent.stop" | "queued-run.cancel" => {
-            if let Some(thread_id) = thread_id {
-                let run_ids = state
-                    .store
-                    .read()
-                    .await
-                    .threads
-                    .get(&thread_id)
-                    .map(|thread| {
-                        thread
-                            .runs
-                            .iter()
-                            .filter(|run| run.status == "running")
-                            .map(|run| run.id)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let mut cancellations = state.cancellations.lock().await;
-                for run_id in run_ids {
-                    if let Some(cancel) = cancellations.remove(&run_id) {
-                        let _ = cancel.send(());
-                    }
-                }
-                return Ok(state
-                    .commit(Event::ThreadPatched {
-                        thread_id,
-                        patch: serde_json::json!({"status":"cancelled"}),
-                    })
-                    .await?
-                    .id);
-            }
-        }
-        "thread.guest-share.close" | "thread.guest-message.dismiss" => {
-            let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
-            if command_type == "thread.guest-share.close" {
-                state.guest.close_thread(id)
-            } else {
-                state.guest.resolve_message(
-                    id,
-                    command["guestMessageId"].as_str().unwrap_or(""),
-                    "dismissed",
-                )
-            }
-            .map_err(anyhow::Error::msg)?;
-        }
-        "thread.archive"
-        | "thread.unarchive"
-        | "thread.settle"
-        | "thread.unsettle"
-        | "thread.pin"
-        | "thread.unpin"
-        | "thread.mark-unread"
-        | "thread.visit"
-        | "thread.snooze"
-        | "thread.unsnooze"
-        | "thread.metadata.update"
-        | "thread.runtime-mode.set"
-        | "thread.interaction-mode.set"
-        | "thread.model-selection.set"
-        | "thread.tag.set" => {
-            if let Some(thread_id) = thread_id {
-                let mut patch = serde_json::Map::new();
-                match command_type {
-                    "thread.archive" => {
-                        patch.insert("archived".into(), true.into());
-                    }
-                    "thread.unarchive" => {
-                        patch.insert("archived".into(), false.into());
-                    }
-                    "thread.settle" => {
-                        patch.insert("settled".into(), true.into());
-                    }
-                    "thread.unsettle" => {
-                        patch.insert("settled".into(), false.into());
-                    }
-                    "thread.pin" => {
-                        patch.insert("pinned".into(), true.into());
-                    }
-                    "thread.unpin" => {
-                        patch.insert("pinned".into(), false.into());
-                    }
-                    "thread.mark-unread" => {
-                        patch.insert("unread".into(), true.into());
-                    }
-                    "thread.visit" => {
-                        patch.insert("unread".into(), false.into());
-                    }
-                    "thread.snooze" => {
-                        patch.insert(
-                            "snoozed_until".into(),
-                            command
-                                .get("snoozedUntil")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null),
-                        );
-                    }
-                    "thread.unsnooze" => {
-                        patch.insert("snoozed_until".into(), serde_json::Value::Null);
-                    }
-                    "thread.metadata.update" => {
-                        if let Some(title) = command.get("title") {
-                            patch.insert("title".into(), title.clone());
-                        }
-                    }
-                    "thread.tag.set" => {
-                        let tag = command.get("tag").and_then(serde_json::Value::as_str);
-                        let tagged = command
-                            .get("tagged")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false);
-                        let mut tags = state
-                            .store
-                            .read()
-                            .await
-                            .threads
-                            .get(&thread_id)
-                            .map(|thread| thread.tags.clone())
-                            .unwrap_or_default();
-                        if let Some(tag) = tag {
-                            if tagged && !tags.iter().any(|value| value == tag) {
-                                tags.push(tag.into());
-                            }
-                            if !tagged {
-                                tags.retain(|value| value != tag);
-                            }
-                        }
-                        patch.insert("tags".into(), serde_json::json!(tags));
-                    }
-                    _ => {}
-                }
-                return Ok(state
-                    .commit(Event::ThreadPatched {
-                        thread_id,
-                        patch: patch.into(),
-                    })
-                    .await?
-                    .id);
-            }
-        }
-        "thread.delete" => {
-            if let Some(thread_id) = thread_id {
-                return Ok(state.commit(Event::ThreadDeleted { thread_id }).await?.id);
-            }
-        }
-        _ => anyhow::bail!("Unsupported orchestration command: {command_type}"),
-    }
-    Ok(state
-        .commit(Event::CommandDispatched {
-            command_id: command_id(&command),
-            command_type: command_type.into(),
-            thread_id,
-            payload: command,
-        })
-        .await?
-        .id)
-}
-
-fn command_id(command: &serde_json::Value) -> String {
-    command
-        .get("commandId")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
-}
-fn internal(e: anyhow::Error) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
 async fn execute_run(
     state: Arc<AppState>,
     run: Run,
     cwd: String,
     prompt: String,
+    mut cancel_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
     let mut command = if state.provider_command.is_empty() {
         vec!["printf".into(), "%s\\n".into()]
@@ -731,8 +487,6 @@ async fn execute_run(
         .spawn()?;
     let stdout = child.stdout.take().map(BufReader::new);
     let stderr = child.stderr.take().map(BufReader::new);
-    let (cancel_tx, mut cancel_rx) = oneshot::channel();
-    state.cancellations.lock().await.insert(run.id, cancel_tx);
     let mut output_tasks = Vec::new();
     if let Some(mut reader) = stdout {
         let s = state.clone();
@@ -744,7 +498,7 @@ async fn execute_run(
                 let _ = s
                     .commit(Event::RunOutput {
                         run_id: r.id,
-                        thread_id: r.thread_id,
+                        thread_id: r.thread_id.clone(),
                         stream: "stdout".into(),
                         text,
                     })
@@ -762,7 +516,7 @@ async fn execute_run(
                 let _ = s
                     .commit(Event::RunOutput {
                         run_id: r.id,
-                        thread_id: r.thread_id,
+                        thread_id: r.thread_id.clone(),
                         stream: "stderr".into(),
                         text,
                     })

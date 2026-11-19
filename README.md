@@ -1,6 +1,6 @@
 # t3code-rust
 
-A Rust implementation of the headless T3 Code environment server and standalone relay. Compatibility work targets [upstream commit 052ca497](https://github.com/pingdotgg/t3code/tree/052ca497cf1103b001327bcd964188a71dfec213). The pinned source declares 235 WebSocket RPC methods and 86 typed HTTP operations, including 30 relay operations. The port is in development. Clients can still distinguish it from the TypeScript server.
+A Rust implementation of the headless T3 Code environment server and standalone relay. Compatibility work targets [upstream commit 052ca497](https://github.com/pingdotgg/t3code/tree/052ca497cf1103b001327bcd964188a71dfec213). The pinned source declares 235 WebSocket RPC methods and 86 typed HTTP operations, including 30 relay operations. Its dispatch RPC accepts 58 command types. The port is in development. Clients can still distinguish it from the TypeScript server.
 
 ## Run
 
@@ -36,6 +36,7 @@ cargo test --locked
 original="node /tmp/t3code-reference/apps/server/src/bin.ts"
 rust="$PWD/target/debug/t3code-server"
 python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$original" --rust-command "$rust"
+python3 scripts/orchestration_parity.py --original-command "$original" --rust-command "$rust"
 python3 scripts/auth_parity.py --original-command "$original" --rust-command "$rust"
 python3 scripts/mcp_parity.py --original-command "$original" --rust-command "$rust"
 python3 scripts/git_workflow_parity.py --original-command "$original" --rust-command "$rust"
@@ -43,7 +44,7 @@ python3 scripts/github_provider_parity.py --original-command "$original" --rust-
 python3 scripts/relay_parity.py --checkout /tmp/t3code-reference --rust "$rust"
 ```
 
-The managed harness starts both processes on loopback with temporary homes, separate authentication sessions, and the same signing key for deterministic registration. It compares HTTP status, selected headers and raw body bytes, and compares WebSocket application frames without reserializing JSON. The GitHub suite also compares the writes each server makes to an isolated provider. The relay suite runs upstream HTTP handlers with test storage and local keys. A separate Chromium suite compares rendered frames and file transfers using the same browser installation. See `scripts/preview_provider_parity.py --help`.
+The managed harness starts both processes on loopback with temporary homes, separate authentication sessions, and the same signing key for deterministic registration. It compares HTTP status, selected headers and raw body bytes, and compares WebSocket application frames without reserializing JSON. The GitHub suite also compares the writes each server makes to an isolated provider. The relay suite runs upstream HTTP handlers with test storage and local keys. The orchestration suite restarts both servers and checks opaque thread IDs, conflict responses and command replay. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to the GitHub suite to include timestamped reads. A separate Chromium suite compares rendered frames and file transfers using the same browser installation. See `scripts/preview_provider_parity.py --help`.
 
 Fixtures cover specific requests and state transitions. Time, random credentials, provider output and platform-specific behavior still limit comparisons. Remaining work includes orchestration projections and replay, coding-agent sessions, provider-specific integrations, guest access through a managed tunnel, relay provisioning and push delivery, MCP tools, and protocol headers and error cases outside the fixtures. The inventory in `contracts/` lists the upstream surface. Regenerate it with `python3 scripts/update_contract_inventory.py /tmp/t3code-reference`.
 

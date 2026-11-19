@@ -3,6 +3,7 @@ use std::{env, fs, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=contracts/http.json");
     println!("cargo:rerun-if-changed=contracts/rpc.json");
+    println!("cargo:rerun-if-changed=contracts/commands.json");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let http: Vec<serde_json::Value> = serde_json::from_str(
         &fs::read_to_string("contracts/http.json").expect("contracts/http.json"),
@@ -53,6 +54,15 @@ fn main() {
             })
             .collect::<String>()
     );
+    let commands: std::collections::BTreeMap<String, Vec<String>> =
+        serde_json::from_str(include_str!("contracts/commands.json"))
+            .expect("valid command inventory");
+    let mut branches = String::from("match tag {\n");
+    for (tag, keys) in commands {
+        branches.push_str(&format!("{tag:?} => Some(&{keys:?}),\n"));
+    }
+    branches.push_str("_ => None }");
+    fs::write(out.join("command_fields.rs"), branches).expect("write command fields");
     fs::write(out.join("http_contracts.rs"), http_source).expect("write HTTP inventory");
     fs::write(out.join("rpc_contracts.rs"), rpc_source).expect("write RPC inventory");
 }

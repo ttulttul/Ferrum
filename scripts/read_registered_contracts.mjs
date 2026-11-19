@@ -7,13 +7,22 @@ const root = resolve(process.argv[2]);
 const { WsRpcGroup } = await import(pathToFileURL(resolve(root, "packages/contracts/src/rpc.ts")));
 const require = createRequire(resolve(root, "packages/contracts/package.json"));
 const Schema = await import(pathToFileURL(require.resolve("effect/Schema")));
+const requiredFields = ast => ast.propertySignatures
+  .filter(property => !property.type.context?.isOptional)
+  .map(property => property.name);
 const fields = {};
+const commands = {};
 for (const [tag, rpc] of WsRpcGroup.requests) {
   const ast = Schema.toEncoded(Schema.toCodecJson(rpc.payloadSchema)).ast;
   if (ast._tag === "Objects") {
-    fields[tag] = ast.propertySignatures
-      .filter(property => !property.type.context?.isOptional)
-      .map(property => property.name);
+    fields[tag] = requiredFields(ast);
+  }
+  if (tag === "orchestration.dispatchCommand") {
+    for (const command of ast.types) {
+      const discriminator = command.propertySignatures.find(property => property.name === "type").type;
+      if (discriminator._tag !== "Literal") throw Error("Unexpected command type schema");
+      commands[discriminator.literal] = requiredFields(command);
+    }
   }
 }
 const http = [];
@@ -29,4 +38,4 @@ for (const [source, name] of [
     }
   }
 }
-process.stdout.write(JSON.stringify({http, fields}));
+process.stdout.write(JSON.stringify({http, fields, commands}));

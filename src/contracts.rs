@@ -28,6 +28,10 @@ pub const HTTP_CONTRACTS: &[HttpContract] =
 
 pub const RPC_CONTRACTS: &[RpcContract] = include!(concat!(env!("OUT_DIR"), "/rpc_contracts.rs"));
 
+pub(crate) fn command_fields(tag: &str) -> Option<&'static [&'static str]> {
+    include!(concat!(env!("OUT_DIR"), "/command_fields.rs"))
+}
+
 pub fn rpc_known(tag: &str) -> bool {
     RPC_CONTRACTS.iter().any(|contract| contract.tag == tag)
 }

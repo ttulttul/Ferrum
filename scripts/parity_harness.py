@@ -87,10 +87,11 @@ def session_cookie(url, secret):
 
 def managed_server(stack, prefix, root, secret, signing_key):
     secrets_dir = root / "userdata" / "secrets"
-    secrets_dir.mkdir(parents=True, mode=0o700)
+    secrets_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     key_file = secrets_dir / "mcp-oauth-signing-key.bin"
-    key_file.write_bytes(signing_key)
-    key_file.chmod(0o600)
+    if not key_file.exists():
+        key_file.write_bytes(signing_key)
+        key_file.chmod(0o600)
     port = free_port()
     url = f"http://127.0.0.1:{port}"
     envelope = dict(mode="desktop", noBrowser=True, host="127.0.0.1", port=port, t3Home=str(root),
@@ -147,18 +148,21 @@ def main():
     parser.add_argument("--managed", action="store_true", help="launch each command in an isolated desktop environment")
     parser.add_argument("--fixtures", type=Path)
     parser.add_argument("--check-required-fields", action="store_true",
-                        help="also compare empty-object validation on provider RPCs with required fields")
+                        help="also compare missing-field validation for registered RPCs and orchestration commands")
     args = parser.parse_args()
     fixtures = json.loads((args.fixtures or ROOT / "tests/parity-fixtures.json").read_text())
     if args.managed and not args.fixtures:
         for name in ("provider-parity.json", "github-voice-parity.json", "host-parity.json"):
             fixtures.extend(json.loads((ROOT / "tests" / name).read_text()))
     if args.check_required_fields:
-        domains = ("vcs.", "terminal.", "preview.", "device.", "guestShare.", "pullRequests.", "issues.", "issueTrackers.")
         for rpc in json.loads((ROOT / "contracts/rpc.json").read_text()):
-            if rpc["tag"].startswith(domains) and rpc.get("required"):
+            if rpc.get("required"):
                 fixtures.append({"name": rpc["tag"] + " missing fields", "frame": {
                     "_tag": "Request", "id": "validation", "tag": rpc["tag"], "payload": {}, "headers": []}})
+        for tag in json.loads((ROOT / "contracts/commands.json").read_text()):
+            fixtures.append({"name": tag + " missing command fields", "frame": {
+                "_tag": "Request", "id": "validation", "tag": "orchestration.dispatchCommand",
+                "payload": {"type": tag}, "headers": []}})
     with contextlib.ExitStack() as stack:
         if args.managed:
             if not args.original_command or not args.rust_command:

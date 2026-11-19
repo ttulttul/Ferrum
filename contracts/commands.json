@@ -1,0 +1,405 @@
+{
+  "thread.stop": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "thread.create": [
+    "type",
+    "createdBy",
+    "creationSource",
+    "commandId",
+    "threadId",
+    "projectId",
+    "title",
+    "modelSelection",
+    "runtimeMode",
+    "interactionMode",
+    "branch",
+    "worktreePath"
+  ],
+  "thread.archive": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "thread.guest-share.close": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "thread.guest-message.dismiss": [
+    "type",
+    "commandId",
+    "threadId",
+    "guestMessageId"
+  ],
+  "thread.unarchive": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "thread.delete": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "thread.settle": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "thread.auto-settle": [
+    "type",
+    "commandId",
+    "threadId",
+    "snapshotAt"
+  ],
+  "thread.unsettle": [
+    "type",
+    "commandId",
+    "threadId",
+    "reason"
+  ],
+  "thread.snooze": [
+    "type",
+    "commandId",
+    "threadId",
+    "snoozedUntil"
+  ],
+  "thread.unsnooze": [
+    "type",
+    "commandId",
+    "threadId",
+    "reason"
+  ],
+  "thread.auto-settle.set": [
+    "type",
+    "commandId",
+    "threadId",
+    "enabled"
+  ],
+  "thread.pin": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "thread.unpin": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "thread.tag.set": [
+    "type",
+    "commandId",
+    "threadId",
+    "tag",
+    "tagged"
+  ],
+  "thread.pin.reorder": [
+    "type",
+    "commandId",
+    "threadId",
+    "orderKey"
+  ],
+  "thread.active.reorder": [
+    "type",
+    "commandId",
+    "threadId",
+    "orderKey"
+  ],
+  "thread.visit": [
+    "type",
+    "commandId",
+    "threadId",
+    "visitedAt"
+  ],
+  "thread.mark-unread": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "thread.metadata.update": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "thread.pull-request.link": [
+    "type",
+    "commandId",
+    "threadId",
+    "host",
+    "repository",
+    "number",
+    "url",
+    "source"
+  ],
+  "thread.pull-request.unlink": [
+    "type",
+    "commandId",
+    "threadId",
+    "host",
+    "repository",
+    "number"
+  ],
+  "thread.pull-request-link.sync": [
+    "type",
+    "commandId",
+    "threadId",
+    "host",
+    "repository",
+    "number",
+    "snapshot",
+    "stack"
+  ],
+  "thread.issue.link": [
+    "type",
+    "commandId",
+    "threadId",
+    "tracker",
+    "host",
+    "scope",
+    "key",
+    "projectId",
+    "url",
+    "displayKey",
+    "title",
+    "source"
+  ],
+  "thread.issue.unlink": [
+    "type",
+    "commandId",
+    "threadId",
+    "tracker",
+    "host",
+    "scope",
+    "key"
+  ],
+  "thread.pull-request.watch": [
+    "type",
+    "commandId",
+    "threadId",
+    "host",
+    "repository",
+    "number",
+    "watching"
+  ],
+  "thread.pull-request.sync": [
+    "type",
+    "commandId",
+    "threadId",
+    "projectId",
+    "snapshotSequence",
+    "expected",
+    "branchPullRequest"
+  ],
+  "thread.title.regeneration.complete": [
+    "type",
+    "commandId",
+    "threadId",
+    "requestId"
+  ],
+  "thread.runtime-mode.set": [
+    "type",
+    "commandId",
+    "threadId",
+    "runtimeMode"
+  ],
+  "thread.interaction-mode.set": [
+    "type",
+    "commandId",
+    "threadId",
+    "interactionMode"
+  ],
+  "thread.model-selection.set": [
+    "type",
+    "commandId",
+    "threadId",
+    "modelSelection"
+  ],
+  "provider-session.detach": [
+    "type",
+    "commandId",
+    "threadId",
+    "providerSessionId"
+  ],
+  "message.dispatch": [
+    "type",
+    "createdBy",
+    "creationSource",
+    "commandId",
+    "threadId",
+    "messageId",
+    "text",
+    "attachments",
+    "dispatchMode"
+  ],
+  "prepared-run.release": [
+    "type",
+    "commandId",
+    "threadId",
+    "runId"
+  ],
+  "notification.delivery.accept": [
+    "type",
+    "commandId",
+    "threadId",
+    "messageId"
+  ],
+  "prepared-run.progress": [
+    "type",
+    "commandId",
+    "threadId",
+    "runId",
+    "phase"
+  ],
+  "prepared-run.fail": [
+    "type",
+    "commandId",
+    "threadId",
+    "runId",
+    "failure"
+  ],
+  "prepared-run.retry": [
+    "type",
+    "commandId",
+    "threadId",
+    "runId"
+  ],
+  "subagent.stop": [
+    "type",
+    "commandId",
+    "threadId",
+    "runId",
+    "subagentId"
+  ],
+  "run.interrupt": [
+    "type",
+    "commandId",
+    "threadId",
+    "runId"
+  ],
+  "queued-message.promote-to-steer": [
+    "type",
+    "commandId",
+    "threadId",
+    "queuedRunId",
+    "targetRunId"
+  ],
+  "queue.resume": [
+    "type",
+    "commandId",
+    "threadId"
+  ],
+  "queued-run.start": [
+    "type",
+    "commandId",
+    "threadId",
+    "runId"
+  ],
+  "queued-run.reorder": [
+    "type",
+    "commandId",
+    "threadId",
+    "runId",
+    "beforeRunId"
+  ],
+  "queued-run.cancel": [
+    "type",
+    "commandId",
+    "threadId",
+    "runId"
+  ],
+  "queued-run.edit": [
+    "type",
+    "commandId",
+    "threadId",
+    "runId",
+    "text"
+  ],
+  "runtime-request.respond": [
+    "type",
+    "commandId",
+    "threadId",
+    "requestId"
+  ],
+  "thread.user-input.dismiss": [
+    "type",
+    "commandId",
+    "threadId",
+    "requestId"
+  ],
+  "checkpoint.rollback": [
+    "type",
+    "commandId",
+    "threadId",
+    "scopeId",
+    "checkpointId"
+  ],
+  "thread.fork": [
+    "type",
+    "createdBy",
+    "creationSource",
+    "commandId",
+    "sourceThreadId",
+    "targetThreadId",
+    "sourcePoint"
+  ],
+  "thread.merge_back": [
+    "type",
+    "createdBy",
+    "creationSource",
+    "commandId",
+    "sourceThreadId",
+    "targetThreadId",
+    "sourcePoint"
+  ],
+  "delegated_task.request": [
+    "type",
+    "createdBy",
+    "creationSource",
+    "commandId",
+    "parentThreadId",
+    "parentRunId",
+    "parentNodeId",
+    "task",
+    "modelSelection",
+    "runtimeMode",
+    "interactionMode"
+  ],
+  "delegated_task.wake-policy": [
+    "type",
+    "commandId",
+    "parentThreadId",
+    "taskId",
+    "completionWake"
+  ],
+  "delegated_task.completion-delivery.acknowledge": [
+    "type",
+    "commandId",
+    "parentThreadId",
+    "taskId",
+    "observedByRunId"
+  ],
+  "delegated_task.completion-delivery.dispose": [
+    "type",
+    "commandId",
+    "parentThreadId",
+    "taskId"
+  ],
+  "thread.created.record": [
+    "type",
+    "commandId",
+    "parentThreadId",
+    "parentRunId",
+    "parentNodeId",
+    "targetThreadId",
+    "targetRunId"
+  ],
+  "provider.switch": [
+    "type",
+    "commandId",
+    "threadId",
+    "modelSelection"
+  ]
+}

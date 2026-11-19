@@ -154,10 +154,7 @@ pub(super) async fn thread_snapshot(
         }
     }
     let store = state.store.read().await;
-    let Some(thread) = Uuid::parse_str(&id)
-        .ok()
-        .and_then(|id| store.threads.get(&id))
-    else {
+    let Some(thread) = store.threads.get(&id) else {
         return (StatusCode::NOT_FOUND,Json(json!({"_tag":"EnvironmentResourceNotFoundError","code":"not_found","reason":"thread_not_found","traceId":crate::trace_id(&h)}))).into_response();
     };
     if uri.path().ends_with("/transcript") {

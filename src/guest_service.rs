@@ -19,7 +19,7 @@ use uuid::Uuid;
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Share {
     pub id: String,
-    pub thread_id: Uuid,
+    pub thread_id: String,
     pub host: String,
     created: i64,
     pub expires: i64,
@@ -76,7 +76,7 @@ impl GuestService {
         mac.update(input.as_bytes());
         mac.finalize().into_bytes().to_vec()
     }
-    fn create_share(&self, id: Uuid, host: String) -> Result<Value, &'static str> {
+    fn create_share(&self, id: &str, host: String) -> Result<Value, &'static str> {
         let (result, removed) = self.records.update(|records| {
             let key = records.secret.get_or_insert_with(|| {
                 let mut key = [0; 32];
@@ -92,7 +92,7 @@ impl GuestService {
             let share = Share {
                 id: share_id.clone(),
                 host: host.clone(),
-                thread_id: id,
+                thread_id: id.to_owned(),
                 created: at,
                 expires: at + 86_400_000,
                 name: None,
@@ -257,7 +257,7 @@ impl GuestService {
             }
         }
     }
-    pub fn close_thread(&self, id: Uuid) -> Result<(), &'static str> {
+    pub fn close_thread(&self, id: &str) -> Result<(), &'static str> {
         let removed = self.records.update(|r| {
             let ids = r
                 .shares
@@ -275,7 +275,7 @@ impl GuestService {
     }
     pub fn resolve_message(
         &self,
-        thread: Uuid,
+        thread: &str,
         id: &str,
         status: &str,
     ) -> Result<(), &'static str> {
@@ -321,7 +321,7 @@ impl GuestService {
         self.changed.send_replace(());
         Ok(())
     }
-    pub fn projection(&self, thread: Uuid) -> Option<Value> {
+    pub fn projection(&self, thread: &str) -> Option<Value> {
         self.records.read(|r| {
             r.shares
                 .values()
@@ -367,10 +367,9 @@ pub async fn create(state: &AppState, params: &Value) -> Result<Value, Value> {
         .ok_or_else(|| error("connect_unavailable"))?;
     let id = params["threadId"]
         .as_str()
-        .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| error("thread_unavailable"))?;
     let store = state.store.read().await;
-    if store.threads.get(&id).is_none_or(|t| t.archived) {
+    if store.threads.get(id).is_none_or(|t| t.archived) {
         return Err(error("thread_unavailable"));
     }
     state
@@ -404,7 +403,7 @@ mod tests {
     #[test]
     fn replacement_redeem_pending_limit_and_persistence() {
         let dir = tempfile::tempdir().unwrap();
-        let thread = Uuid::new_v4();
+        let thread = "opaque:guest";
         let svc = GuestService::open(dir.path()).unwrap();
         let host = "linked.example.test".to_owned();
         svc.set_tunnel_hostname(Some(host.clone()));

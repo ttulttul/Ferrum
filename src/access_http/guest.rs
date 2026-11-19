@@ -328,12 +328,17 @@ mod tests {
     async fn guest_attachments_require_redeemed_session_and_end_on_close() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::new(dir.path(), vec![]).await.unwrap();
-        let id = uuid::Uuid::new_v4();
+        let id = "opaque:guest";
         let thread:crate::Thread=serde_json::from_value(json!({
             "id":id,"project_id":"project","title":"demo","cwd":"/","status":"idle","messages":[],"runs":[],
             "created_at":0,"archived":false,"settled":false,"snoozed_until":null,"pinned":false,"unread":false,"tags":[]
         })).unwrap();
-        state.store.write().await.threads.insert(id, thread);
+        state
+            .store
+            .write()
+            .await
+            .threads
+            .insert(id.to_owned(), thread);
         let input = json!({"threadId":id});
         assert_eq!(
             guest_service::create(&state, &input).await.unwrap_err()["reason"],
