@@ -5,6 +5,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::path::Path;
 
+mod actions;
 mod detail;
 mod listing;
 mod review;
@@ -15,6 +16,7 @@ pub(crate) fn handles(method: &str) -> bool {
     matches!(
         op,
         "detail"
+            | "runAction"
             | "checks"
             | "list"
             | "listStats"
@@ -257,6 +259,12 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
                 .await;
         }
         return Ok(result);
+    }
+    if op == "runAction" {
+        state.pull_requests.clear(&p.id, named, number).await;
+        let result = actions::run(&mut gh, &p.id, named, number, input).await;
+        state.pull_requests.clear(&p.id, named, number).await;
+        return result;
     }
     if op == "checks" {
         return detail::read(&gh, &p, op, named, number).await;

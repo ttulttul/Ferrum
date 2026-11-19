@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compare authenticated RPC and HTTP responses using a local GitHub API and real gh CLI."""
 import argparse
+from copy import deepcopy
 from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler
 import json
@@ -35,8 +36,8 @@ PR.update({"body":"PR body","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","
            "additions":1,"deletions":1,"changedFiles":1,"updatedAt":"2026-02-01T00:00:00Z","mergedAt":None,
            "closedAt":None,"headRefName":"feature","baseRefName":"main","headRefOid":"a"*40,
            "isCrossRepository":False,"maintainerCanModify":False,"headRepositoryOwner":{"__typename":"User","login":"tester"},
-           "headRepository":{"viewerPermission":"WRITE","nameWithOwner":REPO},"headRef":{"id":"HD_3"},
-           "autoMergeRequest":None,"mergeQueueRemovals":{"nodes":[]},"viewerCanUpdateBranch":True,
+           "headRepository":{"viewerPermission":"WRITE","nameWithOwner":REPO,"id":"R1"},"headRef":{"id":"HD_3"},
+           "autoMergeRequest":None,"mergeQueueRemovals":{"nodes":[]},"viewerCanUpdateBranch":True,"isMergeQueueEnabled":False,
            "baseRef":{"compare":{"behindBy":0}},"reviewRequests":{"nodes":[]},"labels":{"nodes":[LABEL]},
            "latestReviews":{"nodes":[]},"stack":None,"stackEntry":None,"commits":{"nodes":[{"commit":{
                "statusCheckRollup":{"state":"SUCCESS","contexts":{"nodes":[{"__typename":"CheckRun","name":"build",
@@ -46,6 +47,10 @@ PR.update({"body":"PR body","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","
                    "pageInfo":{"hasNextPage":False,"endCursor":None}}}}}]}})
 REPOSITORY = {"__typename":"Repository", "viewerPermission":"WRITE","mergeCommitAllowed":True,"squashMergeAllowed":True,
               "rebaseMergeAllowed":True,"autoMergeAllowed":True,"pullRequest":PR}
+
+ACTION_METHODS = ["closePullRequest","reopenPullRequest","markPullRequestReadyForReview",
+                  "convertPullRequestToDraft","mergePullRequest","revertPullRequest","disablePullRequestAutoMerge",
+                  "enablePullRequestAutoMerge","updatePullRequestBranch"]
 
 class Provider(BaseHTTPRequestHandler):
     def log_message(self, *_args):
@@ -100,6 +105,34 @@ class Provider(BaseHTTPRequestHandler):
         elif self.path == "/graphql":
             query = data.get("query", "")
             if query.lstrip().startswith("mutation"):
+                if "updateRefs(" in query:
+                    request = data["variables"]["input"]
+                    expected = {"repositoryId":"R1","refUpdates":[{"name":"refs/heads/feature","beforeOid":"a"*40,"afterOid":"0"*40}]}
+                    if request != expected or self.server.ref_oid != "a"*40:
+                        self.reply(409, {"errors":[{"message":"Ref changed"}]})
+                        return
+                    self.server.ref_oid = None
+                    self.server.deleted += 1
+                    self.reply(200, {"data":{"updateRefs":{"clientMutationId":None}}})
+                    return
+                for key in ACTION_METHODS:
+                    if key + "(" in query:
+                        args = data["variables"]
+                        target = args.get("input",args)
+                        if target["pullRequestId"] != "PR_3":
+                            self.reply(422, {"errors":[{"message":"Wrong PR"}]})
+                            return
+                        self.server.actions.append((key,target.get("mergeMethod"),target.get("updateMethod")))
+                        pr = self.server.repository["pullRequest"]
+                        if key == "closePullRequest":
+                            pr.update(state="CLOSED", closedAt="2026-11-10T12:00:00Z")
+                        elif key == "reopenPullRequest":
+                            pr.update(state="OPEN",closedAt=None)
+                        elif key in ("markPullRequestReadyForReview","convertPullRequestToDraft"):
+                            pr.update(isDraft=(key=="convertPullRequestToDraft"))
+                        result = {key:{"pullRequest":pr,"revertPullRequest":{"id":"revert"}}}
+                        self.reply(200,{"data":result})
+                        return
                 for operation, key in [("updatePullRequest(", "updatePullRequest"), ("addComment(", "addComment")]:
                     if operation in query:
                         args = data.get("variables", {})
@@ -118,7 +151,10 @@ class Provider(BaseHTTPRequestHandler):
                 result = {"repository": {"issue": ISSUE}}
             elif "pullRequest(number:" in query:
                 alias = re.search(r"(\w+)\s*:\s*repository\(", query)
-                result = {(alias.group(1) if alias else "repository"): REPOSITORY}
+                result = {(alias.group(1) if alias else "repository"): self.server.repository}
+            elif "defaultBranchRef" in query and "qualifiedName" in query:
+                result = {"node":{"__typename":"Repository","defaultBranchRef":{"name":"main"},
+                                  "ref":{"target":{"__typename":"Commit","oid":self.server.ref_oid}} if self.server.ref_oid else None}}
             elif "viewer" in query:
                 result = {"viewer": {**AUTHOR, "databaseId": 1234}}
             else:
@@ -156,6 +192,10 @@ def main():
             endpoint = config / "api.sock"
             host = stack.enter_context(ThreadingUnixStreamServer(str(endpoint), Provider))
             host.creates, host.comments, host.pr_writes, host.reviews, host.reviewers = [], [], [], [], []
+            host.repository = deepcopy(REPOSITORY)
+            host.actions = []
+            host.deleted = 0
+            host.ref_oid = "a"*40
             thread = Thread(target=host.serve_forever, daemon=True)
             thread.start()
             stack.callback(thread.join)
@@ -201,13 +241,25 @@ def main():
         ]
         if args.faketime_lib:
             cases.extend(rpc("pullRequests."+op, ref) for op in ("detail","checks","summary"))
+        actions = ["draft","ready","close","delete-branch","reopen","disable-auto-merge","approve-workflows","update-branch","revert","merge"]
+        for action in actions:
+            payload = {**ref,"action":action}
+            if args.faketime_lib and action == "close":
+                payload["replyWithSummary"] = True
+            if action == "merge":
+                payload["mergeMethod"] = "squash"
+            case=rpc("pullRequests.runAction",payload)
+            case["name"] += " " + action
+            cases.append(case)
+        cases.append(rpc("pullRequests.runAction",{**ref,"action":"close","stackNumber":2}))
         failures = 0
         for case in cases:
             if "frame" in case:
                 for ws in sockets:
                     ws.send(harness.encode(case["frame"]).decode())
                 packets = [ws.recv(timeout=15) for ws in sockets]
-                expected_failure = case["frame"]["payload"].get("scope") == "other/repo"
+                payload = case["frame"]["payload"]
+                expected_failure = payload.get("scope") == "other/repo" or "stackNumber" in payload
                 exits = [json.loads(p)["exit"] for p in packets]
                 ok = packets[0] == packets[1] and all(
                     e["_tag"] == ("Failure" if expected_failure else "Success") for e in exits)
@@ -220,6 +272,15 @@ def main():
                 failures += 1
                 print("\n".join(values))
         for provider in providers:
+            expected_actions = [(m,None,None) for m in ("convertPullRequestToDraft","markPullRequestReadyForReview",
+                "closePullRequest","reopenPullRequest","disablePullRequestAutoMerge","revertPullRequest")]
+            expected_actions.append(("mergePullRequest","SQUASH",None))
+            if provider.deleted != 1:
+                failures += 1
+                print("FAIL expected one atomic source branch deletion",provider.deleted)
+            if provider.actions != expected_actions:
+                failures += 1
+                print("FAIL provider lifecycle actions",provider.actions)
             if provider.creates != [create] or provider.comments != [{"body": "Comment body"}]:
                 failures += 1
                 print("FAIL provider received unexpected issue writes", provider.creates, provider.comments)

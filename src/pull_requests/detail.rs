@@ -33,18 +33,25 @@ fn nodes(v: &Value) -> impl Iterator<Item = &Value> {
         .flatten()
         .filter(|n| !n.is_null())
 }
-fn can_write(v: &Value) -> bool {
-    matches!(v.as_str(), Some("WRITE" | "ADMIN" | "MAINTAIN"))
+pub(super) fn can_write(repository: &Value) -> bool {
+    match repository.get("viewerPermission") {
+        Some(Value::Null) => true,
+        Some(Value::String(role)) => matches!(
+            role.trim().to_ascii_uppercase().as_str(),
+            "WRITE" | "ADMIN" | "MAINTAIN"
+        ),
+        _ => false,
+    }
 }
 fn permissions(repo: &Value, pr: &Value) -> Value {
-    let write = can_write(&repo["viewerPermission"]);
+    let write = can_write(repo);
     let update = pr["viewerCanUpdate"] != false;
     let own = pr["viewerDidAuthor"] == true;
     let branch = pr["state"] == "OPEN"
         && pr["viewerCanUpdateBranch"] == true
         && !pr["baseRef"]["compare"].is_null();
     let mut actions = Vec::new();
-    if can_write(&pr["headRepository"]["viewerPermission"]) && !pr["headRef"].is_null() {
+    if can_write(&pr["headRepository"]) && !pr["headRef"].is_null() {
         actions.push("delete-branch")
     }
     if write {

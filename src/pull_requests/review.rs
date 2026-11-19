@@ -129,7 +129,7 @@ pub(super) async fn run(
     let permission = base["repository"]["viewerPermission"]
         .as_str()
         .unwrap_or("");
-    let can_write = matches!(permission, "ADMIN" | "MAINTAIN" | "WRITE");
+    let can_write = super::detail::can_write(&base["repository"]);
     let can_triage = can_write || permission == "TRIAGE";
     if op == "reviewerCandidates" && !can_write {
         return Err(error(
