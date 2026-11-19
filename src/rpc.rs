@@ -3041,7 +3041,10 @@ mod scheduled_task_tests {
             scheduled_task_next_run(true, &schedule, 1_700_000_000_000),
             json!("2023-11-14T22:14:20.000Z")
         );
-        assert_eq!(scheduled_task_next_run(false, &schedule, 1_700_000_000_000), Value::Null);
+        assert_eq!(
+            scheduled_task_next_run(false, &schedule, 1_700_000_000_000),
+            Value::Null
+        );
     }
 
     #[test]
