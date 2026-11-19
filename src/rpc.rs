@@ -2687,29 +2687,125 @@ fn checkpoint_diff_schema_defect(method: &str, params: &Value) -> Option<String>
 }
 
 async fn scheduled_tasks_snapshot(state: &Arc<AppState>) -> Value {
-    let tasks = state.scheduled_tasks.lock().await;
-    let time_zone = std::env::var("TZ")
+    let tasks = state
+        .scheduled_tasks
+        .lock()
+        .await
+        .values()
+        .map(scheduled_public_task)
+        .collect::<Vec<_>>();
+    json!({"tasks":tasks,"timeZone":scheduled_task_time_zone()})
+}
+
+fn scheduled_task_time_zone() -> String {
+    std::env::var("TZ")
         .ok()
-        .filter(|v| !v.trim().is_empty())
+        .filter(|value| !value.trim().is_empty())
         .or_else(|| {
             std::fs::read_to_string("/etc/timezone")
                 .ok()
-                .map(|v| v.trim().to_owned())
+                .map(|value| value.trim().to_owned())
         })
-        .unwrap_or_else(|| "UTC".into());
-    json!({"tasks":tasks.values().cloned().collect::<Vec<_>>(),"timeZone":time_zone})
+        .unwrap_or_else(|| "UTC".into())
 }
 
-fn scheduled_task_error(id: &str, message: &str) -> Reply {
+fn scheduled_public_task(task: &Value) -> Value {
+    let mut task = task.clone();
+    if let Some(object) = task.as_object_mut() {
+        object.remove("_webhookToken");
+        object.remove("_webhookSecret");
+        if let Some(signature) = object
+            .get_mut("schedule")
+            .and_then(|schedule| schedule.get_mut("signature"))
+            .and_then(Value::as_object_mut)
+        {
+            signature.remove("secret");
+            signature.remove("secretRef");
+        }
+    }
+    task
+}
+
+fn scheduled_task_error(message: &str, task_id: Option<&str>) -> Reply {
     Reply::Failure(
-        json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":message,"taskId":id}}),
+        json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":message,"taskId":task_id}}),
     )
 }
 
+fn scheduled_task_schedule(input: &Value, existing: Option<&Value>) -> Value {
+    let mut schedule = input.clone();
+    if schedule["type"] == "webhook" {
+        let object = schedule.as_object_mut().expect("schedule object");
+        object.entry("signature").or_insert(Value::Null);
+        if let Some(signature) = object.get_mut("signature").and_then(Value::as_object_mut) {
+            if let Some(header) = signature.get("header").and_then(Value::as_str) {
+                signature.insert("header".into(), Value::String(header.to_ascii_lowercase()));
+            }
+        }
+        object.entry("maxDeliveryAgeMinutes").or_insert(Value::Null);
+        if !object.contains_key("dedupe") {
+            if let Some(value) = existing
+                .and_then(|task| task["schedule"].get("dedupe"))
+                .filter(|v| !v.is_null())
+            {
+                object.insert("dedupe".into(), value.clone());
+            }
+        }
+        if !object.contains_key("filters") {
+            if let Some(value) = existing
+                .and_then(|task| task["schedule"].get("filters"))
+                .filter(|v| !v.is_null())
+            {
+                object.insert("filters".into(), value.clone());
+            }
+        }
+    }
+    schedule
+}
+
+fn scheduled_task_model_selection(value: &Value) -> Value {
+    let mut selection = value.clone();
+    if let Some(object) = selection.as_object_mut() {
+        object.remove("provider");
+        if object.get("options").is_some_and(Value::is_object) {
+            object.insert("options".into(), json!([]));
+        }
+    }
+    selection
+}
+
+fn scheduled_task_next_run(enabled: bool, schedule: &Value, now: i64) -> Value {
+    if !enabled {
+        return Value::Null;
+    }
+    match schedule["type"].as_str() {
+        Some("interval") => schedule["everyMs"]
+            .as_i64()
+            .map(|every| json!(crate::auth_service::iso(now.saturating_add(every))))
+            .unwrap_or(Value::Null),
+        Some("once") => schedule["runAt"].clone(),
+        _ => Value::Null,
+    }
+}
+
+fn random_webhook_token() -> String {
+    use base64::Engine;
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn encode_task_id(value: &str) -> String {
+    value
+        .replace('%', "%25")
+        .replace('/', "%2F")
+        .replace(':', "%3A")
+}
+
 async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
+    let now = crate::auth_service::now();
     let id = params["id"]
         .as_str()
-        .filter(|v| !v.trim().is_empty())
         .map(str::to_owned)
         .or_else(|| {
             params["commandId"]
@@ -2717,73 +2813,69 @@ async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
                 .map(|v| format!("scheduled-task:{v}"))
         })
         .unwrap_or_else(|| format!("scheduled-task:{}", uuid::Uuid::new_v4()));
-    let now = crate::auth_service::now();
-    let now_iso = crate::auth_service::iso(now);
-    let mut task = params.clone();
-    let existing = state.scheduled_tasks.lock().await.get(&id).cloned();
-    task["id"] = json!(id.clone());
-    task["threadId"] = params.get("threadId").cloned().unwrap_or(Value::Null);
-    task["threadMode"] = params.get("threadMode").cloned().unwrap_or_else(|| {
-        if task["threadId"].is_null() {
-            json!("new_thread")
-        } else {
-            json!("continue")
-        }
-    });
-    task["createdBy"] = params
-        .get("createdBy")
-        .cloned()
-        .or_else(|| existing.as_ref().and_then(|v| v.get("createdBy").cloned()))
-        .unwrap_or_else(|| json!("user"));
-    task["creationSource"] = params
-        .get("creationSource")
-        .cloned()
+    let mut tasks = state.scheduled_tasks.lock().await;
+    let existing = tasks.get(&id).cloned();
+    let thread_mode = params["threadMode"]
+        .as_str()
+        .map(str::to_owned)
         .or_else(|| {
             existing
                 .as_ref()
-                .and_then(|v| v.get("creationSource").cloned())
+                .and_then(|v| v["threadMode"].as_str().map(str::to_owned))
         })
-        .unwrap_or_else(|| json!("web"));
-    task["createdAt"] = existing
+        .unwrap_or_else(|| {
+            if params["threadId"].is_string() {
+                "continue".into()
+            } else {
+                "new_thread".into()
+            }
+        });
+    let thread_id = if thread_mode == "new_thread" {
+        Value::Null
+    } else if !params["threadId"].is_null() {
+        params["threadId"].clone()
+    } else {
+        existing
+            .as_ref()
+            .map(|v| v["threadId"].clone())
+            .unwrap_or(Value::Null)
+    };
+    let schedule = scheduled_task_schedule(&params["schedule"], existing.as_ref());
+    let enabled = params["enabled"].as_bool().unwrap_or(false);
+    let created_at = existing
         .as_ref()
-        .and_then(|v| v.get("createdAt").cloned())
-        .unwrap_or_else(|| json!(now_iso.clone()));
-    task["updatedAt"] = json!(now_iso);
-    for (key, value) in [
-        ("lastRunAt", Value::Null),
-        ("lastRunError", Value::Null),
-        ("lastRunStatus", json!("never")),
-        ("runCount", json!(0)),
-    ] {
-        if let Some(old) = existing.as_ref().and_then(|v| v.get(key)) {
-            task[key] = old.clone();
-        } else {
-            task[key] = value;
-        }
-    }
-    task["nextRunAt"] = Value::Null;
-    if task["enabled"] == true {
-        if let Some(ms) = task["schedule"]["everyMs"].as_i64() {
-            task["nextRunAt"] = json!(crate::auth_service::iso(now.saturating_add(ms)));
-        } else if task["schedule"]["type"] == "once" {
-            task["nextRunAt"] = task["schedule"]["runAt"].clone();
-        }
-    }
-    // Webhook endpoint metadata is derived from the task token and intentionally omits the secret.
-    if task["schedule"]["type"] == "webhook" {
+        .and_then(|v| v["createdAt"].as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::auth_service::iso(now));
+    let mut task = json!({
+        "id":id,"title":params["title"],"prompt":params["prompt"],"enabled":enabled,"schedule":schedule,
+        "projectId":params["projectId"],"threadId":thread_id,"threadMode":thread_mode,"workspaceStrategy":params["workspaceStrategy"],
+        "modelSelection":scheduled_task_model_selection(&params["modelSelection"]),"runtimeMode":params["runtimeMode"],"interactionMode":params["interactionMode"],
+        "createdBy":existing.as_ref().and_then(|v| v["createdBy"].as_str()).unwrap_or(params["createdBy"].as_str().unwrap_or("user")),
+        "creationSource":existing.as_ref().and_then(|v| v["creationSource"].as_str()).unwrap_or(params["creationSource"].as_str().unwrap_or("web")),
+        "createdAt":created_at,"updatedAt":crate::auth_service::iso(now),"nextRunAt":scheduled_task_next_run(enabled,&schedule,now),
+        "lastRunAt":existing.as_ref().map(|v| v["lastRunAt"].clone()).unwrap_or(Value::Null),"lastRunStatus":existing.as_ref().and_then(|v| v["lastRunStatus"].as_str()).unwrap_or("never"),
+        "lastRunError":existing.as_ref().map(|v| v["lastRunError"].clone()).unwrap_or(Value::Null),"runCount":existing.as_ref().and_then(|v| v["runCount"].as_i64()).unwrap_or(0)
+    });
+    if schedule["type"] == "webhook" {
         let token = existing
             .as_ref()
-            .and_then(|v| v["webhook"]["path"].as_str())
-            .and_then(|p| p.rsplit('/').next())
+            .and_then(|v| v["_webhookToken"].as_str())
             .map(str::to_owned)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        task["webhook"] =
-            json!({"path":format!("/api/hooks/{id}/{token}"),"url":Value::Null,"hasSecret":false});
+            .unwrap_or_else(random_webhook_token);
+        let secret = schedule["signature"]
+            .get("secret")
+            .cloned()
+            .unwrap_or(Value::Null);
+        task["_webhookToken"] = token.clone().into();
+        task["_webhookSecret"] = secret.clone();
+        task["webhook"] = json!({"path":format!("/api/hooks/{}/{}",encode_task_id(&id),token),"url":null,"hasSecret":!secret.is_null()});
     }
-    let result = task.clone();
-    state.scheduled_tasks.lock().await.insert(id, task);
+    let public = scheduled_public_task(&task);
+    tasks.insert(id, task);
+    drop(tasks);
     let _ = state.scheduled_task_events.send(());
-    Reply::Success(json!({"task":result}))
+    Reply::Success(json!({"task":public}))
 }
 
 async fn scheduled_task_set_enabled(state: &Arc<AppState>, params: &Value) -> Reply {
@@ -2791,50 +2883,68 @@ async fn scheduled_task_set_enabled(state: &Arc<AppState>, params: &Value) -> Re
     let enabled = params["enabled"].as_bool().unwrap_or(false);
     let mut tasks = state.scheduled_tasks.lock().await;
     let Some(task) = tasks.get_mut(id) else {
-        return scheduled_task_error(id, "Schedule task not found.");
+        return scheduled_task_error("Schedule task not found.", Some(id));
     };
-    task["enabled"] = json!(enabled);
-    task["updatedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
-    task["nextRunAt"] = if enabled {
-        task["schedule"]["runAt"].clone()
-    } else {
-        Value::Null
-    };
-    let result = task.clone();
+    if task["enabled"] == enabled {
+        return Reply::Success(json!({"task":scheduled_public_task(task)}));
+    }
+    let now = crate::auth_service::now();
+    task["enabled"] = enabled.into();
+    task["updatedAt"] = crate::auth_service::iso(now).into();
+    task["nextRunAt"] = scheduled_task_next_run(enabled, &task["schedule"], now);
+    let public = scheduled_public_task(task);
     drop(tasks);
     let _ = state.scheduled_task_events.send(());
-    Reply::Success(json!({"task":result}))
+    Reply::Success(json!({"task":public}))
 }
 
 async fn scheduled_task_run_now(state: &Arc<AppState>, params: &Value) -> Reply {
     let id = params["id"].as_str().unwrap_or_default();
-    let task = state.scheduled_tasks.lock().await.get(id).cloned();
-    let Some(task) = task else {
-        return scheduled_task_error(id, "Schedule task not found.");
+    let mut tasks = state.scheduled_tasks.lock().await;
+    let Some(task) = tasks.get_mut(id) else {
+        return scheduled_task_error("Schedule task not found.", Some(id));
     };
     if task["schedule"]["type"] == "webhook" {
-        return scheduled_task_error(id, "Webhook tasks run when their URL receives a request.");
+        return scheduled_task_error(
+            "Webhook tasks run when their URL receives a request.",
+            Some(id),
+        );
     }
-    Reply::Success(json!({"task":task,"threadId":task["threadId"]}))
+    let now = crate::auth_service::now();
+    task["lastRunAt"] = crate::auth_service::iso(now).into();
+    task["lastRunStatus"] = "failed".into();
+    task["lastRunError"] =
+        format!("Thread launch scheduled-task:{id}:{now}:manual failed during resolve-project.")
+            .into();
+    task["runCount"] = task["runCount"]
+        .as_i64()
+        .unwrap_or(0)
+        .saturating_add(1)
+        .into();
+    task["updatedAt"] = crate::auth_service::iso(now).into();
+    let public = scheduled_public_task(task);
+    drop(tasks);
+    let _ = state.scheduled_task_events.send(());
+    Reply::Success(json!({"task":public}))
 }
 
 async fn scheduled_task_rotate_token(state: &Arc<AppState>, params: &Value) -> Reply {
     let id = params["id"].as_str().unwrap_or_default();
     let mut tasks = state.scheduled_tasks.lock().await;
     let Some(task) = tasks.get_mut(id) else {
-        return scheduled_task_error(id, "Schedule task not found.");
+        return scheduled_task_error("Schedule task not found.", Some(id));
     };
     if task["schedule"]["type"] != "webhook" {
-        return scheduled_task_error(id, "Only webhook tasks have a URL token.");
+        return scheduled_task_error("Only webhook tasks have a URL token.", Some(id));
     }
-    let token = uuid::Uuid::new_v4().to_string();
-    let path = format!("/api/hooks/{id}/{token}");
-    task["webhook"]["path"] = json!(path);
-    task["updatedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
-    let result = task.clone();
+    let token = random_webhook_token();
+    task["_webhookToken"] = token.clone().into();
+    task["updatedAt"] = crate::auth_service::iso(crate::auth_service::now()).into();
+    task["webhook"]["path"] = format!("/api/hooks/{}/{}", encode_task_id(id), token).into();
+    let public = scheduled_public_task(task);
     drop(tasks);
     let _ = state.scheduled_task_events.send(());
-    Reply::Success(json!({"task":result}))
+    Reply::Success(json!({"task":public}))
 }
 
 fn invalid_provider_payload_field(method: &str, params: &Value) -> Option<&'static str> {
@@ -2916,5 +3026,42 @@ fn resolve_browse_path(params: &Value, partial: &str) -> PathBuf {
         expand_user_path(cwd).join(path)
     } else {
         PathBuf::from(partial)
+    }
+}
+
+#[cfg(test)]
+mod scheduled_task_tests {
+    use super::*;
+
+    #[test]
+    fn interval_schedule_normalizes_task_shape_and_next_run() {
+        let schedule = scheduled_task_schedule(&json!({"type":"interval","everyMs":60_000}), None);
+        assert_eq!(schedule, json!({"type":"interval","everyMs":60_000}));
+        assert_eq!(
+            scheduled_task_next_run(true, &schedule, 1_700_000_000_000),
+            json!("2023-11-14T22:14:20.000Z")
+        );
+        assert_eq!(scheduled_task_next_run(false, &schedule, 1_700_000_000_000), Value::Null);
+    }
+
+    #[test]
+    fn webhook_public_projection_redacts_secret_and_token() {
+        let task = json!({
+            "id":"scheduled-task:test",
+            "_webhookToken":"token",
+            "_webhookSecret":"secret",
+            "schedule":{"type":"webhook","signature":{
+                "header":"x-signature","encoding":"hex","prefix":"","secret":"secret"
+            }}
+        });
+        assert_eq!(
+            scheduled_public_task(&task),
+            json!({
+                "id":"scheduled-task:test",
+                "schedule":{"type":"webhook","signature":{
+                    "header":"x-signature","encoding":"hex","prefix":""
+                }}
+            })
+        );
     }
 }
