@@ -2073,7 +2073,35 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         }
         "orchestration.searchThreads" => {
             let query = params["query"].as_str().unwrap_or_default().to_lowercase();
-            json!({"snapshotSequence":sequence,"threads":store.threads.values().filter(|t| t.title.to_lowercase().contains(&query)).collect::<Vec<_>>(),"complete":true})
+            let project_ids = params["projectIds"].as_array();
+            let mut threads: Vec<&crate::Thread> = store
+                .threads
+                .values()
+                .filter(|thread| {
+                    project_ids.is_none_or(|ids| {
+                        ids.iter()
+                            .any(|id| id.as_str() == Some(thread.project_id.as_str()))
+                    })
+                })
+                .filter(|thread| {
+                    if query.is_empty() {
+                        return true;
+                    }
+                    thread.title.to_lowercase().contains(&query)
+                        || thread
+                            .messages
+                            .iter()
+                            .any(|message| message.content.to_lowercase().contains(&query))
+                })
+                .collect();
+            threads.sort_by(|a, b| {
+                b.row["updatedAt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(a.row["updatedAt"].as_str().unwrap_or_default())
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            json!({"snapshotSequence":sequence,"threads":threads.into_iter().map(|thread|thread.shell()).collect::<Vec<_>>(),"complete":true})
         }
         "orchestration.searchThread" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default();
