@@ -2521,13 +2521,25 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         }
         "orchestration.getNativeChildWork" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default();
-            if !store.threads.contains_key(thread_id) {
+            let Some(thread) = store.threads.get(thread_id).cloned() else {
                 return Reply::Failure(json!({"_tag":"Fail","error":{
                     "_tag":"OrchestrationV2GetNativeChildWorkError","threadId":thread_id,
                     "cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}
                 }}));
-            }
-            json!({"children":[]} )
+            };
+            let parent_id = thread.row["lineage"]["parentThreadId"].as_str();
+            let parent = parent_id.and_then(|id| store.threads.get(id).cloned());
+            let children = if let Some(parent) = parent {
+                let parent_projection = parent.projection();
+                crate::native_child_work::read(
+                    &state.data_dir,
+                    &thread.stored_row(),
+                    &parent_projection,
+                )
+            } else {
+                Vec::new()
+            };
+            json!({"children":children})
         }
         "orchestration.getWorkflowScript" => {
             let path = params["scriptPath"].as_str().unwrap_or_default();

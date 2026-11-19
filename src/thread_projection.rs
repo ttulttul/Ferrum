@@ -71,6 +71,12 @@ impl Thread {
     }
     pub(crate) fn projection(&self) -> Value {
         let row = self.stored_row();
+        let array = |key: &str| {
+            row.get(key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        };
         let scope_id = format!("scope:{}", self.id);
         let checkpoint_scopes = self
             .checkpoints
@@ -105,8 +111,8 @@ impl Thread {
             "files":[],
             "capturedAt":auth_service::iso((checkpoint.captured_at as i64).saturating_mul(1000))
         })).collect::<Vec<_>>();
-        json!({"thread":ordered(APP_FIELDS,&row),"runs":self.runs,"attempts":[],"nodes":[],"subagents":[],
-            "providerSessions":[],"providerThreads":[],"providerTurns":[],"runtimeRequests":[],
+        json!({"thread":ordered(APP_FIELDS,&row),"runs":self.runs,"attempts":array("attempts"),"nodes":array("nodes"),"subagents":array("subagents"),
+            "providerSessions":array("providerSessions"),"providerThreads":array("providerThreads"),"providerTurns":array("providerTurns"),"runtimeRequests":array("runtimeRequests"),
             "messages":self.messages,"plans":[],"turnItems":self.turn_items(),"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
             "contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":[],"updatedAt":row["updatedAt"]})
     }

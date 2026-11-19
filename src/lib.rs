@@ -37,6 +37,7 @@ pub mod host_rpc;
 pub mod issues;
 pub mod local_services;
 pub mod mcp_oauth;
+mod native_child_work;
 mod orchestration;
 mod projects;
 mod settings;
