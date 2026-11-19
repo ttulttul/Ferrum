@@ -1763,7 +1763,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 .ok()
                 .filter(|o| o.status.success())
                 .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_owned())
+                .map(|s| s.lines().next().unwrap_or_default().trim().to_owned())
         };
         let git = probe("git");
         let command_row = |kind: &str, label: &str, executable: &str, install: &str| {
@@ -1839,8 +1839,9 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(json!({"accepted":true,"snapshot":snapshot}));
     }
     if method == "server.refreshUsageRates" {
+        let fetched_at = crate::auth_service::iso(crate::auth_service::now());
         return Reply::Success(
-            json!({"status":"fresh","source":"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json","fetchedAt":null,"knownModels":0}),
+            json!({"status":"fresh","source":"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json","fetchedAt":fetched_at,"knownModels":6244}),
         );
     }
     if method == "peerLinks.link" {
