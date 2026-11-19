@@ -42,7 +42,11 @@ def identical(label, originals):
     if left != right:
         i = next((i for i, pair in enumerate(zip(left, right)) if pair[0] != pair[1]),
                  min(len(left), len(right)))
-        raise AssertionError(f"{label} differs at byte {i}\nTS   {left[i:i+360]!r}\nRust {right[i:i+360]!r}")
+        raise AssertionError(
+            f"{label} differs at byte {i}\n"
+            f"TS   {left[i:i+360]!r}\nRust {right[i:i+360]!r}\n"
+            f"TS full {left!r}\nRust full {right!r}"
+        )
 
 
 def disk(state):
