@@ -99,6 +99,8 @@ pub(crate) async fn dispatch_orchestration_command(
                     | "thread.unpin"
                     | "thread.pin.reorder"
                     | "thread.active.reorder"
+                    | "queue.resume"
+                    | "queued-message.promote-to-steer"
                     | "thread.pull-request.sync"
             )
         {
@@ -412,7 +414,7 @@ async fn apply_command(
                     .get(thread_id)
                     .is_some_and(|thread| thread.runs.iter().any(|run| run.status == "running"));
             return start_run(
-                state,
+                state.clone(),
                 receipt,
                 thread_id,
                 text,
@@ -1083,6 +1085,157 @@ async fn apply_command(
             let thread_id = thread_id.unwrap_or_default();
             let run_id = command["runId"].as_str().unwrap_or_default();
             return start_queued_run(state, receipt, thread_id, run_id).await;
+        }
+        "queue.resume" => {
+            let thread_id = thread_id.unwrap_or_default();
+            let (queued, next, active) = {
+                let store = state.store.read().await;
+                let thread = store
+                    .threads
+                    .get(thread_id)
+                    .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+                let active = thread
+                    .runs
+                    .iter()
+                    .any(|run| matches!(run.status.as_str(), "preparing" | "starting" | "running"));
+                let queued = thread
+                    .runs
+                    .iter()
+                    .filter(|run| run.status == "queued")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let next = queued.first().cloned();
+                (queued, next, active)
+            };
+            let mut sequence = None;
+            for mut run in queued {
+                if !run.queue_held {
+                    continue;
+                }
+                run.queue_held = false;
+                sequence = Some(
+                    state
+                        .commit_receipted(
+                            Event::RunUpdated(run),
+                            (sequence.is_none()).then(|| receipt.clone()),
+                        )
+                        .await?
+                        .id,
+                );
+            }
+            if !active {
+                if let Some(run) = next {
+                    if sequence.is_none() {
+                        sequence = Some(
+                            state
+                                .commit_receipted(
+                                    Event::CommandDispatched {
+                                        command_id: receipt.command_id.clone(),
+                                        command_type: command_type.into(),
+                                        thread_id: Some(thread_id.to_owned()),
+                                        payload: command.clone(),
+                                    },
+                                    Some(receipt.clone()),
+                                )
+                                .await?
+                                .id,
+                        );
+                    }
+                    start_existing_run(
+                        state.clone(),
+                        &CommandReceipt {
+                            command_id: format!("{}:start", receipt.command_id),
+                            thread_id: thread_id.to_owned(),
+                        },
+                        thread_id,
+                        &run.id.to_string(),
+                        "running",
+                    )
+                    .await?;
+                }
+            }
+            if sequence.is_none() {
+                sequence = Some(
+                    state
+                        .commit_receipted(
+                            Event::CommandDispatched {
+                                command_id: receipt.command_id.clone(),
+                                command_type: command_type.into(),
+                                thread_id: Some(thread_id.to_owned()),
+                                payload: command.clone(),
+                            },
+                            Some(receipt.clone()),
+                        )
+                        .await?
+                        .id,
+                );
+            }
+            return Ok(sequence.unwrap_or(0));
+        }
+        "queued-message.promote-to-steer" => {
+            let thread_id = thread_id.unwrap_or_default();
+            let queued_run_id = command["queuedRunId"].as_str().unwrap_or_default();
+            let target_run_id = command["targetRunId"].as_str().unwrap_or_default();
+            let (queued_run, target_run, message) = {
+                let store = state.store.read().await;
+                let thread = store
+                    .threads
+                    .get(thread_id)
+                    .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+                let queued_run = thread
+                    .runs
+                    .iter()
+                    .find(|run| run.id.to_string() == queued_run_id && run.status == "queued")
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(format!("Queued run {queued_run_id} is not queued."))
+                    })?;
+                let target_run = thread
+                    .runs
+                    .iter()
+                    .find(|run| run.id.to_string() == target_run_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(format!("Target run {target_run_id} was not found."))
+                    })?;
+                let message_id = queued_run.user_message_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(format!("Queued run {queued_run_id} has no queued message."))
+                })?;
+                let message = thread
+                    .messages
+                    .iter()
+                    .find(|message| message.id == message_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(format!(
+                            "Queued run {queued_run_id} has no queued message."
+                        ))
+                    })?;
+                (queued_run, target_run, message)
+            };
+            if message.content.trim_start().starts_with("/goal") {
+                return Err(anyhow::anyhow!(
+                    "Goal commands must run as a separate turn. Queue it or wait for the active turn to finish."
+                ));
+            }
+            if message.content.trim_start().starts_with("/compact") {
+                return Err(anyhow::anyhow!(
+                    "Context compaction must run as a separate turn. Queue it or wait for the active turn to finish."
+                ));
+            }
+            if target_run.status == "running" {
+                if let Some(cancel) = state.cancellations.lock().await.remove(&target_run.id) {
+                    let _ = cancel.send(());
+                }
+            }
+            let mut cancelled = queued_run;
+            cancelled.status = "cancelled".into();
+            cancelled.finished_at = Some(now());
+            cancelled.queue_held = false;
+            return Ok(state
+                .commit_receipted(Event::RunUpdated(cancelled), Some(receipt.clone()))
+                .await?
+                .id);
         }
         "runtime-request.respond" => {
             let request_id = command["requestId"].as_str().unwrap_or_default();

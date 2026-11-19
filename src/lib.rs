@@ -153,6 +153,7 @@ pub enum Event {
         before_run_id: Option<Uuid>,
     },
     RunStarted(Run),
+    RunUpdated(Run),
     RunQueued {
         message: ConversationMessage,
         run: Run,
@@ -286,6 +287,22 @@ impl Store {
                     } else {
                         t.runs.push(run.clone());
                     }
+                }
+            }
+            Event::RunUpdated(run) => {
+                if let Some(t) = self.threads.get_mut(&run.thread_id) {
+                    if let Some(existing) =
+                        t.runs.iter_mut().find(|candidate| candidate.id == run.id)
+                    {
+                        *existing = run.clone();
+                    } else {
+                        t.runs.push(run.clone());
+                    }
+                    t.status = match run.status.as_str() {
+                        "completed" => "idle".into(),
+                        "queued" => "running".into(),
+                        status => status.into(),
+                    };
                 }
             }
             Event::RunReordered {
