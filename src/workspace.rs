@@ -356,11 +356,53 @@ pub async fn write_file(input: &Value) -> Option<Reply> {
 
 pub async fn metadata(input: &Value) -> Option<Reply> {
     input.get("paths")?;
-    let entries = input["paths"].as_array().into_iter().flatten().map(|path| {
-        let path = path.as_str().unwrap_or_default();
-        std::fs::metadata(path).ok().map(|m| json!({"kind": if m.is_file() {"file"} else if m.is_dir() {"directory"} else {"other"}, "byteLength": m.len()}))
-    }).collect::<Vec<_>>();
+    let entries = input["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|path| {
+            let path = path.as_str().unwrap_or_default();
+            std::fs::metadata(path).ok().map(|m| {
+                let kind = if m.is_file() {
+                    "file"
+                } else if m.is_dir() {
+                    "directory"
+                } else {
+                    "other"
+                };
+                let mut value = json!({"kind": kind});
+                if m.is_file() {
+                    value["byteLength"] = json!(m.len());
+                    if let Some(mime) = mime_type(Path::new(path)) {
+                        value["mimeType"] = json!(mime);
+                    }
+                }
+                value
+            })
+        })
+        .collect::<Vec<_>>();
     Some(Ok(json!({"entries": entries})))
+}
+
+fn mime_type(path: &Path) -> Option<&'static str> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "js" | "mjs" | "cjs" => Some("text/javascript"),
+        "ts" | "tsx" => Some("text/typescript"),
+        "jsx" => Some("text/jsx"),
+        "json" => Some("application/json"),
+        "css" => Some("text/css"),
+        "html" | "htm" => Some("text/html"),
+        "md" => Some("text/markdown"),
+        "py" => Some("text/x-python"),
+        "rs" => Some("text/x-rust"),
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "svg" => Some("image/svg+xml"),
+        "webp" => Some("image/webp"),
+        "pdf" => Some("application/pdf"),
+        _ => None,
+    }
 }
 
 pub async fn browse(input: &Value) -> Option<Reply> {
