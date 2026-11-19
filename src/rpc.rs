@@ -2216,9 +2216,21 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             };
             json!({"snapshotSequence":sequence,"threads":threads,"counts":counts.into_iter().map(|(project_id,count)|json!({"projectId":project_id,"count":count})).collect::<Vec<_>>()})
         }
-        "orchestration.getThreadProjection" => thread(&params["threadId"])
-            .map(|t| t.projection())
-            .unwrap_or(Value::Null),
+        "orchestration.getThreadProjection" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            let Some(thread) = thread(&params["threadId"]) else {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationV2GetThreadProjectionError",
+                    "threadId":thread_id,
+                    "message":format!("Failed to load orchestration V2 thread {thread_id}"),
+                    "cause":{"name":"OrchestratorProjectionError",
+                        "message":"Failed to load orchestration projection for thread ".to_owned()+thread_id+".",
+                        "cause":{"name":"ProjectionStoreThreadNotFoundError",
+                            "message":"No orchestration projection exists for thread ".to_owned()+thread_id+"."}}
+                }}));
+            };
+            thread.projection()
+        }
         "orchestration.getTurnDiff" => {
             let from = params["fromTurnCount"].as_u64().unwrap_or_default();
             let to = params["toTurnCount"].as_u64().unwrap_or_default();

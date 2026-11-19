@@ -263,7 +263,7 @@ async fn apply_command(
                 .to_owned();
             return start_run(state, receipt, thread_id, text, &command["messageId"]).await;
         }
-        "thread.stop" | "run.interrupt" | "subagent.stop" | "queued-run.cancel" => {
+        "thread.stop" | "run.interrupt" | "subagent.stop" => {
             if let Some(thread_id) = thread_id {
                 let run_ids = state
                     .store
@@ -503,6 +503,79 @@ async fn apply_command(
                     )
                     .await?
                     .id);
+            }
+        }
+        "prepared-run.release"
+        | "prepared-run.progress"
+        | "prepared-run.fail"
+        | "prepared-run.retry" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            return Err(anyhow::anyhow!(format!(
+                "Run {run_id} is not awaiting workspace preparation."
+            )));
+        }
+        "provider-session.detach" => {
+            let provider_session_id = command["providerSessionId"].as_str().unwrap_or_default();
+            let thread_id = thread_id.unwrap_or_default();
+            return Err(anyhow::anyhow!(format!(
+                "Provider session {provider_session_id} does not belong to thread {thread_id}."
+            )));
+        }
+        "queued-run.cancel" | "queued-run.edit" | "queued-run.reorder" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
+        }
+        "queued-run.start" => {
+            return Err(anyhow::anyhow!(
+                "A queued user message can only be sent now while the thread is stopped."
+            ));
+        }
+        "runtime-request.respond" => {
+            let request_id = command["requestId"].as_str().unwrap_or_default();
+            return Err(anyhow::anyhow!(format!(
+                "Runtime request {request_id} was not found."
+            )));
+        }
+        "thread.user-input.dismiss" => {
+            return Err(anyhow::anyhow!("This question has already been answered."));
+        }
+        "thread.fork" => {
+            let source_thread_id = command["sourceThreadId"].as_str().unwrap_or_default();
+            let source_point = command["sourcePoint"]["type"].as_str().unwrap_or_default();
+            let source = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(source_thread_id)
+                .cloned();
+            if source.is_none() {
+                return Err(anyhow::anyhow!(format!(
+                    "No orchestration projection exists for thread {source_thread_id}."
+                )));
+            }
+            if source_point == "latest_stable"
+                && source
+                    .as_ref()
+                    .is_some_and(|thread| !thread.runs.iter().any(|run| run.status == "completed"))
+            {
+                return Err(anyhow::anyhow!(
+                    "No stable source run was found for fork source latest_stable."
+                ));
+            }
+        }
+        "thread.merge_back" => {
+            let source_thread_id = command["sourceThreadId"].as_str().unwrap_or_default();
+            if !state
+                .store
+                .read()
+                .await
+                .threads
+                .contains_key(source_thread_id)
+            {
+                return Err(anyhow::anyhow!(format!(
+                    "No orchestration projection exists for thread {source_thread_id}."
+                )));
             }
         }
         // Every command discriminator has a registered wire contract. Commands
