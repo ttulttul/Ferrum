@@ -1,6 +1,6 @@
 pub use crate::local_services::media::routes;
 use crate::AppState;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// Dispatch a host-backed unary RPC or obtain the first value of its stream.
 pub async fn dispatch(
@@ -12,18 +12,7 @@ pub async fn dispatch(
     match service {
         "projects" => match name {
             "listEntries" => crate::workspace::list_entries(input).await,
-            "listIgnoredFiles" => crate::workspace::list_entries(input).await.map(|result| {
-                result.map(|value| {
-                    let files = value["entries"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|entry| entry["kind"] == "file")
-                        .map(|entry| json!({"path": entry["path"], "byteLength": 0}))
-                        .collect::<Vec<_>>();
-                    json!({"files": files, "truncated": false})
-                })
-            }),
+            "listIgnoredFiles" => crate::workspace::list_ignored_files(input).await,
             "searchEntries" => crate::workspace::search_entries(input).await,
             "searchContents" => crate::workspace::search_contents(input).await,
             "readFile" => crate::workspace::read_file(input).await,

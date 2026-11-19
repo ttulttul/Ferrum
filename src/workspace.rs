@@ -77,6 +77,43 @@ pub async fn list_entries(input: &Value) -> Option<Reply> {
     Some(result)
 }
 
+pub async fn list_ignored_files(input: &Value) -> Option<Reply> {
+    if !input.get("cwd").is_some() {
+        return None;
+    }
+    let result = (|| {
+        let root = root(input)?;
+        let mut entries = Vec::new();
+        walk(&root, &root, &mut entries, 20_000);
+        let files = entries
+            .into_iter()
+            .filter(|v| v["kind"] == "file")
+            .filter_map(|v| {
+                let relative = v["path"].as_str()?.to_owned();
+                let ignored = std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        root.to_str()?,
+                        "check-ignore",
+                        "--quiet",
+                        "--",
+                        &relative,
+                    ])
+                    .status()
+                    .ok()
+                    .is_some_and(|status| status.success());
+                if !ignored {
+                    return None;
+                }
+                let byte_length = std::fs::metadata(root.join(&relative)).ok()?.len();
+                Some(json!({"path": relative, "byteLength": byte_length}))
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({"files": files, "truncated": false}))
+    })();
+    Some(result)
+}
+
 fn walk(root: &Path, directory: &Path, output: &mut Vec<Value>, limit: usize) {
     if output.len() >= limit {
         return;
