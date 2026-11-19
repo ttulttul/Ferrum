@@ -2161,7 +2161,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 .filter(|thread| {
                     thread.settled
                         && !thread.archived
-                        && in_projects(&thread)
+                        && in_projects(thread)
                         && thread.row["settledAt"].as_str().is_some_and(|at| {
                             at < before
                                 || (at == before
