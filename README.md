@@ -26,6 +26,14 @@ State is stored in `.t3/events.jsonl` by default. Set `T3CODE_DATA_DIR` to use a
 
 Connect to `/ws`, send `{"type":"subscribe"}`, then send `send_message`, `create_thread`, or `cancel_run` commands. Server events are JSON objects with `type: "event"`, an event id, and an event payload. The event log can be replayed on restart to reconstruct state.
 
+The upstream contract inventory is checked into `contracts/`. It currently
+contains 78 HTTP contracts, 212 general RPC methods, and 23 orchestration v2
+RPC methods. Run `python3 scripts/update_contract_inventory.py /path/to/t3code`
+when upgrading the upstream source. Inventory entries are recognized by the
+Rust server and covered by tests. Provider-backed methods still need their
+domain integrations before they can return the upstream method-specific result
+schemas.
+
 ## Development
 
 ```bash
