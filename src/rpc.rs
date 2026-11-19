@@ -165,14 +165,43 @@ async fn run_call(
     window: Arc<Semaphore>,
 ) -> Reply {
     let (principal, references) = client;
-    if method == "projects.mutate" && params.get("type").and_then(Value::as_str).is_none() {
+    if method == "projects.mutate"
+        && !matches!(
+            params.get("type").and_then(Value::as_str),
+            Some("project.create" | "project.update" | "project.delete")
+        )
+    {
         return Reply::defect(PROJECTS_MUTATE_SCHEMA_DEFECT.into());
     }
-    if method == "device.action" && params.get("type").and_then(Value::as_str).is_none() {
+    if method == "device.action"
+        && !matches!(
+            params.get("type").and_then(Value::as_str),
+            Some(
+                "setAppearance"
+                    | "setTextSize"
+                    | "setToggle"
+                    | "setLiquidGlass"
+                    | "setColorFilter"
+                    | "setOrientation"
+                    | "setLocation"
+                    | "clearLocation"
+                    | "setPermission"
+                    | "openUrl"
+                    | "launchApp"
+                    | "terminateApp"
+                    | "shake"
+                    | "sendPush"
+            )
+        )
+    {
         return Reply::defect(DEVICE_ACTION_SCHEMA_DEFECT.into());
     }
     if method == "orchestration.dispatchCommand"
-        && params.get("type").and_then(Value::as_str).is_none()
+        && params
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(crate::contracts::command_fields)
+            .is_none()
     {
         return Reply::defect(ORCHESTRATION_DISPATCH_COMMAND_SCHEMA_DEFECT.into());
     }
