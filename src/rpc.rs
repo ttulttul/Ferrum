@@ -1072,8 +1072,14 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
             ))
             .unwrap_or_default();
-        let window = params["windowMs"].as_u64().unwrap_or(0).max(1_000);
-        let bucket = params["bucketMs"].as_u64().unwrap_or(0).max(1_000);
+        let window = params["windowMs"]
+            .as_u64()
+            .unwrap_or(0)
+            .clamp(1_000, 3_600_000);
+        let bucket = params["bucketMs"]
+            .as_u64()
+            .unwrap_or(0)
+            .clamp(1_000, window);
         let start_time = now - time::Duration::milliseconds(window as i64);
         let count = window.div_ceil(bucket).min(512) as usize;
         let buckets = (0..count)
@@ -1093,8 +1099,14 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
         );
         let read_at = now.format(fmt).unwrap_or_default();
-        let window = params["windowMs"].as_u64().unwrap_or(0).max(1_000);
-        let bucket = params["bucketMs"].as_u64().unwrap_or(0).max(1_000);
+        let window = params["windowMs"]
+            .as_u64()
+            .unwrap_or(0)
+            .clamp(1_000, 3_600_000);
+        let bucket = params["bucketMs"]
+            .as_u64()
+            .unwrap_or(0)
+            .clamp(1_000, window);
         let start_time = now - time::Duration::milliseconds(window as i64);
         let count = window.div_ceil(bucket).min(512) as usize;
         let buckets = (0..count)
