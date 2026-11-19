@@ -330,6 +330,8 @@ pub struct AppState {
     pub(crate) pull_request_refresh: Mutex<u64>,
     pub(crate) pull_request_linked_refresh: Mutex<u64>,
     pub(crate) pull_request_linked_events: broadcast::Sender<u64>,
+    pub(crate) scheduled_tasks: Mutex<indexmap::IndexMap<String, serde_json::Value>>,
+    pub(crate) scheduled_task_events: broadcast::Sender<()>,
     pub(crate) prompt_suggestion_events: broadcast::Sender<serde_json::Value>,
 }
 impl AppState {
@@ -393,6 +395,7 @@ impl AppState {
             .await?;
         let (events, _) = broadcast::channel(512);
         let (pull_request_linked_events, _) = broadcast::channel(64);
+        let (scheduled_task_events, _) = broadcast::channel(64);
         let (prompt_suggestion_events, _) = broadcast::channel(64);
         Ok(Arc::new(Self {
             config_started_at: auth_service::iso(auth_service::now()),
@@ -423,6 +426,8 @@ impl AppState {
             pull_request_refresh: Mutex::new(0),
             pull_request_linked_refresh: Mutex::new(0),
             pull_request_linked_events,
+            scheduled_tasks: Mutex::new(indexmap::IndexMap::new()),
+            scheduled_task_events,
             prompt_suggestion_events,
         }))
     }

@@ -433,6 +433,19 @@ async fn run_call(
             }
         }
     }
+    if method == "scheduledTasks.subscribe" {
+        let mut events = state.scheduled_task_events.subscribe();
+        send(json!([scheduled_tasks_snapshot(state).await])).await;
+        loop {
+            match events.recv().await {
+                Ok(()) => send(json!([scheduled_tasks_snapshot(state).await])).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Reply::Success(Value::Null)
+                }
+            }
+        }
+    }
     if method == "server.getConfig" {
         return match crate::config_rpc::snapshot(state, references, &Value::Null).await {
             Ok(v) => Reply::Success(v),
@@ -818,22 +831,26 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     if method == "peerLinks.unlink" {
         return Reply::Success(json!({"removed":false}));
     }
-    if matches!(
-        method,
-        "scheduledTasks.delete" | "scheduledTasks.listWebhookDeliveries"
-    ) {
-        if method == "scheduledTasks.delete" {
-            return Reply::Success(json!({"id":params["id"]}));
-        }
-        return Reply::Success(json!({"deliveries":[]}));
+    if method == "scheduledTasks.upsert" {
+        return scheduled_task_upsert(state, params).await;
     }
-    if matches!(
-        method,
-        "scheduledTasks.setEnabled" | "scheduledTasks.runNow" | "scheduledTasks.rotateWebhookToken"
-    ) {
-        return Reply::Failure(
-            json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":"Schedule task not found.","taskId":params["id"]}}),
-        );
+    if method == "scheduledTasks.setEnabled" {
+        return scheduled_task_set_enabled(state, params).await;
+    }
+    if method == "scheduledTasks.runNow" {
+        return scheduled_task_run_now(state, params).await;
+    }
+    if method == "scheduledTasks.rotateWebhookToken" {
+        return scheduled_task_rotate_token(state, params).await;
+    }
+    if method == "scheduledTasks.delete" {
+        state
+            .scheduled_tasks
+            .lock()
+            .await
+            .shift_remove(params["id"].as_str().unwrap_or_default());
+        let _ = state.scheduled_task_events.send(());
+        return Reply::Success(json!({"id":params["id"]}));
     }
     if method == "sourceControl.lookupRepository" {
         let provider = params["provider"].as_str().unwrap_or_default();
@@ -1023,6 +1040,30 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     }
     if method == "scheduledTasks.upsert" && !params["schedule"].is_object() {
         return Reply::defect("Expected { readonly \"type\": \"interval\", ... } | { readonly \"type\": \"fixed_time\", ... } | { readonly \"type\": \"once\", ... } | { readonly \"type\": \"webhook\", ... }\n  at [\"schedule\"]".into());
+    }
+    if method == "provider.consumeResetCredit"
+        && params.get("sourceId").is_none()
+        && params.get("instanceId").is_some()
+    {
+        let instance_id = params["instanceId"].as_str().unwrap_or_default();
+        let known = state
+            .settings
+            .internal()
+            .ok()
+            .and_then(|settings| settings["providerInstances"].get(instance_id).cloned())
+            .is_some()
+            || serde_json::from_str::<Value>(include_str!("../contracts/config-defaults.json"))
+                .ok()
+                .and_then(|defaults| defaults["providers"].get(instance_id).cloned())
+                .is_some();
+        if !known {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"consume-reset-credit","detail":"Provider instance not found."}}),
+            );
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"consume-reset-credit","detail":"This provider does not bank reset credits."}}),
+        );
     }
     // Provider authentication and managed-installation controllers are backed by
     // provider-specific runtimes in the TypeScript server.  Preserve their exact
@@ -1876,10 +1917,21 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                     json!({"_tag":"Some","value":format!("VCS process failed to spawn in source-control.discovery.probe: {executable} ({})",cwd.display())})
                 }
             };
-            let mut row = json!({"kind":kind,"label":label,"status":if executable.is_none() || version.is_some(){"available"}else{"missing"},"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":{"status":if kind == "github" {"unauthenticated"} else {"unknown"},"account":{"_tag":"None"},"detail":{"_tag":"Some","value":auth_detail}}});
-            if let Some(executable) = executable {
-                row["executable"] = json!(executable);
-            }
+            let status = if executable.is_none() || version.is_some() {
+                "available"
+            } else {
+                "missing"
+            };
+            let auth_status = if matches!(kind, "github" | "bitbucket") {
+                "unauthenticated"
+            } else {
+                "unknown"
+            };
+            let mut row = if let Some(executable) = executable {
+                json!({"kind":kind,"label":label,"executable":executable,"status":status,"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":{"status":auth_status,"account":{"_tag":"None"},"detail":{"_tag":"Some","value":auth_detail}}})
+            } else {
+                json!({"kind":kind,"label":label,"status":status,"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":{"status":auth_status,"account":{"_tag":"None"},"detail":{"_tag":"Some","value":auth_detail}}})
+            };
             if kind == "github" {
                 row["auth"]["accounts"] = json!([]);
             }
@@ -1891,7 +1943,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         let providers = vec![
             provider("github", "GitHub", Some("gh"), "Install the GitHub command-line tool (`gh`) via https://cli.github.com/ or your package manager (for example `brew install gh`).", "Run `gh auth login` to authenticate GitHub CLI with an active account.", None),
             provider("cursor-origin", "Cursor Origin", Some("origin"), "Install the Origin CLI with `curl -fsSL https://downloads.cursor.com/origin/install.sh | sh`, then run `origin auth login`.", "Install the Origin CLI with `curl -fsSL https://downloads.cursor.com/origin/install.sh | sh`, then run `origin auth login`.", None),
-            provider("gitlab", "GitLab", Some("glab"), "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager.", "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager.", None),
+            provider("gitlab", "GitLab", Some("glab"), "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager (for example `brew install glab`).", "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager (for example `brew install glab`).", None),
             provider("gitcafe", "GitCafe", Some("cafe"), "Install the GitCafe CLI with `bun install -g @gitcafe/cli`, then run `cafe auth login --host https://git.cafe/api`, save a token in Settings, or set CAFE_TOKEN on the server.", "Install the GitCafe CLI with `bun install -g @gitcafe/cli`, then run `cafe auth login --host https://git.cafe/api`, save a token in Settings, or set CAFE_TOKEN on the server.", None),
             provider("forgejo", "Forgejo / Gitea", Some("tea"), "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.", "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.", None),
             provider("bitbucket", "Bitbucket", None, "Add a Bitbucket token in Settings → Source control & issues.", "Add a Bitbucket token in Settings → Source control & issues, or set the T3CODE_BITBUCKET_* environment variables on the server.", Some("bitbucket.org")),
@@ -1954,17 +2006,6 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"_tag":"Fail","error":{"_tag":"SecretRequestError","reason":"load_failed","cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}}}),
         );
     }
-    if method == "scheduledTasks.setEnabled"
-        || method == "scheduledTasks.runNow"
-        || method == "scheduledTasks.rotateWebhookToken"
-    {
-        return Reply::Failure(
-            json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":"Schedule task not found.","taskId":params["id"]}}),
-        );
-    }
-    if method == "scheduledTasks.delete" {
-        return Reply::Success(json!({"id":params["id"]}));
-    }
     if method == "scheduledTasks.listWebhookDeliveries" {
         return Reply::Success(json!({"deliveries":[]}));
     }
@@ -1972,18 +2013,6 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Failure(
             json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":"Webhook delivery not found.","taskId":params["id"]}}),
         );
-    }
-    if method == "scheduledTasks.subscribe" {
-        let time_zone = std::env::var("TZ")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| {
-                std::fs::read_to_string("/etc/timezone")
-                    .ok()
-                    .map(|v| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "UTC".into());
-        return Reply::Chunk(json!([{"tasks":[],"timeZone":time_zone}]));
     }
     if method == "cloud.getRelayClientStatus" {
         let found = std::env::var_os("PATH").and_then(|paths| {
@@ -2655,6 +2684,157 @@ fn checkpoint_diff_schema_defect(method: &str, params: &Value) -> Option<String>
         }
     }
     None
+}
+
+async fn scheduled_tasks_snapshot(state: &Arc<AppState>) -> Value {
+    let tasks = state.scheduled_tasks.lock().await;
+    let time_zone = std::env::var("TZ")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/timezone")
+                .ok()
+                .map(|v| v.trim().to_owned())
+        })
+        .unwrap_or_else(|| "UTC".into());
+    json!({"tasks":tasks.values().cloned().collect::<Vec<_>>(),"timeZone":time_zone})
+}
+
+fn scheduled_task_error(id: &str, message: &str) -> Reply {
+    Reply::Failure(
+        json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":message,"taskId":id}}),
+    )
+}
+
+async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
+    let id = params["id"]
+        .as_str()
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            params["commandId"]
+                .as_str()
+                .map(|v| format!("scheduled-task:{v}"))
+        })
+        .unwrap_or_else(|| format!("scheduled-task:{}", uuid::Uuid::new_v4()));
+    let now = crate::auth_service::now();
+    let now_iso = crate::auth_service::iso(now);
+    let mut task = params.clone();
+    let existing = state.scheduled_tasks.lock().await.get(&id).cloned();
+    task["id"] = json!(id.clone());
+    task["threadId"] = params.get("threadId").cloned().unwrap_or(Value::Null);
+    task["threadMode"] = params.get("threadMode").cloned().unwrap_or_else(|| {
+        if task["threadId"].is_null() {
+            json!("new_thread")
+        } else {
+            json!("continue")
+        }
+    });
+    task["createdBy"] = params
+        .get("createdBy")
+        .cloned()
+        .or_else(|| existing.as_ref().and_then(|v| v.get("createdBy").cloned()))
+        .unwrap_or_else(|| json!("user"));
+    task["creationSource"] = params
+        .get("creationSource")
+        .cloned()
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|v| v.get("creationSource").cloned())
+        })
+        .unwrap_or_else(|| json!("web"));
+    task["createdAt"] = existing
+        .as_ref()
+        .and_then(|v| v.get("createdAt").cloned())
+        .unwrap_or_else(|| json!(now_iso.clone()));
+    task["updatedAt"] = json!(now_iso);
+    for (key, value) in [
+        ("lastRunAt", Value::Null),
+        ("lastRunError", Value::Null),
+        ("lastRunStatus", json!("never")),
+        ("runCount", json!(0)),
+    ] {
+        if let Some(old) = existing.as_ref().and_then(|v| v.get(key)) {
+            task[key] = old.clone();
+        } else {
+            task[key] = value;
+        }
+    }
+    task["nextRunAt"] = Value::Null;
+    if task["enabled"] == true {
+        if let Some(ms) = task["schedule"]["everyMs"].as_i64() {
+            task["nextRunAt"] = json!(crate::auth_service::iso(now.saturating_add(ms)));
+        } else if task["schedule"]["type"] == "once" {
+            task["nextRunAt"] = task["schedule"]["runAt"].clone();
+        }
+    }
+    // Webhook endpoint metadata is derived from the task token and intentionally omits the secret.
+    if task["schedule"]["type"] == "webhook" {
+        let token = existing
+            .as_ref()
+            .and_then(|v| v["webhook"]["path"].as_str())
+            .and_then(|p| p.rsplit('/').next())
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        task["webhook"] =
+            json!({"path":format!("/api/hooks/{id}/{token}"),"url":Value::Null,"hasSecret":false});
+    }
+    let result = task.clone();
+    state.scheduled_tasks.lock().await.insert(id, task);
+    let _ = state.scheduled_task_events.send(());
+    Reply::Success(json!({"task":result}))
+}
+
+async fn scheduled_task_set_enabled(state: &Arc<AppState>, params: &Value) -> Reply {
+    let id = params["id"].as_str().unwrap_or_default();
+    let enabled = params["enabled"].as_bool().unwrap_or(false);
+    let mut tasks = state.scheduled_tasks.lock().await;
+    let Some(task) = tasks.get_mut(id) else {
+        return scheduled_task_error(id, "Schedule task not found.");
+    };
+    task["enabled"] = json!(enabled);
+    task["updatedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+    task["nextRunAt"] = if enabled {
+        task["schedule"]["runAt"].clone()
+    } else {
+        Value::Null
+    };
+    let result = task.clone();
+    drop(tasks);
+    let _ = state.scheduled_task_events.send(());
+    Reply::Success(json!({"task":result}))
+}
+
+async fn scheduled_task_run_now(state: &Arc<AppState>, params: &Value) -> Reply {
+    let id = params["id"].as_str().unwrap_or_default();
+    let task = state.scheduled_tasks.lock().await.get(id).cloned();
+    let Some(task) = task else {
+        return scheduled_task_error(id, "Schedule task not found.");
+    };
+    if task["schedule"]["type"] == "webhook" {
+        return scheduled_task_error(id, "Webhook tasks run when their URL receives a request.");
+    }
+    Reply::Success(json!({"task":task,"threadId":task["threadId"]}))
+}
+
+async fn scheduled_task_rotate_token(state: &Arc<AppState>, params: &Value) -> Reply {
+    let id = params["id"].as_str().unwrap_or_default();
+    let mut tasks = state.scheduled_tasks.lock().await;
+    let Some(task) = tasks.get_mut(id) else {
+        return scheduled_task_error(id, "Schedule task not found.");
+    };
+    if task["schedule"]["type"] != "webhook" {
+        return scheduled_task_error(id, "Only webhook tasks have a URL token.");
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    let path = format!("/api/hooks/{id}/{token}");
+    task["webhook"]["path"] = json!(path);
+    task["updatedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+    let result = task.clone();
+    drop(tasks);
+    let _ = state.scheduled_task_events.send(());
+    Reply::Success(json!({"task":result}))
 }
 
 fn invalid_provider_payload_field(method: &str, params: &Value) -> Option<&'static str> {
