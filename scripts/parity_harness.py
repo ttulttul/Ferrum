@@ -1,97 +1,211 @@
 #!/usr/bin/env python3
-"""Run the Rust server and an original T3 server against identical HTTP fixtures.
-
-The harness deliberately compares status and response bytes. It does not parse,
-sort, or normalize JSON, so a passing fixture is evidence of wire-level parity.
-The original server may be supplied as an existing URL or a command to launch.
-"""
-from __future__ import annotations
-
+"""Compare HTTP responses and authenticated Effect RPC frames from two T3 servers."""
 import argparse
+import base64
+import contextlib
+import http.client as http_client
 import json
 import os
+from pathlib import Path
+import secrets
 import shlex
 import signal
+import socket
 import subprocess
-import sys
+import tempfile
 import time
-import urllib.error
-import urllib.request
-from pathlib import Path
+from urllib.parse import urlsplit
+
+ROOT = Path(__file__).resolve().parents[1]
+TRACE = "00-0123456789abcdef0123456789abcdef-1234567890abcdef-01"
 
 
-def request(base: str, fixture: dict) -> tuple[int, bytes]:
-    body = fixture.get("body")
-    data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
-    headers = {"content-type": "application/json"} if data is not None else {}
-    req = urllib.request.Request(base.rstrip("/") + fixture["path"], data=data, method=fixture["method"], headers=headers)
+def encode(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def http(base, method, path, body=None, headers=None):
+    url = urlsplit(base)
+    connection = (http_client.HTTPSConnection if url.scheme == "https" else http_client.HTTPConnection)(
+        url.hostname, url.port, timeout=10
+    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as error:
-        return error.code, error.read()
-
-
-def wait_for_health(base: str) -> None:
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        try:
-            request(base, {"method": "GET", "path": "/health", "body": None})
-            return
-        except (OSError, urllib.error.URLError):
-            time.sleep(0.1)
-    raise RuntimeError(f"server did not become reachable: {base}")
-
-
-def launch(command: str | None, base: str) -> subprocess.Popen[str] | None:
-    if not command:
-        wait_for_health(base)
-        return None
-    process = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
-    try:
-        wait_for_health(base)
-    except Exception:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=5)
-        raise
-    return process
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--original-url", default="http://127.0.0.1:3773")
-    parser.add_argument("--rust-url", default="http://127.0.0.1:43773")
-    parser.add_argument("--original-command", help="command used to launch the original server")
-    parser.add_argument("--rust-command", help="command used to launch the Rust server")
-    parser.add_argument("--fixtures", default="tests/parity-fixtures.json")
-    args = parser.parse_args()
-    fixtures = json.loads(Path(args.fixtures).read_text())
-    processes = []
-    try:
-        for command, url in ((args.original_command, args.original_url), (args.rust_command, args.rust_url)):
-            process = launch(command, url)
-            if process is not None:
-                processes.append(process)
-        failures = 0
-        for fixture in fixtures:
-            original = request(args.original_url, fixture)
-            rust = request(args.rust_url, fixture)
-            if original != rust:
-                failures += 1
-                print(f"FAIL {fixture['name']}: original={original[0]} rust={rust[0]}")
-                print(f"  original bytes: {original[1].hex()}")
-                print(f"  rust bytes:     {rust[1].hex()}")
-            else:
-                print(f"PASS {fixture['name']}: {original[0]} and {len(original[1])} bytes identical")
-        return 1 if failures else 0
+        connection.request(method, url.path.rstrip("/") + path, body, headers or {})
+        response = connection.getresponse()
+        return response.status, response.headers, response.read()
     finally:
-        for process in processes:
+        connection.close()
+
+
+def ready(url, process=None):
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        if process and process.poll() is not None:
+            raise RuntimeError(f"server exited before readiness ({process.returncode})")
+        try:
+            if http(url, "GET", "/ws")[0] == 426:
+                return
+        except (OSError, http_client.HTTPException):
+            pass
+        time.sleep(.1)
+    raise RuntimeError(f"{url} did not answer protocol negotiation")
+
+
+@contextlib.contextmanager
+def launch(command, url, **kwargs):
+    if not command:
+        ready(url)
+        yield
+        return
+    process = subprocess.Popen(command, start_new_session=True, stdout=subprocess.DEVNULL, **kwargs)
+    try:
+        ready(url, process)
+        yield
+    finally:
+        if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def session_cookie(url, secret):
+    status, headers, _ = http(url, "POST", "/api/auth/browser-session",
+                              encode({"credential": secret}), {"Content-Type": "application/json"})
+    if status != 200 or not headers.get("set-cookie"):
+        raise RuntimeError(f"browser bootstrap failed on {url} (HTTP {status})")
+    return headers["set-cookie"].split(";", 1)[0]
+
+
+def managed_server(stack, prefix, root, secret, signing_key):
+    secrets_dir = root / "userdata" / "secrets"
+    secrets_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    key_file = secrets_dir / "mcp-oauth-signing-key.bin"
+    if not key_file.exists():
+        key_file.write_bytes(signing_key)
+        key_file.chmod(0o600)
+    port = free_port()
+    url = f"http://127.0.0.1:{port}"
+    envelope = dict(mode="desktop", noBrowser=True, host="127.0.0.1", port=port, t3Home=str(root),
+                    desktopBootstrapToken=secret, tailscaleServeEnabled=False, tailscaleServePort=443)
+    bootstrap = stack.enter_context(tempfile.TemporaryFile())
+    bootstrap.write(encode(envelope) + b"\n")
+    bootstrap.seek(0)
+    # Each child receives its own state directory, home and bootstrap descriptor.
+    # Do not pass developer provider credentials into parity processes.
+    env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "SYSTEMROOT") if k in os.environ}
+    stack.enter_context(launch(prefix + ["--bootstrap-fd", str(bootstrap.fileno())], url,
+                               env={**env, "HOME": str(root), "T3CODE_HOME": str(root)},
+                               cwd=root, pass_fds=(bootstrap.fileno(),)))
+    return url, session_cookie(url, secret)
+
+
+def check(fixture, servers, sockets):
+    if "frame" in fixture:
+        if "setupFrame" in fixture:
+            setup = encode(fixture["setupFrame"]).decode()
+            for ws in sockets:
+                ws.send(setup)
+                reply = json.loads(ws.recv(timeout=10))
+                if reply.get("exit", {}).get("_tag") != "Success":
+                    raise RuntimeError(f"{fixture['name']} setup failed: {reply!r}")
+        frame = encode(fixture["frame"]).decode()
+        for ws in sockets:
+            ws.send(frame)
+        values = [ws.recv(timeout=10) for ws in sockets]
+        return values[0] == values[1], [repr(v)[:1600] for v in values]
+    responses = []
+    for url, cookie in servers:
+        headers = {"traceparent": TRACE, **fixture.get("headers", {})}
+        if fixture.get("authenticated"):
+            headers["Cookie"] = cookie
+        body = fixture.get("body")
+        if body is not None:
+            headers["content-type"] = "application/json"
+            body = encode(body)
+        if "bodyBase64" in fixture:
+            body = base64.b64decode(fixture["bodyBase64"], validate=True)
+            headers.setdefault("content-type", "application/octet-stream")
+        status, actual, data = http(url, fixture["method"], fixture["path"], body, headers)
+        responses.append((status, [(k, actual.get(k)) for k in fixture.get("compareHeaders", [])], data))
+    return responses[0] == responses[1], [repr(v)[:1600] for v in responses]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--original-url", default="http://127.0.0.1:3773")
+    parser.add_argument("--rust-url", default="http://127.0.0.1:43773")
+    parser.add_argument("--original-command")
+    parser.add_argument("--rust-command")
+    parser.add_argument("--managed", action="store_true", help="launch each command in an isolated desktop environment")
+    parser.add_argument("--fixtures", type=Path)
+    parser.add_argument("--check-required-fields", action="store_true",
+                        help="also compare missing-field validation for registered RPCs and orchestration commands")
+    args = parser.parse_args()
+    fixtures = json.loads((args.fixtures or ROOT / "tests/parity-fixtures.json").read_text())
+    if args.managed and not args.fixtures:
+        for name in ("provider-parity.json", "github-voice-parity.json", "host-parity.json"):
+            fixtures.extend(json.loads((ROOT / "tests" / name).read_text()))
+    if args.check_required_fields:
+        for rpc in json.loads((ROOT / "contracts/rpc.json").read_text()):
+            if rpc.get("required"):
+                fixtures.append({"name": rpc["tag"] + " missing fields", "frame": {
+                    "_tag": "Request", "id": "validation", "tag": rpc["tag"], "payload": {}, "headers": []}})
+        for tag in json.loads((ROOT / "contracts/commands.json").read_text()):
+            fixtures.append({"name": tag + " missing command fields", "frame": {
+                "_tag": "Request", "id": "validation", "tag": "orchestration.dispatchCommand",
+                "payload": {"type": tag}, "headers": []}})
+    with contextlib.ExitStack() as stack:
+        if args.managed:
+            if not args.original_command or not args.rust_command:
+                parser.error("--managed requires both launch commands (use absolute executable paths)")
+            root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+            secret = secrets.token_urlsafe(32)
+            signing_key = secrets.token_bytes(32)
+            git_repo = root / "repo"
+            subprocess.run(["git", "init", "-qb", "main", git_repo], check=True)
+            git = ["git", "-C", str(git_repo), "-c", "user.email=test@example.test", "-c", "user.name=Parity"]
+            subprocess.run(git + ["commit", "--allow-empty", "-qm", "Fixture"], check=True)
+            (git_repo / "untracked.txt").write_text("test data")
+            for fixture in fixtures:
+                if "frame" in fixture and fixture["frame"].get("payload", {}).get("cwd") == "$PARITY_REPO":
+                    fixture["frame"]["payload"]["cwd"] = str(git_repo)
+            servers = [managed_server(stack, shlex.split(cmd), root / name, secret, signing_key)
+                       for name, cmd in [("original", args.original_command), ("rust", args.rust_command)]]
+        else:
+            servers = []
+            for url, cmd, credential_var in [(args.original_url, args.original_command, "T3_PARITY_ORIGINAL_BOOTSTRAP"),
+                                             (args.rust_url, args.rust_command, "T3_PARITY_RUST_BOOTSTRAP")]:
+                stack.enter_context(launch(shlex.split(cmd) if cmd else None, url))
+                secret = os.environ.get(credential_var)
+                servers.append((url, session_cookie(url, secret) if secret else None))
+        sockets = []
+        if any("frame" in f for f in fixtures):
+            from websockets.sync.client import connect
+            for url, cookie in servers:
+                if not cookie:
+                    parser.error("RPC fixtures require managed servers or both parity bootstrap environment variables")
+                sockets.append(stack.enter_context(connect(url.replace("http", "ws", 1) + "/ws?orchestrationProtocol=2",
+                                additional_headers={"Cookie": cookie}, proxy=None, compression=None)))
+        failures = 0
+        for fixture in fixtures:
+            passed, values = check(fixture, servers, sockets)
+            if not passed:
+                failures += 1
+                print(f"FAIL {fixture['name']}\n  original {values[0]}\n  rust     {values[1]}")
+            else:
+                print(f"PASS {fixture['name']}")
+        print(f"{len(fixtures) - failures}/{len(fixtures)} fixtures matched")
+        return int(failures != 0)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

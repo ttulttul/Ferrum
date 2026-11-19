@@ -1,0 +1,449 @@
+[
+  {
+    "name": "device.list 0",
+    "frame": {
+      "_tag": "Request",
+      "id": "700",
+      "tag": "device.list",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "device.configure 1",
+    "frame": {
+      "_tag": "Request",
+      "id": "701",
+      "tag": "device.configure",
+      "payload": {
+        "enabled": false,
+        "agentAccessEnabled": true,
+        "onboardingCompleted": true
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "device.list 2",
+    "frame": {
+      "_tag": "Request",
+      "id": "702",
+      "tag": "device.list",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "device.detail 3",
+    "frame": {
+      "_tag": "Request",
+      "id": "703",
+      "tag": "device.detail",
+      "payload": {
+        "deviceId": "missing-device"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "device.open 4",
+    "frame": {
+      "_tag": "Request",
+      "id": "704",
+      "tag": "device.open",
+      "payload": {
+        "threadId": "one",
+        "deviceId": "missing",
+        "platform": "ios"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "device.close 5",
+    "frame": {
+      "_tag": "Request",
+      "id": "705",
+      "tag": "device.close",
+      "payload": {
+        "threadId": "absent",
+        "shutdown": true
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "device.list 6",
+    "frame": {
+      "_tag": "Request",
+      "id": "706",
+      "tag": "device.list",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "device.easAccount 7",
+    "frame": {
+      "_tag": "Request",
+      "id": "707",
+      "tag": "device.easAccount",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "device.simlockIdentity 8",
+    "frame": {
+      "_tag": "Request",
+      "id": "708",
+      "tag": "device.simlockIdentity",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "preview.adjust 9",
+    "frame": {
+      "_tag": "Request",
+      "id": "709",
+      "tag": "preview.adjust",
+      "payload": {
+        "threadId": "missing",
+        "tabId": "missing",
+        "colorScheme": "dark"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "preview.reportStatus 10",
+    "frame": {
+      "_tag": "Request",
+      "id": "710",
+      "tag": "preview.reportStatus",
+      "payload": {
+        "threadId": "missing",
+        "tabId": "a",
+        "navStatus": {
+          "_tag": "Idle"
+        },
+        "canGoBack": false,
+        "canGoForward": false
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "preview.close 11",
+    "frame": {
+      "_tag": "Request",
+      "id": "711",
+      "tag": "preview.close",
+      "payload": {
+        "threadId": "absent"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "preview.list 12",
+    "frame": {
+      "_tag": "Request",
+      "id": "712",
+      "tag": "preview.list",
+      "payload": {
+        "threadId": 123
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "terminal.resize 13",
+    "frame": {
+      "_tag": "Request",
+      "id": "713",
+      "tag": "terminal.resize",
+      "payload": {
+        "threadId": "absent",
+        "terminalId": "term-1",
+        "cols": 120,
+        "rows": 30
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "terminal.write 14",
+    "frame": {
+      "_tag": "Request",
+      "id": "714",
+      "tag": "terminal.write",
+      "payload": {
+        "threadId": "absent",
+        "terminalId": "term-1",
+        "data": "\n"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "terminal.open 15",
+    "frame": {
+      "_tag": "Request",
+      "id": "715",
+      "tag": "terminal.open",
+      "payload": {
+        "threadId": "absent",
+        "terminalId": "term-1",
+        "cwd": "/dev/null"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.pull 16",
+    "frame": {
+      "_tag": "Request",
+      "id": "716",
+      "tag": "vcs.pull",
+      "payload": {
+        "cwd": "$PARITY_REPO"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.pull 17",
+    "frame": {
+      "_tag": "Request",
+      "id": "717",
+      "tag": "vcs.pull",
+      "payload": {
+        "cwd": "/"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.listRefs 18",
+    "frame": {
+      "_tag": "Request",
+      "id": "718",
+      "tag": "vcs.listRefs",
+      "payload": {
+        "cwd": "$PARITY_REPO",
+        "limit": 1,
+        "query": "nonexistent"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.listRefs 19",
+    "frame": {
+      "_tag": "Request",
+      "id": "719",
+      "tag": "vcs.listRefs",
+      "payload": {
+        "cwd": "$PARITY_REPO",
+        "refKind": "remote"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.listRefs 20",
+    "frame": {
+      "_tag": "Request",
+      "id": "720",
+      "tag": "vcs.listRefs",
+      "payload": {
+        "cwd": "$PARITY_REPO",
+        "cursor": 10
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.createRef 21",
+    "frame": {
+      "_tag": "Request",
+      "id": "721",
+      "tag": "vcs.createRef",
+      "payload": {
+        "cwd": "$PARITY_REPO",
+        "refName": "main"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.switchRef 22",
+    "frame": {
+      "_tag": "Request",
+      "id": "722",
+      "tag": "vcs.switchRef",
+      "payload": {
+        "cwd": "$PARITY_REPO",
+        "refName": "-bogus"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.createWorktree 23",
+    "frame": {
+      "_tag": "Request",
+      "id": "723",
+      "tag": "vcs.createWorktree",
+      "payload": {
+        "cwd": "$PARITY_REPO",
+        "refName": "main",
+        "path": "/tmp/external"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "anonymous GET /api/device-hub/never",
+    "authenticated": false,
+    "method": "GET",
+    "path": "/api/device-hub/never",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "anonymous GET /api/device-hub/api/devices",
+    "authenticated": false,
+    "method": "GET",
+    "path": "/api/device-hub/api/devices",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "authenticated GET /api/device-hub/api/devices",
+    "authenticated": true,
+    "method": "GET",
+    "path": "/api/device-hub/api/devices",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "authenticated POST /api/device-hub/api/devices",
+    "authenticated": true,
+    "method": "POST",
+    "path": "/api/device-hub/api/devices",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "anonymous GET /api/preview-stream/ws",
+    "authenticated": false,
+    "method": "GET",
+    "path": "/api/preview-stream/ws",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "anonymous GET /api/preview-stream/upload",
+    "authenticated": false,
+    "method": "GET",
+    "path": "/api/preview-stream/upload",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "anonymous GET /api/preview-stream/download",
+    "authenticated": false,
+    "method": "GET",
+    "path": "/api/preview-stream/download",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "authenticated GET /api/preview-stream/download?id=missing",
+    "authenticated": true,
+    "method": "GET",
+    "path": "/api/preview-stream/download?id=missing",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "preview.stopLocalServer",
+    "frame": {
+      "_tag": "Request",
+      "id": "800",
+      "tag": "preview.stopLocalServer",
+      "payload": {
+        "pid": 2147483647,
+        "port": 32000
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "preview.reportProfiles",
+    "frame": {
+      "_tag": "Request",
+      "id": "801",
+      "tag": "preview.reportProfiles",
+      "payload": {
+        "profiles": [
+          {
+            "id": "test-profile",
+            "name": "Fixture",
+            "kind": "persistent"
+          }
+        ],
+        "defaultProfileId": "test-profile"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "preview.clearProfile",
+    "frame": {
+      "_tag": "Request",
+      "id": "802",
+      "tag": "preview.clearProfile",
+      "payload": {
+        "profileId": "test-profile"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "subscribeVcsBranch",
+    "frame": {
+      "_tag": "Request",
+      "id": "803",
+      "tag": "subscribeVcsBranch",
+      "payload": {
+        "cwd": "$PARITY_REPO"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "subscribeVcsStatus",
+    "frame": {
+      "_tag": "Request",
+      "id": "804",
+      "tag": "subscribeVcsStatus",
+      "payload": {
+        "cwd": "/",
+        "includeRemote": false
+      },
+      "headers": []
+    }
+  }
+]

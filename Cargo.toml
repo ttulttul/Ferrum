@@ -8,16 +8,35 @@ repository = "https://github.com/ttulttul/t3code-rust"
 
 [dependencies]
 anyhow = "1"
-axum = { version = "=0.7.9", features = ["ws"] }
+base64 = "0.22"
+hostname = "0.4"
+hmac = "0.12"
+jsonwebtoken = "9.3"
+rusqlite = { version = "0.38", features = ["bundled"] }
+rand = "0.8"
+regex = "1"
+ring = "0.17"
+tempfile = "3"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+tokio-tungstenite = "0.24"
+portable-pty = "0.8.1"
+url = "=2.4.1"
+axum = { version = "=0.7.9", features = ["ws", "multipart"] }
 clap = { version = "=4.5.23", features = ["derive", "env"] }
 futures-util = "0.3"
 indexmap = "=2.7.0"
+serde_yaml = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "=1.42.0", features = ["full"] }
+time = { version = "=0.3.36", features = ["formatting", "macros", "parsing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "=1.11.0", features = ["serde", "v4"] }
 
 [build-dependencies]
 serde_json = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

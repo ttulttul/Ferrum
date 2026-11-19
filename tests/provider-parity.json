@@ -1,0 +1,676 @@
+[
+  {
+    "name": "anonymous /ws?orchestrationProtocol=2",
+    "method": "GET",
+    "path": "/ws?orchestrationProtocol=2",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "anonymous /api/projects",
+    "method": "GET",
+    "path": "/api/projects",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "anonymous /api/orchestration/shell",
+    "method": "GET",
+    "path": "/api/orchestration/shell",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "anonymous /api/voice/cloud/keys",
+    "method": "GET",
+    "path": "/api/voice/cloud/keys",
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "anonymous /api/guest/session",
+    "method": "GET",
+    "path": "/api/guest/session",
+    "compareHeaders": [
+      "content-type",
+      "cache-control"
+    ]
+  },
+  {
+    "name": "anonymous /api/guest/render",
+    "method": "GET",
+    "path": "/api/guest/render",
+    "compareHeaders": [
+      "content-type",
+      "cache-control"
+    ]
+  },
+  {
+    "name": "anonymous /api/guest/history",
+    "method": "GET",
+    "path": "/api/guest/history",
+    "compareHeaders": [
+      "content-type",
+      "cache-control"
+    ]
+  },
+  {
+    "name": "anonymous /api/guest/item",
+    "method": "GET",
+    "path": "/api/guest/item",
+    "compareHeaders": [
+      "content-type",
+      "cache-control"
+    ]
+  },
+  {
+    "name": "anonymous /api/guest/command-output",
+    "method": "GET",
+    "path": "/api/guest/command-output",
+    "compareHeaders": [
+      "content-type",
+      "cache-control"
+    ]
+  },
+  {
+    "name": "anonymous /api/guest/attachment",
+    "method": "GET",
+    "path": "/api/guest/attachment",
+    "compareHeaders": [
+      "content-type",
+      "cache-control"
+    ]
+  },
+  {
+    "name": "anonymous /api/guest/media",
+    "method": "GET",
+    "path": "/api/guest/media",
+    "compareHeaders": [
+      "content-type",
+      "cache-control"
+    ]
+  },
+  {
+    "name": "Effect heartbeat",
+    "frame": {
+      "_tag": "Ping"
+    }
+  },
+  {
+    "name": "server.probe",
+    "frame": {
+      "_tag": "Request",
+      "id": "0",
+      "tag": "server.probe",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "orchestration.getThreadFamily",
+    "frame": {
+      "_tag": "Request",
+      "id": "1",
+      "tag": "orchestration.getThreadFamily",
+      "payload": {
+        "threadId": "missing"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "orchestration.getThreadTitles",
+    "frame": {
+      "_tag": "Request",
+      "id": "2",
+      "tag": "orchestration.getThreadTitles",
+      "payload": {
+        "threadIds": [
+          "absent",
+          "missing"
+        ]
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "orchestration.getArchivedShellSnapshot",
+    "frame": {
+      "_tag": "Request",
+      "id": "3",
+      "tag": "orchestration.getArchivedShellSnapshot",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "orchestration.getWorktreeThreadIds",
+    "frame": {
+      "_tag": "Request",
+      "id": "4",
+      "tag": "orchestration.getWorktreeThreadIds",
+      "payload": {
+        "worktreePath": "/tmp"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "orchestration.subscribeShell",
+    "frame": {
+      "_tag": "Request",
+      "id": "5",
+      "tag": "orchestration.subscribeShell",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "orchestration.subscribePromptSuggestion",
+    "frame": {
+      "_tag": "Request",
+      "id": "6",
+      "tag": "orchestration.subscribePromptSuggestion",
+      "payload": {
+        "threadId": "missing"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "guestShare.create",
+    "frame": {
+      "_tag": "Request",
+      "id": "7",
+      "tag": "guestShare.create",
+      "payload": {
+        "threadId": "missing"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "unknown.method",
+    "frame": {
+      "_tag": "Request",
+      "id": "8",
+      "tag": "unknown.method",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.refreshStatus",
+    "frame": {
+      "_tag": "Request",
+      "id": "9",
+      "tag": "vcs.refreshStatus",
+      "payload": {
+        "cwd": "/"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "terminal.close",
+    "frame": {
+      "_tag": "Request",
+      "id": "10",
+      "tag": "terminal.close",
+      "payload": {
+        "threadId": "absent"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "issues.list",
+    "frame": {
+      "_tag": "Request",
+      "id": "11",
+      "tag": "issues.list",
+      "payload": {
+        "state": "open"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "MCP protected resource through TLS proxy",
+    "method": "GET",
+    "path": "/.well-known/oauth-protected-resource/mcp",
+    "headers": {
+      "Host": "example.test",
+      "x-forwarded-proto": "https"
+    }
+  },
+  {
+    "name": "MCP authorization server metadata",
+    "method": "GET",
+    "path": "/.well-known/oauth-authorization-server",
+    "headers": {
+      "Host": "example.test"
+    }
+  },
+  {
+    "name": "MCP registration without redirect URI",
+    "method": "POST",
+    "path": "/oauth/mcp/register",
+    "body": {}
+  },
+  {
+    "name": "MCP registration with disallowed redirect",
+    "method": "POST",
+    "path": "/oauth/mcp/register",
+    "body": {
+      "redirect_uris": [
+        "http://example.test/oauth"
+      ]
+    }
+  },
+  {
+    "name": "MCP unregistered client page",
+    "method": "GET",
+    "path": "/oauth/mcp/authorize?client_id=missing",
+    "compareHeaders": [
+      "content-type",
+      "cache-control",
+      "x-frame-options",
+      "content-security-policy",
+      "referrer-policy"
+    ]
+  },
+  {
+    "name": "MCP unregistered client approval",
+    "method": "POST",
+    "path": "/oauth/mcp/approval",
+    "body": {
+      "client_id": "missing"
+    }
+  },
+  {
+    "name": "speech key status",
+    "method": "GET",
+    "path": "/api/voice/cloud/keys",
+    "authenticated": true
+  },
+  {
+    "name": "terminal.open provider response",
+    "frame": {
+      "_tag": "Request",
+      "id": "40",
+      "tag": "terminal.open",
+      "payload": {
+        "cwd": "/t3-parity-path-that-does-not-exist",
+        "terminalId": "term-1",
+        "threadId": "missing"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "terminal.observe provider response",
+    "frame": {
+      "_tag": "Request",
+      "id": "41",
+      "tag": "terminal.observe",
+      "payload": {
+        "threadId": "missing",
+        "terminalId": "term-1"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "terminal.clear provider response",
+    "frame": {
+      "_tag": "Request",
+      "id": "42",
+      "tag": "terminal.clear",
+      "payload": {
+        "threadId": "missing",
+        "terminalId": "term-1"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "preview.open provider response",
+    "frame": {
+      "_tag": "Request",
+      "id": "43",
+      "tag": "preview.open",
+      "payload": {
+        "threadId": "missing",
+        "url": "file:///tmp/foo"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "preview.list provider response",
+    "frame": {
+      "_tag": "Request",
+      "id": "44",
+      "tag": "preview.list",
+      "payload": {
+        "threadId": ""
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.listRefs provider response",
+    "frame": {
+      "_tag": "Request",
+      "id": "45",
+      "tag": "vcs.listRefs",
+      "payload": {
+        "cwd": "/"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "device.list provider response",
+    "frame": {
+      "_tag": "Request",
+      "id": "46",
+      "tag": "device.list",
+      "payload": {
+        "retryHostId": "absent"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "MCP public client signed registration",
+    "method": "POST",
+    "path": "/oauth/mcp/register",
+    "body": {
+      "client_name": "Parity tester",
+      "redirect_uris": [
+        "http://localhost/callback"
+      ]
+    },
+    "compareHeaders": [
+      "pragma",
+      "cache-control",
+      "content-type"
+    ]
+  },
+  {
+    "name": "vcs.refreshStatus in a real Git repository",
+    "frame": {
+      "_tag": "Request",
+      "id": "60",
+      "tag": "vcs.refreshStatus",
+      "payload": {
+        "cwd": "$PARITY_REPO"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.listRefs in a real Git repository",
+    "frame": {
+      "_tag": "Request",
+      "id": "61",
+      "tag": "vcs.listRefs",
+      "payload": {
+        "cwd": "$PARITY_REPO"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "vcs.refreshBranch in a real Git repository",
+    "frame": {
+      "_tag": "Request",
+      "id": "62",
+      "tag": "vcs.refreshBranch",
+      "payload": {
+        "cwd": "$PARITY_REPO"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "live PTY terminal.write",
+    "frame": {
+      "_tag": "Request",
+      "id": "71",
+      "tag": "terminal.write",
+      "payload": {
+        "threadId": "lifecycle",
+        "terminalId": "term-1",
+        "data": "printf test\\n"
+      },
+      "headers": []
+    },
+    "setupFrame": {
+      "_tag": "Request",
+      "id": "70",
+      "tag": "terminal.open",
+      "payload": {
+        "threadId": "lifecycle",
+        "terminalId": "term-1",
+        "cwd": "/tmp"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "live PTY terminal.resize",
+    "frame": {
+      "_tag": "Request",
+      "id": "72",
+      "tag": "terminal.resize",
+      "payload": {
+        "threadId": "lifecycle",
+        "terminalId": "term-1",
+        "cols": 90,
+        "rows": 25
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "live PTY terminal.clear",
+    "frame": {
+      "_tag": "Request",
+      "id": "73",
+      "tag": "terminal.clear",
+      "payload": {
+        "threadId": "lifecycle",
+        "terminalId": "term-1"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "live PTY terminal.close",
+    "frame": {
+      "_tag": "Request",
+      "id": "74",
+      "tag": "terminal.close",
+      "payload": {
+        "threadId": "lifecycle",
+        "terminalId": "term-1"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "terminal metadata after closing PTY",
+    "frame": {
+      "_tag": "Request",
+      "id": "76",
+      "tag": "subscribeTerminalMetadata",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "HTTP /health",
+    "method": "GET",
+    "path": "/health",
+    "authenticated": true,
+    "headers": {},
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "HTTP /v1/projects",
+    "method": "GET",
+    "path": "/v1/projects",
+    "authenticated": true,
+    "headers": {},
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "HTTP /api/orchestration/shell",
+    "method": "GET",
+    "path": "/api/orchestration/shell",
+    "authenticated": true,
+    "headers": {},
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "HTTP /api/orchestration/shell with v2 header",
+    "method": "GET",
+    "path": "/api/orchestration/shell",
+    "authenticated": true,
+    "headers": {
+      "x-t3-orchestration-protocol": "2"
+    },
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "HTTP /api/orchestration/shell?resumeFrom=0 with v2 header",
+    "method": "GET",
+    "path": "/api/orchestration/shell?resumeFrom=0",
+    "authenticated": true,
+    "headers": {
+      "x-t3-orchestration-protocol": "2"
+    },
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "HTTP /api/orchestration/threads/unregistered with v2 header",
+    "method": "GET",
+    "path": "/api/orchestration/threads/unregistered",
+    "authenticated": true,
+    "headers": {
+      "x-t3-orchestration-protocol": "2"
+    },
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "HTTP /api/orchestration/threads/unregistered/bounded with v2 header",
+    "method": "GET",
+    "path": "/api/orchestration/threads/unregistered/bounded",
+    "authenticated": true,
+    "headers": {
+      "x-t3-orchestration-protocol": "2"
+    },
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "HTTP /api/orchestration/threads/unregistered/transcript with v2 header",
+    "method": "GET",
+    "path": "/api/orchestration/threads/unregistered/transcript",
+    "authenticated": true,
+    "headers": {
+      "x-t3-orchestration-protocol": "2"
+    },
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "HTTP /api/orchestration/threads/unregistered/history with v2 header",
+    "method": "GET",
+    "path": "/api/orchestration/threads/unregistered/history",
+    "authenticated": true,
+    "headers": {
+      "x-t3-orchestration-protocol": "2"
+    },
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "HTTP /api/orchestration/threads/unregistered/history?cursor=x with v2 header",
+    "method": "GET",
+    "path": "/api/orchestration/threads/unregistered/history?cursor=x",
+    "authenticated": true,
+    "headers": {
+      "x-t3-orchestration-protocol": "2"
+    },
+    "compareHeaders": [
+      "content-type"
+    ]
+  },
+  {
+    "name": "MCP discovery challenge",
+    "method": "GET",
+    "path": "/mcp",
+    "headers": {
+      "host": "fixture.example",
+      "x-forwarded-proto": "https"
+    },
+    "compareHeaders": [
+      "content-type",
+      "www-authenticate",
+      "cache-control"
+    ]
+  },
+  {
+    "name": "MCP unknown provider bearer",
+    "method": "POST",
+    "path": "/mcp",
+    "headers": {
+      "host": "fixture.example",
+      "x-forwarded-proto": "https",
+      "Authorization": "Bearer invalid"
+    },
+    "compareHeaders": [
+      "content-type",
+      "www-authenticate",
+      "cache-control"
+    ]
+  },
+  {
+    "name": "MCP browser origin",
+    "method": "OPTIONS",
+    "path": "/mcp",
+    "headers": {
+      "host": "fixture.example",
+      "x-forwarded-proto": "https",
+      "Origin": "https://fixture.example"
+    },
+    "compareHeaders": [
+      "content-type",
+      "www-authenticate",
+      "cache-control"
+    ]
+  }
+]

@@ -3,6 +3,8 @@ use std::{env, fs, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=contracts/http.json");
     println!("cargo:rerun-if-changed=contracts/rpc.json");
+    println!("cargo:rerun-if-changed=contracts/commands.json");
+    println!("cargo:rerun-if-changed=contracts/projections.json");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let http: Vec<serde_json::Value> = serde_json::from_str(
         &fs::read_to_string("contracts/http.json").expect("contracts/http.json"),
@@ -18,9 +20,13 @@ fn main() {
         http.iter()
             .map(|entry| {
                 format!(
-                    "HttpContract {{ method: {:?}, path: {:?} }},\n",
+                    "HttpContract {{ method: {:?}, path: {:?}, name: {:?}, relay: {}, auth: {:?}, environment_auth: {} }},\n",
                     entry["method"].as_str().unwrap(),
-                    entry["path"].as_str().unwrap()
+                    entry["path"].as_str().unwrap(),
+                    entry["name"].as_str().unwrap(),
+                    entry["source"].as_str().unwrap().ends_with("/relay.ts"),
+                    entry["auth"][0].as_str().unwrap_or(""),
+                    entry["auth"].as_array().unwrap().iter().any(|m| m == "EnvironmentAuthenticatedAuth")
                 )
             })
             .collect::<String>()
@@ -31,13 +37,40 @@ fn main() {
         rpc.iter()
             .map(|entry| {
                 format!(
-                    "RpcContract {{ group: {:?}, tag: {:?} }},\n",
+                    "RpcContract {{ group: {:?}, tag: {:?}, scope: {:?}, required: {} }},\n",
                     entry["group"].as_str().unwrap(),
-                    entry["tag"].as_str().unwrap()
+                    entry["tag"].as_str().unwrap(),
+                    entry["scope"].as_str().unwrap(),
+                    match entry["required"].as_array() {
+                        None => "None".to_owned(),
+                        Some(fields) => format!(
+                            "Some(&{:?})",
+                            fields
+                                .iter()
+                                .map(|v| v.as_str().unwrap())
+                                .collect::<Vec<_>>()
+                        ),
+                    }
                 )
             })
             .collect::<String>()
     );
+    let projections: std::collections::BTreeMap<String, Vec<String>> =
+        serde_json::from_str(include_str!("contracts/projections.json"))
+            .expect("valid projection inventory");
+    for (name, fields) in projections {
+        fs::write(out.join(format!("{name}.rs")), format!("&{fields:?}"))
+            .expect("write projection fields");
+    }
+    let commands: std::collections::BTreeMap<String, Vec<String>> =
+        serde_json::from_str(include_str!("contracts/commands.json"))
+            .expect("valid command inventory");
+    let mut branches = String::from("match tag {\n");
+    for (tag, keys) in commands {
+        branches.push_str(&format!("{tag:?} => Some(&{keys:?}),\n"));
+    }
+    branches.push_str("_ => None }");
+    fs::write(out.join("command_fields.rs"), branches).expect("write command fields");
     fs::write(out.join("http_contracts.rs"), http_source).expect("write HTTP inventory");
     fs::write(out.join("rpc_contracts.rs"), rpc_source).expect("write RPC inventory");
 }

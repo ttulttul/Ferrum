@@ -1,0 +1,72 @@
+name: Server parity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch the pinned public reference
+        run: |
+          git init --quiet reference
+          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git 052ca497cf1103b001327bcd964188a71dfec213
+          git -C reference checkout --quiet --detach FETCH_HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.13.1
+      - name: Prepare the reference environment
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libfaketime
+          npm install --global pnpm@12.14.0
+          pnpm --dir reference --filter t3 --filter t3code-relay install --frozen-lockfile
+          pnpm --dir reference --filter t3 exec playwright-core install --with-deps chromium
+          # Permit the installed test browser to start its user-namespace sandbox on Ubuntu.
+          shell_path=$(find "$HOME/.cache/ms-playwright" -type f -name chrome-headless-shell -print -quit)
+          test -x "$shell_path"
+          cat > "$RUNNER_TEMP/browser.apparmor" <<PROFILE
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile t3-parity-playwright "$shell_path" flags=(unconfined) { userns, }
+          profile t3-chrome-headless-shell /**/tools/chrome-headless-shell/*/*/chrome-headless-shell flags=(unconfined) { userns, }
+          PROFILE
+          sudo install -m 644 "$RUNNER_TEMP/browser.apparmor" /etc/apparmor.d/t3-chrome-headless-shell
+          sudo apparmor_parser -r /etc/apparmor.d/t3-chrome-headless-shell
+          python3 -m venv "$RUNNER_TEMP/parity-python"
+          "$RUNNER_TEMP/parity-python/bin/pip" install websockets==16.0 cryptography
+          echo "$RUNNER_TEMP/parity-python/bin" >> "$GITHUB_PATH"
+      - name: Check upstream inventory
+        run: |
+          python3 scripts/update_contract_inventory.py "$GITHUB_WORKSPACE/reference"
+          git diff --exit-code -- contracts
+      - name: Validate Rust
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked
+          cargo build --locked
+      - name: Compare both servers
+        run: |
+          reference="node $GITHUB_WORKSPACE/reference/apps/server/src/bin.ts"
+          server="$GITHUB_WORKSPACE/target/debug/t3code-server"
+          python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$reference" --rust-command "$server"
+          python3 scripts/orchestration_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+          python3 scripts/config_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/auth_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/mcp_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/github_provider_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+          python3 scripts/linear_provider_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/source_control_hosts_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/git_workflow_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/preview_provider_parity.py --original-command "$reference" --rust-command "$server" --browser-cache "$HOME/.cache/ms-playwright"
+          python3 scripts/relay_parity.py --checkout "$GITHUB_WORKSPACE/reference" --rust "$server"

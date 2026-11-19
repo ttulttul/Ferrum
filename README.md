@@ -1,60 +1,55 @@
 # t3code-rust
 
-A headless Rust orchestration server for [T3 Code](https://github.com/pingdotgg/t3code). It provides durable project, thread, message, and run state, streams provider subprocess output over WebSocket, and exposes a small HTTP API suitable for web, desktop, and remote clients.
+A Rust implementation of the headless T3 Code environment server and standalone relay. Compatibility work targets [upstream commit 052ca497](https://github.com/pingdotgg/t3code/tree/052ca497cf1103b001327bcd964188a71dfec213). The pinned source declares 235 WebSocket RPC methods and 86 typed HTTP operations, including 30 relay operations. Its dispatch RPC accepts 58 command types. The port is in development. Clients can still distinguish it from the TypeScript server.
 
 ## Run
 
 ```bash
-cargo run -- --listen 127.0.0.1:3773
+cargo build --locked
+target/debug/t3code-server --listen 127.0.0.1:3773 --data-dir .t3
 ```
 
-The default provider is `printf`, which echoes a prompt for local protocol testing. Configure a provider executable with `T3_PROVIDER_COMMAND`, for example `T3_PROVIDER_COMMAND="claude --print"` or `--provider-command codex exec`.
+An environment launcher can pass the desktop bootstrap envelope on an inherited file descriptor with `--bootstrap-fd`. It contains the bind address, port, T3 home directory, and desktop bootstrap credential. Exchange the credential at `POST /api/auth/browser-session` and send the resulting cookie to authenticated HTTP operations. For a separate standalone process, set `T3CODE_BOOTSTRAP_CREDENTIAL` to a fresh high-entropy credential before launching.
 
-State is stored in `.t3/events.jsonl` by default. Set `T3CODE_DATA_DIR` to use another directory.
+The Rust binary follows the TypeScript server's configuration layout. `T3CODE_HOME` and `--base-dir` select a base directory, with mutable files under `userdata`. This includes `settings.json`, `keybindings.json`, `themes`, `attachments`, `browser-artifacts`, `logs`, `secrets`, `environment-id`, `anonymous-id`, and `server-runtime.json`. `T3CODE_HOST`, `T3CODE_PORT`, `T3CODE_MODE`, `T3CODE_NO_BROWSER`, `T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD`, `T3CODE_LOG_WS_EVENTS`, `T3CODE_DEV_ALLOWED_ORIGINS`, `T3CODE_TAILSCALE_SERVE`, and `T3CODE_TAILSCALE_SERVE_PORT` are loaded with the same environment names. `server.getSettings` reads the shared settings file and `server.updateSettings` persists an atomic JSON update.
 
-## HTTP API
+Connect to `/ws?orchestrationProtocol=2` with a session cookie or a WebSocket ticket. The client sends Effect RPC messages as JSON text frames. For example, the following request obtains the server probe response.
 
-- `GET /health`
-- `GET /v1/projects`
-- `POST /v1/projects` with `{ "name": "demo", "path": "/workspace/demo" }`
-- `POST /v1/projects/:project_id/threads` with `{ "project_id": "...", "title": "...", "cwd": "..." }`
-- `GET /v1/threads/:thread_id`
-- `POST /v1/threads/:thread_id/messages` with `{ "content": "...", "provider": "default" }`
-- `POST /v1/runs/:run_id/cancel`
+```json
+{"_tag":"Request","id":"1","tag":"server.probe","payload":{},"headers":[]}
+```
 
-## WebSocket protocol
+```json
+{"_tag":"Exit","requestId":"1","exit":{"_tag":"Success","value":{}}}
+```
 
-Connect to `/ws`, send `{"type":"subscribe"}`, then send `send_message`, `create_thread`, or `cancel_run` commands. Server events are JSON objects with `type: "event"`, an event id, and an event payload. The event log can be replayed on restart to reconstruct state.
+Launch the relay separately with `target/debug/t3code-server --relay --listen 127.0.0.1:3774 --data-dir .t3`. Set `RELAY_ISSUER` to its canonical public URL. Local RS256 Clerk session JWT verification uses `CLERK_JWT_KEY` (public PEM), `CLERK_ISSUER`, and `CLERK_JWT_AUDIENCE`. Relay signing uses `CLOUD_MINT_PRIVATE_KEY` (Ed25519 PKCS#8 PEM) and `CLOUD_MINT_PUBLIC_KEY` (SPKI PEM). Relay links, mobile registrations and replay protection persist in SQLite.
 
-The upstream contract inventory is checked into `contracts/`. It currently
-contains 78 HTTP contracts, 212 general RPC methods, and 23 orchestration v2
-RPC methods. Run `python3 scripts/update_contract_inventory.py /path/to/t3code`
-when upgrading the upstream source. Inventory entries are recognized by the
-Rust server and covered by tests. Provider-backed methods still need their
-domain integrations before they can return the upstream method-specific result
-schemas.
+## Compare against upstream
 
-## Development
+Use Git, the GitHub CLI, Node 26.13.1, pnpm 12.14.0, Python with `websockets` 16 and `cryptography`, and the Rust toolchain pinned in this repo.
 
 ```bash
-cargo test
-cargo clippy --all-targets --all-features
+git clone https://github.com/pingdotgg/t3code /tmp/t3code-reference
+git -C /tmp/t3code-reference checkout 052ca497cf1103b001327bcd964188a71dfec213
+pnpm --dir /tmp/t3code-reference --filter t3 --filter t3code-relay install --frozen-lockfile
+cargo build --locked
+cargo test --locked
+original="node /tmp/t3code-reference/apps/server/src/bin.ts"
+rust="$PWD/target/debug/t3code-server"
+python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$original" --rust-command "$rust"
+python3 scripts/orchestration_parity.py --original-command "$original" --rust-command "$rust"
+python3 scripts/auth_parity.py --original-command "$original" --rust-command "$rust"
+python3 scripts/mcp_parity.py --original-command "$original" --rust-command "$rust"
+python3 scripts/git_workflow_parity.py --original-command "$original" --rust-command "$rust"
+python3 scripts/github_provider_parity.py --original-command "$original" --rust-command "$rust"
+python3 scripts/relay_parity.py --checkout /tmp/t3code-reference --rust "$rust"
 ```
 
-## Original-server parity
+The managed harness starts both processes on loopback with temporary homes, separate authentication sessions, and the same signing key for deterministic registration. It compares HTTP status, selected headers and raw body bytes, and compares WebSocket application frames without reserializing JSON. The GitHub suite also compares the writes each server makes to an isolated provider. The relay suite runs upstream HTTP handlers with test storage and local keys. The orchestration suite restarts both servers and checks opaque thread IDs, conflict responses and command replay. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to the GitHub suite to include timestamped reads. A separate Chromium suite compares rendered frames and file transfers using the same browser installation. See `scripts/preview_provider_parity.py --help`.
 
-The parity harness runs both servers against the same fixture set and compares
-HTTP status codes and response bodies byte-for-byte. Point it at an already
-running original server, or provide launch commands for both implementations.
+Fixtures cover specific requests and state transitions. Time, random credentials, provider output and platform-specific behavior still limit comparisons. Remaining work includes orchestration projections and replay, coding-agent sessions, provider-specific integrations, guest access through a managed tunnel, relay provisioning and push delivery, MCP tools, and protocol headers and error cases outside the fixtures. The inventory in `contracts/` lists the upstream surface. Regenerate it with `python3 scripts/update_contract_inventory.py /tmp/t3code-reference`.
 
-```bash
-python3 scripts/parity_harness.py \
-  --original-command 'pnpm --dir /path/to/t3code dev:server --port 3773' \
-  --rust-command 'cargo run -- --listen 127.0.0.1:43773'
-```
+## License
 
-Add deterministic requests to `tests/parity-fixtures.json`. The initial fixtures
-cover the exact protocol-negotiation failure returned by both servers. Requests involving
-generated IDs or timestamps should be tested only after the corresponding
-protocol contract is made deterministic, since this harness intentionally does
-not normalize output before comparing it.
+MIT. See [LICENSE](LICENSE).
