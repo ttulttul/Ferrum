@@ -1170,11 +1170,16 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         }
         let context_file = dir.join("context.md");
         let generated_at = crate::auth_service::iso(crate::auth_service::now());
-        let _ = tokio::fs::write(
+        if let Err(error) = tokio::fs::write(
             &context_file,
             triage_context(state, &generated_at, &params["client"]),
         )
-        .await;
+        .await
+        {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ServerPrepareTriageError","cause":error.to_string()}}),
+            );
+        }
         let playbook = dir.join("triage-playbook.md");
         if let Err(error) = tokio::fs::write(
             &playbook,
