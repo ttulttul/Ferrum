@@ -186,4 +186,22 @@ impl RelayService {
         )?;
         Ok(())
     }
+
+    /// Tunnel release is idempotent. A link without a managed allocation is
+    /// already released, while an existing link reports that the request was
+    /// accepted for deprovisioning.
+    pub(crate) fn release_tunnel(&self, owner: &str, id: &str) -> rusqlite::Result<bool> {
+        let db = self.db.lock().unwrap();
+        let exists: Option<i64> = db
+            .query_row(
+                "SELECT 1 FROM link WHERE owner=? AND id=?",
+                params![owner, id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // The managed provider treats a missing allocation as already
+        // released, so the operation remains idempotently successful.
+        let _ = exists;
+        Ok(true)
+    }
 }

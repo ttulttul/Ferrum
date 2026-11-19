@@ -273,8 +273,12 @@ impl Call {
             "listEnvironments" => Ok(s.links(owner)?),
             "listDevices" | "listDevicesV2" => Ok(s.list_devices(owner, name == "listDevices")?),
             "unlinkEnvironment" => Ok(json!({"ok":s.unlink(owner,&self.params["environmentId"])?})),
+            "releaseEnvironmentTunnel" => {
+                Ok(json!({"ok":s.release_tunnel(owner, &self.params["environmentId"])?}))
+            }
             "getT3ChatLink" => Ok(json!({"available":false,"link":null})),
             "createT3ChatLinkRequest" => Err(Error::Internal("internal_error")),
+            "unlinkT3Chat" => Ok(json!({"ok":true})),
             "createEnvironmentLinkChallenge" | "linkEnvironment" => {
                 let body = self.json()?;
                 if FLAGS.iter().any(|f| !body[*f].is_boolean()) {
@@ -386,6 +390,18 @@ impl Call {
             .environment(self.credential("Bearer"), id)?
             .ok_or(Error::Auth("not_authorized"))?;
         match self.contract.name {
+            "registerManagedEndpointRecovery" => {
+                // Rust relay does not own a Cloudflare provider. Preserve the
+                // server contract and let callers retry provisioning through a
+                // compatible relay implementation.
+                let _ = self.json()?;
+                Err(Error::Internal("upstream_unavailable"))
+            }
+            "recoverManagedEndpoint" => {
+                let _ = self.json()?;
+                Err(Error::Internal("upstream_unavailable"))
+            }
+            "wakeHeldHooks" => Ok(json!({"pending":false})),
             "publishAgentActivity" => s
                 .publish(id, &key, &self.params["threadId"], &self.json()?)
                 .map_err(Error::Publish),
