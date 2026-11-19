@@ -2841,6 +2841,8 @@ fn scheduled_task_schedule(input: &Value, existing: Option<&Value>) -> Value {
             if let Some(header) = signature.get("header").and_then(Value::as_str) {
                 signature.insert("header".into(), Value::String(header.to_ascii_lowercase()));
             }
+            signature.remove("secret");
+            signature.remove("secretRef");
         }
         object.entry("maxDeliveryAgeMinutes").or_insert(Value::Null);
         if !object.contains_key("dedupe") {
@@ -2941,6 +2943,28 @@ async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
             .unwrap_or(Value::Null)
     };
     let schedule = scheduled_task_schedule(&params["schedule"], existing.as_ref());
+    let webhook_secret =
+        if schedule["type"] == "webhook" && params["schedule"]["signature"].is_object() {
+            params["schedule"]["signature"]["secret"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|task| task["_webhookSecret"].as_str().map(str::to_owned))
+                })
+        } else {
+            None
+        };
+    if schedule["type"] == "webhook"
+        && schedule["signature"].is_object()
+        && webhook_secret.is_none()
+    {
+        return scheduled_task_error(
+            "A webhook signature check needs a signing secret.",
+            Some(&id),
+        );
+    }
     let enabled = params["enabled"].as_bool().unwrap_or(false);
     let created_at = existing
         .as_ref()
@@ -2963,10 +2987,7 @@ async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
             .and_then(|v| v["_webhookToken"].as_str())
             .map(str::to_owned)
             .unwrap_or_else(random_webhook_token);
-        let secret = schedule["signature"]
-            .get("secret")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let secret = webhook_secret.map(Value::String).unwrap_or(Value::Null);
         task["_webhookToken"] = token.clone().into();
         task["_webhookSecret"] = secret.clone();
         task["webhook"] = json!({"path":format!("/api/hooks/{}/{}",encode_task_id(&id),token),"url":null,"hasSecret":!secret.is_null()});
