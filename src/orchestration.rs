@@ -180,6 +180,7 @@ async fn start_run(
     thread_id: &str,
     text: String,
     message_id: &Value,
+    queued: bool,
 ) -> anyhow::Result<u64> {
     let (cwd, needs_baseline) = state
         .store
@@ -194,7 +195,7 @@ async fn start_run(
         id: Uuid::new_v4(),
         thread_id: thread_id.to_owned(),
         provider: "default".into(),
-        status: "running".into(),
+        status: if queued { "queued" } else { "running" }.into(),
         started_at: now(),
         finished_at: None,
         error: None,
@@ -230,6 +231,9 @@ async fn start_run(
                 })
                 .await;
         }
+    }
+    if queued {
+        return Ok(seq);
     }
     let (tx, rx) = oneshot::channel();
     state.cancellations.lock().await.insert(run.id, tx);
@@ -320,7 +324,23 @@ async fn apply_command(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            return start_run(state, receipt, thread_id, text, &command["messageId"]).await;
+            let queued = command["dispatchMode"]["type"] == "queue_after_active"
+                && state
+                    .store
+                    .read()
+                    .await
+                    .threads
+                    .get(thread_id)
+                    .is_some_and(|thread| thread.runs.iter().any(|run| run.status == "running"));
+            return start_run(
+                state,
+                receipt,
+                thread_id,
+                text,
+                &command["messageId"],
+                queued,
+            )
+            .await;
         }
         "thread.stop" | "run.interrupt" | "subagent.stop" => {
             if let Some(thread_id) = thread_id {
@@ -759,9 +779,57 @@ async fn apply_command(
                 "Provider session {provider_session_id} does not belong to thread {thread_id}."
             )));
         }
-        "queued-run.cancel" | "queued-run.edit" | "queued-run.reorder" => {
+        "queued-run.cancel" => {
             let run_id = command["runId"].as_str().unwrap_or_default();
-            return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id.unwrap_or_default())
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .is_some_and(|run| run.status == "queued");
+            if !valid {
+                return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::RunFinished {
+                        run_id: Uuid::parse_str(run_id)?,
+                        thread_id: thread_id.unwrap_or_default().to_owned(),
+                        status: "cancelled".into(),
+                        error: None,
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "queued-run.edit" | "queued-run.reorder" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id.unwrap_or_default())
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .is_some_and(|run| run.status == "queued");
+            if !valid {
+                return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::CommandDispatched {
+                        command_id: receipt.command_id.clone(),
+                        command_type: command_type.into(),
+                        thread_id: Some(thread_id.unwrap_or_default().to_owned()),
+                        payload: command.clone(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
         }
         "queued-run.start" => {
             return Err(anyhow::anyhow!(
