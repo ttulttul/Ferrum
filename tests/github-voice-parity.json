@@ -1,0 +1,216 @@
+[
+  {
+    "name": "POST /api/voice/cloud/xai/key (1)",
+    "authenticated": true,
+    "method": "POST",
+    "path": "/api/voice/cloud/xai/key",
+    "body": {
+      "key": "test-fixture-only"
+    }
+  },
+  {
+    "name": "GET /api/voice/cloud/keys (2)",
+    "authenticated": true,
+    "method": "GET",
+    "path": "/api/voice/cloud/keys"
+  },
+  {
+    "name": "POST /api/voice/cloud/xai/key (3)",
+    "authenticated": true,
+    "method": "POST",
+    "path": "/api/voice/cloud/xai/key",
+    "body": {
+      "key": null
+    }
+  },
+  {
+    "name": "GET /api/voice/cloud/keys (4)",
+    "authenticated": true,
+    "method": "GET",
+    "path": "/api/voice/cloud/keys"
+  },
+  {
+    "name": "POST /api/voice/post-process (5)",
+    "authenticated": true,
+    "method": "POST",
+    "path": "/api/voice/post-process",
+    "body": {
+      "transcript": " \n\t",
+      "draft": {
+        "text": "draft",
+        "selection": {
+          "start": 1,
+          "end": 3
+        }
+      },
+      "options": {
+        "speechCustomWords": [],
+        "speechPostProcessingPrompt": {
+          "mode": "default",
+          "customInstructions": ""
+        }
+      }
+    }
+  },
+  {
+    "name": "POST /api/pull-requests/diff (6)",
+    "authenticated": true,
+    "method": "POST",
+    "path": "/api/pull-requests/diff",
+    "body": {
+      "projectId": "missing",
+      "repository": "owner/example",
+      "number": 1
+    }
+  },
+  {
+    "name": "issues.candidates (7)",
+    "frame": {
+      "_tag": "Request",
+      "id": "106",
+      "tag": "issues.candidates",
+      "payload": {
+        "projectId": "missing",
+        "scope": "owner/example",
+        "tracker": "github"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "issues.create (8)",
+    "frame": {
+      "_tag": "Request",
+      "id": "107",
+      "tag": "issues.create",
+      "payload": {
+        "projectId": "missing",
+        "scope": "owner/example",
+        "tracker": "github",
+        "title": "hello",
+        "body": "",
+        "labels": [],
+        "assignees": []
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "issues.comment (9)",
+    "frame": {
+      "_tag": "Request",
+      "id": "108",
+      "tag": "issues.comment",
+      "payload": {
+        "projectId": "missing",
+        "scope": "owner/example",
+        "tracker": "github",
+        "key": "1",
+        "body": "example"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "issues.update (10)",
+    "frame": {
+      "_tag": "Request",
+      "id": "109",
+      "tag": "issues.update",
+      "payload": {
+        "projectId": "missing",
+        "scope": "owner/example",
+        "tracker": "github",
+        "key": "1",
+        "title": "example"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "issues.setState (11)",
+    "frame": {
+      "_tag": "Request",
+      "id": "110",
+      "tag": "issues.setState",
+      "payload": {
+        "projectId": "missing",
+        "scope": "owner/example",
+        "tracker": "github",
+        "key": "1",
+        "state": "Open"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "issues.react (12)",
+    "frame": {
+      "_tag": "Request",
+      "id": "111",
+      "tag": "issues.react",
+      "payload": {
+        "projectId": "missing",
+        "scope": "owner/example",
+        "tracker": "github",
+        "key": "1",
+        "reacted": true,
+        "content": "heart"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "issueTrackers.list (13)",
+    "frame": {
+      "_tag": "Request",
+      "id": "112",
+      "tag": "issueTrackers.list",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "issueTrackers.connect (14)",
+    "frame": {
+      "_tag": "Request",
+      "id": "113",
+      "tag": "issueTrackers.connect",
+      "payload": {
+        "tracker": "unknown",
+        "token": null
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "issueTrackers.connect (15)",
+    "frame": {
+      "_tag": "Request",
+      "id": "114",
+      "tag": "issueTrackers.connect",
+      "payload": {
+        "tracker": "linear",
+        "token": null
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.diffFileContents (16)",
+    "frame": {
+      "_tag": "Request",
+      "id": "115",
+      "tag": "pullRequests.diffFileContents",
+      "payload": {
+        "projectId": "missing",
+        "repository": "owner/example",
+        "number": 1,
+        "changeType": "change",
+        "oldPath": "a",
+        "newPath": "a"
+      },
+      "headers": []
+    }
+  }
+]
