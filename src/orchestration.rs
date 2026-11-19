@@ -199,6 +199,8 @@ async fn start_run(
         started_at: now(),
         finished_at: None,
         error: None,
+        user_message_id: Some(message_id.as_str().unwrap_or_default().to_owned()),
+        queue_held: queued,
     };
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),
@@ -254,6 +256,69 @@ async fn start_run(
         }
     });
     Ok(seq)
+}
+
+async fn start_queued_run(
+    state: Arc<AppState>,
+    receipt: &CommandReceipt,
+    thread_id: &str,
+    run_id: &str,
+) -> anyhow::Result<u64> {
+    let (mut run, cwd, text) = {
+        let store = state.store.read().await;
+        let thread = store
+            .threads
+            .get(thread_id)
+            .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+        let run = thread
+            .runs
+            .iter()
+            .find(|candidate| candidate.id.to_string() == run_id && candidate.status == "queued")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} is not queued.")))?;
+        if thread
+            .runs
+            .iter()
+            .any(|candidate| candidate.status == "running")
+        {
+            return Err(anyhow::anyhow!(
+                "A queued user message can only be sent now while the thread is stopped."
+            ));
+        }
+        let message_id = run
+            .user_message_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} has no queued message.")))?;
+        let text = thread
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .map(|message| message.content.clone())
+            .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} has no queued message.")))?;
+        (run, thread.cwd.clone(), text)
+    };
+    run.status = "running".into();
+    run.queue_held = false;
+    let sequence = state
+        .commit_receipted(Event::RunStarted(run.clone()), Some(receipt.clone()))
+        .await?
+        .id;
+    let (tx, rx) = oneshot::channel();
+    state.cancellations.lock().await.insert(run.id, tx);
+    tokio::spawn(async move {
+        if let Err(error) = execute_run(state.clone(), run.clone(), cwd, text, rx).await {
+            state.cancellations.lock().await.remove(&run.id);
+            let _ = state
+                .commit(Event::RunFinished {
+                    run_id: run.id,
+                    thread_id: run.thread_id.clone(),
+                    status: "failed".into(),
+                    error: Some(error.to_string()),
+                })
+                .await;
+        }
+    });
+    Ok(sequence)
 }
 
 async fn apply_command(
@@ -805,26 +870,57 @@ async fn apply_command(
                 .await?
                 .id);
         }
-        "queued-run.edit" | "queued-run.reorder" => {
+        "queued-run.edit" => {
             let run_id = command["runId"].as_str().unwrap_or_default();
-            let valid = state
+            let Some((message_id, thread_id)) = state
                 .store
                 .read()
                 .await
                 .threads
                 .get(thread_id.unwrap_or_default())
                 .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .filter(|run| run.status == "queued")
+                .and_then(|run| run.user_message_id.clone())
+                .map(|message_id| (message_id, thread_id.unwrap_or_default().to_owned()))
+            else {
+                return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
+            };
+            return Ok(state
+                .commit_receipted(
+                    Event::MessageEdited {
+                        thread_id,
+                        message_id,
+                        content: command["text"].as_str().unwrap_or_default().to_owned(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "queued-run.reorder" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let thread_id = thread_id.unwrap_or_default();
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
                 .is_some_and(|run| run.status == "queued");
             if !valid {
                 return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
             }
+            let before_run_id = match command.get("beforeRunId") {
+                Some(Value::Null) | None => None,
+                Some(value) => Some(Uuid::parse_str(value.as_str().unwrap_or_default())?),
+            };
             return Ok(state
                 .commit_receipted(
-                    Event::CommandDispatched {
-                        command_id: receipt.command_id.clone(),
-                        command_type: command_type.into(),
-                        thread_id: Some(thread_id.unwrap_or_default().to_owned()),
-                        payload: command.clone(),
+                    Event::RunReordered {
+                        thread_id: thread_id.to_owned(),
+                        run_id: Uuid::parse_str(run_id)?,
+                        before_run_id,
                     },
                     Some(receipt.clone()),
                 )
@@ -832,9 +928,9 @@ async fn apply_command(
                 .id);
         }
         "queued-run.start" => {
-            return Err(anyhow::anyhow!(
-                "A queued user message can only be sent now while the thread is stopped."
-            ));
+            let thread_id = thread_id.unwrap_or_default();
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            return start_queued_run(state, receipt, thread_id, run_id).await;
         }
         "runtime-request.respond" => {
             let request_id = command["requestId"].as_str().unwrap_or_default();
