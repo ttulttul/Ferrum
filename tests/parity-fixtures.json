@@ -10,5 +10,35 @@
     "method": "GET",
     "path": "/ws?orchestrationProtocol=1",
     "body": null
+  },
+  {
+    "name": "projects mutate schema defect",
+    "frame": {
+      "_tag": "Request",
+      "id": "projects-mutate-schema-defect",
+      "tag": "projects.mutate",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "device action schema defect",
+    "frame": {
+      "_tag": "Request",
+      "id": "device-action-schema-defect",
+      "tag": "device.action",
+      "payload": {},
+      "headers": []
+    }
+  },
+  {
+    "name": "dispatch command schema defect",
+    "frame": {
+      "_tag": "Request",
+      "id": "dispatch-command-schema-defect",
+      "tag": "orchestration.dispatchCommand",
+      "payload": {},
+      "headers": []
+    }
   }
 ]
