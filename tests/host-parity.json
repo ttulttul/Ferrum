@@ -376,5 +376,74 @@
     "compareHeaders": [
       "content-type"
     ]
+  },
+  {
+    "name": "preview.stopLocalServer",
+    "frame": {
+      "_tag": "Request",
+      "id": "800",
+      "tag": "preview.stopLocalServer",
+      "payload": {
+        "pid": 2147483647,
+        "port": 32000
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "preview.reportProfiles",
+    "frame": {
+      "_tag": "Request",
+      "id": "801",
+      "tag": "preview.reportProfiles",
+      "payload": {
+        "profiles": [
+          {
+            "id": "test-profile",
+            "name": "Fixture",
+            "kind": "persistent"
+          }
+        ],
+        "defaultProfileId": "test-profile"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "preview.clearProfile",
+    "frame": {
+      "_tag": "Request",
+      "id": "802",
+      "tag": "preview.clearProfile",
+      "payload": {
+        "profileId": "test-profile"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "subscribeVcsBranch",
+    "frame": {
+      "_tag": "Request",
+      "id": "803",
+      "tag": "subscribeVcsBranch",
+      "payload": {
+        "cwd": "$PARITY_REPO"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "subscribeVcsStatus",
+    "frame": {
+      "_tag": "Request",
+      "id": "804",
+      "tag": "subscribeVcsStatus",
+      "payload": {
+        "cwd": "/",
+        "includeRemote": false
+      },
+      "headers": []
+    }
   }
 ]

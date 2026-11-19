@@ -37,7 +37,7 @@ fn home() -> PathBuf {
         .into()
 }
 fn installed(dir: &Path, spec: Tool) -> Vec<String> {
-    let base = dir.join("tools").join(spec.0);
+    let base = super::base_directory(dir).join("tools").join(spec.0);
     let mut versions: Vec<_> = fs::read_dir(&base)
         .into_iter()
         .flatten()
@@ -192,7 +192,10 @@ fn wire(state: &Value) -> Value {
     ordered
 }
 async fn install(dir: &Path, spec: Tool) -> Result<PathBuf, Value> {
-    let base = dir.join("tools").join(spec.0).join(spec.1);
+    let base = super::base_directory(dir)
+        .join("tools")
+        .join(spec.0)
+        .join(spec.1);
     let entry = base.join("node_modules").join(spec.0).join(spec.2);
     if installed(dir, spec).iter().any(|v| v == spec.1) {
         return Ok(entry);
@@ -438,8 +441,8 @@ impl DeviceService {
                 .iter()
                 .filter(|s| {
                     s["threadId"] == thread
-                        && input["hostId"].as_str().map_or(true, |h| s["hostId"] == h)
-                        && id.map_or(true, |id| s["deviceId"] == id)
+                        && input["hostId"].as_str().is_none_or(|h| s["hostId"] == h)
+                        && id.is_none_or(|id| s["deviceId"] == id)
                 })
                 .cloned()
                 .collect();
@@ -538,7 +541,10 @@ impl DeviceService {
             name,
             device,
             input,
-            &dir.join("tools").join(HUB.0).join(HUB.1),
+            &super::base_directory(dir)
+                .join("tools")
+                .join(HUB.0)
+                .join(HUB.1),
         )
         .await
     }

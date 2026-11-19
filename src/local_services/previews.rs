@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 pub struct PreviewService {
     state: Mutex<State>,
+    pub(super) browsers: tokio::sync::Mutex<super::browser::Browsers>,
     events: broadcast::Sender<Value>,
     epoch: Uuid,
 }
@@ -21,6 +22,7 @@ impl Default for PreviewService {
     fn default() -> Self {
         Self {
             state: Default::default(),
+            browsers: Default::default(),
             events: broadcast::channel(512).0,
             epoch: Uuid::new_v4(),
         }
@@ -38,7 +40,7 @@ fn url_error(raw: &str, reason: &str, protocol: Option<&str>) -> Value {
     error
 }
 
-fn normalize_url(raw: &str) -> Result<String, Value> {
+pub(super) fn normalize_url(raw: &str) -> Result<String, Value> {
     let protocol = raw
         .split_once(':')
         .map(|(p, _)| format!("{}:", p.to_ascii_lowercase()));
@@ -175,7 +177,7 @@ impl PreviewService {
             let mut i = 0;
             while i < state.tabs.len() {
                 let tab = &state.tabs[i];
-                if tab["threadId"] == thread && id.map_or(true, |id| tab["tabId"] == id) {
+                if tab["threadId"] == thread && id.is_none_or(|id| tab["tabId"] == id) {
                     let tab = state.tabs.remove(i);
                     self.publish(&mut state, "closed", &tab, None);
                 } else {
@@ -258,25 +260,13 @@ impl PreviewService {
             .cloned()
     }
     pub fn profile(&self, method: &str, input: &Value, base: &std::path::Path) -> Reply {
-        let directory = base.join("userdata/server-browser");
+        let directory = base.join("server-browser");
         if method == "clearProfile" {
             let id = string(input, "profileId")?;
             if id == "incognito" {
                 return Ok(Value::Null);
             }
-            let encoded: String = id
-                .bytes()
-                .map(|b| {
-                    if b.is_ascii_alphanumeric()
-                        || (b"-_!~*'().".contains(&b) && id != "." && id != "..")
-                    {
-                        char::from(b).to_string()
-                    } else {
-                        format!("%{b:02X}")
-                    }
-                })
-                .collect();
-            let err = std::fs::remove_dir_all(directory.join("profiles").join(encoded));
+            let err = std::fs::remove_dir_all(profile_directory(base, id));
             if let Err(e) = err {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     return Err(
@@ -308,5 +298,46 @@ impl PreviewService {
                 .map_err(|e| json!({"_tag":"Die","defect":e.to_string()}))?;
         }
         Ok(Value::Null)
+    }
+}
+
+pub(super) fn profile_directory(base: &std::path::Path, id: &str) -> std::path::PathBuf {
+    let encoded: String = id
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || (b"-_!~*'().".contains(&b) && id != "." && id != "..") {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    base.join("server-browser/profiles").join(encoded)
+}
+impl PreviewService {
+    pub(super) fn page_status(&self, thread: &str, id: &str, nav: Value) {
+        let mut state = self.state.lock().unwrap();
+        let Some(s) = state
+            .tabs
+            .iter_mut()
+            .find(|s| s["threadId"] == thread && s["tabId"] == id)
+        else {
+            return;
+        };
+        if s["navStatus"] == nav {
+            return;
+        }
+        s["navStatus"] = nav;
+        s["updatedAt"] = json!(timestamp());
+        let s = s.clone();
+        self.publish(&mut state, "navigated", &s, None);
+    }
+    pub async fn close_pages(
+        &self,
+        thread: Option<&str>,
+        tab: Option<&str>,
+        profile: Option<&str>,
+    ) {
+        self.browsers.lock().await.close(thread, tab, profile).await;
     }
 }

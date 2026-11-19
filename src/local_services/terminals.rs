@@ -1,6 +1,9 @@
 use super::{invalid, string, timestamp, Reply};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -9,11 +12,11 @@ use std::{
 use tokio::sync::broadcast;
 
 type Key = (String, String);
-const HISTORY_LIMIT: usize = 1024 * 1024;
+const HISTORY_LIMIT: usize = 8 * 1024 * 1024;
 
 struct Session {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     snapshot: Arc<Mutex<Value>>,
 }
@@ -27,6 +30,7 @@ pub struct TerminalService {
     sessions: Arc<Mutex<HashMap<Key, Session>>>,
     events: broadcast::Sender<Value>,
     metadata: broadcast::Sender<Value>,
+    logs: Option<Arc<PathBuf>>,
 }
 impl Default for TerminalService {
     fn default() -> Self {
@@ -34,6 +38,7 @@ impl Default for TerminalService {
             sessions: Default::default(),
             events: broadcast::channel(512).0,
             metadata: broadcast::channel(512).0,
+            logs: None,
         }
     }
 }
@@ -83,7 +88,7 @@ fn label(id: &str) -> String {
         let (n, tail) = s.split_once('-').map_or((s, None), |(n, t)| (n, Some(t)));
         if !n.is_empty()
             && n.bytes().all(|c| c.is_ascii_digit())
-            && tail.map_or(true, |s| s.len() == 36 && uuid::Uuid::parse_str(s).is_ok())
+            && tail.is_none_or(|s| s.len() == 36 && uuid::Uuid::parse_str(s).is_ok())
         {
             return format!("Terminal {n}");
         }
@@ -140,7 +145,117 @@ fn trim_history(history: &mut String, max_bytes: usize) {
         history.drain(..start);
     }
 }
+fn history_names(thread: &str, id: &str) -> (String, String, Option<String>) {
+    let name = |a: String, b: String| {
+        if id == "term-1" {
+            format!("terminal_{a}.log")
+        } else {
+            format!("terminal_{a}_{b}.log")
+        }
+    };
+    let encode = |s: &str| URL_SAFE_NO_PAD.encode(s.as_bytes());
+    let hash = |s: &str| URL_SAFE_NO_PAD.encode(Sha256::digest(s.as_bytes()));
+    let raw = name(encode(thread), encode(id));
+    let primary = if raw.len() > 143 {
+        name(format!("sha256.{}", hash(thread)), hash(id))
+    } else {
+        raw.clone()
+    };
+    let legacy: String = thread
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    (
+        primary,
+        raw,
+        (id == "term-1" && !legacy.to_lowercase().starts_with("terminal_"))
+            .then(|| format!("{legacy}.log")),
+    )
+}
+fn read_history(dir: &Path, thread: &str, id: &str) -> std::io::Result<String> {
+    std::fs::create_dir_all(dir)?;
+    let (first, raw, legacy) = history_names(thread, id);
+    for name in std::iter::once(first.clone())
+        .chain(std::iter::once(raw))
+        .chain(legacy)
+    {
+        if name.len() > 255 {
+            continue;
+        }
+        match std::fs::File::open(dir.join(&name)) {
+            Ok(mut f) => {
+                use std::io::{Seek, SeekFrom};
+                let len = f.metadata()?.len();
+                // Old files can predate the cap. Read only the bounded tail.
+                f.seek(SeekFrom::Start(len.saturating_sub(512 * 1024)))?;
+                let mut bytes = Vec::new();
+                f.read_to_end(&mut bytes)?;
+                let history = String::from_utf8_lossy(&bytes).to_string();
+                if first != name {
+                    std::fs::rename(dir.join(&name), dir.join(&first))?;
+                }
+                return Ok(history);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(String::new())
+}
+pub(super) fn safe_shell_env(key: &str) -> bool {
+    let k = key.to_ascii_uppercase();
+    !k.starts_with("T3CODE_")
+        && !k.starts_with("VITE_")
+        && !matches!(
+            k.as_str(),
+            "PORT"
+                | "ELECTRON_RENDERER_PORT"
+                | "ELECTRON_RUN_AS_NODE"
+                | "TMUX"
+                | "TMUX_PANE"
+                | "STY"
+                | "WINDOW"
+                | "ZELLIJ"
+                | "ZELLIJ_SESSION_NAME"
+                | "ZELLIJ_PANE_ID"
+        )
+}
 impl TerminalService {
+    pub fn with_logs(path: PathBuf) -> Self {
+        Self {
+            logs: Some(Arc::new(path)),
+            ..Default::default()
+        }
+    }
+    fn delete_history(&self, thread: &str, id: Option<&str>) {
+        let Some(dir) = self.logs.as_deref() else {
+            return;
+        };
+        let (first, encoded, legacy) = history_names(thread, id.unwrap_or("term-1"));
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let matches = if id.is_some() {
+                name == first || name == encoded
+            } else {
+                [&first, &encoded].iter().any(|prefix| {
+                    name == prefix.as_str()
+                        || name.starts_with(&format!("{}_", prefix.trim_end_matches(".log")))
+                })
+            };
+            if matches || legacy.as_deref() == Some(name.as_ref()) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
     pub fn subscribe_metadata(&self) -> broadcast::Receiver<Value> {
         self.metadata.subscribe()
     }
@@ -197,6 +312,11 @@ impl TerminalService {
         });
         let mut cmd = CommandBuilder::new(shell);
         cmd.cwd(cwd);
+        for (key, _) in std::env::vars_os() {
+            if !safe_shell_env(&key.to_string_lossy()) {
+                cmd.env_remove(key);
+            }
+        }
         cmd.env("TERM", "xterm-256color");
         if let Some(env) = input.get("env") {
             for (k, v) in env
@@ -220,6 +340,11 @@ impl TerminalService {
                 cmd.env(k, v);
             }
         }
+        let history=self.logs.as_ref().map(|dir|read_history(dir,thread,id)).transpose().map_err(|e|json!({"_tag":"TerminalHistoryError","operation":"read","threadId":thread,"terminalId":id,"cause":{"name":"Error","message":e.to_string()}}))?.unwrap_or_default();
+        let history_path = self
+            .logs
+            .as_ref()
+            .map(|dir| dir.join(history_names(thread, id).0));
         let failure = |e: anyhow::Error| json!({"_tag":"Die","defect":format!("Failed to start terminal: {e}")});
         let pty = portable_pty::native_pty_system()
             .openpty(grid)
@@ -231,7 +356,7 @@ impl TerminalService {
         let killer = child.clone_killer();
         drop(pty.slave);
         let snapshot = Arc::new(Mutex::new(
-            json!({"threadId":thread,"terminalId":id,"cwd":cwd,"worktreePath":input["worktreePath"],"status":"running","pid":pid,"history":"","exitCode":null,"exitSignal":null,"label":label(id),"updatedAt":timestamp(),"sequence":1,"cols":grid.cols,"rows":grid.rows}),
+            json!({"threadId":thread,"terminalId":id,"cwd":cwd,"worktreePath":input["worktreePath"],"status":"running","pid":pid,"history":history,"exitCode":null,"exitSignal":null,"label":label(id),"updatedAt":timestamp(),"sequence":1,"cols":grid.cols,"rows":grid.rows}),
         ));
         let meta = self.metadata.clone();
         let _ = meta.send(json!({"type":"upsert","terminal":summary(&snapshot.lock().unwrap())}));
@@ -252,10 +377,35 @@ impl TerminalService {
                 if !text.is_empty() {
                     let mut s = data.lock().unwrap();
                     if s["status"] == "running" {
-                        let mut history =
-                            s["history"].take().as_str().unwrap_or_default().to_owned();
+                        let Value::String(mut history) = s["history"].take() else {
+                            unreachable!()
+                        };
                         history.push_str(&text);
                         trim_history(&mut history, HISTORY_LIMIT);
+                        if let Some(cut) = history
+                            .match_indices('\n')
+                            .rev()
+                            .nth(5000)
+                            .map(|(i, _)| i + 1)
+                        {
+                            history.drain(..cut);
+                        }
+                        if let Some(path) = &history_path {
+                            let result = if std::fs::metadata(path)
+                                .is_ok_and(|m| m.len() > HISTORY_LIMIT as u64)
+                            {
+                                std::fs::write(path, &history)
+                            } else {
+                                std::fs::OpenOptions::new()
+                                    .append(true)
+                                    .create(true)
+                                    .open(path)
+                                    .and_then(|mut f| f.write_all(text.as_bytes()))
+                            };
+                            if let Err(e) = result {
+                                tracing::warn!(error=%e,"could not persist terminal history");
+                            }
+                        }
                         s["history"] = Value::String(history);
                         emit(&mut s, &bus, "output", json!({"data":text}));
                     }
@@ -281,7 +431,7 @@ impl TerminalService {
         });
         Ok(Session {
             master: pty.master,
-            writer,
+            writer: Arc::new(Mutex::new(writer)),
             killer,
             snapshot,
         })
@@ -296,7 +446,7 @@ impl TerminalService {
                 .map(|_| string(input, "terminalId"))
                 .transpose()?;
             sessions.retain(|(t, i), s| {
-                if t == thread && id.map_or(true, |id| id == i) {
+                if t == thread && id.is_none_or(|id| id == i) {
                     let mut snap = s.snapshot.lock().unwrap();
                     let _ = self
                         .metadata
@@ -308,13 +458,16 @@ impl TerminalService {
                     true
                 }
             });
+            if input["deleteHistory"] == true {
+                self.delete_history(thread, id);
+            }
             return Ok(Value::Null);
         }
         let id = string(input, "terminalId")?;
         let key = (thread.to_owned(), id.to_owned());
         if name == "open" || (name == "attach" && input.get("cwd").is_some()) {
             let cwd = string(input, "cwd")?;
-            let launch = sessions.get(&key).map_or(true, |session| {
+            let launch = sessions.get(&key).is_none_or(|session| {
                 let s = session.snapshot.lock().unwrap();
                 s["cwd"] != cwd
                     || (s["status"] != "running"
@@ -357,6 +510,9 @@ impl TerminalService {
                 Ok(json!({"type":"snapshot","snapshot":snap}))
             }
             "clear" => {
+                if let Some(dir) = &self.logs {
+                    std::fs::write(dir.join(history_names(thread,id).0),"").map_err(|e|json!({"_tag":"TerminalHistoryError","operation":"truncate","threadId":thread,"terminalId":id,"cause":{"name":"Error","message":e.to_string()}}))?;
+                }
                 snapshot["history"] = json!("");
                 emit(&mut snapshot, &self.events, "cleared", Value::Null);
                 Ok(Value::Null)
@@ -380,7 +536,10 @@ impl TerminalService {
                 };
                 let pid = snapshot["pid"].clone();
                 drop(snapshot);
-                session.writer.write_all(&bytes).and_then(|_|session.writer.flush()).map_err(|e|json!({"_tag":"TerminalWriteError","threadId":thread,"terminalId":id,"terminalPid":pid,"cause":{"name":"Error","message":e.to_string()}}))?;
+                let writer = session.writer.clone();
+                drop(sessions);
+                let mut writer = writer.lock().unwrap();
+                writer.write_all(&bytes).and_then(|_|writer.flush()).map_err(|e|json!({"_tag":"TerminalWriteError","threadId":thread,"terminalId":id,"terminalPid":pid,"cause":{"name":"Error","message":e.to_string()}}))?;
                 Ok(Value::Null)
             }
             "resize" => {
