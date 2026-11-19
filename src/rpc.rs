@@ -906,18 +906,35 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 "_tag":"OrchestrationDispatchCommandError","message":format!("Project {project_id} already exists.")
             }}));
         }
+        let started_at = crate::auth_service::iso(crate::auth_service::now());
+        state.project_clone_states.lock().await.insert(
+            project_id.to_owned(),
+            json!({"projectId":project_id,"remoteUrl":remote,"destinationPath":destination,"repository":null,"phase":"running","stage":"connecting","percent":null,"detail":"Connecting","stalled":false,"error":null,"startedAt":started_at,"endedAt":null,"sequence":0}),
+        );
         let output = tokio::process::Command::new("git")
             .args(["clone", "--", remote, destination])
             .output()
             .await;
         let Ok(output) = output else {
+            if let Some(snapshot) = state.project_clone_states.lock().await.get_mut(project_id) {
+                snapshot["phase"] = json!("failed");
+                snapshot["error"] = json!("Git could not be started.");
+                snapshot["endedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+            }
             return Reply::Failure(
                 json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":params["provider"],"operation":"clone","detail":"Git could not be started."}}),
             );
         };
         if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            if let Some(snapshot) = state.project_clone_states.lock().await.get_mut(project_id) {
+                snapshot["phase"] = json!("failed");
+                snapshot["stage"] = json!("checkout");
+                snapshot["error"] = json!(detail);
+                snapshot["endedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+            }
             return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":params["provider"],"operation":"clone","detail":String::from_utf8_lossy(&output.stderr).trim()}}),
+                json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":params["provider"],"operation":"clone","detail":detail}}),
             );
         }
         let project = crate::Project {
@@ -941,11 +958,30 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
             );
         }
+        if let Some(snapshot) = state.project_clone_states.lock().await.get_mut(project_id) {
+            snapshot["phase"] = json!("done");
+            snapshot["stage"] = json!("checkout");
+            snapshot["percent"] = json!(100);
+            snapshot["detail"] = json!("Checking out files");
+            snapshot["endedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+            snapshot["sequence"] = json!(*state.next_event_id.lock().await);
+        }
         return Reply::Success(
             json!({"projectId":project_id,"cwd":destination,"remoteUrl":remote,"repository":null}),
         );
     }
     if method == "projectClone.cancel" || method == "projectClone.retry" {
+        if method == "projectClone.cancel" {
+            let project_id = params["projectId"].as_str().unwrap_or_default();
+            if let Some(snapshot) = state.project_clone_states.lock().await.get_mut(project_id) {
+                if snapshot["phase"] == "running" {
+                    snapshot["phase"] = json!("cancelled");
+                    snapshot["endedAt"] =
+                        json!(crate::auth_service::iso(crate::auth_service::now()));
+                    return Reply::Success(json!({"applied":true}));
+                }
+            }
+        }
         return Reply::Success(json!({"applied":false}));
     }
     if method == "orchestration.searchThreadStream" {
@@ -2502,7 +2538,14 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Chunk(json!([revision]));
     }
     if method == "subscribeProjectClones" {
-        return Reply::Chunk(json!([[]]));
+        let snapshots = state
+            .project_clone_states
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        return Reply::Chunk(json!([snapshots]));
     }
     if method == "subscribeServerLifecycle" {
         let environment = crate::environment_http::descriptor(axum::extract::State(state.clone()))

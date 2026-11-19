@@ -89,6 +89,10 @@ pub struct Run {
     pub started_at: u64,
     pub finished_at: Option<u64>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub user_message_id: Option<String>,
+    #[serde(default)]
+    pub queue_held: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -137,6 +141,16 @@ pub enum Event {
     MessageAdded {
         thread_id: String,
         message: ConversationMessage,
+    },
+    MessageEdited {
+        thread_id: String,
+        message_id: String,
+        content: String,
+    },
+    RunReordered {
+        thread_id: String,
+        run_id: Uuid,
+        before_run_id: Option<Uuid>,
     },
     RunStarted(Run),
     RunQueued {
@@ -244,6 +258,17 @@ impl Store {
                     t.messages.push(message.clone());
                 }
             }
+            Event::MessageEdited {
+                thread_id,
+                message_id,
+                content,
+            } => {
+                if let Some(t) = self.threads.get_mut(thread_id) {
+                    if let Some(message) = t.messages.iter_mut().find(|m| m.id == *message_id) {
+                        message.content = content.clone();
+                    }
+                }
+            }
             Event::RunQueued { message, run } => {
                 if let Some(thread) = self.threads.get_mut(&run.thread_id) {
                     thread.messages.push(message.clone());
@@ -254,7 +279,29 @@ impl Store {
             Event::RunStarted(run) => {
                 if let Some(t) = self.threads.get_mut(&run.thread_id) {
                     t.status = "running".into();
-                    t.runs.push(run.clone());
+                    if let Some(existing) =
+                        t.runs.iter_mut().find(|candidate| candidate.id == run.id)
+                    {
+                        *existing = run.clone();
+                    } else {
+                        t.runs.push(run.clone());
+                    }
+                }
+            }
+            Event::RunReordered {
+                thread_id,
+                run_id,
+                before_run_id,
+            } => {
+                if let Some(t) = self.threads.get_mut(thread_id) {
+                    let Some(index) = t.runs.iter().position(|run| run.id == *run_id) else {
+                        return;
+                    };
+                    let run = t.runs.remove(index);
+                    let target = before_run_id
+                        .and_then(|id| t.runs.iter().position(|candidate| candidate.id == id))
+                        .unwrap_or(t.runs.len());
+                    t.runs.insert(target, run);
                 }
             }
             Event::RunOutput { .. } => {}
@@ -377,6 +424,7 @@ pub struct AppState {
     pub(crate) prompt_suggestion_events: broadcast::Sender<serde_json::Value>,
     pub(crate) provider_install_states: Mutex<HashMap<String, serde_json::Value>>,
     pub(crate) provider_auth_states: Mutex<HashMap<String, serde_json::Value>>,
+    pub(crate) project_clone_states: Mutex<HashMap<String, serde_json::Value>>,
 }
 impl AppState {
     pub async fn new(
@@ -508,6 +556,7 @@ impl AppState {
             prompt_suggestion_events,
             provider_install_states: Mutex::new(HashMap::new()),
             provider_auth_states: Mutex::new(HashMap::new()),
+            project_clone_states: Mutex::new(HashMap::new()),
         }))
     }
 
