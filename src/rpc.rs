@@ -212,15 +212,19 @@ async fn launch_project_clone(
         let outcome = match command {
             Err(error) => Err(format!("Git could not be started: {error}")),
             Ok(mut child) => {
+                let stderr_task = child.stderr.take().map(|mut stderr| {
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncReadExt;
+                        let mut bytes = Vec::new();
+                        let _ = stderr.read_to_end(&mut bytes).await;
+                        String::from_utf8_lossy(&bytes).trim().to_owned()
+                    })
+                });
                 tokio::select! {
                     status = child.wait() => {
-                        let detail = if let Some(mut stderr) = child.stderr.take() {
-                            use tokio::io::AsyncReadExt;
-                            let mut bytes = Vec::new();
-                            let _ = stderr.read_to_end(&mut bytes).await;
-                            String::from_utf8_lossy(&bytes).trim().to_owned()
-                        } else {
-                            String::new()
+                        let detail = match stderr_task {
+                            Some(task) => task.await.unwrap_or_default(),
+                            None => String::new(),
                         };
                         match status {
                             Ok(status) if status.success() => Ok(()),
@@ -232,6 +236,9 @@ async fn launch_project_clone(
                     _ = cancel_rx => {
                         let _ = child.kill().await;
                         let _ = child.wait().await;
+                        if let Some(task) = stderr_task {
+                            let _ = task.await;
+                        }
                         let _ = tokio::fs::remove_dir_all(&destination).await;
                         Err("__cancelled__".to_owned())
                     }
