@@ -250,6 +250,16 @@ async fn run_call(
     {
         return Reply::defect("Expected string\n  at [\"query\"]".into());
     }
+    if method == "orchestration.searchThreads"
+        && params
+            .get("query")
+            .and_then(Value::as_str)
+            .is_some_and(|query| query.encode_utf16().count() < 2)
+    {
+        return Reply::defect(
+            "Expected a value with a length of at least 2\n  at [\"query\"]".into(),
+        );
+    }
     if method == "server.searchAcpRegistry"
         && params.get("limit").is_some_and(|value| {
             value
