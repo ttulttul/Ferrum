@@ -165,6 +165,22 @@ async fn update_project_clone_snapshot(
     Some(snapshot)
 }
 
+fn retain_completed_project_clone(state: Arc<AppState>, project_id: String, sequence: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let removed = {
+            let mut states = state.project_clone_states.lock().await;
+            let should_remove = states.get(&project_id).is_some_and(|snapshot| {
+                snapshot["phase"] == "done" && snapshot["sequence"].as_u64() == Some(sequence)
+            });
+            should_remove && states.remove(&project_id).is_some()
+        };
+        if removed {
+            publish_project_clone_change(&state).await;
+        }
+    });
+}
+
 async fn launch_project_clone(
     state: Arc<AppState>,
     project_id: String,
@@ -224,7 +240,7 @@ async fn launch_project_clone(
         };
         match outcome {
             Ok(()) => {
-                let _ = update_project_clone_snapshot(
+                let snapshot = update_project_clone_snapshot(
                     &state,
                     &project_id,
                     Some(attempt_sequence),
@@ -240,6 +256,11 @@ async fn launch_project_clone(
                     },
                 )
                 .await;
+                if let Some(snapshot) = snapshot {
+                    if let Some(sequence) = snapshot["sequence"].as_u64() {
+                        retain_completed_project_clone(state.clone(), project_id.clone(), sequence);
+                    }
+                }
             }
             Err(error) if error == "__cancelled__" => {
                 let _ = update_project_clone_snapshot(
