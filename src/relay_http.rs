@@ -93,6 +93,7 @@ enum Error {
     Connect(&'static str),
     Hook,
     Telemetry,
+    PayloadTooLarge,
 }
 impl From<rusqlite::Error> for Error {
     fn from(_: rusqlite::Error) -> Self {
@@ -155,6 +156,7 @@ impl Error {
             ),
             Self::Hook => (404, json!({"error":"hook_not_found"})),
             Self::Telemetry => (502, json!({"error":"upstream_unavailable"})),
+            Self::PayloadTooLarge => (413, json!({"error":"payload_too_large"})),
         };
         (StatusCode::from_u16(status).unwrap(), Json(body)).into_response()
     }
@@ -205,6 +207,34 @@ impl Call {
             "RelayEnvironmentAuth" => return self.environment(s),
             _ => {}
         }
+        if matches!(
+            self.contract.name,
+            "forwardPost" | "forwardPut" | "forwardPatch" | "forwardGet"
+        ) {
+            // The relay validates these public webhook requests before it looks up
+            // an endpoint. This keeps malformed URLs and oversized bodies from
+            // consuming endpoint or upstream resources.
+            let endpoint_key = self
+                .params
+                .get("endpointKey")
+                .map(String::as_str)
+                .unwrap_or_default();
+            if endpoint_key.len() != 16
+                || !endpoint_key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(Error::Hook);
+            }
+            if self.body.len() > 1_048_576 {
+                return Err(Error::PayloadTooLarge);
+            }
+            // A standalone Rust relay has no configured managed-endpoint
+            // provider or upstream delivery queue. A validly shaped request
+            // therefore reaches the same public not-found response as an
+            // unallocated endpoint in the reference relay.
+            return Err(Error::Hook);
+        }
         match self.contract.name {
             "health" => s
                 .health()
@@ -216,7 +246,6 @@ impl Call {
                 json!({"resource":issuer,"authorization_servers":[issuer],"scopes_supported":SCOPES,"dpop_bound_access_tokens_required":true,"dpop_signing_alg_values_supported":["ES256"]}),
             ),
             "exchangeDpopAccessToken" => self.exchange(s),
-            "forwardPost" | "forwardPut" | "forwardPatch" | "forwardGet" => Err(Error::Hook),
             "ingest" => Err(Error::Telemetry),
             _ => Err(Error::Internal("internal_error")),
         }
