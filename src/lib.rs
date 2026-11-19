@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use axum::{
     extract::{FromRequest, Request, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
@@ -326,6 +328,9 @@ pub struct AppState {
     next_event_id: Mutex<u64>,
     pub(crate) storage_cleanup_report: Mutex<Option<serde_json::Value>>,
     pub(crate) pull_request_refresh: Mutex<u64>,
+    pub(crate) pull_request_linked_refresh: Mutex<u64>,
+    pub(crate) pull_request_linked_events: broadcast::Sender<u64>,
+    pub(crate) prompt_suggestion_events: broadcast::Sender<serde_json::Value>,
 }
 impl AppState {
     pub async fn new(
@@ -387,6 +392,8 @@ impl AppState {
             .open(log_path)
             .await?;
         let (events, _) = broadcast::channel(512);
+        let (pull_request_linked_events, _) = broadcast::channel(64);
+        let (prompt_suggestion_events, _) = broadcast::channel(64);
         Ok(Arc::new(Self {
             config_started_at: auth_service::iso(auth_service::now()),
             environment_id: environment_http::identity(&dir)?,
@@ -414,6 +421,9 @@ impl AppState {
             next_event_id: Mutex::new(next_event_id),
             storage_cleanup_report: Mutex::new(None),
             pull_request_refresh: Mutex::new(0),
+            pull_request_linked_refresh: Mutex::new(0),
+            pull_request_linked_events,
+            prompt_suggestion_events,
         }))
     }
     async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {
@@ -441,6 +451,13 @@ impl AppState {
         log.flush().await?;
         *next_event_id = record.id;
         store.apply_record(&record);
+        if let Event::ThreadPatched { ref patch, .. } = record.event {
+            if patch["row"].get("pullRequests").is_some() || patch["row"].get("issues").is_some() {
+                let mut revision = self.pull_request_linked_refresh.lock().await;
+                *revision = revision.saturating_add(1);
+                let _ = self.pull_request_linked_events.send(*revision);
+            }
+        }
         let _ = self.events.send(record.clone());
         Ok(record)
     }
@@ -569,6 +586,20 @@ async fn execute_run(
             let mut line = String::new();
             while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                 let text = std::mem::take(&mut line);
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+                    if event["type"] == "prompt_suggestion.updated"
+                        && event["threadId"].is_string()
+                        && event["runId"].is_string()
+                        && event["text"].is_string()
+                    {
+                        let _ = s.prompt_suggestion_events.send(serde_json::json!({
+                            "threadId": event["threadId"].clone(),
+                            "runId": event["runId"].clone(),
+                            "text": event["text"].clone(),
+                        }));
+                        continue;
+                    }
+                }
                 let _ = s
                     .commit(Event::RunOutput {
                         run_id: r.id,

@@ -267,6 +267,9 @@ async fn run_call(
             );
         }
     }
+    if let Some(defect) = checkpoint_diff_schema_defect(method, params) {
+        return Reply::defect(defect);
+    }
     if method == "server.searchAcpRegistry"
         && params.get("query").is_some_and(|value| !value.is_string())
     {
@@ -370,7 +373,15 @@ async fn run_call(
     }
     if matches!(method, "server.getSettings" | "server.updateSettings") {
         let reply = if method == "server.getSettings" {
-            state.settings.client(references)
+            let result = state.settings.client(references);
+            match result {
+                Ok(mut settings) => {
+                    let rows = state.store.read().await.project_rows.clone();
+                    fold_project_rows_into_settings(&mut settings, &rows);
+                    Ok(settings)
+                }
+                Err(error) => Err(error),
+            }
         } else {
             let mut input = params.clone();
             if let Some(hosts) = input
@@ -393,6 +404,35 @@ async fn run_call(
             let _ = chunks.send((id.to_owned(), values)).await;
         }
     };
+    if method == "pullRequests.subscribeLinkedThreadRefreshes" {
+        let mut events = state.pull_request_linked_events.subscribe();
+        loop {
+            match events.recv().await {
+                Ok(revision) => send(json!([revision])).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Reply::Success(Value::Null)
+                }
+            }
+        }
+    }
+    if method == "orchestration.subscribePromptSuggestion" {
+        let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
+        let mut events = state.prompt_suggestion_events.subscribe();
+        send(json!([Value::Null])).await;
+        loop {
+            match events.recv().await {
+                Ok(event) if event["threadId"].as_str() == Some(thread_id.as_str()) => {
+                    send(json!([{"runId":event["runId"],"text":event["text"]}])).await;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Reply::Success(Value::Null)
+                }
+            }
+        }
+    }
     if method == "server.getConfig" {
         return match crate::config_rpc::snapshot(state, references, &Value::Null).await {
             Ok(v) => Reply::Success(v),
@@ -1986,9 +2026,6 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         let revision = (*state.pull_request_refresh.lock().await).max(3);
         return Reply::Chunk(json!([revision]));
     }
-    if method == "pullRequests.subscribeLinkedThreadRefreshes" {
-        return std::future::pending().await;
-    }
     if method == "subscribeProjectClones" {
         return Reply::Chunk(json!([[]]));
     }
@@ -2494,6 +2531,130 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         }
     };
     Reply::Success(result)
+}
+
+pub(crate) fn fold_project_rows_into_settings(
+    settings: &mut Value,
+    rows: &indexmap::IndexMap<String, Value>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+    let Some(mut entries) = settings
+        .get("projectSettingsOverrides")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return;
+    };
+    for (project_id, row) in rows {
+        if row.get("deletedAt").is_some_and(|value| !value.is_null()) {
+            continue;
+        }
+        let entry = entries
+            .entry(project_id.clone())
+            .or_insert_with(|| json!({}));
+        let Some(entry) = entry.as_object_mut() else {
+            continue;
+        };
+        for (field, value) in [
+            ("defaultModelSelection", &row["defaultModelSelection"]),
+            ("defaultThreadEnvMode", &row["defaultThreadEnvMode"]),
+        ] {
+            if !value.is_null()
+                && entry.get(field).is_none()
+                && (field != "defaultThreadEnvMode"
+                    || matches!(value.as_str(), Some("local" | "worktree")))
+            {
+                entry.insert(field.to_owned(), value.clone());
+            }
+        }
+        if row["autoPull"] == true && entry.get("defaultAutoPull").is_none() {
+            entry.insert("defaultAutoPull".into(), json!(true));
+        }
+        if row["scripts"]
+            .as_array()
+            .is_some_and(|scripts| !scripts.is_empty())
+            && entry.get("defaultProjectScripts").is_none()
+        {
+            entry.insert("defaultProjectScripts".into(), row["scripts"].clone());
+        }
+    }
+    entries.retain(|_, entry| entry.as_object().is_some_and(|fields| !fields.is_empty()));
+    settings["projectSettingsOverrides"] = Value::Object(entries.clone());
+    settings["projectSettingsFolded"] = json!(true);
+    for (legacy, field) in [
+        (
+            "projectAgentBrowserAccessOverrides",
+            "enableAgentBrowserAccess",
+        ),
+        ("projectAutoPullOverrides", "defaultAutoPull"),
+        ("projectScriptOverrides", "defaultProjectScripts"),
+    ] {
+        let mut values = serde_json::Map::new();
+        for (project_id, entry) in entries.iter() {
+            if let Some(value) = entry.get(field) {
+                values.insert(project_id.clone(), value.clone());
+            }
+        }
+        settings[legacy] = Value::Object(values);
+    }
+}
+
+/// The checkpoint diff schemas use non-negative integers and an optional boolean. Most RPC
+/// payloads are decoded by the provider-specific handlers, but these two calls return their
+/// zero-turn result before touching a projection. Validate them at the wire boundary so malformed
+/// inputs retain the TypeScript server's exact Effect defect instead of being coerced to zero.
+fn checkpoint_diff_schema_defect(method: &str, params: &Value) -> Option<String> {
+    if !matches!(
+        method,
+        "orchestration.getTurnDiff" | "orchestration.getFullThreadDiff"
+    ) {
+        return None;
+    }
+    if let Some(value) = params.get("threadId") {
+        if !value.is_string() {
+            return Some("Expected string\n  at [\"threadId\"]".into());
+        }
+    }
+    for key in ["fromTurnCount", "toTurnCount"] {
+        let Some(value) = params.get(key) else {
+            continue;
+        };
+        if !value.is_number() {
+            return Some(format!("Expected number\n  at [\"{key}\"]"));
+        }
+        let negative = value.as_i64().is_some_and(|number| number < 0)
+            || value.as_f64().is_some_and(|number| number < 0.0);
+        if negative {
+            return Some(format!(
+                "Expected a value greater than or equal to 0\n  at [\"{key}\"]"
+            ));
+        }
+        let integer = value.as_u64().is_some()
+            || value
+                .as_f64()
+                .is_some_and(|number| number.is_finite() && number.fract() == 0.0);
+        if !integer {
+            return Some(format!("Expected an integer\n  at [\"{key}\"]"));
+        }
+    }
+    if method == "orchestration.getTurnDiff" {
+        if let (Some(from), Some(to)) = (
+            params.get("fromTurnCount").and_then(Value::as_u64),
+            params.get("toTurnCount").and_then(Value::as_u64),
+        ) {
+            if from > to {
+                return Some("fromTurnCount must be less than or equal to toTurnCount".into());
+            }
+        }
+    }
+    if let Some(value) = params.get("ignoreWhitespace") {
+        if !value.is_boolean() {
+            return Some("Expected boolean\n  at [\"ignoreWhitespace\"]".into());
+        }
+    }
+    None
 }
 
 fn invalid_provider_payload_field(method: &str, params: &Value) -> Option<&'static str> {

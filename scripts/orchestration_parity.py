@@ -44,6 +44,17 @@ def main():
     edge_reads = [
         ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": 0}),
         ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": 0}),
+        # Keep the schema boundary covered even when the projection is empty. These inputs must
+        # fail before the handler coerces them to zero, matching Effect Schema's wire defects.
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 1, "toTurnCount": 0}),
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": -1, "toTurnCount": 0}),
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": 1.2}),
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": "1"}),
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": 0, "ignoreWhitespace": None}),
+        ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": -1}),
+        ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": 1.2}),
+        ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": 0, "ignoreWhitespace": None}),
+        ("orchestration.getFullThreadDiff", {"threadId": 1, "toTurnCount": 0}),
         ("orchestration.getTurnDiff", {"threadId": "thread:missing", "fromTurnCount": 0, "toTurnCount": 1}),
         ("orchestration.getFullThreadDiff", {"threadId": "thread:missing", "toTurnCount": 1}),
         ("orchestration.getThreadProjection", {"threadId": "thread:missing"}),
