@@ -4,6 +4,7 @@ mod device_actions;
 mod devices;
 pub(crate) mod discovery;
 pub(crate) mod git_workflow;
+pub(crate) mod local_ssh;
 pub(crate) mod media;
 mod previews;
 mod terminals;
@@ -195,9 +196,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migrates_device_sidecar_without_overwriting_shared_preferences() {
+        let dir = Fixture::new();
+        std::fs::write(
+            dir.0.join("settings.json"),
+            "{ // Explicitly configured by the client\n \"enableDeviceSupport\":false,}",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.0.join("device-settings.json"),
+            r#"{"enabled":true,"agentAccessEnabled":true,"onboardingCompleted":true}"#,
+        )
+        .unwrap();
+        let server = crate::AppState::new(&dir.0, Vec::new()).await.unwrap();
+        let current = server.settings.internal().unwrap();
+        assert_eq!(current["enableDeviceSupport"], false);
+        assert_eq!(current["enableAgentDeviceAccess"], true);
+        assert_eq!(current["deviceOnboardingCompleted"], true);
+        assert!(!dir.0.join("device-settings.json").exists());
+    }
+
+    #[tokio::test]
     async fn device_settings_survive_restart() {
         let data = Fixture::new();
-        let service = DeviceService::default();
+        let server = crate::AppState::new(data.0.clone(), Vec::new())
+            .await
+            .unwrap();
+        let service = &server.devices;
         let updated = service
             .call(
                 "configure",
@@ -209,7 +234,15 @@ mod tests {
             .unwrap();
         assert_eq!(updated["hostStatus"], "disabled");
         assert_eq!(updated["revision"], 1);
-        let fresh = DeviceService::default();
-        assert_eq!(fresh.snapshot(&data.0)["onboardingCompleted"], true);
+        assert_eq!(
+            server.settings.internal().unwrap()["deviceOnboardingCompleted"],
+            true
+        );
+        assert!(!data.0.join("device-settings.json").exists());
+        drop(server);
+        let fresh = crate::AppState::new(data.0.clone(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(fresh.devices.snapshot(&data.0)["onboardingCompleted"], true);
     }
 }

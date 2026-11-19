@@ -347,11 +347,10 @@ fn equal(a: &[u8], b: &[u8]) -> bool {
     mac.verify_slice(&expected.finalize().into_bytes()).is_ok()
 }
 async fn enabled(state: &AppState) -> bool {
-    tokio::fs::read(state.data_dir.join("settings.json"))
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .is_some_and(|s| s["guestSharingEnabled"] == true)
+    state
+        .settings
+        .internal()
+        .is_ok_and(|v| v["guestSharingEnabled"] == true)
 }
 pub async fn create(state: &AppState, params: &Value) -> Result<Value, Value> {
     let error = |reason: &str| json!({"_tag":"GuestShareCreateError","reason":reason});

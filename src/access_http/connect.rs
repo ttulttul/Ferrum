@@ -85,6 +85,22 @@ impl Service {
             write: tokio::sync::Mutex::default(),
         })
     }
+    pub(crate) fn clear_disabled_link(&self) -> anyhow::Result<()> {
+        if self
+            .data
+            .read(|d| d.config.is_some() || d.publish || d.hold)
+        {
+            self.data
+                .update(|d| {
+                    d.config = None;
+                    d.publish = false;
+                    d.hold = false;
+                    Ok(())
+                })
+                .map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    }
     fn state(&self) -> Value {
         self.data
             .read(|d| d.public(self.latest.lock().unwrap().clone()))
@@ -160,6 +176,11 @@ async fn handler(State(s): State<Arc<AppState>>, req: Request) -> Response {
     } else {
         Value::Null
     };
+    if !s.settings.policy.allows_connect()
+        && !matches!(kind, "link-state" | "reachability" | "unlink")
+    {
+        return super::policy_forbidden(&s.settings.policy.denial("T3 Connect"));
+    }
     let service = &s.connect;
     match kind {
         "link-state" => {
@@ -533,12 +554,8 @@ async fn signed_request(state: &Arc<AppState>, input: &Value, health: bool) -> R
         None => return internal(),
     };
     if !health {
-        let settings = match tokio::fs::read(state.data_dir.join("settings.json")).await {
-            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-                Ok(v) => v,
-                Err(_) => return internal(),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+        let settings = match state.settings.internal() {
+            Ok(v) => v,
             Err(_) => return internal(),
         };
         let binding = v["clientProofKeyThumbprint"]

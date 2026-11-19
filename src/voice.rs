@@ -4,11 +4,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
-    io,
-    path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
+use tokio::{fs, sync::Mutex};
 use uuid::Uuid;
 
 pub const MAX_PCM: usize = 16000 * 4 * 60 * 5;
@@ -112,16 +111,14 @@ fn wave(pcm: &[u8]) -> Result<Vec<u8>, SpeechError> {
 }
 
 pub struct VoiceService {
-    file: PathBuf,
-    settings_lock: Mutex<()>,
+    settings: Arc<crate::settings::Settings>,
     http: Client,
     models: Mutex<Option<(Instant, Value)>>,
 }
 impl VoiceService {
-    pub fn new(dir: PathBuf) -> Self {
+    pub(crate) fn new(settings: Arc<crate::settings::Settings>) -> Self {
         Self {
-            file: dir.join("settings.json"),
-            settings_lock: Mutex::new(()),
+            settings,
             http: Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(120))
@@ -130,15 +127,11 @@ impl VoiceService {
             models: Mutex::new(None),
         }
     }
-    async fn settings(&self) -> Result<Value, SpeechError> {
-        match fs::read(&self.file).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| SpeechError::Internal),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(json!({})),
-            Err(_) => Err(SpeechError::Internal),
-        }
+    fn internal_settings(&self) -> Result<Value, SpeechError> {
+        self.settings.internal().map_err(|_| SpeechError::Internal)
     }
     pub async fn cloud_keys(&self) -> Result<Value, SpeechError> {
-        let settings = self.settings().await?;
+        let settings = self.internal_settings()?;
         let keys = &settings["cloudSpeechCredentials"];
         let configured = |name: &str| {
             keys[name].is_object() || keys[name].as_str().is_some_and(|s| !s.is_empty())
@@ -148,41 +141,17 @@ impl VoiceService {
         )
     }
     pub async fn set_key(&self, kind: &str, key: &Value) -> Result<(), SpeechError> {
-        if !key.is_null() && !key.as_str().is_some_and(valid_key) && !valid_reference(key) {
+        if !key.is_null()
+            && !key.as_str().is_some_and(valid_key)
+            && !crate::settings::secrets::reference(key)
+        {
             return Err(SpeechError::Invalid("invalid_command"));
         }
-        let _guard = self.settings_lock.lock().await;
-        let mut settings = self.settings().await?;
-        if !settings.is_object()
-            || settings
-                .get("cloudSpeechCredentials")
-                .is_some_and(|v| !v.is_object())
-        {
-            return Err(SpeechError::Internal);
-        }
-        settings["cloudSpeechCredentials"][kind] = if key.is_null() {
-            json!("")
-        } else {
-            key.clone()
-        };
-        let tmp = self.file.with_extension(format!("{}.tmp", Uuid::new_v4()));
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        opts.mode(0o600);
-        let mut out = opts.open(&tmp).await.map_err(|_| SpeechError::Internal)?;
-        let saved = async {
-            out.write_all(settings.to_string().as_bytes()).await?;
-            out.sync_all().await?;
-            drop(out);
-            fs::rename(&tmp, &self.file).await
-        }
-        .await;
-        if saved.is_err() {
-            let _ = fs::remove_file(tmp).await;
-            return Err(SpeechError::Internal);
-        }
-        Ok(())
+        let empty = Value::String(String::new());
+        self.settings
+            .set_speech_key(kind, if key.is_null() { &empty } else { key })
+            .map(|_| ())
+            .map_err(|_| SpeechError::Internal)
     }
     pub async fn cloud_models(&self) -> Result<Value, SpeechError> {
         let mut cache = self.models.lock().await;
@@ -225,7 +194,7 @@ impl VoiceService {
         body: &[u8],
     ) -> Result<Value, SpeechError> {
         let (options, pcm) = parse_recording(body)?;
-        let source = self.settings().await?["cloudSpeechCredentials"][kind].clone();
+        let source = self.internal_settings()?["cloudSpeechCredentials"][kind].clone();
         if source.is_null() || source == "" {
             return Err(SpeechError::Cloud(kind, "missing-key"));
         }
@@ -306,11 +275,18 @@ impl VoiceService {
                 })
                 .multipart(form.part("file", file))
         };
-        let key = source
-            .as_str()
-            .filter(|k| valid_key(k))
+        let key = self
+            .settings
+            .resolver
+            .resolve(
+                &self.internal_settings()?,
+                &source,
+                crate::settings::secrets::ReadMode::Invalidate,
+            )
+            .await
+            .filter(|s| valid_key(s))
             .ok_or(SpeechError::Cloud(kind, "unreadable-key"))?;
-        let now = self.settings().await?["cloudSpeechCredentials"][kind].clone();
+        let now = self.internal_settings()?["cloudSpeechCredentials"][kind].clone();
         if now != source {
             return Err(SpeechError::Cloud(
                 kind,
@@ -347,22 +323,6 @@ impl VoiceService {
         }
         Ok(json!({"text":text.trim()}))
     }
-}
-fn valid_reference(key: &Value) -> bool {
-    let Some(p) = key["provider"].as_str() else {
-        return false;
-    };
-    let Some(r) = key["reference"].as_str() else {
-        return false;
-    };
-    p.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-        && p.len() <= 64
-        && p.bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-        && r.trim() == r
-        && !r.is_empty()
-        && r.len() <= 1024
-        && !r.contains(['\r', '\n'])
 }
 fn valid_key(key: &str) -> bool {
     !key.is_empty()
