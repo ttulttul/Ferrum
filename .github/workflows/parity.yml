@@ -54,6 +54,8 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --locked --all-targets --all-features -- -D warnings
           cargo test --locked
+          node scripts/settings_schema_cases.mjs reference > "$RUNNER_TEMP/settings-schema-cases.jsonl"
+          T3_SETTINGS_SCHEMA_CASES="$RUNNER_TEMP/settings-schema-cases.jsonl" cargo test --locked upstream_schema_corpus -- --ignored
           cargo build --locked
       - name: Compare both servers
         run: |
@@ -62,6 +64,7 @@ jobs:
           python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$reference" --rust-command "$server"
           python3 scripts/orchestration_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
           python3 scripts/config_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/config_snapshot_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
           python3 scripts/auth_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/mcp_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/github_provider_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1

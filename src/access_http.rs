@@ -139,6 +139,13 @@ fn auth_failure(h: &HeaderMap, e: &str) -> Response {
     )
         .into_response()
 }
+fn policy_forbidden(message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"_tag":"EnvironmentHttpForbiddenError","message":message})),
+    )
+        .into_response()
+}
 const SECRET_HEADERS: [(&str, &str); 2] = [("cache-control", "no-store"), ("pragma", "no-cache")];
 async fn session(State(state): State<Arc<AppState>>, h: HeaderMap) -> Json<Value> {
     Json(state.auth.session_state(credential(&state, &h).ok()).await)
@@ -302,6 +309,12 @@ async fn admin(State(state): State<Arc<AppState>>, req: Request) -> Response {
             .filter(|v| !v.is_empty())
     };
     let result = match parts.uri.path() {
+        "/api/auth/pairing-token" if !state.settings.policy.allows_client("remote") => {
+            let org = state.settings.policy.summary().unwrap()["organization"]
+                .as_str()
+                .unwrap();
+            return policy_forbidden(&format!("{org}'s policy does not allow remote clients, so this server cannot create pairing links."));
+        }
         "/api/auth/pairing-token" => state.auth.pair(&p, &json),
         "/api/auth/pairing-links/revoke" => match field("id") {
             Some(id) => state.auth.revoke_pairing(id).map(|v| json!({"revoked":v})),

@@ -23,6 +23,7 @@ use uuid::Uuid;
 pub mod access_http;
 pub mod auth_service;
 pub mod config;
+mod config_rpc;
 mod contracts;
 mod environment_http;
 pub mod guest_service;
@@ -32,6 +33,9 @@ pub mod local_services;
 pub mod mcp_oauth;
 mod orchestration;
 mod projects;
+mod settings;
+mod wire_json;
+pub use settings::policy::ManagedPolicyFileError;
 mod thread_projection;
 use orchestration::dispatch_orchestration_command;
 pub mod provider_http;
@@ -295,13 +299,14 @@ impl Store {
 }
 
 pub struct AppState {
+    config_started_at: String,
     environment_id: String,
     pub oauth: mcp_oauth::OAuth,
     connect: access_http::connect::Service,
     pub data_dir: PathBuf,
     pub paths: config::ServerPaths,
     pub runtime_config: config::RuntimeConfig,
-    pub settings: RwLock<serde_json::Value>,
+    pub settings: Arc<settings::Settings>,
     pub store: RwLock<Store>,
     pub events: broadcast::Sender<ServerEvent>,
     pub log: Mutex<tokio::fs::File>,
@@ -332,11 +337,36 @@ impl AppState {
         provider_command: Vec<String>,
         auth: auth_service::AuthService,
     ) -> anyhow::Result<Arc<Self>> {
+        Self::with_config(
+            data_dir,
+            provider_command,
+            auth,
+            config::RuntimeConfig::load()?,
+        )
+        .await
+    }
+
+    pub async fn with_config(
+        data_dir: impl Into<PathBuf>,
+        provider_command: Vec<String>,
+        auth: auth_service::AuthService,
+        runtime_config: config::RuntimeConfig,
+    ) -> anyhow::Result<Arc<Self>> {
         let dir = data_dir.into();
         let paths = config::ServerPaths::from_state_dir(dir.clone());
         paths.ensure()?;
-        let runtime_config = config::RuntimeConfig::load(&paths)?;
-        let settings = runtime_config.settings.clone();
+        let settings = Arc::new(settings::Settings::open(&paths)?);
+        let auth = auth.open(&dir)?;
+        auth.revoke_disallowed(
+            settings.policy.allows_client("remote"),
+            settings.policy.allows_connect(),
+        )?;
+        let connect = access_http::connect::Service::open(&dir)?;
+        let guest = guest_service::GuestService::open(&dir)?;
+        if !settings.policy.allows_connect() {
+            connect.clear_disabled_link()?;
+            guest.set_tunnel_hostname(None);
+        }
         let log_path = dir.join("events.jsonl");
         let mut store = Store::default();
         let mut next_event_id = 0;
@@ -355,27 +385,28 @@ impl AppState {
             .await?;
         let (events, _) = broadcast::channel(512);
         Ok(Arc::new(Self {
+            config_started_at: auth_service::iso(auth_service::now()),
             environment_id: environment_http::identity(&dir)?,
             oauth: mcp_oauth::OAuth::open(&dir)?,
-            connect: access_http::connect::Service::open(&dir)?,
+            connect,
             data_dir: dir.clone(),
             paths,
             runtime_config,
-            settings: RwLock::new(settings),
+            settings: settings.clone(),
             store: RwLock::new(store),
             events,
             log: Mutex::new(log),
             provider_command,
             cancellations: Mutex::new(HashMap::new()),
-            auth: auth.open(&dir)?,
-            guest: guest_service::GuestService::open(&dir)?,
-            voice: voice::VoiceService::new(dir.clone()),
+            auth,
+            guest,
+            voice: voice::VoiceService::new(settings.clone()),
             pull_requests: pull_requests::PullRequestService::default(),
             issues: tokio::sync::Mutex::new(issues::IssueService::new(dir.clone())),
             vcs: local_services::VcsService,
             terminals: local_services::TerminalService::with_logs(dir.join("logs/terminals")),
             previews: local_services::PreviewService::default(),
-            devices: local_services::DeviceService::default(),
+            devices: local_services::DeviceService::new(settings.clone(), &dir)?,
             project_mutation_lock: Mutex::new(()),
             next_event_id: Mutex::new(next_event_id),
         }))
@@ -496,7 +527,17 @@ async fn execute_run(
         state.provider_command.clone()
     };
     let executable = command.remove(0);
-    let mut child = Command::new(executable)
+    let mut child_command = Command::new(executable);
+    if state.settings.policy.summary().is_some() {
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy()
+                .eq_ignore_ascii_case("T3CODE_CODEX_LAUNCH_ARGS")
+            {
+                child_command.env_remove(k);
+            }
+        }
+    }
+    let mut child = child_command
         .args(command)
         .arg(prompt)
         .current_dir(cwd)
@@ -664,6 +705,10 @@ pub async fn authorize_upgrade(
 
 async fn websocket(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let query = url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes());
+    let references = query
+        .clone()
+        .find(|(k, _)| k == "clientCapabilities")
+        .is_some_and(|(_, v)| v.split(',').any(|c| c == "settingsSecretReferences"));
     let compatible = query
         .clone()
         .find(|(key, _)| key == "orchestrationProtocol")
@@ -689,12 +734,43 @@ async fn websocket(State(state): State<Arc<AppState>>, request: Request) -> Resp
     };
     match WebSocketUpgrade::from_request(request, &state).await {
         Ok(upgrade) => upgrade
-            .on_upgrade(move |socket| rpc::session(state, socket, principal))
+            .on_upgrade(move |socket| rpc::session(state, socket, principal, references))
             .into_response(),
         Err(rejection) => rejection.into_response(),
     }
 }
 pub async fn run_server(state: Arc<AppState>, listen: std::net::SocketAddr) -> anyhow::Result<()> {
+    let policy = &state.settings.policy;
+    let client = if !listen.ip().is_loopback() {
+        "remote"
+    } else if state.auth.desktop() {
+        "desktop"
+    } else {
+        "local-browser"
+    };
+    if !policy.allows_client(client) {
+        let action = match client {
+            "remote" => "remote clients",
+            "desktop" => "the desktop app",
+            _ => "browsers on this machine",
+        };
+        let refusal = policy.denial(action);
+        if client == "remote" {
+            anyhow::bail!(
+                "{}, so the server cannot listen on {}.",
+                refusal.trim_end_matches('.'),
+                listen.ip()
+            );
+        }
+        anyhow::bail!(refusal);
+    }
+    if !policy.allows_client("remote") && state.runtime_config.tailscale_serve == Some(true) {
+        anyhow::bail!(
+            "{}, so Tailscale Serve cannot be turned on.",
+            policy.denial("remote clients").trim_end_matches('.')
+        );
+    }
+    policy.close_tailscale_routes(listen).await?;
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     info!(%listen, "t3code server listening");

@@ -1,10 +1,14 @@
 use super::{invalid, string, timestamp, Reply};
+use crate::settings::{
+    secrets::{provider_label, ReadMode, Resolver},
+    Settings,
+};
 use serde_json::{json, Value};
 use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
@@ -16,20 +20,60 @@ const HUB: (&str, &str, &str) = ("expo-device-hub", "0.22.1", "dist/server/cli.m
 const AGENT: (&str, &str, &str) = ("agent-device", "0.21.36", "bin/agent-device.mjs");
 type Tool = (&'static str, &'static str, &'static str);
 pub struct DeviceService {
-    state: Mutex<Option<Value>>,
+    settings: Arc<Settings>,
+    state: Mutex<Value>,
     events: broadcast::Sender<Value>,
     runtime: tokio::sync::Mutex<Option<(String, Child)>>,
 }
-impl Default for DeviceService {
-    fn default() -> Self {
-        Self {
-            state: Default::default(),
+const DEVICE_SETTINGS: [(&str, &str); 3] = [
+    ("enabled", "enableDeviceSupport"),
+    ("agentAccessEnabled", "enableAgentDeviceAccess"),
+    ("onboardingCompleted", "deviceOnboardingCompleted"),
+];
+
+impl DeviceService {
+    pub(crate) fn new(settings: Arc<Settings>, dir: &Path) -> anyhow::Result<Self> {
+        if let Err(error) = migrate_device_preferences(&settings, dir) {
+            tracing::warn!(%error,"Could not migrate saved device preferences");
+        }
+        let state = initial(dir, &settings.internal()?);
+        Ok(Self {
+            settings,
+            state: Mutex::new(state),
             events: broadcast::channel(128).0,
             runtime: Default::default(),
-        }
+        })
     }
 }
-
+fn migrate_device_preferences(settings: &Settings, dir: &Path) -> anyhow::Result<()> {
+    // Older Rust servers kept just these booleans in a separate file.
+    let legacy = dir.join("device-settings.json");
+    if legacy.try_exists()? {
+        let old: Value = serde_json::from_slice(&fs::read(&legacy)?)?;
+        let configured: Value = match fs::read(dir.join("settings.json")) {
+            Ok(bytes) => {
+                crate::settings::parse(std::str::from_utf8(&bytes)?).map_err(anyhow::Error::msg)?
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+            Err(e) => return Err(e.into()),
+        };
+        let mut patch = json!({});
+        for (before, after) in DEVICE_SETTINGS {
+            if configured.get(after).is_none() {
+                if let Some(v) = old[before].as_bool() {
+                    patch[after] = json!(v);
+                }
+            }
+        }
+        if patch != json!({}) {
+            settings
+                .update(&json!({"patch":patch}), true)
+                .map_err(|_| anyhow::anyhow!("Could not migrate saved device preferences"))?;
+        }
+        fs::remove_file(legacy)?;
+    }
+    Ok(())
+}
 fn home() -> PathBuf {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
@@ -153,15 +197,8 @@ fn bad_host(id: &str) -> Value {
 fn op_err(op: &str, reason: &str) -> Value {
     json!({"_tag":"DeviceOperationError","operation":op,"reason":reason,"cause":null})
 }
-fn settings_path(dir: &Path) -> PathBuf {
-    dir.join("device-settings.json")
-}
-fn initial(dir: &Path) -> Value {
-    let saved: Value = fs::read(settings_path(dir))
-        .ok()
-        .and_then(|v| serde_json::from_slice(&v).ok())
-        .unwrap_or(Value::Null);
-    json!({"supportsHostRetry":true,"supportsToolUpdate":true,"supportsToolInspection":true,"supportsEasHosts":true,"supportsSimlockHosts":true,"hostStatus":if saved["enabled"]==true{"idle"}else{"disabled"},"hostStatuses":{},"devices":[],"sessions":[],"onboardingCompleted":saved["onboardingCompleted"]==true,"agentAccessEnabled":saved["agentAccessEnabled"]==true,"hubBasePath":"/api/device-hub","revision":0,"hosts":[host(dir,false)],"easHosts":[],"simlockHosts":[]})
+fn initial(dir: &Path, saved: &Value) -> Value {
+    json!({"supportsHostRetry":true,"supportsToolUpdate":true,"supportsToolInspection":true,"supportsEasHosts":true,"supportsSimlockHosts":true,"hostStatus":if saved["enableDeviceSupport"]==true{"idle"}else{"disabled"},"hostStatuses":{},"devices":[],"sessions":[],"onboardingCompleted":saved["deviceOnboardingCompleted"]==true,"agentAccessEnabled":saved["enableAgentDeviceAccess"]==true,"hubBasePath":"/api/device-hub","revision":0,"hosts":[host(dir,false)],"easHosts":[],"simlockHosts":[]})
 }
 fn wire(state: &Value) -> Value {
     let mut ordered = json!({});
@@ -332,13 +369,12 @@ impl DeviceService {
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
         self.events.subscribe()
     }
-    pub fn snapshot(&self, dir: &Path) -> Value {
-        let mut s = self.state.lock().unwrap();
-        wire(s.get_or_insert_with(|| initial(dir)))
+    pub fn snapshot(&self, _dir: &Path) -> Value {
+        wire(&self.state.lock().unwrap())
     }
     fn publish(&self, state: &mut Value) {
         state["revision"] = json!(state["revision"].as_u64().unwrap_or(0) + 1);
-        *self.state.lock().unwrap() = Some(state.clone());
+        *self.state.lock().unwrap() = state.clone();
         let _ = self.events.send(wire(state));
     }
     pub async fn call(&self, name: &str, input: &Value, dir: &Path) -> Option<Reply> {
@@ -361,9 +397,15 @@ impl DeviceService {
     }
     async fn apply(&self, name: &str, input: &Value, dir: &Path) -> Reply {
         match name {
-            "simlockIdentity" => return simlock(input).await,
-            "easAccount" => return expo(input).await,
-            "testHost" => return ssh_probe(input).await,
+            "simlockIdentity" => {
+                let settings = self.settings.internal().map_err(|_| json!({"_tag":"DeviceSimlockIdentityError","reason":"Could not read the saved token."}))?;
+                return simlock(input, &settings, &self.settings.resolver).await;
+            }
+            "easAccount" => {
+                let settings = self.settings.internal().map_err(|_| json!({"_tag":"DeviceEasAccountError","reason":"Could not read the saved token."}))?;
+                return expo(input, &settings, &self.settings.resolver).await;
+            }
+            "testHost" => return ssh_probe(input, dir).await,
             _ => {}
         }
         let mut runtime = self.runtime.lock().await;
@@ -372,26 +414,28 @@ impl DeviceService {
         if name != "close" && host_id != "local" {
             return Err(bad_host(host_id));
         }
-        let enabled = state["hostStatus"] != "disabled";
+        let preferences = self
+            .settings
+            .internal()
+            .map_err(|_| op_err("settings", "settings_failed"))?;
+        let mut enabled = preferences["enableDeviceSupport"] == true;
         if name == "configure" {
-            let mut settings = json!({"enabled":enabled,"agentAccessEnabled":state["agentAccessEnabled"],"onboardingCompleted":state["onboardingCompleted"]});
-            for key in ["enabled", "agentAccessEnabled", "onboardingCompleted"] {
+            let mut patch = json!({});
+            for (key, field) in DEVICE_SETTINGS {
                 if let Some(v) = input.get(key) {
-                    settings[key] = json!(v
+                    patch[field] = json!(v
                         .as_bool()
                         .ok_or_else(|| invalid(key, "Expected boolean"))?);
                 }
             }
-            let tmp = dir.join(format!(".device-settings-{}.tmp", uuid::Uuid::new_v4()));
-            fs::write(&tmp, settings.to_string())
-                .and_then(|_| fs::rename(&tmp, settings_path(dir)))
-                .map_err(|_| op_err("configure", "settings_failed"))?;
-            let enabled = settings["enabled"] == true;
+            let settings = self.settings.update(&json!({"patch":patch}), true)
+                .map_err(|cause| json!({"_tag":"DeviceOperationError","operation":"configure","reason":"settings_failed","cause":cause}))?;
+            enabled = settings["enableDeviceSupport"] == true;
             state["hostStatus"] = json!(if enabled { "idle" } else { "disabled" });
             state["hostStatusDetail"] = Value::Null;
             state["hostStatuses"] = json!({});
-            state["agentAccessEnabled"] = settings["agentAccessEnabled"].clone();
-            state["onboardingCompleted"] = settings["onboardingCompleted"].clone();
+            state["agentAccessEnabled"] = settings["enableAgentDeviceAccess"].clone();
+            state["onboardingCompleted"] = settings["deviceOnboardingCompleted"].clone();
             if !enabled {
                 runtime.take();
                 state["sessions"] = json!([]);
@@ -415,7 +459,7 @@ impl DeviceService {
                 state["hosts"] = json!([host(dir, runtime.is_some())]);
                 self.publish(&mut state);
             }
-            if state["hostStatus"] != "disabled"
+            if enabled
                 && input["inspectOnly"] != true
                 && state["hosts"][0]["platforms"]
                     .as_array()
@@ -550,7 +594,7 @@ impl DeviceService {
     }
 }
 
-async fn ssh_probe(input: &Value) -> Reply {
+async fn ssh_probe(input: &Value, dir: &Path) -> Reply {
     let id = string(input, "id")?;
     let label = string(input, "label")?;
     let target = string(input, "target")?;
@@ -572,6 +616,9 @@ async fn ssh_probe(input: &Value) -> Reply {
     }
     if input.get("identityFile").is_some() {
         cmd.args(["-i", string(input, "identityFile")?]);
+    }
+    if super::local_ssh::local_target(input).await {
+        return Ok(host(dir, false));
     }
     // Probe remote capabilities with a fixed script. No request field enters the remote shell.
     const PROBE: &str = r#"command -v node >/dev/null || exit 42
@@ -618,15 +665,37 @@ exit 0"#;
         json!({"id":id,"label":label,"platforms":platforms,"hubInstalled":has("hub"),"agentDeviceInstalled":has("agent"),"kind":"ssh"}),
     )
 }
-async fn simlock(input: &Value) -> Reply {
+fn saved_host<'a>(settings: &'a Value, key: &str, input: &Value) -> Option<&'a Value> {
+    let id = input["hostId"].as_str()?;
+    settings[key].as_array()?.iter().find(|h| h["id"] == id)
+}
+
+async fn device_token(
+    resolver: &Resolver,
+    settings: &Value,
+    source: &Value,
+) -> Result<String, String> {
+    if source.is_null() {
+        return Ok(String::new());
+    }
+    resolver.resolve(settings, source, ReadMode::Cached).await.ok_or_else(|| {
+        let label = provider_label(settings,source);
+        format!("Could not read the credential from the secret provider \"{label}\". Unlock or fix it in Settings, then try again.")
+    })
+}
+
+async fn simlock(input: &Value, settings: &Value, resolver: &Resolver) -> Reply {
     let fail = |reason: String| json!({"_tag":"DeviceSimlockIdentityError","reason":reason});
     let env_url = env::var("AGENT_DEVICE_DAEMON_BASE_URL").ok().and_then(|v| {
-        v.trim_end_matches('/')
+        v.trim()
+            .trim_end_matches('/')
             .strip_suffix("/v1/agent-device")
+            .filter(|url| url::Url::parse(url).is_ok())
             .map(str::to_owned)
     });
     let env_token = env::var("AGENT_DEVICE_DAEMON_AUTH_TOKEN")
         .ok()
+        .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
     let machine = env_url.as_deref().zip(env_token.as_deref());
     let gateway = input["gatewayUrl"]
@@ -641,16 +710,39 @@ async fn simlock(input: &Value) -> Reply {
         (Ok(a), Ok(b)) => a.origin() == b.origin(),
         _ => false,
     };
-    let (token, source) = input["agentToken"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(|t| (t, "entered"))
-        .or_else(|| {
-            machine
-                .filter(|(url, _)| same_url(url, gateway))
-                .map(|(_, t)| (t, "env"))
-        })
-        .ok_or_else(|| fail("No agent token for this gateway on this machine.".into()))?;
+    let saved = saved_host(settings, "simlockDeviceHosts", input);
+    let present = |v: &Value| v.is_object() || v.as_str().is_some_and(|s| !s.is_empty());
+    let saved = saved.filter(|host| present(&host["agentToken"]));
+    let (token, source) = if present(&input["agentToken"]) {
+        (
+            device_token(resolver, settings, &input["agentToken"])
+                .await
+                .map_err(fail)?,
+            "entered",
+        )
+    } else if let Some(host) = saved.filter(|h| {
+        h["gatewayUrl"]
+            .as_str()
+            .is_some_and(|url| same_url(url, gateway))
+    }) {
+        (
+            device_token(resolver, settings, &host["agentToken"])
+                .await
+                .map_err(fail)?,
+            "settings",
+        )
+    } else if let Some((_, token)) = machine.filter(|(url, _)| same_url(url, gateway)) {
+        (token.to_owned(), "env")
+    } else {
+        return Err(fail(
+            if saved.is_some() {
+                "The saved token is for another gateway. Enter one for this gateway."
+            } else {
+                "No agent token for this gateway on this machine."
+            }
+            .into(),
+        ));
+    };
     let bad = || {
         fail(format!(
             "The Simlock gateway at {gateway} sent an answer T3 could not read."
@@ -690,14 +782,22 @@ async fn simlock(input: &Value) -> Reply {
         json!({"gatewayUrl":gateway,"signedInAs":identity["name"].as_str().ok_or_else(bad)?,"tokenSource":source}),
     )
 }
-async fn expo(input: &Value) -> Reply {
+async fn expo(input: &Value, settings: &Value, resolver: &Resolver) -> Reply {
     let fail = |s: &str| json!({"_tag":"DeviceEasAccountError","reason":s});
     let from_session = || -> Option<String> {
         let state: Value =
             serde_json::from_slice(&fs::read(home().join(".expo/state.json")).ok()?).ok()?;
         state["auth"]["sessionSecret"].as_str().map(str::to_owned)
     };
-    let (source,token)=input["accessToken"].as_str().map(str::trim).filter(|s|!s.is_empty()).map(|s|("settings",s.to_owned()))
+    let saved = saved_host(settings, "easDeviceHosts", input);
+    let credential = input
+        .get("accessToken")
+        .filter(|v| !v.is_null())
+        .or_else(|| saved.and_then(|h| h.get("accessToken")));
+    let token = device_token(resolver, settings, credential.unwrap_or(&Value::Null))
+        .await
+        .map_err(|reason| fail(&reason))?;
+    let (source,token)=Some(token.trim()).filter(|s|!s.is_empty()).map(|s|("settings",s.to_owned()))
         .or_else(||env::var("EXPO_TOKEN").ok().filter(|s|!s.trim().is_empty()).map(|s|("env",s.trim().to_owned())))
         .or_else(||from_session().map(|s|("eas-login",s))).ok_or_else(||fail("No Expo credential on the server: save an access token for this host, set EXPO_TOKEN, or run `eas login`."))?;
     if !token.bytes().all(|b| (0x21..=0x7e).contains(&b)) {

@@ -36,3 +36,10 @@ Path("contracts/http.json").write_text(json.dumps(http, indent=2) + "\n")
 Path("contracts/rpc.json").write_text(json.dumps(rpc, indent=2) + "\n")
 Path("contracts/commands.json").write_text(json.dumps(registered["commands"], indent=2) + "\n")
 Path("contracts/projections.json").write_text(json.dumps(registered["projections"], indent=2) + "\n")
+Path("contracts/settings.json").write_bytes(subprocess.check_output([
+    os.environ.get("NODE", "node"), str(Path(__file__).with_name("read_settings_schema.mjs")), str(root)
+]))
+subprocess.run([
+    os.environ.get("NODE", "node"), str(Path(__file__).with_name("read_config_defaults.mjs")),
+    str(root), "contracts/config-defaults.json",
+], check=True)

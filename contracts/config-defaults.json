@@ -1,0 +1,1612 @@
+{
+  "keybindings": [
+    {
+      "key": "mod+b",
+      "command": "sidebar.toggle"
+    },
+    {
+      "key": "f6",
+      "command": "workspace.focusNext"
+    },
+    {
+      "key": "shift+f6",
+      "command": "workspace.focusPrevious"
+    },
+    {
+      "key": "mod+f6",
+      "command": "workspace.focusNext"
+    },
+    {
+      "key": "mod+shift+f6",
+      "command": "workspace.focusPrevious"
+    },
+    {
+      "key": "mod+[",
+      "command": "navigation.back",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+]",
+      "command": "navigation.forward",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+j",
+      "command": "terminal.toggle"
+    },
+    {
+      "key": "mod+alt+b",
+      "command": "rightPanel.toggle"
+    },
+    {
+      "key": "mod+shift+b",
+      "command": "threadPanel.toggle",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+t",
+      "command": "rightPanel.new",
+      "when": "rightPanelOpen && !terminalFocus"
+    },
+    {
+      "key": "mod+d",
+      "command": "terminal.split",
+      "when": "terminalFocus"
+    },
+    {
+      "key": "mod+shift+d",
+      "command": "terminal.splitVertical",
+      "when": "terminalFocus"
+    },
+    {
+      "key": "mod+shift+d",
+      "command": "composer.dictation",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+n",
+      "command": "terminal.new",
+      "when": "terminalFocus"
+    },
+    {
+      "key": "mod+w",
+      "command": "terminal.close",
+      "when": "terminalFocus"
+    },
+    {
+      "key": "mod+w",
+      "command": "rightPanel.close",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+t",
+      "command": "view.reopenClosed"
+    },
+    {
+      "key": "mod+d",
+      "command": "diff.toggle",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+j",
+      "command": "preview.toggle"
+    },
+    {
+      "key": "mod+r",
+      "command": "preview.refresh",
+      "when": "previewFocus"
+    },
+    {
+      "key": "mod+l",
+      "command": "preview.focusUrl",
+      "when": "previewFocus"
+    },
+    {
+      "key": "mod+=",
+      "command": "preview.zoomIn",
+      "when": "previewFocus"
+    },
+    {
+      "key": "mod++",
+      "command": "preview.zoomIn",
+      "when": "previewFocus"
+    },
+    {
+      "key": "mod+-",
+      "command": "preview.zoomOut",
+      "when": "previewFocus"
+    },
+    {
+      "key": "mod+0",
+      "command": "preview.resetZoom",
+      "when": "previewFocus"
+    },
+    {
+      "key": "mod+f",
+      "command": "preview.find",
+      "when": "previewFocus"
+    },
+    {
+      "key": "mod+k",
+      "command": "commandPalette.toggle",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+p",
+      "command": "filePicker.toggle",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+f",
+      "command": "projectSearch.toggle",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+u",
+      "command": "usage.open",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+alt+a",
+      "command": "theme.select",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+alt+shift+a",
+      "command": "appearance.cycle",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+alt+shift+t",
+      "command": "themeEditor.toggle"
+    },
+    {
+      "key": "mod+s",
+      "command": "composer.stash",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+enter",
+      "command": "thread.steerQueuedMessage",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "alt+arrowup",
+      "command": "thread.editQueuedMessage",
+      "when": "composerFocus"
+    },
+    {
+      "key": "mod+enter",
+      "command": "composer.sendAlternate",
+      "when": "composerFocus && turnRunning"
+    },
+    {
+      "key": "mod+enter",
+      "command": "composer.sendBackground",
+      "when": "composerFocus && draftThreadRoute"
+    },
+    {
+      "key": "mod+alt+enter",
+      "command": "composer.sendBackground",
+      "when": "composerFocus && draftThreadRoute"
+    },
+    {
+      "key": "mod+alt+enter",
+      "command": "composer.sendAndNewThread",
+      "when": "composerFocus && !draftThreadRoute"
+    },
+    {
+      "key": "mod+n",
+      "command": "chat.new",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+o",
+      "command": "chat.new",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+n",
+      "command": "chat.newLocal",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+alt+n",
+      "command": "chat.newWithoutProject",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+f",
+      "command": "chat.find",
+      "when": "!terminalFocus && !previewFocus"
+    },
+    {
+      "key": "mod+shift+m",
+      "command": "modelPicker.toggle",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+h",
+      "command": "composer.host",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+e",
+      "command": "composer.effort",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+a",
+      "command": "composer.mode",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+x",
+      "command": "composer.workspace",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+g",
+      "command": "composer.branch",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+l",
+      "command": "composer.previousWorktree",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+k",
+      "command": "pullRequest.copyNumber",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+arrowup",
+      "command": "modelPicker.previousProvider",
+      "when": "modelPickerOpen"
+    },
+    {
+      "key": "mod+shift+arrowdown",
+      "command": "modelPicker.nextProvider",
+      "when": "modelPickerOpen"
+    },
+    {
+      "key": "mod+o",
+      "command": "editor.openFavorite"
+    },
+    {
+      "key": "mod+shift+[",
+      "command": "thread.previous"
+    },
+    {
+      "key": "mod+shift+]",
+      "command": "thread.next"
+    },
+    {
+      "key": "mod+shift+c",
+      "command": "thread.copyReference",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+s",
+      "command": "thread.settle",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+shift+p",
+      "command": "thread.pin",
+      "when": "!terminalFocus"
+    },
+    {
+      "key": "mod+z",
+      "command": "thread.undo",
+      "when": "!terminalFocus && !editableFocus"
+    },
+    {
+      "key": "mod+1",
+      "command": "thread.jump.1",
+      "when": "!modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+2",
+      "command": "thread.jump.2",
+      "when": "!modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+3",
+      "command": "thread.jump.3",
+      "when": "!modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+4",
+      "command": "thread.jump.4",
+      "when": "!modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+5",
+      "command": "thread.jump.5",
+      "when": "!modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+6",
+      "command": "thread.jump.6",
+      "when": "!modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+7",
+      "command": "thread.jump.7",
+      "when": "!modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+8",
+      "command": "thread.jump.8",
+      "when": "!modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+9",
+      "command": "thread.jump.9",
+      "when": "!modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+1",
+      "command": "modelPicker.jump.1",
+      "when": "modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+2",
+      "command": "modelPicker.jump.2",
+      "when": "modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+3",
+      "command": "modelPicker.jump.3",
+      "when": "modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+4",
+      "command": "modelPicker.jump.4",
+      "when": "modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+5",
+      "command": "modelPicker.jump.5",
+      "when": "modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+6",
+      "command": "modelPicker.jump.6",
+      "when": "modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+7",
+      "command": "modelPicker.jump.7",
+      "when": "modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+8",
+      "command": "modelPicker.jump.8",
+      "when": "modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "mod+9",
+      "command": "modelPicker.jump.9",
+      "when": "modelPickerOpen && isDesktop"
+    },
+    {
+      "key": "c",
+      "command": "usage.cost",
+      "when": "usagePageOpen"
+    },
+    {
+      "key": "t",
+      "command": "usage.tokens",
+      "when": "usagePageOpen"
+    },
+    {
+      "key": "l",
+      "command": "usage.limits",
+      "when": "usagePageOpen"
+    },
+    {
+      "key": "mod+shift+1",
+      "command": "usage.period.day",
+      "when": "usagePageOpen"
+    },
+    {
+      "key": "mod+shift+2",
+      "command": "usage.period.week",
+      "when": "usagePageOpen"
+    },
+    {
+      "key": "mod+shift+3",
+      "command": "usage.period.month",
+      "when": "usagePageOpen"
+    },
+    {
+      "key": "mod+shift+4",
+      "command": "usage.period.quarter",
+      "when": "usagePageOpen"
+    }
+  ],
+  "commands": [
+    "workspace.focusNext",
+    "workspace.focusPrevious",
+    "sidebar.toggle",
+    "navigation.back",
+    "navigation.forward",
+    "terminal.toggle",
+    "terminal.split",
+    "terminal.splitVertical",
+    "terminal.new",
+    "terminal.close",
+    "rightPanel.toggle",
+    "rightPanel.new",
+    "threadPanel.toggle",
+    "rightPanel.toggleMaximized",
+    "rightPanel.close",
+    "view.reopenClosed",
+    "pullRequest.copyNumber",
+    "diff.toggle",
+    "preview.toggle",
+    "preview.refresh",
+    "preview.focusUrl",
+    "preview.zoomIn",
+    "preview.zoomOut",
+    "preview.resetZoom",
+    "preview.find",
+    "commandPalette.toggle",
+    "filePicker.toggle",
+    "projectSearch.toggle",
+    "usage.open",
+    "theme.select",
+    "appearance.cycle",
+    "themeEditor.toggle",
+    "composer.stash",
+    "composer.sendAlternate",
+    "composer.sendBackground",
+    "composer.sendAndNewThread",
+    "composer.dictation",
+    "composer.host",
+    "composer.cycleHost",
+    "composer.effort",
+    "composer.increaseEffort",
+    "composer.decreaseEffort",
+    "composer.mode",
+    "composer.workspace",
+    "composer.previousWorktree",
+    "composer.branch",
+    "chat.new",
+    "chat.newLocal",
+    "chat.newWithoutProject",
+    "chat.find",
+    "editor.openFavorite",
+    "usage.cost",
+    "usage.tokens",
+    "usage.limits",
+    "usage.period.day",
+    "usage.period.week",
+    "usage.period.month",
+    "usage.period.quarter",
+    "modelPicker.toggle",
+    "modelPicker.previousProvider",
+    "modelPicker.nextProvider",
+    "modelPicker.jump.1",
+    "modelPicker.jump.2",
+    "modelPicker.jump.3",
+    "modelPicker.jump.4",
+    "modelPicker.jump.5",
+    "modelPicker.jump.6",
+    "modelPicker.jump.7",
+    "modelPicker.jump.8",
+    "modelPicker.jump.9",
+    "thread.stop",
+    "thread.steerQueuedMessage",
+    "thread.editQueuedMessage",
+    "thread.previous",
+    "thread.next",
+    "thread.copyReference",
+    "thread.settle",
+    "thread.pin",
+    "thread.regenerateTitle",
+    "thread.undo",
+    "thread.jump.1",
+    "thread.jump.2",
+    "thread.jump.3",
+    "thread.jump.4",
+    "thread.jump.5",
+    "thread.jump.6",
+    "thread.jump.7",
+    "thread.jump.8",
+    "thread.jump.9"
+  ],
+  "editors": [
+    {
+      "id": "cursor",
+      "commands": [
+        "cursor"
+      ]
+    },
+    {
+      "id": "trae",
+      "commands": [
+        "trae"
+      ]
+    },
+    {
+      "id": "kiro",
+      "commands": [
+        "kiro"
+      ]
+    },
+    {
+      "id": "vscode",
+      "commands": [
+        "code"
+      ]
+    },
+    {
+      "id": "vscode-insiders",
+      "commands": [
+        "code-insiders"
+      ]
+    },
+    {
+      "id": "vscodium",
+      "commands": [
+        "codium"
+      ]
+    },
+    {
+      "id": "zed",
+      "commands": [
+        "zed",
+        "zeditor"
+      ]
+    },
+    {
+      "id": "antigravity",
+      "commands": [
+        "antigravity-ide",
+        "agy-ide"
+      ]
+    },
+    {
+      "id": "idea",
+      "commands": [
+        "idea"
+      ]
+    },
+    {
+      "id": "aqua",
+      "commands": [
+        "aqua"
+      ]
+    },
+    {
+      "id": "clion",
+      "commands": [
+        "clion"
+      ]
+    },
+    {
+      "id": "datagrip",
+      "commands": [
+        "datagrip"
+      ]
+    },
+    {
+      "id": "dataspell",
+      "commands": [
+        "dataspell"
+      ]
+    },
+    {
+      "id": "goland",
+      "commands": [
+        "goland"
+      ]
+    },
+    {
+      "id": "phpstorm",
+      "commands": [
+        "phpstorm"
+      ]
+    },
+    {
+      "id": "pycharm",
+      "commands": [
+        "pycharm"
+      ]
+    },
+    {
+      "id": "rider",
+      "commands": [
+        "rider"
+      ]
+    },
+    {
+      "id": "rubymine",
+      "commands": [
+        "rubymine"
+      ]
+    },
+    {
+      "id": "rustrover",
+      "commands": [
+        "rustrover"
+      ]
+    },
+    {
+      "id": "webstorm",
+      "commands": [
+        "webstorm"
+      ]
+    },
+    {
+      "id": "file-manager",
+      "commands": null
+    }
+  ],
+  "providers": {
+    "codex": {
+      "displayName": "Codex",
+      "showInteractionModeToggle": true,
+      "reportsContextWindow": true,
+      "models": [],
+      "slashCommands": [],
+      "skills": [],
+      "setup": {
+        "canAuthenticate": false,
+        "canInstall": false
+      }
+    },
+    "claudeAgent": {
+      "displayName": "Claude",
+      "showInteractionModeToggle": true,
+      "reportsContextWindow": true,
+      "models": [
+        {
+          "slug": "claude-opus-5-5",
+          "name": "Claude Opus 5.5",
+          "aliases": [
+            "opus",
+            "opus-5.5",
+            "claude-opus-5.5"
+          ],
+          "isCustom": false,
+          "isDefault": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "high",
+                    "label": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "type": "boolean"
+              },
+              {
+                "id": "fastMode",
+                "label": "Fast Mode",
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-sonnet-5-5",
+          "name": "Claude Sonnet 5.5",
+          "aliases": [
+            "sonnet",
+            "sonnet-5.5",
+            "claude-sonnet-5.5"
+          ],
+          "isCustom": false,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-fable-5-2",
+          "name": "Claude Fable 5.2",
+          "aliases": [
+            "fable",
+            "fable-5.2",
+            "claude-fable-5.2"
+          ],
+          "isCustom": false,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "high",
+                    "label": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-fable-5-1",
+          "name": "Claude Fable 5.1",
+          "aliases": [
+            "fable-5.1",
+            "claude-fable-5.1"
+          ],
+          "isCustom": false,
+          "isLegacy": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "high",
+                    "label": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-fable-5",
+          "name": "Claude Fable 5",
+          "isCustom": false,
+          "isLegacy": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "high",
+                    "label": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-opus-5",
+          "name": "Claude Opus 5",
+          "aliases": [
+            "opus-5",
+            "claude-opus-5.0",
+            "claude-opus-5-0"
+          ],
+          "isCustom": false,
+          "isLegacy": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "type": "boolean"
+              },
+              {
+                "id": "fastMode",
+                "label": "Fast Mode",
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-opus-4-8",
+          "name": "Claude Opus 4.8",
+          "aliases": [
+            "opus-4.8",
+            "claude-opus-4.8"
+          ],
+          "isCustom": false,
+          "isLegacy": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "type": "boolean"
+              },
+              {
+                "id": "fastMode",
+                "label": "Fast Mode",
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-opus-4-7",
+          "name": "Claude Opus 4.7",
+          "aliases": [
+            "opus-4.7",
+            "claude-opus-4.7"
+          ],
+          "isCustom": false,
+          "isLegacy": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "fastMode",
+                "label": "Fast Mode",
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-opus-4-6",
+          "name": "Claude Opus 4.6",
+          "aliases": [
+            "opus-4.6",
+            "claude-opus-4.6",
+            "claude-opus-4-6-20251117"
+          ],
+          "isCustom": false,
+          "isLegacy": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "fastMode",
+                "label": "Fast Mode",
+                "type": "boolean"
+              },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "200k",
+                    "label": "200k"
+                  },
+                  {
+                    "id": "1m",
+                    "label": "1M",
+                    "isDefault": true
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-opus-4-5",
+          "name": "Claude Opus 4.5",
+          "isCustom": false,
+          "isLegacy": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  }
+                ]
+              },
+              {
+                "id": "fastMode",
+                "label": "Fast Mode",
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-sonnet-5",
+          "name": "Claude Sonnet 5",
+          "aliases": [
+            "sonnet-5",
+            "claude-sonnet-5.0",
+            "claude-sonnet-5-0"
+          ],
+          "isCustom": false,
+          "isLegacy": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
+          "aliases": [
+            "sonnet-4.6",
+            "claude-sonnet-4.6",
+            "claude-sonnet-4-6-20251117"
+          ],
+          "isCustom": false,
+          "isLegacy": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium"
+                  },
+                  {
+                    "id": "high",
+                    "label": "High",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "contextWindow",
+                "label": "Context Window",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "200k",
+                    "label": "200k",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "1m",
+                    "label": "1M"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-haiku-5-5",
+          "name": "Claude Haiku 5.5",
+          "aliases": [
+            "haiku",
+            "haiku-5.5",
+            "claude-haiku-5.5"
+          ],
+          "isCustom": false,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Reasoning",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "high",
+                    "label": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  },
+                  {
+                    "id": "ultrathink",
+                    "label": "Ultrathink"
+                  }
+                ],
+                "promptInjectedValues": [
+                  "ultrathink"
+                ]
+              },
+              {
+                "id": "ultracode",
+                "label": "Ultracode",
+                "type": "boolean"
+              }
+            ]
+          }
+        },
+        {
+          "slug": "claude-haiku-4-5",
+          "name": "Claude Haiku 4.5",
+          "aliases": [
+            "haiku-4.5",
+            "claude-haiku-4.5",
+            "claude-haiku-4-5-20251001"
+          ],
+          "isCustom": false,
+          "isLegacy": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "thinking",
+                "label": "Thinking",
+                "type": "boolean",
+                "currentValue": true
+              }
+            ]
+          }
+        }
+      ],
+      "slashCommands": [],
+      "skills": [],
+      "setup": {
+        "canAuthenticate": false,
+        "canInstall": false
+      }
+    },
+    "cursor": {
+      "displayName": "Cursor",
+      "showInteractionModeToggle": true,
+      "supportsConversationRollback": true,
+      "models": [],
+      "slashCommands": [],
+      "skills": [],
+      "setup": {
+        "canAuthenticate": true,
+        "canInstall": false
+      }
+    },
+    "grok": {
+      "displayName": "Grok",
+      "showInteractionModeToggle": false,
+      "supportedRuntimeModes": [
+        "approval-required",
+        "auto",
+        "full-access"
+      ],
+      "supportsConversationRollback": false,
+      "models": [
+        {
+          "slug": "grok-build",
+          "name": "Grok Build",
+          "isCustom": false,
+          "capabilities": {
+            "optionDescriptors": []
+          }
+        }
+      ],
+      "slashCommands": [],
+      "skills": [],
+      "setup": {
+        "canAuthenticate": false,
+        "canInstall": false
+      }
+    },
+    "opencode": {
+      "displayName": "OpenCode",
+      "showInteractionModeToggle": false,
+      "models": [],
+      "slashCommands": [],
+      "skills": [],
+      "setup": {
+        "canAuthenticate": false,
+        "canInstall": false
+      }
+    },
+    "antigravity": {
+      "displayName": "Antigravity",
+      "showInteractionModeToggle": false,
+      "supportsConversationRollback": true,
+      "supportsTextGeneration": false,
+      "supportedRuntimeModes": [
+        "approval-required",
+        "auto-accept-edits",
+        "full-access"
+      ],
+      "models": [],
+      "slashCommands": [],
+      "skills": [],
+      "setup": {
+        "canAuthenticate": true,
+        "canInstall": true
+      }
+    },
+    "fx": {
+      "displayName": "fx",
+      "showInteractionModeToggle": false,
+      "supportedRuntimeModes": [
+        "approval-required",
+        "auto"
+      ],
+      "supportsTextGeneration": false,
+      "models": [
+        {
+          "slug": "default",
+          "name": "Default",
+          "isCustom": false,
+          "isDefault": true,
+          "capabilities": {
+            "optionDescriptors": [
+              {
+                "id": "effort",
+                "label": "Effort",
+                "type": "select",
+                "options": [
+                  {
+                    "id": "auto",
+                    "label": "Auto"
+                  },
+                  {
+                    "id": "low",
+                    "label": "Low"
+                  },
+                  {
+                    "id": "medium",
+                    "label": "Medium",
+                    "isDefault": true
+                  },
+                  {
+                    "id": "high",
+                    "label": "High"
+                  },
+                  {
+                    "id": "xhigh",
+                    "label": "Extra High"
+                  },
+                  {
+                    "id": "max",
+                    "label": "Max"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "slashCommands": [],
+      "skills": [],
+      "setup": {
+        "canAuthenticate": false,
+        "canInstall": false
+      }
+    },
+    "kiro": {
+      "displayName": "Kiro",
+      "showInteractionModeToggle": false,
+      "supportedRuntimeModes": [
+        "approval-required",
+        "full-access"
+      ],
+      "models": [
+        {
+          "slug": "default",
+          "name": "Kiro default",
+          "isCustom": false,
+          "capabilities": {
+            "optionDescriptors": []
+          }
+        }
+      ],
+      "slashCommands": [
+        {
+          "name": "compact",
+          "description": "Summarize the conversation and reduce context usage"
+        }
+      ],
+      "skills": [],
+      "setup": {
+        "canAuthenticate": false,
+        "canInstall": false
+      }
+    },
+    "muse": {
+      "displayName": "Muse Code",
+      "showInteractionModeToggle": false,
+      "reportsContextWindow": true,
+      "supportedRuntimeModes": [
+        "approval-required",
+        "full-access"
+      ],
+      "models": [],
+      "slashCommands": [],
+      "skills": [],
+      "setup": {
+        "canAuthenticate": false,
+        "canInstall": false
+      }
+    },
+    "pi": {
+      "displayName": "Pi",
+      "showInteractionModeToggle": false,
+      "reportsContextWindow": true,
+      "supportedRuntimeModes": [
+        "approval-required",
+        "auto-accept-edits",
+        "full-access"
+      ],
+      "models": [
+        {
+          "slug": "default",
+          "name": "Pi default",
+          "isCustom": false,
+          "capabilities": {
+            "optionDescriptors": []
+          }
+        }
+      ],
+      "slashCommands": [],
+      "skills": [],
+      "setup": {
+        "canAuthenticate": false,
+        "canInstall": false
+      }
+    }
+  }
+}

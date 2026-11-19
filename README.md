@@ -11,7 +11,7 @@ target/debug/t3code-server --listen 127.0.0.1:3773 --data-dir .t3
 
 An environment launcher can pass the desktop bootstrap envelope on an inherited file descriptor with `--bootstrap-fd`. It contains the bind address, port, T3 home directory, and desktop bootstrap credential. Exchange the credential at `POST /api/auth/browser-session` and send the resulting cookie to authenticated HTTP operations. For a separate standalone process, set `T3CODE_BOOTSTRAP_CREDENTIAL` to a fresh high-entropy credential before launching.
 
-The Rust binary follows the TypeScript server's configuration layout. `T3CODE_HOME` and `--base-dir` select a base directory, with mutable files under `userdata`. This includes `settings.json`, `keybindings.json`, `themes`, `attachments`, `browser-artifacts`, `logs`, `secrets`, `environment-id`, `anonymous-id`, and `server-runtime.json`. `T3CODE_HOST`, `T3CODE_PORT`, `T3CODE_MODE`, `T3CODE_NO_BROWSER`, `T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD`, `T3CODE_LOG_WS_EVENTS`, `T3CODE_DEV_ALLOWED_ORIGINS`, `T3CODE_TAILSCALE_SERVE`, and `T3CODE_TAILSCALE_SERVE_PORT` are loaded with the same environment names. `server.getSettings` reads the shared settings file and `server.updateSettings` persists an atomic JSON update.
+The Rust binary follows the TypeScript server's configuration layout. `T3CODE_HOME` and `--base-dir` select a base directory, with mutable files under `userdata`. This includes `settings.json`, `keybindings.json`, `themes`, `attachments`, `browser-artifacts`, `logs`, `secrets`, `environment-id`, `anonymous-id`, and `server-runtime.json`. `T3CODE_HOST`, `T3CODE_PORT`, `T3CODE_MODE`, `T3CODE_NO_BROWSER`, `T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD`, `T3CODE_LOG_WS_EVENTS`, `T3CODE_DEV_ALLOWED_ORIGINS`, `T3CODE_TAILSCALE_SERVE`, and `T3CODE_TAILSCALE_SERVE_PORT` are loaded with the same environment names. `server.getSettings` reads the shared settings file and `server.updateSettings` persists sparse settings atomically through symlinks. Both RPCs return normalized settings with credentials redacted. Clients advertising `settingsSecretReferences` receive supported secret references. Legacy provider and project settings migrate from the shared home and SQLite state. Machine policy supplies defaults, locks, and provider and client restrictions.
 
 Connect to `/ws?orchestrationProtocol=2` with a session cookie or a WebSocket ticket. The client sends Effect RPC messages as JSON text frames. For example, the following request obtains the server probe response.
 
@@ -39,6 +39,8 @@ original="node /tmp/t3code-reference/apps/server/src/bin.ts"
 rust="$PWD/target/debug/t3code-server"
 python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$original" --rust-command "$rust"
 python3 scripts/orchestration_parity.py --original-command "$original" --rust-command "$rust"
+python3 scripts/config_parity.py --original-command "$original" --rust-command "$rust"
+python3 scripts/config_snapshot_parity.py --original-command "$original" --rust-command "$rust" --reference-root /tmp/t3code-reference
 python3 scripts/auth_parity.py --original-command "$original" --rust-command "$rust"
 python3 scripts/mcp_parity.py --original-command "$original" --rust-command "$rust"
 python3 scripts/git_workflow_parity.py --original-command "$original" --rust-command "$rust"
@@ -47,6 +49,8 @@ python3 scripts/relay_parity.py --checkout /tmp/t3code-reference --rust "$rust"
 ```
 
 The managed harness starts both processes on loopback with temporary homes, separate authentication sessions, and the same signing key for deterministic registration. It compares HTTP status, selected headers and raw body bytes, and compares WebSocket application frames without reserializing JSON. The GitHub suite also compares the writes each server makes to an isolated provider. The relay suite runs upstream HTTP handlers with test storage and local keys. The orchestration suite restarts both servers and checks opaque thread IDs, conflict responses and command replay. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to the GitHub suite to include timestamped reads. A separate Chromium suite compares rendered frames and file transfers using the same browser installation. See `scripts/preview_provider_parity.py --help`.
+
+The settings suite compares complete RPC frames, sparse settings files and secret sidecars. It exercises schema errors, redaction, credential migration, managed writes, recovery, and restarts. The config snapshot suite compares deterministic fields and complete settings change events. CI also checks the native decoder against inputs evaluated by the pinned Effect schemas.
 
 Fixtures cover specific requests and state transitions. Time, random credentials, provider output and platform-specific behavior still limit comparisons. Remaining work includes orchestration projections and replay, coding-agent sessions, provider-specific integrations, guest access through a managed tunnel, relay provisioning and push delivery, MCP tools, and protocol headers and error cases outside the fixtures. The inventory in `contracts/` lists the upstream surface. Regenerate it with `python3 scripts/update_contract_inventory.py /tmp/t3code-reference`.
 

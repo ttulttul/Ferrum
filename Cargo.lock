@@ -713,6 +713,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1426,6 +1436,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "ryu-js"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1729,6 +1745,7 @@ dependencies = [
  "futures-util",
  "hmac",
  "hostname",
+ "if-addrs",
  "indexmap",
  "jsonwebtoken",
  "portable-pty",
@@ -1737,6 +1754,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rusqlite",
+ "ryu-js",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1748,8 +1766,10 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "url",
  "uuid",
+ "winreg",
 ]
 
 [[package]]

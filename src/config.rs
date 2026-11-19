@@ -1,4 +1,3 @@
-use serde_json::Value;
 use std::{
     env, fs,
     net::IpAddr,
@@ -106,7 +105,6 @@ pub struct RuntimeConfig {
     pub tailscale_serve: Option<bool>,
     pub tailscale_serve_port: Option<u16>,
     pub dev_allowed_origins: Vec<String>,
-    pub settings: Value,
 }
 
 fn bool_env(name: &str) -> Option<bool> {
@@ -120,16 +118,7 @@ fn bool_env(name: &str) -> Option<bool> {
 }
 
 impl RuntimeConfig {
-    pub fn load(paths: &ServerPaths) -> anyhow::Result<Self> {
-        let settings = match fs::read_to_string(&paths.settings) {
-            Ok(raw) => {
-                serde_json::from_str(&raw).unwrap_or_else(|_| Value::Object(Default::default()))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Value::Object(Default::default())
-            }
-            Err(error) => return Err(error.into()),
-        };
+    pub fn load() -> anyhow::Result<Self> {
         let dev_allowed_origins = env::var("T3CODE_DEV_ALLOWED_ORIGINS")
             .unwrap_or_default()
             .split(',')
@@ -149,7 +138,6 @@ impl RuntimeConfig {
                 .ok()
                 .and_then(|v| v.parse().ok()),
             dev_allowed_origins,
-            settings,
         })
     }
 }
@@ -159,14 +147,6 @@ pub fn default_base_dir() -> PathBuf {
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| dirs_home().join(".t3"))
-}
-
-pub fn write_settings(paths: &ServerPaths, settings: &Value) -> anyhow::Result<()> {
-    let temporary = paths.settings.with_extension("json.tmp");
-    let contents = format!("{}\n", serde_json::to_string_pretty(settings)?);
-    fs::write(&temporary, contents)?;
-    fs::rename(temporary, &paths.settings)?;
-    Ok(())
 }
 
 fn dirs_home() -> PathBuf {
@@ -195,16 +175,5 @@ mod tests {
             state.terminal_logs,
             PathBuf::from("/tmp/t3-home/userdata/logs/terminals")
         );
-    }
-
-    #[test]
-    fn settings_write_is_atomic_and_round_trips_unknown_keys() {
-        let root = tempfile::tempdir().unwrap();
-        let paths = ServerPaths::from_state_dir(root.path());
-        paths.ensure().unwrap();
-        let settings = serde_json::json!({"futureSetting":{"enabled":true},"providerInstances":{}});
-        write_settings(&paths, &settings).unwrap();
-        assert_eq!(RuntimeConfig::load(&paths).unwrap().settings, settings);
-        assert!(!paths.settings.with_extension("json.tmp").exists());
     }
 }
