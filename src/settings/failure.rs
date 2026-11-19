@@ -2,6 +2,8 @@ use serde_json::{json, Value};
 use std::{
     fmt, io,
     path::{Path, PathBuf},
+    process::Command,
+    sync::OnceLock,
 };
 
 #[derive(Debug)]
@@ -126,9 +128,7 @@ fn platform(error: &io::Error, method: &str, syscall: &str, path: &Path) -> Valu
     };
     let node_message = if errno.is_empty() {
         error.to_string()
-    } else if kind == io::ErrorKind::IsADirectory {
-        // Node's fs.readFile error for a directory omits the path from the
-        // syscall suffix. Keep this message byte-for-byte compatible.
+    } else if kind == io::ErrorKind::IsADirectory && !node_directory_error_includes_path() {
         format!("{errno}: {description}, {syscall}")
     } else {
         format!(
@@ -138,6 +138,22 @@ fn platform(error: &io::Error, method: &str, syscall: &str, path: &Path) -> Valu
     };
     json!({"name":"PlatformError","message":format!("{reason}: FileSystem.{method} ({})",path.display()),
            "cause":{"name":"Error","message":node_message}})
+}
+
+fn node_directory_error_includes_path() -> bool {
+    static INCLUDES_PATH: OnceLock<bool> = OnceLock::new();
+    *INCLUDES_PATH.get_or_init(|| {
+        let output = Command::new("node").arg("--version").output();
+        let Ok(output) = output else {
+            return false;
+        };
+        let version = String::from_utf8_lossy(&output.stdout);
+        let major = version
+            .strip_prefix('v')
+            .and_then(|value| value.split('.').next())
+            .and_then(|value| value.parse::<u32>().ok());
+        major.is_some_and(|major| major >= 24)
+    })
 }
 
 pub(super) fn file(
