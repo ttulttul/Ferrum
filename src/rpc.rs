@@ -2076,10 +2076,117 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"snapshotSequence":sequence,"threads":store.threads.values().filter(|t| t.title.to_lowercase().contains(&query)).collect::<Vec<_>>(),"complete":true})
         }
         "orchestration.searchThread" => {
-            json!({"complete":true,"snapshotSequence":sequence,"totalMatches":0,"activeIndex":0,"match":null})
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            let Some(thread) = store.threads.get(thread_id) else {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationV2SearchThreadError",
+                    "cause":{"name":"OrchestratorProjectionError",
+                        "message":format!("Failed to load orchestration projection for thread {thread_id}."),
+                        "cause":{"name":"ProjectionStoreThreadNotFoundError",
+                            "message":format!("No orchestration projection exists for thread {thread_id}.")}}
+                }}));
+            };
+            let query = params["query"].as_str().unwrap_or_default();
+            let query_folded = query
+                .to_lowercase()
+                .replace('ς', "σ")
+                .replace(['‘', '’'], "'");
+            let mut entries = Vec::new();
+            for message in &thread.messages {
+                let text = message
+                    .content
+                    .to_lowercase()
+                    .replace('ς', "σ")
+                    .replace(['‘', '’'], "'");
+                if query_folded.is_empty() {
+                    continue;
+                }
+                let mut count = 0usize;
+                let mut cursor = 0usize;
+                while cursor <= text.len() {
+                    let Some(offset) = text[cursor..].find(&query_folded) else {
+                        break;
+                    };
+                    count += 1;
+                    cursor += offset + query_folded.len();
+                    if query_folded.is_empty() {
+                        break;
+                    }
+                }
+                if count > 0 {
+                    entries.push((message.id.clone(), count));
+                }
+            }
+            let total_matches: usize = entries.iter().map(|(_, count)| *count).sum();
+            let requested = params["index"].as_u64().unwrap_or(0) as usize;
+            let offset = params["offset"].as_i64().unwrap_or(0);
+            let active_index = if total_matches == 0 {
+                0
+            } else if params.get("index").is_none() {
+                ((requested as i64 + offset).rem_euclid(total_matches as i64)) as usize
+            } else {
+                requested.min(total_matches.saturating_sub(1))
+            };
+            let mut start_index = 0usize;
+            let mut navigation = Vec::new();
+            let mut selected = None;
+            let mut remaining = active_index;
+            for (entry_id, count) in &entries {
+                navigation.push(
+                    json!({"entryId":entry_id,"runId":null,"startIndex":start_index,"count":count}),
+                );
+                if selected.is_none() && remaining < *count {
+                    selected =
+                        Some(json!({"entryId":entry_id,"runId":null,"occurrence":remaining}));
+                } else if selected.is_none() {
+                    remaining -= *count;
+                }
+                start_index += count;
+            }
+            json!({"complete":true,"snapshotSequence":sequence,"totalMatches":total_matches,"activeIndex":active_index,"navigation":navigation,"match":selected})
         }
         "orchestration.getOlderSettledThreads" => {
-            json!({"snapshotSequence":sequence,"threads":[],"counts":[]})
+            let before = params["before"]["settledAt"].as_str().unwrap_or_default();
+            let after_id = params["before"]["threadId"].as_str();
+            let project_ids = params["projectIds"].as_array();
+            let in_projects = |thread: &&crate::Thread| {
+                project_ids.is_none_or(|ids| {
+                    ids.iter()
+                        .any(|id| id.as_str() == Some(thread.project_id.as_str()))
+                })
+            };
+            let mut older: Vec<&crate::Thread> = store
+                .threads
+                .values()
+                .filter(|thread| {
+                    thread.settled
+                        && !thread.archived
+                        && in_projects(&thread)
+                        && thread.row["settledAt"].as_str().is_some_and(|at| {
+                            at < before
+                                || (at == before
+                                    && after_id.is_some_and(|id| thread.id.as_str() > id))
+                        })
+                })
+                .collect();
+            older.sort_by(|a, b| {
+                b.row["settledAt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(a.row["settledAt"].as_str().unwrap_or_default())
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            let mut counts = std::collections::BTreeMap::<String, usize>::new();
+            for thread in &older {
+                *counts.entry(thread.project_id.clone()).or_default() += 1;
+            }
+            let limit = params["limit"].as_i64().unwrap_or(0).clamp(0, 50) as usize;
+            let threads = if limit == 0 {
+                Vec::new()
+            } else {
+                older.into_iter().take(limit).map(|t| t.shell()).collect()
+            };
+            json!({"snapshotSequence":sequence,"threads":threads,"counts":counts.into_iter().map(|(project_id,count)|json!({"projectId":project_id,"count":count})).collect::<Vec<_>>()})
         }
         "orchestration.getThreadProjection" => thread(&params["threadId"])
             .map(|t| t.projection())
@@ -2107,8 +2214,26 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 }}));
             }
         }
-        "orchestration.getTurnItem" => json!({"item":null}),
-        "orchestration.getNativeChildWork" => json!({"children":[]} ),
+        "orchestration.getTurnItem" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            if !store.threads.contains_key(thread_id) {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestratorProjectionError",
+                    "message":format!("Failed to load orchestration projection for thread {thread_id}."),
+                    "cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}
+                }}));
+            }
+            json!({"item":null})
+        }
+        "orchestration.getNativeChildWork" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            if !store.threads.contains_key(thread_id) {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationV2GetNativeChildWorkError","threadId":thread_id
+                }}));
+            }
+            json!({"children":[]} )
+        }
         "orchestration.getWorkflowScript" => {
             let path = params["scriptPath"].as_str().unwrap_or_default();
             let invalid = !std::path::Path::new(path).is_absolute()
