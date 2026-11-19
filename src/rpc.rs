@@ -2101,7 +2101,37 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"threadIds":store.threads.values().filter(|t| Some(t.cwd.as_str()) == params["worktreePath"].as_str()).map(|t|&t.id).collect::<Vec<_>>()})
         }
         "orchestration.getArchivedShellSnapshot" => {
-            json!({"schemaVersion":2,"snapshotSequence":sequence,"projects":[],"threads":store.threads.values().filter(|t|t.archived).map(|t|t.shell()).collect::<Vec<_>>()})
+            let projects = store
+                .project_rows
+                .values()
+                .filter(|row| row["deletedAt"].is_null())
+                .map(|row| {
+                    let mut out = serde_json::Map::new();
+                    for key in [
+                        "id",
+                        "title",
+                        "hasCustomTitle",
+                        "workspaceRoot",
+                        "repositoryIdentity",
+                        "defaultModelSelection",
+                        "defaultThreadEnvMode",
+                        "autoPull",
+                        "faviconPath",
+                        "projectIcon",
+                        "scripts",
+                        "pinnedAt",
+                        "archivedAt",
+                        "createdAt",
+                        "updatedAt",
+                    ] {
+                        if let Some(value) = row.get(key) {
+                            out.insert(key.to_owned(), value.clone());
+                        }
+                    }
+                    Value::Object(out)
+                })
+                .collect::<Vec<_>>();
+            json!({"schemaVersion":2,"snapshotSequence":sequence,"projects":projects,"threads":store.threads.values().filter(|t|t.archived).map(|t|t.shell()).collect::<Vec<_>>()})
         }
         "orchestration.searchThreads" => {
             let query = params["query"].as_str().unwrap_or_default().to_lowercase();

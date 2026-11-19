@@ -19,7 +19,7 @@ pub(super) fn wire(p: &Project) -> Value {
         time::OffsetDateTime::from_unix_timestamp(p.created_at as i64)
             .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
     );
-    json!({"id":p.id,"title":p.name,"workspaceRoot":p.path,"repositoryIdentity":null,"faviconPath":null,"projectIcon":null,"defaultModelSelection":null,"defaultThreadEnvMode":null,"autoPull":false,"scripts":[],"pinnedAt":null,"archivedAt":null,"createdAt":at,"updatedAt":at,"deletedAt":null})
+    json!({"id":p.id,"title":p.name,"hasCustomTitle":false,"workspaceRoot":p.path,"repositoryIdentity":null,"faviconPath":null,"projectIcon":null,"defaultModelSelection":null,"defaultThreadEnvMode":null,"autoPull":false,"scripts":[],"pinnedAt":null,"archivedAt":null,"createdAt":at,"updatedAt":at,"deletedAt":null})
 }
 pub async fn snapshot(State(s): State<Arc<AppState>>) -> Json<Value> {
     let store = s.store.read().await;
