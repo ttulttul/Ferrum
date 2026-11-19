@@ -172,18 +172,22 @@ async fn launch_project_clone(
     destination: String,
 ) {
     let (cancel_tx, cancel_rx) = oneshot::channel();
-    let attempt_sequence = state
-        .project_clone_states
-        .lock()
-        .await
-        .get(&project_id)
-        .and_then(|snapshot| snapshot["sequence"].as_u64())
-        .unwrap_or_default();
-    state
-        .project_clone_cancellations
-        .lock()
-        .await
-        .insert(project_id.clone(), (attempt_sequence, cancel_tx));
+    let attempt_sequence = {
+        let states = state.project_clone_states.lock().await;
+        let Some(snapshot) = states.get(&project_id) else {
+            return;
+        };
+        if snapshot["phase"] != "running" {
+            return;
+        }
+        let attempt_sequence = snapshot["sequence"].as_u64().unwrap_or_default();
+        state
+            .project_clone_cancellations
+            .lock()
+            .await
+            .insert(project_id.clone(), (attempt_sequence, cancel_tx));
+        attempt_sequence
+    };
     tokio::spawn(async move {
         let command = tokio::process::Command::new("git")
             .args(["clone", "--", remote.as_str(), destination.as_str()])
