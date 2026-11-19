@@ -17,6 +17,7 @@ pub(crate) async fn dispatch_orchestration_command(
                 .then(|| command["targetThreadId"].as_str())
                 .flatten()
         })
+        .or_else(|| command["parentThreadId"].as_str())
         .unwrap_or_default();
     let error = |detail: String, cause: Value| json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":command_id,"commandType":kind,"message":detail,"detail":detail,"cause":cause});
     let dispatch_error = |detail: String| {
@@ -1085,9 +1086,64 @@ async fn apply_command(
         }
         "runtime-request.respond" => {
             let request_id = command["requestId"].as_str().unwrap_or_default();
-            return Err(anyhow::anyhow!(format!(
-                "Runtime request {request_id} was not found."
-            )));
+            let thread_id = thread_id.unwrap_or_default();
+            let current = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| {
+                    thread
+                        .row
+                        .get("runtimeRequests")
+                        .and_then(Value::as_array)
+                        .and_then(|requests| {
+                            requests.iter().find(|request| request["id"] == request_id)
+                        })
+                })
+                .cloned();
+            let Some(request) = current else {
+                return Err(anyhow::anyhow!(format!(
+                    "Runtime request {request_id} was not found."
+                )));
+            };
+            if request["status"]
+                .as_str()
+                .is_some_and(|status| status != "pending")
+            {
+                return Err(anyhow::anyhow!(format!(
+                    "Runtime request {request_id} is {}.",
+                    request["status"].as_str().unwrap_or("resolved")
+                )));
+            }
+            let mut requests = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.row["runtimeRequests"].as_array().cloned())
+                .unwrap_or_default();
+            if let Some(existing) = requests
+                .iter_mut()
+                .find(|candidate| candidate["id"] == request_id)
+            {
+                existing["status"] = json!("resolved");
+                existing["decision"] = command.get("decision").cloned().unwrap_or(Value::Null);
+                existing["feedback"] = command.get("feedback").cloned().unwrap_or(Value::Null);
+                existing["answers"] = command.get("answers").cloned().unwrap_or(Value::Null);
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: thread_id.to_owned(),
+                        patch: json!({"row":{"runtimeRequests":requests}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
         }
         "thread.user-input.dismiss" => {
             return Err(anyhow::anyhow!("This question has already been answered."));
@@ -1225,8 +1281,6 @@ async fn apply_command(
                 .or_else(|| command["targetThreadId"].as_str())
             {
                 value
-            } else if !receipt.thread_id.is_empty() {
-                receipt.thread_id.as_str()
             } else {
                 generated_child_id = format!(
                     "delegated-task:{}",
@@ -1258,6 +1312,34 @@ async fn apply_command(
             row["lineage"] = json!({"parentThreadId":parent_thread_id,"relationshipToParent":"subagent","rootThreadId":parent.row["lineage"]["rootThreadId"].as_str().unwrap_or(parent_thread_id),"sideChat":false});
             row["forkedFrom"] = json!({"type":"node","nodeId":command["parentNodeId"]});
             let prompt = command["task"].as_str().unwrap_or_default();
+            let task_id = format!(
+                "node:delegated-task:{}",
+                command["commandId"].as_str().unwrap_or_default()
+            );
+            let task = json!({
+                "id": task_id,
+                "threadId": parent_thread_id,
+                "runId": command["parentRunId"],
+                "parentNodeId": command["parentNodeId"],
+                "origin": "app_owned",
+                "createdBy": command["createdBy"].as_str().unwrap_or("user"),
+                "driver": command["modelSelection"]["instanceId"],
+                "providerInstanceId": command["modelSelection"]["instanceId"],
+                "providerThreadId": Value::Null,
+                "childThreadId": target_thread_id,
+                "nativeTaskRef": Value::Null,
+                "prompt": prompt,
+                "title": command.get("title").cloned().unwrap_or(Value::Null),
+                "model": command["modelSelection"]["model"],
+                "modelSelection": command["modelSelection"],
+                "completionWake": command.get("completionWake").cloned().unwrap_or(json!("settled_only")),
+                "completionDelivery": {"state":"pending","observedByRunId":Value::Null},
+                "status": "running",
+                "result": Value::Null,
+                "startedAt": at,
+                "completedAt": Value::Null,
+                "updatedAt": at
+            });
             let message = ConversationMessage {
                 id: format!(
                     "{}:task",
@@ -1289,10 +1371,162 @@ async fn apply_command(
                 tags: vec![],
                 checkpoints: vec![],
             };
+            let mut subagents = parent.row["subagents"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            subagents.push(task);
+            state
+                .commit(Event::ThreadPatched {
+                    thread_id: parent_thread_id.to_owned(),
+                    patch: json!({"row":{"subagents":subagents}}),
+                })
+                .await?;
             return Ok(state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
                 .await?
                 .id);
+        }
+        "delegated_task.wake-policy"
+        | "delegated_task.completion-delivery.acknowledge"
+        | "delegated_task.completion-delivery.dispose" => {
+            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
+            let task_id = command["taskId"].as_str().unwrap_or_default();
+            let mut subagents = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(parent_thread_id)
+                .and_then(|thread| thread.row["subagents"].as_array().cloned())
+                .unwrap_or_default();
+            let Some(task) = subagents.iter_mut().find(|task| task["id"] == task_id) else {
+                return Err(anyhow::anyhow!(format!(
+                    "Delegated task {task_id} is not an app-owned task of thread {parent_thread_id}."
+                )));
+            };
+            if command_type == "delegated_task.wake-policy" {
+                let wake = command["completionWake"].as_str().unwrap_or_default();
+                if task["completionWake"].as_str() == Some(wake) {
+                    return Err(anyhow::anyhow!(format!(
+                        "Delegated task {task_id} already wakes the parent with completionWake {wake}."
+                    )));
+                }
+                task["completionWake"] = json!(wake);
+            } else {
+                let delivery_state = if command_type.ends_with("acknowledge") {
+                    "acknowledged"
+                } else {
+                    "disposed"
+                };
+                let current = task["completionDelivery"]["state"].as_str();
+                if current == Some(delivery_state)
+                    || (delivery_state == "acknowledged" && current == Some("disposed"))
+                {
+                    return Ok(state
+                        .commit_receipted(
+                            Event::ThreadPatched {
+                                thread_id: parent_thread_id.to_owned(),
+                                patch: json!({"row":{"subagents":subagents}}),
+                            },
+                            Some(receipt.clone()),
+                        )
+                        .await?
+                        .id);
+                }
+                task["completionDelivery"] = json!({
+                    "state": delivery_state,
+                    "observedByRunId": command.get("observedByRunId").cloned().unwrap_or(Value::Null)
+                });
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: parent_thread_id.to_owned(),
+                        patch: json!({"row":{"subagents":subagents}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "notification.delivery.accept" => {
+            let thread_id = thread_id.unwrap_or_default();
+            let message_id = command["messageId"].as_str().unwrap_or_default();
+            let exists = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .is_some_and(|thread| {
+                    thread
+                        .messages
+                        .iter()
+                        .any(|message| message.id == message_id)
+                });
+            if !exists {
+                return Err(anyhow::anyhow!(format!(
+                    "Notification message {message_id} was not found."
+                )));
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::CommandDispatched {
+                        command_id: receipt.command_id.clone(),
+                        command_type: command_type.into(),
+                        thread_id: Some(thread_id.to_owned()),
+                        payload: command.clone(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "checkpoint.rollback" => {
+            let thread_id = thread_id.unwrap_or_default();
+            let checkpoint_id = command["checkpointId"].as_str().unwrap_or_default();
+            let target = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| {
+                    thread.checkpoints.iter().find(|checkpoint| {
+                        format!("checkpoint:{}:{}", thread_id, checkpoint.turn_count)
+                            == checkpoint_id
+                    })
+                })
+                .cloned();
+            let Some(target) = target else {
+                return Err(anyhow::anyhow!(format!(
+                    "Checkpoint {checkpoint_id} was not found."
+                )));
+            };
+            if !target.ready && command.get("restoreFiles").and_then(Value::as_bool) != Some(false)
+            {
+                return Err(anyhow::anyhow!(format!(
+                    "Checkpoint {checkpoint_id} is missing and cannot be restored."
+                )));
+            }
+            let expected_scope = format!("scope:{}", thread_id);
+            if command["scopeId"].as_str() != Some(expected_scope.as_str()) {
+                return Err(anyhow::anyhow!(format!(
+                    "Checkpoint {checkpoint_id} belongs to scope {expected_scope}, not {}.",
+                    command["scopeId"].as_str().unwrap_or_default()
+                )));
+            }
+            let second = state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: thread_id.to_owned(),
+                        patch: json!({"row":{"rollbackRequestId":receipt.command_id,"rollbackFailure":Value::Null}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?;
+            return Ok(second.id);
         }
         "thread.created.record" => {
             let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
