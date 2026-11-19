@@ -38,6 +38,7 @@ pub async fn session(
     principal: crate::auth_service::Session,
 ) {
     let principal = Arc::new(principal);
+    state.auth.socket_presence(&principal.id, true);
     let invalidated = state.auth.invalidated(&principal);
     tokio::pin!(invalidated);
     let mut calls = FuturesUnordered::<BoxFuture<'static, (String, Reply)>>::new();
@@ -109,6 +110,7 @@ pub async fn session(
             break;
         }
     }
+    state.auth.socket_presence(&principal.id, false);
 }
 
 // Subscribe before reading the initial snapshot so updates during the read are queued.
@@ -152,6 +154,23 @@ async fn run_call(
             let _ = chunks.send((id.to_owned(), values)).await;
         }
     };
+    if method == "subscribeAuthAccess" {
+        let (mut change, mut changes) = state.auth.subscribe_access();
+        let mut revision = 1;
+        loop {
+            send(json!([change.event(&principal.id, revision)])).await;
+            change = match changes.recv().await {
+                Ok(change) => change,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let (current, subscribed) = state.auth.subscribe_access();
+                    changes = subscribed;
+                    current
+                }
+                Err(broadcast::error::RecvError::Closed) => return Reply::Success(Value::Null),
+            };
+            revision += 1;
+        }
+    }
     if method == "git.runStackedAction" {
         let (tx, mut events) = mpsc::channel(1);
         let workflow = crate::local_services::git_workflow::stream(state, params, tx);

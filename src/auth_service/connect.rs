@@ -64,7 +64,7 @@ impl AuthService {
         if scopes.is_some() {
             return Err("invalid_scope");
         }
-        self.records.update(|r| {
+        self.update(|r| {
             let at = now();
             let mut s = r
                 .sessions
@@ -90,7 +90,7 @@ impl AuthService {
         binding: &str,
         require_approval: bool,
     ) -> Result<(String, i64), &'static str> {
-        self.records.update(|r| {
+        self.update(|r| {
             let at = now();
             r.links.retain(|_, g| g.expires > at);
             let wait = require_approval && !r.devices.contains(binding);
@@ -113,6 +113,9 @@ impl AuthService {
                 key(&code),
                 Grant {
                     id: Uuid::new_v4().to_string(),
+                    created: at,
+                    label: Some("T3 Connect".into()),
+                    requested_client: None,
                     scopes: STANDARD.iter().map(|p| p.to_string()).collect(),
                     expires,
                     purpose: None,
@@ -125,7 +128,7 @@ impl AuthService {
         })
     }
     pub(crate) fn approve_device(&self, id: &str) -> Result<bool, &'static str> {
-        self.records.update(|r| {
+        self.update(|r| {
             let Some(bound) = r
                 .links
                 .values()
@@ -134,6 +137,16 @@ impl AuthService {
             else {
                 return Ok(false);
             };
+            r.device_rows.insert(
+                bound.clone(),
+                (
+                    now(),
+                    r.links
+                        .values()
+                        .find(|g| g.id == id)
+                        .and_then(|g| g.requested_client.clone()),
+                ),
+            );
             r.devices.insert(bound.clone());
             Ok(true)
         })
@@ -142,10 +155,11 @@ impl AuthService {
         r.sessions
             .retain(|_, s| s.proof_key.as_deref() != Some(binding));
         r.links.retain(|_, g| g.binding.as_deref() != Some(binding));
+        r.device_rows.remove(binding);
         r.devices.remove(binding)
     }
     pub(crate) fn revoke_device(&self, binding: &str) -> Result<bool, &'static str> {
-        let removed = self.records.update(|r| Ok(Self::remove_device(r, binding)));
+        let removed = self.update(|r| Ok(Self::remove_device(r, binding)));
         if removed.is_ok() {
             self.invalidations.send_replace(());
         }

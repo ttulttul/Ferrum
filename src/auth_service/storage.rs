@@ -42,6 +42,13 @@ impl<T: Default + DeserializeOwned + Serialize + Clone> Storage<T> {
         &self,
         edit: impl FnOnce(&mut T) -> Result<R, &'static str>,
     ) -> Result<R, &'static str> {
+        self.update_observed(edit, |_, _| {})
+    }
+    pub(crate) fn update_observed<R>(
+        &self,
+        edit: impl FnOnce(&mut T) -> Result<R, &'static str>,
+        committed: impl FnOnce(&T, &T),
+    ) -> Result<R, &'static str> {
         let mut current = self.state.lock().unwrap();
         let mut next = current.clone();
         let result = edit(&mut next)?;
@@ -54,6 +61,7 @@ impl<T: Default + DeserializeOwned + Serialize + Clone> Storage<T> {
                 .map_err(|_| "internal_error")?;
             tmp.persist(path).map_err(|_| "internal_error")?;
         }
+        committed(&current, &next);
         *current = next;
         Ok(result)
     }

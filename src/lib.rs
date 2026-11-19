@@ -680,7 +680,11 @@ pub async fn run_server(state: Arc<AppState>, listen: std::net::SocketAddr) -> a
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     info!(%listen, "t3code server listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 pub fn default_data_dir() -> PathBuf {

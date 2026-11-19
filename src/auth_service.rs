@@ -1,3 +1,4 @@
+mod access;
 mod connect;
 pub(crate) mod permissions;
 pub(crate) mod storage;
@@ -81,6 +82,10 @@ pub struct Session {
     pub id: String,
     pub permissions: Vec<String>,
     pub method: String,
+    #[serde(default)]
+    issued: i64,
+    #[serde(default)]
+    client: Value,
     pub expires: i64,
     pub owner: bool,
     #[serde(default)]
@@ -105,6 +110,12 @@ impl Session {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Grant {
+    #[serde(default)]
+    created: i64,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    requested_client: Option<Value>,
     id: String,
     scopes: Vec<String>,
     expires: i64,
@@ -122,6 +133,12 @@ struct Credentials {
     devices: std::collections::HashSet<String>,
     #[serde(default)]
     used_proofs: HashMap<String, i64>,
+    #[serde(default)]
+    device_rows: HashMap<String, (i64, Option<Value>)>,
+    #[serde(default)]
+    last_connected: HashMap<String, i64>,
+    #[serde(skip)]
+    open_sockets: HashMap<String, usize>,
     links: HashMap<String, Grant>,
     #[serde(default)]
     signing_key: Option<[u8; 32]>,
@@ -140,6 +157,7 @@ pub struct AuthService {
     bootstrap_expires: i64,
     port: u16,
     desktop: bool,
+    changes: tokio::sync::broadcast::Sender<access::Change>,
     invalidations: tokio::sync::watch::Sender<()>,
 }
 impl Default for AuthService {
@@ -162,6 +180,7 @@ impl AuthService {
             bootstrap_expires: now() + DAY,
             port: 3773,
             desktop: true,
+            changes: tokio::sync::broadcast::channel(256).0,
             invalidations: tokio::sync::watch::channel(()).0,
         }
     }
@@ -247,8 +266,9 @@ impl AuthService {
         let owner = !credential.is_empty()
             && self.bootstrap_expires > at
             && key(&self.bootstrap) == key(credential);
-        let result = self.records.update(|records| {
+        let result = self.update(|records| {
             let mut connect = false;
+            let mut client = crate::access_http::client_metadata();
             let mut permissions = if owner {
                 STANDARD.iter().map(|s| s.to_string()).collect()
             } else {
@@ -257,6 +277,15 @@ impl AuthService {
                     .remove(&key(&credential.to_ascii_uppercase()))
                     .filter(|g| g.expires > at && g.purpose.is_none() && g.access.is_none())
                     .ok_or("invalid_credential")?;
+                if let Some(label) = &grant.label {
+                    let mut labeled = json!({"label":label});
+                    labeled
+                        .as_object_mut()
+                        .unwrap()
+                        .extend(client.as_object().unwrap().clone());
+                    labeled["label"] = json!(label);
+                    client = labeled;
+                }
                 if let Some(binding) = &grant.binding {
                     if Some(binding.as_str()) != proof {
                         return Err("invalid_credential");
@@ -265,6 +294,10 @@ impl AuthService {
                         return Err("connect_approval_pending");
                     }
                     records.devices.insert(binding.clone());
+                    records.device_rows.insert(
+                        binding.clone(),
+                        (at, Some(crate::access_http::client_metadata())),
+                    );
                     connect = true;
                 }
                 grant.scopes
@@ -279,6 +312,8 @@ impl AuthService {
             let session = Session {
                 id: Uuid::new_v4().to_string(),
                 owner,
+                issued: at,
+                client,
                 method: method.into(),
                 expires: at + ttl,
                 permissions,
@@ -298,6 +333,18 @@ impl AuthService {
             }
             Ok(Self::save_session(records, session, at))
         });
+        if matches!(&result, Err("connect_approval_pending")) {
+            self.update(|r| {
+                if let Some(g) = r
+                    .links
+                    .get_mut(&key(&credential.to_ascii_uppercase()))
+                    .filter(|g| g.binding.as_deref() == proof && g.requested_client.is_none())
+                {
+                    g.requested_client = Some(crate::access_http::client_metadata());
+                }
+                Ok(())
+            })?;
+        }
         if replace.is_some() && result.is_ok() {
             self.invalidations.send_replace(());
         }
@@ -310,7 +357,7 @@ impl AuthService {
         peer_link: bool,
     ) -> Result<String, &'static str> {
         let k = key(&code.trim().to_ascii_uppercase());
-        self.records.update(|r| {
+        self.update(|r| {
             let grant = r
                 .links
                 .get(&k)
@@ -429,12 +476,15 @@ impl AuthService {
         if let Some(v) = access {
             response["access"] = json!(v)
         }
-        self.records.update(|r| {
+        self.update(|r| {
             r.links.retain(|_, g| g.expires > now());
             r.links.insert(
                 key(&code),
                 Grant {
                     id,
+                    created: expires - 300_000,
+                    label: label.map(str::to_owned),
+                    requested_client: None,
                     expires,
                     scopes: permissions,
                     purpose: purpose.map(String::from),
@@ -447,7 +497,7 @@ impl AuthService {
         })
     }
     pub fn revoke_pairing(&self, id: &str) -> Result<bool, &'static str> {
-        self.records.update(|r| {
+        self.update(|r| {
             let n = r.links.len();
             r.links.retain(|_, g| g.id != id);
             Ok(r.links.len() != n)
@@ -457,7 +507,7 @@ impl AuthService {
         if current.id == id {
             return Err("current_session_revoke_not_allowed");
         }
-        let result = self.records.update(|r| {
+        let result = self.update(|r| {
             let n = r.sessions.len();
             let bound = r
                 .sessions
@@ -474,10 +524,12 @@ impl AuthService {
         result
     }
     pub fn revoke_others(&self, current: &Session) -> Result<usize, &'static str> {
-        let result = self.records.update(|r| {
+        let result = self.update(|r| {
             let mut n = std::collections::HashSet::new();
             r.devices
                 .retain(|key| Some(key) == current.proof_key.as_ref());
+            r.device_rows
+                .retain(|key, _| Some(key) == current.proof_key.as_ref());
             r.links
                 .retain(|_, g| g.binding.is_none() || g.binding == current.proof_key);
             r.sessions.retain(|_, s| {
@@ -499,7 +551,6 @@ impl AuthService {
     }
     pub async fn revoke_session(&self, token: &str) -> bool {
         let result = self
-            .records
             .update(|r| Ok(r.sessions.remove(&key(token)).is_some()))
             .unwrap_or(false);
         self.invalidations.send_replace(());

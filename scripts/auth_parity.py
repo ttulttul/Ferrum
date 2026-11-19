@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import secrets
 import shlex
+import sqlite3
 import tempfile
 import time
 import uuid
@@ -20,6 +21,29 @@ from websockets.sync.client import connect
 
 import parity_harness as harness
 from relay_parity import b64 as base64url, token as signed_jwt
+
+
+# This persisted pairing record gives both databases the same public id and timestamps.
+# Revoking it creates a live frame whose entire payload can be compared byte-for-byte.
+FIXED_LINK = "00000000-0000-4000-8000-000000000007"
+FIXED_CODE = "23456789ABCD"
+FIXED_SCOPES = ["orchestration:read"]
+FIXED_LABEL = "Parity fixture"
+
+def seed_link(root, rust):
+    if rust:
+        userdata=root/"userdata"
+        userdata.mkdir(parents=True,exist_ok=True)
+        grant={"id":FIXED_LINK,"created":1735689600000,"expires":4102444800000,
+               "label":FIXED_LABEL,"scopes":FIXED_SCOPES,"purpose":None,"access":None}
+        key=base64url(hashlib.sha256(FIXED_CODE.encode()).digest())
+        (userdata/"environment-auth.json").write_bytes(harness.encode({"sessions":{},"links":{key:grant}}))
+    else:
+        with sqlite3.connect(root/"userdata"/"statev2.sqlite") as db:
+            db.execute("""insert into auth_pairing_links
+                (id,credential,method,scopes,subject,label,created_at,expires_at)
+                values (?,?,?,?,?,?,?,?)""",(FIXED_LINK,FIXED_CODE,"one-time-token",json.dumps(FIXED_SCOPES),
+                "one-time-token",FIXED_LABEL,"2025-01-01T00:00:00.000Z","2100-01-01T00:00:00.000Z"))
 
 
 def exercise(stack, url, owner_cookie, relay_key):
@@ -37,6 +61,35 @@ def exercise(stack, url, owner_cookie, relay_key):
         status, _, body = post("/api/auth/pairing-token", {"scopes": ["orchestration:read"]})
         assert status == 200, (status, body)
         return json.loads(body)["credential"]
+
+    def access_subscription():
+        status, _, body = post("/api/auth/websocket-ticket/rpc",None)
+        assert status==200
+        ticket=json.loads(body)["ticket"]
+        sock=connect(url.replace("http:","ws:")+"/ws?"+urlencode({
+            "orchestrationProtocol":"2","wsTicket":ticket}),compression=None,proxy=None)
+        sock.send(harness.encode({"_tag":"Request","id":"access","tag":"subscribeAuthAccess","payload":{},"headers":[]}).decode())
+        return sock
+
+    def read_change(sock):
+        wire=sock.recv(timeout=5)
+        frame=json.loads(wire)
+        assert frame["_tag"]=="Chunk" and len(frame["values"])==1,wire
+        sock.send(harness.encode({"_tag":"Ack","requestId":"access"}).decode())
+        return frame["values"][0],wire
+
+    with access_subscription() as sock:
+        initial,_ = read_change(sock)
+        assert initial["type"]=="snapshot" and initial["revision"]==1
+        snapshot=initial["payload"]
+        session=next(x for x in snapshot["clientSessions"] if x["current"])
+        assert session["connected"] and session["lastConnectedAt"] and session["subject"]=="desktop-bootstrap"
+        observations["access snapshot persisted grant"]=harness.encode(next(x for x in snapshot["pairingLinks"] if x["id"]==FIXED_LINK))
+        observations["access current session metadata"]=harness.encode(session["client"])
+        record("revoke fixture pairing",post("/api/auth/pairing-links/revoke",{"id":FIXED_LINK}))
+        change,wire=read_change(sock)
+        assert change["type"]=="pairingLinkRemoved" and change["revision"]==2 and change["payload"]=={"id":FIXED_LINK}
+        observations["live access pairing removal"]=wire
 
     def link_state():
         return harness.http(url, "GET", "/api/connect/link-state", headers={"Cookie": owner_cookie})
@@ -122,6 +175,28 @@ def exercise(stack, url, owner_cookie, relay_key):
         }).encode(), headers)
     record("bound Connect grant refuses browser bootstrap",post("/api/auth/browser-session",{"credential":grant},""))
     record("bound Connect grant refuses bearer exchange",exchange(grant,bootstrap_type))
+    with access_subscription() as sock:
+        event,_=read_change(sock)
+        pending=next(link for link in event["payload"]["pairingLinks"] if "connectDeviceRequest" in link)
+        assert pending["subject"]=="cloud-connect" and pending["label"]=="T3 Connect"
+        waiting=exchange(grant,bootstrap_type,device_proof("POST","/oauth/token"))
+        assert waiting[0]==403,waiting
+        record("Connect credential waits for approval",waiting)
+        event,_=read_change(sock)
+        assert event["type"]=="pairingLinkUpserted" and event["payload"]["id"]==pending["id"]
+        observations["pending device request metadata"]=harness.encode(event["payload"]["connectDeviceRequest"]["client"])
+        record("approve pending Connect device",post("/api/auth/connect-devices/approve",{"pairingLinkId":pending["id"]}))
+        observed=[]
+        for _ in range(2):
+            event,_=read_change(sock)
+            observed.append(event["type"])
+            if event["type"]=="snapshot":
+                trusted=next(row for row in event["payload"]["connectDevices"] if row["proofKeyThumbprint"]==thumb)
+                assert trusted["verificationCode"]==pending["connectDeviceRequest"]["verificationCode"]
+                assert pending["id"] not in [link["id"] for link in event["payload"]["pairingLinks"]]
+        assert sorted(observed)==["pairingLinkRemoved","snapshot"]
+        observations["approval notification order"]=observed
+
     status, _, data = exchange(grant,bootstrap_type,device_proof("POST","/oauth/token"))
     assert status == 200 and json.loads(data)["token_type"]=="DPoP", data
     access = json.loads(data)["access_token"]
@@ -142,7 +217,19 @@ def exercise(stack, url, owner_cookie, relay_key):
         observations["bound DPoP RPC probe"] = sock.recv(timeout=5)
     record("refuse replay of authenticated HTTP proof",protected("POST",path,proof_header))
     record("Connect session cannot renew",exchange(access,access_type,device_proof("POST","/oauth/token")))
-    record("revoke trusted Connect device",post("/api/auth/connect-devices/revoke",{"proofKeyThumbprint":thumb}))
+    with access_subscription() as sock:
+        initial,_=read_change(sock)
+        device_row=next(x for x in initial["payload"]["connectDevices"] if x["proofKeyThumbprint"]==thumb)
+        assert device_row["approvedAt"] and device_row["verificationCode"]
+        record("revoke trusted Connect device",post("/api/auth/connect-devices/revoke",{"proofKeyThumbprint":thumb}))
+        for revision in range(2,6):
+            change,_=read_change(sock)
+            assert change["revision"]==revision
+            if change["type"]=="snapshot":
+                assert change["payload"]["connectDevices"]==[]
+                break
+        else:
+            raise AssertionError("trusted device removal did not refresh the access snapshot")
     record("revoked Connect access token",protected("POST",path,device_proof("POST",path,access)))
     status, _, data = exchange(issue(),bootstrap_type,device_proof("POST","/oauth/token"))
     assert status == 200, data
@@ -177,7 +264,7 @@ def exercise(stack, url, owner_cookie, relay_key):
     rpc = quote(ticket("rpc"), safe="")
     sock = stack.enter_context(connect(url.replace("http:", "ws:") +
         "/ws?orchestrationProtocol=2&wsTicket=" + rpc, compression=None, proxy=None))
-    for name, payload in [("server.probe", {}), ("terminal.write", {
+    for name, payload in [("server.probe", {}),("subscribeAuthAccess",{}), ("terminal.write", {
         "threadId": "test", "terminalId": "default", "data": "unused"})]:
         sock.send(harness.encode({"_tag":"Request","id":name,"tag":name,"payload":payload,"headers":[]}).decode())
         observations[name] = sock.recv(timeout=5)
@@ -199,7 +286,14 @@ def main():
         relay_key = Ed25519PrivateKey.generate()
         outputs = []
         for i, cmd in enumerate((args.original_command, args.rust_command)):
-            url, cookie = harness.managed_server(stack, shlex.split(cmd), Path(tmp)/str(i), seed, signing_key)
+            root=Path(tmp)/str(i)
+            (root/"userdata").mkdir(parents=True)
+            (root/"userdata"/"settings.json").write_text('{"requireConnectDeviceApproval":true}')
+            if i==1:
+                seed_link(root,True)
+            url, cookie = harness.managed_server(stack, shlex.split(cmd), root, seed, signing_key)
+            if i==0:
+                seed_link(root,False)
             outputs.append(exercise(stack, url, cookie, relay_key))
         failures = 0
         for name, original in outputs[0].items():

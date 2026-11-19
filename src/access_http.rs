@@ -18,7 +18,7 @@ use std::{collections::HashMap, sync::Arc};
 pub(crate) mod connect;
 mod dpop;
 mod guest;
-pub(crate) use dpop::{contextualize, reason as proof_failure, uses_proof};
+pub(crate) use dpop::{client_metadata, contextualize, reason as proof_failure, uses_proof};
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .merge(guest::routes())
@@ -200,21 +200,47 @@ async fn exchange(
         return auth_failure(&h, "invalid_scope");
     }
     let renew = field("subject_token_type") == ACCESS;
-    let result = if let Some(token) = header(&h, "dpop") {
-        match dpop::check(token, None) {
-            Ok(checked) => s
-                .auth
-                .exchange_bound(field("subject_token"), scopes, &checked, renew),
-            Err(e) => return auth_failure(&h, e),
+    let mut presentation = json!({});
+    for (source, dest) in [
+        ("client_label", "label"),
+        ("client_os", "os"),
+        ("client_device_type", "deviceType"),
+    ] {
+        if let Some(value) = input
+            .get(source)
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            if dest == "deviceType"
+                && !matches!(value, "desktop" | "mobile" | "tablet" | "bot" | "unknown")
+            {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            presentation[dest] = json!(value);
         }
-    } else if renew {
+    }
+    let exchange = || {
+        if let Some(token) = header(&h, "dpop") {
+            match dpop::check(token, None) {
+                Ok(checked) => {
+                    s.auth
+                        .exchange_bound(field("subject_token"), scopes, &checked, renew)
+                }
+                Err(e) => Err(e),
+            }
+        } else if renew {
+            Err("invalid_credential")
+        } else {
+            s.auth.exchange(field("subject_token"), scopes)
+        }
+    };
+    if renew && header(&h, "dpop").is_none() {
         let mut r = auth_error(&h, "invalid_credential");
         r.headers_mut()
             .insert("www-authenticate", "DPoP".parse().unwrap());
         return r;
-    } else {
-        s.auth.exchange(field("subject_token"), scopes)
-    };
+    }
+    let result = dpop::PRESENTED.sync_scope(presentation, exchange);
     match result {
         Ok(v) => (SECRET_HEADERS, Json(v)).into_response(),
         Err(e) => auth_failure(&h, e),
