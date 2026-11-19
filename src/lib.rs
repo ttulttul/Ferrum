@@ -1,12 +1,10 @@
-use axum::extract::ws::{Message as WsMessage, WebSocket};
 use axum::{
-    extract::{FromRequest, Path, Request, State, WebSocketUpgrade},
-    http::StatusCode,
+    extract::{FromRequest, Request, State, WebSocketUpgrade},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get, post},
     Json, Router,
 };
-use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -17,16 +15,28 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    sync::{broadcast, mpsc, oneshot, Mutex, RwLock},
+    sync::{broadcast, oneshot, Mutex, RwLock},
 };
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
+pub mod access_http;
 pub mod auth_service;
 mod contracts;
+mod environment_http;
 pub mod guest_service;
+pub mod host_rpc;
+pub mod issues;
 pub mod local_services;
+pub mod mcp_oauth;
+mod projects;
+pub mod provider_http;
+pub mod provider_rpc;
+pub mod pull_requests;
+pub mod relay_http;
 pub mod relay_service;
+mod rpc;
+pub mod voice;
 
 pub use contracts::{http_known, rpc_known, HTTP_CONTRACTS, RPC_CONTRACTS};
 
@@ -40,7 +50,7 @@ fn now() -> u64 {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
     pub path: String,
     pub created_at: u64,
@@ -65,7 +75,7 @@ pub struct Run {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Thread {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub project_id: String,
     pub title: String,
     pub cwd: String,
     pub status: String,
@@ -84,6 +94,13 @@ pub struct Thread {
 #[serde(tag = "type", content = "data")]
 pub enum Event {
     ProjectCreated(Project),
+    ProjectCommitted {
+        project: Project,
+        row: serde_json::Value,
+        command_id: String,
+        command_type: String,
+        removed_threads: Vec<Uuid>,
+    },
     ThreadCreated(Thread),
     MessageAdded {
         thread_id: Uuid,
@@ -125,14 +142,38 @@ pub struct ServerEvent {
 
 #[derive(Default)]
 pub struct Store {
-    pub projects: HashMap<Uuid, Project>,
+    pub projects: HashMap<String, Project>,
+    project_rows: indexmap::IndexMap<String, serde_json::Value>,
+    project_receipts: HashMap<String, (String, String)>,
     pub threads: HashMap<Uuid, Thread>,
 }
 impl Store {
     fn apply(&mut self, event: &Event) {
         match event {
             Event::ProjectCreated(p) => {
-                self.projects.insert(p.id, p.clone());
+                self.project_rows.insert(p.id.clone(), projects::wire(p));
+                self.projects.insert(p.id.clone(), p.clone());
+            }
+            Event::ProjectCommitted {
+                project,
+                row,
+                command_id,
+                command_type,
+                removed_threads,
+            } => {
+                self.project_rows.insert(project.id.clone(), row.clone());
+                self.project_receipts.insert(
+                    command_id.clone(),
+                    (project.id.clone(), command_type.clone()),
+                );
+                if row["deletedAt"].is_null() {
+                    self.projects.insert(project.id.clone(), project.clone());
+                } else {
+                    self.projects.remove(&project.id);
+                }
+                for id in removed_threads {
+                    self.threads.remove(id);
+                }
             }
             Event::ThreadCreated(t) => {
                 self.threads.insert(t.id, t.clone());
@@ -210,17 +251,39 @@ impl Store {
 }
 
 pub struct AppState {
+    environment_id: String,
+    pub oauth: mcp_oauth::OAuth,
+    connect: access_http::connect::Service,
+    pub data_dir: PathBuf,
     pub store: RwLock<Store>,
     pub events: broadcast::Sender<ServerEvent>,
     pub log: Mutex<tokio::fs::File>,
     pub provider_command: Vec<String>,
     pub cancellations: Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
+    pub auth: auth_service::AuthService,
+    pub guest: guest_service::GuestService,
+    pub voice: voice::VoiceService,
+    pub pull_requests: pull_requests::PullRequestService,
+    pub issues: tokio::sync::Mutex<issues::IssueService>,
+    pub vcs: local_services::VcsService,
+    pub terminals: local_services::TerminalService,
+    pub previews: local_services::PreviewService,
+    pub devices: local_services::DeviceService,
+    project_mutation_lock: Mutex<()>,
     next_event_id: Mutex<u64>,
 }
 impl AppState {
     pub async fn new(
         data_dir: impl Into<PathBuf>,
         provider_command: Vec<String>,
+    ) -> anyhow::Result<Arc<Self>> {
+        Self::with_auth(data_dir, provider_command, auth_service::AuthService::new()).await
+    }
+
+    pub async fn with_auth(
+        data_dir: impl Into<PathBuf>,
+        provider_command: Vec<String>,
+        auth: auth_service::AuthService,
     ) -> anyhow::Result<Arc<Self>> {
         let dir = data_dir.into();
         tokio::fs::create_dir_all(&dir).await?;
@@ -242,21 +305,33 @@ impl AppState {
             .await?;
         let (events, _) = broadcast::channel(512);
         Ok(Arc::new(Self {
+            environment_id: environment_http::identity(&dir)?,
+            oauth: mcp_oauth::OAuth::open(&dir)?,
+            connect: access_http::connect::Service::open(&dir)?,
+            data_dir: dir.clone(),
             store: RwLock::new(store),
             events,
             log: Mutex::new(log),
             provider_command,
             cancellations: Mutex::new(HashMap::new()),
+            auth: auth.open(&dir)?,
+            guest: guest_service::GuestService::open(&dir)?,
+            voice: voice::VoiceService::new(dir.clone()),
+            pull_requests: pull_requests::PullRequestService::default(),
+            issues: tokio::sync::Mutex::new(issues::IssueService::new(dir.clone())),
+            vcs: local_services::VcsService,
+            terminals: local_services::TerminalService::with_logs(dir.join("logs/terminals")),
+            previews: local_services::PreviewService::default(),
+            devices: local_services::DeviceService::default(),
+            project_mutation_lock: Mutex::new(()),
             next_event_id: Mutex::new(next_event_id),
         }))
     }
     async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {
         let mut store = self.store.write().await;
-        store.apply(&event);
         let mut next_event_id = self.next_event_id.lock().await;
-        *next_event_id += 1;
         let record = ServerEvent {
-            id: *next_event_id,
+            id: *next_event_id + 1,
             at: now(),
             event,
         };
@@ -266,107 +341,76 @@ impl AppState {
             .await?;
         log.write_all(b"\n").await?;
         log.flush().await?;
+        *next_event_id = record.id;
+        store.apply(&record.event);
         let _ = self.events.send(record.clone());
         Ok(record)
     }
 }
 
-#[derive(Deserialize)]
-pub struct CreateProject {
-    pub name: String,
-    pub path: String,
-}
-#[derive(Deserialize)]
-pub struct CreateThread {
-    pub project_id: Uuid,
-    pub title: Option<String>,
-    pub cwd: Option<String>,
-}
-#[derive(Deserialize)]
-pub struct SendMessage {
-    pub content: String,
-    pub provider: Option<String>,
-}
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ClientCommand {
-    Subscribe,
-    CreateThread(CreateThread),
-    SendMessage {
-        thread_id: Uuid,
-        content: String,
-        provider: Option<String>,
-    },
-    CancelRun {
-        run_id: Uuid,
-    },
-}
-
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/health", get(health))
-        .route("/v1/projects", get(list_projects).post(create_project))
-        .route("/api/projects", get(api_projects))
-        .route("/api/orchestration/shell", get(api_shell_snapshot))
+        .merge(provider_http::routes())
+        .route("/api/projects", get(projects::snapshot))
+        .route("/api/projects/mutate", post(projects::mutate_http))
+        .route(
+            "/api/orchestration/shell",
+            get(environment_http::shell_snapshot),
+        )
         .route(
             "/api/orchestration/threads/:thread_id",
-            get(api_thread_snapshot),
+            get(environment_http::thread_snapshot),
         )
         .route(
             "/api/orchestration/threads/:thread_id/transcript",
-            get(api_thread_transcript),
+            get(environment_http::thread_snapshot),
         )
         .route(
             "/api/orchestration/threads/:thread_id/bounded",
-            get(api_thread_snapshot),
+            get(environment_http::thread_snapshot),
         )
         .route(
             "/api/orchestration/threads/:thread_id/history",
-            get(api_thread_transcript),
+            get(environment_http::thread_snapshot),
         )
-        .route("/api/t3-connect/health", post(relay_health))
-        .route("/api/auth/session", get(auth_session))
-        .route("/.well-known/t3/environment", get(environment_descriptor))
-        .route("/v1/environments", get(relay_environments))
-        .route("/v1/client/devices", get(relay_devices))
-        .route("/v2/client/devices", get(relay_devices))
-        .route("/v1/client/environment-links", post(relay_link_environment))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_session,
+        ))
+        .merge(mcp_oauth::routes())
+        .merge(access_http::routes())
+        .merge(host_rpc::routes())
         .route(
-            "/v1/client/environment-links/:environment_id",
-            axum::routing::delete(relay_unlink_environment),
+            "/.well-known/t3/environment",
+            get(environment_http::descriptor),
         )
-        .route(
-            "/v1/environments/:environment_id/status",
-            post(relay_environment_status),
-        )
-        .route(
-            "/v1/environments/:environment_id/connect",
-            post(relay_environment_connect),
-        )
-        .route(
-            "/v1/environments/:environment_id/hooks/wake",
-            post(relay_wake_hooks),
-        )
-        .route("/v1/projects/:project_id/threads", post(create_thread))
-        .route("/v1/threads/:thread_id", get(get_thread))
-        .route("/v1/threads/:thread_id/messages", post(send_message))
-        .route("/v1/runs/:run_id/cancel", post(cancel_run))
         .route("/ws", get(websocket))
         .fallback(any(contract_fallback))
         .with_state(state)
 }
 
-async fn contract_fallback(request: Request) -> Response {
+async fn contract_fallback(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let method = request.method().as_str();
     let path = request.uri().path();
-    let (status, code, message) = if contracts::http_known(method, path) {
+    if HTTP_CONTRACTS
+        .iter()
+        .any(|c| c.environment_auth && c.method == method && contracts::path_matches(c.path, path))
+    {
+        if let Err(reason) = access_http::authenticate(&state, request.headers()).await {
+            return auth_error(request.headers(), reason);
+        }
+    }
+    let (status, code, message) = if HTTP_CONTRACTS
+        .iter()
+        .any(|c| !c.relay && c.method == method && contracts::path_matches(c.path, path))
+    {
         (
             StatusCode::NOT_IMPLEMENTED,
             "contract_not_implemented",
             "This contract endpoint is registered but its provider integration is unavailable.",
         )
     } else {
-        (StatusCode::NOT_FOUND, "not_found", "Route not found.")
+        return environment_http::no_assets();
     };
     let body = serde_json::json!({ "code": code, "message": message });
     Response::builder()
@@ -376,197 +420,6 @@ async fn contract_fallback(request: Request) -> Response {
         .body(body.to_string().into())
         .expect("valid response")
 }
-async fn health() -> impl IntoResponse {
-    Json(serde_json::json!({"ok": true, "protocol_version": PROTOCOL_VERSION}))
-}
-async fn environment_descriptor() -> impl IntoResponse {
-    Json(
-        serde_json::json!({"environmentId":"local","label":"t3code-rust","platform":{"os":std::env::consts::OS,"arch":std::env::consts::ARCH}}),
-    )
-}
-async fn auth_session() -> impl IntoResponse {
-    Json(serde_json::json!({"authenticated":false,"scopes":[],"auth":{}}))
-}
-async fn relay_health() -> impl IntoResponse {
-    Json(serde_json::json!({"ok":true}))
-}
-async fn relay_environments() -> impl IntoResponse {
-    Json(serde_json::json!({"environments":[]}))
-}
-async fn relay_devices() -> impl IntoResponse {
-    Json(serde_json::json!({"devices":[]}))
-}
-async fn relay_link_environment(Json(input): Json<serde_json::Value>) -> impl IntoResponse {
-    Json(
-        serde_json::json!({"environmentId":input.get("environmentId").cloned().unwrap_or(serde_json::Value::Null),"status":"linked"}),
-    )
-}
-async fn relay_unlink_environment(Path(_environment_id): Path<String>) -> StatusCode {
-    StatusCode::NO_CONTENT
-}
-async fn relay_environment_status(Path(environment_id): Path<String>) -> impl IntoResponse {
-    Json(serde_json::json!({"environmentId":environment_id,"status":"offline"}))
-}
-async fn relay_environment_connect(Path(environment_id): Path<String>) -> impl IntoResponse {
-    Json(serde_json::json!({"environmentId":environment_id,"status":"offline"}))
-}
-async fn relay_wake_hooks(Path(_environment_id): Path<String>) -> StatusCode {
-    StatusCode::NO_CONTENT
-}
-async fn list_projects(State(state): State<Arc<AppState>>) -> Json<Vec<Project>> {
-    Json(
-        state
-            .store
-            .read()
-            .await
-            .projects
-            .values()
-            .cloned()
-            .collect(),
-    )
-}
-async fn api_projects(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let store = state.store.read().await;
-    Json(serde_json::json!({"projects": store.projects.values().collect::<Vec<_>>()}))
-}
-async fn api_shell_snapshot(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let store = state.store.read().await;
-    Json(
-        serde_json::json!({"schemaVersion":1,"snapshotSequence":0,"projects":store.projects.values().collect::<Vec<_>>(),"threads":store.threads.values().collect::<Vec<_>>()}),
-    )
-}
-async fn api_thread_snapshot(
-    State(state): State<Arc<AppState>>,
-    Path(thread_id): Path<Uuid>,
-) -> impl IntoResponse {
-    match state.store.read().await.threads.get(&thread_id).cloned() {
-        Some(thread) => (StatusCode::OK, Json(serde_json::json!(thread))),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"code":"not_found","message":"Thread not found."})),
-        ),
-    }
-}
-async fn api_thread_transcript(
-    State(state): State<Arc<AppState>>,
-    Path(thread_id): Path<Uuid>,
-) -> impl IntoResponse {
-    match state.store.read().await.threads.get(&thread_id).cloned() {
-        Some(thread) => (
-            StatusCode::OK,
-            Json(
-                serde_json::json!({"threadId":thread.id,"title":thread.title,"items":thread.messages}),
-            ),
-        ),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"code":"not_found","message":"Thread not found."})),
-        ),
-    }
-}
-async fn create_project(
-    State(state): State<Arc<AppState>>,
-    Json(input): Json<CreateProject>,
-) -> impl IntoResponse {
-    let project = Project {
-        id: Uuid::new_v4(),
-        name: input.name,
-        path: input.path,
-        created_at: now(),
-    };
-    match state.commit(Event::ProjectCreated(project.clone())).await {
-        Ok(_) => (StatusCode::CREATED, Json(serde_json::json!(project))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error":e.to_string()})),
-        ),
-    }
-}
-async fn create_thread(
-    State(state): State<Arc<AppState>>,
-    Path(project_id): Path<Uuid>,
-    Json(input): Json<CreateThread>,
-) -> impl IntoResponse {
-    if project_id != input.project_id {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "project id in path and body must match" })),
-        );
-    }
-    let project = state.store.read().await.projects.get(&project_id).cloned();
-    let Some(project) = project else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error":"project not found"})),
-        );
-    };
-    let thread = Thread {
-        id: Uuid::new_v4(),
-        project_id: project.id,
-        title: input.title.unwrap_or_else(|| "New thread".into()),
-        cwd: input.cwd.unwrap_or(project.path),
-        status: "idle".into(),
-        messages: vec![],
-        runs: vec![],
-        created_at: now(),
-        archived: false,
-        settled: false,
-        snoozed_until: None,
-        pinned: false,
-        unread: false,
-        tags: vec![],
-    };
-    match state.commit(Event::ThreadCreated(thread.clone())).await {
-        Ok(_) => (StatusCode::CREATED, Json(serde_json::json!(thread))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error":e.to_string()})),
-        ),
-    }
-}
-async fn get_thread(
-    State(state): State<Arc<AppState>>,
-    Path(thread_id): Path<Uuid>,
-) -> impl IntoResponse {
-    match state.store.read().await.threads.get(&thread_id).cloned() {
-        Some(t) => (StatusCode::OK, Json(serde_json::json!(t))),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error":"thread not found"})),
-        ),
-    }
-}
-async fn send_message(
-    State(state): State<Arc<AppState>>,
-    Path(thread_id): Path<Uuid>,
-    Json(input): Json<SendMessage>,
-) -> impl IntoResponse {
-    match start_run(
-        state,
-        thread_id,
-        input.content,
-        input.provider.unwrap_or_else(|| "default".into()),
-    )
-    .await
-    {
-        Ok(run) => (StatusCode::ACCEPTED, Json(serde_json::json!(run))),
-        Err((s, e)) => (s, Json(serde_json::json!({"error":e}))),
-    }
-}
-async fn cancel_run(
-    State(state): State<Arc<AppState>>,
-    Path(run_id): Path<Uuid>,
-) -> impl IntoResponse {
-    let mut cancellations = state.cancellations.lock().await;
-    if let Some(cancel) = cancellations.remove(&run_id) {
-        if cancel.send(()).is_ok() {
-            return StatusCode::NO_CONTENT;
-        }
-        warn!("provider cancellation was already completed");
-    }
-    StatusCode::NOT_FOUND
-}
-
 async fn start_run(
     state: Arc<AppState>,
     thread_id: Uuid,
@@ -631,7 +484,7 @@ async fn dispatch_orchestration_command(
             let project_id = command
                 .get("projectId")
                 .and_then(serde_json::Value::as_str)
-                .and_then(|value| Uuid::parse_str(value).ok())
+                .map(str::to_owned)
                 .ok_or_else(|| anyhow::anyhow!("thread.create requires projectId"))?;
             let project = state
                 .store
@@ -676,7 +529,7 @@ async fn dispatch_orchestration_command(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            let run = start_run(state.clone(), thread_id, text, "default".into())
+            start_run(state.clone(), thread_id, text, "default".into())
                 .await
                 .map_err(|(_, error)| anyhow::anyhow!(error))?;
             return Ok(state
@@ -687,8 +540,7 @@ async fn dispatch_orchestration_command(
                     payload: command,
                 })
                 .await?
-                .id
-                .max(run.started_at));
+                .id);
         }
         "thread.stop" | "run.interrupt" | "subagent.stop" | "queued-run.cancel" => {
             if let Some(thread_id) = thread_id {
@@ -721,6 +573,19 @@ async fn dispatch_orchestration_command(
                     .await?
                     .id);
             }
+        }
+        "thread.guest-share.close" | "thread.guest-message.dismiss" => {
+            let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
+            if command_type == "thread.guest-share.close" {
+                state.guest.close_thread(id)
+            } else {
+                state.guest.resolve_message(
+                    id,
+                    command["guestMessageId"].as_str().unwrap_or(""),
+                    "dismissed",
+                )
+            }
+            .map_err(anyhow::Error::msg)?;
         }
         "thread.archive"
         | "thread.unarchive"
@@ -821,7 +686,7 @@ async fn dispatch_orchestration_command(
                 return Ok(state.commit(Event::ThreadDeleted { thread_id }).await?.id);
             }
         }
-        _ => {}
+        _ => anyhow::bail!("Unsupported orchestration command: {command_type}"),
     }
     Ok(state
         .commit(Event::CommandDispatched {
@@ -934,17 +799,87 @@ async fn execute_run(
     Ok(())
 }
 
-async fn websocket(State(state): State<Arc<AppState>>, request: Request) -> Response {
-    let compatible = request
-        .uri()
-        .query()
-        .and_then(|query| {
-            query.split('&').find_map(|part| {
-                let (key, value) = part.split_once('=')?;
-                (key == "orchestrationProtocol").then_some(value == "2")
-            })
+pub fn trace_id(headers: &HeaderMap) -> String {
+    headers
+        .get("traceparent")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split('-').nth(1))
+        .filter(|id| {
+            id.len() == 32
+                && id.bytes().all(|c| c.is_ascii_hexdigit())
+                && id.bytes().any(|c| c != b'0')
         })
-        .unwrap_or(false);
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().simple().to_string())
+}
+pub fn auth_error(headers: &HeaderMap, reason: &str) -> Response {
+    let trace_id = trace_id(headers);
+    (StatusCode::UNAUTHORIZED, [("vary","Accept-Encoding"),("access-control-allow-origin","*")],
+        Json(serde_json::json!({"_tag":"EnvironmentAuthInvalidError","code":"auth_invalid","reason":reason,"traceId":trace_id}))).into_response()
+}
+
+async fn require_session(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    use auth_service::permissions::{http_scopes, project_scopes};
+    let session = match access_http::principal(&state, request.headers()) {
+        Ok(session) => session,
+        Err(e) => return auth_error(request.headers(), e),
+    };
+    for scope in http_scopes(request.uri().path(), request.method().as_str()) {
+        if !session.has(scope) {
+            return access_http::scope_error(request.headers(), scope);
+        }
+    }
+    if request.uri().path() == "/api/projects/mutate" {
+        let (parts, body) = request.into_parts();
+        let bytes = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+            Ok(bytes) => bytes,
+            Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        };
+        if let Ok(body) = serde_json::from_slice(&bytes) {
+            if let Some(scope) = project_scopes(&body)
+                .into_iter()
+                .find(|scope| !session.has(scope))
+            {
+                return access_http::scope_error(&parts.headers, scope);
+            }
+        }
+        return next
+            .run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+            .await;
+    }
+    next.run(request).await
+}
+
+pub async fn authorize_upgrade(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &axum::http::Uri,
+    audience: &str,
+) -> Result<auth_service::Session, &'static str> {
+    let ticket = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
+        .filter(|(key, _)| key == "wsTicket")
+        .last()
+        .map(|(_, value)| value);
+    if let Some(ticket) = ticket.filter(|v| !v.trim().is_empty()) {
+        state
+            .auth
+            .ticket_principal(&ticket, audience)
+            .ok_or("invalid_credential")
+    } else {
+        access_http::principal(state, headers)
+    }
+}
+
+async fn websocket(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let query = url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes());
+    let compatible = query
+        .clone()
+        .find(|(key, _)| key == "orchestrationProtocol")
+        .is_some_and(|(_, value)| value == "2");
     if !compatible {
         let body = serde_json::json!({
             "code": "orchestration_protocol_incompatible",
@@ -959,326 +894,17 @@ async fn websocket(State(state): State<Arc<AppState>>, request: Request) -> Resp
             .body(body.to_string().into())
             .expect("valid response");
     }
-    if request.headers().get("authorization").is_none() && request.headers().get("cookie").is_none()
-    {
-        let body = serde_json::json!({
-            "_tag": "EnvironmentAuthInvalidError",
-            "code": "auth_invalid",
-            "reason": "missing_credential",
-            "traceId": format!("{:032x}", Uuid::new_v4().as_u128()),
-        });
-        return Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .header("content-type", "application/json")
-            .header("vary", "Accept-Encoding")
-            .header("access-control-allow-origin", "*")
-            .body(body.to_string().into())
-            .expect("valid response");
-    }
+    let auth = authorize_upgrade(&state, request.headers(), request.uri(), "rpc").await;
+    let principal = match auth {
+        Ok(s) => s,
+        Err(reason) => return auth_error(request.headers(), reason),
+    };
     match WebSocketUpgrade::from_request(request, &state).await {
         Ok(upgrade) => upgrade
-            .on_upgrade(move |socket| websocket_session(state, socket))
+            .on_upgrade(move |socket| rpc::session(state, socket, principal))
             .into_response(),
         Err(rejection) => rejection.into_response(),
     }
-}
-async fn websocket_session(state: Arc<AppState>, socket: WebSocket) {
-    let (mut sender, mut receiver) = socket.split();
-    let mut events = state.events.subscribe();
-    let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<String>();
-    let outbound_for_events = outbound.clone();
-    let writer = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                event = events.recv() => {
-                    let Ok(event) = event else { break };
-                    let Ok(text) = serde_json::to_string(&serde_json::json!({"type":"event","data":event})) else { break; };
-                    if sender.send(WsMessage::Text(text)).await.is_err() { break; }
-                }
-                text = outbound_rx.recv() => {
-                    let Some(text) = text else { break; };
-                    if sender.send(WsMessage::Text(text)).await.is_err() { break; }
-                }
-            }
-        }
-    });
-    while let Some(Ok(message)) = receiver.next().await {
-        let WsMessage::Text(text) = message else {
-            continue;
-        };
-        if let Ok(rpc) = serde_json::from_str::<serde_json::Value>(&text) {
-            if rpc.get("jsonrpc").and_then(serde_json::Value::as_str) == Some("2.0") {
-                handle_rpc_message(&state, &outbound_for_events, rpc).await;
-                continue;
-            }
-        }
-        match serde_json::from_str::<ClientCommand>(&text) {
-            Ok(ClientCommand::Subscribe) => {
-                let snapshot = state.store.read().await;
-                let payload = serde_json::json!({"protocol_version":PROTOCOL_VERSION,"projects":snapshot.projects.values().collect::<Vec<_>>(),"threads":snapshot.threads.values().collect::<Vec<_>>()});
-                let _ = state.events.send(ServerEvent {
-                    id: 0,
-                    at: now(),
-                    event: Event::RunOutput {
-                        run_id: Uuid::nil(),
-                        thread_id: Uuid::nil(),
-                        stream: "snapshot".into(),
-                        text: payload.to_string(),
-                    },
-                });
-            }
-            Ok(ClientCommand::CreateThread(input)) => {
-                let _ =
-                    create_thread(State(state.clone()), Path(input.project_id), Json(input)).await;
-            }
-            Ok(ClientCommand::SendMessage {
-                thread_id,
-                content,
-                provider,
-            }) => {
-                let _ = start_run(
-                    state.clone(),
-                    thread_id,
-                    content,
-                    provider.unwrap_or_else(|| "default".into()),
-                )
-                .await;
-            }
-            Ok(ClientCommand::CancelRun { run_id }) => {
-                let _ = cancel_run(State(state.clone()), Path(run_id)).await;
-            }
-            Err(e) => {
-                let _ = state.events.send(ServerEvent {
-                    id: 0,
-                    at: now(),
-                    event: Event::RunOutput {
-                        run_id: Uuid::nil(),
-                        thread_id: Uuid::nil(),
-                        stream: "error".into(),
-                        text: e.to_string(),
-                    },
-                });
-            }
-        }
-    }
-    writer.abort();
-}
-
-async fn handle_rpc_message(
-    state: &Arc<AppState>,
-    outbound: &mpsc::UnboundedSender<String>,
-    message: serde_json::Value,
-) {
-    let Some(id) = message.get("id").cloned() else {
-        return;
-    };
-    let method = message
-        .get("method")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if method == "@effect/rpc/Ping" {
-        let _ = outbound
-            .send(serde_json::json!({"jsonrpc":"2.0","method":"@effect/rpc/Pong"}).to_string());
-        return;
-    }
-    match method {
-        "orchestration.dispatchCommand" => {
-            let payload = message
-                .get("params")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            match dispatch_orchestration_command(state.clone(), payload).await {
-                Ok(sequence) => {
-                    let _ = outbound.send(
-                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"sequence":sequence}})
-                            .to_string(),
-                    );
-                }
-                Err(error) => send_rpc_error(outbound, id, "dispatch_failed", error.to_string()),
-            }
-        }
-        "orchestration.getThreadTitles" => {
-            let ids = message
-                .get("params")
-                .and_then(|params| params.get("threadIds"))
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let store = state.store.read().await;
-            let titles = ids
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .filter_map(|id| Uuid::parse_str(id).ok())
-                .filter_map(|id| {
-                    store
-                        .threads
-                        .get(&id)
-                        .map(|thread| (id.to_string(), thread.title.clone()))
-                })
-                .collect::<HashMap<_, _>>();
-            let _ = outbound
-                .send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":titles}).to_string());
-        }
-        "orchestration.getThreadFamily" => {
-            let requested = message
-                .get("params")
-                .and_then(|params| params.get("threadId"))
-                .and_then(serde_json::Value::as_str)
-                .and_then(|id| Uuid::parse_str(id).ok());
-            let store = state.store.read().await;
-            let threads = requested
-                .and_then(|thread_id| store.threads.get(&thread_id).map(|thread| vec![thread]))
-                .unwrap_or_default();
-            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"snapshotSequence":0,"threads":threads}}).to_string());
-        }
-        "orchestration.getWorktreeThreadIds" => {
-            let worktree = message
-                .get("params")
-                .and_then(|params| params.get("worktreePath"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let store = state.store.read().await;
-            let thread_ids = store
-                .threads
-                .values()
-                .filter(|thread| thread.cwd == worktree)
-                .map(|thread| thread.id.to_string())
-                .collect::<Vec<_>>();
-            let _ = outbound.send(
-                serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"threadIds":thread_ids}})
-                    .to_string(),
-            );
-        }
-        "orchestration.getArchivedShellSnapshot" => {
-            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"schemaVersion":1,"snapshotSequence":0,"projects":[],"threads":[]}}).to_string());
-        }
-        "orchestration.getThreadLinkMetadata" => {
-            let ids = message
-                .get("params")
-                .and_then(|params| params.get("threadIds"))
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let store = state.store.read().await;
-            let metadata = ids
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .filter_map(|value| Uuid::parse_str(value).ok())
-                .filter_map(|thread_id| {
-                    store.threads.get(&thread_id).map(|thread| {
-                        (
-                            thread_id.to_string(),
-                            serde_json::json!({"title":thread.title,"projectId":thread.project_id}),
-                        )
-                    })
-                })
-                .collect::<HashMap<_, _>>();
-            let _ = outbound
-                .send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":metadata}).to_string());
-        }
-        "orchestration.searchThreads" => {
-            let query = message
-                .get("params")
-                .and_then(|params| params.get("query"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let store = state.store.read().await;
-            let threads = store
-                .threads
-                .values()
-                .filter(|thread| thread.title.to_ascii_lowercase().contains(&query))
-                .cloned()
-                .collect::<Vec<_>>();
-            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"snapshotSequence":0,"threads":threads,"complete":true}}).to_string());
-        }
-        "orchestration.searchThread" => {
-            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"complete":true,"snapshotSequence":0,"totalMatches":0,"activeIndex":0,"match":null}}).to_string());
-        }
-        "orchestration.getOlderSettledThreads" => {
-            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"snapshotSequence":0,"threads":[],"counts":[]}}).to_string());
-        }
-        "orchestration.getThreadProjection"
-        | "orchestration.getFullThreadDiff"
-        | "orchestration.getTurnDiff" => {
-            let _ = outbound
-                .send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":null}).to_string());
-        }
-        "orchestration.stopWorkflow"
-        | "orchestration.forceStopThread"
-        | "orchestration.getWorkflowScript"
-        | "orchestration.getNativeChildWork"
-        | "orchestration.getTurnItem" => {
-            let _ = outbound
-                .send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":null}).to_string());
-        }
-        "server.probe" => {
-            let _ =
-                outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}}).to_string());
-        }
-        "orchestration.subscribeShell" => {
-            let store = state.store.read().await;
-            let snapshot = serde_json::json!({"kind":"snapshot","snapshot":{"schemaVersion":1,"snapshotSequence":0,"projects":store.projects.values().collect::<Vec<_>>(),"threads":store.threads.values().collect::<Vec<_>>(),"archivedThreads":[]}});
-            let _ = outbound.send(
-                serde_json::json!({"jsonrpc":"2.0","chunk":true,"id":id,"result":[snapshot]})
-                    .to_string(),
-            );
-        }
-        "orchestration.subscribeThread" => {
-            let thread_id = message
-                .get("params")
-                .and_then(|params| params.get("threadId"))
-                .and_then(serde_json::Value::as_str)
-                .and_then(|id| Uuid::parse_str(id).ok());
-            let thread = match thread_id {
-                Some(thread_id) => state.store.read().await.threads.get(&thread_id).cloned(),
-                None => None,
-            };
-            let items = thread
-                .map(|thread| vec![serde_json::json!({"kind":"snapshot","snapshotSequence":0,"projection":thread}), serde_json::json!({"kind":"synchronized"})])
-                .unwrap_or_default();
-            let _ = outbound.send(
-                serde_json::json!({"jsonrpc":"2.0","chunk":true,"id":id,"result":items})
-                    .to_string(),
-            );
-        }
-        "orchestration.subscribeCommandOutput" => {
-            let frame =
-                serde_json::json!({"kind":"replace","text":"","truncated":false,"running":false});
-            let _ = outbound.send(
-                serde_json::json!({"jsonrpc":"2.0","chunk":true,"id":id,"result":[frame]})
-                    .to_string(),
-            );
-        }
-        "orchestration.subscribePromptSuggestion" => {
-            let _ = outbound.send(
-                serde_json::json!({"jsonrpc":"2.0","chunk":true,"id":id,"result":[null]})
-                    .to_string(),
-            );
-        }
-        _ => {
-            let (code, message) = if contracts::rpc_known(method) {
-                (
-                    "contract_not_implemented",
-                    format!("RPC contract is registered but unavailable: {method}"),
-                )
-            } else {
-                ("method_not_found", format!("Unknown RPC method: {method}"))
-            };
-            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"_tag":"Cause","code":0,"message":message,"data":[{"code":code}]}}).to_string());
-        }
-    }
-}
-
-fn send_rpc_error(
-    outbound: &mpsc::UnboundedSender<String>,
-    id: serde_json::Value,
-    code: &str,
-    message: String,
-) {
-    let _ = outbound.send(
-        serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"_tag":"Cause","code":0,"message":message,"data":[{"code":code}]}}).to_string(),
-    );
 }
 pub async fn run_server(state: Arc<AppState>, listen: std::net::SocketAddr) -> anyhow::Result<()> {
     let app = router(state);

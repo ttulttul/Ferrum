@@ -2,14 +2,20 @@ use serde::Deserialize;
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct HttpContract {
+    pub name: &'static str,
+    pub relay: bool,
+    pub auth: &'static str,
+    pub environment_auth: bool,
     pub method: &'static str,
     pub path: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug)]
 pub struct RpcContract {
+    pub scope: &'static str,
     #[allow(dead_code)]
     pub group: &'static str,
+    pub required: Option<&'static [&'static str]>,
     pub tag: &'static str,
 }
 
@@ -32,7 +38,7 @@ pub fn http_known(method: &str, path: &str) -> bool {
         .any(|contract| contract.method == method && path_matches(contract.path, path))
 }
 
-fn path_matches(pattern: &str, path: &str) -> bool {
+pub(crate) fn path_matches(pattern: &str, path: &str) -> bool {
     let pattern_parts = pattern.trim_matches('/').split('/');
     let path_parts = path.trim_matches('/').split('/');
     let pattern_parts = pattern_parts.peekable();

@@ -3,468 +3,720 @@
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "descriptor",
     "method": "GET",
-    "path": "/.well-known/t3/environment"
+    "path": "/.well-known/t3/environment",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "session",
     "method": "GET",
-    "path": "/api/auth/session"
+    "path": "/api/auth/session",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "browserSession",
     "method": "POST",
-    "path": "/api/auth/browser-session"
+    "path": "/api/auth/browser-session",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "token",
     "method": "POST",
-    "path": "/oauth/token"
+    "path": "/oauth/token",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "webSocketTicket",
     "method": "POST",
-    "path": "/api/auth/websocket-ticket"
+    "path": "/api/auth/websocket-ticket",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "webSocketTicketFor",
     "method": "POST",
-    "path": "/api/auth/websocket-ticket/:use"
+    "path": "/api/auth/websocket-ticket/:use",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "pairingCredential",
     "method": "POST",
-    "path": "/api/auth/pairing-token"
+    "path": "/api/auth/pairing-token",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "revokePairingLink",
     "method": "POST",
-    "path": "/api/auth/pairing-links/revoke"
+    "path": "/api/auth/pairing-links/revoke",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "revokeClient",
     "method": "POST",
-    "path": "/api/auth/clients/revoke"
+    "path": "/api/auth/clients/revoke",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "approveConnectDevice",
     "method": "POST",
-    "path": "/api/auth/connect-devices/approve"
+    "path": "/api/auth/connect-devices/approve",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "revokeConnectDevice",
     "method": "POST",
-    "path": "/api/auth/connect-devices/revoke"
+    "path": "/api/auth/connect-devices/revoke",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "revokeOtherClients",
     "method": "POST",
-    "path": "/api/auth/clients/revoke-others"
+    "path": "/api/auth/clients/revoke-others",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "protectedResource",
     "method": "GET",
-    "path": "/.well-known/oauth-protected-resource"
+    "path": "/.well-known/oauth-protected-resource",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "mcpProtectedResource",
     "method": "GET",
-    "path": "/.well-known/oauth-protected-resource/mcp"
+    "path": "/.well-known/oauth-protected-resource/mcp",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "authorizationServer",
     "method": "GET",
-    "path": "/.well-known/oauth-authorization-server"
+    "path": "/.well-known/oauth-authorization-server",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "register",
     "method": "POST",
-    "path": "/oauth/mcp/register"
+    "path": "/oauth/mcp/register",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "authorize",
     "method": "GET",
-    "path": "/oauth/mcp/authorize"
+    "path": "/oauth/mcp/authorize",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "approval",
     "method": "POST",
-    "path": "/oauth/mcp/approval"
+    "path": "/oauth/mcp/approval",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "decision",
     "method": "POST",
-    "path": "/oauth/mcp/decision"
+    "path": "/oauth/mcp/decision",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "token",
     "method": "POST",
-    "path": "/oauth/mcp/token"
+    "path": "/oauth/mcp/token",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "shellSnapshot",
     "method": "GET",
-    "path": "/api/orchestration/shell"
+    "path": "/api/orchestration/shell",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "threadSnapshot",
     "method": "GET",
-    "path": "/api/orchestration/threads/:threadId"
+    "path": "/api/orchestration/threads/:threadId",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "threadTranscript",
     "method": "GET",
-    "path": "/api/orchestration/threads/:threadId/transcript"
+    "path": "/api/orchestration/threads/:threadId/transcript",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "threadBoundedSnapshot",
     "method": "GET",
-    "path": "/api/orchestration/threads/:threadId/bounded"
+    "path": "/api/orchestration/threads/:threadId/bounded",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "threadHistoryPage",
     "method": "GET",
-    "path": "/api/orchestration/threads/:threadId/history"
-  },
-  {
-    "source": "packages/contracts/src/environmentHttp.ts",
-    "name": "snapshot",
-    "method": "GET",
-    "path": "/api/projects"
-  },
-  {
-    "source": "packages/contracts/src/environmentHttp.ts",
-    "name": "mutate",
-    "method": "POST",
-    "path": "/api/projects/mutate"
+    "path": "/api/orchestration/threads/:threadId/history",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "diff",
     "method": "POST",
-    "path": "/api/pull-requests/diff"
+    "path": "/api/pull-requests/diff",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "snapshot",
+    "method": "GET",
+    "path": "/api/projects",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "mutate",
+    "method": "POST",
+    "path": "/api/projects/mutate",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "cloudKeys",
     "method": "GET",
-    "path": "/api/voice/cloud/keys"
+    "path": "/api/voice/cloud/keys",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "setCloudKey",
     "method": "POST",
-    "path": "/api/voice/cloud/:provider/key"
+    "path": "/api/voice/cloud/:provider/key",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "cloudModels",
     "method": "GET",
-    "path": "/api/voice/cloud/openrouter/models"
+    "path": "/api/voice/cloud/openrouter/models",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "transcribeCloud",
     "method": "POST",
-    "path": "/api/voice/cloud/:provider/transcribe"
+    "path": "/api/voice/cloud/:provider/transcribe",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "status",
     "method": "GET",
-    "path": "/api/voice/status"
+    "path": "/api/voice/status",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "prepareModel",
     "method": "POST",
-    "path": "/api/voice/models/prepare"
+    "path": "/api/voice/models/prepare",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "models",
     "method": "GET",
-    "path": "/api/voice/models"
+    "path": "/api/voice/models",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "downloadModel",
     "method": "POST",
-    "path": "/api/voice/models/download"
+    "path": "/api/voice/models/download",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "selectModel",
     "method": "POST",
-    "path": "/api/voice/models/select"
+    "path": "/api/voice/models/select",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "cancelModelDownload",
     "method": "POST",
-    "path": "/api/voice/models/cancel"
+    "path": "/api/voice/models/cancel",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "removeModel",
     "method": "POST",
-    "path": "/api/voice/models/remove"
+    "path": "/api/voice/models/remove",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "linkModels",
     "method": "POST",
-    "path": "/api/voice/models/link"
+    "path": "/api/voice/models/link",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "updateAcceleration",
     "method": "POST",
-    "path": "/api/voice/acceleration"
+    "path": "/api/voice/acceleration",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "updateModelUnloadTimeout",
     "method": "POST",
-    "path": "/api/voice/model-unload-timeout"
+    "path": "/api/voice/model-unload-timeout",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "transcribe",
     "method": "POST",
-    "path": "/api/voice/transcribe"
+    "path": "/api/voice/transcribe",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "postProcess",
     "method": "POST",
-    "path": "/api/voice/post-process"
+    "path": "/api/voice/post-process",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "linkProof",
     "method": "POST",
-    "path": "/api/connect/link-proof"
+    "path": "/api/connect/link-proof",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "relayConfig",
     "method": "POST",
-    "path": "/api/connect/relay-config"
+    "path": "/api/connect/relay-config",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "linkState",
     "method": "GET",
-    "path": "/api/connect/link-state"
+    "path": "/api/connect/link-state",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "checkReachability",
     "method": "POST",
-    "path": "/api/connect/reachability"
+    "path": "/api/connect/reachability",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "unlink",
     "method": "POST",
-    "path": "/api/connect/unlink"
+    "path": "/api/connect/unlink",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "preferences",
     "method": "POST",
-    "path": "/api/connect/preferences"
+    "path": "/api/connect/preferences",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "health",
     "method": "POST",
-    "path": "/api/t3-connect/health"
+    "path": "/api/t3-connect/health",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
     "name": "t3MintCredential",
     "method": "POST",
-    "path": "/api/t3-connect/mint-credential"
+    "path": "/api/t3-connect/mint-credential",
+    "auth": []
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "webhookPost",
+    "method": "POST",
+    "path": "/api/hooks/:hookId/:token",
+    "auth": []
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "webhookPut",
+    "method": "PUT",
+    "path": "/api/hooks/:hookId/:token",
+    "auth": []
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "webhookPatch",
+    "method": "PATCH",
+    "path": "/api/hooks/:hookId/:token",
+    "auth": []
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "webhookGet",
+    "method": "GET",
+    "path": "/api/hooks/:hookId/:token",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "health",
     "method": "GET",
-    "path": "/health"
+    "path": "/health",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "authorizationServer",
     "method": "GET",
-    "path": "/.well-known/oauth-authorization-server"
+    "path": "/.well-known/oauth-authorization-server",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "protectedResource",
     "method": "GET",
-    "path": "/.well-known/oauth-protected-resource"
+    "path": "/.well-known/oauth-protected-resource",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "registerDevice",
     "method": "POST",
-    "path": "/v1/mobile/devices"
+    "path": "/v1/mobile/devices",
+    "auth": [
+      "RelayDpopClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "registerLiveActivity",
     "method": "POST",
-    "path": "/v1/mobile/live-activities"
+    "path": "/v1/mobile/live-activities",
+    "auth": [
+      "RelayDpopClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "getAgentActivitySnapshot",
     "method": "GET",
-    "path": "/v1/mobile/agent-activity"
+    "path": "/v1/mobile/agent-activity",
+    "auth": [
+      "RelayDpopClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "unregisterDevice",
     "method": "DELETE",
-    "path": "/v1/mobile/devices/:deviceId"
+    "path": "/v1/mobile/devices/:deviceId",
+    "auth": [
+      "RelayDpopClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "listEnvironments",
     "method": "GET",
-    "path": "/v1/environments"
+    "path": "/v1/environments",
+    "auth": [
+      "RelayClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "listDevices",
     "method": "GET",
-    "path": "/v1/client/devices"
+    "path": "/v1/client/devices",
+    "auth": [
+      "RelayClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "listDevicesV2",
     "method": "GET",
-    "path": "/v2/client/devices"
+    "path": "/v2/client/devices",
+    "auth": [
+      "RelayClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "linkEnvironment",
     "method": "POST",
-    "path": "/v1/client/environment-links"
+    "path": "/v1/client/environment-links",
+    "auth": [
+      "RelayClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "createEnvironmentLinkChallenge",
     "method": "POST",
-    "path": "/v1/client/environment-link-challenges"
+    "path": "/v1/client/environment-link-challenges",
+    "auth": [
+      "RelayClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "unlinkEnvironment",
     "method": "DELETE",
-    "path": "/v1/client/environment-links/:environmentId"
+    "path": "/v1/client/environment-links/:environmentId",
+    "auth": [
+      "RelayClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "releaseEnvironmentTunnel",
     "method": "DELETE",
-    "path": "/v1/client/environment-links/:environmentId/tunnel"
+    "path": "/v1/client/environment-links/:environmentId/tunnel",
+    "auth": [
+      "RelayClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "getT3ChatLink",
     "method": "GET",
-    "path": "/v1/client/t3chat-link"
+    "path": "/v1/client/t3chat-link",
+    "auth": [
+      "RelayClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "createT3ChatLinkRequest",
     "method": "POST",
-    "path": "/v1/client/t3chat-link-requests"
+    "path": "/v1/client/t3chat-link-requests",
+    "auth": [
+      "RelayClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "unlinkT3Chat",
     "method": "DELETE",
-    "path": "/v1/client/t3chat-link"
+    "path": "/v1/client/t3chat-link",
+    "auth": [
+      "RelayClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "exchangeDpopAccessToken",
     "method": "POST",
-    "path": "/v1/client/dpop-token"
+    "path": "/v1/client/dpop-token",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "connectEnvironment",
     "method": "POST",
-    "path": "/v1/environments/:environmentId/connect"
+    "path": "/v1/environments/:environmentId/connect",
+    "auth": [
+      "RelayDpopClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "getEnvironmentStatus",
     "method": "POST",
-    "path": "/v1/environments/:environmentId/status"
+    "path": "/v1/environments/:environmentId/status",
+    "auth": [
+      "RelayDpopClientAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "registerManagedEndpointRecovery",
     "method": "POST",
-    "path": "/v1/environments/:environmentId/tunnel/recovery"
+    "path": "/v1/environments/:environmentId/tunnel/recovery",
+    "auth": [
+      "RelayEnvironmentAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "recoverManagedEndpoint",
     "method": "POST",
-    "path": "/v1/environments/:environmentId/tunnel"
+    "path": "/v1/environments/:environmentId/tunnel",
+    "auth": [
+      "RelayEnvironmentAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "publishAgentActivity",
     "method": "POST",
-    "path": "/v1/environments/:environmentId/threads/:threadId/agent-activity"
+    "path": "/v1/environments/:environmentId/threads/:threadId/agent-activity",
+    "auth": [
+      "RelayEnvironmentAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "updateLinkPreferences",
     "method": "POST",
-    "path": "/v1/environments/:environmentId/link-preferences"
+    "path": "/v1/environments/:environmentId/link-preferences",
+    "auth": [
+      "RelayEnvironmentAuth"
+    ]
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "wakeHeldHooks",
     "method": "POST",
-    "path": "/v1/environments/:environmentId/hooks/wake"
+    "path": "/v1/environments/:environmentId/hooks/wake",
+    "auth": [
+      "RelayEnvironmentAuth"
+    ]
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "forwardPost",
+    "method": "POST",
+    "path": "/v1/hooks/:endpointKey/:hookId/:token",
+    "auth": []
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "forwardPut",
+    "method": "PUT",
+    "path": "/v1/hooks/:endpointKey/:hookId/:token",
+    "auth": []
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "forwardPatch",
+    "method": "PATCH",
+    "path": "/v1/hooks/:endpointKey/:hookId/:token",
+    "auth": []
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "forwardGet",
+    "method": "GET",
+    "path": "/v1/hooks/:endpointKey/:hookId/:token",
+    "auth": []
   },
   {
     "source": "packages/contracts/src/relay.ts",
     "name": "ingest",
     "method": "POST",
-    "path": "/v1/mobile/observe/:projectId/v1/:signal"
+    "path": "/v1/mobile/observe/:projectId/v1/:signal",
+    "auth": []
   }
 ]

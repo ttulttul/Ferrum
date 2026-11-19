@@ -1,0 +1,54 @@
+name: Server parity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: pingdotgg/t3code
+          ref: 052ca497cf1103b001327bcd964188a71dfec213
+          path: reference
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.13.1
+      - name: Prepare the reference environment
+        run: |
+          npm install --global pnpm@12.14.0
+          pnpm --dir reference --filter t3 --filter t3code-relay install --frozen-lockfile
+          python3 -m venv "$RUNNER_TEMP/parity-python"
+          "$RUNNER_TEMP/parity-python/bin/pip" install websockets==16.0 cryptography
+          echo "$RUNNER_TEMP/parity-python/bin" >> "$GITHUB_PATH"
+      - name: Check upstream inventory
+        run: |
+          python3 scripts/update_contract_inventory.py "$GITHUB_WORKSPACE/reference"
+          git diff --exit-code -- contracts
+      - name: Validate Rust
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked
+          cargo build --locked
+      - name: Compare both servers
+        run: |
+          reference="node $GITHUB_WORKSPACE/reference/apps/server/src/bin.ts"
+          server="$GITHUB_WORKSPACE/target/debug/t3code-server"
+          python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$reference" --rust-command "$server"
+          python3 scripts/auth_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/mcp_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/github_provider_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/git_workflow_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/relay_parity.py --checkout "$GITHUB_WORKSPACE/reference" --rust "$server"

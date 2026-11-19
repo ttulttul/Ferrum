@@ -331,11 +331,7 @@ async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
         .await
         .projects
         .values()
-        .filter(|p| {
-            input["projectId"]
-                .as_str()
-                .is_none_or(|s| s == p.id)
-        })
+        .filter(|p| input["projectId"].as_str().is_none_or(|s| s == p.id))
         .cloned()
         .collect::<Vec<_>>();
     projects.sort_by_key(|p| (p.created_at, p.id.clone()));

@@ -18,9 +18,13 @@ fn main() {
         http.iter()
             .map(|entry| {
                 format!(
-                    "HttpContract {{ method: {:?}, path: {:?} }},\n",
+                    "HttpContract {{ method: {:?}, path: {:?}, name: {:?}, relay: {}, auth: {:?}, environment_auth: {} }},\n",
                     entry["method"].as_str().unwrap(),
-                    entry["path"].as_str().unwrap()
+                    entry["path"].as_str().unwrap(),
+                    entry["name"].as_str().unwrap(),
+                    entry["source"].as_str().unwrap().ends_with("/relay.ts"),
+                    entry["auth"][0].as_str().unwrap_or(""),
+                    entry["auth"].as_array().unwrap().iter().any(|m| m == "EnvironmentAuthenticatedAuth")
                 )
             })
             .collect::<String>()
@@ -31,9 +35,20 @@ fn main() {
         rpc.iter()
             .map(|entry| {
                 format!(
-                    "RpcContract {{ group: {:?}, tag: {:?} }},\n",
+                    "RpcContract {{ group: {:?}, tag: {:?}, scope: {:?}, required: {} }},\n",
                     entry["group"].as_str().unwrap(),
-                    entry["tag"].as_str().unwrap()
+                    entry["tag"].as_str().unwrap(),
+                    entry["scope"].as_str().unwrap(),
+                    match entry["required"].as_array() {
+                        None => "None".to_owned(),
+                        Some(fields) => format!(
+                            "Some(&{:?})",
+                            fields
+                                .iter()
+                                .map(|v| v.as_str().unwrap())
+                                .collect::<Vec<_>>()
+                        ),
+                    }
                 )
             })
             .collect::<String>()
