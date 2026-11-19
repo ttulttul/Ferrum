@@ -31,6 +31,16 @@ fn relative(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+fn within(root: &Path, path: &Path) -> bool {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    path.starts_with(root)
+}
+
 fn entry(root: &Path, path: &Path, ignored: bool) -> Option<Value> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
     let kind = if metadata.is_dir() {
@@ -87,7 +97,7 @@ pub async fn list_entries(input: &Value) -> Option<Reply> {
         let root = root(input)?;
         let directory = input["directoryPath"].as_str().unwrap_or_default();
         let directory = root.join(directory);
-        if !directory.is_dir() {
+        if !directory.is_dir() || !within(&root, &directory) {
             return Err(error(
                 "ProjectEntriesError",
                 "Directory does not exist.".into(),
@@ -301,6 +311,12 @@ pub async fn read_file(input: &Value) -> Option<Reply> {
         } else {
             root.join(relative_path)
         };
+        if !Path::new(relative_path).is_absolute() && !within(&root, &path) {
+            return Err(error(
+                "ProjectReadFileError",
+                "The path is outside the workspace.".into(),
+            ));
+        }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && input["allowMissing"] == true => {
