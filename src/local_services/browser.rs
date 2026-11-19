@@ -8,7 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::{
     borrow::Cow,
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     env,
     path::{Path, PathBuf},
     process::Stdio,
@@ -19,7 +19,6 @@ use tokio::{
     net::TcpStream,
     process::{Child, Command},
     sync::watch,
-    time::Instant,
 };
 use tokio_tungstenite::{
     connect_async, tungstenite::Message as Wire, MaybeTlsStream, WebSocketStream,
@@ -392,95 +391,6 @@ pub(super) async fn viewer(
     let _ = stream(socket, &page, state, viewer, &params).await;
     page.set_controller(viewer, false);
 }
-
-fn jpeg(frame: &Value) -> Option<Vec<u8>> {
-    STANDARD.decode(frame["data"].as_str()?).ok()
-}
-
-async fn capture_still(
-    cdp: &mut Cdp,
-    sequence: &mut u64,
-    quality: u64,
-) -> Result<(u64, Instant), ()> {
-    let id = command(
-        cdp,
-        sequence,
-        "Page.captureScreenshot",
-        json!({"format":"jpeg","quality":quality}),
-    )
-    .await?;
-    Ok((id, Instant::now() + Duration::from_secs(2)))
-}
-
-async fn deadline(at: Option<Instant>) {
-    match at {
-        Some(at) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
-    }
-}
-
-enum FrameAck {
-    Still,
-    Live { id: u64, at: Instant },
-}
-impl FrameAck {
-    fn live(id: u64) -> Self {
-        Self::Live {
-            id,
-            at: Instant::now() + Duration::from_millis(100),
-        }
-    }
-}
-struct Frame {
-    bytes: Vec<u8>,
-    ack: FrameAck,
-}
-
-// One sent frame awaits viewer acknowledgment. Keep only the newest waiting image,
-// releasing superseded live frames back to Chromium without stalling viewer input.
-#[derive(Default)]
-struct ViewerFrames {
-    sent: Option<FrameAck>,
-    waiting: Option<Frame>,
-    acks: VecDeque<(Instant, u64)>,
-    live_count: usize,
-}
-impl ViewerFrames {
-    fn release(&mut self, ack: FrameAck) {
-        if let FrameAck::Live { id, at } = ack {
-            let index = self.acks.partition_point(|(other, _)| *other <= at);
-            self.acks.insert(index, (at, id));
-        }
-    }
-    async fn send(&mut self, socket: &mut WebSocket, frame: Frame) -> Result<(), ()> {
-        socket
-            .send(Message::Binary(frame.bytes))
-            .await
-            .map_err(|_| ())?;
-        self.sent = Some(frame.ack);
-        Ok(())
-    }
-    async fn offer(&mut self, socket: &mut WebSocket, frame: Frame) -> Result<(), ()> {
-        if matches!(frame.ack, FrameAck::Live { .. }) {
-            self.live_count += 1;
-        }
-        if self.sent.is_none() {
-            self.send(socket, frame).await?
-        } else if let Some(previous) = self.waiting.replace(frame) {
-            self.release(previous.ack);
-        }
-        Ok(())
-    }
-    async fn acknowledge(&mut self, socket: &mut WebSocket) -> Result<(), ()> {
-        if let Some(ack) = self.sent.take() {
-            self.release(ack)
-        }
-        if let Some(frame) = self.waiting.take() {
-            self.send(socket, frame).await?
-        }
-        Ok(())
-    }
-}
 async fn stream(
     mut socket: WebSocket,
     page: &Page,
@@ -512,7 +422,6 @@ async fn stream(
             .unwrap_or(fallback)
             .min(max)
     };
-    let quality = param("quality", 70, 100);
     let w = param("maxWidth", 1280, 7680);
     let h = param("maxHeight", 800, 4320);
     let snap = state.previews.tab(&page.thread, &page.tab).ok_or(())?;
@@ -526,16 +435,11 @@ async fn stream(
         json!({"width":width,"height":height,"mobile":false,"deviceScaleFactor":2}),
     )
     .await?;
-    // Begin navigating when the target is ready, independently of Chromium's first paint.
-    let initial_url = page.initial_url.lock().unwrap().take();
-    if let Some(url) = initial_url {
-        command(&mut cdp, &mut sequence, "Page.navigate", json!({"url":url})).await?;
-    }
-    let start = command(
+    command(
         &mut cdp,
         &mut sequence,
         "Page.startScreencast",
-        json!({"format":"jpeg","quality":quality,"maxWidth":w,"maxHeight":h}),
+        json!({"format":"jpeg","quality":param("quality",70,100),"maxWidth":w,"maxHeight":h}),
     )
     .await?;
     let info = || json!({"expression":"JSON.stringify({url:location.href,title:document.title,ready:document.readyState})","returnByValue":true});
@@ -559,17 +463,8 @@ async fn stream(
     .await?;
     let mut pending_downloads = HashMap::<String, String>::new();
     let mut chooser_updates = page.chooser_updates.subscribe();
-    let mut frames = ViewerFrames::default();
-    let mut live = false;
-    let mut still = None;
-    let mut request_still = false;
-    let mut settle = None;
-    let mut overlap = false;
+    let mut pending = None;
     loop {
-        if request_still && still.is_none() {
-            still = Some(capture_still(&mut cdp, &mut sequence, quality).await?);
-            request_still = false;
-        }
         tokio::select! {
             _=gone.changed()=>{let _=socket.send(Message::Close(Some(CloseFrame{code:4404,reason:Cow::Borrowed("tab closed")}))).await;break;}
             _=control.changed()=>{
@@ -583,15 +478,6 @@ async fn stream(
             }
             event=cdp.next()=>{
                 let Some(Ok(Wire::Text(raw)))=event else{break};let Ok(e)=serde_json::from_str::<Value>(&raw)else{continue};
-                if e["id"] == start && !live {
-                    request_still = true;
-                }
-                if still.is_some_and(|(id, _)| e["id"] == id) {
-                    still=None;
-                    if let Some(bytes)=jpeg(&e["result"]){
-                        frames.offer(&mut socket,Frame{bytes,ack:FrameAck::Still}).await?;
-                    }
-                }
                 if e["id"]==document{
                     if let Some(doc)=e["result"]["result"]["value"].as_str().and_then(|s|serde_json::from_str::<Value>(s).ok()){
                         if let Some(url)=doc["url"].as_str().filter(|u|*u!="about:blank"){state.previews.page_status(&page.thread,&page.tab,json!({"_tag":if doc["ready"]=="complete"{"Success"}else{"Loading"},"url":url,"title":doc["title"].as_str().unwrap_or("")}));}
@@ -617,34 +503,19 @@ async fn stream(
                             }
                         }}else if event["state"]=="canceled"{pending_downloads.remove(guid);}}
                     }
-                    Some("Page.screencastFrame")=>{
-                        live=true;
-                        let data=&e["params"];
-                        if let (Some(bytes),Some(id))=(jpeg(data), data["sessionId"].as_u64()){
-                            overlap |= frames.live_count > 0;
-                            settle=Some(Instant::now()+Duration::from_millis(200));
-                            frames.offer(&mut socket,Frame{bytes,ack:FrameAck::live(id)}).await?;
-                        }
-                    }
+                    Some("Page.screencastFrame")=>{let data=&e["params"];if pending.is_none(){if let Some(bytes)=data["data"].as_str().and_then(|s|STANDARD.decode(s).ok()){
+                        let url=page.initial_url.lock().unwrap().take();
+                        if let Some(url)=url{command(&mut cdp,&mut sequence,"Page.navigate",json!({"url":url})).await?;}
+                        socket.send(Message::Binary(bytes)).await.map_err(|_|())?;pending=data["sessionId"].as_u64();
+                    }}else{command(&mut cdp,&mut sequence,"Page.screencastFrameAck",json!({"sessionId":data["sessionId"]})).await?;}}
                     Some("Page.loadEventFired"|"Page.frameNavigated")=>{document=command(&mut cdp,&mut sequence,"Runtime.evaluate",info()).await?;}
                     _=>{}
                 }
             }
-            _ = deadline(still.map(|(_, timeout)| timeout)) => still = None,
-            _=deadline(settle)=>{
-                settle=None;
-                request_still |= overlap;
-                overlap=false;
-            }
-            _=deadline(frames.acks.front().map(|(at,_)|*at))=>{
-                let (_,id)=frames.acks.pop_front().expect("ack deadline");
-                frames.live_count-=1;
-                command(&mut cdp,&mut sequence,"Page.screencastFrameAck",json!({"sessionId":id})).await?;
-            }
             msg=socket.recv()=>{
                 let Some(Ok(Message::Text(raw)))=msg else{break};let Ok(m)=serde_json::from_str::<Value>(&raw)else{continue};
                 match m["type"].as_str(){
-                    Some("ack")=>frames.acknowledge(&mut socket).await?,
+                    Some("ack")=>{if let Some(id)=pending.take(){command(&mut cdp,&mut sequence,"Page.screencastFrameAck",json!({"sessionId":id})).await?;}}
                     Some("takeControl") if can_operate=>page.set_controller(viewer,true),
                     Some("releaseControl") if can_operate=>page.set_controller(viewer,false),
                     _ if page.control.lock().unwrap().owner==Some(viewer)=>{if let Some((method,p))=user_command(&m){command(&mut cdp,&mut sequence,method,p).await?;}}
