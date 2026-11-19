@@ -191,12 +191,17 @@ impl<'a> Github<'a> {
                 "application/vnd.github.raw+json" => 1024 * 1024 + 1,
                 _ => 8 * 1024 * 1024 + 1,
             };
-            let (status, stdout, stderr) = tokio::try_join!(
-                child.wait(),
-                bounded_read(stdout, max_bytes),
-                bounded_read(stderr, 16 * 1024)
-            )
-            .map_err(|_| Failure::Refused)?;
+            let stdout_task = tokio::spawn(bounded_read(stdout, max_bytes));
+            let stderr_task = tokio::spawn(bounded_read(stderr, 16 * 1024));
+            let status = child.wait().await.map_err(|_| Failure::Refused)?;
+            let stdout = stdout_task
+                .await
+                .map_err(|_| Failure::Refused)?
+                .map_err(|_| Failure::Refused)?;
+            let stderr = stderr_task
+                .await
+                .map_err(|_| Failure::Refused)?
+                .map_err(|_| Failure::Refused)?;
             if status.success() {
                 return Ok(stdout);
             }

@@ -20,6 +20,14 @@ static DEFAULTS: LazyLock<Value> = LazyLock::new(|| {
         .expect("provider catalogs and keybinding defaults")
 });
 
+pub(crate) fn keybindings_mutate(
+    state: &AppState,
+    method: &str,
+    input: &Value,
+) -> Result<Value, Value> {
+    keybindings::mutate(&state.paths.keybindings, method, input)
+}
+
 fn observability(state: &AppState, settings: &Value) -> Value {
     fn var(name: &str) -> Option<String> {
         env::var(name)
@@ -100,7 +108,9 @@ pub(crate) async fn snapshot(
     references: bool,
     options: &Value,
 ) -> Result<Value, Value> {
-    let settings = state.settings.client(references)?;
+    let mut settings = state.settings.client(references)?;
+    let project_rows = state.store.read().await.project_rows.clone();
+    crate::rpc::fold_project_rows_into_settings(&mut settings, &project_rows);
     let hostname = hostname::get()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();

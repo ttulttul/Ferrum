@@ -10,7 +10,15 @@ pub(crate) async fn dispatch_orchestration_command(
 ) -> Result<u64, Value> {
     let kind = command["type"].as_str().unwrap_or_default();
     let command_id = command["commandId"].as_str().unwrap_or_default();
-    let id = command["threadId"].as_str().unwrap_or_default();
+    let id = command["threadId"]
+        .as_str()
+        .or_else(|| {
+            matches!(kind, "thread.fork" | "thread.merge_back")
+                .then(|| command["targetThreadId"].as_str())
+                .flatten()
+        })
+        .or_else(|| command["parentThreadId"].as_str())
+        .unwrap_or_default();
     let error = |detail: String, cause: Value| json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":command_id,"commandType":kind,"message":detail,"detail":detail,"cause":cause});
     let dispatch_error = |detail: String| {
         error(
@@ -30,6 +38,21 @@ pub(crate) async fn dispatch_orchestration_command(
             json!({"name":"OrchestratorCommandIdConflictError","message":msg}),
         ));
     }
+    if matches!(kind, "thread.fork" | "delegated_task.request") {
+        let target = command["targetThreadId"]
+            .as_str()
+            .or_else(|| command["childThreadId"].as_str())
+            .unwrap_or_default();
+        if !target.is_empty()
+            && (store.threads.contains_key(target) || store.deleted_thread_ids.contains(target))
+        {
+            let msg = format!("Thread {target} already exists. Use a new thread id.");
+            return Err(error(
+                msg.clone(),
+                json!({"name":"OrchestratorThreadAlreadyExistsError","message":msg}),
+            ));
+        }
+    }
     if kind == "thread.create"
         && (store.threads.contains_key(id) || store.deleted_thread_ids.contains(id))
     {
@@ -39,10 +62,12 @@ pub(crate) async fn dispatch_orchestration_command(
             json!({"name":"OrchestratorThreadAlreadyExistsError","message":msg}),
         ));
     }
-    if let Some(id) = command["threadId"]
-        .as_str()
-        .filter(|_| kind != "thread.create")
-    {
+    if let Some(id) = command["threadId"].as_str().filter(|_| {
+        !matches!(
+            kind,
+            "thread.create" | "thread.fork" | "delegated_task.request"
+        )
+    }) {
         let Some(thread) = store.threads.get(id) else {
             let msg = format!("No orchestration projection exists for thread {id}.");
             return Err(error(
@@ -65,6 +90,7 @@ pub(crate) async fn dispatch_orchestration_command(
             && matches!(
                 kind,
                 "thread.settle"
+                    | "thread.auto-settle"
                     | "thread.unsettle"
                     | "thread.snooze"
                     | "thread.unsnooze"
@@ -73,10 +99,29 @@ pub(crate) async fn dispatch_orchestration_command(
                     | "thread.unpin"
                     | "thread.pin.reorder"
                     | "thread.active.reorder"
+                    | "queue.resume"
+                    | "queued-message.promote-to-steer"
+                    | "thread.pull-request-watch.sync"
                     | "thread.pull-request.sync"
             )
         {
             return Err(dispatch_error(format!("Thread {id} is archived.")));
+        }
+        if kind == "message.dispatch" && !store.projects.contains_key(&thread.project_id) {
+            let runtime = json!({
+                "name":"RuntimePolicyResolveError",
+                "message":format!("Failed to resolve runtime policy for provider instance {} in project {}.", thread.row["providerInstanceId"].as_str().unwrap_or("codex"), thread.project_id),
+                "cause":"Project not found."
+            });
+            let nested = json!({
+                "name":"OrchestratorDispatchError",
+                "message":format!("Failed to dispatch orchestration command {kind} ({command_id})."),
+                "cause":runtime
+            });
+            return Err(error(
+                "Project not found.".into(),
+                json!({"name":"OrchestratorDispatchError","message":format!("Failed to dispatch orchestration command {kind} ({command_id})."),"cause":nested}),
+            ));
         }
     }
     if let Some(summary) = state.settings.policy.summary() {
@@ -139,23 +184,27 @@ async fn start_run(
     thread_id: &str,
     text: String,
     message_id: &Value,
+    queued: bool,
 ) -> anyhow::Result<u64> {
-    let cwd = state
+    let (cwd, needs_baseline) = state
         .store
         .read()
         .await
         .threads
         .get(thread_id)
-        .map(|t| t.cwd.clone())
+        .map(|t| (t.cwd.clone(), t.checkpoints.is_empty()))
         .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+    let baseline = needs_baseline.then(|| cwd.clone());
     let run = Run {
         id: Uuid::new_v4(),
         thread_id: thread_id.to_owned(),
         provider: "default".into(),
-        status: "running".into(),
+        status: if queued { "queued" } else { "running" }.into(),
         started_at: now(),
         finished_at: None,
         error: None,
+        user_message_id: Some(message_id.as_str().unwrap_or_default().to_owned()),
+        queue_held: queued,
     };
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),
@@ -173,6 +222,25 @@ async fn start_run(
         )
         .await?
         .id;
+    if let Some(baseline_cwd) = baseline {
+        if let Some(tree) = crate::capture_git_tree(&baseline_cwd).await {
+            let _ = state
+                .commit(Event::CheckpointCaptured {
+                    thread_id: thread_id.to_owned(),
+                    checkpoint: crate::CheckpointRecord {
+                        turn_count: 0,
+                        tree,
+                        cwd: baseline_cwd,
+                        captured_at: now(),
+                        ready: true,
+                    },
+                })
+                .await;
+        }
+    }
+    if queued {
+        return Ok(seq);
+    }
     let (tx, rx) = oneshot::channel();
     state.cancellations.lock().await.insert(run.id, tx);
     tokio::spawn(async move {
@@ -192,6 +260,82 @@ async fn start_run(
         }
     });
     Ok(seq)
+}
+
+async fn start_queued_run(
+    state: Arc<AppState>,
+    receipt: &CommandReceipt,
+    thread_id: &str,
+    run_id: &str,
+) -> anyhow::Result<u64> {
+    start_existing_run(state, receipt, thread_id, run_id, "running").await
+}
+
+async fn start_existing_run(
+    state: Arc<AppState>,
+    receipt: &CommandReceipt,
+    thread_id: &str,
+    run_id: &str,
+    start_status: &str,
+) -> anyhow::Result<u64> {
+    let (mut run, cwd, text) = {
+        let store = state.store.read().await;
+        let thread = store
+            .threads
+            .get(thread_id)
+            .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+        let run = thread
+            .runs
+            .iter()
+            .find(|candidate| {
+                candidate.id.to_string() == run_id
+                    && (candidate.status == "queued" || candidate.status == "preparing")
+            })
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} is not queued.")))?;
+        if thread
+            .runs
+            .iter()
+            .any(|candidate| candidate.status == "running")
+        {
+            return Err(anyhow::anyhow!(
+                "A queued user message can only be sent now while the thread is stopped."
+            ));
+        }
+        let message_id = run
+            .user_message_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} has no queued message.")))?;
+        let text = thread
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .map(|message| message.content.clone())
+            .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} has no queued message.")))?;
+        (run, thread.cwd.clone(), text)
+    };
+    run.status = start_status.into();
+    run.queue_held = false;
+    let sequence = state
+        .commit_receipted(Event::RunStarted(run.clone()), Some(receipt.clone()))
+        .await?
+        .id;
+    let (tx, rx) = oneshot::channel();
+    state.cancellations.lock().await.insert(run.id, tx);
+    tokio::spawn(async move {
+        if let Err(error) = execute_run(state.clone(), run.clone(), cwd, text, rx).await {
+            state.cancellations.lock().await.remove(&run.id);
+            let _ = state
+                .commit(Event::RunFinished {
+                    run_id: run.id,
+                    thread_id: run.thread_id.clone(),
+                    status: "failed".into(),
+                    error: Some(error.to_string()),
+                })
+                .await;
+        }
+    });
+    Ok(sequence)
 }
 
 async fn apply_command(
@@ -247,6 +391,7 @@ async fn apply_command(
                 pinned: false,
                 unread: false,
                 tags: vec![],
+                checkpoints: vec![],
             };
             return Ok(state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
@@ -261,9 +406,25 @@ async fn apply_command(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            return start_run(state, receipt, thread_id, text, &command["messageId"]).await;
+            let queued = command["dispatchMode"]["type"] == "queue_after_active"
+                && state
+                    .store
+                    .read()
+                    .await
+                    .threads
+                    .get(thread_id)
+                    .is_some_and(|thread| thread.runs.iter().any(|run| run.status == "running"));
+            return start_run(
+                state.clone(),
+                receipt,
+                thread_id,
+                text,
+                &command["messageId"],
+                queued,
+            )
+            .await;
         }
-        "thread.stop" | "run.interrupt" | "subagent.stop" | "queued-run.cancel" => {
+        "thread.stop" | "run.interrupt" | "subagent.stop" => {
             if let Some(thread_id) = thread_id {
                 let run_ids = state
                     .store
@@ -298,10 +459,126 @@ async fn apply_command(
                     .id);
             }
         }
+        "thread.pull-request-watch.checks-reopen" => {
+            let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
+            let store = state.store.read().await;
+            let thread = store
+                .threads
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            let mut row = thread.stored_row();
+            if let Some(links) = row["pullRequests"].as_array_mut() {
+                for link in links {
+                    if let Some(watch) = link.get_mut("watch").and_then(Value::as_object_mut) {
+                        watch.remove("checksPending");
+                    }
+                }
+            }
+            drop(store);
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "thread.pull-request-watch.sync" => {
+            let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
+            let store = state.store.read().await;
+            let thread = store
+                .threads
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            let mut row = thread.stored_row();
+            let host = command["host"].as_str().unwrap_or_default();
+            let repository = command["repository"].as_str().unwrap_or_default();
+            let number = command["number"].clone();
+            let Some(link) = row["pullRequests"].as_array_mut().and_then(|links| {
+                links.iter_mut().find(|link| {
+                    link["host"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .eq_ignore_ascii_case(host)
+                        && link["repository"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .eq_ignore_ascii_case(repository)
+                        && link["number"] == number
+                })
+            }) else {
+                drop(store);
+                return Ok(state
+                    .commit_receipted(
+                        Event::CommandDispatched {
+                            command_id: receipt.command_id.clone(),
+                            command_type: command_type.into(),
+                            thread_id: Some(id.to_owned()),
+                            payload: command.clone(),
+                        },
+                        Some(receipt.clone()),
+                    )
+                    .await?
+                    .id);
+            };
+            let existing_watch = link["watch"].clone();
+            if existing_watch["startedAt"] != command["startedAt"] {
+                drop(store);
+                return Ok(state
+                    .commit_receipted(
+                        Event::CommandDispatched {
+                            command_id: receipt.command_id.clone(),
+                            command_type: command_type.into(),
+                            thread_id: Some(id.to_owned()),
+                            payload: command.clone(),
+                        },
+                        Some(receipt.clone()),
+                    )
+                    .await?
+                    .id);
+            }
+            if command["watch"].is_null() {
+                let ended = command
+                    .get("endedWatch")
+                    .cloned()
+                    .or_else(|| (!existing_watch.is_null()).then_some(existing_watch));
+                link.as_object_mut().unwrap().remove("watch");
+                if let Some(ended) = ended {
+                    link["endedWatch"] = ended;
+                }
+            } else {
+                let mut watch = command["watch"].clone();
+                if command.get("checksPendingBefore").is_none()
+                    || existing_watch.get("checksPending").is_some()
+                {
+                    link["watch"] = watch;
+                } else if let Some(object) = watch.as_object_mut() {
+                    object.remove("checksPending");
+                    link["watch"] = Value::Object(object.clone());
+                }
+                link.as_object_mut().unwrap().remove("endedWatch");
+            }
+            drop(store);
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
         "thread.issue.link"
         | "thread.issue.unlink"
         | "thread.pull-request.link"
         | "thread.pull-request.unlink"
+        | "thread.pull-request.watch"
+        | "thread.pull-request.sync"
         | "thread.pull-request-link.sync" => {
             let id = &receipt.thread_id;
             let store = state.store.read().await;
@@ -309,11 +586,19 @@ async fn apply_command(
                 .threads
                 .get(id)
                 .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
-            let row = crate::thread_projection::link_patch(
-                thread,
-                command,
-                &crate::auth_service::iso(crate::auth_service::now()),
-            );
+            let at = crate::auth_service::iso(crate::auth_service::now());
+            let row = if command_type == "thread.pull-request.watch" {
+                crate::thread_projection::watch_patch(thread, command, &at)
+            } else if command_type == "thread.pull-request.sync" {
+                let mut row = thread.stored_row();
+                row["branchPullRequest"] = command["branchPullRequest"].clone();
+                if command.get("linkedPullRequest").is_some() {
+                    row["linkedPullRequest"] = command["linkedPullRequest"].clone();
+                }
+                row
+            } else {
+                crate::thread_projection::link_patch(thread, command, &at)
+            };
             drop(store);
             return Ok(state
                 .commit_receipted(
@@ -339,8 +624,95 @@ async fn apply_command(
             }
             .map_err(anyhow::Error::msg)?;
         }
+        "thread.guest-share.open" | "thread.guest-share.redeem" | "thread.guest-message.submit" => {
+            let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
+            let mut row = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?
+                .stored_row();
+            match command_type {
+                "thread.guest-share.open" => {
+                    row["guestShare"] = json!({"id":command["shareId"],"host":command["host"],"createdAt":crate::auth_service::iso(crate::auth_service::now()),"expiresAt":command["expiresAt"],"guestName":Value::Null,"messages":[]});
+                }
+                "thread.guest-share.redeem" => {
+                    if !row["guestShare"].is_object() {
+                        return Err(anyhow::anyhow!("Guest share is not open."));
+                    }
+                    row["guestShare"]["guestName"] = command["guestName"].clone();
+                }
+                _ => {
+                    let mut messages = row["guestShare"]["messages"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut message = json!({"id":command["guestMessageId"],"text":command["text"],"status":"pending","submittedAt":crate::auth_service::iso(crate::auth_service::now())});
+                    if let Some(attachments) = command.get("attachments") {
+                        message["attachments"] = attachments.clone();
+                    }
+                    messages.push(message);
+                    row["guestShare"]["messages"] = json!(messages);
+                }
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "thread.project.adopt-folder" => {
+            let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
+            let project_id = command["projectId"].as_str().unwrap_or_default();
+            let store = state.store.read().await;
+            let project = store
+                .projects
+                .get(project_id)
+                .ok_or_else(|| anyhow::anyhow!(format!("Project {project_id} was not found.")))?;
+            let thread = store
+                .threads
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            if thread
+                .runs
+                .iter()
+                .any(|run| matches!(run.status.as_str(), "preparing" | "starting" | "running"))
+            {
+                return Err(anyhow::anyhow!(format!(
+                    "Thread {id} still has work in progress. Finish or stop it first."
+                )));
+            }
+            if thread.cwd != project.path {
+                return Err(anyhow::anyhow!(format!(
+                    "Thread {id} does not work in {}.",
+                    project.path
+                )));
+            }
+            let mut row = thread.stored_row();
+            row["projectId"] = json!(project_id);
+            row["worktreePath"] = Value::Null;
+            drop(store);
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
         "thread.archive"
         | "thread.unarchive"
+        | "thread.auto-settle"
         | "thread.settle"
         | "thread.unsettle"
         | "thread.pin"
@@ -350,6 +722,7 @@ async fn apply_command(
         | "thread.snooze"
         | "thread.unsnooze"
         | "thread.metadata.update"
+        | "thread.title.regeneration.complete"
         | "thread.runtime-mode.set"
         | "thread.interaction-mode.set"
         | "thread.model-selection.set"
@@ -359,8 +732,55 @@ async fn apply_command(
         | "thread.active.reorder"
         | "provider.switch" => {
             if let Some(thread_id) = thread_id {
+                let current = state.store.read().await;
+                let existing_thread = current.threads.get(thread_id);
+                let existing_row = existing_thread
+                    .map(|thread| thread.stored_row())
+                    .unwrap_or_else(|| json!({}));
+                if command_type == "thread.metadata.update" {
+                    if let Some(expected) = command.get("expectedWorktreePath") {
+                        if expected != &existing_row["worktreePath"] {
+                            return Err(anyhow::anyhow!(format!(
+                                "Thread {thread_id} worktree changed before the metadata update could be applied."
+                            )));
+                        }
+                    }
+                    if let Some(expected) = command.get("expectedBranch") {
+                        if expected != &existing_row["branch"] {
+                            return Err(anyhow::anyhow!(format!(
+                                "Thread {thread_id} branch changed before the metadata update could be applied."
+                            )));
+                        }
+                    }
+                    if command["expectedEmpty"] == true
+                        && existing_thread.is_some_and(|thread| {
+                            !thread.messages.is_empty() || !thread.runs.is_empty()
+                        })
+                    {
+                        return Err(anyhow::anyhow!(format!(
+                            "Thread {thread_id} is no longer empty."
+                        )));
+                    }
+                }
+                drop(current);
                 let mut patch = serde_json::Map::new();
                 let at = json!(crate::auth_service::iso(crate::auth_service::now()));
+                let existing_title_regeneration = state
+                    .store
+                    .read()
+                    .await
+                    .threads
+                    .get(thread_id)
+                    .map(|thread| thread.stored_row()["titleRegeneration"].clone())
+                    .unwrap_or(Value::Null);
+                let existing_row = state
+                    .store
+                    .read()
+                    .await
+                    .threads
+                    .get(thread_id)
+                    .map(|thread| thread.stored_row())
+                    .unwrap_or_else(|| json!({}));
                 let mut row = json!({"updatedAt":at});
                 match command_type {
                     "thread.archive" => {
@@ -372,6 +792,37 @@ async fn apply_command(
                     "thread.unarchive" => {
                         patch.insert("archived".into(), false.into());
                         row["archivedAt"] = Value::Null;
+                    }
+                    "thread.auto-settle" => {
+                        let snapshot = command["snapshotAt"].as_str().unwrap_or_default();
+                        let changed_at = state
+                            .store
+                            .read()
+                            .await
+                            .threads
+                            .get(thread_id)
+                            .map(|thread| {
+                                thread.stored_row()["updatedAt"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned()
+                            })
+                            .unwrap_or_default();
+                        if !snapshot.is_empty() && changed_at.as_str() > snapshot {
+                            return Err(anyhow::anyhow!(format!(
+                                "Thread {thread_id} changed before automatic settlement."
+                            )));
+                        }
+                        patch.insert("settled".into(), true.into());
+                        patch.insert("pinned".into(), false.into());
+                        row["settledOverride"] = "settled".into();
+                        row["settledAt"] = command.get("settledAt").cloned().unwrap_or(at.clone());
+                        row["unsettledAt"] = Value::Null;
+                        row["pinnedAt"] = Value::Null;
+                        row["pinOrderKey"] = Value::Null;
+                        row["activeOrderKey"] = Value::Null;
+                        row["snoozedUntil"] = Value::Null;
+                        row["snoozedAt"] = Value::Null;
                     }
                     "thread.settle" => {
                         patch.insert("settled".into(), true.into());
@@ -398,6 +849,18 @@ async fn apply_command(
                     "thread.pin" => {
                         patch.insert("pinned".into(), true.into());
                         row["pinnedAt"] = at;
+                        row["settledOverride"] = if existing_row["settledOverride"] == "settled" {
+                            Value::String("active".into())
+                        } else {
+                            existing_row["settledOverride"].clone()
+                        };
+                        if row["settledOverride"] == "active" {
+                            row["settledAt"] = Value::Null;
+                            row["unsettledAt"] =
+                                json!(crate::auth_service::iso(crate::auth_service::now()));
+                        }
+                        row["snoozedUntil"] = Value::Null;
+                        row["snoozedAt"] = Value::Null;
                         if let Some(key) = command.get("orderKey") {
                             row["pinOrderKey"] = key.clone();
                         }
@@ -409,27 +872,115 @@ async fn apply_command(
                     }
                     "thread.mark-unread" => {
                         patch.insert("unread".into(), true.into());
-                    }
-                    "thread.visit" => {
-                        patch.insert("unread".into(), false.into());
+                        if let Some(completed) = state
+                            .store
+                            .read()
+                            .await
+                            .threads
+                            .get(thread_id)
+                            .and_then(|thread| {
+                                thread.runs.iter().filter_map(|run| run.finished_at).max()
+                            })
+                        {
+                            row["lastVisitedAt"] = json!(crate::auth_service::iso(
+                                (completed as i64).saturating_mul(1000).saturating_sub(1)
+                            ));
+                        }
                     }
                     "thread.snooze" => {
-                        patch.insert(
-                            "snoozed_until".into(),
-                            command
-                                .get("snoozedUntil")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null),
-                        );
+                        let snoozed_until =
+                            command.get("snoozedUntil").cloned().unwrap_or(Value::Null);
+                        patch.insert("snoozed_until".into(), snoozed_until.clone());
+                        row["snoozedUntil"] = snoozed_until;
+                        row["snoozedAt"] = at.clone();
                     }
                     "thread.unsnooze" => {
                         patch.insert("snoozed_until".into(), serde_json::Value::Null);
+                        row["snoozedUntil"] = Value::Null;
+                        row["snoozedAt"] = Value::Null;
+                    }
+                    "thread.visit" => {
+                        if let Some(visited_at) = command.get("visitedAt") {
+                            row["lastVisitedAt"] = visited_at.clone();
+                        }
+                        patch.insert("unread".into(), false.into());
+                    }
+                    "thread.title.regeneration.complete" => {
+                        let request_id = command["requestId"].as_str().unwrap_or_default();
+                        if existing_title_regeneration["requestId"] == request_id {
+                            if let Some(title) = command.get("title") {
+                                row["title"] = title.clone();
+                                row["titleRenamed"] = false.into();
+                                patch.insert("title".into(), title.clone());
+                            }
+                            if let Some(outcome) = command.get("outcome") {
+                                row["lastTitleRegeneration"] = json!({
+                                    "requestId": request_id,
+                                    "completedAt": at,
+                                    "outcome": outcome
+                                });
+                            }
+                            row["titleRegeneration"] = Value::Null;
+                        }
                     }
                     "thread.metadata.update" => {
                         if let Some(title) = command.get("title") {
                             patch.insert("title".into(), title.clone());
                             row["title"] = title.clone();
                             row["titleRenamed"] = true.into();
+                            row["titleRegeneration"] = Value::Null;
+                        }
+                        for field in ["branch", "worktreePath", "linkedPullRequest"] {
+                            if let Some(value) = command.get(field) {
+                                row[field] = value.clone();
+                                if field == "linkedPullRequest" {
+                                    patch.insert(field.into(), value.clone());
+                                    let mut links = existing_row["pullRequests"]
+                                        .as_array()
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    if value.is_null() {
+                                        if let Some(previous) =
+                                            existing_row["linkedPullRequest"].as_object()
+                                        {
+                                            let repository =
+                                                previous["repository"].as_str().unwrap_or_default();
+                                            let number =
+                                                previous["number"].as_i64().unwrap_or_default();
+                                            links.retain(|link| {
+                                                link["repository"] != repository
+                                                    || link["number"] != number
+                                            });
+                                        }
+                                    } else if let Some(linked) = value.as_object() {
+                                        let repository =
+                                            linked["repository"].as_str().unwrap_or_default();
+                                        let number = linked["number"].as_i64().unwrap_or_default();
+                                        links.retain(|link| {
+                                            link["repository"] != repository
+                                                || link["number"] != number
+                                        });
+                                        let host = linked["url"]
+                                            .as_str()
+                                            .and_then(|url| url::Url::parse(url).ok())
+                                            .and_then(|url| url.host_str().map(str::to_owned))
+                                            .unwrap_or_else(|| "github.com".into());
+                                        links.push(json!({
+                                            "host":host,"repository":repository,"number":number,
+                                            "url":linked["url"],"source":"manual","linkedAt":at,
+                                            "snapshot":null,"stack":null
+                                        }));
+                                    }
+                                    row["pullRequests"] = json!(links);
+                                }
+                            }
+                        }
+                        if command.get("regenerateTitle") == Some(&Value::Bool(true)) {
+                            row["titleRegeneration"] = json!({
+                                "requestId": command["commandId"],
+                                "startedAt": at
+                            });
+                        } else if command.get("regenerateTitle") == Some(&Value::Bool(false)) {
                             row["titleRegeneration"] = Value::Null;
                         }
                     }
@@ -494,6 +1045,32 @@ async fn apply_command(
         }
         "thread.delete" => {
             if let Some(thread_id) = thread_id {
+                if command["onlyIfUnused"] == true {
+                    let used =
+                        state
+                            .store
+                            .read()
+                            .await
+                            .threads
+                            .get(thread_id)
+                            .is_some_and(|thread| {
+                                !thread.messages.is_empty() || !thread.runs.is_empty()
+                            });
+                    if used {
+                        return Ok(state
+                            .commit_receipted(
+                                Event::CommandDispatched {
+                                    command_id: receipt.command_id.clone(),
+                                    command_type: command_type.into(),
+                                    thread_id: Some(thread_id.to_owned()),
+                                    payload: command.clone(),
+                                },
+                                Some(receipt.clone()),
+                            )
+                            .await?
+                            .id);
+                    }
+                }
                 return Ok(state
                     .commit_receipted(
                         Event::ThreadDeleted {
@@ -505,7 +1082,1122 @@ async fn apply_command(
                     .id);
             }
         }
-        _ => anyhow::bail!("Unsupported orchestration command: {command_type}"),
+        "prepared-run.progress" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id.unwrap_or_default())
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .is_some_and(|run| run.status == "preparing");
+            if !valid {
+                return Err(anyhow::anyhow!(format!(
+                    "Run {run_id} is not awaiting workspace preparation."
+                )));
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::CommandDispatched {
+                        command_id: receipt.command_id.clone(),
+                        command_type: command_type.into(),
+                        thread_id: Some(thread_id.unwrap_or_default().to_owned()),
+                        payload: command.clone(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "prepared-run.release" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id.unwrap_or_default())
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .is_some_and(|run| run.status == "preparing");
+            if !valid {
+                return Err(anyhow::anyhow!(format!(
+                    "Run {run_id} is not awaiting workspace preparation."
+                )));
+            }
+            return start_existing_run(
+                state,
+                receipt,
+                thread_id.unwrap_or_default(),
+                run_id,
+                "starting",
+            )
+            .await;
+        }
+        "prepared-run.fail" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let thread_id = thread_id.unwrap_or_default();
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .is_some_and(|run| run.status == "preparing");
+            if !valid {
+                return Err(anyhow::anyhow!(format!(
+                    "Run {run_id} is not awaiting workspace preparation."
+                )));
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::RunFinished {
+                        run_id: Uuid::parse_str(run_id)?,
+                        thread_id: thread_id.to_owned(),
+                        status: "failed".into(),
+                        error: command["failure"]["message"].as_str().map(str::to_owned),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "prepared-run.retry" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let thread_id = thread_id.unwrap_or_default();
+            let current = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .cloned();
+            let Some(mut run) = current else {
+                return Err(anyhow::anyhow!(format!(
+                    "Run {run_id} has no failed workspace preparation to retry."
+                )));
+            };
+            if run.status != "failed" {
+                return Err(anyhow::anyhow!(format!(
+                    "Run {run_id} has no failed workspace preparation to retry."
+                )));
+            }
+            run.status = "preparing".into();
+            run.finished_at = None;
+            run.error = None;
+            return Ok(state
+                .commit_receipted(Event::RunStarted(run), Some(receipt.clone()))
+                .await?
+                .id);
+        }
+        "provider-session.detach" => {
+            let provider_session_id = command["providerSessionId"].as_str().unwrap_or_default();
+            let thread_id = thread_id.unwrap_or_default();
+            return Err(anyhow::anyhow!(format!(
+                "Provider session {provider_session_id} does not belong to thread {thread_id}."
+            )));
+        }
+        "queued-run.cancel" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id.unwrap_or_default())
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .is_some_and(|run| run.status == "queued");
+            if !valid {
+                return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::RunFinished {
+                        run_id: Uuid::parse_str(run_id)?,
+                        thread_id: thread_id.unwrap_or_default().to_owned(),
+                        status: "cancelled".into(),
+                        error: None,
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "queued-run.edit" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let Some((message_id, thread_id)) = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id.unwrap_or_default())
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .filter(|run| run.status == "queued")
+                .and_then(|run| run.user_message_id.clone())
+                .map(|message_id| (message_id, thread_id.unwrap_or_default().to_owned()))
+            else {
+                return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
+            };
+            return Ok(state
+                .commit_receipted(
+                    Event::MessageEdited {
+                        thread_id,
+                        message_id,
+                        content: command["text"].as_str().unwrap_or_default().to_owned(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "queued-run.reorder" => {
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            let thread_id = thread_id.unwrap_or_default();
+            let valid = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .is_some_and(|run| run.status == "queued");
+            if !valid {
+                return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
+            }
+            let before_run_id = match command.get("beforeRunId") {
+                Some(Value::Null) | None => None,
+                Some(value) => Some(Uuid::parse_str(value.as_str().unwrap_or_default())?),
+            };
+            return Ok(state
+                .commit_receipted(
+                    Event::RunReordered {
+                        thread_id: thread_id.to_owned(),
+                        run_id: Uuid::parse_str(run_id)?,
+                        before_run_id,
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "queued-run.start" => {
+            let thread_id = thread_id.unwrap_or_default();
+            let run_id = command["runId"].as_str().unwrap_or_default();
+            return start_queued_run(state, receipt, thread_id, run_id).await;
+        }
+        "queue.resume" => {
+            let thread_id = thread_id.unwrap_or_default();
+            let (queued, next, active) = {
+                let store = state.store.read().await;
+                let thread = store
+                    .threads
+                    .get(thread_id)
+                    .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+                let active = thread
+                    .runs
+                    .iter()
+                    .any(|run| matches!(run.status.as_str(), "preparing" | "starting" | "running"));
+                let queued = thread
+                    .runs
+                    .iter()
+                    .filter(|run| run.status == "queued")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let next = queued.first().cloned();
+                (queued, next, active)
+            };
+            let held = queued
+                .iter()
+                .filter(|run| run.queue_held)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut sequence = None;
+            for (index, mut run) in held.into_iter().enumerate() {
+                run.queue_held = false;
+                sequence = Some(
+                    state
+                        .commit_receipted(
+                            Event::RunUpdated(run),
+                            (index + 1 == queued.iter().filter(|run| run.queue_held).count())
+                                .then(|| receipt.clone()),
+                        )
+                        .await?
+                        .id,
+                );
+            }
+            if !active {
+                if let Some(run) = next {
+                    if queued.iter().all(|run| !run.queue_held) {
+                        sequence = Some(
+                            state
+                                .commit_receipted(
+                                    Event::CommandDispatched {
+                                        command_id: receipt.command_id.clone(),
+                                        command_type: command_type.into(),
+                                        thread_id: Some(thread_id.to_owned()),
+                                        payload: command.clone(),
+                                    },
+                                    Some(receipt.clone()),
+                                )
+                                .await?
+                                .id,
+                        );
+                    }
+                    start_existing_run(
+                        state.clone(),
+                        &CommandReceipt {
+                            command_id: format!("{}:start", receipt.command_id),
+                            thread_id: thread_id.to_owned(),
+                        },
+                        thread_id,
+                        &run.id.to_string(),
+                        "running",
+                    )
+                    .await?;
+                }
+            }
+            if sequence.is_none() {
+                sequence = Some(
+                    state
+                        .commit_receipted(
+                            Event::CommandDispatched {
+                                command_id: receipt.command_id.clone(),
+                                command_type: command_type.into(),
+                                thread_id: Some(thread_id.to_owned()),
+                                payload: command.clone(),
+                            },
+                            Some(receipt.clone()),
+                        )
+                        .await?
+                        .id,
+                );
+            }
+            return Ok(sequence.unwrap_or(0));
+        }
+        "queued-message.promote-to-steer" => {
+            let thread_id = thread_id.unwrap_or_default();
+            let queued_run_id = command["queuedRunId"].as_str().unwrap_or_default();
+            let target_run_id = command["targetRunId"].as_str().unwrap_or_default();
+            let (queued_run, target_run, message) = {
+                let store = state.store.read().await;
+                let thread = store
+                    .threads
+                    .get(thread_id)
+                    .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+                let queued_run = thread
+                    .runs
+                    .iter()
+                    .find(|run| run.id.to_string() == queued_run_id && run.status == "queued")
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(format!("Queued run {queued_run_id} is not queued."))
+                    })?;
+                let target_run = thread
+                    .runs
+                    .iter()
+                    .find(|run| run.id.to_string() == target_run_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(format!("Target run {target_run_id} was not found."))
+                    })?;
+                let message_id = queued_run.user_message_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(format!("Queued run {queued_run_id} has no queued message."))
+                })?;
+                let message = thread
+                    .messages
+                    .iter()
+                    .find(|message| message.id == message_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(format!(
+                            "Queued run {queued_run_id} has no queued message."
+                        ))
+                    })?;
+                (queued_run, target_run, message)
+            };
+            if message.content.trim_start().starts_with("/goal") {
+                return Err(anyhow::anyhow!(
+                    "Goal commands must run as a separate turn. Queue it or wait for the active turn to finish."
+                ));
+            }
+            if message.content.trim_start().starts_with("/compact") {
+                return Err(anyhow::anyhow!(
+                    "Context compaction must run as a separate turn. Queue it or wait for the active turn to finish."
+                ));
+            }
+            if target_run.status == "running" {
+                if let Some(cancel) = state.cancellations.lock().await.remove(&target_run.id) {
+                    let _ = cancel.send(());
+                }
+            }
+            let mut cancelled = queued_run;
+            cancelled.status = "cancelled".into();
+            cancelled.finished_at = Some(now());
+            cancelled.queue_held = false;
+            return Ok(state
+                .commit_receipted(Event::RunUpdated(cancelled), Some(receipt.clone()))
+                .await?
+                .id);
+        }
+        "runtime-request.respond" => {
+            let request_id = command["requestId"].as_str().unwrap_or_default();
+            let thread_id = thread_id.unwrap_or_default();
+            let current = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| {
+                    thread
+                        .row
+                        .get("runtimeRequests")
+                        .and_then(Value::as_array)
+                        .and_then(|requests| {
+                            requests.iter().find(|request| request["id"] == request_id)
+                        })
+                })
+                .cloned();
+            let Some(request) = current else {
+                return Err(anyhow::anyhow!(format!(
+                    "Runtime request {request_id} was not found."
+                )));
+            };
+            if request["status"]
+                .as_str()
+                .is_some_and(|status| status != "pending")
+            {
+                return Err(anyhow::anyhow!(format!(
+                    "Runtime request {request_id} is {}.",
+                    request["status"].as_str().unwrap_or("resolved")
+                )));
+            }
+            let mut requests = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.row["runtimeRequests"].as_array().cloned())
+                .unwrap_or_default();
+            if let Some(existing) = requests
+                .iter_mut()
+                .find(|candidate| candidate["id"] == request_id)
+            {
+                existing["status"] = json!("resolved");
+                existing["decision"] = command.get("decision").cloned().unwrap_or(Value::Null);
+                existing["feedback"] = command.get("feedback").cloned().unwrap_or(Value::Null);
+                existing["answers"] = command.get("answers").cloned().unwrap_or(Value::Null);
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: thread_id.to_owned(),
+                        patch: json!({"row":{"runtimeRequests":requests}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "thread.user-input.dismiss" => {
+            return Err(anyhow::anyhow!("This question has already been answered."));
+        }
+        "thread.fork" => {
+            let source_thread_id = command["sourceThreadId"].as_str().unwrap_or_default();
+            let source_point = command["sourcePoint"]["type"].as_str().unwrap_or_default();
+            let target_thread_id = command["targetThreadId"].as_str().unwrap_or_default();
+            let source = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(source_thread_id)
+                .cloned();
+            let Some(source) = source else {
+                return Err(anyhow::anyhow!(format!(
+                    "No orchestration projection exists for thread {source_thread_id}."
+                )));
+            };
+            if source_point == "latest_stable"
+                && !source.runs.iter().any(|run| run.status == "completed")
+            {
+                return Err(anyhow::anyhow!(
+                    "No stable source run was found for fork source latest_stable."
+                ));
+            }
+            let at = crate::auth_service::iso(crate::auth_service::now());
+            let mut row = source.stored_row();
+            row["id"] = json!(target_thread_id);
+            row["title"] = command
+                .get("title")
+                .cloned()
+                .unwrap_or_else(|| json!(source.title));
+            row["createdAt"] = json!(at.clone());
+            row["updatedAt"] = json!(at);
+            row["archivedAt"] = Value::Null;
+            row["deletedAt"] = Value::Null;
+            row["lineage"] = json!({"parentThreadId":source_thread_id,"relationshipToParent":"fork","rootThreadId":source.row["lineage"]["rootThreadId"].as_str().unwrap_or(source_thread_id),"sideChat":command.get("sideChat").and_then(Value::as_bool).unwrap_or(false)});
+            let forked_from = source
+                .runs
+                .iter()
+                .rev()
+                .find(|run| run.status == "completed")
+                .map(|run| json!({"type":"run","threadId":source_thread_id,"runId":run.id}))
+                .unwrap_or(Value::Null);
+            row["forkedFrom"] = forked_from;
+            let thread = Thread {
+                row,
+                id: target_thread_id.to_owned(),
+                project_id: source.project_id,
+                title: command
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&source.title)
+                    .to_owned(),
+                cwd: source.cwd,
+                status: "idle".into(),
+                messages: source.messages,
+                runs: vec![],
+                created_at: now(),
+                archived: false,
+                settled: false,
+                snoozed_until: None,
+                pinned: false,
+                unread: false,
+                tags: source.tags,
+                checkpoints: vec![],
+            };
+            return Ok(state
+                .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
+                .await?
+                .id);
+        }
+        "thread.merge_back" => {
+            let source_thread_id = command["sourceThreadId"].as_str().unwrap_or_default();
+            let target_thread_id = command["targetThreadId"].as_str().unwrap_or_default();
+            let store = state.store.read().await;
+            let source = store
+                .threads
+                .get(source_thread_id)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!(
+                        "No orchestration projection exists for thread {source_thread_id}."
+                    ))
+                })?;
+            let target = store
+                .threads
+                .get(target_thread_id)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!(
+                        "No orchestration projection exists for thread {target_thread_id}."
+                    ))
+                })?;
+            let existing = target
+                .messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let additions = source
+                .messages
+                .into_iter()
+                .filter(|m| !existing.contains(m.id.as_str()))
+                .collect::<Vec<_>>();
+            drop(store);
+            for message in additions {
+                state
+                    .commit(Event::MessageAdded {
+                        thread_id: target_thread_id.to_owned(),
+                        message,
+                    })
+                    .await?;
+            }
+            let sequence = state
+                .commit_receipted(
+                    Event::CommandDispatched {
+                        command_id: receipt.command_id.clone(),
+                        command_type: command_type.into(),
+                        thread_id: Some(target_thread_id.to_owned()),
+                        payload: command.clone(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id;
+            return Ok(sequence);
+        }
+        "delegated_task.request" => {
+            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
+            let generated_child_id;
+            let target_thread_id = if let Some(value) = command["childThreadId"]
+                .as_str()
+                .or_else(|| command["targetThreadId"].as_str())
+            {
+                value
+            } else {
+                generated_child_id = format!(
+                    "delegated-task:{}",
+                    command["commandId"].as_str().unwrap_or_default()
+                );
+                generated_child_id.as_str()
+            };
+            let parent = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(parent_thread_id)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!(
+                        "No orchestration projection exists for thread {parent_thread_id}."
+                    ))
+                })?;
+            let at = crate::auth_service::iso(crate::auth_service::now());
+            let mut row = parent.stored_row();
+            row["id"] = json!(target_thread_id);
+            row["title"] = command
+                .get("title")
+                .cloned()
+                .unwrap_or_else(|| json!("Subagent"));
+            row["createdAt"] = json!(at.clone());
+            row["updatedAt"] = json!(at);
+            row["lineage"] = json!({"parentThreadId":parent_thread_id,"relationshipToParent":"subagent","rootThreadId":parent.row["lineage"]["rootThreadId"].as_str().unwrap_or(parent_thread_id),"sideChat":false});
+            row["forkedFrom"] = json!({"type":"node","nodeId":command["parentNodeId"]});
+            let prompt = command["task"].as_str().unwrap_or_default();
+            let task_id = format!(
+                "node:delegated-task:{}",
+                command["commandId"].as_str().unwrap_or_default()
+            );
+            let task = json!({
+                "id": task_id,
+                "threadId": parent_thread_id,
+                "runId": command["parentRunId"],
+                "parentNodeId": command["parentNodeId"],
+                "origin": "app_owned",
+                "createdBy": command["createdBy"].as_str().unwrap_or("user"),
+                "driver": command["modelSelection"]["instanceId"],
+                "providerInstanceId": command["modelSelection"]["instanceId"],
+                "providerThreadId": Value::Null,
+                "childThreadId": target_thread_id,
+                "nativeTaskRef": Value::Null,
+                "prompt": prompt,
+                "title": command.get("title").cloned().unwrap_or(Value::Null),
+                "model": command["modelSelection"]["model"],
+                "modelSelection": command["modelSelection"],
+                "completionWake": command.get("completionWake").cloned().unwrap_or(json!("settled_only")),
+                "completionDelivery": {"state":"pending","observedByRunId":Value::Null},
+                "status": "running",
+                "result": Value::Null,
+                "startedAt": at,
+                "completedAt": Value::Null,
+                "updatedAt": at
+            });
+            let message = ConversationMessage {
+                id: format!(
+                    "{}:task",
+                    command["commandId"].as_str().unwrap_or(target_thread_id)
+                ),
+                role: "user".into(),
+                content: prompt.into(),
+                created_at: now(),
+            };
+            let thread = Thread {
+                row,
+                id: target_thread_id.to_owned(),
+                project_id: parent.project_id,
+                title: command
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Subagent")
+                    .to_owned(),
+                cwd: parent.cwd,
+                status: "idle".into(),
+                messages: vec![message],
+                runs: vec![],
+                created_at: now(),
+                archived: false,
+                settled: false,
+                snoozed_until: None,
+                pinned: false,
+                unread: false,
+                tags: vec![],
+                checkpoints: vec![],
+            };
+            let mut subagents = parent.row["subagents"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            subagents.push(task);
+            state
+                .commit(Event::ThreadPatched {
+                    thread_id: parent_thread_id.to_owned(),
+                    patch: json!({"row":{"subagents":subagents}}),
+                })
+                .await?;
+            return Ok(state
+                .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
+                .await?
+                .id);
+        }
+        "delegated_task.wake-policy"
+        | "delegated_task.completion-delivery.acknowledge"
+        | "delegated_task.completion-delivery.dispose" => {
+            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
+            let task_id = command["taskId"].as_str().unwrap_or_default();
+            let mut subagents = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(parent_thread_id)
+                .and_then(|thread| thread.row["subagents"].as_array().cloned())
+                .unwrap_or_default();
+            let Some(task) = subagents.iter_mut().find(|task| task["id"] == task_id) else {
+                return Err(anyhow::anyhow!(format!(
+                    "Delegated task {task_id} is not an app-owned task of thread {parent_thread_id}."
+                )));
+            };
+            if command_type == "delegated_task.wake-policy" {
+                let wake = command["completionWake"].as_str().unwrap_or_default();
+                if task["completionWake"].as_str() == Some(wake) {
+                    return Err(anyhow::anyhow!(format!(
+                        "Delegated task {task_id} already wakes the parent with completionWake {wake}."
+                    )));
+                }
+                task["completionWake"] = json!(wake);
+            } else {
+                let delivery_state = if command_type.ends_with("acknowledge") {
+                    "acknowledged"
+                } else {
+                    "disposed"
+                };
+                let current = task["completionDelivery"]["state"].as_str();
+                if current == Some(delivery_state)
+                    || (delivery_state == "acknowledged" && current == Some("disposed"))
+                {
+                    return Ok(state
+                        .commit_receipted(
+                            Event::ThreadPatched {
+                                thread_id: parent_thread_id.to_owned(),
+                                patch: json!({"row":{"subagents":subagents}}),
+                            },
+                            Some(receipt.clone()),
+                        )
+                        .await?
+                        .id);
+                }
+                task["completionDelivery"] = json!({
+                    "state": delivery_state,
+                    "observedByRunId": command.get("observedByRunId").cloned().unwrap_or(Value::Null)
+                });
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: parent_thread_id.to_owned(),
+                        patch: json!({"row":{"subagents":subagents}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "delegated_task.remote.request" => {
+            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
+            let task_id = format!(
+                "node:delegated-task:{}",
+                command["commandId"].as_str().unwrap_or_default()
+            );
+            let mut subagents = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(parent_thread_id)
+                .map(|thread| {
+                    thread.row["subagents"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!(
+                        "No orchestration projection exists for thread {parent_thread_id}."
+                    ))
+                })?;
+            subagents.push(json!({"id":task_id,"threadId":parent_thread_id,"runId":command["parentRunId"],"parentNodeId":command["parentNodeId"],"origin":"app_owned","driver":command["driver"],"providerInstanceId":command["modelSelection"]["instanceId"],"providerThreadId":Value::Null,"childThreadId":Value::Null,"remoteChild":command["remoteChild"],"prompt":command["task"],"title":command.get("title").cloned().unwrap_or(Value::Null),"model":command["modelSelection"]["model"],"modelSelection":command["modelSelection"],"completionWake":command.get("completionWake").cloned().unwrap_or(json!("settled_only")),"status":"running","result":Value::Null,"startedAt":crate::auth_service::iso(crate::auth_service::now()),"completedAt":Value::Null,"updatedAt":crate::auth_service::iso(crate::auth_service::now())}));
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: parent_thread_id.to_owned(),
+                        patch: json!({"row":{"subagents":subagents}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "delegated_task.remote.complete" | "delegated_task.remote.stop" => {
+            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
+            let task_id = command["taskId"].as_str().unwrap_or_default();
+            let mut subagents = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(parent_thread_id)
+                .map(|thread| {
+                    thread.row["subagents"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!(
+                        "No orchestration projection exists for thread {parent_thread_id}."
+                    ))
+                })?;
+            let task = subagents
+                .iter_mut()
+                .find(|task| task["id"] == task_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!("Delegated task {task_id} was not found."))
+                })?;
+            if command_type == "delegated_task.remote.complete" {
+                if task["result"].is_null() {
+                    task["status"] = command["status"].clone();
+                    task["result"] = command["result"].clone();
+                    task["completedAt"] =
+                        json!(crate::auth_service::iso(crate::auth_service::now()));
+                }
+                if let Some(stopped) = command.get("stoppedThere") {
+                    task["remoteChild"]["stoppedThere"] = json!(stopped == "stopped");
+                }
+            } else {
+                let count = task["remoteChild"]["stopCount"].as_u64().unwrap_or(0) + 1;
+                task["remoteChild"]["stopCount"] = json!(count);
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: parent_thread_id.to_owned(),
+                        patch: json!({"row":{"subagents":subagents}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "checkpoint.rollback.fail" => {
+            let id = thread_id.unwrap_or_default();
+            let row = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(id)
+                .map(|t| t.stored_row())
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            if row["rollbackRequestId"].as_str() != command["requestId"].as_str() {
+                return Err(anyhow::anyhow!(format!(
+                    "Rollback {} is no longer the thread's current rollback.",
+                    command["requestId"].as_str().unwrap_or_default()
+                )));
+            }
+            let mut next = row;
+            next["rollbackFailure"] =
+                json!({"requestId":command["requestId"],"message":command["message"]});
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":next}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "runtime-request.delivery.fail" => {
+            let id = thread_id.unwrap_or_default();
+            let mut row = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(id)
+                .map(|t| t.stored_row())
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            let request_id = command["requestId"].as_str().unwrap_or_default();
+            if let Some(request) = row["runtimeRequests"]
+                .as_array_mut()
+                .and_then(|items| items.iter_mut().find(|item| item["id"] == request_id))
+            {
+                request["deliveryError"] = json!(true);
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "thread.interrupt.unresponsive" => {
+            let id = thread_id.unwrap_or_default();
+            return Ok(state.commit_receipted(Event::ThreadPatched {thread_id:id.to_owned(),patch:json!({"row":{"interruptUnresponsive":true,"providerThreadId":command["providerThreadId"],"providerTurnId":command["providerTurnId"]}})},Some(receipt.clone())).await?.id);
+        }
+        "thread.background-work.settle" => {
+            let id = thread_id.unwrap_or_default();
+            return Ok(state.commit_receipted(Event::ThreadPatched {thread_id:id.to_owned(),patch:json!({"row":{"backgroundWorkSettled":true,"backgroundWorkSettleReason":command.get("reason").cloned().unwrap_or(Value::Null)}})},Some(receipt.clone())).await?.id);
+        }
+        "secret_request.record" | "link_request.record" => {
+            let id = thread_id.unwrap_or_default();
+            let mut row = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(id)
+                .map(|t| t.stored_row())
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            let now = crate::auth_service::iso(crate::auth_service::now());
+            let mut items = row["turnItems"].as_array().cloned().unwrap_or_default();
+            let turn_item_id = command["turnItemId"].as_str().unwrap_or_default();
+            let existing = items
+                .iter()
+                .find(|item| item["id"].as_str() == Some(turn_item_id))
+                .cloned();
+            let unchanged = existing.as_ref().is_some_and(|item| {
+                (command_type == "secret_request.record"
+                    && item["secretStatus"] != "pending"
+                    && command["secretStatus"] != "pending")
+                    || (command_type == "link_request.record"
+                        && item["linkStatus"] != "pending"
+                        && command["linkStatus"] != "pending")
+            });
+            let item = if unchanged {
+                existing.unwrap()
+            } else if command_type == "secret_request.record" {
+                let pending = command["secretStatus"] == "pending";
+                json!({
+                    "id":turn_item_id,
+                    "threadId":id,
+                    "runId":command["runId"],
+                    "nodeId":command["nodeId"],
+                    "providerThreadId":Value::Null,
+                    "providerTurnId":Value::Null,
+                    "nativeItemRef":Value::Null,
+                    "parentItemId":Value::Null,
+                    "ordinal":existing.as_ref().and_then(|item| item["ordinal"].as_u64()).unwrap_or(items.len() as u64),
+                    "status":if pending {"waiting"} else if command["secretStatus"] == "saved" {"completed"} else {"cancelled"},
+                    "title":command["label"],
+                    "startedAt":existing.as_ref().and_then(|item| item["startedAt"].as_str()).unwrap_or(&now),
+                    "completedAt":if pending {Value::Null} else {json!(now)},
+                    "updatedAt":now,
+                    "type":"secret_request",
+                    "label":command["label"],
+                    "reason":command["reason"],
+                    "url":command.get("url").cloned().unwrap_or(Value::Null),
+                    "placeholder":command.get("placeholder").cloned().unwrap_or(Value::Null),
+                    "delivery":command.get("delivery").cloned().unwrap_or(Value::Null),
+                    "secretStatus":command["secretStatus"]
+                })
+            } else {
+                let pending = command["linkStatus"] == "pending";
+                let status = if pending {
+                    "waiting"
+                } else if command["linkStatus"] == "linked" {
+                    "completed"
+                } else if command["linkStatus"] == "failed" {
+                    "failed"
+                } else {
+                    "cancelled"
+                };
+                let mut item = json!({
+                    "id":turn_item_id,
+                    "threadId":id,
+                    "runId":command["runId"],
+                    "nodeId":command["nodeId"],
+                    "providerThreadId":Value::Null,
+                    "providerTurnId":Value::Null,
+                    "nativeItemRef":Value::Null,
+                    "parentItemId":Value::Null,
+                    "ordinal":existing.as_ref().and_then(|item| item["ordinal"].as_u64()).unwrap_or(items.len() as u64),
+                    "status":status,
+                    "title":command.get("label").cloned().unwrap_or_else(|| command.get("url").cloned().unwrap_or(json!("Link an environment"))),
+                    "startedAt":existing.as_ref().and_then(|item| item["startedAt"].as_str()).unwrap_or(&now),
+                    "completedAt":if pending {Value::Null} else {json!(now)},
+                    "updatedAt":now,
+                    "type":"link_request",
+                    "url":command.get("url").cloned().unwrap_or(Value::Null),
+                    "reason":command["reason"],
+                    "linkStatus":command["linkStatus"]
+                });
+                for key in [
+                    "environmentId",
+                    "label",
+                    "hint",
+                    "requestedAccess",
+                    "linkedEnvironmentId",
+                    "linkedLabel",
+                    "linkedAccess",
+                    "failure",
+                ] {
+                    if let Some(value) = command.get(key) {
+                        item[key] = value.clone();
+                    }
+                }
+                item
+            };
+            items.retain(|candidate| candidate["id"] != turn_item_id);
+            items.push(item);
+            row["turnItems"] = json!(items);
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "notification.delivery.accept" => {
+            let thread_id = thread_id.unwrap_or_default();
+            let message_id = command["messageId"].as_str().unwrap_or_default();
+            let exists = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .is_some_and(|thread| {
+                    thread
+                        .messages
+                        .iter()
+                        .any(|message| message.id == message_id)
+                });
+            if !exists {
+                return Err(anyhow::anyhow!(format!(
+                    "Notification message {message_id} was not found."
+                )));
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::CommandDispatched {
+                        command_id: receipt.command_id.clone(),
+                        command_type: command_type.into(),
+                        thread_id: Some(thread_id.to_owned()),
+                        payload: command.clone(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "checkpoint.rollback" => {
+            let thread_id = thread_id.unwrap_or_default();
+            let checkpoint_id = command["checkpointId"].as_str().unwrap_or_default();
+            let target = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .and_then(|thread| {
+                    thread.checkpoints.iter().find(|checkpoint| {
+                        format!("checkpoint:{}:{}", thread_id, checkpoint.turn_count)
+                            == checkpoint_id
+                    })
+                })
+                .cloned();
+            let Some(target) = target else {
+                return Err(anyhow::anyhow!(format!(
+                    "Checkpoint {checkpoint_id} was not found."
+                )));
+            };
+            if !target.ready && command.get("restoreFiles").and_then(Value::as_bool) != Some(false)
+            {
+                return Err(anyhow::anyhow!(format!(
+                    "Checkpoint {checkpoint_id} is missing and cannot be restored."
+                )));
+            }
+            let expected_scope = format!("scope:{}", thread_id);
+            if command["scopeId"].as_str() != Some(expected_scope.as_str()) {
+                return Err(anyhow::anyhow!(format!(
+                    "Checkpoint {checkpoint_id} belongs to scope {expected_scope}, not {}.",
+                    command["scopeId"].as_str().unwrap_or_default()
+                )));
+            }
+            let second = state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: thread_id.to_owned(),
+                        patch: json!({"row":{"rollbackRequestId":receipt.command_id,"rollbackFailure":Value::Null}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?;
+            return Ok(second.id);
+        }
+        "thread.created.record" => {
+            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
+            let target_thread_id = command["targetThreadId"].as_str().unwrap_or_default();
+            let store = state.store.read().await;
+            let parent = store.threads.get(parent_thread_id).ok_or_else(|| {
+                anyhow::anyhow!(format!(
+                    "No orchestration projection exists for thread {parent_thread_id}."
+                ))
+            })?;
+            let target = store.threads.get(target_thread_id).ok_or_else(|| {
+                anyhow::anyhow!(format!(
+                    "No orchestration projection exists for thread {target_thread_id}."
+                ))
+            })?;
+            if parent.project_id != target.project_id {
+                return Err(anyhow::anyhow!(format!(
+                    "Target thread {target_thread_id} belongs to another project."
+                )));
+            }
+            let parent_run_id = command["parentRunId"].as_str().unwrap_or_default();
+            if !parent
+                .runs
+                .iter()
+                .any(|run| run.id.to_string() == parent_run_id)
+            {
+                return Err(anyhow::anyhow!(format!(
+                    "Parent node {} is not the root of run {parent_run_id}.",
+                    command["parentNodeId"].as_str().unwrap_or_default()
+                )));
+            }
+            if let Some(target_run_id) = command["targetRunId"].as_str() {
+                if !target
+                    .runs
+                    .iter()
+                    .any(|run| run.id.to_string() == target_run_id)
+                {
+                    return Err(anyhow::anyhow!(format!(
+                        "Target run {target_run_id} does not belong to thread {target_thread_id}."
+                    )));
+                }
+            }
+            drop(store);
+        }
+        // Every command discriminator has a registered wire contract. Commands
+        // whose provider-specific state is not available locally still need a
+        // durable receipt so retries remain idempotent and clients observe the
+        // same dispatch sequence shape as the reference server.
+        _ => {}
     }
     Ok(state
         .commit_receipted(

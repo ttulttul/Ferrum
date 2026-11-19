@@ -42,9 +42,91 @@ pub(super) async fn descriptor(State(s): State<Arc<AppState>>) -> Json<Value> {
         "x86_64" => "x64",
         _ => "other",
     };
+    let mut capabilities = serde_json::Map::new();
+    macro_rules! capability {
+        ($name:literal, $value:expr) => {
+            capabilities.insert($name.to_owned(), json!($value));
+        };
+    }
+    capability!("repositoryIdentity", true);
+    capability!("connectionProbe", true);
+    capability!("accessTokenRenewal", true);
+    capability!("attachmentUploads", true);
+    capability!("questionAttachments", true);
+    capabilities.insert("fileAttachments".into(), json!({"maxUploadBytes":52428800}));
+    capability!("pullRequests", true);
+    capability!("pullRequestChecks", true);
+    capability!("issues", true);
+    capability!("sideChats", true);
+    capability!("vcsBranchStatus", true);
+    capability!("inlineMessageContext", true);
+    capability!("requiredWorktreeBootstrap", true);
+    capability!("threadSettlement", true);
+    capability!("threadAutoSettlement", true);
+    capability!("storageCleanup", true);
+    capability!("storageCleanupRun", true);
+    capability!("databaseStorage", true);
+    capability!("otlpEndpointCheck", true);
+    capability!("secretSourceCheck", true);
+    capability!("projectWorktreeCleanup", true);
+    capability!("settledWorktreeCleanup", true);
+    capability!("worktreesDirectory", true);
+    capability!("threadAutoSettlementScope", true);
+    capability!("threadRestartContinuation", true);
+    capability!("projectSettingsOverrides", true);
+    capability!("projectProviderInstanceOverrides", true);
+    capability!("threadSnooze", true);
+    capability!("threadForceStop", true);
+    capability!("environmentThemes", true);
+    capability!("usageLimitSources", true);
+    capability!("providerWorkspaceSnapshotsOnDemand", true);
+    capability!("modelCatalogRefresh", true);
+    capability!("usagePriceOverrides", true);
+    capability!("usageModelAliases", true);
+    capability!("threadPinning", true);
+    capability!("threadPinReorder", true);
+    capability!("threadActiveReorder", true);
+    capability!("threadAutoSettleOptOut", true);
+    capability!("threadProjectFromScratch", true);
+    capability!("threadTitleRegeneration", true);
+    capability!("threadVisitedTracking", true);
+    capability!("threadPullRequestLinking", true);
+    capability!("serverResolvedCommandContext", true);
+    capability!("threadStop", true);
+    capability!("localServerStop", true);
+    capability!("threadPullRequests", true);
+    capability!("threadPullRequestWatch", true);
+    capability!("pullRequestStackActions", true);
+    if s.runtime_config.mode == "desktop" {
+        capability!("serverSelfUpdate", "desktop-managed");
+    }
+    capability!("npmReleaseLookup", true);
+    capability!("agentActivityPublishing", false);
+    capability!("projectCloneTracking", true);
+    capability!("projectOrganization", true);
+    capability!("ignoredFileListing", true);
+    capability!("ignoredFileSearch", true);
+    capability!("environmentIcon", true);
+    capability!("commandOutputStreaming", true);
+    capability!("serverBrowser", true);
+    capability!("peerLinks", true);
+    capability!("mcpModeLimitHeader", true);
+    capability!("linkFence", true);
+    capability!("mcpApprovalCodes", true);
+    capability!("peerLinkPairingCodes", true);
+    capability!("mcpHostedApproval", true);
+    capability!("triage", true);
+    capability!("oneTimeSchedules", true);
+    capability!("freshContext", true);
+    capability!("scheduledTaskThreadModes", true);
+    capability!("voiceTranscription", true);
+    capability!("cloudVoiceTranscription", true);
+    capability!("shellThreadFamilies", true);
+    capability!("shellOlderSettled", true);
+    capability!("linkedThreadRefreshes", true);
+    capability!("issueLinkedThreads", true);
     Json(
-        json!({"environmentId":s.environment_id,"label":label,"platform":{"os":os,"arch":arch},"serverVersion":"0.1.10","orchestrationProtocolVersion":2,
-        "capabilities":{"repositoryIdentity":false,"connectionProbe":true,"pullRequests":true,"issues":true,"vcsBranchStatus":true,"cloudVoiceTranscription":true}}),
+        json!({"environmentId":s.environment_id,"label":label,"platform":{"os":os,"arch":arch,"machine":"desktop"},"serverVersion":"0.1.10","orchestrationProtocolVersion":2,"databaseMigration":98,"capabilities":capabilities}),
     )
 }
 pub(super) fn no_assets() -> Response {

@@ -17,6 +17,7 @@ use axum::{
     routing::{on, MethodFilter},
     Json, Router,
 };
+use jsonwebtoken::DecodingKey;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use time::{Duration, OffsetDateTime};
@@ -92,6 +93,7 @@ enum Error {
     Connect(&'static str),
     Hook,
     Telemetry,
+    PayloadTooLarge,
 }
 impl From<rusqlite::Error> for Error {
     fn from(_: rusqlite::Error) -> Self {
@@ -154,6 +156,7 @@ impl Error {
             ),
             Self::Hook => (404, json!({"error":"hook_not_found"})),
             Self::Telemetry => (502, json!({"error":"upstream_unavailable"})),
+            Self::PayloadTooLarge => (413, json!({"error":"payload_too_large"})),
         };
         (StatusCode::from_u16(status).unwrap(), Json(body)).into_response()
     }
@@ -204,6 +207,34 @@ impl Call {
             "RelayEnvironmentAuth" => return self.environment(s),
             _ => {}
         }
+        if matches!(
+            self.contract.name,
+            "forwardPost" | "forwardPut" | "forwardPatch" | "forwardGet"
+        ) {
+            // The relay validates these public webhook requests before it looks up
+            // an endpoint. This keeps malformed URLs and oversized bodies from
+            // consuming endpoint or upstream resources.
+            let endpoint_key = self
+                .params
+                .get("endpointKey")
+                .map(String::as_str)
+                .unwrap_or_default();
+            if endpoint_key.len() != 16
+                || !endpoint_key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(Error::Hook);
+            }
+            if self.body.len() > 1_048_576 {
+                return Err(Error::PayloadTooLarge);
+            }
+            // A standalone Rust relay has no configured managed-endpoint
+            // provider or upstream delivery queue. A validly shaped request
+            // therefore reaches the same public not-found response as an
+            // unallocated endpoint in the reference relay.
+            return Err(Error::Hook);
+        }
         match self.contract.name {
             "health" => s
                 .health()
@@ -215,7 +246,6 @@ impl Call {
                 json!({"resource":issuer,"authorization_servers":[issuer],"scopes_supported":SCOPES,"dpop_bound_access_tokens_required":true,"dpop_signing_alg_values_supported":["ES256"]}),
             ),
             "exchangeDpopAccessToken" => self.exchange(s),
-            "forwardPost" | "forwardPut" | "forwardPatch" | "forwardGet" => Err(Error::Hook),
             "ingest" => Err(Error::Telemetry),
             _ => Err(Error::Internal("internal_error")),
         }
@@ -273,8 +303,12 @@ impl Call {
             "listEnvironments" => Ok(s.links(owner)?),
             "listDevices" | "listDevicesV2" => Ok(s.list_devices(owner, name == "listDevices")?),
             "unlinkEnvironment" => Ok(json!({"ok":s.unlink(owner,&self.params["environmentId"])?})),
+            "releaseEnvironmentTunnel" => {
+                Ok(json!({"ok":s.release_tunnel(owner, &self.params["environmentId"])?}))
+            }
             "getT3ChatLink" => Ok(json!({"available":false,"link":null})),
             "createT3ChatLinkRequest" => Err(Error::Internal("internal_error")),
+            "unlinkT3Chat" => Ok(json!({"ok":true})),
             "createEnvironmentLinkChallenge" | "linkEnvironment" => {
                 let body = self.json()?;
                 if FLAGS.iter().any(|f| !body[*f].is_boolean()) {
@@ -386,6 +420,34 @@ impl Call {
             .environment(self.credential("Bearer"), id)?
             .ok_or(Error::Auth("not_authorized"))?;
         match self.contract.name {
+            "registerManagedEndpointRecovery" => {
+                let body = self.json()?;
+                validate_recovery_proof(
+                    &body,
+                    "register",
+                    id,
+                    &key,
+                    &s.issuer,
+                    Some(
+                        body.get("tunnelId")
+                            .and_then(Value::as_str)
+                            .filter(|v| !v.trim().is_empty())
+                            .ok_or(Error::Auth("not_authorized"))?,
+                    ),
+                )?;
+                // Provisioning is deliberately delegated to the configured
+                // managed-endpoint provider. The standalone relay has no
+                // provider credentials, but it must authenticate and validate
+                // recovery requests before returning the same upstream error
+                // as the TypeScript relay when provisioning is unavailable.
+                Err(Error::Internal("upstream_unavailable"))
+            }
+            "recoverManagedEndpoint" => {
+                let body = self.json()?;
+                validate_recovery_proof(&body, "recover", id, &key, &s.issuer, None)?;
+                Err(Error::Internal("upstream_unavailable"))
+            }
+            "wakeHeldHooks" => Ok(json!({"pending":false})),
             "publishAgentActivity" => s
                 .publish(id, &key, &self.params["threadId"], &self.json()?)
                 .map_err(Error::Publish),
@@ -398,6 +460,79 @@ impl Call {
             _ => Err(Error::Internal("upstream_unavailable")),
         }
     }
+}
+
+/// Validate the environment-signed proof used by managed tunnel recovery.
+///
+/// The provider operation itself is optional in the standalone relay, but the
+/// proof gate is part of the public API contract. Checking it here keeps an
+/// invalid request at the authentication boundary instead of leaking the
+/// provider-unavailable response used for an otherwise valid request.
+fn validate_recovery_proof(
+    body: &Value,
+    action: &str,
+    environment_id: &str,
+    environment_public_key: &str,
+    relay_issuer: &str,
+    expected_tunnel_id: Option<&str>,
+) -> Result<(), Error> {
+    let proof = body
+        .get("proof")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+        .ok_or(Error::Auth("not_authorized"))?;
+    let cloud_user_id = body
+        .get("cloudUserId")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+        .ok_or(Error::Auth("not_authorized"))?;
+    let origin = body
+        .get("origin")
+        .and_then(Value::as_object)
+        .ok_or(Error::Auth("not_authorized"))?;
+    let host = origin
+        .get("localHttpHost")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+        .ok_or(Error::Auth("not_authorized"))?;
+    let port = origin
+        .get("localHttpPort")
+        .and_then(Value::as_u64)
+        .filter(|p| (1..=65535).contains(p))
+        .ok_or(Error::Auth("not_authorized"))?;
+
+    let key = DecodingKey::from_ed_pem(environment_public_key.as_bytes())
+        .map_err(|_| Error::Auth("not_authorized"))?;
+    let claims = verified(
+        proof,
+        &key,
+        "t3-env-managed-tunnel-recovery+jwt",
+        &format!("t3-env:{environment_id}"),
+        relay_issuer,
+    )
+    .ok_or(Error::Auth("not_authorized"))?;
+    if claims.get("environmentId").and_then(Value::as_str) != Some(environment_id)
+        || claims.get("sub").and_then(Value::as_str) != Some(environment_id)
+        || claims.get("cloudUserId").and_then(Value::as_str) != Some(cloud_user_id)
+        || claims.get("action").and_then(Value::as_str) != Some(action)
+        || claims
+            .get("origin")
+            .and_then(|v| v.get("localHttpHost"))
+            .and_then(Value::as_str)
+            != Some(host)
+        || claims
+            .get("origin")
+            .and_then(|v| v.get("localHttpPort"))
+            .and_then(Value::as_u64)
+            != Some(port)
+    {
+        return Err(Error::Auth("not_authorized"));
+    }
+    if action == "register" && claims.get("tunnelId").and_then(Value::as_str) != expected_tunnel_id
+    {
+        return Err(Error::Auth("not_authorized"));
+    }
+    Ok(())
 }
 fn validate_device(v: &Value) -> Result<(), Error> {
     required(v, "label")?;

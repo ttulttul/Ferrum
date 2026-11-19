@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
+    process::Command,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -12,6 +13,35 @@ use uuid::Uuid;
 
 pub const MAX_PCM: usize = 16000 * 4 * 60 * 5;
 pub const MAX_OPTIONS: usize = 128000;
+
+const SPEECH_CATALOG: &str = include_str!("speech_catalog.json");
+const DEFAULT_SPEECH_MODEL: &str = "handy-computer/parakeet-unified-en-0.6b-gguf";
+
+fn speech_catalog_models(_settings: &Value) -> Vec<Value> {
+    let catalog =
+        serde_json::from_str::<Value>(SPEECH_CATALOG).unwrap_or_else(|_| json!({"models":[]}));
+    catalog["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|model| {
+            let mut row = json!({
+                "id": model["id"], "name": model["name"], "description": model["description"],
+                "size": model["size"], "languages": model["languages"], "accuracy": 0,
+                "speed": 0, "recommended": model["recommended"],
+                "supportsStreaming": model["supportsStreaming"],
+                "supportsLanguageDetection": model["supportsLanguageDetection"],
+                "supportsTranslation": model["supportsTranslation"],
+            // A model is active only after its files are installed and selected.
+            "active": false, "state": "downloadable"
+            });
+            if model["benchmark"].is_object() {
+                row["benchmark"] = model["benchmark"].clone();
+            }
+            row
+        })
+        .collect()
+}
 
 #[derive(Debug)]
 pub enum SpeechError {
@@ -114,6 +144,7 @@ pub struct VoiceService {
     settings: Arc<crate::settings::Settings>,
     http: Client,
     models: Mutex<Option<(Instant, Value)>>,
+    installed: std::sync::Mutex<HashSet<String>>,
 }
 impl VoiceService {
     pub(crate) fn new(settings: Arc<crate::settings::Settings>) -> Self {
@@ -125,11 +156,169 @@ impl VoiceService {
                 .build()
                 .expect("TLS client"),
             models: Mutex::new(None),
+            installed: std::sync::Mutex::new(HashSet::new()),
         }
     }
     fn internal_settings(&self) -> Result<Value, SpeechError> {
         self.settings.internal().map_err(|_| SpeechError::Internal)
     }
+    pub(crate) fn local_status(&self) -> Result<Value, SpeechError> {
+        let settings = self.internal_settings()?;
+        let selected = settings["speechModelId"]
+            .as_str()
+            .unwrap_or(DEFAULT_SPEECH_MODEL);
+        let catalog =
+            serde_json::from_str::<Value>(SPEECH_CATALOG).unwrap_or_else(|_| json!({"models":[]}));
+        let model = catalog["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|row| row["id"].as_str() == Some(selected))
+            .unwrap_or(&Value::Null);
+        let gpu_devices = Command::new("nvidia-smi")
+            .args(["--query-gpu=name,pci.bus_id", "--format=csv,noheader"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|line| {
+                        let (name, bus) = line.split_once(',')?;
+                        let bus = bus.trim().trim_start_matches("00000000:");
+                        let bus = if bus.starts_with("0000:") {
+                            bus.to_owned()
+                        } else {
+                            format!("0000:{bus}")
+                        };
+                        Some(json!({"id":json!(["vulkan", bus]).to_string(),"name":name.trim()}))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let installed = self
+            .installed
+            .lock()
+            .map(|models| models.contains(selected))
+            .unwrap_or(false);
+        Ok(json!({
+            "supported": true, "state": if installed { "ready" } else { "missing-model" }, "modelId": selected,
+            "model": model["name"], "size": model["size"],
+            "supportsStreaming": model["supportsStreaming"], "supportsBufferedStreaming": true,
+            "supportsModelLinking": true, "supportsTranslation": model["supportsTranslation"],
+            "languages": model["languages"], "supportsLanguageDetection": model["supportsLanguageDetection"],
+            "acceleration": settings["speechAcceleration"], "benchmarkTier": if settings["speechAcceleration"] == "cpu" {"cpu"} else {"accelerated"},
+            "modelUnloadTimeout": settings["speechModelUnloadTimeout"], "gpuDevices": gpu_devices
+        }))
+    }
+
+    pub(crate) fn local_models(&self, benchmarks: bool) -> Result<Value, SpeechError> {
+        let settings = self.internal_settings()?;
+        let mut models = speech_catalog_models(&settings);
+        let installed = self
+            .installed
+            .lock()
+            .map(|models| models.clone())
+            .unwrap_or_default();
+        for model in &mut models {
+            if let Some(id) = model["id"].as_str() {
+                if installed.contains(id) {
+                    model["active"] = json!(true);
+                    model["state"] = json!("installed");
+                }
+            }
+        }
+        if !benchmarks {
+            for model in &mut models {
+                model.as_object_mut().map(|row| row.remove("benchmark"));
+            }
+        }
+        Ok(json!({"models":models}))
+    }
+
+    pub(crate) fn local_update(&self, action: &str, input: &Value) -> Result<Value, SpeechError> {
+        let patch = match action {
+            "select" => {
+                let id = input["modelId"]
+                    .as_str()
+                    .filter(|id| {
+                        serde_json::from_str::<Value>(SPEECH_CATALOG)
+                            .ok()
+                            .is_some_and(|catalog| {
+                                catalog["models"].as_array().is_some_and(|models| {
+                                    models.iter().any(|model| model["id"].as_str() == Some(*id))
+                                })
+                            })
+                    })
+                    .ok_or(SpeechError::Invalid("invalid_command"))?;
+                json!({"speechModelId": id})
+            }
+            "acceleration" => {
+                let acceleration = input["acceleration"]
+                    .as_str()
+                    .filter(|value| matches!(*value, "auto" | "cpu" | "gpu"))
+                    .ok_or(SpeechError::Invalid("invalid_command"))?;
+                json!({"speechAcceleration": acceleration})
+            }
+            "timeout" => {
+                let timeout = input["timeout"]
+                    .as_str()
+                    .filter(|value| {
+                        matches!(*value, "never" | "min_1" | "min_5" | "min_15" | "min_30")
+                    })
+                    .ok_or(SpeechError::Invalid("invalid_command"))?;
+                json!({"speechModelUnloadTimeout": timeout})
+            }
+            "download" | "cancel" | "remove" => {
+                let model = input["modelId"]
+                    .as_str()
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or(SpeechError::Invalid("invalid_command"))?;
+                if action == "download" {
+                    let _ = self
+                        .installed
+                        .lock()
+                        .map(|mut models| models.insert(model.to_owned()));
+                } else if action == "remove" {
+                    let _ = self.installed.lock().map(|mut models| models.remove(model));
+                }
+                json!({})
+            }
+            "link" => {
+                let path = input["path"]
+                    .as_str()
+                    .filter(|path| !path.trim().is_empty())
+                    .ok_or(SpeechError::Invalid("invalid_command"))?;
+                let linked = std::fs::read_dir(path)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        let name = entry.file_name().to_string_lossy().to_lowercase();
+                        name.contains("parakeet")
+                            || name.contains("nemotron")
+                            || name.contains("canary")
+                    });
+                if !linked {
+                    return Err(SpeechError::Invalid("invalid_command"));
+                }
+                json!({})
+            }
+            _ => return Err(SpeechError::Invalid("invalid_command")),
+        };
+        if !patch.as_object().is_none_or(|fields| fields.is_empty()) {
+            self.settings
+                .update(&json!({"patch":patch}), true)
+                .map_err(|_| SpeechError::Internal)?;
+        }
+        self.local_models(false)
+    }
+
+    pub(crate) fn prepare_local(&self) -> Result<(), SpeechError> {
+        Ok(())
+    }
+
     pub async fn cloud_keys(&self) -> Result<Value, SpeechError> {
         let settings = self.internal_settings()?;
         let keys = &settings["cloudSpeechCredentials"];

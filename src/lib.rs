@@ -1,11 +1,18 @@
+#![recursion_limit = "512"]
+
 use axum::{
-    extract::{FromRequest, Request, State, WebSocketUpgrade},
+    body::Bytes,
+    extract::{FromRequest, Path, Request, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::Sha256;
 use std::{
     collections::HashMap,
     path::{Path as FsPath, PathBuf},
@@ -21,6 +28,7 @@ use tracing::info;
 use uuid::Uuid;
 
 pub mod access_http;
+pub mod asset_http;
 pub mod auth_service;
 pub mod config;
 mod config_rpc;
@@ -31,6 +39,7 @@ pub mod host_rpc;
 pub mod issues;
 pub mod local_services;
 pub mod mcp_oauth;
+mod native_child_work;
 mod orchestration;
 mod projects;
 mod settings;
@@ -45,6 +54,7 @@ pub mod relay_http;
 pub mod relay_service;
 mod rpc;
 pub mod voice;
+mod workspace;
 
 pub use contracts::{http_known, rpc_known, HTTP_CONTRACTS, RPC_CONTRACTS};
 
@@ -79,6 +89,20 @@ pub struct Run {
     pub started_at: u64,
     pub finished_at: Option<u64>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub user_message_id: Option<String>,
+    #[serde(default)]
+    pub queue_held: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckpointRecord {
+    pub turn_count: u64,
+    pub tree: String,
+    pub cwd: String,
+    pub captured_at: u64,
+    #[serde(default)]
+    pub ready: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Thread {
@@ -98,6 +122,8 @@ pub struct Thread {
     pub pinned: bool,
     pub unread: bool,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub checkpoints: Vec<CheckpointRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,7 +142,18 @@ pub enum Event {
         thread_id: String,
         message: ConversationMessage,
     },
+    MessageEdited {
+        thread_id: String,
+        message_id: String,
+        content: String,
+    },
+    RunReordered {
+        thread_id: String,
+        run_id: Uuid,
+        before_run_id: Option<Uuid>,
+    },
     RunStarted(Run),
+    RunUpdated(Run),
     RunQueued {
         message: ConversationMessage,
         run: Run,
@@ -132,6 +169,10 @@ pub enum Event {
         thread_id: String,
         status: String,
         error: Option<String>,
+    },
+    CheckpointCaptured {
+        thread_id: String,
+        checkpoint: CheckpointRecord,
     },
     CommandDispatched {
         command_id: String,
@@ -218,6 +259,17 @@ impl Store {
                     t.messages.push(message.clone());
                 }
             }
+            Event::MessageEdited {
+                thread_id,
+                message_id,
+                content,
+            } => {
+                if let Some(t) = self.threads.get_mut(thread_id) {
+                    if let Some(message) = t.messages.iter_mut().find(|m| m.id == *message_id) {
+                        message.content = content.clone();
+                    }
+                }
+            }
             Event::RunQueued { message, run } => {
                 if let Some(thread) = self.threads.get_mut(&run.thread_id) {
                     thread.messages.push(message.clone());
@@ -228,7 +280,45 @@ impl Store {
             Event::RunStarted(run) => {
                 if let Some(t) = self.threads.get_mut(&run.thread_id) {
                     t.status = "running".into();
-                    t.runs.push(run.clone());
+                    if let Some(existing) =
+                        t.runs.iter_mut().find(|candidate| candidate.id == run.id)
+                    {
+                        *existing = run.clone();
+                    } else {
+                        t.runs.push(run.clone());
+                    }
+                }
+            }
+            Event::RunUpdated(run) => {
+                if let Some(t) = self.threads.get_mut(&run.thread_id) {
+                    if let Some(existing) =
+                        t.runs.iter_mut().find(|candidate| candidate.id == run.id)
+                    {
+                        *existing = run.clone();
+                    } else {
+                        t.runs.push(run.clone());
+                    }
+                    t.status = match run.status.as_str() {
+                        "completed" => "idle".into(),
+                        "queued" => "running".into(),
+                        status => status.into(),
+                    };
+                }
+            }
+            Event::RunReordered {
+                thread_id,
+                run_id,
+                before_run_id,
+            } => {
+                if let Some(t) = self.threads.get_mut(thread_id) {
+                    let Some(index) = t.runs.iter().position(|run| run.id == *run_id) else {
+                        return;
+                    };
+                    let run = t.runs.remove(index);
+                    let target = before_run_id
+                        .and_then(|id| t.runs.iter().position(|candidate| candidate.id == id))
+                        .unwrap_or(t.runs.len());
+                    t.runs.insert(target, run);
                 }
             }
             Event::RunOutput { .. } => {}
@@ -251,6 +341,22 @@ impl Store {
                     }
                 }
             }
+            Event::CheckpointCaptured {
+                thread_id,
+                checkpoint,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    if !thread.checkpoints.iter().any(|candidate| {
+                        candidate.turn_count == checkpoint.turn_count
+                            && candidate.tree == checkpoint.tree
+                    }) {
+                        thread.checkpoints.push(checkpoint.clone());
+                        thread
+                            .checkpoints
+                            .sort_by_key(|candidate| candidate.turn_count);
+                    }
+                }
+            }
             Event::CommandDispatched { .. } => {}
             Event::ThreadPatched { thread_id, patch } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
@@ -261,6 +367,10 @@ impl Store {
                     }
                     if let Some(value) = patch.get("title").and_then(serde_json::Value::as_str) {
                         thread.title = value.to_owned();
+                    }
+                    if let Some(value) = patch.get("project_id").and_then(serde_json::Value::as_str)
+                    {
+                        thread.project_id = value.to_owned();
                     }
                     if let Some(value) = patch.get("archived").and_then(serde_json::Value::as_bool)
                     {
@@ -323,6 +433,22 @@ pub struct AppState {
     pub devices: local_services::DeviceService,
     project_mutation_lock: Mutex<()>,
     next_event_id: Mutex<u64>,
+    pub(crate) storage_cleanup_report: Mutex<Option<serde_json::Value>>,
+    pub(crate) pull_request_refresh: Mutex<u64>,
+    pub(crate) pull_request_linked_refresh: Mutex<u64>,
+    pub(crate) pull_request_linked_events: broadcast::Sender<u64>,
+    pub(crate) scheduled_tasks: Mutex<indexmap::IndexMap<String, serde_json::Value>>,
+    pub(crate) scheduled_tasks_path: PathBuf,
+    pub(crate) scheduled_webhook_deliveries: Mutex<indexmap::IndexMap<String, serde_json::Value>>,
+    pub(crate) scheduled_webhook_deliveries_path: PathBuf,
+    pub(crate) scheduled_task_events: broadcast::Sender<()>,
+    pub(crate) prompt_suggestion_events: broadcast::Sender<serde_json::Value>,
+    pub(crate) provider_install_states: Mutex<HashMap<String, serde_json::Value>>,
+    pub(crate) provider_auth_states: Mutex<HashMap<String, serde_json::Value>>,
+    pub(crate) project_clone_states: Mutex<HashMap<String, serde_json::Value>>,
+    pub(crate) project_clone_events: broadcast::Sender<()>,
+    pub(crate) project_clone_cancellations: Mutex<HashMap<String, (u64, oneshot::Sender<()>)>>,
+    pub(crate) project_clone_sequence: Mutex<u64>,
 }
 impl AppState {
     pub async fn new(
@@ -384,6 +510,40 @@ impl AppState {
             .open(log_path)
             .await?;
         let (events, _) = broadcast::channel(512);
+        let (pull_request_linked_events, _) = broadcast::channel(64);
+        let (scheduled_task_events, _) = broadcast::channel(64);
+        let (prompt_suggestion_events, _) = broadcast::channel(64);
+        let (project_clone_events, _) = broadcast::channel(64);
+        let scheduled_tasks_path = dir.join("scheduled-tasks.json");
+        let scheduled_tasks = tokio::fs::read(&scheduled_tasks_path)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
+            .map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|task| {
+                        let id = task["id"].as_str()?.to_owned();
+                        Some((id, task))
+                    })
+                    .collect::<indexmap::IndexMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let scheduled_webhook_deliveries_path = dir.join("scheduled-webhook-deliveries.json");
+        let scheduled_webhook_deliveries = tokio::fs::read(&scheduled_webhook_deliveries_path)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
+            .map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|delivery| {
+                        let id = delivery["id"].as_str()?.to_owned();
+                        Some((id, delivery))
+                    })
+                    .collect::<indexmap::IndexMap<_, _>>()
+            })
+            .unwrap_or_default();
         Ok(Arc::new(Self {
             config_started_at: auth_service::iso(auth_service::now()),
             environment_id: environment_http::identity(&dir)?,
@@ -409,7 +569,44 @@ impl AppState {
             devices: local_services::DeviceService::new(settings.clone(), &dir)?,
             project_mutation_lock: Mutex::new(()),
             next_event_id: Mutex::new(next_event_id),
+            storage_cleanup_report: Mutex::new(None),
+            pull_request_refresh: Mutex::new(0),
+            pull_request_linked_refresh: Mutex::new(0),
+            pull_request_linked_events,
+            scheduled_tasks: Mutex::new(scheduled_tasks),
+            scheduled_tasks_path,
+            scheduled_webhook_deliveries: Mutex::new(scheduled_webhook_deliveries),
+            scheduled_webhook_deliveries_path,
+            scheduled_task_events,
+            prompt_suggestion_events,
+            provider_install_states: Mutex::new(HashMap::new()),
+            provider_auth_states: Mutex::new(HashMap::new()),
+            project_clone_states: Mutex::new(HashMap::new()),
+            project_clone_events,
+            project_clone_cancellations: Mutex::new(HashMap::new()),
+            project_clone_sequence: Mutex::new(0),
         }))
+    }
+
+    pub(crate) async fn persist_scheduled_tasks(&self) -> anyhow::Result<()> {
+        let tasks = self.scheduled_tasks.lock().await;
+        let bytes = serde_json::to_vec(&tasks.values().collect::<Vec<_>>())?;
+        drop(tasks);
+        let temporary = self.scheduled_tasks_path.with_extension("json.tmp");
+        tokio::fs::write(&temporary, bytes).await?;
+        tokio::fs::rename(temporary, &self.scheduled_tasks_path).await?;
+        Ok(())
+    }
+    pub(crate) async fn persist_scheduled_webhook_deliveries(&self) -> anyhow::Result<()> {
+        let deliveries = self.scheduled_webhook_deliveries.lock().await;
+        let bytes = serde_json::to_vec(&deliveries.values().collect::<Vec<_>>())?;
+        drop(deliveries);
+        let temporary = self
+            .scheduled_webhook_deliveries_path
+            .with_extension("json.tmp");
+        tokio::fs::write(&temporary, bytes).await?;
+        tokio::fs::rename(temporary, &self.scheduled_webhook_deliveries_path).await?;
+        Ok(())
     }
     async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {
         self.commit_receipted(event, None).await
@@ -436,6 +633,13 @@ impl AppState {
         log.flush().await?;
         *next_event_id = record.id;
         store.apply_record(&record);
+        if let Event::ThreadPatched { ref patch, .. } = record.event {
+            if patch["row"].get("pullRequests").is_some() || patch["row"].get("issues").is_some() {
+                let mut revision = self.pull_request_linked_refresh.lock().await;
+                *revision = revision.saturating_add(1);
+                let _ = self.pull_request_linked_events.send(*revision);
+            }
+        }
         let _ = self.events.send(record.clone());
         Ok(record)
     }
@@ -446,6 +650,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(provider_http::routes())
         .route("/api/projects", get(projects::snapshot))
         .route("/api/projects/mutate", post(projects::mutate_http))
+        .route("/api/observability/v1/traces", post(otlp_traces_proxy))
         .route(
             "/api/orchestration/shell",
             get(environment_http::shell_snapshot),
@@ -470,6 +675,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_session,
         ))
+        // Hook credentials are carried in the URL. The public webhook route
+        // must bypass the environment session middleware above.
+        .route("/api/hooks/:hook_id/:token", any(webhook_handler))
+        .merge(asset_http::routes())
         .merge(mcp_oauth::routes())
         .merge(access_http::routes())
         .merge(host_rpc::routes())
@@ -481,6 +690,282 @@ pub fn router(state: Arc<AppState>) -> Router {
         .fallback(any(contract_fallback))
         .layer(axum::middleware::from_fn(access_http::contextualize))
         .with_state(state)
+}
+
+async fn otlp_traces_proxy(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match access_http::principal(&state, &headers) {
+        Ok(session) => session,
+        Err(reason) => return auth_error(&headers, reason),
+    };
+    if !session.has("orchestration:operate") {
+        return access_http::scope_error(&headers, "orchestration:operate");
+    }
+    if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let exporter_disabled = std::env::var("OTEL_TRACES_EXPORTER")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .any(|item| item.trim().eq_ignore_ascii_case("none"))
+        })
+        .unwrap_or(false)
+        && !std::env::var("OTEL_TRACES_EXPORTER")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .any(|item| item.trim().eq_ignore_ascii_case("otlp"))
+            })
+            .unwrap_or(false);
+    let endpoint = if exporter_disabled {
+        None
+    } else {
+        let explicit = std::env::var("T3CODE_OTLP_TRACES_URL")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+                    .ok()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| {
+                state
+                    .settings
+                    .internal()
+                    .ok()
+                    .and_then(|settings| {
+                        settings["observability"]["otlpTracesUrl"]
+                            .as_str()
+                            .map(str::to_owned)
+                    })
+                    .filter(|value| !value.trim().is_empty())
+            });
+        let generic = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .and_then(|value| {
+                let mut parsed = url::Url::parse(&value).ok()?;
+                if !matches!(parsed.scheme(), "http" | "https") {
+                    return None;
+                }
+                parsed.set_path(&format!(
+                    "{}/v1/traces",
+                    parsed.path().trim_end_matches('/')
+                ));
+                Some(parsed.to_string())
+            });
+        explicit.or(generic)
+    };
+    let Some(endpoint) = endpoint else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    let mut request = reqwest::Client::new()
+        .post(endpoint)
+        .header("content-type", "application/json");
+    let headers_value = std::env::var("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
+        .ok()
+        .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_HEADERS").ok());
+    if let Some(headers_value) = headers_value {
+        for pair in headers_value.split(',') {
+            let Some((name, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let Ok(value) = percent_encoding::percent_decode_str(value).decode_utf8() else {
+                continue;
+            };
+            if let (Ok(name), Ok(value)) = (
+                reqwest::header::HeaderName::from_bytes(name.trim().as_bytes()),
+                reqwest::header::HeaderValue::from_str(value.trim()),
+            ) {
+                request = request.header(name, value);
+            }
+        }
+    }
+    let response = request.body(body).send().await;
+    match response {
+        Ok(response) if response.status().is_success() => StatusCode::NO_CONTENT.into_response(),
+        _ => (StatusCode::BAD_GATEWAY, "Trace export failed.").into_response(),
+    }
+}
+
+async fn webhook_handler(
+    State(state): State<Arc<AppState>>,
+    Path((hook_id, token)): Path<(String, String)>,
+    request: Request,
+) -> Response {
+    let outcome = |status: StatusCode, body: serde_json::Value, name: &'static str| {
+        let mut response = (status, Json(body)).into_response();
+        response.headers_mut().insert(
+            "x-t3-hook-outcome",
+            axum::http::HeaderValue::from_static(name),
+        );
+        response
+    };
+    if request.method() == axum::http::Method::HEAD {
+        let mut response = outcome(
+            StatusCode::METHOD_NOT_ALLOWED,
+            serde_json::json!({"error":"method_not_allowed"}),
+            "method_not_allowed",
+        );
+        response.headers_mut().insert(
+            axum::http::header::ALLOW,
+            axum::http::HeaderValue::from_static("GET, POST, PUT, PATCH"),
+        );
+        return response;
+    }
+    let headers = request.headers().clone();
+    let method = request.method().as_str().to_owned();
+    let query = request.uri().query().map(str::to_owned).unwrap_or_default();
+    let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024 + 1).await {
+        Ok(bytes) if bytes.len() <= 1024 * 1024 => bytes,
+        _ => {
+            return outcome(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                serde_json::json!({"error":"body_too_large"}),
+                "body_too_large",
+            )
+        }
+    };
+    let tasks = state.scheduled_tasks.lock().await;
+    let task = tasks
+        .values()
+        .find(|task| {
+            task["schedule"]["type"] == "webhook"
+                && task["id"].as_str().is_some_and(|id| id == hook_id)
+                && task["_webhookToken"].as_str() == Some(token.as_str())
+        })
+        .cloned();
+    let Some(task) = task else {
+        return outcome(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"error":"hook_not_found"}),
+            "not_found",
+        );
+    };
+    let delivery_id = format!("delivery:{}", uuid::Uuid::new_v4());
+    let headers_json = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((
+                name.as_str().to_ascii_lowercase(),
+                json!(value.to_str().ok()?.to_owned()),
+            ))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let content_type = headers_json
+        .get("content-type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let record_delivery = |outcome_name: &str, signature_verified: bool, error: Option<String>| {
+        let state = state.clone();
+        let delivery_id = delivery_id.clone();
+        let hook_id = hook_id.clone();
+        let method = method.clone();
+        let query = query.clone();
+        let headers_json = headers_json.clone();
+        let content_type = content_type.clone();
+        let outcome_name = outcome_name.to_owned();
+        let delivery_key = delivery_id.clone();
+        let delivery = json!({
+            "id":delivery_id,
+            "taskId":hook_id,
+            "receivedAt":crate::auth_service::iso(crate::auth_service::now()),
+            "method":method,
+            "query":query,
+            "headers":headers_json,
+            "body":String::from_utf8_lossy(&body),
+            "bodyBytes":body.len(),
+            "bodyTruncated":false,
+            "outcome":outcome_name,
+            "signatureVerified":signature_verified,
+            "pendingWindow":false,
+            "missingFields":[],
+            "error":error,
+            "renderedPrompt":null,
+            "contentType":content_type
+        });
+        async move {
+            state
+                .scheduled_webhook_deliveries
+                .lock()
+                .await
+                .insert(delivery_key, delivery);
+            let _ = state.persist_scheduled_webhook_deliveries().await;
+        }
+    };
+    if task["enabled"] != true {
+        record_delivery("disabled", false, None).await;
+        return outcome(
+            StatusCode::CONFLICT,
+            serde_json::json!({"error":"hook_disabled"}),
+            "disabled",
+        );
+    }
+    if let Some(signature) = task["schedule"]["signature"].as_object() {
+        let valid =
+            webhook_signature_valid(signature, task["_webhookSecret"].as_str(), &headers, &body);
+        if !valid {
+            record_delivery("rejected_signature", false, None).await;
+            return outcome(
+                StatusCode::UNAUTHORIZED,
+                serde_json::json!({"error":"invalid_signature"}),
+                "rejected_signature",
+            );
+        }
+    }
+    record_delivery("accepted", task["schedule"]["signature"].is_object(), None).await;
+    let _ = body;
+    outcome(
+        StatusCode::ACCEPTED,
+        serde_json::json!({"deliveryId":delivery_id}),
+        "accepted",
+    )
+}
+
+fn webhook_signature_valid(
+    signature: &serde_json::Map<String, serde_json::Value>,
+    secret: Option<&str>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> bool {
+    let Some(secret) = secret else { return false };
+    let Some(header) = signature["header"].as_str() else {
+        return false;
+    };
+    let Some(received) = headers.get(header).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let prefix = signature["prefix"].as_str().unwrap_or_default();
+    let value = received.trim();
+    if value.len() < prefix.len() {
+        return false;
+    }
+    let Some(head) = value.get(..prefix.len()) else {
+        return false;
+    };
+    if !head.eq_ignore_ascii_case(prefix) {
+        return false;
+    }
+    let candidate = &value[prefix.len()..];
+    let decoded = match signature["encoding"].as_str().unwrap_or("base64") {
+        "hex" => hex::decode(candidate.to_ascii_lowercase()).ok(),
+        _ => BASE64.decode(candidate).ok(),
+    };
+    let Some(decoded) = decoded else { return false };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    mac.verify_slice(&decoded).is_ok()
 }
 
 async fn contract_fallback(State(state): State<Arc<AppState>>, request: Request) -> Response {
@@ -540,7 +1025,7 @@ async fn execute_run(
     let mut child = child_command
         .args(command)
         .arg(prompt)
-        .current_dir(cwd)
+        .current_dir(&cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
@@ -554,6 +1039,20 @@ async fn execute_run(
             let mut line = String::new();
             while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                 let text = std::mem::take(&mut line);
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+                    if event["type"] == "prompt_suggestion.updated"
+                        && event["threadId"].is_string()
+                        && event["runId"].is_string()
+                        && event["text"].is_string()
+                    {
+                        let _ = s.prompt_suggestion_events.send(serde_json::json!({
+                            "threadId": event["threadId"].clone(),
+                            "runId": event["runId"].clone(),
+                            "text": event["text"].clone(),
+                        }));
+                        continue;
+                    }
+                }
                 let _ = s
                     .commit(Event::RunOutput {
                         run_id: r.id,
@@ -595,10 +1094,11 @@ async fn execute_run(
         let _ = task.await;
     }
     let ok = status.success();
+    let thread_id = run.thread_id.clone();
     state
         .commit(Event::RunFinished {
             run_id: run.id,
-            thread_id: run.thread_id,
+            thread_id: thread_id.clone(),
             status: if cancelled {
                 "cancelled"
             } else if ok {
@@ -610,7 +1110,78 @@ async fn execute_run(
             error: (!ok && !cancelled).then(|| format!("provider exited with {status}")),
         })
         .await?;
+    if ok && !cancelled {
+        if let Some(tree) = capture_git_tree(&cwd).await {
+            let turn_count = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(&thread_id)
+                .map(|thread| thread.messages.len() as u64)
+                .unwrap_or_default();
+            let _ = state
+                .commit(Event::CheckpointCaptured {
+                    thread_id,
+                    checkpoint: CheckpointRecord {
+                        turn_count,
+                        tree,
+                        cwd,
+                        captured_at: now(),
+                        ready: true,
+                    },
+                })
+                .await;
+        }
+    }
     Ok(())
+}
+
+async fn capture_git_tree(cwd: &str) -> Option<String> {
+    let cwd = std::path::Path::new(cwd);
+    if !cwd.is_dir() {
+        return None;
+    }
+    let probe = Command::new("git")
+        .args(["-C", cwd.to_str()?, "rev-parse", "--show-toplevel"])
+        .output()
+        .await
+        .ok()?;
+    if !probe.status.success() {
+        return None;
+    }
+    let index = tempfile::NamedTempFile::new().ok()?;
+    let index_path = index.path().to_path_buf();
+    drop(index);
+    let _ = tokio::fs::remove_file(&index_path).await;
+    let index_text = index_path.to_str()?.to_owned();
+    let mut command = Command::new("git");
+    command
+        .args(["-C", cwd.to_str()?, "read-tree", "HEAD"])
+        .env("GIT_INDEX_FILE", &index_text);
+    if !command.status().await.ok()?.success() {
+        let _ = tokio::fs::remove_file(&index_path).await;
+        return None;
+    }
+    let mut add = Command::new("git");
+    add.args(["-C", cwd.to_str()?, "add", "-A", "--"])
+        .arg(".")
+        .env("GIT_INDEX_FILE", &index_text);
+    if !add.status().await.ok()?.success() {
+        let _ = tokio::fs::remove_file(&index_path).await;
+        return None;
+    }
+    let output = Command::new("git")
+        .args(["-C", cwd.to_str()?, "write-tree"])
+        .env("GIT_INDEX_FILE", &index_text)
+        .output()
+        .await
+        .ok()?;
+    let _ = tokio::fs::remove_file(&index_path).await;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 pub fn trace_id(headers: &HeaderMap) -> String {

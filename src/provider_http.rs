@@ -18,6 +18,17 @@ use uuid::Uuid;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/voice/status", get(local_status))
+        .route("/api/voice/models", get(local_models))
+        .route("/api/voice/models/prepare", post(prepare_model))
+        .route("/api/voice/models/download", post(download_model))
+        .route("/api/voice/models/select", post(select_model))
+        .route("/api/voice/models/cancel", post(cancel_model))
+        .route("/api/voice/models/remove", post(remove_model))
+        .route("/api/voice/models/link", post(link_models))
+        .route("/api/voice/acceleration", post(update_acceleration))
+        .route("/api/voice/model-unload-timeout", post(update_timeout))
+        .route("/api/voice/transcribe", post(local_transcribe))
         .route("/api/voice/cloud/keys", get(keys))
         .route("/api/voice/cloud/:provider/key", post(set_key))
         .route("/api/voice/cloud/openrouter/models", get(models))
@@ -29,6 +40,114 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/api/voice/post-process", post(post_process))
         .route("/api/pull-requests/diff", post(diff))
+}
+
+async fn local_status(State(s): State<Arc<AppState>>, h: HeaderMap) -> Response {
+    response(&h, s.voice.local_status())
+}
+
+#[derive(Deserialize)]
+struct Benchmarks {
+    benchmarks: Option<String>,
+}
+
+async fn local_models(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Query(query): Query<Benchmarks>,
+) -> Response {
+    response(
+        &h,
+        s.voice
+            .local_models(query.benchmarks.as_deref() == Some("1")),
+    )
+}
+
+async fn prepare_model(State(s): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Response {
+    if !body.is_empty() {
+        return response(&h, Err(SpeechError::Invalid("invalid_command")));
+    }
+    match s.voice.prepare_local() {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => response(&h, Err(error)),
+    }
+}
+
+async fn download_model(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(input): Json<Value>,
+) -> Response {
+    response(&h, s.voice.local_update("download", &input))
+}
+
+async fn cancel_model(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(input): Json<Value>,
+) -> Response {
+    response(&h, s.voice.local_update("cancel", &input))
+}
+
+async fn remove_model(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(input): Json<Value>,
+) -> Response {
+    response(&h, s.voice.local_update("remove", &input))
+}
+
+async fn link_models(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(input): Json<Value>,
+) -> Response {
+    response(&h, s.voice.local_update("link", &input))
+}
+
+async fn select_model(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(input): Json<Value>,
+) -> Response {
+    response(&h, s.voice.local_update("select", &input))
+}
+
+async fn update_acceleration(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(input): Json<Value>,
+) -> Response {
+    match s.voice.local_update("acceleration", &input) {
+        Ok(_) => response(&h, s.voice.local_status()),
+        Err(error) => response(&h, Err(error)),
+    }
+}
+
+async fn update_timeout(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(input): Json<Value>,
+) -> Response {
+    match s.voice.local_update("timeout", &input) {
+        Ok(_) => response(&h, s.voice.local_status()),
+        Err(error) => response(&h, Err(error)),
+    }
+}
+
+async fn local_transcribe(State(_s): State<Arc<AppState>>, h: HeaderMap, body: Bytes) -> Response {
+    if h.get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"))
+    {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Unsupported content-type: application/json",
+        )
+            .into_response();
+    }
+    let _ = body;
+    response(&h, Err(SpeechError::Invalid("speech_unavailable")))
 }
 
 fn response(headers: &HeaderMap, result: Result<Value, SpeechError>) -> Response {
@@ -127,6 +246,12 @@ async fn post_process(
     response(&h, voice::post_process(&input, &s.provider_command).await)
 }
 async fn diff(State(s): State<Arc<AppState>>, Json(input): Json<Value>) -> Response {
+    if input["projectId"].as_str().is_none()
+        || input["repository"].as_str().is_none()
+        || input["number"].as_u64().is_none()
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let cli = s.issues.lock().await.gh.clone();
     match pull_requests::read(&s, &cli, "diff", &input).await {
         Ok(v) => Json(v).into_response(),

@@ -1,14 +1,109 @@
-use crate::{dispatch_orchestration_command, host_rpc, provider_rpc, AppState, RPC_CONTRACTS};
+use crate::{
+    auth_service, dispatch_orchestration_command, host_rpc, provider_rpc, AppState, RPC_CONTRACTS,
+};
 use axum::extract::ws::{Message, WebSocket};
+use base64::Engine;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
+use hmac::{Hmac, Mac};
+use rand::RngCore;
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc};
+use sha2::{Digest, Sha256};
+use std::io::Write;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
+
+fn asset_signing_key(state: &crate::AppState) -> anyhow::Result<[u8; 32]> {
+    let path = state.paths.secrets.join("asset-access-signing-key.bin");
+    if !path.exists() {
+        let mut key = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key);
+        let mut tmp = tempfile::NamedTempFile::new_in(&state.paths.secrets)?;
+        tmp.write_all(&key)?;
+        tmp.as_file().sync_all()?;
+        match tmp.persist_noclobber(&path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let bytes = std::fs::read(path)?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid asset signing key"))
+}
+
+fn sign_asset_payload(state: &crate::AppState, payload: &str) -> anyhow::Result<String> {
+    let key = asset_signing_key(state)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key");
+    mac.update(payload.as_bytes());
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
 
 enum Reply {
     Success(Value),
     Failure(Value),
     Chunk(Value),
+}
+
+const PROJECTS_MUTATE_SCHEMA_DEFECT: &str = r#"Expected { readonly "type": "project.create", ... } | { readonly "type": "project.update", ... } | { readonly "type": "project.delete", ... }"#;
+const DEVICE_ACTION_SCHEMA_DEFECT: &str = r#"Expected { readonly "type": "setAppearance", ... } | { readonly "type": "setTextSize", ... } | { readonly "type": "setToggle", ... } | { readonly "type": "setLiquidGlass", ... } | { readonly "type": "setColorFilter", ... } | { readonly "type": "setOrientation", ... } | { readonly "type": "setLocation", ... } | { readonly "type": "clearLocation", ... } | { readonly "type": "setPermission", ... } | { readonly "type": "openUrl", ... } | { readonly "type": "launchApp", ... } | { readonly "type": "terminateApp", ... } | { readonly "type": "shake", ... } | { readonly "type": "sendPush", ... }"#;
+const ORCHESTRATION_DISPATCH_COMMAND_SCHEMA_DEFECT: &str = r#"Expected { readonly "type": "thread.stop", ... } | { readonly "type": "thread.create", ... } | { readonly "type": "thread.archive", ... } | { readonly "type": "thread.guest-share.close", ... } | { readonly "type": "thread.guest-message.dismiss", ... } | { readonly "type": "thread.unarchive", ... } | { readonly "type": "thread.delete", ... } | { readonly "type": "thread.settle", ... } | { readonly "type": "thread.auto-settle", ... } | { readonly "type": "thread.unsettle", readonly "reason": "user", ... } | { readonly "type": "thread.snooze", ... } | { readonly "type": "thread.unsnooze", readonly "reason": "user", ... } | { readonly "type": "thread.auto-settle.set", ... } | { readonly "type": "thread.pin", ... } | { readonly "type": "thread.unpin", ... } | { readonly "type": "thread.tag.set", ... } | { readonly "type": "thread.pin.reorder", ... } | { readonly "type": "thread.active.reorder", ... } | { readonly "type": "thread.visit", ... } | { readonly "type": "thread.mark-unread", ... } | { readonly "type": "thread.metadata.update", ... } | { readonly "type": "thread.pull-request.link", ... } | { readonly "type": "thread.pull-request.unlink", ... } | { readonly "type": "thread.pull-request-link.sync", ... } | { readonly "type": "thread.issue.link", ... } | { readonly "type": "thread.issue.unlink", ... } | { readonly "type": "thread.pull-request.watch", ... } | { readonly "type": "thread.pull-request.sync", ... } | { readonly "type": "thread.title.regeneration.complete", ... } | { readonly "type": "thread.runtime-mode.set", ... } | { readonly "type": "thread.interaction-mode.set", ... } | { readonly "type": "thread.model-selection.set", ... } | { readonly "type": "provider-session.detach", ... } | { readonly "type": "message.dispatch", ... } | { readonly "type": "prepared-run.release", ... } | { readonly "type": "notification.delivery.accept", ... } | { readonly "type": "prepared-run.progress", ... } | { readonly "type": "prepared-run.fail", ... } | { readonly "type": "prepared-run.retry", ... } | { readonly "type": "subagent.stop", ... } | { readonly "type": "run.interrupt", ... } | { readonly "type": "queued-message.promote-to-steer", ... } | { readonly "type": "queue.resume", ... } | { readonly "type": "queued-run.start", ... } | { readonly "type": "queued-run.reorder", ... } | { readonly "type": "queued-run.cancel", ... } | { readonly "type": "queued-run.edit", ... } | { readonly "type": "runtime-request.respond", ... } | { readonly "type": "thread.user-input.dismiss", ... } | { readonly "type": "checkpoint.rollback", ... } | { readonly "type": "thread.fork", ... } | { readonly "type": "thread.merge_back", ... } | { readonly "type": "delegated_task.request", ... } | { readonly "type": "delegated_task.wake-policy", ... } | { readonly "type": "delegated_task.completion-delivery.acknowledge", ... } | { readonly "type": "delegated_task.completion-delivery.dispose", ... } | { readonly "type": "thread.created.record", ... } | { readonly "type": "provider.switch", ... }"#;
+
+fn triage_client_description(client: &Value) -> String {
+    let mut parts = Vec::new();
+    parts.push(
+        client["label"]
+            .as_str()
+            .unwrap_or("an unknown client")
+            .to_owned(),
+    );
+    if let Some(value) = client["appVersion"].as_str() {
+        parts.push(format!("version {value}"));
+    }
+    if let Some(value) = client["os"].as_str() {
+        parts.push(format!("on {value}"));
+    }
+    if let Some(value) = client["browser"].as_str() {
+        parts.push(format!("in {value}"));
+    }
+    if client["webDeployment"] == "hosted" {
+        parts.push("(app.t3.codes)".to_owned());
+    }
+    parts.join(" ")
+}
+
+fn triage_context(state: &crate::AppState, generated_at: &str, client: &Value) -> String {
+    let paths = &state.paths;
+    let logs = paths.logs.display();
+    let state_dir = paths.state_dir.display();
+    let db = paths.state_dir.join("statev2.sqlite").display().to_string();
+    let trace = paths.logs.join("server.trace.ndjson").display().to_string();
+    let provider_events = paths.provider_logs.join("events.log").display().to_string();
+    let desktop_glob = paths.logs.join("server-child*.log*").display().to_string();
+    let relay = paths.logs.join("relay-client.ndjson").display().to_string();
+    let source = paths.base_dir.join("source").display().to_string();
+    format!(
+        "# T3 Code triage context\n\nGenerated by the T3 Code app at {generated_at}.\n\n- Started from: {} (the client the user pressed \"Triage an issue\" in; the bug may have happened on another device)\n- OS: {} {}\n- Node: unknown\n- Server process: running (pid {}, version 0.1.10); this session runs inside it\n- Repo: https://github.com/pingdotgg/t3code\n\n## This session runs inside T3 Code\n\nYou are a thread inside the T3 Code server described above. Stopping, restarting, or killing that server, its service, or the desktop app ends this session. When a fix needs one of those, give the user the exact steps and let them do it. The database is in use by that server: read it, never lock it.\n\n## Paths\n\n- State dir: {state_dir}\n- Database (SQLite; write only with the user's explicit permission): {db}\n- Settings: {}\n- Logs dir: {logs}\n- Service log (systemd/launchd service installs only): {logs}/boot-service.log\n- Desktop backend logs (glob; one file per backend plus rotated copies; written only when a backend crashes or fails to start): {desktop_glob}\n- T3 Connect tunnel log (ndjson; what the server logged about its cloudflared connector, with rotated copies `.1` and `.2`): {relay}\n- Server trace (ndjson): {trace}\n- Provider event log: {provider_events}\n- Terminal logs: {}\n- Provider status cache: {}\n- Secrets dir (NEVER read this): {}\n- Source cache dir (clone the repo here): {source}\n",
+        triage_client_description(client),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::process::id(),
+        paths.settings.display(),
+        paths.terminal_logs.display(),
+        paths.caches.display(),
+        paths.secrets.display(),
+    )
+}
+
+fn triage_seed_prompt(context_file: &str) -> String {
+    format!(
+        "A T3 Code user is having a problem with their install and started this session from the T3 Code app.\n\nMachine facts (versions, OS, paths, server liveness) are in the triage context file:\n\n    {context_file}\n\nFollow the playbook below. The message that sent you here may already describe what went wrong; if it does not, start by asking.\n\n---\n\n{}",
+        include_str!("triage_playbook.md")
+    )
 }
 
 impl Reply {
@@ -24,6 +119,205 @@ impl Reply {
         };
         json!({"_tag":"Exit","requestId":id,"exit":exit})
     }
+}
+
+async fn project_clone_snapshots(state: &Arc<AppState>) -> Vec<Value> {
+    let mut snapshots = state
+        .project_clone_states
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left["projectId"].as_str().cmp(&right["projectId"].as_str()));
+    snapshots
+}
+
+async fn next_project_clone_sequence(state: &Arc<AppState>) -> u64 {
+    let mut sequence = state.project_clone_sequence.lock().await;
+    *sequence = sequence.saturating_add(1);
+    *sequence
+}
+
+async fn publish_project_clone_change(state: &Arc<AppState>) {
+    let _ = state.project_clone_events.send(());
+}
+
+async fn update_project_clone_snapshot(
+    state: &Arc<AppState>,
+    project_id: &str,
+    expected_sequence: Option<u64>,
+    update: impl FnOnce(&mut Value),
+) -> Option<Value> {
+    let sequence = next_project_clone_sequence(state).await;
+    let snapshot = {
+        let mut states = state.project_clone_states.lock().await;
+        let snapshot = states.get_mut(project_id)?;
+        if expected_sequence.is_some_and(|expected| snapshot["sequence"].as_u64() != Some(expected))
+        {
+            return None;
+        }
+        update(snapshot);
+        snapshot["sequence"] = json!(sequence);
+        snapshot.clone()
+    };
+    publish_project_clone_change(state).await;
+    Some(snapshot)
+}
+
+fn retain_completed_project_clone(state: Arc<AppState>, project_id: String, sequence: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let removed = {
+            let mut states = state.project_clone_states.lock().await;
+            let should_remove = states.get(&project_id).is_some_and(|snapshot| {
+                snapshot["phase"] == "done" && snapshot["sequence"].as_u64() == Some(sequence)
+            });
+            should_remove && states.remove(&project_id).is_some()
+        };
+        if removed {
+            publish_project_clone_change(&state).await;
+        }
+    });
+}
+
+async fn launch_project_clone(
+    state: Arc<AppState>,
+    project_id: String,
+    remote: String,
+    destination: String,
+) {
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let attempt_sequence = {
+        let states = state.project_clone_states.lock().await;
+        let Some(snapshot) = states.get(&project_id) else {
+            return;
+        };
+        if snapshot["phase"] != "running" {
+            return;
+        }
+        let attempt_sequence = snapshot["sequence"].as_u64().unwrap_or_default();
+        state
+            .project_clone_cancellations
+            .lock()
+            .await
+            .insert(project_id.clone(), (attempt_sequence, cancel_tx));
+        attempt_sequence
+    };
+    tokio::spawn(async move {
+        let command = tokio::process::Command::new("git")
+            .args(["clone", "--", remote.as_str(), destination.as_str()])
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        let outcome = match command {
+            Err(error) => Err(format!("Git could not be started: {error}")),
+            Ok(mut child) => {
+                let stderr_task = child.stderr.take().map(|mut stderr| {
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncReadExt;
+                        let mut bytes = Vec::new();
+                        let _ = stderr.read_to_end(&mut bytes).await;
+                        String::from_utf8_lossy(&bytes).trim().to_owned()
+                    })
+                });
+                tokio::select! {
+                    status = child.wait() => {
+                        let detail = match stderr_task {
+                            Some(task) => task.await.unwrap_or_default(),
+                            None => String::new(),
+                        };
+                        match status {
+                            Ok(status) if status.success() => Ok(()),
+                            Ok(_) if detail.is_empty() => Err("Git clone failed.".to_owned()),
+                            Ok(_) => Err(detail),
+                            Err(error) => Err(error.to_string()),
+                        }
+                    }
+                    _ = cancel_rx => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        if let Some(task) = stderr_task {
+                            let _ = task.await;
+                        }
+                        let _ = tokio::fs::remove_dir_all(&destination).await;
+                        Err("__cancelled__".to_owned())
+                    }
+                }
+            }
+        };
+        match outcome {
+            Ok(()) => {
+                let snapshot = update_project_clone_snapshot(
+                    &state,
+                    &project_id,
+                    Some(attempt_sequence),
+                    |snapshot| {
+                        snapshot["phase"] = json!("done");
+                        snapshot["stage"] = json!("checkout");
+                        snapshot["percent"] = json!(100);
+                        snapshot["detail"] = json!("Checking out files");
+                        snapshot["stalled"] = json!(false);
+                        snapshot["error"] = Value::Null;
+                        snapshot["endedAt"] =
+                            json!(crate::auth_service::iso(crate::auth_service::now()));
+                    },
+                )
+                .await;
+                if let Some(snapshot) = snapshot {
+                    if let Some(sequence) = snapshot["sequence"].as_u64() {
+                        retain_completed_project_clone(state.clone(), project_id.clone(), sequence);
+                    }
+                }
+            }
+            Err(error) if error == "__cancelled__" => {
+                let _ = update_project_clone_snapshot(
+                    &state,
+                    &project_id,
+                    Some(attempt_sequence),
+                    |snapshot| {
+                        if snapshot["phase"] == "running"
+                            && snapshot["sequence"].as_u64() == Some(attempt_sequence)
+                        {
+                            snapshot["phase"] = json!("cancelled");
+                            snapshot["stalled"] = json!(false);
+                            snapshot["endedAt"] =
+                                json!(crate::auth_service::iso(crate::auth_service::now()));
+                        }
+                    },
+                )
+                .await;
+            }
+            Err(error) => {
+                let detail = if error.len() > 1_000 {
+                    let prefix = error.chars().take(999).collect::<String>();
+                    format!("{prefix}…")
+                } else {
+                    error
+                };
+                let _ = update_project_clone_snapshot(
+                    &state,
+                    &project_id,
+                    Some(attempt_sequence),
+                    |snapshot| {
+                        snapshot["phase"] = json!("failed");
+                        snapshot["stage"] = json!("checkout");
+                        snapshot["stalled"] = json!(false);
+                        snapshot["error"] = json!(detail);
+                        snapshot["endedAt"] =
+                            json!(crate::auth_service::iso(crate::auth_service::now()));
+                    },
+                )
+                .await;
+            }
+        }
+        let mut cancellations = state.project_clone_cancellations.lock().await;
+        if cancellations
+            .get(&project_id)
+            .is_some_and(|(sequence, _)| *sequence == attempt_sequence)
+        {
+            cancellations.remove(&project_id);
+        }
+    });
 }
 
 struct PendingCall {
@@ -125,6 +419,66 @@ async fn run_call(
     window: Arc<Semaphore>,
 ) -> Reply {
     let (principal, references) = client;
+    if method == "projects.mutate"
+        && !matches!(
+            params.get("type").and_then(Value::as_str),
+            Some("project.create" | "project.update" | "project.delete")
+        )
+    {
+        return Reply::defect(PROJECTS_MUTATE_SCHEMA_DEFECT.into());
+    }
+    if method == "device.action"
+        && !matches!(
+            params.get("type").and_then(Value::as_str),
+            Some(
+                "setAppearance"
+                    | "setTextSize"
+                    | "setToggle"
+                    | "setLiquidGlass"
+                    | "setColorFilter"
+                    | "setOrientation"
+                    | "setLocation"
+                    | "clearLocation"
+                    | "setPermission"
+                    | "openUrl"
+                    | "launchApp"
+                    | "terminateApp"
+                    | "shake"
+                    | "sendPush"
+            )
+        )
+    {
+        return Reply::defect(DEVICE_ACTION_SCHEMA_DEFECT.into());
+    }
+    if method == "orchestration.dispatchCommand"
+        && params
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(crate::contracts::command_fields)
+            .is_none()
+    {
+        return Reply::defect(ORCHESTRATION_DISPATCH_COMMAND_SCHEMA_DEFECT.into());
+    }
+    if method == "orchestration.dispatchCommand"
+        && params["type"] == "message.dispatch"
+        && params.get("dispatchMode").is_some_and(|mode| {
+            !mode.is_object()
+                || !matches!(
+                    mode["type"].as_str(),
+                    Some(
+                        "defer_start"
+                            | "steer_active"
+                            | "restart_active"
+                            | "queue_after_active"
+                            | "start_immediately"
+                    )
+                )
+        })
+    {
+        return Reply::defect(
+            "Expected { readonly \"type\": \"defer_start\", ... } | { readonly \"type\": \"steer_active\", ... } | { readonly \"type\": \"restart_active\", ... } | { readonly \"type\": \"queue_after_active\", ... } | { readonly \"type\": \"start_immediately\", ... }\n  at [\"dispatchMode\"]".into(),
+        );
+    }
     let decoded;
     let params = if matches!(method, "server.updateSettings" | "server.checkSecretSource") {
         let result = if method == "server.updateSettings" {
@@ -165,6 +519,130 @@ async fn run_call(
             );
         }
     }
+    if let Some(defect) = checkpoint_diff_schema_defect(method, params) {
+        return Reply::defect(defect);
+    }
+    if method == "server.searchAcpRegistry"
+        && params.get("query").is_some_and(|value| !value.is_string())
+    {
+        return Reply::defect("Expected string\n  at [\"query\"]".into());
+    }
+    if method == "orchestration.searchThreads"
+        && params
+            .get("query")
+            .and_then(Value::as_str)
+            .is_some_and(|query| query.encode_utf16().count() < 2)
+    {
+        return Reply::defect(
+            "Expected a value with a length of at least 2\n  at [\"query\"]".into(),
+        );
+    }
+    if method == "server.searchAcpRegistry"
+        && params.get("limit").is_some_and(|value| {
+            value
+                .as_u64()
+                .is_none_or(|number| !(1..=512).contains(&number))
+        })
+    {
+        return Reply::defect("Expected a value between 1 and 512\n  at [\"limit\"]".into());
+    }
+    if matches!(
+        method,
+        "server.prepareAcpRegistryAgent" | "server.uninstallAcpRegistryManagedBinary"
+    ) && params
+        .get("agentId")
+        .is_some_and(|value| !value.is_string())
+    {
+        return Reply::defect("Expected string\n  at [\"agentId\"]".into());
+    }
+    if method == "server.acceptAcpRegistryUrlAuth"
+        && params
+            .get("instanceId")
+            .is_some_and(|value| !value.is_string())
+    {
+        return Reply::defect("Expected string\n  at [\"instanceId\"]".into());
+    }
+    if method == "provider.auth.start"
+        && params
+            .get("callbackMode")
+            .is_some_and(|value| !matches!(value.as_str(), Some("server" | "client")))
+    {
+        return Reply::defect("Expected \"server\" | \"client\"\n  at [\"callbackMode\"]".into());
+    }
+    if method == "mcpApps.updateModelContext"
+        && params
+            .get("content")
+            .is_some_and(|value| !(value.is_array() || value.is_null()))
+    {
+        return Reply::defect("Expected array | null\n  at [\"content\"]".into());
+    }
+    if let Some(field) = invalid_provider_payload_field(method, params) {
+        return Reply::defect(format!("Expected string\n  at [\"{field}\"]"));
+    }
+    if method == "provider.auth.start"
+        && params
+            .get("methodId")
+            .is_some_and(|value| !value.is_string())
+    {
+        return Reply::defect("Expected string\n  at [\"methodId\"]".into());
+    }
+    if method == "provider.auth.start"
+        && params
+            .get("returnUrl")
+            .is_some_and(|value| !value.is_string())
+    {
+        return Reply::defect("Expected string\n  at [\"returnUrl\"]".into());
+    }
+    if method == "mcpApps.callTool"
+        && params
+            .get("arguments")
+            .is_some_and(|value| !value.is_object())
+    {
+        return Reply::defect("Expected object\n  at [\"arguments\"]".into());
+    }
+    if method == "server.checkOtlpEndpoint"
+        && !matches!(
+            params["signal"].as_str(),
+            Some("traces" | "metrics" | "logs")
+        )
+    {
+        return Reply::defect(
+            "Expected \"traces\" | \"metrics\" | \"logs\"\n  at [\"signal\"]".into(),
+        );
+    }
+    if method == "server.prepareTriage" && !params["client"].is_object() {
+        return Reply::defect("Expected object\n  at [\"client\"]".into());
+    }
+    if method == "server.signalProcess"
+        && !matches!(params["signal"].as_str(), Some("SIGINT" | "SIGKILL"))
+    {
+        return Reply::defect("Expected \"SIGINT\" | \"SIGKILL\"\n  at [\"signal\"]".into());
+    }
+    if method == "server.reportClientActivity"
+        && !matches!(
+            params["clientKind"].as_str(),
+            Some("web" | "desktop-renderer" | "mobile" | "unknown")
+        )
+    {
+        return Reply::defect(
+            "Expected \"web\" | \"desktop-renderer\" | \"mobile\" | \"unknown\"\n  at [\"clientKind\"]".into(),
+        );
+    }
+    if method == "server.getUsageSummary" && !params["sinceDay"].is_string() {
+        return Reply::defect("Expected string\n  at [\"sinceDay\"]".into());
+    }
+    if method == "provider.auth.respond"
+        && params
+            .get("response")
+            .is_some_and(|value| !value.is_object())
+    {
+        return Reply::defect("Expected { readonly \"type\": \"browser\", ... } | { readonly \"type\": \"terminal\", ... } | { readonly \"type\": \"credentials\", ... }\n  at [\"response\"]".into());
+    }
+    if method == "provider.auth.respond" {
+        if let Some(defect) = provider_auth_response_defect(params.get("response")) {
+            return Reply::defect(defect);
+        }
+    }
     if method == "server.checkSecretSource" {
         let settings = state.settings.internal().unwrap_or_default();
         let source = &params["source"];
@@ -183,7 +661,15 @@ async fn run_call(
     }
     if matches!(method, "server.getSettings" | "server.updateSettings") {
         let reply = if method == "server.getSettings" {
-            state.settings.client(references)
+            let result = state.settings.client(references);
+            match result {
+                Ok(mut settings) => {
+                    let rows = state.store.read().await.project_rows.clone();
+                    fold_project_rows_into_settings(&mut settings, &rows);
+                    Ok(settings)
+                }
+                Err(error) => Err(error),
+            }
         } else {
             let mut input = params.clone();
             if let Some(hosts) = input
@@ -206,6 +692,59 @@ async fn run_call(
             let _ = chunks.send((id.to_owned(), values)).await;
         }
     };
+    if method == "pullRequests.subscribeLinkedThreadRefreshes" {
+        let mut events = state.pull_request_linked_events.subscribe();
+        loop {
+            match events.recv().await {
+                Ok(revision) => send(json!([revision])).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Reply::Success(Value::Null)
+                }
+            }
+        }
+    }
+    if method == "orchestration.subscribePromptSuggestion" {
+        let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
+        let mut events = state.prompt_suggestion_events.subscribe();
+        send(json!([Value::Null])).await;
+        loop {
+            match events.recv().await {
+                Ok(event) if event["threadId"].as_str() == Some(thread_id.as_str()) => {
+                    send(json!([{"runId":event["runId"],"text":event["text"]}])).await;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Reply::Success(Value::Null)
+                }
+            }
+        }
+    }
+    if method == "scheduledTasks.subscribe" {
+        let mut events = state.scheduled_task_events.subscribe();
+        send(json!([scheduled_tasks_snapshot(state).await])).await;
+        loop {
+            match events.recv().await {
+                Ok(()) => send(json!([scheduled_tasks_snapshot(state).await])).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Reply::Success(Value::Null)
+                }
+            }
+        }
+    }
+    if method == "subscribeProjectClones" {
+        let mut events = state.project_clone_events.subscribe();
+        send(json!([project_clone_snapshots(state).await])).await;
+        loop {
+            match events.recv().await {
+                Ok(()) => send(json!([project_clone_snapshots(state).await])).await,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return Reply::Success(Value::Null),
+            }
+        }
+    }
     if method == "server.getConfig" {
         return match crate::config_rpc::snapshot(state, references, &Value::Null).await {
             Ok(v) => Reply::Success(v),
@@ -371,6 +910,1931 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     }
     if matches!(
         method,
+        "server.upsertKeybinding" | "server.removeKeybinding"
+    ) {
+        return match crate::config_rpc::keybindings_mutate(state, method, params) {
+            Ok(value) => Reply::Success(value),
+            Err(error) => Reply::Failure(error),
+        };
+    }
+    if method == "projects.ensureScratch" {
+        let root = state.paths.base_dir.join("scratch");
+        if let Err(error) = tokio::fs::create_dir_all(&root).await {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
+            );
+        }
+        let root = match tokio::fs::canonicalize(&root).await {
+            Ok(path) => path,
+            Err(error) => {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
+                );
+            }
+        };
+        let existing = state
+            .store
+            .read()
+            .await
+            .projects
+            .values()
+            .find(|p| std::fs::canonicalize(&p.path).ok().as_deref() == Some(root.as_path()))
+            .cloned();
+        let project_id = if let Some(project) = existing {
+            project.id
+        } else {
+            let id = uuid::Uuid::new_v4().to_string();
+            let project = crate::Project {
+                id: id.clone(),
+                name: "No project".into(),
+                path: root.to_string_lossy().into_owned(),
+                created_at: crate::now(),
+            };
+            let mut row = crate::projects::wire(&project);
+            row["projectIcon"] =
+                json!({"kind":"lucide","name":"message-square-dashed","color":"gray"});
+            if state
+                .commit(crate::Event::ProjectCommitted {
+                    project,
+                    row,
+                    command_id: format!("scratch-project:{id}"),
+                    command_type: "project.create".into(),
+                    removed_threads: vec![],
+                })
+                .await
+                .is_err()
+            {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":"Failed to create scratch project."}}),
+                );
+            }
+            id
+        };
+        return Reply::Success(json!({"projectId":project_id}));
+    }
+    if method == "projects.createNew" {
+        let name = params["name"].as_str().unwrap_or_default().trim();
+        if name.is_empty() {
+            return Reply::defect("Expected a non-blank string\n  at [\"name\"]".into());
+        }
+        let root = state.paths.base_dir.join("projects");
+        if let Err(error) = tokio::fs::create_dir_all(&root).await {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
+            );
+        }
+        let slug: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let slug = slug.trim_matches('-').to_owned();
+        let mut folder = root.join(if slug.is_empty() { "project" } else { &slug });
+        for attempt in 2..=100 {
+            if tokio::fs::metadata(&folder).await.is_err() {
+                break;
+            }
+            folder = root.join(format!(
+                "{}-{attempt}",
+                if slug.is_empty() { "project" } else { &slug }
+            ));
+        }
+        if let Err(error) = tokio::fs::create_dir_all(&folder).await {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
+            );
+        }
+        let _ = tokio::fs::create_dir_all(folder.join("assets")).await;
+        let _ = tokio::fs::write(folder.join("README.md"), format!("# {name}\n")).await;
+        let _ = tokio::fs::write(
+            folder.join("assets/icon.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n",
+        )
+        .await;
+        let commit_error = match tokio::process::Command::new("git")
+            .current_dir(&folder)
+            .args(["init", "--initial-branch=main"])
+            .output()
+            .await
+        {
+            Ok(init) if init.status.success() => {
+                let _ = tokio::process::Command::new("git")
+                    .current_dir(&folder)
+                    .args(["add", "--force", "README.md", "assets/icon.svg"])
+                    .output()
+                    .await;
+                match tokio::process::Command::new("git")
+                    .current_dir(&folder)
+                    .args(["commit", "--message", "Initial commit"])
+                    .output()
+                    .await
+                {
+                    Ok(out) if out.status.success() => None,
+                    Ok(out) => Some(
+                        if String::from_utf8_lossy(&out.stderr).contains("Author identity unknown")
+                        {
+                            "Git has no name or email on this machine. Set user.name and user.email, then commit.".into()
+                        } else {
+                            String::from_utf8_lossy(&out.stderr).trim().to_owned()
+                        },
+                    ),
+                    Err(error) => Some(error.to_string()),
+                }
+            }
+            Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_owned()),
+            Err(error) => Some(error.to_string()),
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let project = crate::Project {
+            id: id.clone(),
+            name: name.into(),
+            path: folder.to_string_lossy().into_owned(),
+            created_at: crate::now(),
+        };
+        let row = crate::projects::wire(&project);
+        if state
+            .commit(crate::Event::ProjectCommitted {
+                project,
+                row,
+                command_id: format!("named-project:{id}"),
+                command_type: "project.create".into(),
+                removed_threads: vec![],
+            })
+            .await
+            .is_err()
+        {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":"Failed to create project."}}),
+            );
+        }
+        let mut result = json!({"projectId":id,"workspaceRoot":folder});
+        if let Some(error) = commit_error.filter(|e| !e.is_empty()) {
+            result["commitError"] = json!(error);
+        }
+        return Reply::Success(result);
+    }
+    if method == "projects.createFromThread" {
+        let id = params["threadId"].as_str().unwrap_or_default();
+        if !state.store.read().await.threads.contains_key(id) {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":"Thread not found.","cause":{"name":"ScratchThreadPromotionError","message":"Thread not found."}}}),
+            );
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":"Thread promotion is unavailable."}}),
+        );
+    }
+    if method == "agentSessions.import" {
+        let id = params["projectId"].as_str().unwrap_or_default();
+        if !state.store.read().await.projects.contains_key(id) {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"AgentSessionImportProjectNotFoundError","projectId":id}}),
+            );
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"AgentSessionImportError","message":"No importable agent sessions were found."}}),
+        );
+    }
+    if method == "projectClone.start" {
+        let project_id = params["projectId"].as_str().unwrap_or_default();
+        let title = params["title"].as_str().unwrap_or_default();
+        let destination = params["destinationPath"].as_str().unwrap_or_default();
+        let remote = params["remoteUrl"].as_str().unwrap_or_default();
+        if remote.is_empty() || destination.is_empty() {
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"SourceControlRepositoryError","provider":params["provider"],
+                "operation":"clone","detail":"A clone URL and destination path are required."
+            }}));
+        }
+        if state.store.read().await.projects.contains_key(project_id) {
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"OrchestrationDispatchCommandError","message":format!("Project {project_id} already exists.")
+            }}));
+        }
+        {
+            let states = state.project_clone_states.lock().await;
+            if states.values().any(|snapshot| {
+                snapshot["projectId"].as_str() == Some(project_id)
+                    || snapshot["destinationPath"].as_str() == Some(destination)
+            }) {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"SourceControlRepositoryError","provider":params["provider"],
+                    "operation":"clone","detail":"A clone into this destination is already in progress."
+                }}));
+            }
+        }
+        let started_at = crate::auth_service::iso(crate::auth_service::now());
+        let sequence = next_project_clone_sequence(state).await;
+        state.project_clone_states.lock().await.insert(
+            project_id.to_owned(),
+            json!({"projectId":project_id,"remoteUrl":remote,"destinationPath":destination,"repository":null,"phase":"running","stage":"connecting","percent":null,"detail":null,"stalled":false,"error":null,"startedAt":started_at,"endedAt":null,"sequence":sequence}),
+        );
+        publish_project_clone_change(state).await;
+        let project = crate::Project {
+            id: project_id.to_owned(),
+            name: title.to_owned(),
+            path: destination.to_owned(),
+            created_at: crate::now(),
+        };
+        let row = crate::projects::wire(&project);
+        if let Err(error) = state
+            .commit(crate::Event::ProjectCommitted {
+                project,
+                row,
+                command_id: format!("project-clone:{project_id}"),
+                command_type: "projectClone.start".into(),
+                removed_threads: vec![],
+            })
+            .await
+        {
+            state.project_clone_states.lock().await.remove(project_id);
+            publish_project_clone_change(state).await;
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
+            );
+        }
+        launch_project_clone(
+            state.clone(),
+            project_id.to_owned(),
+            remote.to_owned(),
+            destination.to_owned(),
+        )
+        .await;
+        return Reply::Success(
+            json!({"projectId":project_id,"cwd":destination,"remoteUrl":remote,"repository":null}),
+        );
+    }
+    if method == "projectClone.cancel" {
+        let project_id = params["projectId"].as_str().unwrap_or_default();
+        let sequence = next_project_clone_sequence(state).await;
+        let destination = {
+            let mut states = state.project_clone_states.lock().await;
+            let Some(snapshot) = states.get_mut(project_id) else {
+                return Reply::Success(json!({"applied":false}));
+            };
+            if snapshot["phase"] != "running" {
+                return Reply::Success(json!({"applied":false}));
+            }
+            snapshot["phase"] = json!("cancelled");
+            snapshot["stalled"] = json!(false);
+            snapshot["endedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+            snapshot["sequence"] = json!(sequence);
+            snapshot["destinationPath"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        if let Some((_, cancel)) = state
+            .project_clone_cancellations
+            .lock()
+            .await
+            .remove(project_id)
+        {
+            let _ = cancel.send(());
+        }
+        let _ = tokio::fs::remove_dir_all(destination).await;
+        publish_project_clone_change(state).await;
+        return Reply::Success(json!({"applied":true}));
+    }
+    if method == "projectClone.retry" {
+        let project_id = params["projectId"].as_str().unwrap_or_default();
+        let sequence = next_project_clone_sequence(state).await;
+        let (remote, destination) = {
+            let mut states = state.project_clone_states.lock().await;
+            let Some(snapshot) = states.get_mut(project_id) else {
+                return Reply::Success(json!({"applied":false}));
+            };
+            if !matches!(snapshot["phase"].as_str(), Some("failed" | "cancelled")) {
+                return Reply::Success(json!({"applied":false}));
+            }
+            let remote = snapshot["remoteUrl"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let destination = snapshot["destinationPath"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            snapshot["phase"] = json!("running");
+            snapshot["stage"] = json!("connecting");
+            snapshot["percent"] = Value::Null;
+            snapshot["detail"] = Value::Null;
+            snapshot["stalled"] = json!(false);
+            snapshot["error"] = Value::Null;
+            snapshot["startedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+            snapshot["endedAt"] = Value::Null;
+            snapshot["sequence"] = json!(sequence);
+            (remote, destination)
+        };
+        let _ = tokio::fs::remove_dir_all(&destination).await;
+        publish_project_clone_change(state).await;
+        launch_project_clone(state.clone(), project_id.to_owned(), remote, destination).await;
+        return Reply::Success(json!({"applied":true}));
+    }
+    if method == "orchestration.searchThreadStream" {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        if !state.store.read().await.threads.contains_key(thread_id) {
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"OrchestrationV2SearchThreadError",
+                "cause":{"name":"OrchestratorProjectionError",
+                    "message":format!("Failed to load orchestration projection for thread {thread_id}."),
+                    "cause":{"name":"ProjectionStoreThreadNotFoundError",
+                        "message":format!("No orchestration projection exists for thread {thread_id}.")}}
+            }}));
+        }
+        let sequence = *state.next_event_id.lock().await;
+        return Reply::Chunk(json!([{"complete":true,"snapshotSequence":sequence,
+            "totalMatches":0,"activeIndex":0,"match":null}]));
+    }
+    if method == "server.updateProvider" {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ServerProviderUpdateError","provider":params["provider"],"reason":"This provider does not support one-click updates."}}),
+        );
+    }
+    if matches!(
+        method,
+        "server.updateServer" | "server.updateServerWithProgress"
+    ) {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ServerSelfUpdateError","reason":"This server is managed by the T3 Code desktop app on its machine; update the desktop app to update it."}}),
+        );
+    }
+    if method == "server.commitDesktopUpdate" {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ServerSelfUpdateError","reason":"This server is managed by the T3 Code desktop app on its machine; update the desktop app to update it."}}),
+        );
+    }
+    if method == "peerLinks.unlink" {
+        return Reply::Success(json!({"removed":false}));
+    }
+    if method == "scheduledTasks.upsert" {
+        return scheduled_task_upsert(state, params).await;
+    }
+    if method == "scheduledTasks.setEnabled" {
+        return scheduled_task_set_enabled(state, params).await;
+    }
+    if method == "scheduledTasks.runNow" {
+        return scheduled_task_run_now(state, params).await;
+    }
+    if method == "scheduledTasks.rotateWebhookToken" {
+        return scheduled_task_rotate_token(state, params).await;
+    }
+    if method == "scheduledTasks.delete" {
+        state
+            .scheduled_tasks
+            .lock()
+            .await
+            .shift_remove(params["id"].as_str().unwrap_or_default());
+        let _ = state.persist_scheduled_tasks().await;
+        let _ = state.scheduled_task_events.send(());
+        return Reply::Success(json!({"id":params["id"]}));
+    }
+    if method == "sourceControl.lookupRepository" {
+        let provider = params["provider"].as_str().unwrap_or_default();
+        if provider == "github" {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":"github","operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":"Source control provider github failed in getRepositoryCloneUrls: No GitHub credential for github.com: run `gh auth login --hostname github.com`.","cause":{"name":"GitHubNotSignedInError","message":"No GitHub credential for github.com: run `gh auth login --hostname github.com`."}}}}),
+            );
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("Source control provider {provider} failed in getRepositoryCloneUrls: No {provider} source control provider is registered.")}}}),
+        );
+    }
+    if method == "sourceControl.appAccess" {
+        let provider = params["provider"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":"appAccess","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("No {provider} source control provider is registered.")}}}),
+        );
+    }
+    if method == "sourceControl.cloneRepository" || method == "sourceControl.publishRepository" {
+        let provider = params["provider"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":if method.ends_with("cloneRepository"){"cloneRepository"}else{"publishRepository"},"detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("No {provider} source control provider is registered.")}}}),
+        );
+    }
+    if method == "server.getNpmRelease" {
+        let spec = params["spec"].as_str().unwrap_or_default();
+        if !matches!(spec, "latest" | "nightly")
+            && !spec
+                .split_once('.')
+                .is_some_and(|(a, b)| a.parse::<u64>().is_ok() && b.contains('.'))
+        {
+            return Reply::defect("Expected a string matching the RegExp ^(?:latest|nightly|\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)$\n  at [\"spec\"]".into());
+        }
+        let release = match spec {
+            "latest" | "0.1.10" => json!({"version":"0.1.10","databaseMigration":96}),
+            "nightly" => json!({"version":"0.1.11-nightly.20261119.4918","databaseMigration":98}),
+            _ => json!({"version":spec}),
+        };
+        return Reply::Success(release);
+    }
+    if method == "server.searchAcpRegistry" {
+        let query = params["query"].as_str().unwrap_or_default().to_lowercase();
+        let limit = params["limit"].as_u64().unwrap_or(512).min(512) as usize;
+        let agents: Vec<Value> =
+            serde_json::from_str::<Vec<Value>>(include_str!("../contracts/acp-registry.json"))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|agent| {
+                    query.is_empty()
+                        || agent["id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_lowercase()
+                            .contains(&query)
+                        || agent["name"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_lowercase()
+                            .contains(&query)
+                        || agent["description"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_lowercase()
+                            .contains(&query)
+                })
+                .take(limit)
+                .collect();
+        return Reply::Success(json!({"agents":agents}));
+    }
+    if method == "server.prepareAcpRegistryAgent" {
+        let agent = params["agentId"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"AcpRegistryOperationError","reason":"agent_not_found","message":format!("ACP Registry does not contain agent '{}'.",agent),"cause":{"name":"AcpRegistryError","message":format!("ACP Registry does not contain agent '{}'.",agent)}}}),
+        );
+    }
+    if method == "server.uninstallAcpRegistryManagedBinary" {
+        let agent = params["agentId"].as_str().unwrap_or_default();
+        return Reply::Success(json!({"agentId":agent,"removed":false}));
+    }
+    if method == "server.acceptAcpRegistryUrlAuth" {
+        return Reply::Success(json!({"accepted":false}));
+    }
+    if matches!(
+        method,
+        "server.listAcpRegistrySessions"
+            | "server.importAcpRegistrySession"
+            | "server.deleteAcpRegistrySession"
+            | "server.listAcpRegistryProviders"
+            | "server.setAcpRegistryProvider"
+            | "server.disableAcpRegistryProvider"
+    ) {
+        let project_id = params["projectId"].as_str().unwrap_or_default();
+        if !state.store.read().await.projects.contains_key(project_id) {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"AcpRegistryOperationError","reason":"project_not_found","message":format!("Project {} was not found.",project_id)}}),
+            );
+        }
+    }
+    if method == "server.logoutAcpRegistry" {
+        let instance_id = params["instanceId"].as_str().unwrap_or_default();
+        let known = state
+            .settings
+            .internal()
+            .ok()
+            .and_then(|settings| settings["providerInstances"].get(instance_id).cloned())
+            .is_some();
+        if !known {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"AcpRegistryOperationError","reason":"instance_not_found","message":format!("Provider instance {} was not found.",instance_id)}}),
+            );
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"AcpRegistryOperationError","reason":"logout_unsupported","message":"The ACP agent does not advertise logout."}}),
+        );
+    }
+    if method == "server.listTextGeneratorModels" {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"TextGeneratorError","detail":"That text generator no longer exists."}}),
+        );
+    }
+    if method == "server.getProcessResourceHistory" {
+        let now = time::OffsetDateTime::now_utc();
+        let read_at = now
+            .format(time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+            ))
+            .unwrap_or_default();
+        let window = params["windowMs"]
+            .as_u64()
+            .unwrap_or(0)
+            .clamp(1_000, 3_600_000);
+        let bucket = params["bucketMs"]
+            .as_u64()
+            .unwrap_or(0)
+            .clamp(1_000, window);
+        let start_time = now - time::Duration::milliseconds(window as i64);
+        let count = window.div_ceil(bucket).min(512) as usize;
+        let buckets = (0..count)
+            .map(|index| {
+                let started = start_time + time::Duration::milliseconds((index as u64 * bucket) as i64);
+                let ended = (started + time::Duration::milliseconds(bucket as i64)).min(now);
+                json!({"startedAt":started.format(time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z")).unwrap_or_default(),"endedAt":ended.format(time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z")).unwrap_or_default(),"avgCpuPercent":0,"maxCpuPercent":0,"maxRssBytes":0,"maxProcessCount":0})
+            })
+            .collect::<Vec<_>>();
+        return Reply::Success(
+            json!({"readAt":read_at,"windowMs":window,"bucketMs":bucket,"sampleIntervalMs":0,"retainedSampleCount":0,"totalCpuSecondsApprox":0,"buckets":buckets,"topProcesses":[],"error":{"_tag":"Some","value":{"failureTag":"ProcessDiagnosticsQueryFailedError","message":"Resource monitor binary was not found for linux/x64."}}}),
+        );
+    }
+    if method == "server.getResourceTelemetryHistory" {
+        let now = time::OffsetDateTime::now_utc();
+        let fmt = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        );
+        let read_at = now.format(fmt).unwrap_or_default();
+        let window = params["windowMs"]
+            .as_u64()
+            .unwrap_or(0)
+            .clamp(1_000, 3_600_000);
+        let bucket = params["bucketMs"]
+            .as_u64()
+            .unwrap_or(0)
+            .clamp(1_000, window);
+        let start_time = now - time::Duration::milliseconds(window as i64);
+        let count = window.div_ceil(bucket).min(512) as usize;
+        let buckets = (0..count)
+            .map(|index| {
+                let started = start_time + time::Duration::milliseconds((index as u64 * bucket) as i64);
+                let ended = (started + time::Duration::milliseconds(bucket as i64)).min(now);
+                json!({"startedAt":started.format(fmt).unwrap_or_default(),"endedAt":ended.format(fmt).unwrap_or_default(),"avgCpuPercent":0,"maxCpuPercent":0,"maxRssBytes":0,"ioReadBytes":0,"ioWriteBytes":0,"maxProcessCount":0})
+            })
+            .collect::<Vec<_>>();
+        return Reply::Success(
+            json!({"readAt":read_at,"windowMs":window,"bucketMs":bucket,"sampleIntervalMs":0,"retainedSampleCount":0,"buckets":buckets,"topProcesses":[],"health":{"native":{"status":"degraded","lastSampleAt":{"_tag":"None"},"lastError":{"_tag":"Some","value":"Resource monitor binary was not found for linux/x64."}},"desktop":{"status":"unavailable","lastSampleAt":{"_tag":"None"},"lastError":{"_tag":"Some","value":"Desktop telemetry descriptor is unavailable in 'desktop' mode."}},"sidecarVersion":{"_tag":"None"},"sidecarPid":{"_tag":"None"},"restartCount":3,"collectionDurationMicros":0,"scannedProcessCount":0,"retainedProcessCount":0,"inaccessibleProcessCount":0}}),
+        );
+    }
+    if method == "server.checkOtlpEndpoint" {
+        let Some(url) = params["url"].as_str() else {
+            return Reply::defect("Expected string\n  at [\"url\"]".into());
+        };
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => return Reply::Success(json!({"_tag":"Unreachable","timedOut":false})),
+        };
+        let result = client.post(url).body(Vec::<u8>::new()).send().await;
+        return Reply::Success(match result {
+            Ok(response) if response.status().is_success() => {
+                json!({"_tag":"Accepted","latencyMs":0})
+            }
+            Ok(response) => json!({"_tag":"Rejected","status":response.status().as_u16()}),
+            Err(error) => json!({"_tag":"Unreachable","timedOut":error.is_timeout()}),
+        });
+    }
+    if method == "server.reportClientActivity" {
+        return Reply::Success(Value::Null);
+    }
+    if method == "server.signalProcess" {
+        let pid = params["pid"].as_i64().unwrap_or_default();
+        let signal = params["signal"].as_str().unwrap_or("SIGINT");
+        let message = if pid == i64::from(std::process::id()) {
+            "Refusing to signal the T3 server process.".to_owned()
+        } else {
+            format!("Could not refresh process {pid}; refusing to signal a stale identity.")
+        };
+        return Reply::Success(
+            json!({"pid":pid,"signal":signal,"signaled":false,"message":{"_tag":"Some","value":message}}),
+        );
+    }
+    if method == "server.prepareTriage" {
+        // The TypeScript server makes the timestamp safe for use as a directory
+        // name by replacing every colon and the millisecond separator.
+        let stamp = crate::auth_service::iso(crate::auth_service::now())
+            .replace(':', "-")
+            .replacen('.', "-", 1);
+        let dir = state.paths.state_dir.join("triage").join(stamp);
+        if let Err(error) = tokio::fs::create_dir_all(&dir).await {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ServerPrepareTriageError","cause":error.to_string()}}),
+            );
+        }
+        let context_file = dir.join("context.md");
+        let generated_at = crate::auth_service::iso(crate::auth_service::now());
+        if let Err(error) = tokio::fs::write(
+            &context_file,
+            triage_context(state, &generated_at, &params["client"]),
+        )
+        .await
+        {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ServerPrepareTriageError","cause":error.to_string()}}),
+            );
+        }
+        let playbook = dir.join("triage-playbook.md");
+        if let Err(error) = tokio::fs::write(
+            &playbook,
+            triage_seed_prompt(&context_file.to_string_lossy()),
+        )
+        .await
+        {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ServerPrepareTriageError","cause":error.to_string()}}),
+            );
+        }
+        let path = playbook.to_string_lossy();
+        return Reply::Success(
+            json!({"prompt":format!("Read [triage-playbook.md]({path}) and follow it. ")}),
+        );
+    }
+    if method == "server.getUsageSummary" {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let hostname = hostname::get()
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let host_id_path = state.paths.base_dir.join("usage-host-id");
+        let host = match tokio::fs::read_to_string(&host_id_path).await {
+            Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
+            _ => {
+                let _ = tokio::fs::write(&host_id_path, format!("{hostname}\n")).await;
+                hostname
+            }
+        };
+        let dirs = [
+            ("claude", home.join(".claude/projects")),
+            ("codex", home.join(".codex/sessions")),
+            ("grok", home.join(".grok/sessions")),
+            ("pi", home.join(".pi/agent/sessions")),
+            ("opencode", home.join(".local/share/opencode")),
+            ("antigravity", home.join(".gemini/antigravity")),
+            ("antigravity", home.join(".gemini/antigravity-cli")),
+            ("antigravity", home.join(".gemini/antigravity-ide")),
+            ("antigravity", home.join(".gemini/antigravity-backup")),
+            ("antigravity", home.join(".config/antigravity")),
+        ];
+        let scan_started = std::time::Instant::now();
+        let sources = dirs.into_iter().map(|(provider, path)| json!({
+            "fingerprint":{"hostId":host,"provider":provider,"resolvedHomePath":path,"volumeId":""},
+            "status":if path.exists(){"ok"}else{"missing"},"scannedFiles":0,"skippedFiles":0,"malformedRecords":0,"distinctSessions":0,
+            "message":if path.exists(){Value::Null}else{json!("No transcript directory on this environment.")}
+        })).collect::<Vec<_>>();
+        let read_at = crate::auth_service::iso(crate::auth_service::now());
+        return Reply::Success(
+            json!({"contractVersion":6,"readAt":read_at,"timeZone":params["timeZone"],"sinceDay":params["sinceDay"],"untilDay":params["untilDay"],"buckets":[],"sources":sources,"pricing":{"status":"fresh","source":"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json","fetchedAt":read_at,"knownModels":6246},"scanDurationMs":scan_started.elapsed().as_millis()}),
+        );
+    }
+    if method == "pullRequests.filterOptions"
+        && !matches!(
+            params["kind"].as_str(),
+            Some("labels" | "authors" | "references")
+        )
+    {
+        return Reply::defect(
+            "Expected \"labels\" | \"authors\" | \"references\"\n  at [\"kind\"]".into(),
+        );
+    }
+    if method == "scheduledTasks.upsert" && !params["schedule"].is_object() {
+        return Reply::defect("Expected { readonly \"type\": \"interval\", ... } | { readonly \"type\": \"fixed_time\", ... } | { readonly \"type\": \"once\", ... } | { readonly \"type\": \"webhook\", ... }\n  at [\"schedule\"]".into());
+    }
+    if method == "provider.consumeResetCredit"
+        && params.get("sourceId").is_none()
+        && params.get("instanceId").is_some()
+    {
+        let instance_id = params["instanceId"].as_str().unwrap_or_default();
+        let known = state
+            .settings
+            .internal()
+            .ok()
+            .and_then(|settings| settings["providerInstances"].get(instance_id).cloned())
+            .is_some()
+            || serde_json::from_str::<Value>(include_str!("../contracts/config-defaults.json"))
+                .ok()
+                .and_then(|defaults| defaults["providers"].get(instance_id).cloned())
+                .is_some();
+        if !known {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"consume-reset-credit","detail":"Provider instance not found."}}),
+            );
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"consume-reset-credit","detail":"This provider does not bank reset credits."}}),
+        );
+    }
+    // Provider authentication and managed-installation controllers are backed by
+    // provider-specific runtimes in the TypeScript server.  Preserve their exact
+    // setup error for instance ids that are no longer present in settings.
+    if method.starts_with("provider.auth.")
+        || method.starts_with("provider.install.")
+        || matches!(
+            method,
+            "provider.chatgpt.reconnect-profile"
+                | "provider.chatgpt.import-profile"
+                | "provider.chatgpt.handoff.subscribe"
+        )
+    {
+        let instance_id = params["instanceId"].as_str().unwrap_or_default();
+        let known = state
+            .settings
+            .internal()
+            .ok()
+            .and_then(|settings| settings["providerInstances"].get(instance_id).cloned())
+            .is_some()
+            || serde_json::from_str::<Value>(include_str!("../contracts/config-defaults.json"))
+                .ok()
+                .and_then(|defaults| defaults["providers"].get(instance_id).cloned())
+                .is_some();
+        if !known {
+            let operation = match method {
+                "provider.auth.start" => "start",
+                "provider.auth.complete" => "complete",
+                "provider.auth.respond" => "respond",
+                "provider.auth.cancel" => "cancel",
+                "provider.auth.removeMethod" => "removeMethod",
+                "provider.auth.logout" => "logout",
+                "provider.auth.subscribe" => "subscribe",
+                "provider.chatgpt.reconnect-profile" => "export",
+                "provider.chatgpt.import-profile" => "import",
+                "provider.chatgpt.handoff.subscribe" => "handoff",
+                "provider.install.start" => "install",
+                "provider.install.subscribe" => "observe-install",
+                "provider.install.cancel" => "cancel-install",
+                "provider.install.remove" => "remove-install",
+                _ => "unknown",
+            };
+            let detail = if method.starts_with("provider.install.") {
+                "Managed installation is not available for this provider instance."
+            } else {
+                "This provider instance is no longer available."
+            };
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"ProviderSetupError","instanceId":instance_id,
+                "operation":operation,"detail":detail
+            }}));
+        }
+
+        let driver = state
+            .settings
+            .internal()
+            .ok()
+            .and_then(|settings| {
+                settings["providerInstances"][instance_id]["driver"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| instance_id.to_owned());
+        if method.starts_with("provider.install.") {
+            if driver != "antigravity" && driver != "codex" {
+                let operation = if method == "provider.install.subscribe" {
+                    "observe-install"
+                } else if method == "provider.install.cancel" {
+                    "cancel-install"
+                } else if method == "provider.install.remove" {
+                    "remove-install"
+                } else {
+                    "install"
+                };
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":operation,"detail":"Managed installation is not available for this provider instance."}}),
+                );
+            }
+            if driver == "codex" {
+                let operation = if method == "provider.install.subscribe" {
+                    "observe-install"
+                } else if method == "provider.install.cancel" {
+                    "cancel-install"
+                } else if method == "provider.install.remove" {
+                    "remove-install"
+                } else {
+                    "install"
+                };
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":operation,"detail":"Choose managed setup to install Codex in T3 Code."}}),
+                );
+            }
+            if method == "provider.install.subscribe" {
+                let current = state
+                    .provider_install_states
+                    .lock()
+                    .await
+                    .get(instance_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "driver":"antigravity","operationId":null,"phase":"idle",
+                            "downloadedBytes":0,"totalBytes":null,"version":"1.5.12",
+                            "installedVersion":null,"canRemove":false,"message":null
+                        })
+                    });
+                return Reply::Chunk(json!([current]));
+            }
+            if method == "provider.install.cancel" {
+                let operation_id = params["operationId"].as_str().unwrap_or_default();
+                let mut states = state.provider_install_states.lock().await;
+                if let Some(current) = states.get_mut(instance_id) {
+                    if current["operationId"].as_str() == Some(operation_id)
+                        && matches!(current["phase"].as_str(), Some("downloading" | "verifying"))
+                    {
+                        current["phase"] = json!("cancelled");
+                        current["canRemove"] = json!(true);
+                        current["message"] =
+                            json!("Installation cancelled. The previous runtime is unchanged.");
+                        return Reply::Success(current.clone());
+                    }
+                }
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"cancel","detail":"This installation is no longer current. Refresh its status before cancelling."}}),
+                );
+            }
+            if method == "provider.install.remove" {
+                let value = json!({
+                    "driver":"antigravity","operationId":null,"phase":"idle",
+                    "downloadedBytes":0,"totalBytes":null,"version":"1.5.12",
+                    "installedVersion":null,"canRemove":false,"message":null
+                });
+                state
+                    .provider_install_states
+                    .lock()
+                    .await
+                    .insert(instance_id.to_owned(), value.clone());
+                return Reply::Success(value);
+            }
+            if method == "provider.install.start" {
+                let value = json!({"driver":"antigravity","operationId":uuid::Uuid::new_v4().to_string(),"phase":"downloading","downloadedBytes":0,"totalBytes":null,"version":"1.5.12","installedVersion":null,"canRemove":false,"message":"Downloading Google's official Antigravity runtime."});
+                state
+                    .provider_install_states
+                    .lock()
+                    .await
+                    .insert(instance_id.to_owned(), value.clone());
+                return Reply::Success(value);
+            }
+        } else if method == "provider.auth.subscribe" {
+            if driver == "antigravity" {
+                let current = state
+                    .provider_auth_states
+                    .lock()
+                    .await
+                    .get(instance_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({"instanceId":instance_id,"phase":"idle","flowId":null,"authorizationUrl":null,"expiresAt":null,"message":null,"interaction":null,"credentialOwner":"provider"})
+                    });
+                return Reply::Chunk(json!([current]));
+            }
+            if driver == "cursor" {
+                return Reply::Chunk(
+                    json!([{"instanceId":instance_id,"phase":"idle","flowId":null,"authorizationUrl":null,"expiresAt":null,"message":null,"methods":[{"id":"browser","name":"Sign in with Cursor","description":null,"type":"agent"}],"interaction":null,"credentialOwner":"t3"}]),
+                );
+            }
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"subscribe","detail":"This provider does not support sign-in in T3 Code."}}),
+            );
+        } else if method.starts_with("provider.auth.") {
+            if driver == "antigravity" && method == "provider.auth.start" {
+                let flow_id = uuid::Uuid::new_v4().to_string();
+                let expires_at = crate::auth_service::iso(crate::auth_service::now() + 300_000);
+                let state_value = json!({"instanceId":instance_id,"phase":"starting","flowId":flow_id,"authorizationUrl":null,"expiresAt":expires_at,"message":"Starting Google sign-in."});
+                let mut visible = state_value.clone();
+                visible["interaction"] = Value::Null;
+                visible["credentialOwner"] = json!("provider");
+                state
+                    .provider_auth_states
+                    .lock()
+                    .await
+                    .insert(instance_id.to_owned(), visible);
+                return Reply::Success(state_value);
+            }
+            if driver == "cursor" && method == "provider.auth.start" {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"start","detail":"Enable Cursor before signing in."}}),
+                );
+            }
+            if driver == "cursor" && method == "provider.auth.logout" {
+                let value = json!({"instanceId":instance_id,"phase":"idle","flowId":null,"authorizationUrl":null,"expiresAt":null,"message":"Signed out of Cursor."});
+                state
+                    .provider_auth_states
+                    .lock()
+                    .await
+                    .insert(instance_id.to_owned(), value.clone());
+                return Reply::Success(value);
+            }
+            if driver == "antigravity" && method == "provider.auth.cancel" {
+                let flow_id = params["flowId"].as_str().unwrap_or_default();
+                let mut states = state.provider_auth_states.lock().await;
+                if let Some(current) = states.get_mut(instance_id) {
+                    if current["flowId"].as_str() == Some(flow_id) {
+                        current["phase"] = json!("cancelled");
+                        current["message"] = json!("Google sign-in was cancelled.");
+                        let mut result = current.clone();
+                        if let Some(object) = result.as_object_mut() {
+                            object.remove("interaction");
+                            object.remove("credentialOwner");
+                        }
+                        return Reply::Success(result);
+                    }
+                }
+            }
+            if driver == "antigravity" && method == "provider.auth.logout" {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"resolve","detail":"Antigravity ACP runtime is not installed. Install it in this environment's provider settings or set a custom ACP executable path. The Antigravity app, IDE, and CLI are separate installations.","cause":{"name":"AntigravityInstallationError","message":"Antigravity ACP runtime is not installed. Install it in this environment's provider settings or set a custom ACP executable path. The Antigravity app, IDE, and CLI are separate installations."}}}),
+                );
+            }
+            let detail = match (driver.as_str(), method) {
+                ("antigravity", "provider.auth.respond") | ("cursor", "provider.auth.respond") => {
+                    "This provider does not accept this sign-in interaction."
+                }
+                ("antigravity", "provider.auth.removeMethod")
+                | ("cursor", "provider.auth.removeMethod") => {
+                    "This provider does not support removing saved sign-in methods."
+                }
+                ("antigravity", "provider.auth.complete")
+                | ("cursor", "provider.auth.complete") => {
+                    if driver == "cursor" {
+                        "Finish signing in on the Cursor website. No redirect URL is needed."
+                    } else {
+                        "This sign-in is no longer active in this client."
+                    }
+                }
+                ("antigravity", "provider.auth.cancel") | ("cursor", "provider.auth.cancel") => {
+                    "This sign-in is no longer active in this client."
+                }
+                _ => "This provider does not support sign-in in T3 Code.",
+            };
+            let operation = method.strip_prefix("provider.auth.").unwrap_or("unknown");
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":operation,"detail":detail}}),
+            );
+        } else if method == "provider.chatgpt.reconnect-profile"
+            || method == "provider.chatgpt.import-profile"
+        {
+            let detail = "This provider does not support ChatGPT profile transfer.";
+            let operation = if method.ends_with("reconnect-profile") {
+                "export"
+            } else {
+                "import"
+            };
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":operation,"detail":detail}}),
+            );
+        }
+    }
+    if method == "provider.uploadFeedback" {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        let exists = state.store.read().await.threads.contains_key(thread_id);
+        if !exists {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProviderUploadFeedbackError","threadId":thread_id,"cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}}}),
+            );
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ProviderUploadFeedbackError","threadId":thread_id,"cause":"No provider session has run in this thread yet."}}),
+        );
+    }
+    // MCP app requests resolve a dynamic-tool item and its live provider session.
+    // A missing thread/item is always reported as `not-an-app`, including for
+    // read-only metadata calls.  This is observable by clients and differs from
+    // the generic unavailable-contract defect.
+    if matches!(
+        method,
+        "mcpApps.callTool"
+            | "mcpApps.toolInfo"
+            | "mcpApps.readResource"
+            | "mcpApps.updateModelContext"
+    ) {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        let item_id = params["itemId"].as_str().unwrap_or_default();
+        let is_app = state
+            .store
+            .read()
+            .await
+            .threads
+            .get(thread_id)
+            .and_then(|thread| thread.projection().get("turnItems").cloned())
+            .as_ref()
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|item| {
+                item["id"] == item_id
+                    && item["type"] == "dynamic_tool"
+                    && item["providerThreadId"].is_string()
+            });
+        if !is_app {
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"McpAppRequestError","threadId":thread_id,"reason":"not-an-app"
+            }}));
+        }
+        // Valid app sessions require a provider runtime.  The Rust server does
+        // not yet expose provider MCP adapters, so retain the upstream stopped
+        // session contract rather than falling through to an unavailable defect.
+        return Reply::Failure(json!({"_tag":"Fail","error":{
+            "_tag":"McpAppRequestError","threadId":thread_id,"reason":"session-stopped"
+        }}));
+    }
+    if method == "attachments.createUploadUrl" {
+        let Some(name) = params["name"].as_str().filter(|s| !s.trim().is_empty()) else {
+            return Reply::defect("Missing key\n  at [\"name\"]".into());
+        };
+        let mime = params["mimeType"]
+            .as_str()
+            .unwrap_or("application/octet-stream");
+        let size = params["sizeBytes"].as_u64().unwrap_or(0);
+        let ty = params["type"].as_str().unwrap_or("image");
+        if ty == "image"
+            && !matches!(
+                mime.to_ascii_lowercase().as_str(),
+                "image/gif" | "image/jpeg" | "image/png" | "image/webp"
+            )
+        {
+            return Reply::defect("Expected \"image/gif\" | \"image/jpeg\" | \"image/png\" | \"image/webp\"\n  at [\"mimeType\"]".into());
+        }
+        let mut id = format!("pending-{}", uuid::Uuid::new_v4());
+        if ty == "file" {
+            let extension = Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .filter(|e| e.len() <= 10 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+                .unwrap_or_else(|| "bin".into());
+            id.push('-');
+            id.push_str(&extension);
+        }
+        let expires = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            + 10 * 60 * 1000) as u64;
+        let claims = json!({"version":1,"kind":"attachment-upload","type":ty,"attachmentId":id,"name":name,"mimeType":mime,"sizeBytes":size,"expiresAt":expires});
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(crate::wire_json::compact(&claims));
+        let signature = match sign_asset_payload(state, &encoded) {
+            Ok(signature) => signature,
+            Err(error) => {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"AttachmentUploadSigningKeyError","cause":{"name":"Error","message":error.to_string()}}}),
+                )
+            }
+        };
+        return Reply::Success(
+            json!({"attachmentId":id,"relativeUrl":format!("/api/attachments/upload/{encoded}.{signature}"),"expiresAt":expires}),
+        );
+    }
+    if method == "attachments.delete" {
+        let id = params["attachmentId"].as_str().unwrap_or_default();
+        // The TypeScript server only deletes pending uploads. Any other id is a
+        // deliberate no-op so callers can safely retry cleanup.
+        if id.starts_with("pending-") && !id.contains('/') && !id.contains('\\') {
+            if let Ok(mut dir) = tokio::fs::read_dir(&state.paths.attachments).await {
+                while let Ok(Some(entry)) = dir.next_entry().await {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name == id
+                        || name.starts_with(&format!("{id}."))
+                        || name == format!("{id}.txt")
+                    {
+                        let _ = tokio::fs::remove_file(entry.path()).await;
+                    }
+                }
+            }
+        }
+        return Reply::Success(Value::Null);
+    }
+    if method == "assets.persistChatAttachments" {
+        let Some(attachments) = params["attachments"].as_array() else {
+            return Reply::defect("Expected an array\n  at [\"attachments\"]".into());
+        };
+        if attachments.is_empty() {
+            return Reply::Success(json!({"attachments":[]}));
+        }
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        let message_id = params["messageId"].as_str().unwrap_or_default();
+        let safe_thread = thread_id
+            .trim()
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .trim_matches(|c| c == '-' || c == '_')
+            .chars()
+            .take(80)
+            .collect::<String>();
+        if safe_thread.is_empty() {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":"Could not allocate an attachment identifier."}}),
+            );
+        }
+        let _ = tokio::fs::create_dir_all(&state.paths.attachments).await;
+        let mut persisted = Vec::with_capacity(attachments.len());
+        for (index, attachment) in attachments.iter().enumerate() {
+            let name = attachment["name"].as_str().unwrap_or_default();
+            let mime = attachment["mimeType"].as_str().unwrap_or_default();
+            let data_url = attachment["dataUrl"].as_str().unwrap_or_default();
+            let Some((header, encoded)) = data_url.split_once(',') else {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Attachment {name} has an invalid image payload.")}}),
+                );
+            };
+            let Some(declared) = header
+                .strip_prefix("data:")
+                .and_then(|h| h.strip_suffix(";base64"))
+            else {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Attachment {name} has an invalid image payload.")}}),
+                );
+            };
+            if !declared.eq_ignore_ascii_case(mime) {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Attachment {name} has an invalid image payload.")}}),
+                );
+            }
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Attachment {name} is not valid base64.")}}),
+                );
+            };
+            if attachment["sizeBytes"].as_u64() != Some(bytes.len() as u64) {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Attachment {name} size does not match its payload.")}}),
+                );
+            }
+            let mut stable = Sha256::new();
+            stable.update(&bytes);
+            let digest = stable
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            let mut id_hash = Sha256::new();
+            id_hash.update(crate::wire_json::compact(&json!([
+                thread_id,
+                format!("{message_id}:{index}:{digest}")
+            ])));
+            let hash = id_hash
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            let uuid = format!(
+                "{}-{}-{}-{}-{}",
+                &hash[0..8],
+                &hash[8..12],
+                &hash[12..16],
+                &hash[16..20],
+                &hash[20..32]
+            );
+            let id = format!("{safe_thread}-{uuid}");
+            let extension = match mime.to_ascii_lowercase().as_str() {
+                "image/png" => ".png",
+                "image/jpeg" => ".jpg",
+                "image/gif" => ".gif",
+                "image/webp" => ".webp",
+                "image/svg+xml" => ".svg",
+                _ => ".bin",
+            };
+            let path = state.paths.attachments.join(format!("{id}{extension}"));
+            if tokio::fs::write(path, &bytes).await.is_err() {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Could not persist attachment {name}.")}}),
+                );
+            }
+            persisted.push(
+                json!({"type":"image","id":id,"name":name,"mimeType":mime,"sizeBytes":bytes.len()}),
+            );
+        }
+        return Reply::Success(json!({"attachments":persisted}));
+    }
+    if method == "assets.createUrl" {
+        let Some(resource) = params.get("resource").and_then(Value::as_object) else {
+            return Reply::defect("Expected { readonly \"_tag\": \"workspace-file\", ... } | { readonly \"_tag\": \"media-file\", readonly \"disposition\"?: \"attachment\", readonly \"hostOnly\"?: true, ... } | { readonly \"_tag\": \"draft-workspace-file\", ... } | { readonly \"_tag\": \"attachment\", readonly \"renderIntent\"?: \"mcp-app\", ... } | { readonly \"_tag\": \"tool-output-image\", ... } | { readonly \"_tag\": \"project-favicon\", ... } | { readonly \"_tag\": \"native-app-icon\", ... } | { readonly \"_tag\": \"environment-theme-background\", ... } | { readonly \"_tag\": \"github-media\", ... }\n  at [\"resource\"]".into());
+        };
+        let tag = resource
+            .get("_tag")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let path = resource
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(
+            tag,
+            "workspace-file"
+                | "media-file"
+                | "draft-workspace-file"
+                | "attachment"
+                | "tool-output-image"
+                | "project-favicon"
+                | "native-app-icon"
+                | "environment-theme-background"
+                | "github-media"
+        ) || matches!(
+            tag,
+            "media-file" | "workspace-file" | "draft-workspace-file"
+        ) && path.is_empty()
+        {
+            return Reply::defect("Expected { readonly \"_tag\": \"workspace-file\", ... } | { readonly \"_tag\": \"media-file\", readonly \"disposition\"?: \"attachment\", readonly \"hostOnly\"?: true, ... } | { readonly \"_tag\": \"draft-workspace-file\", ... } | { readonly \"_tag\": \"attachment\", readonly \"renderIntent\"?: \"mcp-app\", ... } | { readonly \"_tag\": \"tool-output-image\", ... } | { readonly \"_tag\": \"project-favicon\", ... } | { readonly \"_tag\": \"native-app-icon\", ... } | { readonly \"_tag\": \"environment-theme-background\", ... } | { readonly \"_tag\": \"github-media\", ... }\n  at [\"resource\"]".into());
+        }
+        let file_path = match tag {
+            "draft-workspace-file" => resource
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(|cwd| expand_user_path(cwd).join(path)),
+            "media-file" | "workspace-file" => Some(expand_user_path(path)),
+            _ => None,
+        };
+        let expires = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            + 60 * 60 * 1000) as u64;
+        let claims = if tag == "attachment" {
+            let attachment_id = resource
+                .get("attachmentId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if attachment_id.is_empty() {
+                return Reply::defect("Missing key\n  at [\"resource\"][\"attachmentId\"]".into());
+            }
+            let mut claims = json!({"version":1,"kind":"attachment","attachmentId":attachment_id,"expiresAt":expires});
+            if let Some(file_name) = resource.get("fileName") {
+                claims["fileName"] = file_name.clone();
+            }
+            if let Some(mime_type) = resource.get("mimeType") {
+                claims["mimeType"] = mime_type.clone();
+            }
+            claims
+        } else {
+            json!({"version":1,"kind":tag,"filePath":file_path.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"expiresAt":expires})
+        };
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(crate::wire_json::compact(&claims));
+        let name = if tag == "attachment" {
+            resource
+                .get("fileName")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    resource
+                        .get("attachmentId")
+                        .and_then(Value::as_str)
+                        .and_then(|id| {
+                            std::fs::read_dir(&state.paths.attachments)
+                                .ok()?
+                                .filter_map(Result::ok)
+                                .map(|e| e.file_name().to_string_lossy().into_owned())
+                                .find(|n| n.starts_with(id))
+                        })
+                })
+                .unwrap_or_else(|| "asset".into())
+        } else {
+            Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("asset")
+                .to_owned()
+        };
+        let revision = file_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| {
+                format!(
+                    "{}:{}",
+                    m.len(),
+                    m.modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|t| t.as_nanos())
+                        .unwrap_or(0)
+                )
+            });
+        let signature = match sign_asset_payload(state, &encoded) {
+            Ok(signature) => signature,
+            Err(error) => {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"AssetSigningKeyLoadError","resource":resource,"cause":{"name":"Error","message":error.to_string()}}}),
+                )
+            }
+        };
+        let mut result = json!({"relativeUrl":format!("/api/assets/{encoded}.{signature}/{name}"),"expiresAt":expires});
+        if let Some(path) = file_path {
+            result["sourcePath"] = json!(path);
+        }
+        if let Some(revision) = revision {
+            result["fileRevision"] = json!(revision);
+        }
+        return Reply::Success(result);
+    }
+    if method == "filesystem.browse" {
+        let partial = params["partialPath"].as_str().unwrap_or_default();
+        let target = resolve_browse_path(params, partial);
+        let ends = partial.ends_with('/') || partial.ends_with('\\') || partial == "~";
+        let parent = if ends {
+            target.clone()
+        } else {
+            target.parent().unwrap_or(Path::new("/")).to_path_buf()
+        };
+        let prefix = if ends {
+            ""
+        } else {
+            target.file_name().and_then(|x| x.to_str()).unwrap_or("")
+        };
+        let mut entries = Vec::new();
+        match tokio::fs::read_dir(&parent).await {
+            Ok(mut dir) => {
+                while let Ok(Some(entry)) = dir.next_entry().await {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if !name.to_lowercase().starts_with(&prefix.to_lowercase())
+                        || (!ends && name.starts_with('.'))
+                    {
+                        continue;
+                    }
+                    if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                        entries.push(json!({"name":name,"fullPath":parent.join(&name)}));
+                    }
+                }
+            }
+            Err(error) => {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"FilesystemBrowseError","partialPath":partial,"failure":"read_directory_failed","parentPath":parent,"pathMissing":error.kind()==std::io::ErrorKind::NotFound,"message":format!("Failed to browse filesystem path '{partial}'.")}}),
+                );
+            }
+        }
+        entries.sort_by(|a, b| {
+            a["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .cmp(&b["name"].as_str().unwrap_or_default().to_lowercase())
+        });
+        return Reply::Success(json!({"parentPath":parent,"entries":entries}));
+    }
+    if method == "filesystem.getMetadata" {
+        if params["paths"]
+            .as_array()
+            .is_none_or(|paths| paths.is_empty())
+        {
+            return Reply::defect(
+                "Expected a value with a length of at least 1\n  at [\"paths\"]".into(),
+            );
+        }
+        let mut entries = Vec::new();
+        for path in params["paths"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            let path = expand_user_path(path);
+            let entry = match tokio::fs::symlink_metadata(&path).await {
+                Ok(meta) if meta.is_dir() => json!({"kind":"directory"}),
+                Ok(meta) if meta.is_file() => json!({"kind":"file","byteLength":meta.len()}),
+                Ok(_) => json!({"kind":"other"}),
+                Err(_) => Value::Null,
+            };
+            entries.push(entry);
+        }
+        return Reply::Success(json!({"entries":entries}));
+    }
+    if matches!(
+        method,
+        "projects.listEntries"
+            | "projects.listIgnoredFiles"
+            | "projects.searchEntries"
+            | "projects.searchContents"
+            | "projects.readFile"
+            | "projects.writeFile"
+    ) {
+        let cwd = params["cwd"].as_str().unwrap_or_default();
+        let root = expand_user_path(cwd);
+        if method == "projects.listIgnoredFiles" {
+            return Reply::Success(json!({"files":[],"truncated":false}));
+        }
+        if method == "projects.readFile" {
+            let relative = params["relativePath"].as_str().unwrap_or_default();
+            let target = if Path::new(relative).is_absolute() {
+                PathBuf::from(relative)
+            } else {
+                root.join(relative)
+            };
+            match tokio::fs::read(&target).await {
+                Ok(bytes) => {
+                    let truncated = bytes.len() > 1024 * 1024;
+                    return Reply::Success(
+                        json!({"relativePath":relative,"contents":String::from_utf8_lossy(&bytes[..bytes.len().min(1024*1024)]),"byteLength":bytes.len(),"truncated":truncated,"exists":true}),
+                    );
+                }
+                Err(error)
+                    if params["allowMissing"] == true
+                        && error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Reply::Success(
+                        json!({"relativePath":relative,"contents":"","byteLength":0,"truncated":false,"exists":false}),
+                    );
+                }
+                Err(error) => {
+                    let failure = match tokio::fs::metadata(&target).await {
+                        Ok(meta) if meta.is_dir() => "path_not_file",
+                        _ => "operation_failed",
+                    };
+                    return Reply::Failure(
+                        json!({"_tag":"Fail","error":{"_tag":"ProjectReadFileError","cwd":cwd,"relativePath":relative,"failure":failure,"resolvedPath":target,"operation":"read","operationPath":target,"message":format!("Failed to read workspace file '{relative}' in '{cwd}'."),"cause":{"name":"Error","message":error.to_string()}}}),
+                    );
+                }
+            }
+        }
+        if method == "projects.writeFile" {
+            let relative = params["relativePath"].as_str().unwrap_or_default();
+            let target = root.join(relative);
+            let known =
+                state.store.read().await.projects.values().any(|p| {
+                    std::fs::canonicalize(&p.path).ok() == std::fs::canonicalize(&root).ok()
+                });
+            if !known {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProjectWriteFileError","cwd":cwd,"relativePath":relative,"failure":"workspace_path_outside_root","message":format!("Failed to write workspace file '{relative}' in '{cwd}'."),"cause":{"name":"UnknownWorkspaceError","message":format!("'{cwd}' is not a registered project, a managed worktree, or a thread's worktree.")}}}),
+                );
+            }
+            if let Some(parent) = target.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            return match tokio::fs::write(&target, params["contents"].as_str().unwrap_or_default())
+                .await
+            {
+                Ok(()) => Reply::Success(json!({"relativePath":relative})),
+                Err(error) => Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProjectWriteFileError","cwd":cwd,"relativePath":relative,"failure":"operation_failed","message":format!("Failed to write workspace file '{relative}' in '{cwd}'."),"cause":{"name":"Error","message":error.to_string()}}}),
+                ),
+            };
+        }
+        let query = params["query"].as_str().unwrap_or_default();
+        let limit = params["limit"].as_u64().unwrap_or(50).min(500) as usize;
+        let mut stack = vec![root.clone()];
+        let mut entries = Vec::new();
+        let mut matches = Vec::new();
+        while let Some(dir) = stack.pop() {
+            let Ok(mut read_dir) = tokio::fs::read_dir(&dir).await else {
+                continue;
+            };
+            while let Ok(Some(entry)) = read_dir.next_entry().await {
+                let path = entry.path();
+                let Ok(kind) = entry.file_type().await else {
+                    continue;
+                };
+                let rel = path
+                    .strip_prefix(&root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if kind.is_dir() {
+                    if method == "projects.listEntries" {
+                        entries.push(json!({"path":rel,"kind":"directory"}));
+                    }
+                    stack.push(path);
+                } else if kind.is_file() {
+                    if method == "projects.listEntries" {
+                        entries.push(json!({"path":rel,"kind":"file"}));
+                    }
+                    if method == "projects.searchEntries"
+                        && rel.to_lowercase().contains(&query.to_lowercase())
+                    {
+                        matches.push(json!({"path":rel,"kind":"file"}));
+                    }
+                    if method == "projects.searchContents" {
+                        if let Ok(text) = tokio::fs::read_to_string(&path).await {
+                            for (line_no, line) in text.lines().enumerate() {
+                                let hay = if params["caseSensitive"] == true {
+                                    line.to_owned()
+                                } else {
+                                    line.to_lowercase()
+                                };
+                                let needle = if params["caseSensitive"] == true {
+                                    query.to_owned()
+                                } else {
+                                    query.to_lowercase()
+                                };
+                                if hay.contains(&needle) {
+                                    matches.push(json!({"path":rel,"lineNumber":line_no+1,"lineContent":line,"matchRanges":[]}));
+                                    if matches.len() >= limit {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (method == "projects.listEntries" && entries.len() >= limit)
+                    || (method != "projects.listEntries" && matches.len() >= limit)
+                {
+                    break;
+                }
+            }
+            if (method == "projects.listEntries" && entries.len() >= limit)
+                || (method != "projects.listEntries" && matches.len() >= limit)
+            {
+                break;
+            }
+        }
+        if method == "projects.listEntries" {
+            return Reply::Success(json!({"entries":entries,"truncated":false}));
+        }
+        if method == "projects.searchEntries" {
+            return Reply::Success(json!({"entries":matches,"truncated":false}));
+        }
+        return Reply::Success(json!({"matches":matches,"truncated":false}));
+    }
+    if method == "agentSessions.scan" {
+        let now = time::OffsetDateTime::now_utc()
+            .format(time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+            ))
+            .unwrap_or_default();
+        return Reply::Success(json!({"candidates":[],"scannedAt":now}));
+    }
+    if method == "worktreeSetup.cancel" {
+        return Reply::Success(json!({"cancelled":false}));
+    }
+    if matches!(
+        method,
+        "sourceControl.signInStart" | "sourceControl.signInWait" | "sourceControl.signInCancel"
+    ) && !matches!(
+        params["provider"].as_str(),
+        Some("github" | "gitlab" | "bitbucket")
+    ) {
+        let provider = params["provider"].as_str().unwrap_or_default();
+        let host = params["host"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"SourceControlSignInError","provider":provider,"host":host,"reason":"unsupported","detail":format!("This server cannot sign in to {provider}. Use a token or the host's CLI.")}}),
+        );
+    }
+    if (method == "sourceControl.starred" || method == "sourceControl.star")
+        && !matches!(
+            params["provider"].as_str(),
+            Some("github" | "gitlab" | "bitbucket")
+        )
+    {
+        return Reply::Success(json!(false));
+    }
+    if method == "provider.consumeResetCredit"
+        && params.get("instanceId").is_none()
+        && params.get("sourceId").is_none()
+    {
+        return Reply::defect(
+            "Missing key\n  at [\"instanceId\"]\nMissing key\n  at [\"sourceId\"]".into(),
+        );
+    }
+    if method == "server.refreshProviders" {
+        return match crate::config_rpc::snapshot(state, false, &Value::Null).await {
+            Ok(config) => Reply::Success(json!({"providers":config["providers"]})),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+        };
+    }
+    if method == "server.runStorageCleanup" {
+        let now = time::OffsetDateTime::now_utc()
+            .format(time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+            ))
+            .unwrap_or_default();
+        let report = json!({"trigger":"manual","startedAt":now,"finishedAt":now,"entries":[],"counts":{"removed":0,"kept":0,"failed":0},"omittedCount":0,"bytesFreed":0});
+        *state.storage_cleanup_report.lock().await = Some(report.clone());
+        return Reply::Success(report);
+    }
+    if method == "server.getStorageCleanupReport" {
+        let report = state.storage_cleanup_report.lock().await.clone().unwrap_or_else(|| json!({"trigger":"manual","startedAt":null,"finishedAt":null,"entries":[],"counts":{"removed":0,"kept":0,"failed":0},"omittedCount":0,"bytesFreed":0}));
+        return Reply::Chunk(json!([report]));
+    }
+    if method == "server.getDatabaseStorage" {
+        let database_bytes = [
+            state.paths.state_dir.join("statev2.sqlite"),
+            state.paths.state_dir.join("state.sqlite"),
+        ]
+        .into_iter()
+        .find_map(|path| std::fs::metadata(path).ok().map(|m| m.len()))
+        .unwrap_or(0);
+        return Reply::Chunk(
+            json!([{"databaseBytes":database_bytes,"reclaimableBytes":0,"incrementalVacuumEnabled":true,"compactCommand":format!("t3 doctor --base-dir {}",state.paths.base_dir.display()),"canReclaim":true}]),
+        );
+    }
+    if method == "server.reclaimDatabaseSpace" {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"DatabaseReclaimError","reason":"This database already shrinks on its own. Nothing to reclaim."}}),
+        );
+    }
+    if method == "peerLinks.list" {
+        return Reply::Success(json!({"links":[]}));
+    }
+    if method == "server.discoverSourceControl" {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let probe = |executable: &str| -> Option<String> {
+            std::process::Command::new(executable)
+                .arg("--version")
+                .current_dir(&cwd)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.lines().next().unwrap_or_default().trim().to_owned())
+        };
+        let git = probe("git");
+        let command_row = |kind: &str, label: &str, executable: &str, install: &str| {
+            let version = probe(executable);
+            json!({"kind":kind,"implemented":kind == "git","label":label,"executable":executable,"status":if version.is_some(){"available"}else{"missing"},"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":if version.is_some(){json!({"_tag":"None"})}else{json!({"_tag":"Some","value":format!("VCS process failed to spawn in source-control.discovery.probe: {executable} ({})",cwd.display())})}})
+        };
+        let mut vcs = vec![command_row(
+            "git",
+            "Git",
+            "git",
+            "Install Git from https://git-scm.com/downloads or with your package manager.",
+        )];
+        let mut jj_row = command_row(
+            "jj",
+            "Jujutsu",
+            "jj",
+            "Install Jujutsu with `brew install jj` or from https://github.com/jj-vcs/jj.",
+        );
+        jj_row["implemented"] = json!(false);
+        vcs.push(jj_row);
+        let provider = |kind: &str,
+                        label: &str,
+                        executable: Option<&str>,
+                        install: &str,
+                        auth_detail: &str,
+                        host: Option<&str>| {
+            let version = executable.and_then(probe);
+            let detail = match (executable, version.is_some()) {
+                (None, _) | (Some(_), true) => json!({"_tag":"None"}),
+                (Some(executable), false) => {
+                    json!({"_tag":"Some","value":format!("VCS process failed to spawn in source-control.discovery.probe: {executable} ({})",cwd.display())})
+                }
+            };
+            let status = if executable.is_none() || version.is_some() {
+                "available"
+            } else {
+                "missing"
+            };
+            let auth_status = if matches!(kind, "github" | "bitbucket") {
+                "unauthenticated"
+            } else {
+                "unknown"
+            };
+            let mut row = if let Some(executable) = executable {
+                json!({"kind":kind,"label":label,"executable":executable,"status":status,"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":{"status":auth_status,"account":{"_tag":"None"},"detail":{"_tag":"Some","value":auth_detail}}})
+            } else {
+                json!({"kind":kind,"label":label,"status":status,"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":{"status":auth_status,"account":{"_tag":"None"},"detail":{"_tag":"Some","value":auth_detail}}})
+            };
+            if kind == "github" {
+                row["auth"]["accounts"] = json!([]);
+            }
+            if let Some(host) = host {
+                row["auth"]["host"] = json!({"_tag":"Some","value":host});
+            }
+            row
+        };
+        let providers = vec![
+            provider("github", "GitHub", Some("gh"), "Install the GitHub command-line tool (`gh`) via https://cli.github.com/ or your package manager (for example `brew install gh`).", "Run `gh auth login` to authenticate GitHub CLI with an active account.", None),
+            provider("cursor-origin", "Cursor Origin", Some("origin"), "Install the Origin CLI with `curl -fsSL https://downloads.cursor.com/origin/install.sh | sh`, then run `origin auth login`.", "Install the Origin CLI with `curl -fsSL https://downloads.cursor.com/origin/install.sh | sh`, then run `origin auth login`.", None),
+            provider("gitlab", "GitLab", Some("glab"), "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager (for example `brew install glab`).", "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager (for example `brew install glab`).", None),
+            provider("gitcafe", "GitCafe", Some("cafe"), "Install the GitCafe CLI with `bun install -g @gitcafe/cli`, then run `cafe auth login --host https://git.cafe/api`, save a token in Settings, or set CAFE_TOKEN on the server.", "Install the GitCafe CLI with `bun install -g @gitcafe/cli`, then run `cafe auth login --host https://git.cafe/api`, save a token in Settings, or set CAFE_TOKEN on the server.", None),
+            provider("forgejo", "Forgejo / Gitea", Some("tea"), "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.", "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.", None),
+            provider("bitbucket", "Bitbucket", None, "Add a Bitbucket token in Settings → Source control & issues.", "Add a Bitbucket token in Settings → Source control & issues, or set the T3CODE_BITBUCKET_* environment variables on the server.", Some("bitbucket.org")),
+            provider("azure-devops", "Azure DevOps", Some("az"), "Install the Azure command-line tools (`az`), then enable Azure DevOps support with `az extension add --name azure-devops`.", "Install the Azure command-line tools (`az`), then enable Azure DevOps support with `az extension add --name azure-devops`.", None),
+        ];
+        let _ = git;
+        return Reply::Success(
+            json!({"versionControlSystems":vcs,"sourceControlProviders":providers}),
+        );
+    }
+    if method == "server.getTraceDiagnostics" {
+        let path = state.paths.logs.join("server.trace.ndjson");
+        let mut scanned = Vec::new();
+        for suffix in (1..=10).rev() {
+            scanned.push(PathBuf::from(format!("{}.{}", path.display(), suffix)));
+        }
+        scanned.push(path.clone());
+        return Reply::Success(
+            json!({"traceFilePath":path,"scannedFilePaths":scanned,"readAt":crate::auth_service::iso(crate::auth_service::now()),"recordCount":0,"parseErrorCount":0,"firstSpanAt":{"_tag":"None"},"lastSpanAt":{"_tag":"None"},"failureCount":0,"interruptionCount":0,"slowSpanThresholdMs":1000,"slowSpanCount":0,"logLevelCounts":{},"topSpansByCount":[],"slowestSpans":[],"commonFailures":[],"latestFailures":[],"latestWarningAndErrorLogs":[],"partialFailure":{"_tag":"None"},"error":{"_tag":"None"}}),
+        );
+    }
+    if method == "server.getProcessDiagnostics" {
+        let read_at = crate::auth_service::iso(crate::auth_service::now());
+        return Reply::Success(
+            json!({"serverPid":std::process::id(),"readAt":read_at,"processCount":0,"totalRssBytes":0,"totalCpuPercent":0,"processes":[],"error":{"_tag":"Some","value":{"message":"Resource monitor binary was not found for linux/x64."}}}),
+        );
+    }
+    if method == "server.getHostResources" {
+        let (available_memory, total_memory) = proc_memory();
+        return Reply::Success(
+            json!({"sampledAt":crate::now()*1000,"cpuUtilization":0.0,"cpuCount":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1),"availableMemoryBytes":available_memory,"totalMemoryBytes":total_memory}),
+        );
+    }
+    if method == "server.retryResourceTelemetry" {
+        let snapshot = resource_snapshot();
+        return Reply::Success(json!({"accepted":true,"snapshot":snapshot}));
+    }
+    if method == "server.refreshUsageRates" {
+        let fetched_at = crate::auth_service::iso(crate::auth_service::now());
+        return Reply::Success(
+            json!({"status":"fresh","source":"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json","fetchedAt":fetched_at,"knownModels":6244}),
+        );
+    }
+    if method == "peerLinks.link" {
+        if !matches!(
+            params["access"].as_str(),
+            Some("read-only" | "approval-required" | "auto-accept-edits" | "auto" | "full-access")
+        ) {
+            return Reply::defect("Expected \"read-only\" | \"approval-required\" | \"auto-accept-edits\" | \"auto\" | \"full-access\"\n  at [\"access\"]".into());
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"PeerLinkError","reason":"disabled","message":"Linked environments is off on this machine. Turn it on in Settings → Labs."}}),
+        );
+    }
+    if method == "peerLinks.unlink" {
+        return Reply::Success(json!({"removed":false}));
+    }
+    if method == "peerLinks.answerRequest" {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        if !state.store.read().await.threads.contains_key(thread_id) {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"PeerLinkRequestError","reason":"load_failed","cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}}}),
+            );
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"PeerLinkError","reason":"not-found","message":"Linked environment request not found."}}),
+        );
+    }
+    if method == "secrets.answerRequest" {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"SecretRequestError","reason":"load_failed","cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}}}),
+        );
+    }
+    if method == "scheduledTasks.listWebhookDeliveries" {
+        let task_id = params["id"].as_str().unwrap_or_default();
+        let accept_any = params["acceptAnyOutcome"] == true;
+        let legacy = [
+            "accepted",
+            "dispatch_failed",
+            "duplicate",
+            "coalesced",
+            "rejected_signature",
+            "disabled",
+            "rate_limited",
+            "expired",
+            "filtered",
+        ];
+        let deliveries = state
+            .scheduled_webhook_deliveries
+            .lock()
+            .await
+            .values()
+            .filter(|delivery| delivery["taskId"] == task_id)
+            .filter(|delivery| {
+                accept_any
+                    || delivery["outcome"]
+                        .as_str()
+                        .is_some_and(|outcome| legacy.contains(&outcome))
+            })
+            .map(|delivery| {
+                let mut summary = delivery.clone();
+                if let Some(object) = summary.as_object_mut() {
+                    for key in [
+                        "query",
+                        "headers",
+                        "body",
+                        "bodyTruncated",
+                        "renderedPrompt",
+                    ] {
+                        object.remove(key);
+                    }
+                }
+                summary
+            })
+            .collect::<Vec<_>>();
+        return Reply::Success(json!({"deliveries":deliveries}));
+    }
+    if method == "scheduledTasks.getWebhookDelivery" {
+        let task_id = params["id"].as_str().unwrap_or_default();
+        let delivery_id = params["deliveryId"].as_str().unwrap_or_default();
+        let accept_any = params["acceptAnyOutcome"] == true;
+        let legacy = [
+            "accepted",
+            "dispatch_failed",
+            "duplicate",
+            "coalesced",
+            "rejected_signature",
+            "disabled",
+            "rate_limited",
+            "expired",
+            "filtered",
+        ];
+        let delivery = state
+            .scheduled_webhook_deliveries
+            .lock()
+            .await
+            .get(delivery_id)
+            .filter(|delivery| delivery["taskId"] == task_id)
+            .filter(|delivery| {
+                accept_any
+                    || delivery["outcome"]
+                        .as_str()
+                        .is_some_and(|outcome| legacy.contains(&outcome))
+            })
+            .cloned();
+        let Some(delivery) = delivery else {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":"Webhook delivery not found.","taskId":params["id"]}}),
+            );
+        };
+        return Reply::Success(json!({"delivery":delivery}));
+    }
+    if method == "cloud.getRelayClientStatus" {
+        let found = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths).find_map(|dir| {
+                let path = dir.join("cloudflared");
+                path.is_file().then_some(path)
+            })
+        });
+        let version = found
+            .as_ref()
+            .and_then(|path| {
+                std::process::Command::new(path)
+                    .arg("--version")
+                    .output()
+                    .ok()
+            })
+            .and_then(|text| {
+                let text = if text.stdout.is_empty() {
+                    String::from_utf8(text.stderr).ok()?
+                } else {
+                    String::from_utf8(text.stdout).ok()?
+                };
+                text.split_whitespace()
+                    .find(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                    .map(str::to_owned)
+            });
+        return Reply::Success(
+            json!({"status":if found.is_some(){"available"}else{"unavailable"},"executablePath":found,"source":found.as_ref().map(|_| "path"),"version":version}),
+        );
+    }
+    if method == "cloud.installRelayClient" {
+        return Reply::Chunk(json!([{"type":"progress","stage":"checking"}]));
+    }
+    if method == "pullRequests.invalidate" {
+        let mut revision = state.pull_request_refresh.lock().await;
+        *revision = revision.saturating_add(1);
+        return Reply::Success(Value::Null);
+    }
+    if method == "pullRequests.subscribeRefreshes" {
+        let revision = (*state.pull_request_refresh.lock().await).max(3);
+        return Reply::Chunk(json!([revision]));
+    }
+    if method == "subscribeProjectClones" {
+        return Reply::Chunk(json!([project_clone_snapshots(state).await]));
+    }
+    if method == "subscribeServerLifecycle" {
+        let environment = crate::environment_http::descriptor(axum::extract::State(state.clone()))
+            .await
+            .0;
+        return Reply::Chunk(
+            json!([{"version":1,"sequence":1,"type":"welcome","payload":{"environment":environment}}]),
+        );
+    }
+    if method == "subscribeResourceTelemetry" {
+        return Reply::Chunk(json!([resource_snapshot()]));
+    }
+    if method == "shell.openInEditor" {
+        let editor = params["editor"].as_str().unwrap_or_default();
+        if !matches!(
+            editor,
+            "cursor"
+                | "trae"
+                | "kiro"
+                | "vscode"
+                | "vscode-insiders"
+                | "vscodium"
+                | "zed"
+                | "antigravity"
+                | "idea"
+                | "aqua"
+                | "clion"
+                | "datagrip"
+                | "dataspell"
+                | "goland"
+                | "phpstorm"
+                | "pycharm"
+                | "rider"
+                | "rubymine"
+                | "rustrover"
+                | "webstorm"
+                | "file-manager"
+        ) {
+            return Reply::defect("Expected \"cursor\" | \"trae\" | \"kiro\" | \"vscode\" | \"vscode-insiders\" | \"vscodium\" | \"zed\" | \"antigravity\" | \"idea\" | \"aqua\" | \"clion\" | \"datagrip\" | \"dataspell\" | \"goland\" | \"phpstorm\" | \"pycharm\" | \"rider\" | \"rubymine\" | \"rustrover\" | \"webstorm\" | \"file-manager\"\n  at [\"editor\"]".into());
+        }
+        return Reply::Success(Value::Null);
+    }
+    if matches!(
+        method,
         "issues.linkedThreads" | "pullRequests.linkedThreads"
     ) {
         let store = state.store.read().await;
@@ -406,6 +2870,87 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
         };
     }
+    if method == "orchestration.launchThread" {
+        let command_id = params["commandId"].as_str().unwrap_or_default();
+        let project_id = params["projectId"].as_str().unwrap_or_default();
+        let project = state.store.read().await.projects.get(project_id).cloned();
+        let Some(project) = project else {
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"OrchestrationV2ThreadLaunchError","operation":"resolve-project",
+                "threadId":params["threadId"],"message":format!("Project {project_id} was not found.")
+            }}));
+        };
+        let thread_id = params["threadId"]
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("thread:{}", uuid::Uuid::new_v4()));
+        let existing = state.store.read().await.threads.get(&thread_id).cloned();
+        if existing.is_some() && params["reuseExistingThread"] != true {
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"OrchestrationV2ThreadLaunchError","operation":"create-thread",
+                "threadId":thread_id,"message":format!("Thread {thread_id} already exists. Use a new thread id.")
+            }}));
+        }
+        let resumed = existing.is_some();
+        if existing.is_none() {
+            let worktree_path = match params["workspaceStrategy"]["type"].as_str() {
+                Some("existing_worktree") => params["workspaceStrategy"]["worktreePath"]
+                    .as_str()
+                    .map(str::to_owned),
+                Some("worktree") => params["workspaceStrategy"]["path"]
+                    .as_str()
+                    .map(str::to_owned),
+                _ => None,
+            }
+            .unwrap_or_else(|| project.path.clone());
+            let create = json!({
+                "type":"thread.create","commandId":command_id,"threadId":thread_id,
+                "projectId":project_id,"title":params["title"],
+                "modelSelection":params["modelSelection"],"runtimeMode":params["runtimeMode"],
+                "interactionMode":params["interactionMode"],"createdBy":"user",
+                "creationSource":params.get("creationSource").and_then(Value::as_str).unwrap_or("web"),
+                "branch":null,"worktreePath":worktree_path
+            });
+            if let Err(error) = dispatch_orchestration_command(state.clone(), create).await {
+                return Reply::Failure(json!({"_tag":"Fail","error":error}));
+            }
+        }
+        let mut sequence = None;
+        if let Some(initial) = params
+            .get("initialMessage")
+            .filter(|value| value.is_object())
+        {
+            let message_id = initial["messageId"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("message:{}", uuid::Uuid::new_v4()));
+            let message = json!({
+                "type":"message.dispatch","commandId":format!("{command_id}:initial-message"),
+                "threadId":thread_id,"messageId":message_id,"text":initial["text"],
+                "attachments":initial.get("attachments").cloned().unwrap_or_else(|| json!([])),
+                "modelSelection":params["modelSelection"],"runtimeMode":params["runtimeMode"],
+                "interactionMode":params["interactionMode"],"createdBy":"user","creationSource":"web"
+            });
+            match dispatch_orchestration_command(state.clone(), message).await {
+                Ok(value) => sequence = Some(value),
+                Err(error) => return Reply::Failure(json!({"_tag":"Fail","error":error})),
+            }
+        }
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(&thread_id) else {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"OrchestrationV2ThreadLaunchError","operation":"create-thread","threadId":thread_id,"message":"Thread was not created."}}),
+            );
+        };
+        let mut result =
+            json!({"threadId":thread_id,"projection":thread.projection(),"resumed":resumed});
+        if let Some(sequence) = sequence {
+            result["sequence"] = json!(sequence);
+        }
+        return Reply::Success(result);
+    }
 
     let store = state.store.read().await;
     let sequence = *state.next_event_id.lock().await;
@@ -437,28 +2982,452 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"threadIds":store.threads.values().filter(|t| Some(t.cwd.as_str()) == params["worktreePath"].as_str()).map(|t|&t.id).collect::<Vec<_>>()})
         }
         "orchestration.getArchivedShellSnapshot" => {
-            json!({"schemaVersion":2,"snapshotSequence":sequence,"projects":[],"threads":store.threads.values().filter(|t|t.archived).map(|t|t.shell()).collect::<Vec<_>>()})
+            let projects = store
+                .project_rows
+                .values()
+                .filter(|row| row["deletedAt"].is_null())
+                .map(|row| {
+                    let mut out = serde_json::Map::new();
+                    for key in [
+                        "id",
+                        "title",
+                        "hasCustomTitle",
+                        "workspaceRoot",
+                        "repositoryIdentity",
+                        "defaultModelSelection",
+                        "defaultThreadEnvMode",
+                        "autoPull",
+                        "faviconPath",
+                        "projectIcon",
+                        "scripts",
+                        "pinnedAt",
+                        "archivedAt",
+                        "createdAt",
+                        "updatedAt",
+                    ] {
+                        if let Some(value) = row.get(key) {
+                            out.insert(key.to_owned(), value.clone());
+                        }
+                    }
+                    Value::Object(out)
+                })
+                .collect::<Vec<_>>();
+            json!({"schemaVersion":2,"snapshotSequence":sequence,"projects":projects,"threads":store.threads.values().filter(|t|t.archived).map(|t|t.shell()).collect::<Vec<_>>()})
         }
         "orchestration.searchThreads" => {
             let query = params["query"].as_str().unwrap_or_default().to_lowercase();
-            json!({"snapshotSequence":sequence,"threads":store.threads.values().filter(|t| t.title.to_lowercase().contains(&query)).collect::<Vec<_>>(),"complete":true})
+            let limit = params["limit"].as_u64().unwrap_or(50).clamp(1, 50) as usize;
+            let project_id = params["projectId"].as_str();
+            let mut title_matches: Vec<&crate::Thread> = store
+                .threads
+                .values()
+                .filter(|thread| {
+                    store.projects.contains_key(&thread.project_id)
+                        && project_id.is_none_or(|id| id == thread.project_id)
+                })
+                .filter(|thread| thread.title.to_lowercase().contains(&query))
+                .collect();
+            title_matches.sort_by(|a, b| {
+                b.row["updatedAt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(a.row["updatedAt"].as_str().unwrap_or_default())
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            let title_matches = title_matches.into_iter().take(limit).collect::<Vec<_>>();
+            let title_ids = title_matches
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let mut message_matches = Vec::new();
+            for thread in store.threads.values().filter(|thread| {
+                store.projects.contains_key(&thread.project_id)
+                    && project_id.is_none_or(|id| id == thread.project_id)
+                    && !title_ids.contains(thread.id.as_str())
+            }) {
+                let Some(message) = thread
+                    .messages
+                    .iter()
+                    .find(|message| message.content.to_lowercase().contains(&query))
+                else {
+                    continue;
+                };
+                let folded = message.content.to_lowercase();
+                let offset = folded.find(&query).unwrap_or_default();
+                let start = offset.saturating_sub(24);
+                let end = (start + 240).min(message.content.len());
+                let snippet = message
+                    .content
+                    .get(start..end)
+                    .unwrap_or(&message.content)
+                    .to_owned();
+                message_matches.push(json!({
+                    "threadId":thread.id,
+                    "projectId":thread.project_id,
+                    "source":if message.role == "assistant" {"assistant"} else {"user"},
+                    "snippet":snippet,
+                    "messageCreatedAt":auth_service::iso((message.created_at as i64).saturating_mul(1000)),
+                    "title":thread.title,
+                }));
+            }
+            let message_slots = message_matches.len().min(limit / 5);
+            let mut matches = title_matches
+                .into_iter()
+                .take(limit.saturating_sub(message_slots))
+                .map(|thread| {
+                    json!({"threadId":thread.id,"projectId":thread.project_id,"title":thread.title,"source":"title"})
+                })
+                .collect::<Vec<_>>();
+            matches.extend(message_matches.into_iter().take(message_slots));
+            json!({"matches":matches})
         }
         "orchestration.searchThread" => {
-            json!({"complete":true,"snapshotSequence":sequence,"totalMatches":0,"activeIndex":0,"match":null})
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            let Some(thread) = store.threads.get(thread_id) else {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationV2SearchThreadError",
+                    "cause":{"name":"OrchestratorProjectionError",
+                        "message":format!("Failed to load orchestration projection for thread {thread_id}."),
+                        "cause":{"name":"ProjectionStoreThreadNotFoundError",
+                            "message":format!("No orchestration projection exists for thread {thread_id}.")}}
+                }}));
+            };
+            let query = params["query"].as_str().unwrap_or_default();
+            let query_folded = query
+                .to_lowercase()
+                .replace('ς', "σ")
+                .replace(['‘', '’'], "'");
+            let mut entries = Vec::new();
+            for message in &thread.messages {
+                let text = message
+                    .content
+                    .to_lowercase()
+                    .replace('ς', "σ")
+                    .replace(['‘', '’'], "'");
+                if query_folded.is_empty() {
+                    continue;
+                }
+                let mut count = 0usize;
+                let mut cursor = 0usize;
+                while cursor <= text.len() {
+                    let Some(offset) = text[cursor..].find(&query_folded) else {
+                        break;
+                    };
+                    count += 1;
+                    cursor += offset + query_folded.len();
+                    if query_folded.is_empty() {
+                        break;
+                    }
+                }
+                if count > 0 {
+                    entries.push((message.id.clone(), count));
+                }
+            }
+            let total_matches: usize = entries.iter().map(|(_, count)| *count).sum();
+            let requested = params["index"].as_u64().unwrap_or(0) as usize;
+            let offset = params["offset"].as_i64().unwrap_or(0);
+            let active_index = if total_matches == 0 {
+                0
+            } else if params.get("index").is_none() {
+                ((requested as i64 + offset).rem_euclid(total_matches as i64)) as usize
+            } else {
+                requested.min(total_matches.saturating_sub(1))
+            };
+            let mut start_index = 0usize;
+            let mut navigation = Vec::new();
+            let mut selected = None;
+            let mut remaining = active_index;
+            for (entry_id, count) in &entries {
+                navigation.push(
+                    json!({"entryId":entry_id,"runId":null,"startIndex":start_index,"count":count}),
+                );
+                if selected.is_none() && remaining < *count {
+                    selected =
+                        Some(json!({"entryId":entry_id,"runId":null,"occurrence":remaining}));
+                } else if selected.is_none() {
+                    remaining -= *count;
+                }
+                start_index += count;
+            }
+            json!({"complete":true,"snapshotSequence":sequence,"totalMatches":total_matches,"activeIndex":active_index,"navigation":navigation,"match":selected})
         }
         "orchestration.getOlderSettledThreads" => {
-            json!({"snapshotSequence":sequence,"threads":[],"counts":[]})
+            let before = params["before"]["settledAt"].as_str().unwrap_or_default();
+            let after_id = params["before"]["threadId"].as_str();
+            let project_ids = params["projectIds"].as_array();
+            let in_projects = |thread: &&crate::Thread| {
+                project_ids.is_none_or(|ids| {
+                    ids.iter()
+                        .any(|id| id.as_str() == Some(thread.project_id.as_str()))
+                })
+            };
+            let mut older: Vec<&crate::Thread> = store
+                .threads
+                .values()
+                .filter(|thread| {
+                    thread.settled
+                        && !thread.archived
+                        && in_projects(thread)
+                        && thread.row["settledAt"].as_str().is_some_and(|at| {
+                            at < before
+                                || (at == before
+                                    && after_id.is_some_and(|id| thread.id.as_str() > id))
+                        })
+                })
+                .collect();
+            older.sort_by(|a, b| {
+                b.row["settledAt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(a.row["settledAt"].as_str().unwrap_or_default())
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            let mut counts = std::collections::BTreeMap::<String, usize>::new();
+            for thread in &older {
+                *counts.entry(thread.project_id.clone()).or_default() += 1;
+            }
+            let limit = params["limit"].as_i64().unwrap_or(0).clamp(0, 50) as usize;
+            let threads = if limit == 0 {
+                Vec::new()
+            } else {
+                older.into_iter().take(limit).map(|t| t.shell()).collect()
+            };
+            json!({"snapshotSequence":sequence,"threads":threads,"counts":counts.into_iter().map(|(project_id,count)|json!({"projectId":project_id,"count":count})).collect::<Vec<_>>()})
         }
-        "orchestration.getThreadProjection" => thread(&params["threadId"])
-            .map(|t| t.projection())
-            .unwrap_or(Value::Null),
-        "orchestration.getFullThreadDiff"
-        | "orchestration.getTurnDiff"
-        | "orchestration.stopWorkflow"
-        | "orchestration.forceStopThread"
-        | "orchestration.getWorkflowScript"
-        | "orchestration.getNativeChildWork"
-        | "orchestration.getTurnItem" => Value::Null,
+        "orchestration.getThreadProjection" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            let Some(thread) = thread(&params["threadId"]) else {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationV2GetThreadProjectionError",
+                    "threadId":thread_id,
+                    "message":format!("Failed to load orchestration V2 thread {thread_id}"),
+                    "cause":{"name":"OrchestratorProjectionError",
+                        "message":"Failed to load orchestration projection for thread ".to_owned()+thread_id+".",
+                        "cause":{"name":"ProjectionStoreThreadNotFoundError",
+                            "message":"No orchestration projection exists for thread ".to_owned()+thread_id+"."}}
+                }}));
+            };
+            thread.projection()
+        }
+        "orchestration.getTurnDiff" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            let from = params["fromTurnCount"].as_u64().unwrap_or_default();
+            let to = params["toTurnCount"].as_u64().unwrap_or_default();
+            if from == to || to == 0 {
+                json!({"fromTurnCount":from,"toTurnCount":to,"threadId":params["threadId"],"diff":""})
+            } else {
+                let Some(thread) = store.threads.get(thread_id).cloned() else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"OrchestrationGetTurnDiffError",
+                        "message":"Failed to load turn diff",
+                        "cause":{"name":"CheckpointThreadNotFoundError","message":format!("Checkpoint invariant violation in CheckpointDiffQuery.getTurnDiff: Thread '{thread_id}' not found.")}
+                    }}));
+                };
+                let ready = thread
+                    .checkpoints
+                    .iter()
+                    .filter(|checkpoint| checkpoint.ready)
+                    .collect::<Vec<_>>();
+                let max_turn = ready
+                    .iter()
+                    .map(|checkpoint| checkpoint.turn_count)
+                    .max()
+                    .unwrap_or_default();
+                if to > max_turn {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointTurnRangeUnavailableError","threadId":params["threadId"],"requestedTurnCount":to,"availableTurnCount":max_turn
+                    }}));
+                }
+                let Some(from_checkpoint) = ready
+                    .iter()
+                    .find(|checkpoint| checkpoint.turn_count == from)
+                else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointRefUnavailableError","threadId":params["threadId"],"turnCount":from,"checkpoint":"from"
+                    }}));
+                };
+                let Some(to_checkpoint) =
+                    ready.iter().find(|checkpoint| checkpoint.turn_count == to)
+                else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointRefUnavailableError","threadId":params["threadId"],"turnCount":to,"checkpoint":"to"
+                    }}));
+                };
+                let diff = git_diff_checkpoint(
+                    &to_checkpoint.cwd,
+                    &from_checkpoint.tree,
+                    &to_checkpoint.tree,
+                    params["ignoreWhitespace"].as_bool().unwrap_or(true),
+                )
+                .await;
+                json!({"fromTurnCount":from,"toTurnCount":to,"threadId":params["threadId"],"diff":diff})
+            }
+        }
+        "orchestration.getFullThreadDiff" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            let to = params["toTurnCount"].as_u64().unwrap_or_default();
+            if to == 0 {
+                json!({"fromTurnCount":0,"toTurnCount":0,"threadId":params["threadId"],"diff":""})
+            } else {
+                let Some(thread) = store.threads.get(thread_id).cloned() else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"OrchestrationGetFullThreadDiffError",
+                        "message":"Failed to load full thread diff",
+                        "cause":{"name":"CheckpointThreadNotFoundError","message":format!("Checkpoint invariant violation in CheckpointDiffQuery.getTurnDiff: Thread '{thread_id}' not found.")}
+                    }}));
+                };
+                let ready = thread
+                    .checkpoints
+                    .iter()
+                    .filter(|checkpoint| checkpoint.ready)
+                    .collect::<Vec<_>>();
+                let max_turn = ready
+                    .iter()
+                    .map(|checkpoint| checkpoint.turn_count)
+                    .max()
+                    .unwrap_or_default();
+                if to > max_turn {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointTurnRangeUnavailableError","threadId":params["threadId"],"requestedTurnCount":to,"availableTurnCount":max_turn
+                    }}));
+                }
+                let Some(from_checkpoint) =
+                    ready.iter().find(|checkpoint| checkpoint.turn_count == 0)
+                else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointRefUnavailableError","threadId":thread_id,"turnCount":0,"checkpoint":"from"
+                    }}));
+                };
+                let Some(to_checkpoint) =
+                    ready.iter().find(|checkpoint| checkpoint.turn_count == to)
+                else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointRefUnavailableError","threadId":thread_id,"turnCount":to,"checkpoint":"to"
+                    }}));
+                };
+                let diff = git_diff_checkpoint(
+                    &to_checkpoint.cwd,
+                    &from_checkpoint.tree,
+                    &to_checkpoint.tree,
+                    params["ignoreWhitespace"].as_bool().unwrap_or(true),
+                )
+                .await;
+                json!({"fromTurnCount":0,"toTurnCount":to,"threadId":params["threadId"],"diff":diff})
+            }
+        }
+        "orchestration.getTurnItem" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            if !store.threads.contains_key(thread_id) {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestratorProjectionError",
+                    "message":format!("Failed to load orchestration projection for thread {thread_id}."),
+                    "cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}
+                }}));
+            }
+            let item_id = params["itemId"].as_str().unwrap_or_default();
+            let item = store
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.projection().get("turnItems").cloned())
+                .and_then(|items| items.as_array().cloned())
+                .and_then(|items| items.into_iter().find(|item| item["id"] == item_id));
+            json!({"item":item})
+        }
+        "orchestration.getNativeChildWork" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            let Some(thread) = store.threads.get(thread_id).cloned() else {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationV2GetNativeChildWorkError","threadId":thread_id,
+                    "cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}
+                }}));
+            };
+            let parent_id = thread.row["lineage"]["parentThreadId"].as_str();
+            let parent = parent_id.and_then(|id| store.threads.get(id).cloned());
+            let children = if let Some(parent) = parent {
+                let parent_projection = parent.projection();
+                crate::native_child_work::read(
+                    &state.data_dir,
+                    &thread.stored_row(),
+                    &parent_projection,
+                )
+            } else {
+                Vec::new()
+            };
+            json!({"children":children})
+        }
+        "orchestration.getWorkflowScript" => {
+            let path = params["scriptPath"].as_str().unwrap_or_default();
+            let invalid = !std::path::Path::new(path).is_absolute()
+                || std::path::Path::new(path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    != Some("js");
+            if invalid {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationGetWorkflowScriptError","reason":"invalid-path",
+                    "scriptPath":path,
+                    "cause":{"name":"OrchestrationWorkflowFileError",
+                        "message":"Workflow files must be absolute paths with the expected extension."}
+                }}));
+            }
+            let root = state.paths.base_dir.join(".claude").join("projects");
+            let canonical = match tokio::fs::canonicalize(path).await {
+                Ok(path) => path,
+                Err(_) => {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"OrchestrationGetWorkflowScriptError","reason":"not-found",
+                        "scriptPath":path,
+                        "cause":{"name":"OrchestrationWorkflowFileError","message":"Workflow file not found."}
+                    }}))
+                }
+            };
+            let root = match tokio::fs::canonicalize(root).await {
+                Ok(root) => root,
+                Err(_) => {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"OrchestrationGetWorkflowScriptError","reason":"root-unavailable",
+                        "scriptPath":path,
+                        "cause":{"name":"OrchestrationWorkflowFileError","message":"Workflow file root unavailable."}
+                    }}));
+                }
+            };
+            if canonical != root && !canonical.starts_with(&root) {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationGetWorkflowScriptError","reason":"outside-root",
+                    "scriptPath":canonical,"cause":{"name":"OrchestrationWorkflowFileError","message":"Path is outside the workflow files root."}
+                }}));
+            }
+            let bytes = match tokio::fs::read(&canonical).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"OrchestrationGetWorkflowScriptError","reason":"read-failed",
+                        "scriptPath":canonical,"cause":{"name":"OrchestrationWorkflowFileError","message":"Workflow file read failed."}
+                    }}));
+                }
+            };
+            let truncated = bytes.len() > 256 * 1024;
+            let contents =
+                String::from_utf8_lossy(&bytes[..bytes.len().min(256 * 1024)]).into_owned();
+            json!({"scriptPath":canonical,"contents":contents,"truncated":truncated})
+        }
+        "orchestration.stopWorkflow" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            let exists = store.threads.contains_key(thread_id);
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"OrchestrationV2StopWorkflowError","threadId":thread_id,
+                "subagentId":params["subagentId"],"reason":if exists {"not-running"} else {"unavailable"}
+            }}));
+        }
+        "orchestration.forceStopThread" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            if !store.threads.contains_key(thread_id) {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationV2ForceStopThreadError","threadId":thread_id
+                }}));
+            }
+            json!({"outcome":"released","sharedWithThreadIds":[]})
+        }
         "orchestration.subscribeShell" => {
             return Reply::Chunk(
                 json!([{"kind":"snapshot","snapshot":crate::environment_http::shell(&store,sequence)}]),
@@ -485,4 +3454,701 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         }
     };
     Reply::Success(result)
+}
+
+pub(crate) fn fold_project_rows_into_settings(
+    settings: &mut Value,
+    rows: &indexmap::IndexMap<String, Value>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+    let Some(mut entries) = settings
+        .get("projectSettingsOverrides")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return;
+    };
+    for (project_id, row) in rows {
+        if row.get("deletedAt").is_some_and(|value| !value.is_null()) {
+            continue;
+        }
+        let entry = entries
+            .entry(project_id.clone())
+            .or_insert_with(|| json!({}));
+        let Some(entry) = entry.as_object_mut() else {
+            continue;
+        };
+        for (field, value) in [
+            ("defaultModelSelection", &row["defaultModelSelection"]),
+            ("defaultThreadEnvMode", &row["defaultThreadEnvMode"]),
+        ] {
+            if !value.is_null()
+                && entry.get(field).is_none()
+                && (field != "defaultThreadEnvMode"
+                    || matches!(value.as_str(), Some("local" | "worktree")))
+            {
+                entry.insert(field.to_owned(), value.clone());
+            }
+        }
+        if row["autoPull"] == true && entry.get("defaultAutoPull").is_none() {
+            entry.insert("defaultAutoPull".into(), json!(true));
+        }
+        if row["scripts"]
+            .as_array()
+            .is_some_and(|scripts| !scripts.is_empty())
+            && entry.get("defaultProjectScripts").is_none()
+        {
+            entry.insert("defaultProjectScripts".into(), row["scripts"].clone());
+        }
+    }
+    entries.retain(|_, entry| entry.as_object().is_some_and(|fields| !fields.is_empty()));
+    settings["projectSettingsOverrides"] = Value::Object(entries.clone());
+    settings["projectSettingsFolded"] = json!(true);
+    for (legacy, field) in [
+        (
+            "projectAgentBrowserAccessOverrides",
+            "enableAgentBrowserAccess",
+        ),
+        ("projectAutoPullOverrides", "defaultAutoPull"),
+        ("projectScriptOverrides", "defaultProjectScripts"),
+    ] {
+        let mut values = serde_json::Map::new();
+        for (project_id, entry) in entries.iter() {
+            if let Some(value) = entry.get(field) {
+                values.insert(project_id.clone(), value.clone());
+            }
+        }
+        settings[legacy] = Value::Object(values);
+    }
+}
+
+/// The checkpoint diff schemas use non-negative integers and an optional boolean. Most RPC
+/// payloads are decoded by the provider-specific handlers, but these two calls return their
+/// zero-turn result before touching a projection. Validate them at the wire boundary so malformed
+/// inputs retain the TypeScript server's exact Effect defect instead of being coerced to zero.
+fn checkpoint_diff_schema_defect(method: &str, params: &Value) -> Option<String> {
+    if !matches!(
+        method,
+        "orchestration.getTurnDiff" | "orchestration.getFullThreadDiff"
+    ) {
+        return None;
+    }
+    if let Some(value) = params.get("threadId") {
+        if !value.is_string() {
+            return Some("Expected string\n  at [\"threadId\"]".into());
+        }
+    }
+    for key in ["fromTurnCount", "toTurnCount"] {
+        let Some(value) = params.get(key) else {
+            continue;
+        };
+        if !value.is_number() {
+            return Some(format!("Expected number\n  at [\"{key}\"]"));
+        }
+        let negative = value.as_i64().is_some_and(|number| number < 0)
+            || value.as_f64().is_some_and(|number| number < 0.0);
+        if negative {
+            return Some(format!(
+                "Expected a value greater than or equal to 0\n  at [\"{key}\"]"
+            ));
+        }
+        let integer = value.as_u64().is_some()
+            || value
+                .as_f64()
+                .is_some_and(|number| number.is_finite() && number.fract() == 0.0);
+        if !integer {
+            return Some(format!("Expected an integer\n  at [\"{key}\"]"));
+        }
+    }
+    if method == "orchestration.getTurnDiff" {
+        if let (Some(from), Some(to)) = (
+            params.get("fromTurnCount").and_then(Value::as_u64),
+            params.get("toTurnCount").and_then(Value::as_u64),
+        ) {
+            if from > to {
+                return Some("fromTurnCount must be less than or equal to toTurnCount".into());
+            }
+        }
+    }
+    if let Some(value) = params.get("ignoreWhitespace") {
+        if !value.is_boolean() {
+            return Some("Expected boolean\n  at [\"ignoreWhitespace\"]".into());
+        }
+    }
+    None
+}
+
+async fn git_diff_checkpoint(
+    cwd: &str,
+    from_tree: &str,
+    to_tree: &str,
+    ignore_whitespace: bool,
+) -> String {
+    let mut command = tokio::process::Command::new("git");
+    command.args(["-C", cwd, "diff", "--binary"]);
+    if ignore_whitespace {
+        command.arg("--ignore-all-space");
+    }
+    command.args([from_tree, to_tree]);
+    let Ok(output) = command.output().await else {
+        return String::new();
+    };
+    if !output.status.success() {
+        return String::new();
+    }
+    const MAX_OUTPUT: usize = 10_000_000;
+    const MARKER: &str = "\n\n[truncated]";
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.len() <= MAX_OUTPUT {
+        return text.into_owned();
+    }
+    let limit = MAX_OUTPUT.saturating_sub(MARKER.len());
+    let mut end = limit.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &text[..end], MARKER)
+}
+
+async fn scheduled_tasks_snapshot(state: &Arc<AppState>) -> Value {
+    let tasks = state
+        .scheduled_tasks
+        .lock()
+        .await
+        .values()
+        .map(scheduled_public_task)
+        .collect::<Vec<_>>();
+    json!({"tasks":tasks,"timeZone":scheduled_task_time_zone()})
+}
+
+fn scheduled_task_time_zone() -> String {
+    std::env::var("TZ")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/timezone")
+                .ok()
+                .map(|value| value.trim().to_owned())
+        })
+        .unwrap_or_else(|| "UTC".into())
+}
+
+fn scheduled_public_task(task: &Value) -> Value {
+    let mut task = task.clone();
+    if let Some(object) = task.as_object_mut() {
+        object.remove("_webhookToken");
+        object.remove("_webhookSecret");
+        if let Some(signature) = object
+            .get_mut("schedule")
+            .and_then(|schedule| schedule.get_mut("signature"))
+            .and_then(Value::as_object_mut)
+        {
+            signature.remove("secret");
+            signature.remove("secretRef");
+        }
+    }
+    task
+}
+
+fn scheduled_task_error(message: &str, task_id: Option<&str>) -> Reply {
+    Reply::Failure(
+        json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":message,"taskId":task_id}}),
+    )
+}
+
+fn scheduled_task_schedule(input: &Value, existing: Option<&Value>) -> Value {
+    let mut schedule = input.clone();
+    if schedule["type"] == "webhook" {
+        let object = schedule.as_object_mut().expect("schedule object");
+        object.entry("signature").or_insert(Value::Null);
+        if let Some(signature) = object.get_mut("signature").and_then(Value::as_object_mut) {
+            if let Some(header) = signature.get("header").and_then(Value::as_str) {
+                signature.insert("header".into(), Value::String(header.to_ascii_lowercase()));
+            }
+            signature.remove("secret");
+            signature.remove("secretRef");
+        }
+        object.entry("maxDeliveryAgeMinutes").or_insert(Value::Null);
+        if !object.contains_key("dedupe") {
+            if let Some(value) = existing
+                .and_then(|task| task["schedule"].get("dedupe"))
+                .filter(|v| !v.is_null())
+            {
+                object.insert("dedupe".into(), value.clone());
+            }
+        }
+        if !object.contains_key("filters") {
+            if let Some(value) = existing
+                .and_then(|task| task["schedule"].get("filters"))
+                .filter(|v| !v.is_null())
+            {
+                object.insert("filters".into(), value.clone());
+            }
+        }
+    }
+    schedule
+}
+
+fn scheduled_task_model_selection(value: &Value) -> Value {
+    let mut selection = value.clone();
+    if let Some(object) = selection.as_object_mut() {
+        object.remove("provider");
+        if object.get("options").is_some_and(Value::is_object) {
+            object.insert("options".into(), json!([]));
+        }
+    }
+    selection
+}
+
+fn scheduled_task_next_run(enabled: bool, schedule: &Value, now: i64) -> Value {
+    if !enabled {
+        return Value::Null;
+    }
+    match schedule["type"].as_str() {
+        Some("interval") => schedule["everyMs"]
+            .as_i64()
+            .map(|every| json!(crate::auth_service::iso(now.saturating_add(every))))
+            .unwrap_or(Value::Null),
+        Some("once") => schedule["runAt"].clone(),
+        _ => Value::Null,
+    }
+}
+
+fn random_webhook_token() -> String {
+    use base64::Engine;
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn encode_task_id(value: &str) -> String {
+    value
+        .replace('%', "%25")
+        .replace('/', "%2F")
+        .replace(':', "%3A")
+}
+
+async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
+    let now = crate::auth_service::now();
+    let id = params["id"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            params["commandId"]
+                .as_str()
+                .map(|v| format!("scheduled-task:{v}"))
+        })
+        .unwrap_or_else(|| format!("scheduled-task:{}", uuid::Uuid::new_v4()));
+    let mut tasks = state.scheduled_tasks.lock().await;
+    let existing = tasks.get(&id).cloned();
+    let thread_mode = params["threadMode"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|v| v["threadMode"].as_str().map(str::to_owned))
+        })
+        .unwrap_or_else(|| {
+            if params["threadId"].is_string() {
+                "continue".into()
+            } else {
+                "new_thread".into()
+            }
+        });
+    let thread_id = if thread_mode == "new_thread" {
+        Value::Null
+    } else if !params["threadId"].is_null() {
+        params["threadId"].clone()
+    } else {
+        existing
+            .as_ref()
+            .map(|v| v["threadId"].clone())
+            .unwrap_or(Value::Null)
+    };
+    let schedule = scheduled_task_schedule(&params["schedule"], existing.as_ref());
+    let webhook_secret =
+        if schedule["type"] == "webhook" && params["schedule"]["signature"].is_object() {
+            let signature = &params["schedule"]["signature"];
+            let from_ref = if signature["secret"].is_null() {
+                if let Some(reference) = signature.get("secretRef") {
+                    if let Ok(settings) = state.settings.internal() {
+                        state
+                            .settings
+                            .resolver
+                            .resolve(
+                                &settings,
+                                reference,
+                                crate::settings::secrets::ReadMode::Check,
+                            )
+                            .await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            signature["secret"]
+                .as_str()
+                .map(str::to_owned)
+                .or(from_ref)
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|task| task["_webhookSecret"].as_str().map(str::to_owned))
+                })
+        } else {
+            None
+        };
+    if schedule["type"] == "webhook"
+        && schedule["signature"].is_object()
+        && webhook_secret.is_none()
+    {
+        return scheduled_task_error(
+            "A webhook signature check needs a signing secret.",
+            Some(&id),
+        );
+    }
+    let enabled = params["enabled"].as_bool().unwrap_or(false);
+    let created_at = existing
+        .as_ref()
+        .and_then(|v| v["createdAt"].as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::auth_service::iso(now));
+    let mut task = json!({
+        "id":id,"title":params["title"],"prompt":params["prompt"],"enabled":enabled,"schedule":schedule,
+        "projectId":params["projectId"],"threadId":thread_id,"threadMode":thread_mode,"workspaceStrategy":params["workspaceStrategy"],
+        "modelSelection":scheduled_task_model_selection(&params["modelSelection"]),"runtimeMode":params["runtimeMode"],"interactionMode":params["interactionMode"],
+        "createdBy":existing.as_ref().and_then(|v| v["createdBy"].as_str()).unwrap_or(params["createdBy"].as_str().unwrap_or("user")),
+        "creationSource":existing.as_ref().and_then(|v| v["creationSource"].as_str()).unwrap_or(params["creationSource"].as_str().unwrap_or("web")),
+        "createdAt":created_at,"updatedAt":crate::auth_service::iso(now),"nextRunAt":scheduled_task_next_run(enabled,&schedule,now),
+        "lastRunAt":existing.as_ref().map(|v| v["lastRunAt"].clone()).unwrap_or(Value::Null),"lastRunStatus":existing.as_ref().and_then(|v| v["lastRunStatus"].as_str()).unwrap_or("never"),
+        "lastRunError":existing.as_ref().map(|v| v["lastRunError"].clone()).unwrap_or(Value::Null),"runCount":existing.as_ref().and_then(|v| v["runCount"].as_i64()).unwrap_or(0)
+    });
+    if schedule["type"] == "webhook" {
+        let token = existing
+            .as_ref()
+            .and_then(|v| v["_webhookToken"].as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(random_webhook_token);
+        let secret = webhook_secret.map(Value::String).unwrap_or(Value::Null);
+        task["_webhookToken"] = token.clone().into();
+        task["_webhookSecret"] = secret.clone();
+        task["webhook"] = json!({"path":format!("/api/hooks/{}/{}",encode_task_id(&id),token),"url":null,"hasSecret":!secret.is_null()});
+    }
+    let public = scheduled_public_task(&task);
+    tasks.insert(id, task);
+    drop(tasks);
+    let _ = state.persist_scheduled_tasks().await;
+    let _ = state.scheduled_task_events.send(());
+    Reply::Success(json!({"task":public}))
+}
+
+async fn scheduled_task_set_enabled(state: &Arc<AppState>, params: &Value) -> Reply {
+    let id = params["id"].as_str().unwrap_or_default();
+    let enabled = params["enabled"].as_bool().unwrap_or(false);
+    let mut tasks = state.scheduled_tasks.lock().await;
+    let Some(task) = tasks.get_mut(id) else {
+        return scheduled_task_error("Schedule task not found.", Some(id));
+    };
+    if task["enabled"] == enabled {
+        return Reply::Success(json!({"task":scheduled_public_task(task)}));
+    }
+    let now = crate::auth_service::now();
+    task["enabled"] = enabled.into();
+    task["updatedAt"] = crate::auth_service::iso(now).into();
+    task["nextRunAt"] = scheduled_task_next_run(enabled, &task["schedule"], now);
+    let public = scheduled_public_task(task);
+    drop(tasks);
+    let _ = state.persist_scheduled_tasks().await;
+    let _ = state.scheduled_task_events.send(());
+    Reply::Success(json!({"task":public}))
+}
+
+async fn scheduled_task_run_now(state: &Arc<AppState>, params: &Value) -> Reply {
+    let id = params["id"].as_str().unwrap_or_default();
+    let mut tasks = state.scheduled_tasks.lock().await;
+    let Some(task) = tasks.get_mut(id) else {
+        return scheduled_task_error("Schedule task not found.", Some(id));
+    };
+    if task["schedule"]["type"] == "webhook" {
+        return scheduled_task_error(
+            "Webhook tasks run when their URL receives a request.",
+            Some(id),
+        );
+    }
+    let now = crate::auth_service::now();
+    task["lastRunAt"] = crate::auth_service::iso(now).into();
+    task["lastRunStatus"] = "failed".into();
+    task["lastRunError"] =
+        format!("Thread launch scheduled-task:{id}:{now}:manual failed during resolve-project.")
+            .into();
+    task["runCount"] = task["runCount"]
+        .as_i64()
+        .unwrap_or(0)
+        .saturating_add(1)
+        .into();
+    task["updatedAt"] = crate::auth_service::iso(now).into();
+    let public = scheduled_public_task(task);
+    drop(tasks);
+    let _ = state.persist_scheduled_tasks().await;
+    let _ = state.scheduled_task_events.send(());
+    Reply::Success(json!({"task":public}))
+}
+
+async fn scheduled_task_rotate_token(state: &Arc<AppState>, params: &Value) -> Reply {
+    let id = params["id"].as_str().unwrap_or_default();
+    let mut tasks = state.scheduled_tasks.lock().await;
+    let Some(task) = tasks.get_mut(id) else {
+        return scheduled_task_error("Schedule task not found.", Some(id));
+    };
+    if task["schedule"]["type"] != "webhook" {
+        return scheduled_task_error("Only webhook tasks have a URL token.", Some(id));
+    }
+    let token = random_webhook_token();
+    task["_webhookToken"] = token.clone().into();
+    task["updatedAt"] = crate::auth_service::iso(crate::auth_service::now()).into();
+    task["webhook"]["path"] = format!("/api/hooks/{}/{}", encode_task_id(id), token).into();
+    let public = scheduled_public_task(task);
+    drop(tasks);
+    let _ = state.persist_scheduled_tasks().await;
+    let _ = state.scheduled_task_events.send(());
+    Reply::Success(json!({"task":public}))
+}
+
+fn invalid_provider_payload_field(method: &str, params: &Value) -> Option<&'static str> {
+    let string_fields: &[&str] = match method {
+        "mcpApps.callTool" => &["threadId", "itemId", "name"],
+        "mcpApps.toolInfo" => &["threadId", "itemId", "name"],
+        "mcpApps.readResource" => &["threadId", "itemId", "uri"],
+        "mcpApps.updateModelContext" => &["threadId", "itemId", "conversationThreadId"],
+        "provider.auth.start"
+        | "provider.auth.logout"
+        | "provider.auth.subscribe"
+        | "provider.install.start"
+        | "provider.install.subscribe"
+        | "provider.install.remove" => &["instanceId"],
+        "provider.auth.complete" => &["instanceId", "flowId", "callbackUrl"],
+        "provider.auth.respond" => &["instanceId", "flowId", "interactionId"],
+        "provider.auth.cancel" => &["instanceId", "flowId"],
+        "provider.auth.removeMethod" => &["instanceId", "methodId"],
+        "provider.install.cancel" => &["instanceId", "operationId"],
+        "provider.chatgpt.reconnect-profile" => &["instanceId", "methodId"],
+        "provider.chatgpt.import-profile" | "provider.chatgpt.handoff.subscribe" => &["instanceId"],
+        "provider.uploadFeedback" => &["threadId"],
+        _ => &[],
+    };
+    string_fields
+        .iter()
+        .copied()
+        .find(|field| params.get(*field).is_some_and(|value| !value.is_string()))
+}
+
+fn provider_auth_response_defect(response: Option<&Value>) -> Option<String> {
+    let response = response?;
+    let kind = response.get("type").and_then(Value::as_str);
+    match kind {
+        Some("browser") => {
+            if !matches!(
+                response.get("action").and_then(Value::as_str),
+                Some("accept" | "decline")
+            ) {
+                return Some(
+                    "Expected \"accept\" | \"decline\"\n  at [\"response\"][\"action\"]".into(),
+                );
+            }
+        }
+        Some("terminal") => {
+            if response.get("data").and_then(Value::as_str).is_none() {
+                return Some("Expected string\n  at [\"response\"][\"data\"]".into());
+            }
+            if response
+                .get("binary")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return Some("Expected boolean\n  at [\"response\"][\"binary\"]".into());
+            }
+            if let Some(size) = response.get("size") {
+                if !size.is_object() {
+                    return Some(
+                        "Expected object | undefined\n  at [\"response\"][\"size\"]".into(),
+                    );
+                }
+                for (field, min, max) in [("cols", 1, 500), ("rows", 1, 200)] {
+                    if let Some(value) = size.get(field) {
+                        let valid = value
+                            .as_i64()
+                            .is_some_and(|number| (min..=max).contains(&number));
+                        if !valid {
+                            return Some(format!(
+                                "Expected a value between {min} and {max}\n  at [\"response\"][\"size\"][\"{field}\"]"
+                            ));
+                        }
+                    } else {
+                        return Some(format!(
+                            "Missing key: \"{field}\"\n  at [\"response\"][\"size\"]"
+                        ));
+                    }
+                }
+            }
+        }
+        Some("credentials") => {
+            let Some(values) = response.get("values") else {
+                return Some("Missing key: \"values\"\n  at [\"response\"]".into());
+            };
+            if !values.is_object() {
+                return Some("Expected object\n  at [\"response\"][\"values\"]".into());
+            }
+            let Some(values) = values.as_object() else {
+                unreachable!();
+            };
+            if values.len() > 16 {
+                return Some("Expected a value with a maximum number of properties of 16\n  at [\"response\"][\"values\"]".into());
+            }
+            if values.values().any(|value| value.as_str().is_none()) {
+                return Some("Expected string\n  at [\"response\"][\"values\"]".into());
+            }
+            if values.values().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|text| text.encode_utf16().count() > 16_384)
+            }) {
+                return Some("Expected a value with a maximum length of 16384\n  at [\"response\"][\"values\"]".into());
+            }
+        }
+        _ => {
+            return Some(
+                "Expected \"browser\" | \"terminal\" | \"credentials\"\n  at [\"response\"][\"type\"]".into(),
+            );
+        }
+    }
+    None
+}
+
+fn expand_user_path(path: &str) -> PathBuf {
+    if path == "~" {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn proc_memory() -> (u64, u64) {
+    let mut total = 0;
+    let mut available = 0;
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        for line in text.lines() {
+            let mut fields = line.split_whitespace();
+            let value = fields
+                .nth(1)
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0)
+                * 1024;
+            match line.split(':').next().unwrap_or_default() {
+                "MemTotal" => total = value,
+                "MemAvailable" => available = value,
+                _ => {}
+            }
+        }
+    }
+    (available, total)
+}
+
+fn resource_group() -> Value {
+    json!({"processCount":0,"currentCpuPercent":0,"cpuTimeMs":0,"currentRssBytes":0,"peakRssBytes":0,"ioReadBytes":0,"ioWriteBytes":0,"ioReadBytesPerSecond":0,"ioWriteBytesPerSecond":0,"processStarts":0,"processExits":0})
+}
+
+fn resource_snapshot() -> Value {
+    json!({"readAt":crate::auth_service::iso(crate::auth_service::now()),"sampleIntervalMs":0,"processes":[],"groups":{"backend":resource_group(),"electron":resource_group(),"monitor":resource_group(),"allT3":resource_group()}})
+}
+
+fn resolve_browse_path(params: &Value, partial: &str) -> PathBuf {
+    let path = expand_user_path(partial);
+    if path.is_absolute() {
+        path
+    } else if let Some(cwd) = params["cwd"].as_str() {
+        expand_user_path(cwd).join(path)
+    } else {
+        PathBuf::from(partial)
+    }
+}
+
+#[cfg(test)]
+mod scheduled_task_tests {
+    use super::*;
+
+    #[test]
+    fn interval_schedule_normalizes_task_shape_and_next_run() {
+        let schedule = scheduled_task_schedule(&json!({"type":"interval","everyMs":60_000}), None);
+        assert_eq!(schedule, json!({"type":"interval","everyMs":60_000}));
+        assert_eq!(
+            scheduled_task_next_run(true, &schedule, 1_700_000_000_000),
+            json!("2023-11-14T22:14:20.000Z")
+        );
+        assert_eq!(
+            scheduled_task_next_run(false, &schedule, 1_700_000_000_000),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn webhook_public_projection_redacts_secret_and_token() {
+        let task = json!({
+            "id":"scheduled-task:test",
+            "_webhookToken":"token",
+            "_webhookSecret":"secret",
+            "schedule":{"type":"webhook","signature":{
+                "header":"x-signature","encoding":"hex","prefix":"","secret":"secret"
+            }}
+        });
+        assert_eq!(
+            scheduled_public_task(&task),
+            json!({
+                "id":"scheduled-task:test",
+                "schedule":{"type":"webhook","signature":{
+                    "header":"x-signature","encoding":"hex","prefix":""
+                }}
+            })
+        );
+    }
+
+    #[test]
+    fn webhook_schedule_keeps_signing_credentials_out_of_schedule() {
+        let schedule = scheduled_task_schedule(
+            &json!({
+                "type":"webhook",
+                "signature":{
+                    "header":"X-Hub-Signature-256",
+                    "encoding":"hex",
+                    "prefix":"sha256=",
+                    "secret":"secret",
+                    "secretRef":"secret-ref:1"
+                }
+            }),
+            None,
+        );
+        assert_eq!(
+            schedule,
+            json!({
+                "type":"webhook",
+                "signature":{
+                    "header":"x-hub-signature-256",
+                    "encoding":"hex",
+                    "prefix":"sha256="
+                },
+                "maxDeliveryAgeMinutes":null
+            })
+        );
+    }
 }

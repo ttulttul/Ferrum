@@ -2,7 +2,7 @@
 use crate::{access_http, AppState};
 mod transport;
 use axum::{
-    extract::{OriginalUri, Query, State},
+    extract::{rejection::JsonRejection, OriginalUri, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -410,8 +410,12 @@ async fn csrf(s: &AppState, h: &HeaderMap, v: &Verified) -> Option<Hmac<Sha256>>
 async fn approval(
     State(s): State<Arc<AppState>>,
     h: HeaderMap,
-    Json(req): Json<Authorization>,
+    req: Result<Json<Authorization>, JsonRejection>,
 ) -> Response {
+    let Json(req) = match req {
+        Ok(req) => req,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
     let v = match s.oauth.validate(req, origin(&h)) {
         Ok(v) => v,
         Err(e) => return invalid(e),
@@ -431,8 +435,12 @@ struct Decision {
 async fn decision(
     State(s): State<Arc<AppState>>,
     h: HeaderMap,
-    Json(req): Json<Decision>,
+    req: Result<Json<Decision>, JsonRejection>,
 ) -> Response {
+    let Json(req) = match req {
+        Ok(req) => req,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
     let v = match s.oauth.validate(req.authorization, origin(&h)) {
         Ok(v) => v,
         Err(e) => return invalid(e),

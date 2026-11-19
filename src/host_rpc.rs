@@ -10,9 +10,24 @@ pub async fn dispatch(
 ) -> Option<Result<Value, Value>> {
     let (service, name) = method.split_once('.')?;
     match service {
+        "projects" => match name {
+            "listEntries" => crate::workspace::list_entries(input).await,
+            "listIgnoredFiles" => crate::workspace::list_ignored_files(input).await,
+            "searchEntries" => crate::workspace::search_entries(input).await,
+            "searchContents" => crate::workspace::search_contents(input).await,
+            "readFile" => crate::workspace::read_file(input).await,
+            "writeFile" => crate::workspace::write_file(input).await,
+            _ => None,
+        },
+        "filesystem" => match name {
+            "getMetadata" => crate::workspace::metadata(input).await,
+            "browse" => crate::workspace::browse(input).await,
+            _ => None,
+        },
         "git" if matches!(name, "resolvePullRequest" | "preparePullRequestThread") => {
             Some(crate::local_services::git_workflow::pull_request(state, name, input).await)
         }
+        "review" => Some(crate::local_services::review::call(state, name, input).await),
         "vcs" => state.vcs.call(name, input, &state.data_dir).await,
         "terminal" => state.terminals.call(name, input).await,
         "preview" if name == "stopLocalServer" => {

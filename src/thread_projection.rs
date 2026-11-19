@@ -25,6 +25,39 @@ pub(crate) fn created(command: &Value, at: &str) -> Value {
 }
 
 impl Thread {
+    fn turn_items(&self) -> Vec<Value> {
+        self.messages
+            .iter()
+            .enumerate()
+            .map(|(ordinal, message)| {
+                let at = auth_service::iso((message.created_at as i64).saturating_mul(1000));
+                json!({
+                    "id": message.id,
+                    "threadId": self.id,
+                    "runId": null,
+                    "nodeId": null,
+                    "providerThreadId": null,
+                    "providerTurnId": null,
+                    "nativeItemRef": null,
+                    "parentItemId": null,
+                    "ordinal": ordinal,
+                    "status": "completed",
+                    "title": null,
+                    "startedAt": at,
+                    "completedAt": at,
+                    "updatedAt": at,
+                    "type": "user_message",
+                    "createdBy": "user",
+                    "creationSource": "web",
+                    "messageId": message.id,
+                    "inputIntent": "turn_start",
+                    "text": message.content,
+                    "attachments": []
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn stored_row(&self) -> Value {
         if self.row.is_object() {
             return self.row.clone();
@@ -38,9 +71,49 @@ impl Thread {
     }
     pub(crate) fn projection(&self) -> Value {
         let row = self.stored_row();
-        json!({"thread":ordered(APP_FIELDS,&row),"runs":self.runs,"attempts":[],"nodes":[],"subagents":[],
-            "providerSessions":[],"providerThreads":[],"providerTurns":[],"runtimeRequests":[],
-            "messages":self.messages,"plans":[],"turnItems":[],"checkpointScopes":[],"checkpoints":[],
+        let array = |key: &str| {
+            row.get(key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        };
+        let scope_id = format!("scope:{}", self.id);
+        let checkpoint_scopes = self
+            .checkpoints
+            .first()
+            .map(|checkpoint| {
+                vec![json!({
+                    "id":scope_id,
+                    "threadId":self.id,
+                    "runId":null,
+                    "nodeId":format!("node:{}",self.id),
+                    "parentScopeId":null,
+                    "providerThreadId":null,
+                    "kind":"root_run",
+                    "ordinalWithinParent":0,
+                    "advancesAppRunCount":true,
+                    "cwd":checkpoint.cwd,
+                    "createdAt":auth_service::iso((checkpoint.captured_at as i64).saturating_mul(1000))
+                })]
+            })
+            .unwrap_or_default();
+        let checkpoints = self.checkpoints.iter().map(|checkpoint| json!({
+            "id":format!("checkpoint:{}:{}",self.id,checkpoint.turn_count),
+            "threadId":self.id,
+            "scopeId":scope_id,
+            "runId":null,
+            "nodeId":format!("node:{}",self.id),
+            "parentCheckpointId":null,
+            "ordinalWithinScope":checkpoint.turn_count,
+            "appRunOrdinal":if checkpoint.turn_count == 0 {Value::Null} else {json!(checkpoint.turn_count)},
+            "ref":checkpoint.tree,
+            "status":if checkpoint.ready {"ready"} else {"missing"},
+            "files":[],
+            "capturedAt":auth_service::iso((checkpoint.captured_at as i64).saturating_mul(1000))
+        })).collect::<Vec<_>>();
+        json!({"thread":ordered(APP_FIELDS,&row),"runs":self.runs,"attempts":array("attempts"),"nodes":array("nodes"),"subagents":array("subagents"),
+            "providerSessions":array("providerSessions"),"providerThreads":array("providerThreads"),"providerTurns":array("providerTurns"),"runtimeRequests":array("runtimeRequests"),
+            "messages":self.messages,"plans":[],"turnItems":self.turn_items(),"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
             "contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":[],"updatedAt":row["updatedAt"]})
     }
     pub(crate) fn shell(&self) -> Value {
@@ -168,6 +241,97 @@ pub(crate) fn link_patch(thread: &Thread, cmd: &Value, at: &str) -> Value {
         patch.insert("updatedAt".into(), json!(at));
     }
     Value::Object(patch)
+}
+
+pub(crate) fn watch_patch(thread: &Thread, cmd: &Value, at: &str) -> Value {
+    let mut links = thread.row["pullRequests"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let host = field(cmd, "host");
+    let repository = field(cmd, "repository");
+    let number = cmd["number"].clone();
+    let matches = |link: &Value| {
+        field(link, "host").eq_ignore_ascii_case(host)
+            && field(link, "repository").eq_ignore_ascii_case(repository)
+            && link["number"] == number
+            && link["source"] != "stack-dismissed"
+    };
+    let key_matches = |link: &Value| {
+        field(link, "host").eq_ignore_ascii_case(host)
+            && field(link, "repository").eq_ignore_ascii_case(repository)
+            && link["number"] == number
+    };
+    let mut index = links.iter().position(matches);
+    if cmd["watching"] == true {
+        if index.is_none() {
+            let Some(link) = cmd.get("link").cloned() else {
+                return json!({});
+            };
+            let ended_watch = links
+                .iter()
+                .find(|candidate| {
+                    key_matches(candidate) && candidate["source"] == "stack-dismissed"
+                })
+                .and_then(|candidate| candidate.get("endedWatch").cloned());
+            links.retain(|candidate| !key_matches(candidate));
+            let mut created = json!({
+                "host": host.to_lowercase(),
+                "repository": repository.to_lowercase(),
+                "number": number,
+                "url": link["url"],
+                "source": link["source"],
+                "linkedAt": at,
+                "snapshot": Value::Null,
+                "stack": Value::Null
+            });
+            if let Some(repository_web_url) = link.get("repositoryWebUrl") {
+                created["repositoryWebUrl"] = repository_web_url.clone();
+            }
+            if let Some(ended_watch) = ended_watch {
+                created["endedWatch"] = ended_watch;
+            }
+            links.push(created);
+            index = Some(links.len() - 1);
+        }
+        let index = index.expect("watch link index exists");
+        if links[index].get("watch").is_some() {
+            return json!({});
+        }
+        let previous = links[index].get("endedWatch").cloned();
+        let mut watch = previous.unwrap_or_else(|| {
+            json!({
+                "startedAt": at,
+                "headSha": Value::Null,
+                "failedChecks": [],
+                "passed": false,
+                "passedChecks": [],
+                "remarksThrough": at,
+                "remarkIds": [],
+                "conflicting": false,
+                "wakes": 0
+            })
+        });
+        watch["startedAt"] = json!(at);
+        watch["remarksThrough"] = json!(at);
+        watch["remarkIds"] = json!([]);
+        watch["wakes"] = json!(0);
+        if let Some(object) = links[index].as_object_mut() {
+            object.remove("endedWatch");
+            object.insert("watch".into(), watch);
+        }
+    } else if let Some(index) = index {
+        let Some(link) = links[index].as_object_mut() else {
+            return json!({});
+        };
+        let Some(previous) = link.remove("watch") else {
+            return json!({});
+        };
+        link.insert("endedWatch".into(), previous);
+    } else {
+        return json!({});
+    }
+    json!({"pullRequests":links,"updatedAt":at})
 }
 
 pub(crate) fn linked(store: &Store, input: &Value, issue: bool) -> Value {

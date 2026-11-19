@@ -41,8 +41,38 @@ def main():
         ("orchestration.getThreadProjection",{"threadId":first}),("orchestration.getThreadFamily",{"threadId":first}),
         *[("HTTP",path) for path in ["/api/orchestration/shell",f"/api/orchestration/threads/{first}",
           f"/api/orchestration/threads/{first}/bounded",f"/api/orchestration/threads/{first}/transcript"]]]
+    edge_reads = [
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": 0}),
+        ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": 0}),
+        # Keep the schema boundary covered even when the projection is empty. These inputs must
+        # fail before the handler coerces them to zero, matching Effect Schema's wire defects.
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 1, "toTurnCount": 0}),
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": -1, "toTurnCount": 0}),
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": 1.2}),
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": "1"}),
+        ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": 0, "ignoreWhitespace": None}),
+        ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": -1}),
+        ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": 1.2}),
+        ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": 0, "ignoreWhitespace": None}),
+        ("orchestration.getFullThreadDiff", {"threadId": 1, "toTurnCount": 0}),
+        ("orchestration.getTurnDiff", {"threadId": "thread:missing", "fromTurnCount": 0, "toTurnCount": 1}),
+        ("orchestration.getFullThreadDiff", {"threadId": "thread:missing", "toTurnCount": 1}),
+        ("orchestration.getThreadProjection", {"threadId": "thread:missing"}),
+        ("orchestration.getTurnItem", {"threadId": first, "itemId": "item:missing"}),
+        ("orchestration.getNativeChildWork", {"threadId": first}),
+        ("orchestration.getWorkflowScript", {"threadId": first, "scriptPath": "relative.js"}),
+        ("orchestration.stopWorkflow", {"threadId": first, "subagentId": "subagent:missing"}),
+        ("orchestration.forceStopThread", {"threadId": first}),
+    ]
+    dispatch_edge_reads = [
+        command("prepared-run.release", "prepared-missing", runId="00000000-0000-4000-8000-000000000001"),
+        command("provider-session.detach", "session-missing", providerSessionId="session:missing"),
+        command("queued-run.cancel", "queued-missing", runId="00000000-0000-4000-8000-000000000001"),
+        command("runtime-request.respond", "request-missing", requestId="request:missing"),
+        command("thread.user-input.dismiss", "input-missing", requestId="request:missing"),
+    ]
     sessions = [
-        [create, titles, metadata, *snapshots, issue_threads,pr_threads,link_issue,link_pr,issue_threads,pr_threads,*snapshots, command("thread.mark-unread","no-run"),
+        [create, *dispatch_edge_reads, *edge_reads, titles, metadata, *snapshots, issue_threads,pr_threads,link_issue,link_pr,issue_threads,pr_threads,*snapshots, command("thread.mark-unread","no-run"),
          command("thread.unarchive","active"),archive, archive, command("thread.archive","archived"), command("thread.archive", "archive-1", other),
          command("thread.pin", "pin-archived")],
         [create, archive, titles, *([issue_threads,pr_threads] if args.faketime_lib else []), command("thread.unarchive", "unarchive-1"),
