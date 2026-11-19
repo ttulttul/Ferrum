@@ -1741,8 +1741,15 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Chunk(json!([report]));
     }
     if method == "server.getDatabaseStorage" {
+        let database_bytes = [
+            state.paths.state_dir.join("statev2.sqlite"),
+            state.paths.state_dir.join("state.sqlite"),
+        ]
+        .into_iter()
+        .find_map(|path| std::fs::metadata(path).ok().map(|m| m.len()))
+        .unwrap_or(0);
         return Reply::Chunk(
-            json!([{"databaseBytes":0,"reclaimableBytes":0,"incrementalVacuumEnabled":true,"compactCommand":format!("t3 doctor --base-dir {}",state.paths.base_dir.display()),"canReclaim":true}]),
+            json!([{"databaseBytes":database_bytes,"reclaimableBytes":0,"incrementalVacuumEnabled":true,"compactCommand":format!("t3 doctor --base-dir {}",state.paths.base_dir.display()),"canReclaim":true}]),
         );
     }
     if method == "server.reclaimDatabaseSpace" {
@@ -1788,6 +1795,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                         label: &str,
                         executable: Option<&str>,
                         install: &str,
+                        auth_detail: &str,
                         host: Option<&str>| {
             let version = executable.and_then(probe);
             let detail = match (executable, version.is_some()) {
@@ -1796,20 +1804,26 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                     json!({"_tag":"Some","value":format!("VCS process failed to spawn in source-control.discovery.probe: {executable} ({})",cwd.display())})
                 }
             };
-            let mut row = json!({"kind":kind,"label":label,"status":if executable.is_none() || version.is_some(){"available"}else{"missing"},"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":{"status":if kind == "github" {"unauthenticated"} else {"unknown"},"account":{"_tag":"None"},"detail":{"_tag":"Some","value":install}}});
+            let mut row = json!({"kind":kind,"label":label,"status":if executable.is_none() || version.is_some(){"available"}else{"missing"},"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":{"status":if kind == "github" {"unauthenticated"} else {"unknown"},"account":{"_tag":"None"},"detail":{"_tag":"Some","value":auth_detail}}});
+            if let Some(executable) = executable {
+                row["executable"] = json!(executable);
+            }
+            if kind == "github" {
+                row["auth"]["accounts"] = json!([]);
+            }
             if let Some(host) = host {
                 row["auth"]["host"] = json!({"_tag":"Some","value":host});
             }
             row
         };
         let providers = vec![
-            provider("github", "GitHub", Some("gh"), "Run `gh auth login` to authenticate GitHub CLI with an active account.", None),
-            provider("cursor-origin", "Cursor Origin", Some("origin"), "Install the Origin CLI with `curl -fsSL https://downloads.cursor.com/origin/install.sh | sh`, then run `origin auth login`.", None),
-            provider("gitlab", "GitLab", Some("glab"), "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager.", None),
-            provider("gitcafe", "GitCafe", Some("cafe"), "Install the GitCafe CLI with `bun install -g @gitcafe/cli`, then run `cafe auth login --host https://git.cafe/api`, save a token in Settings, or set CAFE_TOKEN on the server.", None),
-            provider("forgejo", "Forgejo / Gitea", Some("tea"), "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.", None),
-            provider("bitbucket", "Bitbucket", None, "Add a Bitbucket token in Settings → Source control & issues, or set the T3CODE_BITBUCKET_* environment variables on the server.", Some("bitbucket.org")),
-            provider("azure-devops", "Azure DevOps", Some("az"), "Install the Azure command-line tools (`az`), then enable Azure DevOps support with `az extension add --name azure-devops`.", None),
+            provider("github", "GitHub", Some("gh"), "Install the GitHub command-line tool (`gh`) via https://cli.github.com/ or your package manager (for example `brew install gh`).", "Run `gh auth login` to authenticate GitHub CLI with an active account.", None),
+            provider("cursor-origin", "Cursor Origin", Some("origin"), "Install the Origin CLI with `curl -fsSL https://downloads.cursor.com/origin/install.sh | sh`, then run `origin auth login`.", "Install the Origin CLI with `curl -fsSL https://downloads.cursor.com/origin/install.sh | sh`, then run `origin auth login`.", None),
+            provider("gitlab", "GitLab", Some("glab"), "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager.", "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager.", None),
+            provider("gitcafe", "GitCafe", Some("cafe"), "Install the GitCafe CLI with `bun install -g @gitcafe/cli`, then run `cafe auth login --host https://git.cafe/api`, save a token in Settings, or set CAFE_TOKEN on the server.", "Install the GitCafe CLI with `bun install -g @gitcafe/cli`, then run `cafe auth login --host https://git.cafe/api`, save a token in Settings, or set CAFE_TOKEN on the server.", None),
+            provider("forgejo", "Forgejo / Gitea", Some("tea"), "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.", "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.", None),
+            provider("bitbucket", "Bitbucket", None, "Add a Bitbucket token in Settings → Source control & issues.", "Add a Bitbucket token in Settings → Source control & issues, or set the T3CODE_BITBUCKET_* environment variables on the server.", Some("bitbucket.org")),
+            provider("azure-devops", "Azure DevOps", Some("az"), "Install the Azure command-line tools (`az`), then enable Azure DevOps support with `az extension add --name azure-devops`.", "Install the Azure command-line tools (`az`), then enable Azure DevOps support with `az extension add --name azure-devops`.", None),
         ];
         let _ = git;
         return Reply::Success(
@@ -1818,8 +1832,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     }
     if method == "server.getTraceDiagnostics" {
         let path = state.paths.logs.join("server.trace.ndjson");
+        let mut scanned = Vec::new();
+        for suffix in (1..=10).rev() {
+            scanned.push(PathBuf::from(format!("{}.{}", path.display(), suffix)));
+        }
+        scanned.push(path.clone());
         return Reply::Success(
-            json!({"traceFilePath":path,"scannedFilePaths":[],"spans":[],"errors":[]}),
+            json!({"traceFilePath":path,"scannedFilePaths":scanned,"readAt":crate::auth_service::iso(crate::auth_service::now()),"recordCount":0,"parseErrorCount":0,"firstSpanAt":{"_tag":"None"},"lastSpanAt":{"_tag":"None"},"failureCount":0,"interruptionCount":0,"slowSpanThresholdMs":1000,"slowSpanCount":0,"logLevelCounts":{},"topSpansByCount":[],"slowestSpans":[],"commonFailures":[],"latestFailures":[],"latestWarningAndErrorLogs":[],"partialFailure":{"_tag":"None"},"error":{"_tag":"None"}}),
         );
     }
     if method == "server.getProcessDiagnostics" {
