@@ -324,6 +324,8 @@ pub struct AppState {
     pub devices: local_services::DeviceService,
     project_mutation_lock: Mutex<()>,
     next_event_id: Mutex<u64>,
+    pub(crate) storage_cleanup_report: Mutex<Option<serde_json::Value>>,
+    pub(crate) pull_request_refresh: Mutex<u64>,
 }
 impl AppState {
     pub async fn new(
@@ -410,6 +412,8 @@ impl AppState {
             devices: local_services::DeviceService::new(settings.clone(), &dir)?,
             project_mutation_lock: Mutex::new(()),
             next_event_id: Mutex::new(next_event_id),
+            storage_cleanup_report: Mutex::new(None),
+            pull_request_refresh: Mutex::new(0),
         }))
     }
     async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {

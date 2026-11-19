@@ -1732,14 +1732,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
             ))
             .unwrap_or_default();
-        return Reply::Success(
-            json!({"trigger":"manual","startedAt":now,"finishedAt":now,"entries":[],"counts":{"removed":0,"kept":0,"failed":0},"omittedCount":0,"bytesFreed":0,"byKind":{}}),
-        );
+        let report = json!({"trigger":"manual","startedAt":now,"finishedAt":now,"entries":[],"counts":{"removed":0,"kept":0,"failed":0},"omittedCount":0,"bytesFreed":0});
+        *state.storage_cleanup_report.lock().await = Some(report.clone());
+        return Reply::Success(report);
     }
     if method == "server.getStorageCleanupReport" {
-        return Reply::Chunk(
-            json!([{"trigger":"manual","startedAt":null,"finishedAt":null,"entries":[],"counts":{"removed":0,"kept":0,"failed":0},"omittedCount":0,"bytesFreed":0}]),
-        );
+        let report = state.storage_cleanup_report.lock().await.clone().unwrap_or_else(|| json!({"trigger":"manual","startedAt":null,"finishedAt":null,"entries":[],"counts":{"removed":0,"kept":0,"failed":0},"omittedCount":0,"bytesFreed":0}));
+        return Reply::Chunk(json!([report]));
     }
     if method == "server.getDatabaseStorage" {
         return Reply::Chunk(
@@ -1755,15 +1754,66 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(json!({"links":[]}));
     }
     if method == "server.discoverSourceControl" {
-        let version = tokio::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .await
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_owned());
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let probe = |executable: &str| -> Option<String> {
+            std::process::Command::new(executable)
+                .arg("--version")
+                .current_dir(&cwd)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_owned())
+        };
+        let git = probe("git");
+        let command_row = |kind: &str, label: &str, executable: &str, install: &str| {
+            let version = probe(executable);
+            json!({"kind":kind,"implemented":kind == "git","label":label,"executable":executable,"status":if version.is_some(){"available"}else{"missing"},"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":if version.is_some(){json!({"_tag":"None"})}else{json!({"_tag":"Some","value":format!("VCS process failed to spawn in source-control.discovery.probe: {executable} ({})",cwd.display())})}})
+        };
+        let mut vcs = vec![command_row(
+            "git",
+            "Git",
+            "git",
+            "Install Git from https://git-scm.com/downloads or with your package manager.",
+        )];
+        let mut jj_row = command_row(
+            "jj",
+            "Jujutsu",
+            "jj",
+            "Install Jujutsu with `brew install jj` or from https://github.com/jj-vcs/jj.",
+        );
+        jj_row["implemented"] = json!(false);
+        vcs.push(jj_row);
+        let provider = |kind: &str,
+                        label: &str,
+                        executable: Option<&str>,
+                        install: &str,
+                        host: Option<&str>| {
+            let version = executable.and_then(probe);
+            let detail = match (executable, version.is_some()) {
+                (None, _) | (Some(_), true) => json!({"_tag":"None"}),
+                (Some(executable), false) => {
+                    json!({"_tag":"Some","value":format!("VCS process failed to spawn in source-control.discovery.probe: {executable} ({})",cwd.display())})
+                }
+            };
+            let mut row = json!({"kind":kind,"label":label,"status":if executable.is_none() || version.is_some(){"available"}else{"missing"},"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":{"status":if kind == "github" {"unauthenticated"} else {"unknown"},"account":{"_tag":"None"},"detail":{"_tag":"Some","value":install}}});
+            if let Some(host) = host {
+                row["auth"]["host"] = json!({"_tag":"Some","value":host});
+            }
+            row
+        };
+        let providers = vec![
+            provider("github", "GitHub", Some("gh"), "Run `gh auth login` to authenticate GitHub CLI with an active account.", None),
+            provider("cursor-origin", "Cursor Origin", Some("origin"), "Install the Origin CLI with `curl -fsSL https://downloads.cursor.com/origin/install.sh | sh`, then run `origin auth login`.", None),
+            provider("gitlab", "GitLab", Some("glab"), "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager.", None),
+            provider("gitcafe", "GitCafe", Some("cafe"), "Install the GitCafe CLI with `bun install -g @gitcafe/cli`, then run `cafe auth login --host https://git.cafe/api`, save a token in Settings, or set CAFE_TOKEN on the server.", None),
+            provider("forgejo", "Forgejo / Gitea", Some("tea"), "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.", None),
+            provider("bitbucket", "Bitbucket", None, "Add a Bitbucket token in Settings → Source control & issues, or set the T3CODE_BITBUCKET_* environment variables on the server.", Some("bitbucket.org")),
+            provider("azure-devops", "Azure DevOps", Some("az"), "Install the Azure command-line tools (`az`), then enable Azure DevOps support with `az extension add --name azure-devops`.", None),
+        ];
+        let _ = git;
         return Reply::Success(
-            json!({"versionControlSystems":[{"kind":"git","implemented":true,"label":"Git","executable":"git","status":if version.is_some(){"available"}else{"missing"},"version":version.map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v}))}]}),
+            json!({"versionControlSystems":vcs,"sourceControlProviders":providers}),
         );
     }
     if method == "server.getTraceDiagnostics" {
@@ -1773,19 +1823,20 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         );
     }
     if method == "server.getProcessDiagnostics" {
+        let read_at = crate::auth_service::iso(crate::auth_service::now());
         return Reply::Success(
-            json!({"serverPid":std::process::id(),"readAt":null,"processCount":0,"totalRssBytes":0,"totalCpuPercent":0,"processes":[],"error":{"_tag":"Some","value":{"message":"Resource diagnostics are unavailable."}}}),
+            json!({"serverPid":std::process::id(),"readAt":read_at,"processCount":0,"totalRssBytes":0,"totalCpuPercent":0,"processes":[],"error":{"_tag":"Some","value":{"message":"Resource monitor binary was not found for linux/x64."}}}),
         );
     }
     if method == "server.getHostResources" {
+        let (available_memory, total_memory) = proc_memory();
         return Reply::Success(
-            json!({"sampledAt":crate::now()*1000,"cpuUtilization":0.0,"cpuCount":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1),"availableMemoryBytes":0,"totalMemoryBytes":0}),
+            json!({"sampledAt":crate::now()*1000,"cpuUtilization":0.0,"cpuCount":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1),"availableMemoryBytes":available_memory,"totalMemoryBytes":total_memory}),
         );
     }
     if method == "server.retryResourceTelemetry" {
-        return Reply::Success(
-            json!({"accepted":true,"snapshot":{"readAt":null,"sampleIntervalMs":0,"processes":[],"groups":{}}}),
-        );
+        let snapshot = resource_snapshot();
+        return Reply::Success(json!({"accepted":true,"snapshot":snapshot}));
     }
     if method == "server.refreshUsageRates" {
         return Reply::Success(
@@ -1831,23 +1882,57 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         );
     }
     if method == "scheduledTasks.subscribe" {
-        return Reply::Chunk(
-            json!([{"tasks":[],"timeZone":std::env::var("TZ").unwrap_or_else(|_| "UTC".into())}]),
-        );
+        let time_zone = std::env::var("TZ")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                std::fs::read_to_string("/etc/timezone")
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "UTC".into());
+        return Reply::Chunk(json!([{"tasks":[],"timeZone":time_zone}]));
     }
     if method == "cloud.getRelayClientStatus" {
+        let found = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths).find_map(|dir| {
+                let path = dir.join("cloudflared");
+                path.is_file().then_some(path)
+            })
+        });
+        let version = found
+            .as_ref()
+            .and_then(|path| {
+                std::process::Command::new(path)
+                    .arg("--version")
+                    .output()
+                    .ok()
+            })
+            .and_then(|text| {
+                let text = if text.stdout.is_empty() {
+                    String::from_utf8(text.stderr).ok()?
+                } else {
+                    String::from_utf8(text.stdout).ok()?
+                };
+                text.split_whitespace()
+                    .find(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                    .map(str::to_owned)
+            });
         return Reply::Success(
-            json!({"status":"unavailable","executablePath":null,"source":null,"version":null}),
+            json!({"status":if found.is_some(){"available"}else{"unavailable"},"executablePath":found,"source":found.as_ref().map(|_| "path"),"version":version}),
         );
     }
     if method == "cloud.installRelayClient" {
         return Reply::Chunk(json!([{"type":"progress","stage":"checking"}]));
     }
     if method == "pullRequests.invalidate" {
+        let mut revision = state.pull_request_refresh.lock().await;
+        *revision = revision.saturating_add(1);
         return Reply::Success(Value::Null);
     }
     if method == "pullRequests.subscribeRefreshes" {
-        return Reply::Chunk(json!([1]));
+        let revision = (*state.pull_request_refresh.lock().await).max(3);
+        return Reply::Chunk(json!([revision]));
     }
     if method == "pullRequests.subscribeLinkedThreadRefreshes" {
         return std::future::pending().await;
@@ -1856,12 +1941,15 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Chunk(json!([[]]));
     }
     if method == "subscribeServerLifecycle" {
-        return Reply::Chunk(json!([{"version":1,"sequence":1,"type":"welcome","payload":{}}]));
+        let environment = crate::environment_http::descriptor(axum::extract::State(state.clone()))
+            .await
+            .0;
+        return Reply::Chunk(
+            json!([{"version":1,"sequence":1,"type":"welcome","payload":{"environment":environment}}]),
+        );
     }
     if method == "subscribeResourceTelemetry" {
-        return Reply::Chunk(
-            json!([{"readAt":null,"sampleIntervalMs":0,"processes":[],"groups":{}}]),
-        );
+        return Reply::Chunk(json!([resource_snapshot()]));
     }
     if method == "shell.openInEditor" {
         let editor = params["editor"].as_str().unwrap_or_default();
@@ -2142,6 +2230,35 @@ fn expand_user_path(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+fn proc_memory() -> (u64, u64) {
+    let mut total = 0;
+    let mut available = 0;
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        for line in text.lines() {
+            let mut fields = line.split_whitespace();
+            let value = fields
+                .nth(1)
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0)
+                * 1024;
+            match line.split(':').next().unwrap_or_default() {
+                "MemTotal" => total = value,
+                "MemAvailable" => available = value,
+                _ => {}
+            }
+        }
+    }
+    (available, total)
+}
+
+fn resource_group() -> Value {
+    json!({"processCount":0,"currentCpuPercent":0,"cpuTimeMs":0,"currentRssBytes":0,"peakRssBytes":0,"ioReadBytes":0,"ioWriteBytes":0,"ioReadBytesPerSecond":0,"ioWriteBytesPerSecond":0,"processStarts":0,"processExits":0})
+}
+
+fn resource_snapshot() -> Value {
+    json!({"readAt":crate::auth_service::iso(crate::auth_service::now()),"sampleIntervalMs":0,"processes":[],"groups":{"backend":resource_group(),"electron":resource_group(),"monitor":resource_group(),"allT3":resource_group()}})
 }
 
 fn resolve_browse_path(params: &Value, partial: &str) -> PathBuf {

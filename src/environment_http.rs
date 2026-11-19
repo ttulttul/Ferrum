@@ -43,8 +43,8 @@ pub(super) async fn descriptor(State(s): State<Arc<AppState>>) -> Json<Value> {
         _ => "other",
     };
     Json(
-        json!({"environmentId":s.environment_id,"label":label,"platform":{"os":os,"arch":arch},"serverVersion":"0.1.10","orchestrationProtocolVersion":2,
-        "capabilities":{"repositoryIdentity":false,"connectionProbe":true,"pullRequests":true,"issues":true,"vcsBranchStatus":true,"cloudVoiceTranscription":true}}),
+        json!({"environmentId":s.environment_id,"label":label,"platform":{"os":os,"arch":arch,"machine":"desktop"},"serverVersion":"0.1.10","orchestrationProtocolVersion":2,"databaseMigration":98,
+        "capabilities":{"repositoryIdentity":true,"connectionProbe":true,"accessTokenRenewal":true,"attachmentUploads":true,"questionAttachments":true,"fileAttachments":{"maxUploadBytes":52428800},"pullRequests":true,"pullRequestChecks":true,"issues":true,"sideChats":true,"vcsBranchStatus":true,"inlineMessageContext":true,"requiredWorktreeBootstrap":true,"threadSettlement":true,"threadAutoSettlement":true,"storageCleanup":true,"storageCleanupRun":true,"databaseStorage":true,"otlpEndpointCheck":true,"secretSourceCheck":true,"projectWorktreeCleanup":true,"settledWorktreeCleanup":true,"worktreesDirectory":true,"threadAutoSettlementScope":true,"threadRestartContinuation":true,"projectSettingsOverrides":true,"linkedThreadRefreshes":true}}),
     )
 }
 pub(super) fn no_assets() -> Response {
