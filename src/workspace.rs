@@ -47,10 +47,33 @@ fn entry(root: &Path, path: &Path, ignored: bool) -> Option<Value> {
     Some(value)
 }
 
+fn is_ignored(root: &Path, path: &Path) -> bool {
+    let Some(relative) = path.strip_prefix(root).ok() else {
+        return false;
+    };
+    std::process::Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or_default(),
+            "check-ignore",
+            "--quiet",
+            "--",
+            &relative.to_string_lossy(),
+        ])
+        .status()
+        .ok()
+        .is_some_and(|status| status.success())
+}
+
 fn sorted_entries(root: &Path, directory: &Path) -> std::io::Result<Vec<Value>> {
     let mut values = std::fs::read_dir(directory)?
         .filter_map(Result::ok)
-        .filter_map(|item| entry(root, &item.path(), false))
+        .filter_map(|item| {
+            let path = item.path();
+            (path.file_name().and_then(|n| n.to_str()) != Some(".git"))
+                .then(|| entry(root, &path, is_ignored(root, &path)))
+                .flatten()
+        })
         .collect::<Vec<_>>();
     values.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     Ok(values)
@@ -83,32 +106,37 @@ pub async fn list_ignored_files(input: &Value) -> Option<Reply> {
     }
     let result = (|| {
         let root = root(input)?;
-        let mut entries = Vec::new();
-        walk(&root, &root, &mut entries, 20_000);
-        let files = entries
-            .into_iter()
-            .filter(|v| v["kind"] == "file")
-            .filter_map(|v| {
-                let relative = v["path"].as_str()?.to_owned();
-                let ignored = std::process::Command::new("git")
-                    .args([
-                        "-C",
-                        root.to_str()?,
-                        "check-ignore",
-                        "--quiet",
-                        "--",
-                        &relative,
-                    ])
-                    .status()
-                    .ok()
-                    .is_some_and(|status| status.success());
-                if !ignored {
-                    return None;
+        let mut files = Vec::new();
+        fn visit(root: &Path, directory: &Path, files: &mut Vec<Value>) {
+            let Ok(items) = std::fs::read_dir(directory) else {
+                return;
+            };
+            let mut paths = items
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths {
+                if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
+                    continue;
                 }
-                let byte_length = std::fs::metadata(root.join(&relative)).ok()?.len();
-                Some(json!({"path": relative, "byteLength": byte_length}))
-            })
-            .collect::<Vec<_>>();
+                let directory = path.is_dir();
+                let ignored = is_ignored(root, &path);
+                if directory && ignored {
+                    continue;
+                }
+                if directory {
+                    visit(root, &path, files);
+                } else if ignored {
+                    if let (Some(relative), Ok(metadata)) =
+                        (path.strip_prefix(root).ok(), std::fs::metadata(&path))
+                    {
+                        files.push(json!({"path": relative.to_string_lossy().replace('\\', "/"), "byteLength": metadata.len()}));
+                    }
+                }
+            }
+        }
+        visit(&root, &root, &mut files);
         Ok(json!({"files": files, "truncated": false}))
     })();
     Some(result)
@@ -129,6 +157,9 @@ fn walk(root: &Path, directory: &Path, output: &mut Vec<Value>, limit: usize) {
     for path in paths {
         if output.len() >= limit {
             break;
+        }
+        if path.file_name().and_then(|n| n.to_str()) == Some(".git") || is_ignored(root, &path) {
+            continue;
         }
         let Some(value) = entry(root, &path, false) else {
             continue;
@@ -178,11 +209,22 @@ pub async fn search_contents(input: &Value) -> Option<Reply> {
         let query = input["query"].as_str().unwrap_or_default();
         let limit = input["limit"].as_u64().unwrap_or(100).clamp(1, 10_000) as usize;
         let case_sensitive = input["caseSensitive"].as_bool().unwrap_or(false);
+        let whole_word = input["wholeWord"].as_bool().unwrap_or(false);
+        let use_regex = input["useRegex"].as_bool().unwrap_or(false);
         let needle = if case_sensitive {
             query.to_owned()
         } else {
             query.to_lowercase()
         };
+        let expression = if use_regex {
+            regex::RegexBuilder::new(query)
+                .case_insensitive(!case_sensitive)
+                .build()
+                .ok()
+        } else {
+            None
+        };
+        let regex_fallback_error = use_regex && expression.is_none();
         let mut files = Vec::new();
         walk(&root, &root, &mut files, 10_000);
         let mut matches = Vec::new();
@@ -200,17 +242,51 @@ pub async fn search_contents(input: &Value) -> Option<Reply> {
                 } else {
                     line.to_lowercase()
                 };
-                if let Some(start) = haystack.find(&needle) {
-                    matches.push(json!({"path":file["path"],"lineNumber":index + 1,"lineContent":line,"matchRanges":[{"start":start,"end":start + needle.len()}]}));
+                let ranges = if let Some(expression) = &expression {
+                    expression
+                        .find_iter(line)
+                        .filter(|m| !whole_word || whole_word_match(line, m.start(), m.end()))
+                        .map(|m| json!({"start": m.start(), "end": m.end()}))
+                        .collect::<Vec<_>>()
+                } else {
+                    let mut ranges = Vec::new();
+                    let mut offset = 0;
+                    while !needle.is_empty() && offset <= haystack.len() {
+                        let Some(found) = haystack[offset..].find(&needle) else {
+                            break;
+                        };
+                        let start = offset + found;
+                        let end = start + needle.len();
+                        if !whole_word || whole_word_match(&haystack, start, end) {
+                            ranges.push(json!({"start": start, "end": end}));
+                        }
+                        offset = end.max(start + 1);
+                    }
+                    ranges
+                };
+                if !ranges.is_empty() {
+                    matches.push(json!({"path":file["path"],"lineNumber":index + 1,"lineContent":line,"matchRanges":ranges}));
                     if matches.len() >= limit {
                         break;
                     }
                 }
             }
         }
-        Ok(json!({"matches": matches, "truncated": matches.len() == limit}))
+        let mut result = json!({"matches": matches, "truncated": matches.len() == limit});
+        if regex_fallback_error {
+            result["regexFallbackError"] = json!("Invalid regular expression");
+        }
+        Ok(result)
     })();
     Some(result)
+}
+
+fn whole_word_match(text: &str, start: usize, end: usize) -> bool {
+    fn word(byte: Option<u8>) -> bool {
+        byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    }
+    !word(text.as_bytes().get(start.wrapping_sub(1)).copied())
+        && !word(text.as_bytes().get(end).copied())
 }
 
 pub async fn read_file(input: &Value) -> Option<Reply> {
