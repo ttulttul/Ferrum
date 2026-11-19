@@ -2945,9 +2945,32 @@ async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
     let schedule = scheduled_task_schedule(&params["schedule"], existing.as_ref());
     let webhook_secret =
         if schedule["type"] == "webhook" && params["schedule"]["signature"].is_object() {
-            params["schedule"]["signature"]["secret"]
+            let signature = &params["schedule"]["signature"];
+            let from_ref = if signature["secret"].is_null() {
+                if let Some(reference) = signature.get("secretRef") {
+                    if let Ok(settings) = state.settings.internal() {
+                        state
+                            .settings
+                            .resolver
+                            .resolve(
+                                &settings,
+                                reference,
+                                crate::settings::secrets::ReadMode::Check,
+                            )
+                            .await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            signature["secret"]
                 .as_str()
                 .map(str::to_owned)
+                .or(from_ref)
                 .or_else(|| {
                     existing
                         .as_ref()
