@@ -1,0 +1,620 @@
+#!/usr/bin/env python3
+"""Safely switch a running standalone T3 server between TypeScript and Rust."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from typing import NoReturn
+from urllib.request import urlopen
+
+
+ROOT = Path(__file__).resolve().parent
+STATE_ROOT = Path(
+    os.environ.get(
+        "T3CODE_RUST_SWITCH_STATE",
+        os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")),
+    )
+) / "t3code-rust-switch"
+STATE_PATH = STATE_ROOT / "state.json"
+ARGV_PATH = STATE_ROOT / "original.argv"
+ENV_PATH = STATE_ROOT / "original.env"
+LOG_PATH = STATE_ROOT / "rust-server.log"
+
+
+class SwitchError(RuntimeError):
+    pass
+
+
+def fail(message: str) -> "NoReturn":
+    raise SwitchError(message)
+
+
+def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def atomic_json(path: Path, value: object) -> None:
+    atomic_write(path, (json.dumps(value, separators=(",", ":")) + "\n").encode())
+
+
+def read_json(path: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text())
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def command_output(command: list[str]) -> str | None:
+    try:
+        return subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def linux_process(pid: int) -> dict[str, object] | None:
+    proc = Path("/proc") / str(pid)
+    try:
+        raw_argv = (proc / "cmdline").read_bytes()
+        argv = [part.decode(errors="replace") for part in raw_argv.split(b"\0") if part]
+        cwd = os.readlink(proc / "cwd")
+        raw_env = (proc / "environ").read_bytes()
+        environment = {}
+        for item in raw_env.split(b"\0"):
+            if b"=" in item:
+                key, value = item.split(b"=", 1)
+                environment[key.decode(errors="replace")] = value.decode(errors="replace")
+        stat = (proc / "stat").read_text()
+        after_name = stat.rsplit(")", 1)[-1].split()
+        parent = int(after_name[1]) if len(after_name) > 1 else 0
+    except (FileNotFoundError, PermissionError, OSError, ValueError):
+        return None
+    return {"argv": argv, "cwd": cwd, "environment": environment, "parent": parent}
+
+
+def portable_process(pid: int) -> dict[str, object] | None:
+    if sys.platform.startswith("linux"):
+        return linux_process(pid)
+    if sys.platform != "darwin":
+        return None
+    command = command_output(["ps", "-ww", "-p", str(pid), "-o", "command="])
+    parent = command_output(["ps", "-p", str(pid), "-o", "ppid="])
+    cwd_output = command_output(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
+    if not command or not parent:
+        return None
+    cwd = next((line[1:] for line in (cwd_output or "").splitlines() if line.startswith("n")), None)
+    if not cwd:
+        return None
+    return {
+        "argv": command.split(),
+        "cwd": cwd,
+        "environment": dict(os.environ),
+        "parent": int(parent),
+    }
+
+
+def process_description(pid: int) -> str:
+    info = portable_process(pid)
+    if info is None:
+        return f"PID {pid} (details unavailable)"
+    return f"PID {pid}: {' '.join(info['argv'])}"
+
+
+def runtime_roots(extra: list[Path] | None = None) -> list[Path]:
+    roots: list[Path] = []
+
+    def add(path: Path) -> None:
+        path = path.expanduser()
+        if path not in roots:
+            roots.append(path)
+
+    explicit_home = os.environ.get("T3CODE_HOME")
+    if explicit_home:
+        add(Path(explicit_home))
+        return roots
+    current = Path.cwd()
+    for parent in [current, *current.parents[:4]]:
+        add(parent / ".t3")
+    add(Path.home() / ".t3")
+    if sys.platform == "darwin":
+        add(Path.home() / "Library" / "Application Support" / "t3")
+    add(Path.home() / ".local" / "share" / "t3")
+    for path in extra or []:
+        add(path)
+    return roots
+
+
+def process_roots() -> list[Path]:
+    roots: list[Path] = []
+    if not sys.platform.startswith("linux"):
+        return roots
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        info = linux_process(int(entry.name))
+        if info is None or not is_typescript_server(info["argv"]):
+            continue
+        environment = info["environment"]
+        if environment.get("T3CODE_HOME"):
+            roots.append(Path(environment["T3CODE_HOME"]))
+        argv = info["argv"]
+        for index, argument in enumerate(argv[:-1]):
+            if argument in {"--base-dir", "--baseDir"}:
+                roots.append(Path(argv[index + 1]))
+    return roots
+
+
+def runtime_paths() -> list[Path]:
+    paths: list[Path] = []
+    for root in runtime_roots(process_roots()):
+        for relative in ("userdata/server-runtime.json", "dev/server-runtime.json"):
+            path = root / relative
+            if path not in paths:
+                paths.append(path)
+
+    # A custom --base-dir is common for command-line servers. Search only the
+    # user's home and prune large dependency and cache trees.
+    home = Path.home()
+    if home.exists():
+        ignored = {".cache", ".cargo", ".npm", "node_modules", ".rustup"}
+        for directory, names, files in os.walk(home):
+            current = Path(directory)
+            try:
+                depth = len(current.relative_to(home).parts)
+            except ValueError:
+                continue
+            if depth >= 6:
+                names[:] = []
+            else:
+                names[:] = [name for name in names if name not in ignored]
+            if "server-runtime.json" in files and current.name in {"userdata", "dev"}:
+                path = current / "server-runtime.json"
+                if path not in paths:
+                    paths.append(path)
+    return paths
+
+
+def is_typescript_server(argv: list[str]) -> bool:
+    text = " ".join(argv).lower()
+    if "t3code-server" in text:
+        return False
+    markers = (
+        "apps/server/src/bin.ts",
+        "apps/server/dist/bin.mjs",
+        "server/src/bin.ts",
+        "server/dist/bin.mjs",
+        " t3 serve",
+        " t3 up",
+        "/bin/t3",
+        "\\bin\\t3",
+    )
+    return any(marker in text for marker in markers) or Path(argv[0]).name.lower() in {"t3", "t3.exe"}
+
+
+def managed_ancestor(pid: int) -> str | None:
+    seen: set[int] = set()
+    current = pid
+    while current and current not in seen:
+        seen.add(current)
+        info = portable_process(current)
+        if info is None:
+            break
+        if current != pid:
+            text = " ".join(info["argv"]).lower()
+            if any(marker in text for marker in ("electron", "t3 code", "t3code.app", "desktop")):
+                return process_description(current)
+        current = int(info["parent"])
+    return None
+
+
+def origin(runtime: dict[str, object]) -> tuple[str, int]:
+    raw_origin = runtime.get("origin")
+    port = runtime.get("port")
+    if not isinstance(raw_origin, str) or not isinstance(port, int) or not 1 <= port <= 65535:
+        fail("the live runtime record has no valid origin or port")
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(raw_origin)
+    host = runtime.get("host") if isinstance(runtime.get("host"), str) else parsed.hostname
+    host = host or "127.0.0.1"
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    return host, port
+
+
+def health(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1.5) as connection:
+            request = f"GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode()
+            connection.sendall(request)
+            response = connection.recv(128)
+        # A T3 server can legitimately return 503 from /health before its
+        # static/dev client is configured. Any complete HTTP status line proves
+        # that the intended process owns the listener and is responding.
+        return response.startswith(b"HTTP/") and b" " in response.split(b"\r\n", 1)[0]
+    except (OSError, ValueError):
+        return False
+
+
+def discover() -> dict[str, object]:
+    candidates: list[dict[str, object]] = []
+    for path in runtime_paths():
+        runtime = read_json(path)
+        if runtime is None:
+            continue
+        pid = runtime.get("pid")
+        if not isinstance(pid, int) or not process_alive(pid):
+            continue
+        info = portable_process(pid)
+        if info is None or not is_typescript_server(info["argv"]):
+            continue
+        try:
+            host, port = origin(runtime)
+        except SwitchError:
+            continue
+        if not health(host, port):
+            continue
+        candidate = {"runtime_path": str(path), "runtime": runtime, "pid": pid, "info": info, "host": host, "port": port}
+        candidates.append(candidate)
+
+    if len(candidates) > 1:
+        details = "; ".join(process_description(int(item["pid"])) for item in candidates)
+        fail(f"more than one live standalone T3 server was found. Stop one first. Found {details}")
+    if not candidates:
+        fail(
+            "no live standalone TypeScript T3 server was found. The server must be running and publish "
+            "a valid server-runtime.json. Set T3CODE_HOME before retrying if it uses a custom T3 home."
+        )
+    candidate = candidates[0]
+    runtime = candidate["runtime"]
+    if runtime.get("serviceManaged") is True:
+        fail(
+            "the discovered T3 server is managed by the background service. Stop or uninstall that service "
+            "first so it cannot restart the TypeScript server during the switch"
+        )
+    if candidate["info"]["environment"].get("T3CODE_MODE") == "desktop":
+        fail("the discovered server is running in desktop mode and may be restarted by T3 Code. Quit the desktop app first")
+    ancestor = managed_ancestor(int(candidate["pid"]))
+    if ancestor:
+        fail(f"the discovered server belongs to a managed desktop process ({ancestor}). Quit T3 Code first")
+    return candidate
+
+
+def wait_for_exit(pid: int, timeout: float = 30.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not process_alive(pid):
+            return True
+        time.sleep(0.25)
+    return not process_alive(pid)
+
+
+def stop(pid: int, label: str) -> None:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        fail(f"cannot stop the {label} process {pid}. Run this command as the same user that started T3")
+    if not wait_for_exit(pid):
+        fail(f"the {label} process {pid} did not stop within 30 seconds. It was left running")
+
+
+def read_bytes(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        fail(f"cannot read {path}: {error}")
+
+
+def save_original(candidate: dict[str, object]) -> None:
+    info = candidate["info"]
+    argv = info["argv"]
+    environment = info["environment"]
+    if not argv or not isinstance(info["cwd"], str):
+        fail("the running server's command or working directory could not be captured safely")
+    if not environment:
+        fail("the running server environment could not be captured safely")
+    runtime_path = Path(candidate["runtime_path"])
+    state = {
+        "version": 1,
+        "mode": "switching",
+        "runtimePath": str(runtime_path),
+        "baseDir": str(runtime_path.parent.parent),
+        "host": candidate["host"],
+        "port": candidate["port"],
+        "originalPid": candidate["pid"],
+        "originalCwd": info["cwd"],
+        "rustPid": None,
+        "rustStartedAt": None,
+    }
+    atomic_write(ARGV_PATH, b"\0".join(str(item).encode() for item in argv) + b"\0")
+    atomic_write(ENV_PATH, b"\0".join(f"{key}={value}".encode() for key, value in environment.items()) + b"\0")
+    try:
+        atomic_write(STATE_PATH, (json.dumps(state, separators=(",", ":")) + "\n").encode())
+    except BaseException:
+        ARGV_PATH.unlink(missing_ok=True)
+        ENV_PATH.unlink(missing_ok=True)
+        raise
+    backup = runtime_path.with_name("server-runtime.json.rust-switch-backup")
+    try:
+        atomic_write(backup, read_bytes(runtime_path))
+    except SwitchError:
+        STATE_PATH.unlink(missing_ok=True)
+        ARGV_PATH.unlink(missing_ok=True)
+        ENV_PATH.unlink(missing_ok=True)
+        raise
+    state["runtimeBackup"] = str(backup)
+    atomic_json(STATE_PATH, state)
+
+
+def load_saved_environment() -> dict[str, str]:
+    try:
+        raw = ENV_PATH.read_bytes()
+    except OSError as error:
+        fail(f"cannot read the saved TypeScript environment at {ENV_PATH}: {error}")
+    result: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        result[key.decode(errors="strict")] = value.decode(errors="strict")
+    if not result:
+        fail("the saved TypeScript environment is empty")
+    return result
+
+
+def load_saved_argv() -> list[str]:
+    try:
+        raw = ARGV_PATH.read_bytes()
+    except OSError as error:
+        fail(f"cannot read the saved TypeScript command at {ARGV_PATH}: {error}")
+    argv = [item.decode(errors="strict") for item in raw.split(b"\0") if item]
+    if not argv:
+        fail("the saved TypeScript command is empty")
+    return argv
+
+
+def start_process(argv: list[str], environment: dict[str, str], cwd: str, log_path: Path) -> subprocess.Popen[bytes]:
+    if not Path(argv[0]).exists() and shutil.which(argv[0]) is None:
+        fail(f"the original executable is no longer available: {argv[0]}")
+    if not Path(cwd).is_dir():
+        fail(f"the original server working directory no longer exists: {cwd}")
+    try:
+        log = log_path.open("ab")
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd if Path(cwd).is_dir() else str(Path.home()),
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+        )
+        log.close()
+    except OSError as error:
+        fail(f"could not start {' '.join(argv)}: {error}")
+    return process
+
+
+def wait_for_server(process: subprocess.Popen[bytes], host: str, port: int, label: str) -> None:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            fail(f"the {label} server exited with status {process.returncode}. See {LOG_PATH}")
+        if health(host, port):
+            return
+        time.sleep(0.25)
+    fail(f"the {label} server did not become ready on {host}:{port}. See {LOG_PATH}")
+
+
+def runtime_for_rust(path: Path, pid: int, host: str, port: int) -> None:
+    runtime = {
+        "version": 1,
+        "pid": pid,
+        "host": host,
+        "port": port,
+        "origin": f"http://{host}:{port}",
+        "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "serverVersion": "rust",
+    }
+    atomic_json(path, runtime)
+
+
+def launch_rust(state: dict[str, object]) -> subprocess.Popen[bytes]:
+    binary = ROOT / "target" / "release" / "t3code-server"
+    if not binary.exists():
+        fail(f"Rust build completed without producing {binary}")
+    environment = load_saved_environment()
+    environment["T3CODE_HOME"] = str(state["baseDir"])
+    environment["T3CODE_HOST"] = str(state["host"])
+    environment["T3CODE_PORT"] = str(state["port"])
+    environment["T3CODE_MODE"] = environment.get("T3CODE_MODE", "web")
+    environment["T3CODE_NO_BROWSER"] = "true"
+    environment.pop("T3CODE_BOOTSTRAP_FD", None)
+    environment.pop("T3CODE_BOOTSTRAP_CREDENTIAL", None)
+    argv = [
+        str(binary),
+        "--base-dir",
+        str(state["baseDir"]),
+        "--host",
+        str(state["host"]),
+        "--port",
+        str(state["port"]),
+    ]
+    process = start_process(argv, environment, str(state["originalCwd"]), LOG_PATH)
+    wait_for_server(process, str(state["host"]), int(state["port"]), "Rust")
+    runtime_for_rust(Path(state["runtimePath"]), process.pid, str(state["host"]), int(state["port"]))
+    state["mode"] = "rust"
+    state["rustPid"] = process.pid
+    state["rustStartedAt"] = time.time()
+    atomic_json(STATE_PATH, state)
+    return process
+
+
+def build_rust() -> None:
+    cargo = command_output(["sh", "-c", "command -v cargo"])
+    if cargo is None:
+        rustup = Path.home() / ".cargo" / "bin" / "rustup"
+        if not rustup.exists():
+            try:
+                with urlopen("https://sh.rustup.rs", timeout=30) as response:
+                    installer = response.read()
+            except Exception as error:
+                fail(f"Rust is not installed and rustup could not be downloaded: {error}")
+            result = subprocess.run(
+                ["sh", "-s", "--", "-y", "--profile", "minimal"],
+                input=installer,
+                cwd=ROOT,
+                check=False,
+            )
+            if result.returncode != 0:
+                fail("rustup installation failed. Install Rust from https://rustup.rs and retry")
+        cargo = str(Path.home() / ".cargo" / "bin" / "cargo")
+        if not Path(cargo).exists():
+            fail("Rust installation completed without a cargo executable")
+    print("Building the Rust server in release mode…", flush=True)
+    result = subprocess.run([cargo, "build", "--locked", "--release"], cwd=ROOT, check=False)
+    if result.returncode != 0:
+        fail("cargo build failed. The TypeScript server is still stopped, so run ./install --original to restore it")
+
+
+def rust_switch() -> None:
+    if STATE_PATH.exists():
+        saved = read_json(STATE_PATH)
+        if saved and saved.get("mode") == "rust":
+            pid = saved.get("rustPid")
+            if isinstance(pid, int) and process_alive(pid):
+                print(f"Rust T3 server is already active at {saved['host']}:{saved['port']} (PID {pid}).")
+                return
+        fail(f"a previous switch is incomplete. Inspect {STATE_PATH} and run ./install --original")
+    candidate = discover()
+    build_rust()
+    save_original(candidate)
+    state = read_json(STATE_PATH)
+    assert state is not None
+    try:
+        stop(int(candidate["pid"]), "TypeScript")
+        launch_rust(state)
+    except SwitchError as error:
+        try:
+            restore_original(state, rollback=True)
+        except SwitchError as rollback_error:
+            fail(f"Rust switch failed: {error}. Automatic restoration also failed: {rollback_error}")
+        raise
+    print(f"Rust T3 server is active at {state['host']}:{state['port']} (PID {state['rustPid']}).")
+
+
+def restore_original(state: dict[str, object], rollback: bool = False) -> None:
+    if state.get("mode") not in {"switching", "rust"}:
+        fail("the saved switch state is not an active Rust installation")
+    rust_pid = state.get("rustPid")
+    if isinstance(rust_pid, int) and process_alive(rust_pid):
+        stop(rust_pid, "Rust")
+    runtime_path = Path(str(state["runtimePath"]))
+    runtime = read_json(runtime_path)
+    if runtime and runtime.get("pid") == rust_pid:
+        runtime_path.unlink(missing_ok=True)
+    environment = load_saved_environment()
+    argv = load_saved_argv()
+    process = start_process(argv, environment, str(state["originalCwd"]), LOG_PATH)
+    try:
+        wait_for_server(process, str(state["host"]), int(state["port"]), "TypeScript")
+    except SwitchError:
+        if rollback:
+            state["mode"] = "rust"
+            launch_rust(state)
+        raise
+    backup = state.get("runtimeBackup")
+    if isinstance(backup, str):
+        Path(backup).unlink(missing_ok=True)
+    STATE_PATH.unlink(missing_ok=True)
+    ARGV_PATH.unlink(missing_ok=True)
+    ENV_PATH.unlink(missing_ok=True)
+    print(f"Original TypeScript T3 server is active at {state['host']}:{state['port']} (PID {process.pid}).")
+
+
+def status() -> None:
+    state = read_json(STATE_PATH)
+    if state is None:
+        print("No Rust switch is recorded.")
+        try:
+            candidate = discover()
+        except SwitchError as error:
+            print(f"No switchable standalone TypeScript server found: {error}")
+            return
+        print(f"Standalone TypeScript server found at {candidate['host']}:{candidate['port']} (PID {candidate['pid']}).")
+        return
+    print(json.dumps(state, indent=2))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Safely switch a running standalone T3 server between TypeScript and Rust."
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--rust", action="store_true", help="build and start the Rust server")
+    group.add_argument("--original", action="store_true", help="stop Rust and restore the TypeScript server")
+    group.add_argument("--status", action="store_true", help="show the discovered server and switch state")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if os.name == "nt":
+        fail("this evaluator currently supports Linux and macOS. Use a Unix shell on the machine running T3")
+    if args.status:
+        status()
+        return 0
+    if args.rust:
+        rust_switch()
+    else:
+        state = read_json(STATE_PATH)
+        if state is None:
+            fail(f"no Rust switch is recorded at {STATE_PATH}. Run ./install --rust first")
+        restore_original(state)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except SwitchError as error:
+        print(f"t3code-rust install: {error}", file=sys.stderr)
+        raise SystemExit(1)
