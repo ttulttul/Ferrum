@@ -7,6 +7,7 @@ use std::path::Path;
 
 mod actions;
 mod detail;
+mod discussion;
 mod files;
 mod listing;
 mod review;
@@ -21,6 +22,8 @@ pub(crate) fn handles(method: &str) -> bool {
             | "filesViewed"
             | "setFilesViewed"
             | "changeBreakdown"
+            | "stack"
+            | "threadComments"
             | "checks"
             | "list"
             | "listStats"
@@ -263,6 +266,12 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
                 .await;
         }
         return Ok(result);
+    }
+    if op == "stack" {
+        return discussion::stack(&gh, named, number).await;
+    }
+    if op == "threadComments" {
+        return discussion::comments(&gh, named, number, input).await;
     }
     if matches!(op, "filesViewed" | "setFilesViewed" | "changeBreakdown") {
         return files::run(&gh, named, number, op, input).await;

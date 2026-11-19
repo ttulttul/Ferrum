@@ -51,6 +51,16 @@ PR.update({"body":"PR body","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","
 REPOSITORY = {"__typename":"Repository", "viewerPermission":"WRITE","mergeCommitAllowed":True,"squashMergeAllowed":True,
               "rebaseMergeAllowed":True,"autoMergeAllowed":True,"pullRequest":PR}
 
+STACK = {"number":6,"id":91,"url":"https://api.github.com/repos/example/parity/stacks/6",
+         "html_url":"https://github.com/example/parity/stacks/6","base":{"ref":"main"},"pull_requests":[
+             {"number":3,"head":{"ref":"feature","sha":"a"*40},"draft":False,"title":"First","state":"open"},
+             {"number":4,"head":{"ref":"second"},"title":"Second","state":"closed","merged_at":"2026-11-10T00:00:00Z"}]}
+THREAD_COMMENT = {"id":"C42","author":{"__typename":"User","login":"reader","avatarUrl":"https://example.test/avatar"},
+                  "body":"A visible comment","createdAt":"2026-11-01T10:00:00Z","lastEditedAt":None,
+                  "url":"https://example.test/comment","isMinimized":False,"pullRequestReview":{"url":"https://example.test/review"},
+                  "reactionGroups":[{"content":"THUMBS_UP","viewerHasReacted":True,
+                                     "reactors":{"totalCount":2,"nodes":[{"__typename":"User","login":"tester"},{"__typename":"User","login":"reader"}]}}]}
+
 ACTION_METHODS = ["closePullRequest","reopenPullRequest","markPullRequestReadyForReview",
                   "convertPullRequestToDraft","mergePullRequest","revertPullRequest","disablePullRequestAutoMerge",
                   "enablePullRequestAutoMerge","updatePullRequestBranch"]
@@ -69,7 +79,11 @@ class Provider(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path.endswith("/actions/runs"):
+        if path == f"/repos/{REPO}/stacks":
+            self.reply(200, [STACK] if self.path.endswith("pull_request=3") else [])
+        elif path == f"/repos/{REPO}/stacks/6":
+            self.reply(200, STACK)
+        elif path.endswith("/actions/runs"):
             self.reply(200, {"workflow_runs":[], "total_count":0})
         elif path == "/user":
             self.reply(200, {"login": "tester", "id": 1234})
@@ -172,6 +186,14 @@ class Provider(BaseHTTPRequestHandler):
             elif "assignableUsers(" in query and "labels(" in query:
                 result = {"repository": {"labels": {"pageInfo": {"hasNextPage": False}, "nodes": [LABEL]},
                                          "assignableUsers": {"pageInfo": {"hasNextPage": False}, "nodes": [AUTHOR]}}}
+            elif "threadId" in data.get("variables", {}) and "comments(" in query:
+                variables=data["variables"]
+                pr="PR_3" if variables["threadId"]=="Thread1" else "Wrong"
+                more=variables["after"]=="first"
+                result={"viewer":{"login":"tester"},"repository":{"pullRequest":{"id":"PR_3"}},
+                        "node":{"__typename":"PullRequestReviewThread","pullRequest":{"id":pr},
+                                "comments":{"pageInfo":{"hasNextPage":more,"endCursor":"second" if more else None},
+                                            "nodes":[THREAD_COMMENT,{**THREAD_COMMENT,"isMinimized":True}] if more else []}}}
             elif "issue(number:" in query:
                 result = {"repository": {"issue": ISSUE}}
             elif "pullRequest(number:" in query:
@@ -258,6 +280,11 @@ def main():
             rpc("issues.list", {"projectId": "test-project", "state": "open"}),
             rpc("issues.candidates", issue),
             rpc("pullRequests.preview", ref),
+            rpc("pullRequests.stack", ref),
+            rpc("pullRequests.stack", {**ref,"number":99}),
+            rpc("pullRequests.threadComments",{**ref,"threadId":"Thread1","cursor":"first"}),
+            rpc("pullRequests.threadComments",{**ref,"threadId":"Thread1","cursor":"second"}),
+            rpc("pullRequests.threadComments",{**ref,"threadId":"Other","cursor":"first"}),
             rpc("pullRequests.filesViewed", ref),
             rpc("pullRequests.changeBreakdown", ref),
             rpc("pullRequests.setFilesViewed",{**ref,"files":[{"path":"lib.rs","viewed":True},{"path":"README.md","viewed":True},{"path":"lib.rs","viewed":False}]}),
@@ -289,7 +316,7 @@ def main():
                     ws.send(harness.encode(case["frame"]).decode())
                 packets = [ws.recv(timeout=15) for ws in sockets]
                 payload = case["frame"]["payload"]
-                expected_failure = payload.get("scope") == "other/repo" or "stackNumber" in payload
+                expected_failure = payload.get("scope") == "other/repo" or "stackNumber" in payload or payload.get("threadId")=="Other"
                 exits = [json.loads(p)["exit"] for p in packets]
                 ok = packets[0] == packets[1] and all(
                     e["_tag"] == ("Failure" if expected_failure else "Success") for e in exits)
