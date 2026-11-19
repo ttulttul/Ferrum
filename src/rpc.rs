@@ -890,6 +890,61 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"_tag":"Fail","error":{"_tag":"AgentSessionImportError","message":"No importable agent sessions were found."}}),
         );
     }
+    if method == "projectClone.start" {
+        let project_id = params["projectId"].as_str().unwrap_or_default();
+        let title = params["title"].as_str().unwrap_or_default();
+        let destination = params["destinationPath"].as_str().unwrap_or_default();
+        let remote = params["remoteUrl"].as_str().unwrap_or_default();
+        if remote.is_empty() || destination.is_empty() {
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"SourceControlRepositoryError","provider":params["provider"],
+                "operation":"clone","detail":"A clone URL and destination path are required."
+            }}));
+        }
+        if state.store.read().await.projects.contains_key(project_id) {
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"OrchestrationDispatchCommandError","message":format!("Project {project_id} already exists.")
+            }}));
+        }
+        let output = tokio::process::Command::new("git")
+            .args(["clone", "--", remote, destination])
+            .output()
+            .await;
+        let Ok(output) = output else {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":params["provider"],"operation":"clone","detail":"Git could not be started."}}),
+            );
+        };
+        if !output.status.success() {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":params["provider"],"operation":"clone","detail":String::from_utf8_lossy(&output.stderr).trim()}}),
+            );
+        }
+        let project = crate::Project {
+            id: project_id.to_owned(),
+            name: title.to_owned(),
+            path: destination.to_owned(),
+            created_at: crate::now(),
+        };
+        let row = crate::projects::wire(&project);
+        if let Err(error) = state
+            .commit(crate::Event::ProjectCommitted {
+                project,
+                row,
+                command_id: format!("project-clone:{project_id}"),
+                command_type: "projectClone.start".into(),
+                removed_threads: vec![],
+            })
+            .await
+        {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
+            );
+        }
+        return Reply::Success(
+            json!({"projectId":project_id,"cwd":destination,"remoteUrl":remote,"repository":null}),
+        );
+    }
     if method == "projectClone.cancel" || method == "projectClone.retry" {
         return Reply::Success(json!({"applied":false}));
     }
