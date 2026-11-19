@@ -458,6 +458,36 @@ async fn apply_command(
                     .id);
             }
         }
+        "thread.pull-request-watch.checks-reopen" => {
+            let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
+            let store = state.store.read().await;
+            let thread = store
+                .threads
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            let mut row = thread.stored_row();
+            if let Some(links) = row["pullRequests"].as_array_mut() {
+                for link in links {
+                    if let Some(watch) = link.get_mut("watch").and_then(Value::as_object_mut) {
+                        watch.remove("checksPending");
+                        watch.remove("checksAwaitedSince");
+                        watch.remove("awaitingApproval");
+                        watch.remove("approvalAnnounced");
+                    }
+                }
+            }
+            drop(store);
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
         "thread.issue.link"
         | "thread.issue.unlink"
         | "thread.pull-request.link"
@@ -508,6 +538,76 @@ async fn apply_command(
                 )
             }
             .map_err(anyhow::Error::msg)?;
+        }
+        "thread.guest-share.open" | "thread.guest-share.redeem" | "thread.guest-message.submit" => {
+            let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
+            let mut row = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?
+                .stored_row();
+            match command_type {
+                "thread.guest-share.open" => {
+                    row["guestShare"] = json!({"id":command["shareId"],"host":command["host"],"createdAt":crate::auth_service::iso(crate::auth_service::now()),"expiresAt":command["expiresAt"],"guestName":Value::Null,"messages":[]});
+                }
+                "thread.guest-share.redeem" => {
+                    if !row["guestShare"].is_object() {
+                        return Err(anyhow::anyhow!("Guest share is not open."));
+                    }
+                    row["guestShare"]["guestName"] = command["guestName"].clone();
+                }
+                _ => {
+                    let mut messages = row["guestShare"]["messages"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut message = json!({"id":command["guestMessageId"],"text":command["text"],"status":"pending","submittedAt":crate::auth_service::iso(crate::auth_service::now())});
+                    if let Some(attachments) = command.get("attachments") {
+                        message["attachments"] = attachments.clone();
+                    }
+                    messages.push(message);
+                    row["guestShare"]["messages"] = json!(messages);
+                }
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "thread.project.adopt-folder" => {
+            let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
+            let project_id = command["projectId"].as_str().unwrap_or_default();
+            let store = state.store.read().await;
+            let _project = store
+                .projects
+                .get(project_id)
+                .ok_or_else(|| anyhow::anyhow!(format!("Project {project_id} was not found.")))?;
+            let thread = store
+                .threads
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            let mut row = thread.stored_row();
+            row["projectId"] = json!(project_id);
+            drop(store);
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
         }
         "thread.archive"
         | "thread.unarchive"
@@ -1600,6 +1700,189 @@ async fn apply_command(
                     Event::ThreadPatched {
                         thread_id: parent_thread_id.to_owned(),
                         patch: json!({"row":{"subagents":subagents}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "delegated_task.remote.request" => {
+            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
+            let task_id = format!(
+                "node:delegated-task:{}",
+                command["commandId"].as_str().unwrap_or_default()
+            );
+            let mut subagents = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(parent_thread_id)
+                .map(|thread| {
+                    thread.row["subagents"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!(
+                        "No orchestration projection exists for thread {parent_thread_id}."
+                    ))
+                })?;
+            subagents.push(json!({"id":task_id,"threadId":parent_thread_id,"runId":command["parentRunId"],"parentNodeId":command["parentNodeId"],"origin":"app_owned","driver":command["driver"],"providerInstanceId":command["modelSelection"]["instanceId"],"providerThreadId":Value::Null,"childThreadId":Value::Null,"remoteChild":command["remoteChild"],"prompt":command["task"],"title":command.get("title").cloned().unwrap_or(Value::Null),"model":command["modelSelection"]["model"],"modelSelection":command["modelSelection"],"completionWake":command.get("completionWake").cloned().unwrap_or(json!("settled_only")),"status":"running","result":Value::Null,"startedAt":crate::auth_service::iso(crate::auth_service::now()),"completedAt":Value::Null,"updatedAt":crate::auth_service::iso(crate::auth_service::now())}));
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: parent_thread_id.to_owned(),
+                        patch: json!({"row":{"subagents":subagents}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "delegated_task.remote.complete" | "delegated_task.remote.stop" => {
+            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
+            let task_id = command["taskId"].as_str().unwrap_or_default();
+            let mut subagents = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(parent_thread_id)
+                .map(|thread| {
+                    thread.row["subagents"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!(
+                        "No orchestration projection exists for thread {parent_thread_id}."
+                    ))
+                })?;
+            let task = subagents
+                .iter_mut()
+                .find(|task| task["id"] == task_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!("Delegated task {task_id} was not found."))
+                })?;
+            if command_type == "delegated_task.remote.complete" {
+                if task["result"].is_null() {
+                    task["status"] = command["status"].clone();
+                    task["result"] = command["result"].clone();
+                    task["completedAt"] =
+                        json!(crate::auth_service::iso(crate::auth_service::now()));
+                }
+                if let Some(stopped) = command.get("stoppedThere") {
+                    task["remoteChild"]["stoppedThere"] = json!(stopped == "stopped");
+                }
+            } else {
+                let count = task["remoteChild"]["stopCount"].as_u64().unwrap_or(0) + 1;
+                task["remoteChild"]["stopCount"] = json!(count);
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: parent_thread_id.to_owned(),
+                        patch: json!({"row":{"subagents":subagents}}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "checkpoint.rollback.fail" => {
+            let id = thread_id.unwrap_or_default();
+            let row = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(id)
+                .map(|t| t.stored_row())
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            if row["rollbackRequestId"].as_str() != command["requestId"].as_str() {
+                return Err(anyhow::anyhow!(format!(
+                    "Rollback {} is no longer the thread's current rollback.",
+                    command["requestId"].as_str().unwrap_or_default()
+                )));
+            }
+            let mut next = row;
+            next["rollbackFailure"] =
+                json!({"requestId":command["requestId"],"message":command["message"]});
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":next}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "runtime-request.delivery.fail" => {
+            let id = thread_id.unwrap_or_default();
+            let mut row = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(id)
+                .map(|t| t.stored_row())
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            let request_id = command["requestId"].as_str().unwrap_or_default();
+            if let Some(request) = row["runtimeRequests"]
+                .as_array_mut()
+                .and_then(|items| items.iter_mut().find(|item| item["id"] == request_id))
+            {
+                request["deliveryError"] = json!(true);
+            }
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "thread.interrupt.unresponsive" => {
+            let id = thread_id.unwrap_or_default();
+            return Ok(state.commit_receipted(Event::ThreadPatched {thread_id:id.to_owned(),patch:json!({"row":{"interruptUnresponsive":true,"providerThreadId":command["providerThreadId"],"providerTurnId":command["providerTurnId"]}})},Some(receipt.clone())).await?.id);
+        }
+        "thread.background-work.settle" => {
+            let id = thread_id.unwrap_or_default();
+            return Ok(state.commit_receipted(Event::ThreadPatched {thread_id:id.to_owned(),patch:json!({"row":{"backgroundWorkSettled":true,"backgroundWorkSettleReason":command.get("reason").cloned().unwrap_or(Value::Null)}})},Some(receipt.clone())).await?.id);
+        }
+        "secret_request.record" | "link_request.record" => {
+            let id = thread_id.unwrap_or_default();
+            let mut row = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(id)
+                .map(|t| t.stored_row())
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            let key = if command_type == "secret_request.record" {
+                "secretRequests"
+            } else {
+                "linkRequests"
+            };
+            let mut items = row[key].as_array().cloned().unwrap_or_default();
+            let item = command.clone();
+            items.retain(|candidate| candidate["turnItemId"] != item["turnItemId"]);
+            items.push(item);
+            row[key] = json!(items);
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
                     },
                     Some(receipt.clone()),
                 )
