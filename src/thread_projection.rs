@@ -283,16 +283,16 @@ pub(crate) fn watch_patch(thread: &Thread, cmd: &Value, at: &str) -> Value {
             "failedChecks": [],
             "passed": false,
             "passedChecks": [],
-            "conflicting": false,
-            "awaitingBaseline": "all",
             "remarksThrough": at,
             "remarkIds": [],
-            "wakes": 0
+            "conflicting": false,
+            "wakes": 0,
+            "awaitingBaseline": "all"
         });
     } else if let Some(index) = index {
-        links[index].as_object_mut().map(|link| {
+        if let Some(link) = links[index].as_object_mut() {
             link.remove("watch");
-        });
+        }
     }
     json!({"pullRequests":links,"updatedAt":at})
 }

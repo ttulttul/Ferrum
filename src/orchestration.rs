@@ -523,6 +523,20 @@ async fn apply_command(
                     }
                     "thread.mark-unread" => {
                         patch.insert("unread".into(), true.into());
+                        if let Some(completed) = state
+                            .store
+                            .read()
+                            .await
+                            .threads
+                            .get(thread_id)
+                            .and_then(|thread| {
+                                thread.runs.iter().filter_map(|run| run.finished_at).max()
+                            })
+                        {
+                            row["lastVisitedAt"] = json!(crate::auth_service::iso(
+                                (completed as i64).saturating_mul(1000).saturating_sub(1)
+                            ));
+                        }
                     }
                     "thread.snooze" => {
                         let snoozed_until =
