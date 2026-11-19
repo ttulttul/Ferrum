@@ -10,7 +10,14 @@ pub(crate) async fn dispatch_orchestration_command(
 ) -> Result<u64, Value> {
     let kind = command["type"].as_str().unwrap_or_default();
     let command_id = command["commandId"].as_str().unwrap_or_default();
-    let id = command["threadId"].as_str().unwrap_or_default();
+    let id = command["threadId"]
+        .as_str()
+        .or_else(|| {
+            matches!(kind, "thread.fork" | "thread.merge_back")
+                .then(|| command["targetThreadId"].as_str())
+                .flatten()
+        })
+        .unwrap_or_default();
     let error = |detail: String, cause: Value| json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":command_id,"commandType":kind,"message":detail,"detail":detail,"cause":cause});
     let dispatch_error = |detail: String| {
         error(
@@ -30,6 +37,21 @@ pub(crate) async fn dispatch_orchestration_command(
             json!({"name":"OrchestratorCommandIdConflictError","message":msg}),
         ));
     }
+    if matches!(kind, "thread.fork" | "delegated_task.request") {
+        let target = command["targetThreadId"]
+            .as_str()
+            .or_else(|| command["childThreadId"].as_str())
+            .unwrap_or_default();
+        if !target.is_empty()
+            && (store.threads.contains_key(target) || store.deleted_thread_ids.contains(target))
+        {
+            let msg = format!("Thread {target} already exists. Use a new thread id.");
+            return Err(error(
+                msg.clone(),
+                json!({"name":"OrchestratorThreadAlreadyExistsError","message":msg}),
+            ));
+        }
+    }
     if kind == "thread.create"
         && (store.threads.contains_key(id) || store.deleted_thread_ids.contains(id))
     {
@@ -39,10 +61,12 @@ pub(crate) async fn dispatch_orchestration_command(
             json!({"name":"OrchestratorThreadAlreadyExistsError","message":msg}),
         ));
     }
-    if let Some(id) = command["threadId"]
-        .as_str()
-        .filter(|_| kind != "thread.create")
-    {
+    if let Some(id) = command["threadId"].as_str().filter(|_| {
+        !matches!(
+            kind,
+            "thread.create" | "thread.fork" | "delegated_task.request"
+        )
+    }) {
         let Some(thread) = store.threads.get(id) else {
             let msg = format!("No orchestration projection exists for thread {id}.");
             return Err(error(
@@ -558,6 +582,7 @@ async fn apply_command(
         "thread.fork" => {
             let source_thread_id = command["sourceThreadId"].as_str().unwrap_or_default();
             let source_point = command["sourcePoint"]["type"].as_str().unwrap_or_default();
+            let target_thread_id = command["targetThreadId"].as_str().unwrap_or_default();
             let source = state
                 .store
                 .read()
@@ -565,34 +590,194 @@ async fn apply_command(
                 .threads
                 .get(source_thread_id)
                 .cloned();
-            if source.is_none() {
+            let Some(source) = source else {
                 return Err(anyhow::anyhow!(format!(
                     "No orchestration projection exists for thread {source_thread_id}."
                 )));
-            }
+            };
             if source_point == "latest_stable"
-                && source
-                    .as_ref()
-                    .is_some_and(|thread| !thread.runs.iter().any(|run| run.status == "completed"))
+                && !source.runs.iter().any(|run| run.status == "completed")
             {
                 return Err(anyhow::anyhow!(
                     "No stable source run was found for fork source latest_stable."
                 ));
             }
+            let at = crate::auth_service::iso(crate::auth_service::now());
+            let mut row = source.stored_row();
+            row["id"] = json!(target_thread_id);
+            row["title"] = command
+                .get("title")
+                .cloned()
+                .unwrap_or_else(|| json!(source.title));
+            row["createdAt"] = json!(at.clone());
+            row["updatedAt"] = json!(at);
+            row["archivedAt"] = Value::Null;
+            row["deletedAt"] = Value::Null;
+            row["lineage"] = json!({"parentThreadId":source_thread_id,"relationshipToParent":"fork","rootThreadId":source.row["lineage"]["rootThreadId"].as_str().unwrap_or(source_thread_id),"sideChat":command.get("sideChat").and_then(Value::as_bool).unwrap_or(false)});
+            let forked_from = source
+                .runs
+                .iter()
+                .rev()
+                .find(|run| run.status == "completed")
+                .map(|run| json!({"type":"run","threadId":source_thread_id,"runId":run.id}))
+                .unwrap_or(Value::Null);
+            row["forkedFrom"] = forked_from;
+            let thread = Thread {
+                row,
+                id: target_thread_id.to_owned(),
+                project_id: source.project_id,
+                title: command
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&source.title)
+                    .to_owned(),
+                cwd: source.cwd,
+                status: "idle".into(),
+                messages: source.messages,
+                runs: vec![],
+                created_at: now(),
+                archived: false,
+                settled: false,
+                snoozed_until: None,
+                pinned: false,
+                unread: false,
+                tags: source.tags,
+            };
+            return Ok(state
+                .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
+                .await?
+                .id);
         }
         "thread.merge_back" => {
             let source_thread_id = command["sourceThreadId"].as_str().unwrap_or_default();
-            if !state
+            let target_thread_id = command["targetThreadId"].as_str().unwrap_or_default();
+            let store = state.store.read().await;
+            let source = store
+                .threads
+                .get(source_thread_id)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!(
+                        "No orchestration projection exists for thread {source_thread_id}."
+                    ))
+                })?;
+            let target = store
+                .threads
+                .get(target_thread_id)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!(
+                        "No orchestration projection exists for thread {target_thread_id}."
+                    ))
+                })?;
+            let existing = target
+                .messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let additions = source
+                .messages
+                .into_iter()
+                .filter(|m| !existing.contains(m.id.as_str()))
+                .collect::<Vec<_>>();
+            drop(store);
+            for message in additions {
+                state
+                    .commit(Event::MessageAdded {
+                        thread_id: target_thread_id.to_owned(),
+                        message,
+                    })
+                    .await?;
+            }
+            let sequence = state
+                .commit_receipted(
+                    Event::CommandDispatched {
+                        command_id: receipt.command_id.clone(),
+                        command_type: command_type.into(),
+                        thread_id: Some(target_thread_id.to_owned()),
+                        payload: command.clone(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id;
+            return Ok(sequence);
+        }
+        "delegated_task.request" => {
+            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
+            let generated_child_id;
+            let target_thread_id = if let Some(value) = command["childThreadId"]
+                .as_str()
+                .or_else(|| command["targetThreadId"].as_str())
+            {
+                value
+            } else if !receipt.thread_id.is_empty() {
+                receipt.thread_id.as_str()
+            } else {
+                generated_child_id = format!(
+                    "delegated-task:{}",
+                    command["commandId"].as_str().unwrap_or_default()
+                );
+                generated_child_id.as_str()
+            };
+            let parent = state
                 .store
                 .read()
                 .await
                 .threads
-                .contains_key(source_thread_id)
-            {
-                return Err(anyhow::anyhow!(format!(
-                    "No orchestration projection exists for thread {source_thread_id}."
-                )));
-            }
+                .get(parent_thread_id)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(format!(
+                        "No orchestration projection exists for thread {parent_thread_id}."
+                    ))
+                })?;
+            let at = crate::auth_service::iso(crate::auth_service::now());
+            let mut row = parent.stored_row();
+            row["id"] = json!(target_thread_id);
+            row["title"] = command
+                .get("title")
+                .cloned()
+                .unwrap_or_else(|| json!("Subagent"));
+            row["createdAt"] = json!(at.clone());
+            row["updatedAt"] = json!(at);
+            row["lineage"] = json!({"parentThreadId":parent_thread_id,"relationshipToParent":"subagent","rootThreadId":parent.row["lineage"]["rootThreadId"].as_str().unwrap_or(parent_thread_id),"sideChat":false});
+            row["forkedFrom"] = json!({"type":"node","nodeId":command["parentNodeId"]});
+            let prompt = command["task"].as_str().unwrap_or_default();
+            let message = ConversationMessage {
+                id: format!(
+                    "{}:task",
+                    command["commandId"].as_str().unwrap_or(target_thread_id)
+                ),
+                role: "user".into(),
+                content: prompt.into(),
+                created_at: now(),
+            };
+            let thread = Thread {
+                row,
+                id: target_thread_id.to_owned(),
+                project_id: parent.project_id,
+                title: command
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Subagent")
+                    .to_owned(),
+                cwd: parent.cwd,
+                status: "idle".into(),
+                messages: vec![message],
+                runs: vec![],
+                created_at: now(),
+                archived: false,
+                settled: false,
+                snoozed_until: None,
+                pinned: false,
+                unread: false,
+                tags: vec![],
+            };
+            return Ok(state
+                .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
+                .await?
+                .id);
         }
         // Every command discriminator has a registered wire contract. Commands
         // whose provider-specific state is not available locally still need a
