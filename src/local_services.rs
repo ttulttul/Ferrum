@@ -1,345 +1,202 @@
-//! Local implementations for the provider-backed VCS, terminal, preview, and
-//! device capabilities. These services deliberately keep host integration
-//! behind small async APIs so the WebSocket dispatcher can expose the same
-//! operations without embedding process or filesystem logic in RPC handlers.
+//! Host-backed RPC services. Each service owns the state shared by its clients.
+mod device_actions;
+mod devices;
+pub(crate) mod media;
+mod previews;
+mod terminals;
+mod vcs;
 
-use anyhow::{anyhow, Context, Result};
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path, sync::Arc};
-use tokio::{process::Command, sync::Mutex};
-use uuid::Uuid;
+pub use devices::DeviceService;
+pub use previews::PreviewService;
+pub use terminals::TerminalService;
+pub use vcs::VcsService;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct VcsStatus {
-    pub branch: Option<String>,
-    pub staged: Vec<String>,
-    pub unstaged: Vec<String>,
-    pub untracked: Vec<String>,
+use serde_json::{json, Value};
+
+type Reply = Result<Value, Value>;
+
+fn invalid(key: &str, message: &str) -> Value {
+    json!({"_tag":"Die","defect":format!("{message}\n  at [\"{key}\"]")})
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct VcsRef {
-    pub name: String,
-    pub object: String,
-    pub kind: String,
+fn string<'a>(input: &'a Value, key: &str) -> Result<&'a str, Value> {
+    let value = input.get(key).ok_or_else(|| invalid(key, "Missing key"))?;
+    let value = value
+        .as_str()
+        .ok_or_else(|| invalid(key, "Expected string"))?
+        .trim();
+    if value.is_empty() {
+        return Err(invalid(key, "Expected a non-blank string"));
+    }
+    Ok(value)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct VcsResult {
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
-    pub code: Option<i32>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct VcsService;
-
-impl VcsService {
-    pub async fn status(&self, cwd: impl AsRef<Path>) -> Result<VcsStatus> {
-        let cwd = cwd.as_ref();
-        let branch = git(cwd, &["branch", "--show-current"])
-            .await?
-            .stdout
-            .trim()
-            .to_owned();
-        let porcelain = git(cwd, &["status", "--porcelain=v1"]).await?.stdout;
-        let mut status = VcsStatus {
-            branch: (!branch.is_empty()).then_some(branch),
-            staged: vec![],
-            unstaged: vec![],
-            untracked: vec![],
-        };
-        for line in porcelain.lines().filter(|line| line.len() >= 3) {
-            let code = &line[..2];
-            let path = line[3..].to_owned();
-            if code == "??" {
-                status.untracked.push(path);
-                continue;
-            }
-            if code.as_bytes().first().is_some_and(|c| *c != b' ') {
-                status.staged.push(path.clone());
-            }
-            if code.as_bytes().get(1).is_some_and(|c| *c != b' ') {
-                status.unstaged.push(path);
-            }
-        }
-        Ok(status)
-    }
-
-    pub async fn refs(&self, cwd: impl AsRef<Path>) -> Result<Vec<VcsRef>> {
-        let result = git(
-            cwd.as_ref(),
-            &[
-                "for-each-ref",
-                "--format=%(refname)\t%(objectname)\t%(objecttype)",
-            ],
-        )
-        .await?;
-        Ok(result
-            .stdout
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.splitn(3, '\t');
-                Some(VcsRef {
-                    name: fields.next()?.to_owned(),
-                    object: fields.next()?.to_owned(),
-                    kind: fields.next()?.to_owned(),
-                })
-            })
-            .collect())
-    }
-
-    pub async fn diff(&self, cwd: impl AsRef<Path>, staged: bool) -> Result<String> {
-        let args = if staged {
-            vec!["diff", "--cached"]
-        } else {
-            vec!["diff"]
-        };
-        Ok(git(cwd.as_ref(), &args).await?.stdout)
-    }
-
-    pub async fn init(&self, cwd: impl AsRef<Path>) -> Result<VcsResult> {
-        git(cwd.as_ref(), &["init"]).await
-    }
-    pub async fn pull(&self, cwd: impl AsRef<Path>) -> Result<VcsResult> {
-        git(cwd.as_ref(), &["pull"]).await
-    }
-
-    pub async fn create_worktree(
-        &self,
-        cwd: impl AsRef<Path>,
-        path: impl AsRef<Path>,
-        branch: &str,
-    ) -> Result<VcsResult> {
-        let path = path.as_ref().to_string_lossy().into_owned();
-        git(cwd.as_ref(), &["worktree", "add", &path, branch]).await
-    }
-
-    pub async fn remove_worktree(
-        &self,
-        cwd: impl AsRef<Path>,
-        path: impl AsRef<Path>,
-    ) -> Result<VcsResult> {
-        let path = path.as_ref().to_string_lossy().into_owned();
-        git(cwd.as_ref(), &["worktree", "remove", &path]).await
-    }
-}
-
-async fn git(cwd: &Path, args: &[&str]) -> Result<VcsResult> {
-    if !cwd.is_dir() {
-        return Err(anyhow!(
-            "working directory does not exist: {}",
-            cwd.display()
-        ));
-    }
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .await
-        .context("run git")?;
-    Ok(VcsResult {
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        code: output.status.code(),
-    })
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TerminalSession {
-    pub id: Uuid,
-    pub cwd: String,
-    pub command: String,
-    pub output: String,
-    pub running: bool,
-    pub exit_code: Option<i32>,
-}
-
-#[derive(Clone, Default)]
-pub struct TerminalService {
-    sessions: Arc<Mutex<HashMap<Uuid, TerminalSession>>>,
-}
-
-impl TerminalService {
-    pub async fn open(&self, cwd: impl AsRef<Path>, command: &str) -> Result<TerminalSession> {
-        let cwd = cwd.as_ref();
-        if !cwd.is_dir() {
-            return Err(anyhow!(
-                "working directory does not exist: {}",
-                cwd.display()
-            ));
-        }
-        let id = Uuid::new_v4();
-        let result = Command::new("sh")
-            .arg("-lc")
-            .arg(command)
-            .current_dir(cwd)
-            .output()
-            .await
-            .context("run terminal command")?;
-        let session = TerminalSession {
-            id,
-            cwd: cwd.to_string_lossy().into_owned(),
-            command: command.to_owned(),
-            output: format!(
-                "{}{}",
-                String::from_utf8_lossy(&result.stdout),
-                String::from_utf8_lossy(&result.stderr)
-            ),
-            running: false,
-            exit_code: result.status.code(),
-        };
-        self.sessions.lock().await.insert(id, session.clone());
-        Ok(session)
-    }
-
-    pub async fn observe(&self, id: Uuid) -> Option<TerminalSession> {
-        self.sessions.lock().await.get(&id).cloned()
-    }
-    pub async fn clear(&self, id: Uuid) -> bool {
-        self.sessions
-            .lock()
-            .await
-            .get_mut(&id)
-            .map(|session| {
-                session.output.clear();
-                true
-            })
-            .unwrap_or(false)
-    }
-    pub async fn close(&self, id: Uuid) -> bool {
-        self.sessions.lock().await.remove(&id).is_some()
-    }
-    pub async fn list(&self) -> Vec<TerminalSession> {
-        self.sessions.lock().await.values().cloned().collect()
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PreviewTab {
-    pub id: Uuid,
-    pub url: String,
-    pub title: Option<String>,
-    pub status: String,
-}
-
-#[derive(Clone, Default)]
-pub struct PreviewService {
-    tabs: Arc<Mutex<HashMap<Uuid, PreviewTab>>>,
-}
-
-impl PreviewService {
-    pub async fn open(&self, url: &str) -> Result<PreviewTab> {
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(anyhow!("preview URL must use http or https"));
-        }
-        let tab = PreviewTab {
-            id: Uuid::new_v4(),
-            url: url.to_owned(),
-            title: None,
-            status: "open".into(),
-        };
-        self.tabs.lock().await.insert(tab.id, tab.clone());
-        Ok(tab)
-    }
-    pub async fn list(&self) -> Vec<PreviewTab> {
-        self.tabs.lock().await.values().cloned().collect()
-    }
-    pub async fn close(&self, id: Uuid) -> bool {
-        self.tabs.lock().await.remove(&id).is_some()
-    }
-    pub async fn resize(&self, id: Uuid, _width: u32, _height: u32) -> Result<PreviewTab> {
-        self.tabs
-            .lock()
-            .await
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| anyhow!("preview tab not found"))
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Device {
-    pub id: String,
-    pub name: String,
-    pub platform: String,
-    pub connected: bool,
-}
-
-#[derive(Clone, Default)]
-pub struct DeviceService {
-    devices: Arc<Mutex<HashMap<String, Device>>>,
-}
-
-impl DeviceService {
-    pub async fn configure(&self, device: Device) -> Device {
-        self.devices
-            .lock()
-            .await
-            .insert(device.id.clone(), device.clone());
-        device
-    }
-    pub async fn list(&self) -> Vec<Device> {
-        self.devices.lock().await.values().cloned().collect()
-    }
-    pub async fn get(&self, id: &str) -> Option<Device> {
-        self.devices.lock().await.get(id).cloned()
-    }
-    pub async fn close(&self, id: &str) -> bool {
-        self.devices.lock().await.remove(id).is_some()
-    }
-    pub async fn test_host(&self, id: &str) -> Result<Device> {
-        self.get(id)
-            .await
-            .ok_or_else(|| anyhow!("device not found"))
-    }
+fn timestamp() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        ))
+        .unwrap()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    #[tokio::test]
-    async fn vcs_status_parses_porcelain() {
-        let dir = tempfile_dir();
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&dir)
-            .output()
-            .await
-            .unwrap();
-        tokio::fs::write(dir.join("untracked.txt"), "x")
-            .await
-            .unwrap();
-        let status = VcsService.status(&dir).await.unwrap();
-        assert_eq!(status.untracked, vec!["untracked.txt"]);
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("t3-host-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
     }
-    #[tokio::test]
-    async fn preview_rejects_non_http_urls() {
-        assert!(PreviewService::default()
-            .open("file:///tmp/a")
-            .await
-            .is_err());
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
+
     #[tokio::test]
-    async fn device_lifecycle_is_deterministic() {
+    async fn git_status_refs_and_worktrees_share_a_real_repository() {
+        let repo = Fixture::new();
+        let data = Fixture::new();
+        let cwd = repo.0.to_str().unwrap();
+        let input = json!({"cwd":cwd});
+        let svc = VcsService;
+        let call = |name: &'static str, input: Value| {
+            let dir = &data.0;
+            let svc = &svc;
+            async move { svc.call(name, &input, dir).await.unwrap().unwrap() }
+        };
+        assert_eq!(call("refreshStatus", input.clone()).await["isRepo"], false);
+        call("init", input.clone()).await;
+        assert!(std::process::Command::new("git")
+            .current_dir(cwd)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@localhost",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "First"
+            ])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(repo.0.join("tracked.txt"), "a\nb\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(["add", "tracked.txt"])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(repo.0.join("untracked.txt"), "c\nd\ne\n").unwrap();
+        let status = call("refreshStatus", input.clone()).await;
+        assert_eq!(status["workingTree"]["insertions"], 2);
+        assert_eq!(status["branchChanges"]["insertions"], 5);
+        call("createRef", json!({"cwd":cwd,"refName":"side"})).await;
+        let refs = call("listRefs", json!({"cwd":cwd,"query":"id","limit":1})).await;
+        assert_eq!(refs["totalCount"], 1);
+        assert_eq!(refs["refs"][0]["name"], "side");
+        let wt = call(
+            "createWorktree",
+            json!({"cwd":cwd,"refName":"side","path":null}),
+        )
+        .await;
+        let path = wt["worktree"]["path"].as_str().unwrap();
+        assert!(std::path::Path::new(path).join(".git").exists());
+        call("removeWorktree", json!({"cwd":cwd,"path":path})).await;
+        assert!(!std::path::Path::new(path).exists());
+    }
+
+    #[test]
+    fn preview_threads_and_revisions_follow_mutations() {
+        let service = PreviewService::default();
+        let mut events = service.subscribe();
+        let call = |name: &str, input: Value| service.call(name, &input).unwrap().unwrap();
+        let tab = call("open", json!({"threadId":"t","url":"localhost:4100"}));
+        assert_eq!(
+            tab["navStatus"],
+            json!({"_tag":"Loading","url":"http://localhost:4100/","title":""})
+        );
+        let tab_id = tab["tabId"].clone();
+        assert_eq!(events.try_recv().unwrap()["revision"], 1);
+        call(
+            "reportStatus",
+            json!({"threadId":"t","tabId":tab_id,"navStatus":{"_tag":"Success","url":"http://localhost:4100/","title":"Home"},"canGoBack":true,"canGoForward":false}),
+        );
+        assert_eq!(
+            call("list", json!({"threadId":"another"}))["sessions"],
+            json!([])
+        );
+        assert_eq!(
+            call("list", json!({"threadId":"t"}))["sessions"][0]["canGoBack"],
+            true
+        );
+        call("close", json!({"threadId":"t"}));
+        assert_eq!(call("list", json!({"threadId":"t"}))["revision"], 3);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_writes_reach_the_pty_and_close_is_scoped_to_thread() {
+        let svc = TerminalService::default();
+        let key = json!({"threadId":"t","terminalId":"term-2"});
+        let mut input = key.clone();
+        input["cwd"] = json!("/tmp");
+        let mut events = svc.subscribe();
+        let opened = svc.call("open", &input).await.unwrap().unwrap();
+        assert_eq!(opened["label"], "Terminal 2");
+        assert!(opened["pid"].as_u64().is_some());
+        let mut resize = key.clone();
+        resize["rows"] = json!(36);
+        resize["cols"] = json!(82);
+        svc.call("resize", &resize).await.unwrap().unwrap();
+        let mut write = key.clone();
+        write["data"] = json!("printf '%s%s!\\n' T3 HOST; stty size\r");
+        svc.call("write", &write).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            let mut history = String::new();
+            while !history.contains("T3HOST!") || !history.contains("36 82") {
+                let event = events.recv().await.unwrap();
+                if let Some(data) = event["data"].as_str() {
+                    history.push_str(data);
+                }
+            }
+        })
+        .await
+        .unwrap();
+        svc.call("close", &json!({"threadId":"other"}))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(svc.call("observe", &key).await.unwrap().is_ok());
+        svc.call("close", &key).await.unwrap().unwrap();
+        assert_eq!(
+            svc.call("observe", &key).await.unwrap().unwrap_err()["_tag"],
+            "TerminalSessionLookupError"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_settings_survive_restart() {
+        let data = Fixture::new();
         let service = DeviceService::default();
-        service
-            .configure(Device {
-                id: "one".into(),
-                name: "Phone".into(),
-                platform: "ios".into(),
-                connected: true,
-            })
-            .await;
-        assert!(service.test_host("one").await.is_ok());
-        assert!(service.close("one").await);
-    }
-    fn tempfile_dir() -> PathBuf {
-        let path = std::env::temp_dir().join(format!("t3code-vcs-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&path).unwrap();
-        path
+        let updated = service
+            .call(
+                "configure",
+                &json!({"enabled":false,"onboardingCompleted":true}),
+                &data.0,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated["hostStatus"], "disabled");
+        assert_eq!(updated["revision"], 1);
+        let fresh = DeviceService::default();
+        assert_eq!(fresh.snapshot(&data.0)["onboardingCompleted"], true);
     }
 }
