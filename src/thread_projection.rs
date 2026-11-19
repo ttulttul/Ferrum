@@ -25,6 +25,39 @@ pub(crate) fn created(command: &Value, at: &str) -> Value {
 }
 
 impl Thread {
+    fn turn_items(&self) -> Vec<Value> {
+        self.messages
+            .iter()
+            .enumerate()
+            .map(|(ordinal, message)| {
+                let at = auth_service::iso((message.created_at as i64).saturating_mul(1000));
+                json!({
+                    "id": message.id,
+                    "threadId": self.id,
+                    "runId": null,
+                    "nodeId": null,
+                    "providerThreadId": null,
+                    "providerTurnId": null,
+                    "nativeItemRef": null,
+                    "parentItemId": null,
+                    "ordinal": ordinal,
+                    "status": "completed",
+                    "title": null,
+                    "startedAt": at,
+                    "completedAt": at,
+                    "updatedAt": at,
+                    "type": "user_message",
+                    "createdBy": "user",
+                    "creationSource": "web",
+                    "messageId": message.id,
+                    "inputIntent": "turn_start",
+                    "text": message.content,
+                    "attachments": []
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn stored_row(&self) -> Value {
         if self.row.is_object() {
             return self.row.clone();
@@ -40,7 +73,7 @@ impl Thread {
         let row = self.stored_row();
         json!({"thread":ordered(APP_FIELDS,&row),"runs":self.runs,"attempts":[],"nodes":[],"subagents":[],
             "providerSessions":[],"providerThreads":[],"providerTurns":[],"runtimeRequests":[],
-            "messages":self.messages,"plans":[],"turnItems":[],"checkpointScopes":[],"checkpoints":[],
+            "messages":self.messages,"plans":[],"turnItems":self.turn_items(),"checkpointScopes":[],"checkpoints":[],
             "contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":[],"updatedAt":row["updatedAt"]})
     }
     pub(crate) fn shell(&self) -> Value {

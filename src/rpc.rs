@@ -2223,7 +2223,14 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                     "cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}
                 }}));
             }
-            json!({"item":null})
+            let item_id = params["itemId"].as_str().unwrap_or_default();
+            let item = store
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.projection().get("turnItems").cloned())
+                .and_then(|items| items.as_array().cloned())
+                .and_then(|items| items.into_iter().find(|item| item["id"] == item_id));
+            json!({"item":item})
         }
         "orchestration.getNativeChildWork" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default();
