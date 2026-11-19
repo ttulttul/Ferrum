@@ -10,6 +10,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::Sha256;
 use std::{
     collections::HashMap,
@@ -368,6 +369,8 @@ pub struct AppState {
     pub(crate) pull_request_linked_events: broadcast::Sender<u64>,
     pub(crate) scheduled_tasks: Mutex<indexmap::IndexMap<String, serde_json::Value>>,
     pub(crate) scheduled_tasks_path: PathBuf,
+    pub(crate) scheduled_webhook_deliveries: Mutex<indexmap::IndexMap<String, serde_json::Value>>,
+    pub(crate) scheduled_webhook_deliveries_path: PathBuf,
     pub(crate) scheduled_task_events: broadcast::Sender<()>,
     pub(crate) prompt_suggestion_events: broadcast::Sender<serde_json::Value>,
 }
@@ -449,6 +452,21 @@ impl AppState {
                     .collect::<indexmap::IndexMap<_, _>>()
             })
             .unwrap_or_default();
+        let scheduled_webhook_deliveries_path = dir.join("scheduled-webhook-deliveries.json");
+        let scheduled_webhook_deliveries = tokio::fs::read(&scheduled_webhook_deliveries_path)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
+            .map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|delivery| {
+                        let id = delivery["id"].as_str()?.to_owned();
+                        Some((id, delivery))
+                    })
+                    .collect::<indexmap::IndexMap<_, _>>()
+            })
+            .unwrap_or_default();
         Ok(Arc::new(Self {
             config_started_at: auth_service::iso(auth_service::now()),
             environment_id: environment_http::identity(&dir)?,
@@ -480,6 +498,8 @@ impl AppState {
             pull_request_linked_events,
             scheduled_tasks: Mutex::new(scheduled_tasks),
             scheduled_tasks_path,
+            scheduled_webhook_deliveries: Mutex::new(scheduled_webhook_deliveries),
+            scheduled_webhook_deliveries_path,
             scheduled_task_events,
             prompt_suggestion_events,
         }))
@@ -492,6 +512,17 @@ impl AppState {
         let temporary = self.scheduled_tasks_path.with_extension("json.tmp");
         tokio::fs::write(&temporary, bytes).await?;
         tokio::fs::rename(temporary, &self.scheduled_tasks_path).await?;
+        Ok(())
+    }
+    pub(crate) async fn persist_scheduled_webhook_deliveries(&self) -> anyhow::Result<()> {
+        let deliveries = self.scheduled_webhook_deliveries.lock().await;
+        let bytes = serde_json::to_vec(&deliveries.values().collect::<Vec<_>>())?;
+        drop(deliveries);
+        let temporary = self
+            .scheduled_webhook_deliveries_path
+            .with_extension("json.tmp");
+        tokio::fs::write(&temporary, bytes).await?;
+        tokio::fs::rename(temporary, &self.scheduled_webhook_deliveries_path).await?;
         Ok(())
     }
     async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {
@@ -601,6 +632,8 @@ async fn webhook_handler(
         return response;
     }
     let headers = request.headers().clone();
+    let method = request.method().as_str().to_owned();
+    let query = request.uri().query().map(str::to_owned).unwrap_or_default();
     let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024 + 1).await {
         Ok(bytes) if bytes.len() <= 1024 * 1024 => bytes,
         _ => {
@@ -627,7 +660,59 @@ async fn webhook_handler(
             "not_found",
         );
     };
+    let delivery_id = format!("delivery:{}", uuid::Uuid::new_v4());
+    let headers_json = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((
+                name.as_str().to_ascii_lowercase(),
+                json!(value.to_str().ok()?.to_owned()),
+            ))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let content_type = headers_json
+        .get("content-type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let record_delivery = |outcome_name: &str, signature_verified: bool, error: Option<String>| {
+        let state = state.clone();
+        let delivery_id = delivery_id.clone();
+        let hook_id = hook_id.clone();
+        let method = method.clone();
+        let query = query.clone();
+        let headers_json = headers_json.clone();
+        let content_type = content_type.clone();
+        let outcome_name = outcome_name.to_owned();
+        let delivery_key = delivery_id.clone();
+        let delivery = json!({
+            "id":delivery_id,
+            "taskId":hook_id,
+            "receivedAt":crate::auth_service::iso(crate::auth_service::now()),
+            "method":method,
+            "query":query,
+            "headers":headers_json,
+            "body":String::from_utf8_lossy(&body),
+            "bodyBytes":body.len(),
+            "bodyTruncated":false,
+            "outcome":outcome_name,
+            "signatureVerified":signature_verified,
+            "pendingWindow":false,
+            "missingFields":[],
+            "error":error,
+            "renderedPrompt":null,
+            "contentType":content_type
+        });
+        async move {
+            state
+                .scheduled_webhook_deliveries
+                .lock()
+                .await
+                .insert(delivery_key, delivery);
+            let _ = state.persist_scheduled_webhook_deliveries().await;
+        }
+    };
     if task["enabled"] != true {
+        record_delivery("disabled", false, None).await;
         return outcome(
             StatusCode::CONFLICT,
             serde_json::json!({"error":"hook_disabled"}),
@@ -638,6 +723,7 @@ async fn webhook_handler(
         let valid =
             webhook_signature_valid(signature, task["_webhookSecret"].as_str(), &headers, &body);
         if !valid {
+            record_delivery("rejected_signature", false, None).await;
             return outcome(
                 StatusCode::UNAUTHORIZED,
                 serde_json::json!({"error":"invalid_signature"}),
@@ -645,7 +731,7 @@ async fn webhook_handler(
             );
         }
     }
-    let delivery_id = format!("delivery:{}", uuid::Uuid::new_v4());
+    record_delivery("accepted", task["schedule"]["signature"].is_object(), None).await;
     let _ = body;
     outcome(
         StatusCode::ACCEPTED,

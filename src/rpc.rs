@@ -2008,12 +2008,83 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         );
     }
     if method == "scheduledTasks.listWebhookDeliveries" {
-        return Reply::Success(json!({"deliveries":[]}));
+        let task_id = params["id"].as_str().unwrap_or_default();
+        let accept_any = params["acceptAnyOutcome"] == true;
+        let legacy = [
+            "accepted",
+            "dispatch_failed",
+            "duplicate",
+            "coalesced",
+            "rejected_signature",
+            "disabled",
+            "rate_limited",
+            "expired",
+            "filtered",
+        ];
+        let deliveries = state
+            .scheduled_webhook_deliveries
+            .lock()
+            .await
+            .values()
+            .filter(|delivery| delivery["taskId"] == task_id)
+            .filter(|delivery| {
+                accept_any
+                    || delivery["outcome"]
+                        .as_str()
+                        .is_some_and(|outcome| legacy.contains(&outcome))
+            })
+            .map(|delivery| {
+                let mut summary = delivery.clone();
+                if let Some(object) = summary.as_object_mut() {
+                    for key in [
+                        "query",
+                        "headers",
+                        "body",
+                        "bodyTruncated",
+                        "renderedPrompt",
+                    ] {
+                        object.remove(key);
+                    }
+                }
+                summary
+            })
+            .collect::<Vec<_>>();
+        return Reply::Success(json!({"deliveries":deliveries}));
     }
     if method == "scheduledTasks.getWebhookDelivery" {
-        return Reply::Failure(
-            json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":"Webhook delivery not found.","taskId":params["id"]}}),
-        );
+        let task_id = params["id"].as_str().unwrap_or_default();
+        let delivery_id = params["deliveryId"].as_str().unwrap_or_default();
+        let accept_any = params["acceptAnyOutcome"] == true;
+        let legacy = [
+            "accepted",
+            "dispatch_failed",
+            "duplicate",
+            "coalesced",
+            "rejected_signature",
+            "disabled",
+            "rate_limited",
+            "expired",
+            "filtered",
+        ];
+        let delivery = state
+            .scheduled_webhook_deliveries
+            .lock()
+            .await
+            .get(delivery_id)
+            .filter(|delivery| delivery["taskId"] == task_id)
+            .filter(|delivery| {
+                accept_any
+                    || delivery["outcome"]
+                        .as_str()
+                        .is_some_and(|outcome| legacy.contains(&outcome))
+            })
+            .cloned();
+        let Some(delivery) = delivery else {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":"Webhook delivery not found.","taskId":params["id"]}}),
+            );
+        };
+        return Reply::Success(json!({"delivery":delivery}));
     }
     if method == "cloud.getRelayClientStatus" {
         let found = std::env::var_os("PATH").and_then(|paths| {
