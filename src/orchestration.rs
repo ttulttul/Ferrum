@@ -979,6 +979,49 @@ async fn apply_command(
                 .await?
                 .id);
         }
+        "thread.created.record" => {
+            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
+            let target_thread_id = command["targetThreadId"].as_str().unwrap_or_default();
+            let store = state.store.read().await;
+            let parent = store.threads.get(parent_thread_id).ok_or_else(|| {
+                anyhow::anyhow!(format!(
+                    "No orchestration projection exists for thread {parent_thread_id}."
+                ))
+            })?;
+            let target = store.threads.get(target_thread_id).ok_or_else(|| {
+                anyhow::anyhow!(format!(
+                    "No orchestration projection exists for thread {target_thread_id}."
+                ))
+            })?;
+            if parent.project_id != target.project_id {
+                return Err(anyhow::anyhow!(format!(
+                    "Target thread {target_thread_id} belongs to another project."
+                )));
+            }
+            let parent_run_id = command["parentRunId"].as_str().unwrap_or_default();
+            if !parent
+                .runs
+                .iter()
+                .any(|run| run.id.to_string() == parent_run_id)
+            {
+                return Err(anyhow::anyhow!(format!(
+                    "Parent node {} is not the root of run {parent_run_id}.",
+                    command["parentNodeId"].as_str().unwrap_or_default()
+                )));
+            }
+            if let Some(target_run_id) = command["targetRunId"].as_str() {
+                if !target
+                    .runs
+                    .iter()
+                    .any(|run| run.id.to_string() == target_run_id)
+                {
+                    return Err(anyhow::anyhow!(format!(
+                        "Target run {target_run_id} does not belong to thread {target_thread_id}."
+                    )));
+                }
+            }
+            drop(store);
+        }
         // Every command discriminator has a registered wire contract. Commands
         // whose provider-specific state is not available locally still need a
         // durable receipt so retries remain idempotent and clients observe the
