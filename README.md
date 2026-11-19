@@ -27,7 +27,7 @@ Launch the relay separately with `target/debug/t3code-server --relay --listen 12
 
 ## Compare against upstream
 
-Use Git, the GitHub CLI, Node 26.13.1, pnpm 12.14.0, Python with `websockets` 16 and `cryptography`, and the Rust toolchain pinned in this repo.
+Use Git, the GitHub CLI, Node 26.13.1, pnpm 12.14.0, Python with `websockets` 16, `cryptography` and `Pillow`, and the Rust toolchain pinned in this repo.
 
 ```bash
 git clone https://github.com/pingdotgg/t3code /tmp/t3code-reference

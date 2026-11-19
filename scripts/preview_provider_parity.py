@@ -4,14 +4,17 @@ import argparse
 from contextlib import ExitStack
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 import json
 from pathlib import Path
 import secrets
 import shlex
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Event, Thread
+from time import monotonic
 from urllib.parse import urlencode
 
+from PIL import Image
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 
@@ -25,18 +28,31 @@ class PreviewPage(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition", 'attachment; filename="sample.txt"')
             self.end_headers()
             self.wfile.write(b"Preview download fixture\n")
+        elif self.path == "/painted":
+            self.end_headers()
+            self.server.painted.set()
         else:
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(b"""<!doctype html><title>Preview fixture</title>
                 <style>body {background: #793} input,a {display:block;width:250px;height:60px}</style>
-                <input type=file><a href="/file" download="sample.txt">Download</a>""")
+                <input type=file><a href="/file" download="sample.txt">Download</a>
+                <script>
+                  const colors = ["#357", "#a53", "#248"];
+                  document.addEventListener("click", event => {
+                    if (event.clientY <= 150 || !colors.length) return;
+                    document.body.style.background = colors.shift();
+                    if (!colors.length)
+                      requestAnimationFrame(() => requestAnimationFrame(() => fetch("/painted")));
+                  });
+                </script>""")
 
     def log_message(self, *args):
         pass
 
 
-def observe(server, page_url):
+def observe(name, server, page_url, painted):
+    painted.clear()
     url, cookie = server
     headers = {"Cookie": cookie}
     ws = url.replace("http", "ws", 1)
@@ -53,32 +69,56 @@ def observe(server, page_url):
         tab = {key: opened[key] for key in ("threadId", "tabId")}
         target = ws + "/api/preview-stream/ws?" + urlencode(tab)
         with connect(target, additional_headers=headers, proxy=None, compression=None) as viewer:
-            def receive(kind):
-                while True:
-                    message = viewer.recv(timeout=10)
+            def receive(kind, *, color=None, size=None, hold=False):
+                # Chromium may emit a blank document, live frames, and full-size stills
+                # during navigation. Identify a paint before comparing its encoded bytes.
+                deadline = monotonic() + 10
+                observed = []
+                while (remaining := deadline - monotonic()) > 0:
+                    try:
+                        message = viewer.recv(timeout=remaining)
+                    except TimeoutError:
+                        break
                     if isinstance(message, bytes):
+                        if color is not None:
+                            with Image.open(BytesIO(message)) as frame:
+                                if frame.format != "JPEG":
+                                    raise ValueError(f"Unexpected preview encoding {frame.format}")
+                                pixel = frame.getpixel((frame.width // 2, frame.height // 2))
+                                observed.append((frame.size, pixel))
+                                if (size is None or frame.size == size) and all(
+                                    abs(a - b) <= 2 for a, b in zip(pixel, color, strict=True)
+                                ):
+                                    if not hold:
+                                        viewer.send('{"type":"ack"}')
+                                    return message
                         viewer.send('{"type":"ack"}')
-                        if "JPEG" not in result:
-                            result["JPEG"] = message
-                        elif message!=result["JPEG"]:
-                            result.setdefault("page JPEG",message)
-                        if kind == "jpeg" or (kind == "loaded" and "page JPEG" in result):
-                            return
                     else:
                         event = json.loads(message)
                         if event["type"] in ("control", "viewport"):
                             result.setdefault(event["type"], message.encode())
                         if event["type"] == kind:
                             return event
+                raise RuntimeError(f"{name} timed out waiting for {kind}, {color=}, {size=}; saw {observed}")
 
             def click(y):
                 for action, buttons in (("down", 1), ("up", 0)):
                     viewer.send(json.dumps(dict(type="mouse", action=action, x=30, y=y,
                                                 button="left", buttons=buttons, clickCount=1)))
 
-            receive("jpeg")
-            # The first frame can show the blank document preceding navigation.
-            receive("loaded")
+            receive("ready paint", color=(119, 153, 51))
+            click(200)
+            result["first paint JPEG"] = receive("first paint", color=(51, 85, 119), size=(1280, 800))
+            click(200)
+            result["second paint JPEG"] = receive("second paint", color=(170, 85, 51),
+                                                  size=(1280, 800), hold=True)
+            # Keep one live frame in flight through the final paint. Both servers
+            # should deliver a full-resolution still once the burst settles.
+            click(200)
+            if not painted.wait(10):
+                raise RuntimeError("Page did not report its final paint")
+            viewer.send('{"type":"ack"}')
+            result["settled JPEG"] = receive("settled paint", color=(34, 68, 136), size=(2560, 1600))
             click(25)
             chooser = receive("fileChooser")
             multipart = (b'--T3Fixture\r\nContent-Disposition: form-data; name="file"; '
@@ -114,20 +154,23 @@ def main():
     args = parser.parse_args()
     with TemporaryDirectory() as directory, ExitStack() as stack:
         page = stack.enter_context(ThreadingHTTPServer(("127.0.0.1", 0), PreviewPage))
+        page.painted = Event()
         Thread(target=page.serve_forever, daemon=True).start()
         stack.callback(page.shutdown)
         url = f"http://127.0.0.1:{page.server_port}/"
         secret = secrets.token_urlsafe(32)
         signing_key = secrets.token_bytes(32)
-        servers = []
+        servers = {}
         for name, cmd in (("original", args.original_command), ("rust", args.rust_command)):
             root = Path(directory, name)
             (root / ".cache").mkdir(parents=True)
             (root / ".cache/ms-playwright").symlink_to(args.browser_cache.resolve(), target_is_directory=True)
-            servers.append(managed_server(stack, shlex.split(cmd), root, secret, signing_key))
-        original, rust = [observe(server, url) for server in servers]
+            servers[name] = managed_server(stack, shlex.split(cmd), root, secret, signing_key)
+        original = observe("original", servers["original"], url, page.painted)
+        rust = observe("rust", servers["rust"], url, page.painted)
         failed = 0
-        for key in ("control", "viewport", "JPEG", "page JPEG", "upload", "download", "socket close"):
+        for key in ("control", "viewport", "first paint JPEG", "second paint JPEG",
+                    "settled JPEG", "upload", "download", "socket close"):
             left, right = original[key], rust[key]
             if left == right:
                 print("PASS", key)
