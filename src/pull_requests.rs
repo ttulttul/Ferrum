@@ -7,6 +7,7 @@ use std::path::Path;
 
 mod actions;
 mod detail;
+mod files;
 mod listing;
 mod review;
 pub(crate) fn handles(method: &str) -> bool {
@@ -17,6 +18,9 @@ pub(crate) fn handles(method: &str) -> bool {
         op,
         "detail"
             | "runAction"
+            | "filesViewed"
+            | "setFilesViewed"
+            | "changeBreakdown"
             | "checks"
             | "list"
             | "listStats"
@@ -259,6 +263,9 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
                 .await;
         }
         return Ok(result);
+    }
+    if matches!(op, "filesViewed" | "setFilesViewed" | "changeBreakdown") {
+        return files::run(&gh, named, number, op, input).await;
     }
     if op == "runAction" {
         state.pull_requests.clear(&p.id, named, number).await;

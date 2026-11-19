@@ -32,6 +32,9 @@ PR = {"viewerCanUpdate":True,"viewerDidAuthor":False,"headRepository":{"viewerPe
       "state": "OPEN", "isDraft": False, "author": AUTHOR, "createdAt": "2026-01-02T00:00:00Z"}
 
 
+PR["files"] = {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes":[
+    {"path":path,"viewerViewedState":"UNVIEWED","additions":i+1,"deletions":2*i}
+    for i,path in enumerate(["lib.rs","README.md","tests/test_api.py","__fixtures__/main.txt","Cargo.lock"])]}
 PR.update({"body":"PR body","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED",
            "additions":1,"deletions":1,"changedFiles":1,"updatedAt":"2026-02-01T00:00:00Z","mergedAt":None,
            "closedAt":None,"headRefName":"feature","baseRefName":"main","headRefOid":"a"*40,
@@ -105,6 +108,28 @@ class Provider(BaseHTTPRequestHandler):
         elif self.path == "/graphql":
             query = data.get("query", "")
             if query.lstrip().startswith("mutation"):
+                if "markFileAsViewed(" in query:
+                    result={}
+                    args=data["variables"]
+                    fields=re.finditer(r"(?:(\w+):\s*)?(unmarkFileAsViewed|markFileAsViewed)\s*\(\s*input\s*:\s*\{([^}]*)}\s*\)\s*(@(?:include|skip)\(if:\s*\$(\w+)\))?",query)
+                    for f in fields:
+                        alias, method, inputs, directive, flag=f.groups()
+                        if directive and (bool(args[flag])!=directive.startswith("@include")):
+                            continue
+                        variables={k:args[v] for k,v in re.findall(r"(\w+)\s*:\s*\$(\w+)", inputs)}
+                        if variables.get("pullRequestId")!="PR_3":
+                            self.reply(422,{"errors":[{"message":"Wrong PR file mutation"}]})
+                            return
+                        path=variables["path"]
+                        viewed=method=="markFileAsViewed"
+                        for file in self.server.repository["pullRequest"]["files"]["nodes"]:
+                            if file["path"]==path:
+                                file["viewerViewedState"]="VIEWED" if viewed else "UNVIEWED"
+                                break
+                        self.server.file_writes.append((path,viewed))
+                        result[alias or method]={"clientMutationId":None}
+                    self.reply(200,{"data":result})
+                    return
                 if "updateRefs(" in query:
                     request = data["variables"]["input"]
                     expected = {"repositoryId":"R1","refUpdates":[{"name":"refs/heads/feature","beforeOid":"a"*40,"afterOid":"0"*40}]}
@@ -194,6 +219,7 @@ def main():
             host.creates, host.comments, host.pr_writes, host.reviews, host.reviewers = [], [], [], [], []
             host.repository = deepcopy(REPOSITORY)
             host.actions = []
+            host.file_writes = []
             host.deleted = 0
             host.ref_oid = "a"*40
             thread = Thread(target=host.serve_forever, daemon=True)
@@ -232,6 +258,10 @@ def main():
             rpc("issues.list", {"projectId": "test-project", "state": "open"}),
             rpc("issues.candidates", issue),
             rpc("pullRequests.preview", ref),
+            rpc("pullRequests.filesViewed", ref),
+            rpc("pullRequests.changeBreakdown", ref),
+            rpc("pullRequests.setFilesViewed",{**ref,"files":[{"path":"lib.rs","viewed":True},{"path":"README.md","viewed":True},{"path":"lib.rs","viewed":False}]}),
+            rpc("pullRequests.filesViewed",ref),
             rpc("pullRequests.update", {**ref,"title":"New title","body":"New body"}),
             rpc("pullRequests.comment", {**ref,"body":"PR comment"}),
             rpc("pullRequests.submitReview", {**ref,"body":"Reviewed","verdict":"comment","comments":[{"path":"lib.rs","position":{"kind":"added","newLine":1},"body":"Inline remark"}]}),
@@ -275,6 +305,9 @@ def main():
             expected_actions = [(m,None,None) for m in ("convertPullRequestToDraft","markPullRequestReadyForReview",
                 "closePullRequest","reopenPullRequest","disablePullRequestAutoMerge","revertPullRequest")]
             expected_actions.append(("mergePullRequest","SQUASH",None))
+            if provider.file_writes != [("lib.rs",True),("README.md",True),("lib.rs",False)]:
+                failures += 1
+                print("FAIL file toggles",provider.file_writes)
             if provider.deleted != 1:
                 failures += 1
                 print("FAIL expected one atomic source branch deletion",provider.deleted)
