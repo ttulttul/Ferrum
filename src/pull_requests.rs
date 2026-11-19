@@ -5,6 +5,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::path::Path;
 
+mod detail;
 mod listing;
 mod review;
 pub(crate) fn handles(method: &str) -> bool {
@@ -13,7 +14,9 @@ pub(crate) fn handles(method: &str) -> bool {
     };
     matches!(
         op,
-        "list"
+        "detail"
+            | "checks"
+            | "list"
             | "listStats"
             | "preview"
             | "summary"
@@ -23,8 +26,85 @@ pub(crate) fn handles(method: &str) -> bool {
     ) || review::handles(op)
 }
 
+type SummaryKey = (String, String, u64, String);
+type HeldSummaries = indexmap::IndexMap<SummaryKey, (std::time::Instant, Value)>;
+
 #[derive(Default, Debug)]
-pub struct PullRequestService;
+pub struct PullRequestService {
+    summaries: tokio::sync::Mutex<HeldSummaries>,
+}
+impl PullRequestService {
+    async fn clear(&self, project: &str, repository: &str, number: u64) {
+        self.summaries.lock().await.retain(|(p, r, n, _), _| {
+            p != project || !r.eq_ignore_ascii_case(repository) || *n != number
+        });
+    }
+    async fn remember(&self, key: SummaryKey, next: &Value, from_detail: bool) {
+        let mut cache = self.summaries.lock().await;
+        if cache
+            .get(&key)
+            .is_some_and(|(_, last)| last["observedAt"].as_u64() > next["observedAt"].as_u64())
+        {
+            return;
+        }
+        let summary = if from_detail {
+            let mut summary = json!({});
+            let prior = cache.get(&key).map(|(_, value)| value);
+            for field in [
+                "provider",
+                "projectId",
+                "repository",
+                "number",
+                "title",
+                "url",
+                "state",
+                "isDraft",
+                "headBranch",
+                "baseBranch",
+                "closedAt",
+                "mergedAt",
+                "updatedAt",
+                "observedAt",
+                "author",
+                "additions",
+                "deletions",
+                "changedFiles",
+                "reviewDecision",
+                "checksState",
+                "mergeability",
+                "rebaseRequired",
+                "stack",
+                "headSha",
+                "autoMergeEnabled",
+                "autoMergeMethod",
+            ] {
+                let value = if matches!(
+                    field,
+                    "stack"
+                        | "headSha"
+                        | "autoMergeEnabled"
+                        | "autoMergeMethod"
+                        | "checksState"
+                        | "reviewDecision"
+                ) {
+                    prior.and_then(|s| s.get(field))
+                } else {
+                    next.get(field)
+                };
+                if let Some(v) = value {
+                    summary[field] = v.clone()
+                }
+            }
+            summary
+        } else {
+            next.clone()
+        };
+        if cache.len() >= 256 && !cache.contains_key(&key) {
+            cache.shift_remove_index(0);
+        }
+        cache.insert(key, (std::time::Instant::now(), summary));
+    }
+}
 
 fn error(op: &str, detail: &str) -> Value {
     json!({"_tag":"PullRequestOperationError","operation":op,"detail":detail})
@@ -38,7 +118,7 @@ fn failure(op: &str, f: Failure) -> Value {
             json!({"_tag":"PullRequestUnavailableError","reason":if f==Failure::Auth{"cli-unauthenticated"}else{"cli-missing"},"provider":"github","requirement":if f==Failure::Missing{"No GitHub credential on the server. Set GH_TOKEN, or install the GitHub CLI (https://cli.github.com/) and run `gh auth login`."}else{"GitHub has no working credential for this host. Run `gh auth login`, or check the account and hosts in Settings → Source control & issues."}})
         }
         Failure::NotFound => {
-            json!({"_tag":"PullRequestOperationError","operation":op,"detail":"GitHub could not find the requested resource.","reason":"not-found"})
+            json!({"_tag":"PullRequestOperationError","operation":op,"detail":"GitHub could not find the requested resource, or the credential cannot see it.","reason":"not-found"})
         }
         Failure::RateLimit => {
             json!({"_tag":"PullRequestOperationError","operation":op,"detail":"GitHub API rate limit exceeded."})
@@ -150,10 +230,45 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
         .as_u64()
         .filter(|n| *n > 0)
         .ok_or_else(|| error(op, "A pull request number is required."))?;
-    if review::handles(op) {
-        return review::run(&gh, op, named, number, input).await;
+    if matches!(op, "summary" | "detail") {
+        let viewer = identity(&gh)
+            .await
+            .ok()
+            .and_then(|v| v["accountId"].as_str().map(str::to_owned));
+        let key = viewer.map(|v| (p.id.clone(), named.to_ascii_lowercase(), number, v));
+        if op == "summary" && input["allowStale"] != false {
+            if let Some(k) = &key {
+                if let Some((when, cached)) = state.pull_requests.summaries.lock().await.get(k) {
+                    if when.elapsed() < std::time::Duration::from_secs(15) {
+                        return Ok(cached.clone());
+                    }
+                }
+            }
+        }
+        let result = if op == "detail" {
+            detail::read(&gh, &p, op, named, number).await?
+        } else {
+            metadata(&gh, op, named, &p.id, number).await?
+        };
+        if let Some(k) = key {
+            state
+                .pull_requests
+                .remember(k, &result, op == "detail")
+                .await;
+        }
+        return Ok(result);
     }
-    if matches!(op, "summary" | "preview") {
+    if op == "checks" {
+        return detail::read(&gh, &p, op, named, number).await;
+    }
+    if review::handles(op) {
+        let result = review::run(&gh, op, named, number, input).await;
+        if !matches!(op, "labelCandidates" | "reviewerCandidates") {
+            state.pull_requests.clear(&p.id, named, number).await;
+        }
+        return result;
+    }
+    if op == "preview" {
         return metadata(&gh, op, named, &p.id.to_string(), number).await;
     }
     let repo = format!("repos/{named}");
@@ -431,7 +546,7 @@ async fn contents(gh: &Github<'_>, input: &Value, repo: &str, target: &str, file
     }
     .unwrap_or("");
     if !valid_sha(head)
-        || (!valid_sha(&base) && !(commit.is_some() && kind == "new" && base.is_empty()))
+        || !(valid_sha(&base) || commit.is_some() && kind == "new" && base.is_empty())
     {
         let msg = match commit {
             Some(c) => format!("Commit {c} reported no usable revisions for this file."),

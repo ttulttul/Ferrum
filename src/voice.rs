@@ -82,7 +82,7 @@ fn parse_recording(data: &[u8]) -> Result<(Options, &[u8]), SpeechError> {
     Ok((options, &data[4 + len..]))
 }
 fn wave(pcm: &[u8]) -> Result<Vec<u8>, SpeechError> {
-    if pcm.is_empty() || pcm.len() > MAX_PCM || pcm.len() % 4 != 0 {
+    if pcm.is_empty() || pcm.len() > MAX_PCM || !pcm.len().is_multiple_of(4) {
         return Err(SpeechError::Invalid("invalid_audio"));
     }
     let size = pcm.len() / 2;

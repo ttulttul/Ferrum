@@ -51,7 +51,7 @@ fn cursor(raw: &str) -> Option<Cursor> {
     let before = fields.next()?;
     if before.len() < 20
         || !before.is_ascii()
-        || !before.as_bytes().get(10).is_some_and(|c| *c == b'T')
+        || before.as_bytes().get(10) != Some(&b'T')
         || !before
             .bytes()
             .all(|b| b.is_ascii_digit() || b"-:T.Z+".contains(&b))

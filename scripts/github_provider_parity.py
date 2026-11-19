@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import secrets
 import shlex
+import re
 from socketserver import ThreadingUnixStreamServer
 import subprocess
 import tempfile
@@ -19,7 +20,7 @@ import parity_harness as harness
 
 REPO = "example/parity"
 PATCH = "diff --git a/lib.rs b/lib.rs\n--- a/lib.rs\n+++ b/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"
-AUTHOR = {"__typename":"User","login": "tester", "name": "Test User", "avatarUrl": "https://github.com/tester.png"}
+AUTHOR = {"__typename":"User","id":"U1","login": "tester", "name": "Test User", "avatarUrl": "https://github.com/tester.png"}
 LABEL = {"name": "bug", "color": "fff", "description": "Something needs fixing"}
 ISSUE = {"id": "I_12", "__typename": "Issue", "number": 12, "title": "Regression", "body": "Read me",
          "author": AUTHOR, "url": "https://github.com/example/parity/issues/12", "state": "OPEN",
@@ -29,6 +30,22 @@ ISSUE = {"id": "I_12", "__typename": "Issue", "number": 12, "title": "Regression
 PR = {"viewerCanUpdate":True,"viewerDidAuthor":False,"headRepository":{"viewerPermission":"WRITE"},"id": "PR_3", "__typename": "PullRequest", "number": 3, "title": "Work", "url": "https://github.com/example/parity/pull/3",
       "state": "OPEN", "isDraft": False, "author": AUTHOR, "createdAt": "2026-01-02T00:00:00Z"}
 
+
+PR.update({"body":"PR body","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED",
+           "additions":1,"deletions":1,"changedFiles":1,"updatedAt":"2026-02-01T00:00:00Z","mergedAt":None,
+           "closedAt":None,"headRefName":"feature","baseRefName":"main","headRefOid":"a"*40,
+           "isCrossRepository":False,"maintainerCanModify":False,"headRepositoryOwner":{"__typename":"User","login":"tester"},
+           "headRepository":{"viewerPermission":"WRITE","nameWithOwner":REPO},"headRef":{"id":"HD_3"},
+           "autoMergeRequest":None,"mergeQueueRemovals":{"nodes":[]},"viewerCanUpdateBranch":True,
+           "baseRef":{"compare":{"behindBy":0}},"reviewRequests":{"nodes":[]},"labels":{"nodes":[LABEL]},
+           "latestReviews":{"nodes":[]},"stack":None,"stackEntry":None,"commits":{"nodes":[{"commit":{
+               "statusCheckRollup":{"state":"SUCCESS","contexts":{"nodes":[{"__typename":"CheckRun","name":"build",
+                   "status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-01-01T12:00:00Z",
+                   "completedAt":"2026-01-01T13:00:00Z","detailsUrl":"https://example.test/build",
+                   "isRequired":True,"checkSuite":{"workflowRun":{"workflow":{"name":"CI"}}}}],
+                   "pageInfo":{"hasNextPage":False,"endCursor":None}}}}}]}})
+REPOSITORY = {"__typename":"Repository", "viewerPermission":"WRITE","mergeCommitAllowed":True,"squashMergeAllowed":True,
+              "rebaseMergeAllowed":True,"autoMergeAllowed":True,"pullRequest":PR}
 
 class Provider(BaseHTTPRequestHandler):
     def log_message(self, *_args):
@@ -44,7 +61,9 @@ class Provider(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path == "/user":
+        if path.endswith("/actions/runs"):
+            self.reply(200, {"workflow_runs":[], "total_count":0})
+        elif path == "/user":
             self.reply(200, {"login": "tester", "id": 1234})
         elif path == f"/repos/{REPO}/pulls/3" and "diff" in self.headers.get("Accept", ""):
             self.reply(200, PATCH, "application/vnd.github.diff")
@@ -98,7 +117,8 @@ class Provider(BaseHTTPRequestHandler):
             elif "issue(number:" in query:
                 result = {"repository": {"issue": ISSUE}}
             elif "pullRequest(number:" in query:
-                result = {"repository": {"viewerPermission":"WRITE", "mergeCommitAllowed":True,"squashMergeAllowed":True,"rebaseMergeAllowed":True,"autoMergeAllowed":True,"pullRequest": PR}}
+                alias = re.search(r"(\w+)\s*:\s*repository\(", query)
+                result = {(alias.group(1) if alias else "repository"): REPOSITORY}
             elif "viewer" in query:
                 result = {"viewer": {**AUTHOR, "databaseId": 1234}}
             else:
@@ -117,6 +137,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command", required=True)
     parser.add_argument("--rust-command", required=True)
+    parser.add_argument("--faketime-lib", type=Path, help="libfaketime shared object, enables exact comparisons for reads containing observedAt")
     args = parser.parse_args()
     with ExitStack() as stack:
         root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="t3-gh-parity-")))
@@ -142,6 +163,9 @@ def main():
             providers.append(host)
             (config / "config.yml").write_text(f"http_unix_socket: {endpoint}\n")
             prefix = ["env", f"GH_CONFIG_DIR={config}", "GH_TOKEN=offline-test-fixture", "GH_NO_UPDATE_NOTIFIER=1"]
+            if args.faketime_lib:
+                lib = args.faketime_lib.resolve(strict=True)
+                prefix.extend([f"LD_PRELOAD={lib}", "FAKETIME=2026-11-10 12:00:00", "FAKETIME_DONT_FAKE_MONOTONIC=1", "TZ=UTC"])
             # Assert this gh version is actually using the fixture before starting either server.
             probe = subprocess.run(prefix + ["gh", "api", "--hostname", "github.com", "user"],
                                    capture_output=True, check=True, timeout=8)
@@ -175,9 +199,22 @@ def main():
             {"name": "posted PR diff", "authenticated": True, "method": "POST", "path": "/api/pull-requests/diff", "body": ref},
             {"name": "paged PR diff", "authenticated": True, "method": "POST", "path": "/api/pull-requests/diff", "body": {**ref, "cursor": "1"}},
         ]
+        if args.faketime_lib:
+            cases.extend(rpc("pullRequests."+op, ref) for op in ("detail","checks","summary"))
         failures = 0
         for case in cases:
-            ok, values = harness.check(case, projects, sockets)
+            if "frame" in case:
+                for ws in sockets:
+                    ws.send(harness.encode(case["frame"]).decode())
+                packets = [ws.recv(timeout=15) for ws in sockets]
+                expected_failure = case["frame"]["payload"].get("scope") == "other/repo"
+                exits = [json.loads(p)["exit"] for p in packets]
+                ok = packets[0] == packets[1] and all(
+                    e["_tag"] == ("Failure" if expected_failure else "Success") for e in exits)
+                values = [repr(v)[:5000] for v in packets]
+            else:
+                ok, values = harness.check(case, projects, sockets)
+                ok = ok and values[0].startswith("(200,")
             print(("PASS" if ok else "FAIL"), case["name"])
             if not ok:
                 failures += 1
