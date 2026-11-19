@@ -430,8 +430,54 @@ async fn apply_command(
         | "thread.active.reorder"
         | "provider.switch" => {
             if let Some(thread_id) = thread_id {
+                let current = state.store.read().await;
+                let existing_thread = current.threads.get(thread_id);
+                let existing_row = existing_thread
+                    .map(|thread| thread.stored_row())
+                    .unwrap_or_else(|| json!({}));
+                if command_type == "thread.metadata.update" {
+                    if let Some(expected) = command.get("expectedWorktreePath") {
+                        if expected != &existing_row["worktreePath"] {
+                            return Err(anyhow::anyhow!(format!(
+                                "Thread {thread_id} worktree changed before the metadata update could be applied."
+                            )));
+                        }
+                    }
+                    if let Some(expected) = command.get("expectedBranch") {
+                        if expected != &existing_row["branch"] {
+                            return Err(anyhow::anyhow!(format!(
+                                "Thread {thread_id} branch changed before the metadata update could be applied."
+                            )));
+                        }
+                    }
+                    if command["expectedEmpty"] == true
+                        && existing_thread
+                            .is_some_and(|thread| !thread.messages.is_empty() || !thread.runs.is_empty())
+                    {
+                        return Err(anyhow::anyhow!(format!(
+                            "Thread {thread_id} is no longer empty."
+                        )));
+                    }
+                }
+                drop(current);
                 let mut patch = serde_json::Map::new();
                 let at = json!(crate::auth_service::iso(crate::auth_service::now()));
+                let existing_title_regeneration = state
+                    .store
+                    .read()
+                    .await
+                    .threads
+                    .get(thread_id)
+                    .map(|thread| thread.stored_row()["titleRegeneration"].clone())
+                    .unwrap_or(Value::Null);
+                let existing_row = state
+                    .store
+                    .read()
+                    .await
+                    .threads
+                    .get(thread_id)
+                    .map(|thread| thread.stored_row())
+                    .unwrap_or_else(|| json!({}));
                 let mut row = json!({"updatedAt":at});
                 match command_type {
                     "thread.archive" => {
@@ -500,10 +546,10 @@ async fn apply_command(
                     "thread.pin" => {
                         patch.insert("pinned".into(), true.into());
                         row["pinnedAt"] = at;
-                        row["settledOverride"] = if row["settledOverride"] == "settled" {
+                        row["settledOverride"] = if existing_row["settledOverride"] == "settled" {
                             Value::String("active".into())
                         } else {
-                            row["settledOverride"].clone()
+                            existing_row["settledOverride"].clone()
                         };
                         if row["settledOverride"] == "active" {
                             row["settledAt"] = Value::Null;
@@ -558,7 +604,7 @@ async fn apply_command(
                     }
                     "thread.title.regeneration.complete" => {
                         let request_id = command["requestId"].as_str().unwrap_or_default();
-                        if row["titleRegeneration"]["requestId"] == request_id {
+                        if existing_title_regeneration["requestId"] == request_id {
                             if let Some(title) = command.get("title") {
                                 row["title"] = title.clone();
                                 row["titleRenamed"] = false.into();
@@ -579,6 +625,22 @@ async fn apply_command(
                             patch.insert("title".into(), title.clone());
                             row["title"] = title.clone();
                             row["titleRenamed"] = true.into();
+                            row["titleRegeneration"] = Value::Null;
+                        }
+                        for field in ["branch", "worktreePath", "linkedPullRequest"] {
+                            if let Some(value) = command.get(field) {
+                                row[field] = value.clone();
+                                if field == "linkedPullRequest" {
+                                    patch.insert(field.into(), value.clone());
+                                }
+                            }
+                        }
+                        if command.get("regenerateTitle") == Some(&Value::Bool(true)) {
+                            row["titleRegeneration"] = json!({
+                                "requestId": command["commandId"],
+                                "startedAt": at
+                            });
+                        } else if command.get("regenerateTitle") == Some(&Value::Bool(false)) {
                             row["titleRegeneration"] = Value::Null;
                         }
                     }

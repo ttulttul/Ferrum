@@ -439,6 +439,11 @@ async fn run_call(
     {
         return Reply::defect("Expected { readonly \"type\": \"browser\", ... } | { readonly \"type\": \"terminal\", ... } | { readonly \"type\": \"credentials\", ... }\n  at [\"response\"]".into());
     }
+    if method == "provider.auth.respond" {
+        if let Some(defect) = provider_auth_response_defect(params.get("response")) {
+            return Reply::defect(defect);
+        }
+    }
     if method == "server.checkSecretSource" {
         let settings = state.settings.internal().unwrap_or_default();
         let source = &params["source"];
@@ -1420,9 +1425,16 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             }
         } else if method == "provider.auth.subscribe" {
             if driver == "antigravity" {
-                return Reply::Chunk(
-                    json!([{"instanceId":instance_id,"phase":"idle","flowId":null,"authorizationUrl":null,"expiresAt":null,"message":null,"interaction":null,"credentialOwner":"provider"}]),
-                );
+                let current = state
+                    .provider_auth_states
+                    .lock()
+                    .await
+                    .get(instance_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({"instanceId":instance_id,"phase":"idle","flowId":null,"authorizationUrl":null,"expiresAt":null,"message":null,"interaction":null,"credentialOwner":"provider"})
+                    });
+                return Reply::Chunk(json!([current]));
             }
             if driver == "cursor" {
                 return Reply::Chunk(
@@ -1433,6 +1445,55 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"subscribe","detail":"This provider does not support sign-in in T3 Code."}}),
             );
         } else if method.starts_with("provider.auth.") {
+            if driver == "antigravity" && method == "provider.auth.start" {
+                let flow_id = uuid::Uuid::new_v4().to_string();
+                let expires_at = crate::auth_service::iso(crate::auth_service::now() + 300_000);
+                let state_value = json!({"instanceId":instance_id,"phase":"starting","flowId":flow_id,"authorizationUrl":null,"expiresAt":expires_at,"message":"Starting Google sign-in."});
+                let mut visible = state_value.clone();
+                visible["interaction"] = Value::Null;
+                visible["credentialOwner"] = json!("provider");
+                state
+                    .provider_auth_states
+                    .lock()
+                    .await
+                    .insert(instance_id.to_owned(), visible);
+                return Reply::Success(state_value);
+            }
+            if driver == "cursor" && method == "provider.auth.start" {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"start","detail":"Enable Cursor before signing in."}}),
+                );
+            }
+            if driver == "cursor" && method == "provider.auth.logout" {
+                let value = json!({"instanceId":instance_id,"phase":"idle","flowId":null,"authorizationUrl":null,"expiresAt":null,"message":"Signed out of Cursor."});
+                state
+                    .provider_auth_states
+                    .lock()
+                    .await
+                    .insert(instance_id.to_owned(), value.clone());
+                return Reply::Success(value);
+            }
+            if driver == "antigravity" && method == "provider.auth.cancel" {
+                let flow_id = params["flowId"].as_str().unwrap_or_default();
+                let mut states = state.provider_auth_states.lock().await;
+                if let Some(current) = states.get_mut(instance_id) {
+                    if current["flowId"].as_str() == Some(flow_id) {
+                        current["phase"] = json!("cancelled");
+                        current["message"] = json!("Google sign-in was cancelled.");
+                        let mut result = current.clone();
+                        if let Some(object) = result.as_object_mut() {
+                            object.remove("interaction");
+                            object.remove("credentialOwner");
+                        }
+                        return Reply::Success(result);
+                    }
+                }
+            }
+            if driver == "antigravity" && method == "provider.auth.logout" {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"resolve","detail":"Antigravity ACP runtime is not installed. Install it in this environment's provider settings or set a custom ACP executable path. The Antigravity app, IDE, and CLI are separate installations.","cause":{"name":"AntigravityInstallationError","message":"Antigravity ACP runtime is not installed. Install it in this environment's provider settings or set a custom ACP executable path. The Antigravity app, IDE, and CLI are separate installations."}}}),
+                );
+            }
             let detail = match (driver.as_str(), method) {
                 ("antigravity", "provider.auth.respond") | ("cursor", "provider.auth.respond") => {
                     "This provider does not accept this sign-in interaction."
@@ -3462,6 +3523,87 @@ fn invalid_provider_payload_field(method: &str, params: &Value) -> Option<&'stat
         .iter()
         .copied()
         .find(|field| params.get(*field).is_some_and(|value| !value.is_string()))
+}
+
+fn provider_auth_response_defect(response: Option<&Value>) -> Option<String> {
+    let response = response?;
+    let kind = response.get("type").and_then(Value::as_str);
+    match kind {
+        Some("browser") => {
+            if !matches!(
+                response.get("action").and_then(Value::as_str),
+                Some("accept" | "decline")
+            ) {
+                return Some(
+                    "Expected \"accept\" | \"decline\"\n  at [\"response\"][\"action\"]".into(),
+                );
+            }
+        }
+        Some("terminal") => {
+            if response.get("data").and_then(Value::as_str).is_none() {
+                return Some("Expected string\n  at [\"response\"][\"data\"]".into());
+            }
+            if response
+                .get("binary")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return Some("Expected boolean\n  at [\"response\"][\"binary\"]".into());
+            }
+            if let Some(size) = response.get("size") {
+                if !size.is_object() {
+                    return Some(
+                        "Expected object | undefined\n  at [\"response\"][\"size\"]".into(),
+                    );
+                }
+                for (field, min, max) in [("cols", 1, 500), ("rows", 1, 200)] {
+                    if let Some(value) = size.get(field) {
+                        let valid = value
+                            .as_i64()
+                            .is_some_and(|number| (min..=max).contains(&number));
+                        if !valid {
+                            return Some(format!(
+                                "Expected a value between {min} and {max}\n  at [\"response\"][\"size\"][\"{field}\"]"
+                            ));
+                        }
+                    } else {
+                        return Some(format!(
+                            "Missing key: \"{field}\"\n  at [\"response\"][\"size\"]"
+                        ));
+                    }
+                }
+            }
+        }
+        Some("credentials") => {
+            let Some(values) = response.get("values") else {
+                return Some("Missing key: \"values\"\n  at [\"response\"]".into());
+            };
+            if !values.is_object() {
+                return Some("Expected object\n  at [\"response\"][\"values\"]".into());
+            }
+            let Some(values) = values.as_object() else {
+                unreachable!();
+            };
+            if values.len() > 16 {
+                return Some("Expected a value with a maximum number of properties of 16\n  at [\"response\"][\"values\"]".into());
+            }
+            if values.values().any(|value| value.as_str().is_none()) {
+                return Some("Expected string\n  at [\"response\"][\"values\"]".into());
+            }
+            if values.values().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|text| text.encode_utf16().count() > 16_384)
+            }) {
+                return Some("Expected a value with a maximum length of 16384\n  at [\"response\"][\"values\"]".into());
+            }
+        }
+        _ => {
+            return Some(
+                "Expected \"browser\" | \"terminal\" | \"credentials\"\n  at [\"response\"][\"type\"]".into(),
+            );
+        }
+    }
+    None
 }
 
 fn expand_user_path(path: &str) -> PathBuf {

@@ -23,6 +23,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio-tungstenite = "0.24"
 portable-pty = "0.8.1"
 url = "=2.4.1"
+percent-encoding = "2"
 axum = { version = "=0.7.9", features = ["ws", "multipart"] }
 clap = { version = "=4.5.23", features = ["derive", "env"] }
 futures-util = "0.3"

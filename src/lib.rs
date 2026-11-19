@@ -375,6 +375,7 @@ pub struct AppState {
     pub(crate) scheduled_task_events: broadcast::Sender<()>,
     pub(crate) prompt_suggestion_events: broadcast::Sender<serde_json::Value>,
     pub(crate) provider_install_states: Mutex<HashMap<String, serde_json::Value>>,
+    pub(crate) provider_auth_states: Mutex<HashMap<String, serde_json::Value>>,
 }
 impl AppState {
     pub async fn new(
@@ -505,6 +506,7 @@ impl AppState {
             scheduled_task_events,
             prompt_suggestion_events,
             provider_install_states: Mutex::new(HashMap::new()),
+            provider_auth_states: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -627,37 +629,90 @@ async fn otlp_traces_proxy(
     if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let endpoint = std::env::var("T3CODE_OTLP_TRACES_URL")
+    let exporter_disabled = std::env::var("OTEL_TRACES_EXPORTER")
         .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-                .ok()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .split(',')
+                .any(|item| item.trim().eq_ignore_ascii_case("none"))
         })
-        .or_else(|| {
-            state
-                .settings
-                .internal()
-                .ok()
-                .and_then(|settings| {
-                    settings["observability"]["otlpTracesUrl"]
-                        .as_str()
-                        .map(str::to_owned)
-                })
-                .filter(|value| !value.trim().is_empty())
-        });
+        .unwrap_or(false)
+        && !std::env::var("OTEL_TRACES_EXPORTER")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .any(|item| item.trim().eq_ignore_ascii_case("otlp"))
+            })
+            .unwrap_or(false);
+    let endpoint = if exporter_disabled {
+        None
+    } else {
+        let explicit = std::env::var("T3CODE_OTLP_TRACES_URL")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+                    .ok()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| {
+                state
+                    .settings
+                    .internal()
+                    .ok()
+                    .and_then(|settings| {
+                        settings["observability"]["otlpTracesUrl"]
+                            .as_str()
+                            .map(str::to_owned)
+                    })
+                    .filter(|value| !value.trim().is_empty())
+            });
+        let generic = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .and_then(|value| {
+                let mut parsed = url::Url::parse(&value).ok()?;
+                if !matches!(parsed.scheme(), "http" | "https") {
+                    return None;
+                }
+                parsed.set_path(&format!(
+                    "{}/v1/traces",
+                    parsed.path().trim_end_matches('/')
+                ));
+                Some(parsed.to_string())
+            });
+        explicit.or(generic)
+    };
     let Some(endpoint) = endpoint else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    let response = reqwest::Client::new()
+    let mut request = reqwest::Client::new()
         .post(endpoint)
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await;
+        .header("content-type", "application/json");
+    let headers_value = std::env::var("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
+        .ok()
+        .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_HEADERS").ok());
+    if let Some(headers_value) = headers_value {
+        for pair in headers_value.split(',') {
+            let Some((name, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let Ok(value) = percent_encoding::percent_decode_str(value).decode_utf8() else {
+                continue;
+            };
+            if let (Ok(name), Ok(value)) = (
+                reqwest::header::HeaderName::from_bytes(name.trim().as_bytes()),
+                reqwest::header::HeaderValue::from_str(value.trim()),
+            ) {
+                request = request.header(name, value);
+            }
+        }
+    }
+    let response = request.body(body).send().await;
     match response {
         Ok(response) if response.status().is_success() => StatusCode::NO_CONTENT.into_response(),
         _ => (StatusCode::BAD_GATEWAY, "Trace export failed.").into_response(),
