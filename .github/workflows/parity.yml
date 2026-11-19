@@ -16,12 +16,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          repository: pingdotgg/t3code
-          ref: 052ca497cf1103b001327bcd964188a71dfec213
-          path: reference
-          persist-credentials: false
+      - name: Fetch the pinned public reference
+        run: |
+          git init --quiet reference
+          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git 052ca497cf1103b001327bcd964188a71dfec213
+          git -C reference checkout --quiet --detach FETCH_HEAD
       - uses: actions/setup-node@v4
         with:
           node-version: 26.13.1
@@ -29,6 +28,7 @@ jobs:
         run: |
           npm install --global pnpm@12.14.0
           pnpm --dir reference --filter t3 --filter t3code-relay install --frozen-lockfile
+          pnpm --dir reference --filter t3 exec playwright-core install --with-deps chromium
           python3 -m venv "$RUNNER_TEMP/parity-python"
           "$RUNNER_TEMP/parity-python/bin/pip" install websockets==16.0 cryptography
           echo "$RUNNER_TEMP/parity-python/bin" >> "$GITHUB_PATH"
@@ -51,4 +51,5 @@ jobs:
           python3 scripts/mcp_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/github_provider_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/git_workflow_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/preview_provider_parity.py --original-command "$reference" --rust-command "$server" --browser-cache "$HOME/.cache/ms-playwright"
           python3 scripts/relay_parity.py --checkout "$GITHUB_WORKSPACE/reference" --rust "$server"
