@@ -151,21 +151,11 @@ fn executable() -> Option<PathBuf> {
         .map(|d| d.path())
         .collect();
     browsers.sort();
-    // Playwright's `chromium.executablePath()` resolves to the full Chrome
-    // bundle when both the regular browser and the optional headless-shell
-    // bundle are installed. Prefer that same bundle so CDP rendering and JPEG
-    // screencasts use the identical compositor implementation. The headless
-    // shell remains a fallback for installations that only contain it.
-    for p in browsers.iter().rev() {
-        for file in ["chrome-linux64/chrome", "chrome-linux/chrome"] {
-            if p.join(file).is_file() {
-                return Some(p.join(file));
-            }
-        }
-    }
-    for p in browsers {
+    for p in browsers.into_iter().rev() {
         for file in [
             "chrome-headless-shell-linux64/chrome-headless-shell",
+            "chrome-linux64/chrome",
+            "chrome-linux/chrome",
             "chrome-headless-shell-mac-arm64/chrome-headless-shell",
             "chrome-headless-shell-win64/chrome-headless-shell.exe",
         ] {
