@@ -207,6 +207,26 @@ async fn run_call(
     {
         return Reply::defect(ORCHESTRATION_DISPATCH_COMMAND_SCHEMA_DEFECT.into());
     }
+    if method == "orchestration.dispatchCommand"
+        && params["type"] == "message.dispatch"
+        && params.get("dispatchMode").is_some_and(|mode| {
+            !mode.is_object()
+                || !matches!(
+                    mode["type"].as_str(),
+                    Some(
+                        "defer_start"
+                            | "steer_active"
+                            | "restart_active"
+                            | "queue_after_active"
+                            | "start_immediately"
+                    )
+                )
+        })
+    {
+        return Reply::defect(
+            "Expected { readonly \"type\": \"defer_start\", ... } | { readonly \"type\": \"steer_active\", ... } | { readonly \"type\": \"restart_active\", ... } | { readonly \"type\": \"queue_after_active\", ... } | { readonly \"type\": \"start_immediately\", ... }\n  at [\"dispatchMode\"]".into(),
+        );
+    }
     let decoded;
     let params = if matches!(method, "server.updateSettings" | "server.checkSecretSource") {
         let result = if method == "server.updateSettings" {

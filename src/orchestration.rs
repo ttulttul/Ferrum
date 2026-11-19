@@ -78,6 +78,22 @@ pub(crate) async fn dispatch_orchestration_command(
         {
             return Err(dispatch_error(format!("Thread {id} is archived.")));
         }
+        if kind == "message.dispatch" && !store.projects.contains_key(&thread.project_id) {
+            let runtime = json!({
+                "name":"RuntimePolicyResolveError",
+                "message":format!("Failed to resolve runtime policy for provider instance {} in project {}.", thread.row["providerInstanceId"].as_str().unwrap_or("codex"), thread.project_id),
+                "cause":"Project not found."
+            });
+            let nested = json!({
+                "name":"OrchestratorDispatchError",
+                "message":format!("Failed to dispatch orchestration command {kind} ({command_id})."),
+                "cause":runtime
+            });
+            return Err(error(
+                "Project not found.".into(),
+                json!({"name":"OrchestratorDispatchError","message":format!("Failed to dispatch orchestration command {kind} ({command_id})."),"cause":nested}),
+            ));
+        }
     }
     if let Some(summary) = state.settings.policy.summary() {
         let row = store
