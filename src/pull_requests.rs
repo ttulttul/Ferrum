@@ -5,6 +5,24 @@ use crate::{
 use serde_json::{json, Value};
 use std::path::Path;
 
+mod listing;
+mod review;
+pub(crate) fn handles(method: &str) -> bool {
+    let Some(op) = method.strip_prefix("pullRequests.") else {
+        return false;
+    };
+    matches!(
+        op,
+        "list"
+            | "listStats"
+            | "preview"
+            | "summary"
+            | "routing"
+            | "routingIdentity"
+            | "diffFileContents"
+    ) || review::handles(op)
+}
+
 #[derive(Default, Debug)]
 pub struct PullRequestService;
 
@@ -17,13 +35,13 @@ fn unavailable() -> Value {
 fn failure(op: &str, f: Failure) -> Value {
     match f {
         Failure::Auth | Failure::Missing => {
-            json!({"_tag":"PullRequestUnavailableError","reason":if f==Failure::Auth{"cli-unauthenticated"}else{"cli-missing"},"provider":"github"})
+            json!({"_tag":"PullRequestUnavailableError","reason":if f==Failure::Auth{"cli-unauthenticated"}else{"cli-missing"},"provider":"github","requirement":if f==Failure::Missing{"No GitHub credential on the server. Set GH_TOKEN, or install the GitHub CLI (https://cli.github.com/) and run `gh auth login`."}else{"GitHub has no working credential for this host. Run `gh auth login`, or check the account and hosts in Settings → Source control & issues."}})
         }
         Failure::NotFound => {
             json!({"_tag":"PullRequestOperationError","operation":op,"detail":"GitHub could not find the requested resource.","reason":"not-found"})
         }
         Failure::RateLimit => {
-            json!({"_tag":"PullRequestOperationError","operation":op,"detail":"GitHub API rate limit exceeded.","reason":"rate-limited"})
+            json!({"_tag":"PullRequestOperationError","operation":op,"detail":"GitHub API rate limit exceeded."})
         }
         _ => error(op, "The GitHub pull request could not be read."),
     }
@@ -34,6 +52,12 @@ fn valid_sha(v: &str) -> bool {
 }
 
 pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) -> Reply {
+    if op == "list" {
+        return listing::list(state, cli, input).await;
+    }
+    if op == "listStats" {
+        return listing::stats(state, cli, input).await;
+    }
     if op == "routingIdentity" {
         if !input["host"]
             .as_str()
@@ -81,6 +105,18 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
             "A repository was named that GitHub cannot address.",
         ));
     }
+    if matches!(op, "comment" | "updateComment" | "replyToThread")
+        && input["body"].as_str().is_none_or(|s| s.trim().is_empty())
+    {
+        return Err(error(
+            op,
+            if op == "replyToThread" {
+                "A reply cannot be empty."
+            } else {
+                "A comment cannot be empty."
+            },
+        ));
+    }
     let mut gh = Github::new(cli, &p.path);
     if op == "routing" {
         let mut response = identity(&gh).await?;
@@ -114,6 +150,9 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
         .as_u64()
         .filter(|n| *n > 0)
         .ok_or_else(|| error(op, "A pull request number is required."))?;
+    if review::handles(op) {
+        return review::run(&gh, op, named, number, input).await;
+    }
     if matches!(op, "summary" | "preview") {
         return metadata(&gh, op, named, &p.id.to_string(), number).await;
     }

@@ -212,5 +212,343 @@
       },
       "headers": []
     }
+  },
+  {
+    "name": "invalid PCM request header",
+    "authenticated": true,
+    "method": "POST",
+    "path": "/api/voice/cloud/openai/transcribe",
+    "bodyBase64": "AA=="
+  },
+  {
+    "name": "truncated options",
+    "authenticated": true,
+    "method": "POST",
+    "path": "/api/voice/cloud/xai/transcribe",
+    "bodyBase64": "/////w=="
+  },
+  {
+    "name": "OpenAI missing key",
+    "authenticated": true,
+    "method": "POST",
+    "path": "/api/voice/cloud/openai/transcribe",
+    "bodyBase64": "bgAAAHsic3BlZWNoTGFuZ3VhZ2UiOiJlbiIsInNwZWVjaFRyYW5zbGF0ZVRvRW5nbGlzaCI6ZmFsc2UsInNwZWVjaEN1c3RvbVdvcmRzIjpbXSwic3BlZWNoUmVtb3ZlRmlsbGVyV29yZHMiOnRydWV9zczMPQ=="
+  },
+  {
+    "name": "xAI missing key",
+    "authenticated": true,
+    "method": "POST",
+    "path": "/api/voice/cloud/xai/transcribe",
+    "bodyBase64": "bgAAAHsic3BlZWNoTGFuZ3VhZ2UiOiJlbiIsInNwZWVjaFRyYW5zbGF0ZVRvRW5nbGlzaCI6ZmFsc2UsInNwZWVjaEN1c3RvbVdvcmRzIjpbXSwic3BlZWNoUmVtb3ZlRmlsbGVyV29yZHMiOnRydWV9zczMPQ=="
+  },
+  {
+    "name": "OpenRouter missing key",
+    "authenticated": true,
+    "method": "POST",
+    "path": "/api/voice/cloud/openrouter/transcribe",
+    "bodyBase64": "bgAAAHsic3BlZWNoTGFuZ3VhZ2UiOiJlbiIsInNwZWVjaFRyYW5zbGF0ZVRvRW5nbGlzaCI6ZmFsc2UsInNwZWVjaEN1c3RvbVdvcmRzIjpbXSwic3BlZWNoUmVtb3ZlRmlsbGVyV29yZHMiOnRydWV9zczMPQ=="
+  },
+  {
+    "name": "issues.detail without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "121",
+      "tag": "issues.detail",
+      "payload": {
+        "projectId": "absent",
+        "scope": "org/repo",
+        "tracker": "github",
+        "key": "1"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "issues.comments without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "122",
+      "tag": "issues.comments",
+      "payload": {
+        "projectId": "absent",
+        "scope": "org/repo",
+        "tracker": "github",
+        "key": "1",
+        "cursor": "a"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "issues.templates without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "123",
+      "tag": "issues.templates",
+      "payload": {
+        "projectId": "absent",
+        "scope": "org/repo",
+        "tracker": "github"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.list without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "124",
+      "tag": "pullRequests.list",
+      "payload": {
+        "state": "all"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.listStats without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "125",
+      "tag": "pullRequests.listStats",
+      "payload": {
+        "refs": []
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.routingIdentity without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "126",
+      "tag": "pullRequests.routingIdentity",
+      "payload": {
+        "host": "github.com"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.summary without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "127",
+      "tag": "pullRequests.summary",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.preview without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "128",
+      "tag": "pullRequests.preview",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.routing without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "129",
+      "tag": "pullRequests.routing",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.comment without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "130",
+      "tag": "pullRequests.comment",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23,
+        "body": " \t"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.replyToThread without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "131",
+      "tag": "pullRequests.replyToThread",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23,
+        "threadId": "123",
+        "body": "  "
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.update without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "132",
+      "tag": "pullRequests.update",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23,
+        "body": "body"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.updateComment without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "133",
+      "tag": "pullRequests.updateComment",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23,
+        "commentId": "321",
+        "kind": "review-comment",
+        "body": "text"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.setThreadResolution without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "134",
+      "tag": "pullRequests.setThreadResolution",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23,
+        "threadId": "123",
+        "resolved": true
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.submitReview without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "135",
+      "tag": "pullRequests.submitReview",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23,
+        "verdict": "approve",
+        "comments": [],
+        "body": ""
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.labelCandidates without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "136",
+      "tag": "pullRequests.labelCandidates",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.reviewerCandidates without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "137",
+      "tag": "pullRequests.reviewerCandidates",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23,
+        "query": "dev"
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.requestReviewers without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "138",
+      "tag": "pullRequests.requestReviewers",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23,
+        "reviewers": [
+          {
+            "kind": "user",
+            "id": "dev"
+          }
+        ],
+        "requested": true
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.setLabels without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "139",
+      "tag": "pullRequests.setLabels",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23,
+        "applied": true,
+        "labels": [
+          "bug"
+        ]
+      },
+      "headers": []
+    }
+  },
+  {
+    "name": "pullRequests.setReaction without registered checkout",
+    "frame": {
+      "_tag": "Request",
+      "id": "140",
+      "tag": "pullRequests.setReaction",
+      "payload": {
+        "projectId": "absent",
+        "repository": "org/repo",
+        "number": 23,
+        "reacted": true,
+        "content": "heart"
+      },
+      "headers": []
+    }
   }
 ]

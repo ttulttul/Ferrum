@@ -9,16 +9,7 @@ pub async fn dispatch(state: &AppState, method: &str, params: &Value) -> Option<
     if method.starts_with("issueTrackers.") {
         return issues::tracker_dispatch(state, method, params).await;
     }
-    if !method.starts_with("issues.")
-        && !matches!(
-            method,
-            "pullRequests.summary"
-                | "pullRequests.preview"
-                | "pullRequests.diffFileContents"
-                | "pullRequests.routing"
-                | "pullRequests.routingIdentity"
-        )
-    {
+    if !method.starts_with("issues.") && !crate::pull_requests::handles(method) {
         return None;
     }
     let cli = state.issues.lock().await.gh.clone();

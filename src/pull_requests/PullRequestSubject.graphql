@@ -1,0 +1,28 @@
+query PullRequestSubject($owner: String!, $name: String!, $number: Int!, $subjectId: ID!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+    }
+  }
+  node(id: $subjectId) {
+    __typename
+    ... on PullRequestReviewThread { threadPullRequest: pullRequest {id} }
+    id
+    ... on IssueComment {
+      pullRequest {
+        id
+      }
+    }
+    # Aliased apart: an issue comment's pull request is nullable, the other two are not.
+    ... on PullRequestReviewComment {
+      reviewCommentPullRequest: pullRequest {
+        id
+      }
+    }
+    ... on PullRequestReview {
+      reviewPullRequest: pullRequest {
+        id
+      }
+    }
+  }
+}
