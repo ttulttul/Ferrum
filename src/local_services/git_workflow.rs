@@ -7,6 +7,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::path::Path;
 
+mod hosts;
 mod stacked;
 pub use stacked::stream;
 
@@ -180,23 +181,32 @@ pub async fn pull_request(state: &AppState, name: &str, input: &Value) -> Reply 
     if mode.is_some_and(|m| !matches!(m, "worktree" | "local")) {
         return Err(invalid("mode", "Expected \"local\" | \"worktree\""));
     }
-    let Some((remote, Some(repo))) = primary(cwd).await else {
-        return Err(provider_error(
+    let unknown = || {
+        provider_error(
             "unknown",
             "getChangeRequest",
             cwd,
             reference,
             "No unknown source control provider is registered.",
-        ));
+        )
     };
-    let bin = state.issues.lock().await.gh.clone();
-    let cli = Github::new(&bin, cwd);
-    let row = lookup(&cli, &repo, reference, false)
+    let (remote, repo) = primary(cwd).await.ok_or_else(unknown)?;
+    let url = read(cwd, &["remote", "get-url", &remote])
         .await
-        .and_then(|v| v.ok_or(Failure::NotFound))
-        .map_err(|e| github_error(e, "getChangeRequest", cwd, reference))?;
-    let pr = resolved(&row)
-        .ok_or_else(|| github_error(Failure::Invalid, "getChangeRequest", cwd, reference))?;
+        .unwrap_or_default();
+    let host = hosts::Remote::parse(&url);
+    let row = if let Some(host) = &host {
+        host.read(cwd, reference).await?
+    } else if let Some(repo) = repo {
+        let bin = state.issues.lock().await.gh.clone();
+        lookup(&Github::new(&bin, cwd), &repo, reference, false)
+            .await
+            .and_then(|v| v.ok_or(Failure::NotFound))
+            .map_err(|e| github_error(e, "getChangeRequest", cwd, reference))?
+    } else {
+        return Err(unknown());
+    };
+    let pr = resolved(&row).ok_or_else(unknown)?;
     let Some(mode) = mode else {
         return Ok(json!({"pullRequest":pr}));
     };
@@ -212,7 +222,18 @@ pub async fn pull_request(state: &AppState, name: &str, input: &Value) -> Reply 
     let mut local = head.to_owned();
     let mut head_remote = Some(remote.clone());
     if row["isCrossRepository"] == true {
-        if mode == "worktree" {
+        if host.as_ref().is_some_and(|h| h.kind == "azure-devops") && mode == "local" {
+            return Err(provider_error(
+                "azure-devops",
+                "checkoutChangeRequest",
+                cwd,
+                reference,
+                "Checking out an Azure DevOps pull request from a fork is not supported.",
+            ));
+        }
+        if mode == "local" && host.as_ref().is_some_and(|h| h.kind == "gitcafe") {
+            local = format!("pr-{number}/{head}");
+        } else if mode == "worktree" || host.as_ref().is_some_and(|h| h.kind == "bitbucket") {
             local = fork_branch(head, number, &branches)
         } else if row["baseRefName"] == head || default_ref(cwd).await.as_deref() == Some(head) {
             let owner = row["headRepositoryOwner"]["login"]
@@ -235,7 +256,9 @@ pub async fn pull_request(state: &AppState, name: &str, input: &Value) -> Reply 
                 if let (Some(name), Some(url), Some("(fetch)")) =
                     (fields.next(), fields.next(), fields.next())
                 {
-                    if scope(url).is_some_and(|s| s.eq_ignore_ascii_case(head_repo)) {
+                    if host.as_ref().is_some_and(|h| h.matches(url, head_repo))
+                        || scope(url).is_some_and(|s| s.eq_ignore_ascii_case(head_repo))
+                    {
                         head_remote = Some(name.into());
                         break;
                     }
@@ -289,6 +312,34 @@ pub async fn pull_request(state: &AppState, name: &str, input: &Value) -> Reply 
             }
         }
     }
+    if mode == "local" {
+        if let Some(host) = &host {
+            if host.local_checkout(cwd, reference, number, &remote).await? {
+                let local = branch(cwd).await.unwrap_or_else(|| head.to_owned());
+                let sha = row["headRefOid"].as_str().filter(|s| {
+                    (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+                });
+                if let Some(sha) = sha {
+                    let _ = read(cwd, &["merge", "--ff-only", "--quiet", sha]).await;
+                }
+                let actual = read(cwd, &["rev-parse", "HEAD"]).await;
+                let on_head = actual.is_some() && actual.as_deref() == sha;
+                let _ = read(
+                    cwd,
+                    &[
+                        "config",
+                        "--local",
+                        &format!("branch.{local}.t3-pull-request"),
+                        pr["url"].as_str().unwrap(),
+                    ],
+                )
+                .await;
+                return Ok(
+                    json!({"pullRequest":pr,"branch":local,"worktreePath":null,"isOnPullRequestHead":on_head}),
+                );
+            }
+        }
+    }
     let mut tracking = None;
     if let Some(remote) = head_remote {
         let spec = format!("+refs/heads/{head}:refs/remotes/{remote}/{head}");
@@ -314,7 +365,14 @@ pub async fn pull_request(state: &AppState, name: &str, input: &Value) -> Reply 
                 "--no-tags",
                 "--",
                 &remote,
-                &format!("refs/pull/{number}/head"),
+                &format!(
+                    "refs/{}/{number}/head",
+                    if host.as_ref().is_some_and(|h| h.kind == "gitlab") {
+                        "merge-requests"
+                    } else {
+                        "pull"
+                    }
+                ),
             ],
             "Failed to fetch pull request head.",
         )
