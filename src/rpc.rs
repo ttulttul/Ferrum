@@ -2398,39 +2398,106 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             let thread_id = params["threadId"].as_str().unwrap_or_default();
             let from = params["fromTurnCount"].as_u64().unwrap_or_default();
             let to = params["toTurnCount"].as_u64().unwrap_or_default();
-            if !store.threads.contains_key(thread_id) && from != to && to != 0 {
-                return Reply::Failure(json!({"_tag":"Fail","error":{
-                    "_tag":"OrchestrationGetTurnDiffError",
-                    "message":"Failed to load turn diff",
-                    "cause":{"name":"CheckpointThreadNotFoundError","message":format!("Checkpoint invariant violation in CheckpointDiffQuery.getTurnDiff: Thread '{thread_id}' not found.")}
-                }}));
-            }
             if from == to || to == 0 {
                 json!({"fromTurnCount":from,"toTurnCount":to,"threadId":params["threadId"],"diff":""})
             } else {
-                return Reply::Failure(json!({"_tag":"Fail","error":{
-                    "_tag":"CheckpointTurnRangeUnavailableError",
-                    "threadId":params["threadId"],"requestedTurnCount":to,"availableTurnCount":0
-                }}));
+                let Some(thread) = store.threads.get(thread_id).cloned() else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"OrchestrationGetTurnDiffError",
+                        "message":"Failed to load turn diff",
+                        "cause":{"name":"CheckpointThreadNotFoundError","message":format!("Checkpoint invariant violation in CheckpointDiffQuery.getTurnDiff: Thread '{thread_id}' not found.")}
+                    }}));
+                };
+                let ready = thread
+                    .checkpoints
+                    .iter()
+                    .filter(|checkpoint| checkpoint.ready)
+                    .collect::<Vec<_>>();
+                let max_turn = ready
+                    .iter()
+                    .map(|checkpoint| checkpoint.turn_count)
+                    .max()
+                    .unwrap_or_default();
+                if to > max_turn {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointTurnRangeUnavailableError","threadId":params["threadId"],"requestedTurnCount":to,"availableTurnCount":max_turn
+                    }}));
+                }
+                let Some(from_checkpoint) = ready
+                    .iter()
+                    .find(|checkpoint| checkpoint.turn_count == from)
+                else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointRefUnavailableError","threadId":params["threadId"],"turnCount":from,"checkpoint":"from"
+                    }}));
+                };
+                let Some(to_checkpoint) =
+                    ready.iter().find(|checkpoint| checkpoint.turn_count == to)
+                else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointRefUnavailableError","threadId":params["threadId"],"turnCount":to,"checkpoint":"to"
+                    }}));
+                };
+                let diff = git_diff_checkpoint(
+                    &to_checkpoint.cwd,
+                    &from_checkpoint.tree,
+                    &to_checkpoint.tree,
+                    params["ignoreWhitespace"].as_bool().unwrap_or(true),
+                )
+                .await;
+                json!({"fromTurnCount":from,"toTurnCount":to,"threadId":params["threadId"],"diff":diff})
             }
         }
         "orchestration.getFullThreadDiff" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default();
             let to = params["toTurnCount"].as_u64().unwrap_or_default();
-            if !store.threads.contains_key(thread_id) && to != 0 {
-                return Reply::Failure(json!({"_tag":"Fail","error":{
-                    "_tag":"OrchestrationGetFullThreadDiffError",
-                    "message":"Failed to load full thread diff",
-                    "cause":{"name":"CheckpointThreadNotFoundError","message":format!("Checkpoint invariant violation in CheckpointDiffQuery.getTurnDiff: Thread '{thread_id}' not found.")}
-                }}));
-            }
             if to == 0 {
                 json!({"fromTurnCount":0,"toTurnCount":0,"threadId":params["threadId"],"diff":""})
             } else {
-                return Reply::Failure(json!({"_tag":"Fail","error":{
-                    "_tag":"CheckpointTurnRangeUnavailableError",
-                    "threadId":params["threadId"],"requestedTurnCount":to,"availableTurnCount":0
-                }}));
+                let Some(thread) = store.threads.get(thread_id).cloned() else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"OrchestrationGetFullThreadDiffError",
+                        "message":"Failed to load full thread diff",
+                        "cause":{"name":"CheckpointThreadNotFoundError","message":format!("Checkpoint invariant violation in CheckpointDiffQuery.getTurnDiff: Thread '{thread_id}' not found.")}
+                    }}));
+                };
+                let ready = thread
+                    .checkpoints
+                    .iter()
+                    .filter(|checkpoint| checkpoint.ready)
+                    .collect::<Vec<_>>();
+                let max_turn = ready
+                    .iter()
+                    .map(|checkpoint| checkpoint.turn_count)
+                    .max()
+                    .unwrap_or_default();
+                if to > max_turn {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointTurnRangeUnavailableError","threadId":params["threadId"],"requestedTurnCount":to,"availableTurnCount":max_turn
+                    }}));
+                }
+                let Some(from_checkpoint) =
+                    ready.iter().find(|checkpoint| checkpoint.turn_count == 0)
+                else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointRefUnavailableError","threadId":thread_id,"turnCount":0,"checkpoint":"from"
+                    }}));
+                };
+                let Some(to_checkpoint) =
+                    ready.iter().find(|checkpoint| checkpoint.turn_count == to)
+                else {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"CheckpointRefUnavailableError","threadId":thread_id,"turnCount":to,"checkpoint":"to"
+                    }}));
+                };
+                let diff = git_diff_checkpoint(
+                    &to_checkpoint.cwd,
+                    &from_checkpoint.tree,
+                    &to_checkpoint.tree,
+                    params["ignoreWhitespace"].as_bool().unwrap_or(true),
+                )
+                .await;
+                json!({"fromTurnCount":0,"toTurnCount":to,"threadId":params["threadId"],"diff":diff})
             }
         }
         "orchestration.getTurnItem" => {
@@ -2684,6 +2751,38 @@ fn checkpoint_diff_schema_defect(method: &str, params: &Value) -> Option<String>
         }
     }
     None
+}
+
+async fn git_diff_checkpoint(
+    cwd: &str,
+    from_tree: &str,
+    to_tree: &str,
+    ignore_whitespace: bool,
+) -> String {
+    let mut command = tokio::process::Command::new("git");
+    command.args(["-C", cwd, "diff", "--binary"]);
+    if ignore_whitespace {
+        command.arg("--ignore-all-space");
+    }
+    command.args([from_tree, to_tree]);
+    let Ok(output) = command.output().await else {
+        return String::new();
+    };
+    if !output.status.success() {
+        return String::new();
+    }
+    const MAX_OUTPUT: usize = 10_000_000;
+    const MARKER: &str = "\n\n[truncated]";
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.len() <= MAX_OUTPUT {
+        return text.into_owned();
+    }
+    let limit = MAX_OUTPUT.saturating_sub(MARKER.len());
+    let mut end = limit.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &text[..end], MARKER)
 }
 
 async fn scheduled_tasks_snapshot(state: &Arc<AppState>) -> Value {

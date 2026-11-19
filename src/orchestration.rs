@@ -180,14 +180,15 @@ async fn start_run(
     text: String,
     message_id: &Value,
 ) -> anyhow::Result<u64> {
-    let cwd = state
+    let (cwd, needs_baseline) = state
         .store
         .read()
         .await
         .threads
         .get(thread_id)
-        .map(|t| t.cwd.clone())
+        .map(|t| (t.cwd.clone(), t.checkpoints.is_empty()))
         .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+    let baseline = needs_baseline.then(|| cwd.clone());
     let run = Run {
         id: Uuid::new_v4(),
         thread_id: thread_id.to_owned(),
@@ -213,6 +214,22 @@ async fn start_run(
         )
         .await?
         .id;
+    if let Some(baseline_cwd) = baseline {
+        if let Some(tree) = crate::capture_git_tree(&baseline_cwd).await {
+            let _ = state
+                .commit(Event::CheckpointCaptured {
+                    thread_id: thread_id.to_owned(),
+                    checkpoint: crate::CheckpointRecord {
+                        turn_count: 0,
+                        tree,
+                        cwd: baseline_cwd,
+                        captured_at: now(),
+                        ready: true,
+                    },
+                })
+                .await;
+        }
+    }
     let (tx, rx) = oneshot::channel();
     state.cancellations.lock().await.insert(run.id, tx);
     tokio::spawn(async move {
@@ -287,6 +304,7 @@ async fn apply_command(
                 pinned: false,
                 unread: false,
                 tags: vec![],
+                checkpoints: vec![],
             };
             return Ok(state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
@@ -642,6 +660,7 @@ async fn apply_command(
                 pinned: false,
                 unread: false,
                 tags: source.tags,
+                checkpoints: vec![],
             };
             return Ok(state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
@@ -773,6 +792,7 @@ async fn apply_command(
                 pinned: false,
                 unread: false,
                 tags: vec![],
+                checkpoints: vec![],
             };
             return Ok(state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))

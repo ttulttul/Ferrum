@@ -83,6 +83,16 @@ pub struct Run {
     pub finished_at: Option<u64>,
     pub error: Option<String>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckpointRecord {
+    pub turn_count: u64,
+    pub tree: String,
+    pub cwd: String,
+    pub captured_at: u64,
+    #[serde(default)]
+    pub ready: bool,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Thread {
     #[serde(default)]
@@ -101,6 +111,8 @@ pub struct Thread {
     pub pinned: bool,
     pub unread: bool,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub checkpoints: Vec<CheckpointRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -135,6 +147,10 @@ pub enum Event {
         thread_id: String,
         status: String,
         error: Option<String>,
+    },
+    CheckpointCaptured {
+        thread_id: String,
+        checkpoint: CheckpointRecord,
     },
     CommandDispatched {
         command_id: String,
@@ -251,6 +267,22 @@ impl Store {
                         run.status = status.clone();
                         run.error = error.clone();
                         run.finished_at = Some(now());
+                    }
+                }
+            }
+            Event::CheckpointCaptured {
+                thread_id,
+                checkpoint,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    if !thread.checkpoints.iter().any(|candidate| {
+                        candidate.turn_count == checkpoint.turn_count
+                            && candidate.tree == checkpoint.tree
+                    }) {
+                        thread.checkpoints.push(checkpoint.clone());
+                        thread
+                            .checkpoints
+                            .sort_by_key(|candidate| candidate.turn_count);
                     }
                 }
             }
@@ -636,7 +668,7 @@ async fn execute_run(
     let mut child = child_command
         .args(command)
         .arg(prompt)
-        .current_dir(cwd)
+        .current_dir(&cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
@@ -705,10 +737,11 @@ async fn execute_run(
         let _ = task.await;
     }
     let ok = status.success();
+    let thread_id = run.thread_id.clone();
     state
         .commit(Event::RunFinished {
             run_id: run.id,
-            thread_id: run.thread_id,
+            thread_id: thread_id.clone(),
             status: if cancelled {
                 "cancelled"
             } else if ok {
@@ -720,7 +753,78 @@ async fn execute_run(
             error: (!ok && !cancelled).then(|| format!("provider exited with {status}")),
         })
         .await?;
+    if ok && !cancelled {
+        if let Some(tree) = capture_git_tree(&cwd).await {
+            let turn_count = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(&thread_id)
+                .map(|thread| thread.messages.len() as u64)
+                .unwrap_or_default();
+            let _ = state
+                .commit(Event::CheckpointCaptured {
+                    thread_id,
+                    checkpoint: CheckpointRecord {
+                        turn_count,
+                        tree,
+                        cwd,
+                        captured_at: now(),
+                        ready: true,
+                    },
+                })
+                .await;
+        }
+    }
     Ok(())
+}
+
+async fn capture_git_tree(cwd: &str) -> Option<String> {
+    let cwd = std::path::Path::new(cwd);
+    if !cwd.is_dir() {
+        return None;
+    }
+    let probe = Command::new("git")
+        .args(["-C", cwd.to_str()?, "rev-parse", "--show-toplevel"])
+        .output()
+        .await
+        .ok()?;
+    if !probe.status.success() {
+        return None;
+    }
+    let index = tempfile::NamedTempFile::new().ok()?;
+    let index_path = index.path().to_path_buf();
+    drop(index);
+    let _ = tokio::fs::remove_file(&index_path).await;
+    let index_text = index_path.to_str()?.to_owned();
+    let mut command = Command::new("git");
+    command
+        .args(["-C", cwd.to_str()?, "read-tree", "HEAD"])
+        .env("GIT_INDEX_FILE", &index_text);
+    if !command.status().await.ok()?.success() {
+        let _ = tokio::fs::remove_file(&index_path).await;
+        return None;
+    }
+    let mut add = Command::new("git");
+    add.args(["-C", cwd.to_str()?, "add", "-A", "--"])
+        .arg(".")
+        .env("GIT_INDEX_FILE", &index_text);
+    if !add.status().await.ok()?.success() {
+        let _ = tokio::fs::remove_file(&index_path).await;
+        return None;
+    }
+    let output = Command::new("git")
+        .args(["-C", cwd.to_str()?, "write-tree"])
+        .env("GIT_INDEX_FILE", &index_text)
+        .output()
+        .await
+        .ok()?;
+    let _ = tokio::fs::remove_file(&index_path).await;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 pub fn trace_id(headers: &HeaderMap) -> String {

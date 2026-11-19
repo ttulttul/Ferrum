@@ -71,9 +71,43 @@ impl Thread {
     }
     pub(crate) fn projection(&self) -> Value {
         let row = self.stored_row();
+        let scope_id = format!("scope:{}", self.id);
+        let checkpoint_scopes = self
+            .checkpoints
+            .first()
+            .map(|checkpoint| {
+                vec![json!({
+                    "id":scope_id,
+                    "threadId":self.id,
+                    "runId":null,
+                    "nodeId":format!("node:{}",self.id),
+                    "parentScopeId":null,
+                    "providerThreadId":null,
+                    "kind":"root_run",
+                    "ordinalWithinParent":0,
+                    "advancesAppRunCount":true,
+                    "cwd":checkpoint.cwd,
+                    "createdAt":auth_service::iso((checkpoint.captured_at as i64).saturating_mul(1000))
+                })]
+            })
+            .unwrap_or_default();
+        let checkpoints = self.checkpoints.iter().map(|checkpoint| json!({
+            "id":format!("checkpoint:{}:{}",self.id,checkpoint.turn_count),
+            "threadId":self.id,
+            "scopeId":scope_id,
+            "runId":null,
+            "nodeId":format!("node:{}",self.id),
+            "parentCheckpointId":null,
+            "ordinalWithinScope":checkpoint.turn_count,
+            "appRunOrdinal":if checkpoint.turn_count == 0 {Value::Null} else {json!(checkpoint.turn_count)},
+            "ref":checkpoint.tree,
+            "status":if checkpoint.ready {"ready"} else {"missing"},
+            "files":[],
+            "capturedAt":auth_service::iso((checkpoint.captured_at as i64).saturating_mul(1000))
+        })).collect::<Vec<_>>();
         json!({"thread":ordered(APP_FIELDS,&row),"runs":self.runs,"attempts":[],"nodes":[],"subagents":[],
             "providerSessions":[],"providerThreads":[],"providerTurns":[],"runtimeRequests":[],
-            "messages":self.messages,"plans":[],"turnItems":self.turn_items(),"checkpointScopes":[],"checkpoints":[],
+            "messages":self.messages,"plans":[],"turnItems":self.turn_items(),"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
             "contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":[],"updatedAt":row["updatedAt"]})
     }
     pub(crate) fn shell(&self) -> Value {
