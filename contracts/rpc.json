@@ -1,0 +1,1177 @@
+[
+  {
+    "group": "general",
+    "name": "projectsListEntries",
+    "tag": "projects.listEntries"
+  },
+  {
+    "group": "general",
+    "name": "projectsListIgnoredFiles",
+    "tag": "projects.listIgnoredFiles"
+  },
+  {
+    "group": "general",
+    "name": "projectsReadFile",
+    "tag": "projects.readFile"
+  },
+  {
+    "group": "general",
+    "name": "projectsSearchContents",
+    "tag": "projects.searchContents"
+  },
+  {
+    "group": "general",
+    "name": "projectsSearchEntries",
+    "tag": "projects.searchEntries"
+  },
+  {
+    "group": "general",
+    "name": "projectsWriteFile",
+    "tag": "projects.writeFile"
+  },
+  {
+    "group": "general",
+    "name": "projectsMutate",
+    "tag": "projects.mutate"
+  },
+  {
+    "group": "general",
+    "name": "projectsEnsureScratch",
+    "tag": "projects.ensureScratch"
+  },
+  {
+    "group": "general",
+    "name": "projectsCreateNew",
+    "tag": "projects.createNew"
+  },
+  {
+    "group": "general",
+    "name": "projectsCreateFromThread",
+    "tag": "projects.createFromThread"
+  },
+  {
+    "group": "general",
+    "name": "shellOpenInEditor",
+    "tag": "shell.openInEditor"
+  },
+  {
+    "group": "general",
+    "name": "filesystemBrowse",
+    "tag": "filesystem.browse"
+  },
+  {
+    "group": "general",
+    "name": "filesystemGetMetadata",
+    "tag": "filesystem.getMetadata"
+  },
+  {
+    "group": "general",
+    "name": "agentSessionsScan",
+    "tag": "agentSessions.scan"
+  },
+  {
+    "group": "general",
+    "name": "agentSessionsImport",
+    "tag": "agentSessions.import"
+  },
+  {
+    "group": "general",
+    "name": "assetsCreateUrl",
+    "tag": "assets.createUrl"
+  },
+  {
+    "group": "general",
+    "name": "assetsPersistChatAttachments",
+    "tag": "assets.persistChatAttachments"
+  },
+  {
+    "group": "general",
+    "name": "attachmentsCreateUploadUrl",
+    "tag": "attachments.createUploadUrl"
+  },
+  {
+    "group": "general",
+    "name": "attachmentsDelete",
+    "tag": "attachments.delete"
+  },
+  {
+    "group": "general",
+    "name": "mcpAppsCallTool",
+    "tag": "mcpApps.callTool"
+  },
+  {
+    "group": "general",
+    "name": "mcpAppsToolInfo",
+    "tag": "mcpApps.toolInfo"
+  },
+  {
+    "group": "general",
+    "name": "mcpAppsReadResource",
+    "tag": "mcpApps.readResource"
+  },
+  {
+    "group": "general",
+    "name": "mcpAppsUpdateModelContext",
+    "tag": "mcpApps.updateModelContext"
+  },
+  {
+    "group": "general",
+    "name": "providerUploadFeedback",
+    "tag": "provider.uploadFeedback"
+  },
+  {
+    "group": "general",
+    "name": "providerAuthStart",
+    "tag": "provider.auth.start"
+  },
+  {
+    "group": "general",
+    "name": "providerConsumeResetCredit",
+    "tag": "provider.consumeResetCredit"
+  },
+  {
+    "group": "general",
+    "name": "providerAuthComplete",
+    "tag": "provider.auth.complete"
+  },
+  {
+    "group": "general",
+    "name": "chatGptReconnectProfile",
+    "tag": "provider.chatgpt.reconnect-profile"
+  },
+  {
+    "group": "general",
+    "name": "chatGptImportProfile",
+    "tag": "provider.chatgpt.import-profile"
+  },
+  {
+    "group": "general",
+    "name": "chatGptHandoffSubscribe",
+    "tag": "provider.chatgpt.handoff.subscribe"
+  },
+  {
+    "group": "general",
+    "name": "providerAuthRespond",
+    "tag": "provider.auth.respond"
+  },
+  {
+    "group": "general",
+    "name": "providerAuthCancel",
+    "tag": "provider.auth.cancel"
+  },
+  {
+    "group": "general",
+    "name": "providerAuthRemoveMethod",
+    "tag": "provider.auth.removeMethod"
+  },
+  {
+    "group": "general",
+    "name": "providerAuthLogout",
+    "tag": "provider.auth.logout"
+  },
+  {
+    "group": "general",
+    "name": "providerAuthSubscribe",
+    "tag": "provider.auth.subscribe"
+  },
+  {
+    "group": "general",
+    "name": "providerInstallStart",
+    "tag": "provider.install.start"
+  },
+  {
+    "group": "general",
+    "name": "providerInstallCancel",
+    "tag": "provider.install.cancel"
+  },
+  {
+    "group": "general",
+    "name": "providerInstallSubscribe",
+    "tag": "provider.install.subscribe"
+  },
+  {
+    "group": "general",
+    "name": "providerInstallRemove",
+    "tag": "provider.install.remove"
+  },
+  {
+    "group": "general",
+    "name": "vcsPull",
+    "tag": "vcs.pull"
+  },
+  {
+    "group": "general",
+    "name": "vcsRefreshStatus",
+    "tag": "vcs.refreshStatus"
+  },
+  {
+    "group": "general",
+    "name": "vcsListRefs",
+    "tag": "vcs.listRefs"
+  },
+  {
+    "group": "general",
+    "name": "vcsCreateWorktree",
+    "tag": "vcs.createWorktree"
+  },
+  {
+    "group": "general",
+    "name": "vcsRemoveWorktree",
+    "tag": "vcs.removeWorktree"
+  },
+  {
+    "group": "general",
+    "name": "vcsCreateRef",
+    "tag": "vcs.createRef"
+  },
+  {
+    "group": "general",
+    "name": "vcsSwitchRef",
+    "tag": "vcs.switchRef"
+  },
+  {
+    "group": "general",
+    "name": "vcsInit",
+    "tag": "vcs.init"
+  },
+  {
+    "group": "general",
+    "name": "gitRunStackedAction",
+    "tag": "git.runStackedAction"
+  },
+  {
+    "group": "general",
+    "name": "gitResolvePullRequest",
+    "tag": "git.resolvePullRequest"
+  },
+  {
+    "group": "general",
+    "name": "gitPreparePullRequestThread",
+    "tag": "git.preparePullRequestThread"
+  },
+  {
+    "group": "general",
+    "name": "reviewGetBranchCommits",
+    "tag": "review.getBranchCommits"
+  },
+  {
+    "group": "general",
+    "name": "reviewGetDiffPreview",
+    "tag": "review.getDiffPreview"
+  },
+  {
+    "group": "general",
+    "name": "reviewGetDiffFileContents",
+    "tag": "review.getDiffFileContents"
+  },
+  {
+    "group": "general",
+    "name": "terminalOpen",
+    "tag": "terminal.open"
+  },
+  {
+    "group": "general",
+    "name": "terminalAttach",
+    "tag": "terminal.attach"
+  },
+  {
+    "group": "general",
+    "name": "terminalObserve",
+    "tag": "terminal.observe"
+  },
+  {
+    "group": "general",
+    "name": "terminalWrite",
+    "tag": "terminal.write"
+  },
+  {
+    "group": "general",
+    "name": "terminalResize",
+    "tag": "terminal.resize"
+  },
+  {
+    "group": "general",
+    "name": "terminalClear",
+    "tag": "terminal.clear"
+  },
+  {
+    "group": "general",
+    "name": "terminalClose",
+    "tag": "terminal.close"
+  },
+  {
+    "group": "general",
+    "name": "previewOpen",
+    "tag": "preview.open"
+  },
+  {
+    "group": "general",
+    "name": "previewResize",
+    "tag": "preview.resize"
+  },
+  {
+    "group": "general",
+    "name": "previewAdjust",
+    "tag": "preview.adjust"
+  },
+  {
+    "group": "general",
+    "name": "previewClose",
+    "tag": "preview.close"
+  },
+  {
+    "group": "general",
+    "name": "previewList",
+    "tag": "preview.list"
+  },
+  {
+    "group": "general",
+    "name": "previewClearProfile",
+    "tag": "preview.clearProfile"
+  },
+  {
+    "group": "general",
+    "name": "previewReportProfiles",
+    "tag": "preview.reportProfiles"
+  },
+  {
+    "group": "general",
+    "name": "previewReportStatus",
+    "tag": "preview.reportStatus"
+  },
+  {
+    "group": "general",
+    "name": "previewStopLocalServer",
+    "tag": "preview.stopLocalServer"
+  },
+  {
+    "group": "general",
+    "name": "deviceConfigure",
+    "tag": "device.configure"
+  },
+  {
+    "group": "general",
+    "name": "deviceList",
+    "tag": "device.list"
+  },
+  {
+    "group": "general",
+    "name": "deviceTestHost",
+    "tag": "device.testHost"
+  },
+  {
+    "group": "general",
+    "name": "deviceEasAccount",
+    "tag": "device.easAccount"
+  },
+  {
+    "group": "general",
+    "name": "deviceSimlockIdentity",
+    "tag": "device.simlockIdentity"
+  },
+  {
+    "group": "general",
+    "name": "deviceOpen",
+    "tag": "device.open"
+  },
+  {
+    "group": "general",
+    "name": "deviceClose",
+    "tag": "device.close"
+  },
+  {
+    "group": "general",
+    "name": "deviceShutdown",
+    "tag": "device.shutdown"
+  },
+  {
+    "group": "general",
+    "name": "deviceDetail",
+    "tag": "device.detail"
+  },
+  {
+    "group": "general",
+    "name": "deviceAction",
+    "tag": "device.action"
+  },
+  {
+    "group": "general",
+    "name": "serverProbe",
+    "tag": "server.probe"
+  },
+  {
+    "group": "general",
+    "name": "serverGetConfig",
+    "tag": "server.getConfig"
+  },
+  {
+    "group": "general",
+    "name": "serverGetNpmRelease",
+    "tag": "server.getNpmRelease"
+  },
+  {
+    "group": "general",
+    "name": "serverRefreshProviders",
+    "tag": "server.refreshProviders"
+  },
+  {
+    "group": "general",
+    "name": "serverUpdateProvider",
+    "tag": "server.updateProvider"
+  },
+  {
+    "group": "general",
+    "name": "serverUpdateServer",
+    "tag": "server.updateServer"
+  },
+  {
+    "group": "general",
+    "name": "serverUpdateServerWithProgress",
+    "tag": "server.updateServerWithProgress"
+  },
+  {
+    "group": "general",
+    "name": "serverCommitDesktopUpdate",
+    "tag": "server.commitDesktopUpdate"
+  },
+  {
+    "group": "general",
+    "name": "serverUpsertKeybinding",
+    "tag": "server.upsertKeybinding"
+  },
+  {
+    "group": "general",
+    "name": "serverRemoveKeybinding",
+    "tag": "server.removeKeybinding"
+  },
+  {
+    "group": "general",
+    "name": "serverRunStorageCleanup",
+    "tag": "server.runStorageCleanup"
+  },
+  {
+    "group": "general",
+    "name": "serverGetStorageCleanupReport",
+    "tag": "server.getStorageCleanupReport"
+  },
+  {
+    "group": "general",
+    "name": "serverGetDatabaseStorage",
+    "tag": "server.getDatabaseStorage"
+  },
+  {
+    "group": "general",
+    "name": "serverReclaimDatabaseSpace",
+    "tag": "server.reclaimDatabaseSpace"
+  },
+  {
+    "group": "general",
+    "name": "peerLinksList",
+    "tag": "peerLinks.list"
+  },
+  {
+    "group": "general",
+    "name": "peerLinksLink",
+    "tag": "peerLinks.link"
+  },
+  {
+    "group": "general",
+    "name": "peerLinksUnlink",
+    "tag": "peerLinks.unlink"
+  },
+  {
+    "group": "general",
+    "name": "peerLinksAnswerRequest",
+    "tag": "peerLinks.answerRequest"
+  },
+  {
+    "group": "general",
+    "name": "serverGetSettings",
+    "tag": "server.getSettings"
+  },
+  {
+    "group": "general",
+    "name": "serverUpdateSettings",
+    "tag": "server.updateSettings"
+  },
+  {
+    "group": "general",
+    "name": "serverDiscoverSourceControl",
+    "tag": "server.discoverSourceControl"
+  },
+  {
+    "group": "general",
+    "name": "serverCheckSecretSource",
+    "tag": "server.checkSecretSource"
+  },
+  {
+    "group": "general",
+    "name": "serverSearchAcpRegistry",
+    "tag": "server.searchAcpRegistry"
+  },
+  {
+    "group": "general",
+    "name": "serverPrepareAcpRegistryAgent",
+    "tag": "server.prepareAcpRegistryAgent"
+  },
+  {
+    "group": "general",
+    "name": "serverUninstallAcpRegistryManagedBinary",
+    "tag": "server.uninstallAcpRegistryManagedBinary"
+  },
+  {
+    "group": "general",
+    "name": "serverAcceptAcpRegistryUrlAuth",
+    "tag": "server.acceptAcpRegistryUrlAuth"
+  },
+  {
+    "group": "general",
+    "name": "serverListAcpRegistrySessions",
+    "tag": "server.listAcpRegistrySessions"
+  },
+  {
+    "group": "general",
+    "name": "serverImportAcpRegistrySession",
+    "tag": "server.importAcpRegistrySession"
+  },
+  {
+    "group": "general",
+    "name": "serverDeleteAcpRegistrySession",
+    "tag": "server.deleteAcpRegistrySession"
+  },
+  {
+    "group": "general",
+    "name": "serverListAcpRegistryProviders",
+    "tag": "server.listAcpRegistryProviders"
+  },
+  {
+    "group": "general",
+    "name": "serverSetAcpRegistryProvider",
+    "tag": "server.setAcpRegistryProvider"
+  },
+  {
+    "group": "general",
+    "name": "serverDisableAcpRegistryProvider",
+    "tag": "server.disableAcpRegistryProvider"
+  },
+  {
+    "group": "general",
+    "name": "serverLogoutAcpRegistry",
+    "tag": "server.logoutAcpRegistry"
+  },
+  {
+    "group": "general",
+    "name": "serverGetTraceDiagnostics",
+    "tag": "server.getTraceDiagnostics"
+  },
+  {
+    "group": "general",
+    "name": "serverGetProcessDiagnostics",
+    "tag": "server.getProcessDiagnostics"
+  },
+  {
+    "group": "general",
+    "name": "serverGetHostResources",
+    "tag": "server.getHostResources"
+  },
+  {
+    "group": "general",
+    "name": "serverGetProcessResourceHistory",
+    "tag": "server.getProcessResourceHistory"
+  },
+  {
+    "group": "general",
+    "name": "serverGetResourceTelemetryHistory",
+    "tag": "server.getResourceTelemetryHistory"
+  },
+  {
+    "group": "general",
+    "name": "serverRetryResourceTelemetry",
+    "tag": "server.retryResourceTelemetry"
+  },
+  {
+    "group": "general",
+    "name": "serverCheckOtlpEndpoint",
+    "tag": "server.checkOtlpEndpoint"
+  },
+  {
+    "group": "general",
+    "name": "serverListTextGeneratorModels",
+    "tag": "server.listTextGeneratorModels"
+  },
+  {
+    "group": "general",
+    "name": "serverPrepareTriage",
+    "tag": "server.prepareTriage"
+  },
+  {
+    "group": "general",
+    "name": "serverSignalProcess",
+    "tag": "server.signalProcess"
+  },
+  {
+    "group": "general",
+    "name": "serverReportClientActivity",
+    "tag": "server.reportClientActivity"
+  },
+  {
+    "group": "general",
+    "name": "serverGetUsageSummary",
+    "tag": "server.getUsageSummary"
+  },
+  {
+    "group": "general",
+    "name": "serverRefreshUsageRates",
+    "tag": "server.refreshUsageRates"
+  },
+  {
+    "group": "general",
+    "name": "scheduledTasksSubscribe",
+    "tag": "scheduledTasks.subscribe"
+  },
+  {
+    "group": "general",
+    "name": "scheduledTasksUpsert",
+    "tag": "scheduledTasks.upsert"
+  },
+  {
+    "group": "general",
+    "name": "scheduledTasksSetEnabled",
+    "tag": "scheduledTasks.setEnabled"
+  },
+  {
+    "group": "general",
+    "name": "scheduledTasksDelete",
+    "tag": "scheduledTasks.delete"
+  },
+  {
+    "group": "general",
+    "name": "scheduledTasksRunNow",
+    "tag": "scheduledTasks.runNow"
+  },
+  {
+    "group": "general",
+    "name": "scheduledTasksRotateWebhookToken",
+    "tag": "scheduledTasks.rotateWebhookToken"
+  },
+  {
+    "group": "general",
+    "name": "secretsAnswerRequest",
+    "tag": "secrets.answerRequest"
+  },
+  {
+    "group": "general",
+    "name": "guestShareCreate",
+    "tag": "guestShare.create"
+  },
+  {
+    "group": "general",
+    "name": "scheduledTasksListWebhookDeliveries",
+    "tag": "scheduledTasks.listWebhookDeliveries"
+  },
+  {
+    "group": "general",
+    "name": "scheduledTasksGetWebhookDelivery",
+    "tag": "scheduledTasks.getWebhookDelivery"
+  },
+  {
+    "group": "general",
+    "name": "cloudGetRelayClientStatus",
+    "tag": "cloud.getRelayClientStatus"
+  },
+  {
+    "group": "general",
+    "name": "cloudInstallRelayClient",
+    "tag": "cloud.installRelayClient"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsList",
+    "tag": "pullRequests.list"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsListStats",
+    "tag": "pullRequests.listStats"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsFilterOptions",
+    "tag": "pullRequests.filterOptions"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsSummary",
+    "tag": "pullRequests.summary"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsRouting",
+    "tag": "pullRequests.routing"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsRoutingIdentity",
+    "tag": "pullRequests.routingIdentity"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsStack",
+    "tag": "pullRequests.stack"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsLinkedThreads",
+    "tag": "pullRequests.linkedThreads"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsDetail",
+    "tag": "pullRequests.detail"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsPreview",
+    "tag": "pullRequests.preview"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsChecks",
+    "tag": "pullRequests.checks"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsActivity",
+    "tag": "pullRequests.activity"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsReviewGuide",
+    "tag": "pullRequests.reviewGuide"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsGenerateReviewGuide",
+    "tag": "pullRequests.generateReviewGuide"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsThreadComments",
+    "tag": "pullRequests.threadComments"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsDiffFileContents",
+    "tag": "pullRequests.diffFileContents"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsFilesViewed",
+    "tag": "pullRequests.filesViewed"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsChangeBreakdown",
+    "tag": "pullRequests.changeBreakdown"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsSetFilesViewed",
+    "tag": "pullRequests.setFilesViewed"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsRunAction",
+    "tag": "pullRequests.runAction"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsUpdate",
+    "tag": "pullRequests.update"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsComment",
+    "tag": "pullRequests.comment"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsUpdateComment",
+    "tag": "pullRequests.updateComment"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsSubmitReview",
+    "tag": "pullRequests.submitReview"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsReplyToThread",
+    "tag": "pullRequests.replyToThread"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsSetThreadResolution",
+    "tag": "pullRequests.setThreadResolution"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsSetReaction",
+    "tag": "pullRequests.setReaction"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsInvalidate",
+    "tag": "pullRequests.invalidate"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsReportState",
+    "tag": "pullRequests.reportState"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsSubscribeRefreshes",
+    "tag": "pullRequests.subscribeRefreshes"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsSubscribeLinkedThreadRefreshes",
+    "tag": "pullRequests.subscribeLinkedThreadRefreshes"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsReviewerCandidates",
+    "tag": "pullRequests.reviewerCandidates"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsRequestReviewers",
+    "tag": "pullRequests.requestReviewers"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsLabelCandidates",
+    "tag": "pullRequests.labelCandidates"
+  },
+  {
+    "group": "general",
+    "name": "pullRequestsSetLabels",
+    "tag": "pullRequests.setLabels"
+  },
+  {
+    "group": "general",
+    "name": "issuesList",
+    "tag": "issues.list"
+  },
+  {
+    "group": "general",
+    "name": "issuesDetail",
+    "tag": "issues.detail"
+  },
+  {
+    "group": "general",
+    "name": "issuesComments",
+    "tag": "issues.comments"
+  },
+  {
+    "group": "general",
+    "name": "issuesTemplates",
+    "tag": "issues.templates"
+  },
+  {
+    "group": "general",
+    "name": "issuesCandidates",
+    "tag": "issues.candidates"
+  },
+  {
+    "group": "general",
+    "name": "issuesCreate",
+    "tag": "issues.create"
+  },
+  {
+    "group": "general",
+    "name": "issuesComment",
+    "tag": "issues.comment"
+  },
+  {
+    "group": "general",
+    "name": "issuesUpdate",
+    "tag": "issues.update"
+  },
+  {
+    "group": "general",
+    "name": "issuesSetState",
+    "tag": "issues.setState"
+  },
+  {
+    "group": "general",
+    "name": "issuesReact",
+    "tag": "issues.react"
+  },
+  {
+    "group": "general",
+    "name": "issuesLinkedThreads",
+    "tag": "issues.linkedThreads"
+  },
+  {
+    "group": "general",
+    "name": "issueTrackersList",
+    "tag": "issueTrackers.list"
+  },
+  {
+    "group": "general",
+    "name": "issueTrackersConnect",
+    "tag": "issueTrackers.connect"
+  },
+  {
+    "group": "general",
+    "name": "issueTrackersBindProject",
+    "tag": "issueTrackers.bindProject"
+  },
+  {
+    "group": "general",
+    "name": "sourceControlLookupRepository",
+    "tag": "sourceControl.lookupRepository"
+  },
+  {
+    "group": "general",
+    "name": "sourceControlCloneRepository",
+    "tag": "sourceControl.cloneRepository"
+  },
+  {
+    "group": "general",
+    "name": "sourceControlPublishRepository",
+    "tag": "sourceControl.publishRepository"
+  },
+  {
+    "group": "general",
+    "name": "sourceControlSignInStart",
+    "tag": "sourceControl.signInStart"
+  },
+  {
+    "group": "general",
+    "name": "sourceControlSignInWait",
+    "tag": "sourceControl.signInWait"
+  },
+  {
+    "group": "general",
+    "name": "sourceControlSignInCancel",
+    "tag": "sourceControl.signInCancel"
+  },
+  {
+    "group": "general",
+    "name": "sourceControlAppAccess",
+    "tag": "sourceControl.appAccess"
+  },
+  {
+    "group": "general",
+    "name": "sourceControlStarred",
+    "tag": "sourceControl.starred"
+  },
+  {
+    "group": "general",
+    "name": "sourceControlStar",
+    "tag": "sourceControl.star"
+  },
+  {
+    "group": "general",
+    "name": "projectCloneStart",
+    "tag": "projectClone.start"
+  },
+  {
+    "group": "general",
+    "name": "projectCloneCancel",
+    "tag": "projectClone.cancel"
+  },
+  {
+    "group": "general",
+    "name": "projectCloneRetry",
+    "tag": "projectClone.retry"
+  },
+  {
+    "group": "general",
+    "name": "subscribeProjectClones",
+    "tag": "subscribeProjectClones"
+  },
+  {
+    "group": "general",
+    "name": "subscribeVcsStatus",
+    "tag": "subscribeVcsStatus"
+  },
+  {
+    "group": "general",
+    "name": "subscribeVcsBranch",
+    "tag": "subscribeVcsBranch"
+  },
+  {
+    "group": "general",
+    "name": "vcsRefreshBranch",
+    "tag": "vcs.refreshBranch"
+  },
+  {
+    "group": "general",
+    "name": "subscribeWorktreeSetup",
+    "tag": "subscribeWorktreeSetup"
+  },
+  {
+    "group": "general",
+    "name": "worktreeSetupCancel",
+    "tag": "worktreeSetup.cancel"
+  },
+  {
+    "group": "general",
+    "name": "subscribeTerminalMetadata",
+    "tag": "subscribeTerminalMetadata"
+  },
+  {
+    "group": "general",
+    "name": "subscribePreviewEvents",
+    "tag": "subscribePreviewEvents"
+  },
+  {
+    "group": "general",
+    "name": "subscribeDiscoveredLocalServers",
+    "tag": "subscribeDiscoveredLocalServers"
+  },
+  {
+    "group": "general",
+    "name": "subscribeDeviceState",
+    "tag": "subscribeDeviceState"
+  },
+  {
+    "group": "general",
+    "name": "subscribeServerConfig",
+    "tag": "subscribeServerConfig"
+  },
+  {
+    "group": "general",
+    "name": "subscribeServerLifecycle",
+    "tag": "subscribeServerLifecycle"
+  },
+  {
+    "group": "general",
+    "name": "subscribeAuthAccess",
+    "tag": "subscribeAuthAccess"
+  },
+  {
+    "group": "general",
+    "name": "subscribeResourceTelemetry",
+    "tag": "subscribeResourceTelemetry"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "dispatchCommand",
+    "tag": "orchestration.dispatchCommand"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getTurnDiff",
+    "tag": "orchestration.getTurnDiff"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getFullThreadDiff",
+    "tag": "orchestration.getFullThreadDiff"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "searchThreads",
+    "tag": "orchestration.searchThreads"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "searchThread",
+    "tag": "orchestration.searchThread"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "searchThreadStream",
+    "tag": "orchestration.searchThreadStream"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getArchivedShellSnapshot",
+    "tag": "orchestration.getArchivedShellSnapshot"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getThreadFamily",
+    "tag": "orchestration.getThreadFamily"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getThreadTitles",
+    "tag": "orchestration.getThreadTitles"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getThreadLinkMetadata",
+    "tag": "orchestration.getThreadLinkMetadata"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getWorktreeThreadIds",
+    "tag": "orchestration.getWorktreeThreadIds"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getOlderSettledThreads",
+    "tag": "orchestration.getOlderSettledThreads"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getThreadProjection",
+    "tag": "orchestration.getThreadProjection"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getWorkflowScript",
+    "tag": "orchestration.getWorkflowScript"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getNativeChildWork",
+    "tag": "orchestration.getNativeChildWork"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "stopWorkflow",
+    "tag": "orchestration.stopWorkflow"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "forceStopThread",
+    "tag": "orchestration.forceStopThread"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "getTurnItem",
+    "tag": "orchestration.getTurnItem"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "launchThread",
+    "tag": "orchestration.launchThread"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "subscribeShell",
+    "tag": "orchestration.subscribeShell"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "subscribeThread",
+    "tag": "orchestration.subscribeThread"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "subscribeCommandOutput",
+    "tag": "orchestration.subscribeCommandOutput"
+  },
+  {
+    "group": "orchestration_v2",
+    "name": "subscribePromptSuggestion",
+    "tag": "orchestration.subscribePromptSuggestion"
+  }
+]

@@ -1,0 +1,470 @@
+[
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "descriptor",
+    "method": "GET",
+    "path": "/.well-known/t3/environment"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "session",
+    "method": "GET",
+    "path": "/api/auth/session"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "browserSession",
+    "method": "POST",
+    "path": "/api/auth/browser-session"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "token",
+    "method": "POST",
+    "path": "/oauth/token"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "webSocketTicket",
+    "method": "POST",
+    "path": "/api/auth/websocket-ticket"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "webSocketTicketFor",
+    "method": "POST",
+    "path": "/api/auth/websocket-ticket/:use"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "pairingCredential",
+    "method": "POST",
+    "path": "/api/auth/pairing-token"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "revokePairingLink",
+    "method": "POST",
+    "path": "/api/auth/pairing-links/revoke"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "revokeClient",
+    "method": "POST",
+    "path": "/api/auth/clients/revoke"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "approveConnectDevice",
+    "method": "POST",
+    "path": "/api/auth/connect-devices/approve"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "revokeConnectDevice",
+    "method": "POST",
+    "path": "/api/auth/connect-devices/revoke"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "revokeOtherClients",
+    "method": "POST",
+    "path": "/api/auth/clients/revoke-others"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "protectedResource",
+    "method": "GET",
+    "path": "/.well-known/oauth-protected-resource"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "mcpProtectedResource",
+    "method": "GET",
+    "path": "/.well-known/oauth-protected-resource/mcp"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "authorizationServer",
+    "method": "GET",
+    "path": "/.well-known/oauth-authorization-server"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "register",
+    "method": "POST",
+    "path": "/oauth/mcp/register"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "authorize",
+    "method": "GET",
+    "path": "/oauth/mcp/authorize"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "approval",
+    "method": "POST",
+    "path": "/oauth/mcp/approval"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "decision",
+    "method": "POST",
+    "path": "/oauth/mcp/decision"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "token",
+    "method": "POST",
+    "path": "/oauth/mcp/token"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "shellSnapshot",
+    "method": "GET",
+    "path": "/api/orchestration/shell"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "threadSnapshot",
+    "method": "GET",
+    "path": "/api/orchestration/threads/:threadId"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "threadTranscript",
+    "method": "GET",
+    "path": "/api/orchestration/threads/:threadId/transcript"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "threadBoundedSnapshot",
+    "method": "GET",
+    "path": "/api/orchestration/threads/:threadId/bounded"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "threadHistoryPage",
+    "method": "GET",
+    "path": "/api/orchestration/threads/:threadId/history"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "snapshot",
+    "method": "GET",
+    "path": "/api/projects"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "mutate",
+    "method": "POST",
+    "path": "/api/projects/mutate"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "diff",
+    "method": "POST",
+    "path": "/api/pull-requests/diff"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "cloudKeys",
+    "method": "GET",
+    "path": "/api/voice/cloud/keys"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "setCloudKey",
+    "method": "POST",
+    "path": "/api/voice/cloud/:provider/key"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "cloudModels",
+    "method": "GET",
+    "path": "/api/voice/cloud/openrouter/models"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "transcribeCloud",
+    "method": "POST",
+    "path": "/api/voice/cloud/:provider/transcribe"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "status",
+    "method": "GET",
+    "path": "/api/voice/status"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "prepareModel",
+    "method": "POST",
+    "path": "/api/voice/models/prepare"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "models",
+    "method": "GET",
+    "path": "/api/voice/models"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "downloadModel",
+    "method": "POST",
+    "path": "/api/voice/models/download"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "selectModel",
+    "method": "POST",
+    "path": "/api/voice/models/select"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "cancelModelDownload",
+    "method": "POST",
+    "path": "/api/voice/models/cancel"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "removeModel",
+    "method": "POST",
+    "path": "/api/voice/models/remove"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "linkModels",
+    "method": "POST",
+    "path": "/api/voice/models/link"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "updateAcceleration",
+    "method": "POST",
+    "path": "/api/voice/acceleration"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "updateModelUnloadTimeout",
+    "method": "POST",
+    "path": "/api/voice/model-unload-timeout"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "transcribe",
+    "method": "POST",
+    "path": "/api/voice/transcribe"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "postProcess",
+    "method": "POST",
+    "path": "/api/voice/post-process"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "linkProof",
+    "method": "POST",
+    "path": "/api/connect/link-proof"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "relayConfig",
+    "method": "POST",
+    "path": "/api/connect/relay-config"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "linkState",
+    "method": "GET",
+    "path": "/api/connect/link-state"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "checkReachability",
+    "method": "POST",
+    "path": "/api/connect/reachability"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "unlink",
+    "method": "POST",
+    "path": "/api/connect/unlink"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "preferences",
+    "method": "POST",
+    "path": "/api/connect/preferences"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "health",
+    "method": "POST",
+    "path": "/api/t3-connect/health"
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "t3MintCredential",
+    "method": "POST",
+    "path": "/api/t3-connect/mint-credential"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "health",
+    "method": "GET",
+    "path": "/health"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "authorizationServer",
+    "method": "GET",
+    "path": "/.well-known/oauth-authorization-server"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "protectedResource",
+    "method": "GET",
+    "path": "/.well-known/oauth-protected-resource"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "registerDevice",
+    "method": "POST",
+    "path": "/v1/mobile/devices"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "registerLiveActivity",
+    "method": "POST",
+    "path": "/v1/mobile/live-activities"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "getAgentActivitySnapshot",
+    "method": "GET",
+    "path": "/v1/mobile/agent-activity"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "unregisterDevice",
+    "method": "DELETE",
+    "path": "/v1/mobile/devices/:deviceId"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "listEnvironments",
+    "method": "GET",
+    "path": "/v1/environments"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "listDevices",
+    "method": "GET",
+    "path": "/v1/client/devices"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "listDevicesV2",
+    "method": "GET",
+    "path": "/v2/client/devices"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "linkEnvironment",
+    "method": "POST",
+    "path": "/v1/client/environment-links"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "createEnvironmentLinkChallenge",
+    "method": "POST",
+    "path": "/v1/client/environment-link-challenges"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "unlinkEnvironment",
+    "method": "DELETE",
+    "path": "/v1/client/environment-links/:environmentId"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "releaseEnvironmentTunnel",
+    "method": "DELETE",
+    "path": "/v1/client/environment-links/:environmentId/tunnel"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "getT3ChatLink",
+    "method": "GET",
+    "path": "/v1/client/t3chat-link"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "createT3ChatLinkRequest",
+    "method": "POST",
+    "path": "/v1/client/t3chat-link-requests"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "unlinkT3Chat",
+    "method": "DELETE",
+    "path": "/v1/client/t3chat-link"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "exchangeDpopAccessToken",
+    "method": "POST",
+    "path": "/v1/client/dpop-token"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "connectEnvironment",
+    "method": "POST",
+    "path": "/v1/environments/:environmentId/connect"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "getEnvironmentStatus",
+    "method": "POST",
+    "path": "/v1/environments/:environmentId/status"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "registerManagedEndpointRecovery",
+    "method": "POST",
+    "path": "/v1/environments/:environmentId/tunnel/recovery"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "recoverManagedEndpoint",
+    "method": "POST",
+    "path": "/v1/environments/:environmentId/tunnel"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "publishAgentActivity",
+    "method": "POST",
+    "path": "/v1/environments/:environmentId/threads/:threadId/agent-activity"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "updateLinkPreferences",
+    "method": "POST",
+    "path": "/v1/environments/:environmentId/link-preferences"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "wakeHeldHooks",
+    "method": "POST",
+    "path": "/v1/environments/:environmentId/hooks/wake"
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "ingest",
+    "method": "POST",
+    "path": "/v1/mobile/observe/:projectId/v1/:signal"
+  }
+]

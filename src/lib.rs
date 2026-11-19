@@ -3,7 +3,7 @@ use axum::{
     extract::{FromRequest, Path, Request, State, WebSocketUpgrade},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -21,6 +21,10 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+mod contracts;
+
+pub use contracts::{http_known, rpc_known, HTTP_CONTRACTS, RPC_CONTRACTS};
 
 pub const PROTOCOL_VERSION: u32 = 2;
 fn now() -> u64 {
@@ -64,6 +68,12 @@ pub struct Thread {
     pub messages: Vec<ConversationMessage>,
     pub runs: Vec<Run>,
     pub created_at: u64,
+    pub archived: bool,
+    pub settled: bool,
+    pub snoozed_until: Option<String>,
+    pub pinned: bool,
+    pub unread: bool,
+    pub tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -87,6 +97,19 @@ pub enum Event {
         thread_id: Uuid,
         status: String,
         error: Option<String>,
+    },
+    CommandDispatched {
+        command_id: String,
+        command_type: String,
+        thread_id: Option<Uuid>,
+        payload: serde_json::Value,
+    },
+    ThreadPatched {
+        thread_id: Uuid,
+        patch: serde_json::Value,
+    },
+    ThreadDeleted {
+        thread_id: Uuid,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -140,6 +163,43 @@ impl Store {
                         run.finished_at = Some(now());
                     }
                 }
+            }
+            Event::CommandDispatched { .. } => {}
+            Event::ThreadPatched { thread_id, patch } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    if let Some(value) = patch.get("title").and_then(serde_json::Value::as_str) {
+                        thread.title = value.to_owned();
+                    }
+                    if let Some(value) = patch.get("archived").and_then(serde_json::Value::as_bool)
+                    {
+                        thread.archived = value;
+                    }
+                    if let Some(value) = patch.get("settled").and_then(serde_json::Value::as_bool) {
+                        thread.settled = value;
+                    }
+                    if let Some(value) = patch.get("pinned").and_then(serde_json::Value::as_bool) {
+                        thread.pinned = value;
+                    }
+                    if let Some(value) = patch.get("unread").and_then(serde_json::Value::as_bool) {
+                        thread.unread = value;
+                    }
+                    if let Some(value) = patch.get("status").and_then(serde_json::Value::as_str) {
+                        thread.status = value.to_owned();
+                    }
+                    if let Some(value) = patch.get("snoozed_until") {
+                        thread.snoozed_until = value.as_str().map(str::to_owned);
+                    }
+                    if let Some(values) = patch.get("tags").and_then(serde_json::Value::as_array) {
+                        thread.tags = values
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .collect();
+                    }
+                }
+            }
+            Event::ThreadDeleted { thread_id } => {
+                self.threads.remove(thread_id);
             }
         }
     }
@@ -242,15 +302,112 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/projects", get(list_projects).post(create_project))
+        .route("/api/projects", get(api_projects))
+        .route("/api/orchestration/shell", get(api_shell_snapshot))
+        .route(
+            "/api/orchestration/threads/:thread_id",
+            get(api_thread_snapshot),
+        )
+        .route(
+            "/api/orchestration/threads/:thread_id/transcript",
+            get(api_thread_transcript),
+        )
+        .route(
+            "/api/orchestration/threads/:thread_id/bounded",
+            get(api_thread_snapshot),
+        )
+        .route(
+            "/api/orchestration/threads/:thread_id/history",
+            get(api_thread_transcript),
+        )
+        .route("/api/t3-connect/health", post(relay_health))
+        .route("/api/auth/session", get(auth_session))
+        .route("/.well-known/t3/environment", get(environment_descriptor))
+        .route("/v1/environments", get(relay_environments))
+        .route("/v1/client/devices", get(relay_devices))
+        .route("/v2/client/devices", get(relay_devices))
+        .route("/v1/client/environment-links", post(relay_link_environment))
+        .route(
+            "/v1/client/environment-links/:environment_id",
+            axum::routing::delete(relay_unlink_environment),
+        )
+        .route(
+            "/v1/environments/:environment_id/status",
+            post(relay_environment_status),
+        )
+        .route(
+            "/v1/environments/:environment_id/connect",
+            post(relay_environment_connect),
+        )
+        .route(
+            "/v1/environments/:environment_id/hooks/wake",
+            post(relay_wake_hooks),
+        )
         .route("/v1/projects/:project_id/threads", post(create_thread))
         .route("/v1/threads/:thread_id", get(get_thread))
         .route("/v1/threads/:thread_id/messages", post(send_message))
         .route("/v1/runs/:run_id/cancel", post(cancel_run))
         .route("/ws", get(websocket))
+        .fallback(any(contract_fallback))
         .with_state(state)
+}
+
+async fn contract_fallback(request: Request) -> Response {
+    let method = request.method().as_str();
+    let path = request.uri().path();
+    let (status, code, message) = if contracts::http_known(method, path) {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "contract_not_implemented",
+            "This contract endpoint is registered but its provider integration is unavailable.",
+        )
+    } else {
+        (StatusCode::NOT_FOUND, "not_found", "Route not found.")
+    };
+    let body = serde_json::json!({ "code": code, "message": message });
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .header("access-control-allow-origin", "*")
+        .body(body.to_string().into())
+        .expect("valid response")
 }
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({"ok": true, "protocol_version": PROTOCOL_VERSION}))
+}
+async fn environment_descriptor() -> impl IntoResponse {
+    Json(
+        serde_json::json!({"environmentId":"local","label":"t3code-rust","platform":{"os":std::env::consts::OS,"arch":std::env::consts::ARCH}}),
+    )
+}
+async fn auth_session() -> impl IntoResponse {
+    Json(serde_json::json!({"authenticated":false,"scopes":[],"auth":{}}))
+}
+async fn relay_health() -> impl IntoResponse {
+    Json(serde_json::json!({"ok":true}))
+}
+async fn relay_environments() -> impl IntoResponse {
+    Json(serde_json::json!({"environments":[]}))
+}
+async fn relay_devices() -> impl IntoResponse {
+    Json(serde_json::json!({"devices":[]}))
+}
+async fn relay_link_environment(Json(input): Json<serde_json::Value>) -> impl IntoResponse {
+    Json(
+        serde_json::json!({"environmentId":input.get("environmentId").cloned().unwrap_or(serde_json::Value::Null),"status":"linked"}),
+    )
+}
+async fn relay_unlink_environment(Path(_environment_id): Path<String>) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+async fn relay_environment_status(Path(environment_id): Path<String>) -> impl IntoResponse {
+    Json(serde_json::json!({"environmentId":environment_id,"status":"offline"}))
+}
+async fn relay_environment_connect(Path(environment_id): Path<String>) -> impl IntoResponse {
+    Json(serde_json::json!({"environmentId":environment_id,"status":"offline"}))
+}
+async fn relay_wake_hooks(Path(_environment_id): Path<String>) -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 async fn list_projects(State(state): State<Arc<AppState>>) -> Json<Vec<Project>> {
     Json(
@@ -263,6 +420,45 @@ async fn list_projects(State(state): State<Arc<AppState>>) -> Json<Vec<Project>>
             .cloned()
             .collect(),
     )
+}
+async fn api_projects(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let store = state.store.read().await;
+    Json(serde_json::json!({"projects": store.projects.values().collect::<Vec<_>>()}))
+}
+async fn api_shell_snapshot(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let store = state.store.read().await;
+    Json(
+        serde_json::json!({"schemaVersion":1,"snapshotSequence":0,"projects":store.projects.values().collect::<Vec<_>>(),"threads":store.threads.values().collect::<Vec<_>>()}),
+    )
+}
+async fn api_thread_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(thread_id): Path<Uuid>,
+) -> impl IntoResponse {
+    match state.store.read().await.threads.get(&thread_id).cloned() {
+        Some(thread) => (StatusCode::OK, Json(serde_json::json!(thread))),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"code":"not_found","message":"Thread not found."})),
+        ),
+    }
+}
+async fn api_thread_transcript(
+    State(state): State<Arc<AppState>>,
+    Path(thread_id): Path<Uuid>,
+) -> impl IntoResponse {
+    match state.store.read().await.threads.get(&thread_id).cloned() {
+        Some(thread) => (
+            StatusCode::OK,
+            Json(
+                serde_json::json!({"threadId":thread.id,"title":thread.title,"items":thread.messages}),
+            ),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"code":"not_found","message":"Thread not found."})),
+        ),
+    }
 }
 async fn create_project(
     State(state): State<Arc<AppState>>,
@@ -309,6 +505,12 @@ async fn create_thread(
         messages: vec![],
         runs: vec![],
         created_at: now(),
+        archived: false,
+        settled: false,
+        snoozed_until: None,
+        pinned: false,
+        unread: false,
+        tags: vec![],
     };
     match state.commit(Event::ThreadCreated(thread.clone())).await {
         Ok(_) => (StatusCode::CREATED, Json(serde_json::json!(thread))),
@@ -406,6 +608,234 @@ async fn start_run(
         }
     });
     Ok(run)
+}
+
+async fn dispatch_orchestration_command(
+    state: Arc<AppState>,
+    command: serde_json::Value,
+) -> anyhow::Result<u64> {
+    let command_type = command
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let thread_id = command
+        .get("threadId")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    match command_type {
+        "thread.create" => {
+            let project_id = command
+                .get("projectId")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or_else(|| anyhow::anyhow!("thread.create requires projectId"))?;
+            let project = state
+                .store
+                .read()
+                .await
+                .projects
+                .get(&project_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("project not found"))?;
+            let id = thread_id.unwrap_or_else(Uuid::new_v4);
+            let thread = Thread {
+                id,
+                project_id,
+                title: command
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("New thread")
+                    .to_owned(),
+                cwd: command
+                    .get("worktreePath")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&project.path)
+                    .to_owned(),
+                status: "idle".into(),
+                messages: vec![],
+                runs: vec![],
+                created_at: now(),
+                archived: false,
+                settled: false,
+                snoozed_until: None,
+                pinned: false,
+                unread: false,
+                tags: vec![],
+            };
+            return Ok(state.commit(Event::ThreadCreated(thread)).await?.id);
+        }
+        "message.dispatch" => {
+            let thread_id =
+                thread_id.ok_or_else(|| anyhow::anyhow!("message.dispatch requires threadId"))?;
+            let text = command
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let run = start_run(state.clone(), thread_id, text, "default".into())
+                .await
+                .map_err(|(_, error)| anyhow::anyhow!(error))?;
+            return Ok(state
+                .commit(Event::CommandDispatched {
+                    command_id: command_id(&command),
+                    command_type: command_type.into(),
+                    thread_id: Some(thread_id),
+                    payload: command,
+                })
+                .await?
+                .id
+                .max(run.started_at));
+        }
+        "thread.stop" | "run.interrupt" | "subagent.stop" | "queued-run.cancel" => {
+            if let Some(thread_id) = thread_id {
+                let run_ids = state
+                    .store
+                    .read()
+                    .await
+                    .threads
+                    .get(&thread_id)
+                    .map(|thread| {
+                        thread
+                            .runs
+                            .iter()
+                            .filter(|run| run.status == "running")
+                            .map(|run| run.id)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let mut cancellations = state.cancellations.lock().await;
+                for run_id in run_ids {
+                    if let Some(cancel) = cancellations.remove(&run_id) {
+                        let _ = cancel.send(());
+                    }
+                }
+                return Ok(state
+                    .commit(Event::ThreadPatched {
+                        thread_id,
+                        patch: serde_json::json!({"status":"cancelled"}),
+                    })
+                    .await?
+                    .id);
+            }
+        }
+        "thread.archive"
+        | "thread.unarchive"
+        | "thread.settle"
+        | "thread.unsettle"
+        | "thread.pin"
+        | "thread.unpin"
+        | "thread.mark-unread"
+        | "thread.visit"
+        | "thread.snooze"
+        | "thread.unsnooze"
+        | "thread.metadata.update"
+        | "thread.runtime-mode.set"
+        | "thread.interaction-mode.set"
+        | "thread.model-selection.set"
+        | "thread.tag.set" => {
+            if let Some(thread_id) = thread_id {
+                let mut patch = serde_json::Map::new();
+                match command_type {
+                    "thread.archive" => {
+                        patch.insert("archived".into(), true.into());
+                    }
+                    "thread.unarchive" => {
+                        patch.insert("archived".into(), false.into());
+                    }
+                    "thread.settle" => {
+                        patch.insert("settled".into(), true.into());
+                    }
+                    "thread.unsettle" => {
+                        patch.insert("settled".into(), false.into());
+                    }
+                    "thread.pin" => {
+                        patch.insert("pinned".into(), true.into());
+                    }
+                    "thread.unpin" => {
+                        patch.insert("pinned".into(), false.into());
+                    }
+                    "thread.mark-unread" => {
+                        patch.insert("unread".into(), true.into());
+                    }
+                    "thread.visit" => {
+                        patch.insert("unread".into(), false.into());
+                    }
+                    "thread.snooze" => {
+                        patch.insert(
+                            "snoozed_until".into(),
+                            command
+                                .get("snoozedUntil")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                    "thread.unsnooze" => {
+                        patch.insert("snoozed_until".into(), serde_json::Value::Null);
+                    }
+                    "thread.metadata.update" => {
+                        if let Some(title) = command.get("title") {
+                            patch.insert("title".into(), title.clone());
+                        }
+                    }
+                    "thread.tag.set" => {
+                        let tag = command.get("tag").and_then(serde_json::Value::as_str);
+                        let tagged = command
+                            .get("tagged")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        let mut tags = state
+                            .store
+                            .read()
+                            .await
+                            .threads
+                            .get(&thread_id)
+                            .map(|thread| thread.tags.clone())
+                            .unwrap_or_default();
+                        if let Some(tag) = tag {
+                            if tagged && !tags.iter().any(|value| value == tag) {
+                                tags.push(tag.into());
+                            }
+                            if !tagged {
+                                tags.retain(|value| value != tag);
+                            }
+                        }
+                        patch.insert("tags".into(), serde_json::json!(tags));
+                    }
+                    _ => {}
+                }
+                return Ok(state
+                    .commit(Event::ThreadPatched {
+                        thread_id,
+                        patch: patch.into(),
+                    })
+                    .await?
+                    .id);
+            }
+        }
+        "thread.delete" => {
+            if let Some(thread_id) = thread_id {
+                return Ok(state.commit(Event::ThreadDeleted { thread_id }).await?.id);
+            }
+        }
+        _ => {}
+    }
+    Ok(state
+        .commit(Event::CommandDispatched {
+            command_id: command_id(&command),
+            command_type: command_type.into(),
+            thread_id,
+            payload: command,
+        })
+        .await?
+        .id)
+}
+
+fn command_id(command: &serde_json::Value) -> String {
+    command
+        .get("commandId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 fn internal(e: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
@@ -648,6 +1078,136 @@ async fn handle_rpc_message(
         return;
     }
     match method {
+        "orchestration.dispatchCommand" => {
+            let payload = message
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            match dispatch_orchestration_command(state.clone(), payload).await {
+                Ok(sequence) => {
+                    let _ = outbound.send(
+                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"sequence":sequence}})
+                            .to_string(),
+                    );
+                }
+                Err(error) => send_rpc_error(outbound, id, "dispatch_failed", error.to_string()),
+            }
+        }
+        "orchestration.getThreadTitles" => {
+            let ids = message
+                .get("params")
+                .and_then(|params| params.get("threadIds"))
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let store = state.store.read().await;
+            let titles = ids
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter_map(|id| Uuid::parse_str(id).ok())
+                .filter_map(|id| {
+                    store
+                        .threads
+                        .get(&id)
+                        .map(|thread| (id.to_string(), thread.title.clone()))
+                })
+                .collect::<HashMap<_, _>>();
+            let _ = outbound
+                .send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":titles}).to_string());
+        }
+        "orchestration.getThreadFamily" => {
+            let requested = message
+                .get("params")
+                .and_then(|params| params.get("threadId"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| Uuid::parse_str(id).ok());
+            let store = state.store.read().await;
+            let threads = requested
+                .and_then(|thread_id| store.threads.get(&thread_id).map(|thread| vec![thread]))
+                .unwrap_or_default();
+            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"snapshotSequence":0,"threads":threads}}).to_string());
+        }
+        "orchestration.getWorktreeThreadIds" => {
+            let worktree = message
+                .get("params")
+                .and_then(|params| params.get("worktreePath"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let store = state.store.read().await;
+            let thread_ids = store
+                .threads
+                .values()
+                .filter(|thread| thread.cwd == worktree)
+                .map(|thread| thread.id.to_string())
+                .collect::<Vec<_>>();
+            let _ = outbound.send(
+                serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"threadIds":thread_ids}})
+                    .to_string(),
+            );
+        }
+        "orchestration.getArchivedShellSnapshot" => {
+            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"schemaVersion":1,"snapshotSequence":0,"projects":[],"threads":[]}}).to_string());
+        }
+        "orchestration.getThreadLinkMetadata" => {
+            let ids = message
+                .get("params")
+                .and_then(|params| params.get("threadIds"))
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let store = state.store.read().await;
+            let metadata = ids
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter_map(|value| Uuid::parse_str(value).ok())
+                .filter_map(|thread_id| {
+                    store.threads.get(&thread_id).map(|thread| {
+                        (
+                            thread_id.to_string(),
+                            serde_json::json!({"title":thread.title,"projectId":thread.project_id}),
+                        )
+                    })
+                })
+                .collect::<HashMap<_, _>>();
+            let _ = outbound
+                .send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":metadata}).to_string());
+        }
+        "orchestration.searchThreads" => {
+            let query = message
+                .get("params")
+                .and_then(|params| params.get("query"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let store = state.store.read().await;
+            let threads = store
+                .threads
+                .values()
+                .filter(|thread| thread.title.to_ascii_lowercase().contains(&query))
+                .cloned()
+                .collect::<Vec<_>>();
+            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"snapshotSequence":0,"threads":threads,"complete":true}}).to_string());
+        }
+        "orchestration.searchThread" => {
+            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"complete":true,"snapshotSequence":0,"totalMatches":0,"activeIndex":0,"match":null}}).to_string());
+        }
+        "orchestration.getOlderSettledThreads" => {
+            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"snapshotSequence":0,"threads":[],"counts":[]}}).to_string());
+        }
+        "orchestration.getThreadProjection"
+        | "orchestration.getFullThreadDiff"
+        | "orchestration.getTurnDiff" => {
+            let _ = outbound
+                .send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":null}).to_string());
+        }
+        "orchestration.stopWorkflow"
+        | "orchestration.forceStopThread"
+        | "orchestration.getWorkflowScript"
+        | "orchestration.getNativeChildWork"
+        | "orchestration.getTurnItem" => {
+            let _ = outbound
+                .send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":null}).to_string());
+        }
         "server.probe" => {
             let _ =
                 outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}}).to_string());
@@ -660,10 +1220,61 @@ async fn handle_rpc_message(
                     .to_string(),
             );
         }
+        "orchestration.subscribeThread" => {
+            let thread_id = message
+                .get("params")
+                .and_then(|params| params.get("threadId"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| Uuid::parse_str(id).ok());
+            let thread = match thread_id {
+                Some(thread_id) => state.store.read().await.threads.get(&thread_id).cloned(),
+                None => None,
+            };
+            let items = thread
+                .map(|thread| vec![serde_json::json!({"kind":"snapshot","snapshotSequence":0,"projection":thread}), serde_json::json!({"kind":"synchronized"})])
+                .unwrap_or_default();
+            let _ = outbound.send(
+                serde_json::json!({"jsonrpc":"2.0","chunk":true,"id":id,"result":items})
+                    .to_string(),
+            );
+        }
+        "orchestration.subscribeCommandOutput" => {
+            let frame =
+                serde_json::json!({"kind":"replace","text":"","truncated":false,"running":false});
+            let _ = outbound.send(
+                serde_json::json!({"jsonrpc":"2.0","chunk":true,"id":id,"result":[frame]})
+                    .to_string(),
+            );
+        }
+        "orchestration.subscribePromptSuggestion" => {
+            let _ = outbound.send(
+                serde_json::json!({"jsonrpc":"2.0","chunk":true,"id":id,"result":[null]})
+                    .to_string(),
+            );
+        }
         _ => {
-            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"_tag":"Cause","code":0,"message":format!("Unknown RPC method: {method}"),"data":[]}}).to_string());
+            let (code, message) = if contracts::rpc_known(method) {
+                (
+                    "contract_not_implemented",
+                    format!("RPC contract is registered but unavailable: {method}"),
+                )
+            } else {
+                ("method_not_found", format!("Unknown RPC method: {method}"))
+            };
+            let _ = outbound.send(serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"_tag":"Cause","code":0,"message":message,"data":[{"code":code}]}}).to_string());
         }
     }
+}
+
+fn send_rpc_error(
+    outbound: &mpsc::UnboundedSender<String>,
+    id: serde_json::Value,
+    code: &str,
+    message: String,
+) {
+    let _ = outbound.send(
+        serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"_tag":"Cause","code":0,"message":message,"data":[{"code":code}]}}).to_string(),
+    );
 }
 pub async fn run_server(state: Arc<AppState>, listen: std::net::SocketAddr) -> anyhow::Result<()> {
     let app = router(state);
