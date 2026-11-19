@@ -54,6 +54,7 @@ pub mod relay_http;
 pub mod relay_service;
 mod rpc;
 pub mod voice;
+mod workspace;
 
 pub use contracts::{http_known, rpc_known, HTTP_CONTRACTS, RPC_CONTRACTS};
 

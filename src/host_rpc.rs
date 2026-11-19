@@ -1,6 +1,6 @@
 pub use crate::local_services::media::routes;
 use crate::AppState;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Dispatch a host-backed unary RPC or obtain the first value of its stream.
 pub async fn dispatch(
@@ -10,6 +10,31 @@ pub async fn dispatch(
 ) -> Option<Result<Value, Value>> {
     let (service, name) = method.split_once('.')?;
     match service {
+        "projects" => match name {
+            "listEntries" => crate::workspace::list_entries(input).await,
+            "listIgnoredFiles" => crate::workspace::list_entries(input).await.map(|result| {
+                result.map(|value| {
+                    let files = value["entries"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|entry| entry["kind"] == "file")
+                        .map(|entry| json!({"path": entry["path"], "byteLength": 0}))
+                        .collect::<Vec<_>>();
+                    json!({"files": files, "truncated": false})
+                })
+            }),
+            "searchEntries" => crate::workspace::search_entries(input).await,
+            "searchContents" => crate::workspace::search_contents(input).await,
+            "readFile" => crate::workspace::read_file(input).await,
+            "writeFile" => crate::workspace::write_file(input).await,
+            _ => None,
+        },
+        "filesystem" => match name {
+            "getMetadata" => crate::workspace::metadata(input).await,
+            "browse" => crate::workspace::browse(input).await,
+            _ => None,
+        },
         "git" if matches!(name, "resolvePullRequest" | "preparePullRequestThread") => {
             Some(crate::local_services::git_workflow::pull_request(state, name, input).await)
         }
