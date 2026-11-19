@@ -399,7 +399,12 @@ impl Call {
                     id,
                     &key,
                     &s.issuer,
-                    body.get("tunnelId").and_then(Value::as_str),
+                    Some(
+                        body.get("tunnelId")
+                            .and_then(Value::as_str)
+                            .filter(|v| !v.trim().is_empty())
+                            .ok_or(Error::Auth("not_authorized"))?,
+                    ),
                 )?;
                 // Provisioning is deliberately delegated to the configured
                 // managed-endpoint provider. The standalone relay has no
