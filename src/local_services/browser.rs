@@ -435,6 +435,16 @@ async fn stream(
         json!({"width":width,"height":height,"mobile":false,"deviceScaleFactor":2}),
     )
     .await?;
+    let initial_url = { page.initial_url.lock().unwrap().take() };
+    if let Some(url) = initial_url {
+        command(
+            &mut cdp,
+            &mut sequence,
+            "Page.navigate",
+            json!({"url": normalize_url(&url).map_err(|_| ())?}),
+        )
+        .await?;
+    }
     command(
         &mut cdp,
         &mut sequence,
@@ -521,8 +531,6 @@ async fn stream(
                         }}else if event["state"]=="canceled"{pending_downloads.remove(guid);}}
                     }
                     Some("Page.screencastFrame")=>{let data=&e["params"];if pending.is_none(){if let Some(bytes)=data["data"].as_str().and_then(|s|STANDARD.decode(s).ok()){
-                        let url=page.initial_url.lock().unwrap().take();
-                        if let Some(url)=url{initial_load_pending=true;command(&mut cdp,&mut sequence,"Page.navigate",json!({"url":url})).await?;}
                         socket.send(Message::Binary(bytes)).await.map_err(|_|())?;pending=data["sessionId"].as_u64();
                     }}else{command(&mut cdp,&mut sequence,"Page.screencastFrameAck",json!({"sessionId":data["sessionId"]})).await?;}}
                     Some("Page.loadEventFired")=>{document=command(&mut cdp,&mut sequence,"Runtime.evaluate",info()).await?;if initial_load_pending{initial_capture_id=Some(command(&mut cdp,&mut sequence,"Page.captureScreenshot",json!({"format":"jpeg","quality":70})).await?);}}
