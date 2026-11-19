@@ -1,6 +1,6 @@
 use crate::{provider_rpc::Reply, AppState};
 use serde_json::{json, Value};
-use std::{path::Path, time::Duration};
+use std::path::Path;
 use tokio::{fs, io::AsyncWriteExt};
 use uuid::Uuid;
 
@@ -15,37 +15,22 @@ fn disconnected() -> Value {
 }
 async fn probe(token: &str) -> Reply {
     let failed = |detail: &str| error("linear", "failed", detail);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| failed("Linear could not be reached."))?;
-    let response=client.post("https://api.linear.app/graphql").header("Authorization",token).json(&json!({"query":"query T3Viewer{viewer{id name displayName email avatarUrl} teams(first:250){nodes{id key name}}}","operationName":"T3Viewer","variables":{}})).send().await.map_err(|_|failed("Linear could not be reached."))?;
-    let code = response.status().as_u16();
-    let body = response.json::<Value>().await.unwrap_or(Value::Null);
-    let errors = body["errors"].as_array();
-    let has_code =
-        |s: &str| errors.is_some_and(|list| list.iter().any(|v| v["extensions"]["code"] == s));
-    if code == 429 || has_code("RATELIMITED") {
-        return Err(failed("Linear's rate limit was reached."));
-    }
-    if matches!(code, 401 | 403) || has_code("AUTHENTICATION_ERROR") {
-        return Err(error("linear", "rejected", "Linear rejected the API key."));
-    }
-    if let Some(first) = errors.and_then(|v| v.first()) {
-        return Err(failed(
-            first["message"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or("Linear refused the request."),
-        ));
-    }
-    if !(200..300).contains(&code) {
-        return Err(failed(&format!(
-            "Linear returned HTTP {code} with an unexpected body."
-        )));
-    }
-    let data = &body["data"];
+    let data = super::linear::probe(token).await.map_err(|e| {
+        let detail = e["detail"]
+            .as_str()
+            .unwrap_or("Linear rejected the API key.");
+        let mut err = error(
+            "linear",
+            if e["reason"] == "unauthenticated" {
+                "rejected"
+            } else {
+                "failed"
+            },
+            detail,
+        );
+        err["cause"] = e["cause"].clone();
+        err
+    })?;
     let viewer = &data["viewer"];
     let invalid = || failed("Linear returned an unexpected body.");
     let account = ["displayName", "name", "email", "id"]
@@ -55,7 +40,7 @@ async fn probe(token: &str) -> Reply {
     let scopes=data["teams"]["nodes"].as_array().ok_or_else(invalid)?.iter().map(|t|Ok(json!({"key":t["key"].as_str().ok_or_else(invalid)?,"name":t["name"].as_str().ok_or_else(invalid)?}))).collect::<Result<Vec<_>,Value>>()?;
     Ok(status(true, json!(account), Value::Null, json!(scopes)))
 }
-async fn read(path: &Path) -> Reply {
+pub(super) async fn read(path: &Path) -> Reply {
     let err = || {
         error(
             "linear",

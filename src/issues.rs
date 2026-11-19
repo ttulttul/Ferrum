@@ -20,6 +20,7 @@ impl IssueService {
     }
 }
 
+mod linear;
 mod reads;
 mod templates;
 mod trackers;
@@ -72,6 +73,9 @@ fn selected_fields(input: &Value, keys: &[&str]) -> Value {
 
 async fn run(state: &AppState, cli: &Path, op: &str, input: &Value) -> Reply {
     let project = project(state, input).await.ok_or_else(unsupported)?;
+    if input["tracker"] == "linear" {
+        return linear::run(state, &project, op, input).await;
+    }
     let remote = github_remote(&project).await.ok_or_else(unsupported)?;
     if input["tracker"] != "github"
         || input["host"]
@@ -342,13 +346,70 @@ async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
     let mut entries = Vec::new();
     let mut viewers = json!({});
     let mut next = json!({});
+    let cfg = linear::record(state).await?;
+    let mut linear_count = 0;
+    let mut linear_error = None;
+    let mut host_order = Vec::new();
     let mut total = 0;
     let mut host_error = None;
     for p in projects {
+        if cfg["bindings"][&p.id]["tracker"] == "linear" {
+            let scope = cfg["bindings"][&p.id]["scope"].as_str().unwrap_or("");
+            linear_count += 1;
+            if !host_order.contains(&"linear.app") {
+                host_order.push("linear.app");
+            }
+            let key = format!("linear.app {}", scope.to_lowercase());
+            if input["host"]
+                .as_str()
+                .is_none_or(|h| h.trim().eq_ignore_ascii_case("linear.app"))
+                && seen.insert(key.clone())
+            {
+                scopes.push(
+                    json!({"projectId":p.id,"tracker":"linear","host":"linear.app","scope":scope}),
+                );
+                let cursor = &input["cursors"][&key];
+                if input.get("cursors").is_none() || !cursor.is_null() {
+                    match linear::page(&cfg, &p, scope, input, cursor, &mut viewers).await {
+                        Ok(page) => {
+                            entries
+                                .extend(page["entries"].as_array().into_iter().flatten().cloned());
+                            if !page["cursor"].is_null() {
+                                next[&key] = page["cursor"].clone();
+                            }
+                        }
+                        Err(e) => {
+                            if !cursor.is_null() {
+                                next[&key] = cursor.clone();
+                            }
+                            let message = if e["reason"] == "unauthenticated" {
+                                let detail = e["cause"]["message"]
+                                    .as_str()
+                                    .and_then(|m| m.split_once(": "))
+                                    .map(|(_, s)| s)
+                                    .unwrap_or("Linear rejected the API key.");
+                                linear_error = Some(detail.to_owned());
+                                detail
+                            } else {
+                                e["detail"]
+                                    .as_str()
+                                    .unwrap_or("The issue tracker request failed.")
+                            };
+                            errors.push(
+                                json!({"projectId":p.id,"projectTitle":p.name,"message":message}),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let Some(scope) = github_remote(&p).await else {
             continue;
         };
         total += 1;
+        if !host_order.contains(&"github.com") {
+            host_order.push("github.com");
+        }
         if input["host"]
             .as_str()
             .is_some_and(|s| !s.trim().eq_ignore_ascii_case("github.com"))
@@ -410,6 +471,10 @@ async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
     if total > 0 {
         trackers.push(json!({"tracker":"github","host":"github.com","projectCount":total,"capabilities":capabilities(),"configured":host_error.is_none(),"detail":host_error}))
     }
+    if linear_count > 0 {
+        trackers.push(json!({"tracker":"linear","host":"linear.app","projectCount":linear_count,"capabilities":capabilities(),"configured":linear_error.is_none(),"detail":linear_error}));
+    }
+    trackers.sort_by_key(|t| host_order.iter().position(|h| t["host"] == *h));
     entries.sort_by(|a, b| b["updatedAt"].as_str().cmp(&a["updatedAt"].as_str()));
     Ok(
         json!({"viewers":viewers,"trackers":trackers,"entries":entries,"errors":errors,"nextCursors":next,"scopes":scopes}),
