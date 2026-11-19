@@ -170,3 +170,83 @@ pub(super) fn read(path: &Path) -> (Value, Value) {
     all.drain(..all.len().saturating_sub(256));
     (all.into(), issues.into())
 }
+
+fn raw_entries(path: &Path) -> Result<Vec<Value>, Value> {
+    match fs::read_to_string(path) {
+        Ok(text) => match crate::settings::parse(&text) {
+            Ok(Value::Array(rows)) => Ok(rows),
+            _ => Err(json!({
+                "_tag":"Fail",
+                "error":{"_tag":"KeybindingsConfigError","detail":"expected JSON array","configPath":path}
+            })),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(DEFAULTS["keybindings"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()),
+        Err(error) => Err(json!({
+            "_tag":"Fail",
+            "error":{"_tag":"KeybindingsConfigError","detail":"failed to read keybindings config","configPath":path,"cause":error.to_string()}
+        })),
+    }
+}
+
+fn same_rule(left: &Value, right: &Value) -> bool {
+    match (compile(left), compile(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn write_entries(path: &Path, entries: &[Value]) -> Result<(), Value> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| json!({
+            "_tag":"Fail",
+            "error":{"_tag":"KeybindingsConfigError","detail":"failed to prepare keybindings config directory","configPath":path,"cause":error.to_string()}
+        }))?;
+    }
+    let contents = serde_json::to_string_pretty(entries).map_err(|error| json!({
+        "_tag":"Fail",
+        "error":{"_tag":"KeybindingsConfigError","detail":"failed to encode keybindings config","configPath":path,"cause":error.to_string()}
+    }))?;
+    fs::write(path, format!("{contents}\n")).map_err(|error| json!({
+        "_tag":"Fail",
+        "error":{"_tag":"KeybindingsConfigError","detail":"failed to write keybindings config","configPath":path,"cause":error.to_string()}
+    }))
+}
+
+pub(super) fn mutate(path: &Path, method: &str, input: &Value) -> Result<Value, Value> {
+    let mut entries = raw_entries(path)?;
+    let target = if method == "server.removeKeybinding" {
+        input.clone()
+    } else {
+        input.get("replace").cloned().unwrap_or(Value::Null)
+    };
+    if !target.is_null() {
+        entries.retain(|entry| !same_rule(entry, &target));
+    }
+    if method == "server.upsertKeybinding" {
+        let mut rule = serde_json::Map::new();
+        rule.insert("key".into(), input["key"].clone());
+        rule.insert("command".into(), input["command"].clone());
+        if let Some(when) = input.get("when") {
+            rule.insert("when".into(), when.clone());
+        }
+        let rule = Value::Object(rule);
+        if compile(&rule).is_none() {
+            return Err(json!({
+                "_tag":"Fail",
+                "error":{"_tag":"KeybindingsConfigError","detail":"Invalid keybinding rule","configPath":path}
+            }));
+        }
+        entries.retain(|entry| !same_rule(entry, &rule));
+        entries.push(rule);
+    }
+    const MAX: usize = 256;
+    if entries.len() > MAX {
+        entries = entries.split_off(entries.len() - MAX);
+    }
+    write_entries(path, &entries)?;
+    let (keybindings, issues) = read(path);
+    Ok(json!({"keybindings":keybindings,"issues":issues}))
+}

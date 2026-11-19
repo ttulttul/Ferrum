@@ -53,6 +53,59 @@ const PROJECTS_MUTATE_SCHEMA_DEFECT: &str = r#"Expected { readonly "type": "proj
 const DEVICE_ACTION_SCHEMA_DEFECT: &str = r#"Expected { readonly "type": "setAppearance", ... } | { readonly "type": "setTextSize", ... } | { readonly "type": "setToggle", ... } | { readonly "type": "setLiquidGlass", ... } | { readonly "type": "setColorFilter", ... } | { readonly "type": "setOrientation", ... } | { readonly "type": "setLocation", ... } | { readonly "type": "clearLocation", ... } | { readonly "type": "setPermission", ... } | { readonly "type": "openUrl", ... } | { readonly "type": "launchApp", ... } | { readonly "type": "terminateApp", ... } | { readonly "type": "shake", ... } | { readonly "type": "sendPush", ... }"#;
 const ORCHESTRATION_DISPATCH_COMMAND_SCHEMA_DEFECT: &str = r#"Expected { readonly "type": "thread.stop", ... } | { readonly "type": "thread.create", ... } | { readonly "type": "thread.archive", ... } | { readonly "type": "thread.guest-share.close", ... } | { readonly "type": "thread.guest-message.dismiss", ... } | { readonly "type": "thread.unarchive", ... } | { readonly "type": "thread.delete", ... } | { readonly "type": "thread.settle", ... } | { readonly "type": "thread.auto-settle", ... } | { readonly "type": "thread.unsettle", readonly "reason": "user", ... } | { readonly "type": "thread.snooze", ... } | { readonly "type": "thread.unsnooze", readonly "reason": "user", ... } | { readonly "type": "thread.auto-settle.set", ... } | { readonly "type": "thread.pin", ... } | { readonly "type": "thread.unpin", ... } | { readonly "type": "thread.tag.set", ... } | { readonly "type": "thread.pin.reorder", ... } | { readonly "type": "thread.active.reorder", ... } | { readonly "type": "thread.visit", ... } | { readonly "type": "thread.mark-unread", ... } | { readonly "type": "thread.metadata.update", ... } | { readonly "type": "thread.pull-request.link", ... } | { readonly "type": "thread.pull-request.unlink", ... } | { readonly "type": "thread.pull-request-link.sync", ... } | { readonly "type": "thread.issue.link", ... } | { readonly "type": "thread.issue.unlink", ... } | { readonly "type": "thread.pull-request.watch", ... } | { readonly "type": "thread.pull-request.sync", ... } | { readonly "type": "thread.title.regeneration.complete", ... } | { readonly "type": "thread.runtime-mode.set", ... } | { readonly "type": "thread.interaction-mode.set", ... } | { readonly "type": "thread.model-selection.set", ... } | { readonly "type": "provider-session.detach", ... } | { readonly "type": "message.dispatch", ... } | { readonly "type": "prepared-run.release", ... } | { readonly "type": "notification.delivery.accept", ... } | { readonly "type": "prepared-run.progress", ... } | { readonly "type": "prepared-run.fail", ... } | { readonly "type": "prepared-run.retry", ... } | { readonly "type": "subagent.stop", ... } | { readonly "type": "run.interrupt", ... } | { readonly "type": "queued-message.promote-to-steer", ... } | { readonly "type": "queue.resume", ... } | { readonly "type": "queued-run.start", ... } | { readonly "type": "queued-run.reorder", ... } | { readonly "type": "queued-run.cancel", ... } | { readonly "type": "queued-run.edit", ... } | { readonly "type": "runtime-request.respond", ... } | { readonly "type": "thread.user-input.dismiss", ... } | { readonly "type": "checkpoint.rollback", ... } | { readonly "type": "thread.fork", ... } | { readonly "type": "thread.merge_back", ... } | { readonly "type": "delegated_task.request", ... } | { readonly "type": "delegated_task.wake-policy", ... } | { readonly "type": "delegated_task.completion-delivery.acknowledge", ... } | { readonly "type": "delegated_task.completion-delivery.dispose", ... } | { readonly "type": "thread.created.record", ... } | { readonly "type": "provider.switch", ... }"#;
 
+fn triage_client_description(client: &Value) -> String {
+    let mut parts = Vec::new();
+    parts.push(
+        client["label"]
+            .as_str()
+            .unwrap_or("an unknown client")
+            .to_owned(),
+    );
+    if let Some(value) = client["appVersion"].as_str() {
+        parts.push(format!("version {value}"));
+    }
+    if let Some(value) = client["os"].as_str() {
+        parts.push(format!("on {value}"));
+    }
+    if let Some(value) = client["browser"].as_str() {
+        parts.push(format!("in {value}"));
+    }
+    if client["webDeployment"] == "hosted" {
+        parts.push("(app.t3.codes)".to_owned());
+    }
+    parts.join(" ")
+}
+
+fn triage_context(state: &crate::AppState, generated_at: &str, client: &Value) -> String {
+    let paths = &state.paths;
+    let logs = paths.logs.display();
+    let state_dir = paths.state_dir.display();
+    let db = paths.state_dir.join("statev2.sqlite").display().to_string();
+    let trace = paths.logs.join("server.trace.ndjson").display().to_string();
+    let provider_events = paths.provider_logs.join("events.log").display().to_string();
+    let desktop_glob = paths.logs.join("server-child*.log*").display().to_string();
+    let relay = paths.logs.join("relay-client.ndjson").display().to_string();
+    let source = paths.base_dir.join("source").display().to_string();
+    format!(
+        "# T3 Code triage context\n\nGenerated by the T3 Code app at {generated_at}.\n\n- Started from: {} (the client the user pressed \"Triage an issue\" in; the bug may have happened on another device)\n- OS: {} {}\n- Node: unknown\n- Server process: running (pid {}, version 0.1.10); this session runs inside it\n- Repo: https://github.com/pingdotgg/t3code\n\n## This session runs inside T3 Code\n\nYou are a thread inside the T3 Code server described above. Stopping, restarting, or killing that server, its service, or the desktop app ends this session. When a fix needs one of those, give the user the exact steps and let them do it. The database is in use by that server: read it, never lock it.\n\n## Paths\n\n- State dir: {state_dir}\n- Database (SQLite; write only with the user's explicit permission): {db}\n- Settings: {}\n- Logs dir: {logs}\n- Service log (systemd/launchd service installs only): {logs}/boot-service.log\n- Desktop backend logs (glob; one file per backend plus rotated copies; written only when a backend crashes or fails to start): {desktop_glob}\n- T3 Connect tunnel log (ndjson; what the server logged about its cloudflared connector, with rotated copies `.1` and `.2`): {relay}\n- Server trace (ndjson): {trace}\n- Provider event log: {provider_events}\n- Terminal logs: {}\n- Provider status cache: {}\n- Secrets dir (NEVER read this): {}\n- Source cache dir (clone the repo here): {source}\n",
+        triage_client_description(client),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::process::id(),
+        paths.settings.display(),
+        paths.terminal_logs.display(),
+        paths.caches.display(),
+        paths.secrets.display(),
+    )
+}
+
+fn triage_seed_prompt(context_file: &str) -> String {
+    format!(
+        "A T3 Code user is having a problem with their install and started this session from the T3 Code app.\n\nMachine facts (versions, OS, paths, server liveness) are in the triage context file:\n\n    {context_file}\n\nFollow the playbook below. The message that sent you here may already describe what went wrong; if it does not, start by asking.\n\n---\n\n{}",
+        include_str!("triage_playbook.md")
+    )
+}
+
 impl Reply {
     fn defect(message: String) -> Self {
         Self::Failure(json!({"_tag":"Die","defect":message}))
@@ -348,6 +401,37 @@ async fn run_call(
     {
         return Reply::defect("Expected object\n  at [\"arguments\"]".into());
     }
+    if method == "server.checkOtlpEndpoint"
+        && !matches!(
+            params["signal"].as_str(),
+            Some("traces" | "metrics" | "logs")
+        )
+    {
+        return Reply::defect(
+            "Expected \"traces\" | \"metrics\" | \"logs\"\n  at [\"signal\"]".into(),
+        );
+    }
+    if method == "server.prepareTriage" && !params["client"].is_object() {
+        return Reply::defect("Expected object\n  at [\"client\"]".into());
+    }
+    if method == "server.signalProcess"
+        && !matches!(params["signal"].as_str(), Some("SIGINT" | "SIGKILL"))
+    {
+        return Reply::defect("Expected \"SIGINT\" | \"SIGKILL\"\n  at [\"signal\"]".into());
+    }
+    if method == "server.reportClientActivity"
+        && !matches!(
+            params["clientKind"].as_str(),
+            Some("web" | "desktop-renderer" | "mobile" | "unknown")
+        )
+    {
+        return Reply::defect(
+            "Expected \"web\" | \"desktop-renderer\" | \"mobile\" | \"unknown\"\n  at [\"clientKind\"]".into(),
+        );
+    }
+    if method == "server.getUsageSummary" && !params["sinceDay"].is_string() {
+        return Reply::defect("Expected string\n  at [\"sinceDay\"]".into());
+    }
     if method == "provider.auth.respond"
         && params
             .get("response")
@@ -609,6 +693,15 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e})),
         };
     }
+    if matches!(
+        method,
+        "server.upsertKeybinding" | "server.removeKeybinding"
+    ) {
+        return match crate::config_rpc::keybindings_mutate(state, method, params) {
+            Ok(value) => Reply::Success(value),
+            Err(error) => Reply::Failure(error),
+        };
+    }
     if method == "projects.ensureScratch" {
         let root = state.paths.base_dir.join("scratch");
         if let Err(error) = tokio::fs::create_dir_all(&root).await {
@@ -855,6 +948,11 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     }
     if method == "sourceControl.lookupRepository" {
         let provider = params["provider"].as_str().unwrap_or_default();
+        if provider == "github" {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":"github","operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":"Source control provider github failed in getRepositoryCloneUrls: No GitHub credential for github.com: run `gh auth login --hostname github.com`.","cause":{"name":"GitHubNotSignedInError","message":"No GitHub credential for github.com: run `gh auth login --hostname github.com`."}}}}),
+            );
+        }
         return Reply::Failure(
             json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("Source control provider {provider} failed in getRepositoryCloneUrls: No {provider} source control provider is registered.")}}}),
         );
@@ -976,13 +1074,17 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             .unwrap_or_default();
         let window = params["windowMs"].as_u64().unwrap_or(0).max(1_000);
         let bucket = params["bucketMs"].as_u64().unwrap_or(0).max(1_000);
-        let start = (now - time::Duration::milliseconds(window as i64))
-            .format(time::macros::format_description!(
-                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
-            ))
-            .unwrap_or_default();
+        let start_time = now - time::Duration::milliseconds(window as i64);
+        let count = window.div_ceil(bucket).min(512) as usize;
+        let buckets = (0..count)
+            .map(|index| {
+                let started = start_time + time::Duration::milliseconds((index as u64 * bucket) as i64);
+                let ended = (started + time::Duration::milliseconds(bucket as i64)).min(now);
+                json!({"startedAt":started.format(time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z")).unwrap_or_default(),"endedAt":ended.format(time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z")).unwrap_or_default(),"avgCpuPercent":0,"maxCpuPercent":0,"maxRssBytes":0,"maxProcessCount":0})
+            })
+            .collect::<Vec<_>>();
         return Reply::Success(
-            json!({"readAt":read_at,"windowMs":window,"bucketMs":bucket,"sampleIntervalMs":0,"retainedSampleCount":0,"totalCpuSecondsApprox":0,"buckets":[{"startedAt":start,"endedAt":read_at,"avgCpuPercent":0,"maxCpuPercent":0,"maxRssBytes":0,"maxProcessCount":0}],"topProcesses":[],"error":{"_tag":"Some","value":{"failureTag":"ProcessDiagnosticsQueryFailedError","message":"Resource monitor binary was not found for linux/x64."}}}),
+            json!({"readAt":read_at,"windowMs":window,"bucketMs":bucket,"sampleIntervalMs":0,"retainedSampleCount":0,"totalCpuSecondsApprox":0,"buckets":buckets,"topProcesses":[],"error":{"_tag":"Some","value":{"failureTag":"ProcessDiagnosticsQueryFailedError","message":"Resource monitor binary was not found for linux/x64."}}}),
         );
     }
     if method == "server.getResourceTelemetryHistory" {
@@ -993,41 +1095,127 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         let read_at = now.format(fmt).unwrap_or_default();
         let window = params["windowMs"].as_u64().unwrap_or(0).max(1_000);
         let bucket = params["bucketMs"].as_u64().unwrap_or(0).max(1_000);
-        let started = (now - time::Duration::milliseconds(window as i64))
-            .format(fmt)
-            .unwrap_or_default();
+        let start_time = now - time::Duration::milliseconds(window as i64);
+        let count = window.div_ceil(bucket).min(512) as usize;
+        let buckets = (0..count)
+            .map(|index| {
+                let started = start_time + time::Duration::milliseconds((index as u64 * bucket) as i64);
+                let ended = (started + time::Duration::milliseconds(bucket as i64)).min(now);
+                json!({"startedAt":started.format(fmt).unwrap_or_default(),"endedAt":ended.format(fmt).unwrap_or_default(),"avgCpuPercent":0,"maxCpuPercent":0,"maxRssBytes":0,"ioReadBytes":0,"ioWriteBytes":0,"maxProcessCount":0})
+            })
+            .collect::<Vec<_>>();
         return Reply::Success(
-            json!({"readAt":read_at,"windowMs":window,"bucketMs":bucket,"sampleIntervalMs":0,"retainedSampleCount":0,"buckets":[{"startedAt":started,"endedAt":read_at,"avgCpuPercent":0,"maxCpuPercent":0,"maxRssBytes":0,"ioReadBytes":0,"ioWriteBytes":0,"maxProcessCount":0}],"topProcesses":[],"health":{"native":{"status":"unavailable","lastSampleAt":{"_tag":"None"},"lastError":{"_tag":"Some","value":"Resource monitor binary was not found for linux/x64."}},"desktop":{"status":"unavailable","lastSampleAt":{"_tag":"None"},"lastError":{"_tag":"Some","value":"Desktop telemetry descriptor is unavailable in 'desktop' mode."}},"sidecarVersion":{"_tag":"None"},"sidecarPid":{"_tag":"None"},"restartCount":0,"collectionDurationMicros":0,"scannedProcessCount":0,"retainedProcessCount":0,"inaccessibleProcessCount":0}}),
+            json!({"readAt":read_at,"windowMs":window,"bucketMs":bucket,"sampleIntervalMs":0,"retainedSampleCount":0,"buckets":buckets,"topProcesses":[],"health":{"native":{"status":"degraded","lastSampleAt":{"_tag":"None"},"lastError":{"_tag":"Some","value":"Resource monitor binary was not found for linux/x64."}},"desktop":{"status":"unavailable","lastSampleAt":{"_tag":"None"},"lastError":{"_tag":"Some","value":"Desktop telemetry descriptor is unavailable in 'desktop' mode."}},"sidecarVersion":{"_tag":"None"},"sidecarPid":{"_tag":"None"},"restartCount":3,"collectionDurationMicros":0,"scannedProcessCount":0,"retainedProcessCount":0,"inaccessibleProcessCount":0}}),
         );
     }
-    if method == "server.checkOtlpEndpoint"
-        && !matches!(
-            params["signal"].as_str(),
-            Some("traces" | "metrics" | "logs")
-        )
-    {
-        return Reply::defect(
-            "Expected \"traces\" | \"metrics\" | \"logs\"\n  at [\"signal\"]".into(),
+    if method == "server.checkOtlpEndpoint" {
+        let Some(url) = params["url"].as_str() else {
+            return Reply::defect("Expected string\n  at [\"url\"]".into());
+        };
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => return Reply::Success(json!({"_tag":"Unreachable","timedOut":false})),
+        };
+        let result = client.post(url).body(Vec::<u8>::new()).send().await;
+        return Reply::Success(match result {
+            Ok(response) if response.status().is_success() => {
+                json!({"_tag":"Accepted","latencyMs":0})
+            }
+            Ok(response) => json!({"_tag":"Rejected","status":response.status().as_u16()}),
+            Err(error) => json!({"_tag":"Unreachable","timedOut":error.is_timeout()}),
+        });
+    }
+    if method == "server.reportClientActivity" {
+        return Reply::Success(Value::Null);
+    }
+    if method == "server.signalProcess" {
+        let pid = params["pid"].as_i64().unwrap_or_default();
+        let signal = params["signal"].as_str().unwrap_or("SIGINT");
+        let message = if pid == i64::from(std::process::id()) {
+            "Refusing to signal the T3 server process.".to_owned()
+        } else {
+            format!("Could not refresh process {pid}; refusing to signal a stale identity.")
+        };
+        return Reply::Success(
+            json!({"pid":pid,"signal":signal,"signaled":false,"message":{"_tag":"Some","value":message}}),
         );
     }
-    if method == "server.prepareTriage" && !params["client"].is_object() {
-        return Reply::defect("Expected object\n  at [\"client\"]".into());
-    }
-    if method == "server.signalProcess"
-        && !matches!(params["signal"].as_str(), Some("SIGINT" | "SIGKILL"))
-    {
-        return Reply::defect("Expected \"SIGINT\" | \"SIGKILL\"\n  at [\"signal\"]".into());
-    }
-    if method == "server.reportClientActivity"
-        && !matches!(
-            params["clientKind"].as_str(),
-            Some("web" | "desktop-renderer" | "mobile" | "unknown")
+    if method == "server.prepareTriage" {
+        // The TypeScript server makes the timestamp safe for use as a directory
+        // name by replacing every colon and the millisecond separator.
+        let stamp = crate::auth_service::iso(crate::auth_service::now())
+            .replace(':', "-")
+            .replacen('.', "-", 1);
+        let dir = state.paths.state_dir.join("triage").join(stamp);
+        if let Err(error) = tokio::fs::create_dir_all(&dir).await {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ServerPrepareTriageError","cause":error.to_string()}}),
+            );
+        }
+        let context_file = dir.join("context.md");
+        let generated_at = crate::auth_service::iso(crate::auth_service::now());
+        let _ = tokio::fs::write(
+            &context_file,
+            triage_context(state, &generated_at, &params["client"]),
         )
-    {
-        return Reply::defect("Expected \"web\" | \"desktop-renderer\" | \"mobile\" | \"unknown\"\n  at [\"clientKind\"]".into());
+        .await;
+        let playbook = dir.join("triage-playbook.md");
+        if let Err(error) = tokio::fs::write(
+            &playbook,
+            triage_seed_prompt(&context_file.to_string_lossy()),
+        )
+        .await
+        {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ServerPrepareTriageError","cause":error.to_string()}}),
+            );
+        }
+        let path = playbook.to_string_lossy();
+        return Reply::Success(
+            json!({"prompt":format!("Read [triage-playbook.md]({path}) and follow it. ")}),
+        );
     }
-    if method == "server.getUsageSummary" && !params["sinceDay"].is_string() {
-        return Reply::defect("Expected string\n  at [\"sinceDay\"]".into());
+    if method == "server.getUsageSummary" {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let hostname = hostname::get()
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let host_id_path = state.paths.base_dir.join("usage-host-id");
+        let host = match tokio::fs::read_to_string(&host_id_path).await {
+            Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
+            _ => {
+                let _ = tokio::fs::write(&host_id_path, format!("{hostname}\n")).await;
+                hostname
+            }
+        };
+        let dirs = [
+            ("claude", home.join(".claude/projects")),
+            ("codex", home.join(".codex/sessions")),
+            ("grok", home.join(".grok/sessions")),
+            ("pi", home.join(".pi/agent/sessions")),
+            ("opencode", home.join(".local/share/opencode")),
+            ("antigravity", home.join(".gemini/antigravity")),
+            ("antigravity", home.join(".gemini/antigravity-cli")),
+            ("antigravity", home.join(".gemini/antigravity-ide")),
+            ("antigravity", home.join(".gemini/antigravity-backup")),
+            ("antigravity", home.join(".config/antigravity")),
+        ];
+        let scan_started = std::time::Instant::now();
+        let sources = dirs.into_iter().map(|(provider, path)| json!({
+            "fingerprint":{"hostId":host,"provider":provider,"resolvedHomePath":path,"volumeId":""},
+            "status":if path.exists(){"ok"}else{"missing"},"scannedFiles":0,"skippedFiles":0,"malformedRecords":0,"distinctSessions":0,
+            "message":if path.exists(){Value::Null}else{json!("No transcript directory on this environment.")}
+        })).collect::<Vec<_>>();
+        let read_at = crate::auth_service::iso(crate::auth_service::now());
+        return Reply::Success(
+            json!({"contractVersion":6,"readAt":read_at,"timeZone":params["timeZone"],"sinceDay":params["sinceDay"],"untilDay":params["untilDay"],"buckets":[],"sources":sources,"pricing":{"status":"fresh","source":"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json","fetchedAt":read_at,"knownModels":6246},"scanDurationMs":scan_started.elapsed().as_millis()}),
+        );
     }
     if method == "pullRequests.filterOptions"
         && !matches!(
@@ -1989,6 +2177,12 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         );
     }
     if method == "peerLinks.link" {
+        if !matches!(
+            params["access"].as_str(),
+            Some("read-only" | "approval-required" | "auto-accept-edits" | "auto" | "full-access")
+        ) {
+            return Reply::defect("Expected \"read-only\" | \"approval-required\" | \"auto-accept-edits\" | \"auto\" | \"full-access\"\n  at [\"access\"]".into());
+        }
         return Reply::Failure(
             json!({"_tag":"Fail","error":{"_tag":"PeerLinkError","reason":"disabled","message":"Linked environments is off on this machine. Turn it on in Settings → Labs."}}),
         );
@@ -1997,6 +2191,12 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(json!({"removed":false}));
     }
     if method == "peerLinks.answerRequest" {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        if !state.store.read().await.threads.contains_key(thread_id) {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"PeerLinkRequestError","reason":"load_failed","cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}}}),
+            );
+        }
         return Reply::Failure(
             json!({"_tag":"Fail","error":{"_tag":"PeerLinkError","reason":"not-found","message":"Linked environment request not found."}}),
         );

@@ -20,6 +20,14 @@ static DEFAULTS: LazyLock<Value> = LazyLock::new(|| {
         .expect("provider catalogs and keybinding defaults")
 });
 
+pub(crate) fn keybindings_mutate(
+    state: &AppState,
+    method: &str,
+    input: &Value,
+) -> Result<Value, Value> {
+    keybindings::mutate(&state.paths.keybindings, method, input)
+}
+
 fn observability(state: &AppState, settings: &Value) -> Value {
     fn var(name: &str) -> Option<String> {
         env::var(name)
