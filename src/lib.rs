@@ -22,7 +22,10 @@ use tokio::{
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+pub mod auth_service;
 mod contracts;
+pub mod guest_service;
+pub mod relay_service;
 
 pub use contracts::{http_known, rpc_known, HTTP_CONTRACTS, RPC_CONTRACTS};
 
