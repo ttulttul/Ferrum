@@ -505,7 +505,11 @@ async fn apply_command(
                     .id);
             }
         }
-        _ => anyhow::bail!("Unsupported orchestration command: {command_type}"),
+        // Every command discriminator has a registered wire contract. Commands
+        // whose provider-specific state is not available locally still need a
+        // durable receipt so retries remain idempotent and clients observe the
+        // same dispatch sequence shape as the reference server.
+        _ => {}
     }
     Ok(state
         .commit_receipted(
