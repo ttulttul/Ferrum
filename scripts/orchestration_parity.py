@@ -44,14 +44,22 @@ def main():
     edge_reads = [
         ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": 0}),
         ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": 0}),
+        ("orchestration.getThreadProjection", {"threadId": "thread:missing"}),
         ("orchestration.getTurnItem", {"threadId": first, "itemId": "item:missing"}),
         ("orchestration.getNativeChildWork", {"threadId": first}),
         ("orchestration.getWorkflowScript", {"threadId": first, "scriptPath": "relative.js"}),
         ("orchestration.stopWorkflow", {"threadId": first, "subagentId": "subagent:missing"}),
         ("orchestration.forceStopThread", {"threadId": first}),
     ]
+    dispatch_edge_reads = [
+        command("prepared-run.release", "prepared-missing", runId="00000000-0000-4000-8000-000000000001"),
+        command("provider-session.detach", "session-missing", providerSessionId="session:missing"),
+        command("queued-run.cancel", "queued-missing", runId="00000000-0000-4000-8000-000000000001"),
+        command("runtime-request.respond", "request-missing", requestId="request:missing"),
+        command("thread.user-input.dismiss", "input-missing", requestId="request:missing"),
+    ]
     sessions = [
-        [create, *edge_reads, titles, metadata, *snapshots, issue_threads,pr_threads,link_issue,link_pr,issue_threads,pr_threads,*snapshots, command("thread.mark-unread","no-run"),
+        [create, *dispatch_edge_reads, *edge_reads, titles, metadata, *snapshots, issue_threads,pr_threads,link_issue,link_pr,issue_threads,pr_threads,*snapshots, command("thread.mark-unread","no-run"),
          command("thread.unarchive","active"),archive, archive, command("thread.archive","archived"), command("thread.archive", "archive-1", other),
          command("thread.pin", "pin-archived")],
         [create, archive, titles, *([issue_threads,pr_threads] if args.faketime_lib else []), command("thread.unarchive", "unarchive-1"),
