@@ -363,6 +363,7 @@ pub struct AppState {
     pub(crate) pull_request_linked_refresh: Mutex<u64>,
     pub(crate) pull_request_linked_events: broadcast::Sender<u64>,
     pub(crate) scheduled_tasks: Mutex<indexmap::IndexMap<String, serde_json::Value>>,
+    pub(crate) scheduled_tasks_path: PathBuf,
     pub(crate) scheduled_task_events: broadcast::Sender<()>,
     pub(crate) prompt_suggestion_events: broadcast::Sender<serde_json::Value>,
 }
@@ -429,6 +430,21 @@ impl AppState {
         let (pull_request_linked_events, _) = broadcast::channel(64);
         let (scheduled_task_events, _) = broadcast::channel(64);
         let (prompt_suggestion_events, _) = broadcast::channel(64);
+        let scheduled_tasks_path = dir.join("scheduled-tasks.json");
+        let scheduled_tasks = tokio::fs::read(&scheduled_tasks_path)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
+            .map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|task| {
+                        let id = task["id"].as_str()?.to_owned();
+                        Some((id, task))
+                    })
+                    .collect::<indexmap::IndexMap<_, _>>()
+            })
+            .unwrap_or_default();
         Ok(Arc::new(Self {
             config_started_at: auth_service::iso(auth_service::now()),
             environment_id: environment_http::identity(&dir)?,
@@ -458,10 +474,21 @@ impl AppState {
             pull_request_refresh: Mutex::new(0),
             pull_request_linked_refresh: Mutex::new(0),
             pull_request_linked_events,
-            scheduled_tasks: Mutex::new(indexmap::IndexMap::new()),
+            scheduled_tasks: Mutex::new(scheduled_tasks),
+            scheduled_tasks_path,
             scheduled_task_events,
             prompt_suggestion_events,
         }))
+    }
+
+    pub(crate) async fn persist_scheduled_tasks(&self) -> anyhow::Result<()> {
+        let tasks = self.scheduled_tasks.lock().await;
+        let bytes = serde_json::to_vec(&tasks.values().collect::<Vec<_>>())?;
+        drop(tasks);
+        let temporary = self.scheduled_tasks_path.with_extension("json.tmp");
+        tokio::fs::write(&temporary, bytes).await?;
+        tokio::fs::rename(temporary, &self.scheduled_tasks_path).await?;
+        Ok(())
     }
     async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {
         self.commit_receipted(event, None).await

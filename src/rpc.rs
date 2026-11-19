@@ -849,6 +849,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             .lock()
             .await
             .shift_remove(params["id"].as_str().unwrap_or_default());
+        let _ = state.persist_scheduled_tasks().await;
         let _ = state.scheduled_task_events.send(());
         return Reply::Success(json!({"id":params["id"]}));
     }
@@ -2973,6 +2974,7 @@ async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
     let public = scheduled_public_task(&task);
     tasks.insert(id, task);
     drop(tasks);
+    let _ = state.persist_scheduled_tasks().await;
     let _ = state.scheduled_task_events.send(());
     Reply::Success(json!({"task":public}))
 }
@@ -2993,6 +2995,7 @@ async fn scheduled_task_set_enabled(state: &Arc<AppState>, params: &Value) -> Re
     task["nextRunAt"] = scheduled_task_next_run(enabled, &task["schedule"], now);
     let public = scheduled_public_task(task);
     drop(tasks);
+    let _ = state.persist_scheduled_tasks().await;
     let _ = state.scheduled_task_events.send(());
     Reply::Success(json!({"task":public}))
 }
@@ -3023,6 +3026,7 @@ async fn scheduled_task_run_now(state: &Arc<AppState>, params: &Value) -> Reply 
     task["updatedAt"] = crate::auth_service::iso(now).into();
     let public = scheduled_public_task(task);
     drop(tasks);
+    let _ = state.persist_scheduled_tasks().await;
     let _ = state.scheduled_task_events.send(());
     Reply::Success(json!({"task":public}))
 }
@@ -3042,6 +3046,7 @@ async fn scheduled_task_rotate_token(state: &Arc<AppState>, params: &Value) -> R
     task["webhook"]["path"] = format!("/api/hooks/{}/{}", encode_task_id(id), token).into();
     let public = scheduled_public_task(task);
     drop(tasks);
+    let _ = state.persist_scheduled_tasks().await;
     let _ = state.scheduled_task_events.send(());
     Reply::Success(json!({"task":public}))
 }
