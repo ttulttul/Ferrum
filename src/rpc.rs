@@ -1386,6 +1386,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                         && matches!(current["phase"].as_str(), Some("downloading" | "verifying"))
                     {
                         current["phase"] = json!("cancelled");
+                        current["canRemove"] = json!(true);
                         current["message"] =
                             json!("Installation cancelled. The previous runtime is unchanged.");
                         return Reply::Success(current.clone());
