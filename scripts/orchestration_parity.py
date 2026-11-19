@@ -44,6 +44,8 @@ def main():
     edge_reads = [
         ("orchestration.getTurnDiff", {"threadId": first, "fromTurnCount": 0, "toTurnCount": 0}),
         ("orchestration.getFullThreadDiff", {"threadId": first, "toTurnCount": 0}),
+        ("orchestration.getTurnDiff", {"threadId": "thread:missing", "fromTurnCount": 0, "toTurnCount": 1}),
+        ("orchestration.getFullThreadDiff", {"threadId": "thread:missing", "toTurnCount": 1}),
         ("orchestration.getThreadProjection", {"threadId": "thread:missing"}),
         ("orchestration.getTurnItem", {"threadId": first, "itemId": "item:missing"}),
         ("orchestration.getNativeChildWork", {"threadId": first}),

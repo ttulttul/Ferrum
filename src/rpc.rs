@@ -2299,8 +2299,16 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             thread.projection()
         }
         "orchestration.getTurnDiff" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
             let from = params["fromTurnCount"].as_u64().unwrap_or_default();
             let to = params["toTurnCount"].as_u64().unwrap_or_default();
+            if !store.threads.contains_key(thread_id) && from != to && to != 0 {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationGetTurnDiffError",
+                    "message":"Failed to load turn diff",
+                    "cause":{"name":"CheckpointThreadNotFoundError","message":format!("Checkpoint invariant violation in CheckpointDiffQuery.getTurnDiff: Thread '{thread_id}' not found.")}
+                }}));
+            }
             if from == to || to == 0 {
                 json!({"fromTurnCount":from,"toTurnCount":to,"threadId":params["threadId"],"diff":""})
             } else {
@@ -2311,7 +2319,15 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             }
         }
         "orchestration.getFullThreadDiff" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
             let to = params["toTurnCount"].as_u64().unwrap_or_default();
+            if !store.threads.contains_key(thread_id) && to != 0 {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationGetFullThreadDiffError",
+                    "message":"Failed to load full thread diff",
+                    "cause":{"name":"CheckpointThreadNotFoundError","message":format!("Checkpoint invariant violation in CheckpointDiffQuery.getTurnDiff: Thread '{thread_id}' not found.")}
+                }}));
+            }
             if to == 0 {
                 json!({"fromTurnCount":0,"toTurnCount":0,"threadId":params["threadId"],"diff":""})
             } else {
@@ -2343,7 +2359,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             let thread_id = params["threadId"].as_str().unwrap_or_default();
             if !store.threads.contains_key(thread_id) {
                 return Reply::Failure(json!({"_tag":"Fail","error":{
-                    "_tag":"OrchestrationV2GetNativeChildWorkError","threadId":thread_id
+                    "_tag":"OrchestrationV2GetNativeChildWorkError","threadId":thread_id,
+                    "cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}
                 }}));
             }
             json!({"children":[]} )
