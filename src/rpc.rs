@@ -47,6 +47,10 @@ enum Reply {
     Chunk(Value),
 }
 
+const PROJECTS_MUTATE_SCHEMA_DEFECT: &str = r#"Expected { readonly "type": "project.create", ... } | { readonly "type": "project.update", ... } | { readonly "type": "project.delete", ... }"#;
+const DEVICE_ACTION_SCHEMA_DEFECT: &str = r#"Expected { readonly "type": "setAppearance", ... } | { readonly "type": "setTextSize", ... } | { readonly "type": "setToggle", ... } | { readonly "type": "setLiquidGlass", ... } | { readonly "type": "setColorFilter", ... } | { readonly "type": "setOrientation", ... } | { readonly "type": "setLocation", ... } | { readonly "type": "clearLocation", ... } | { readonly "type": "setPermission", ... } | { readonly "type": "openUrl", ... } | { readonly "type": "launchApp", ... } | { readonly "type": "terminateApp", ... } | { readonly "type": "shake", ... } | { readonly "type": "sendPush", ... }"#;
+const ORCHESTRATION_DISPATCH_COMMAND_SCHEMA_DEFECT: &str = r#"Expected { readonly "type": "thread.stop", ... } | { readonly "type": "thread.create", ... } | { readonly "type": "thread.archive", ... } | { readonly "type": "thread.guest-share.close", ... } | { readonly "type": "thread.guest-message.dismiss", ... } | { readonly "type": "thread.unarchive", ... } | { readonly "type": "thread.delete", ... } | { readonly "type": "thread.settle", ... } | { readonly "type": "thread.auto-settle", ... } | { readonly "type": "thread.unsettle", readonly "reason": "user", ... } | { readonly "type": "thread.snooze", ... } | { readonly "type": "thread.unsnooze", readonly "reason": "user", ... } | { readonly "type": "thread.auto-settle.set", ... } | { readonly "type": "thread.pin", ... } | { readonly "type": "thread.unpin", ... } | { readonly "type": "thread.tag.set", ... } | { readonly "type": "thread.pin.reorder", ... } | { readonly "type": "thread.active.reorder", ... } | { readonly "type": "thread.visit", ... } | { readonly "type": "thread.mark-unread", ... } | { readonly "type": "thread.metadata.update", ... } | { readonly "type": "thread.pull-request.link", ... } | { readonly "type": "thread.pull-request.unlink", ... } | { readonly "type": "thread.pull-request-link.sync", ... } | { readonly "type": "thread.issue.link", ... } | { readonly "type": "thread.issue.unlink", ... } | { readonly "type": "thread.pull-request.watch", ... } | { readonly "type": "thread.pull-request.sync", ... } | { readonly "type": "thread.title.regeneration.complete", ... } | { readonly "type": "thread.runtime-mode.set", ... } | { readonly "type": "thread.interaction-mode.set", ... } | { readonly "type": "thread.model-selection.set", ... } | { readonly "type": "provider-session.detach", ... } | { readonly "type": "message.dispatch", ... } | { readonly "type": "prepared-run.release", ... } | { readonly "type": "notification.delivery.accept", ... } | { readonly "type": "prepared-run.progress", ... } | { readonly "type": "prepared-run.fail", ... } | { readonly "type": "prepared-run.retry", ... } | { readonly "type": "subagent.stop", ... } | { readonly "type": "run.interrupt", ... } | { readonly "type": "queued-message.promote-to-steer", ... } | { readonly "type": "queue.resume", ... } | { readonly "type": "queued-run.start", ... } | { readonly "type": "queued-run.reorder", ... } | { readonly "type": "queued-run.cancel", ... } | { readonly "type": "queued-run.edit", ... } | { readonly "type": "runtime-request.respond", ... } | { readonly "type": "thread.user-input.dismiss", ... } | { readonly "type": "checkpoint.rollback", ... } | { readonly "type": "thread.fork", ... } | { readonly "type": "thread.merge_back", ... } | { readonly "type": "delegated_task.request", ... } | { readonly "type": "delegated_task.wake-policy", ... } | { readonly "type": "delegated_task.completion-delivery.acknowledge", ... } | { readonly "type": "delegated_task.completion-delivery.dispose", ... } | { readonly "type": "thread.created.record", ... } | { readonly "type": "provider.switch", ... }"#;
+
 impl Reply {
     fn defect(message: String) -> Self {
         Self::Failure(json!({"_tag":"Die","defect":message}))
@@ -161,6 +165,17 @@ async fn run_call(
     window: Arc<Semaphore>,
 ) -> Reply {
     let (principal, references) = client;
+    if method == "projects.mutate" && params.get("type").and_then(Value::as_str).is_none() {
+        return Reply::defect(PROJECTS_MUTATE_SCHEMA_DEFECT.into());
+    }
+    if method == "device.action" && params.get("type").and_then(Value::as_str).is_none() {
+        return Reply::defect(DEVICE_ACTION_SCHEMA_DEFECT.into());
+    }
+    if method == "orchestration.dispatchCommand"
+        && params.get("type").and_then(Value::as_str).is_none()
+    {
+        return Reply::defect(ORCHESTRATION_DISPATCH_COMMAND_SCHEMA_DEFECT.into());
+    }
     let decoded;
     let params = if matches!(method, "server.updateSettings" | "server.checkSecretSource") {
         let result = if method == "server.updateSettings" {
