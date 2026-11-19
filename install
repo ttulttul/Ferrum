@@ -29,6 +29,7 @@ STATE_PATH = STATE_ROOT / "state.json"
 ARGV_PATH = STATE_ROOT / "original.argv"
 ENV_PATH = STATE_ROOT / "original.env"
 LOG_PATH = STATE_ROOT / "rust-server.log"
+SYSTEMD_UNIT_SUFFIX = ".service"
 
 
 class SwitchError(RuntimeError):
@@ -76,6 +77,21 @@ def command_output(command: list[str]) -> str | None:
         return None
 
 
+def command_status(command: list[str]) -> tuple[bool, str]:
+    """Run a control command without exposing its output in normal errors."""
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    except OSError as error:
+        return False, str(error)
+    return result.returncode == 0, result.stdout.strip()
+
+
 def process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -106,6 +122,123 @@ def linux_process(pid: int) -> dict[str, object] | None:
     except (FileNotFoundError, PermissionError, OSError, ValueError):
         return None
     return {"argv": argv, "cwd": cwd, "environment": environment, "parent": parent}
+
+
+def systemd_scope_for_cgroup(path: str) -> str | None:
+    """Return the systemctl scope for a cgroup path owned by a service."""
+    components = [component for component in path.split("/") if component]
+    service = next(
+        (
+            component
+            for component in reversed(components)
+            if component.endswith(SYSTEMD_UNIT_SUFFIX) and not component.startswith("user@")
+        ),
+        None,
+    )
+    if service is None:
+        return None
+    if any(component == "system.slice" or component.startswith("system-") for component in components):
+        return "system"
+    if any(component == "user.slice" or component.startswith("user-") for component in components):
+        return "user"
+    return None
+
+
+def systemd_unit_for_pid(pid: int) -> dict[str, object] | None:
+    """Find a systemd service containing a server process on Linux."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        cgroup = (Path("/proc") / str(pid) / "cgroup").read_text()
+    except (FileNotFoundError, OSError):
+        return None
+    for line in cgroup.splitlines():
+        if ":" not in line:
+            continue
+        scope = systemd_scope_for_cgroup(line.rsplit(":", 1)[-1])
+        if scope is None:
+            continue
+        path = line.rsplit(":", 1)[-1]
+        unit = next(
+            component
+            for component in reversed([part for part in path.split("/") if part])
+            if component.endswith(SYSTEMD_UNIT_SUFFIX) and not component.startswith("user@")
+        )
+        prefix = ["systemctl"] if scope == "system" else ["systemctl", "--user"]
+        active = command_output(prefix + ["show", unit, "-p", "ActiveState", "--value", "--no-pager"])
+        if active is None:
+            continue
+        enabled = command_output(prefix + ["show", unit, "-p", "UnitFileState", "--value", "--no-pager"])
+        main_pid = command_output(prefix + ["show", unit, "-p", "MainPID", "--value", "--no-pager"])
+        return {
+            "scope": scope,
+            "unit": unit,
+            "activeState": active,
+            "unitFileState": enabled or "",
+            "mainPid": int(main_pid) if main_pid and main_pid.isdigit() else None,
+        }
+    return None
+
+
+def systemd_prefix(service: dict[str, object]) -> list[str]:
+    return ["systemctl"] + (["--user"] if service.get("scope") == "user" else [])
+
+
+def systemd_enabled(service: dict[str, object]) -> bool:
+    state = str(service.get("unitFileState", ""))
+    return state in {"enabled", "enabled-runtime", "linked", "linked-runtime", "alias"}
+
+
+def systemd_control(service: dict[str, object], *arguments: str, action: str) -> None:
+    command = systemd_prefix(service) + list(arguments) + ["--no-pager"]
+    ok, output = command_status(command)
+    if not ok:
+        detail = f": {output}" if output else ""
+        fail(f"could not {action} systemd service {service['unit']}{detail}")
+
+
+def systemd_prepare(service: dict[str, object], state: dict[str, object]) -> None:
+    """Stop and make the original service unavailable while Rust owns its port."""
+    if service.get("activeState") in {"active", "activating", "deactivating", "reloading"}:
+        systemd_control(service, "stop", str(service["unit"]), action="stop")
+    state["serviceAction"] = "stopped"
+    atomic_json(STATE_PATH, state)
+    if systemd_enabled(service):
+        systemd_control(service, "disable", str(service["unit"]), action="disable")
+    state["serviceAction"] = "disabled"
+    atomic_json(STATE_PATH, state)
+    # --runtime is required when the unit is defined in the user's config
+    # directory. A persistent mask cannot replace an existing unit file.
+    systemd_control(service, "mask", "--runtime", str(service["unit"]), action="mask")
+    state["serviceAction"] = "masked"
+    atomic_json(STATE_PATH, state)
+
+
+def systemd_restore(service: dict[str, object], state: dict[str, object]) -> None:
+    """Undo the temporary mask and restore the service's enabled state."""
+    systemd_control(service, "unmask", str(service["unit"]), action="unmask")
+    state["serviceAction"] = "unmasked"
+    atomic_json(STATE_PATH, state)
+    if systemd_enabled(service):
+        systemd_control(service, "enable", str(service["unit"]), action="enable")
+    state["serviceAction"] = "enabled" if systemd_enabled(service) else "unmasked"
+    atomic_json(STATE_PATH, state)
+    systemd_control(service, "start", str(service["unit"]), action="start")
+    state["serviceAction"] = "started"
+    atomic_json(STATE_PATH, state)
+
+
+def systemd_remask(service: dict[str, object], state: dict[str, object]) -> None:
+    """Re-mask a service when an automatic Rust rollback is required."""
+    try:
+        systemd_control(service, "stop", str(service["unit"]), action="stop")
+        systemd_control(service, "mask", "--runtime", str(service["unit"]), action="mask")
+        state["serviceAction"] = "masked"
+        atomic_json(STATE_PATH, state)
+    except SwitchError:
+        # The original error carries the useful diagnostic. The next explicit
+        # --original invocation can finish restoration from the saved state.
+        pass
 
 
 def portable_process(pid: int) -> dict[str, object] | None:
@@ -182,11 +315,17 @@ def process_roots() -> list[Path]:
 
 def runtime_paths() -> list[Path]:
     paths: list[Path] = []
+    explicit_home = os.environ.get("T3CODE_HOME")
     for root in runtime_roots(process_roots()):
         for relative in ("userdata/server-runtime.json", "dev/server-runtime.json"):
             path = root / relative
             if path not in paths:
                 paths.append(path)
+
+    # An explicit home is an evaluation boundary. Do not accidentally pick a
+    # second user's runtime while testing a custom T3 installation.
+    if explicit_home:
+        return paths
 
     # A custom --base-dir is common for command-line servers. Search only the
     # user's home and prune large dependency and cache trees.
@@ -290,7 +429,16 @@ def discover() -> dict[str, object]:
             continue
         if not health(host, port):
             continue
-        candidate = {"runtime_path": str(path), "runtime": runtime, "pid": pid, "info": info, "host": host, "port": port}
+        service = systemd_unit_for_pid(pid)
+        candidate = {
+            "runtime_path": str(path),
+            "runtime": runtime,
+            "pid": pid,
+            "info": info,
+            "host": host,
+            "port": port,
+            "service": service,
+        }
         candidates.append(candidate)
 
     if len(candidates) > 1:
@@ -303,10 +451,11 @@ def discover() -> dict[str, object]:
         )
     candidate = candidates[0]
     runtime = candidate["runtime"]
-    if runtime.get("serviceManaged") is True:
+    service = candidate["service"]
+    if runtime.get("serviceManaged") is True and service is None:
         fail(
-            "the discovered T3 server is managed by the background service. Stop or uninstall that service "
-            "first so it cannot restart the TypeScript server during the switch"
+            "the discovered T3 server is managed by a background service, but its service unit could not be "
+            "identified. Stop or uninstall that service first so it cannot restart the TypeScript server during the switch"
         )
     if candidate["info"]["environment"].get("T3CODE_MODE") == "desktop":
         fail("the discovered server is running in desktop mode and may be restarted by T3 Code. Quit the desktop app first")
@@ -361,6 +510,8 @@ def save_original(candidate: dict[str, object]) -> None:
         "port": candidate["port"],
         "originalPid": candidate["pid"],
         "originalCwd": info["cwd"],
+        "service": candidate.get("service"),
+        "serviceAction": "running" if candidate.get("service") else None,
         "rustPid": None,
         "rustStartedAt": None,
     }
@@ -436,8 +587,21 @@ def start_process(argv: list[str], environment: dict[str, str], cwd: str, log_pa
 def wait_for_server(process: subprocess.Popen[bytes], host: str, port: int, label: str) -> None:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        if process.poll() is not None:
+        if process is not None and process.poll() is not None:
             fail(f"the {label} server exited with status {process.returncode}. See {LOG_PATH}")
+        if health(host, port):
+            return
+        time.sleep(0.25)
+    fail(f"the {label} server did not become ready on {host}:{port}. See {LOG_PATH}")
+
+
+def wait_for_service(service: dict[str, object], host: str, port: int, label: str) -> None:
+    deadline = time.monotonic() + 30
+    prefix = systemd_prefix(service)
+    while time.monotonic() < deadline:
+        active = command_output(prefix + ["show", str(service["unit"]), "-p", "ActiveState", "--value", "--no-pager"])
+        if active in {"failed", "inactive"}:
+            fail(f"the {label} systemd service {service['unit']} is {active}. See {LOG_PATH}")
         if health(host, port):
             return
         time.sleep(0.25)
@@ -530,7 +694,11 @@ def rust_switch() -> None:
     state = read_json(STATE_PATH)
     assert state is not None
     try:
-        stop(int(candidate["pid"]), "TypeScript")
+        service = state.get("service")
+        if isinstance(service, dict):
+            systemd_prepare(service, state)
+        if process_alive(int(candidate["pid"])):
+            stop(int(candidate["pid"]), "TypeScript")
         launch_rust(state)
     except SwitchError as error:
         try:
@@ -553,21 +721,42 @@ def restore_original(state: dict[str, object], rollback: bool = False) -> None:
         runtime_path.unlink(missing_ok=True)
     environment = load_saved_environment()
     argv = load_saved_argv()
-    process = start_process(argv, environment, str(state["originalCwd"]), LOG_PATH)
+    service = state.get("service")
     try:
-        wait_for_server(process, str(state["host"]), int(state["port"]), "TypeScript")
+        if isinstance(service, dict):
+            systemd_restore(service, state)
+            wait_for_service(service, str(state["host"]), int(state["port"]), "TypeScript")
+            process_pid = service.get("mainPid")
+            current_pid = command_output(
+                systemd_prefix(service)
+                + ["show", str(service["unit"]), "-p", "MainPID", "--value", "--no-pager"]
+            )
+            if current_pid and current_pid.isdigit():
+                process_pid = int(current_pid)
+        else:
+            process = start_process(argv, environment, str(state["originalCwd"]), LOG_PATH)
+            wait_for_server(process, str(state["host"]), int(state["port"]), "TypeScript")
+            process_pid = process.pid
     except SwitchError:
         if rollback:
+            if isinstance(service, dict):
+                systemd_remask(service, state)
             state["mode"] = "rust"
             launch_rust(state)
         raise
+    if not read_json(runtime_path):
+        backup = state.get("runtimeBackup")
+        original_runtime = read_json(Path(backup)) if isinstance(backup, str) else None
+        if original_runtime is not None:
+            original_runtime["pid"] = process_pid
+            atomic_json(runtime_path, original_runtime)
     backup = state.get("runtimeBackup")
     if isinstance(backup, str):
         Path(backup).unlink(missing_ok=True)
     STATE_PATH.unlink(missing_ok=True)
     ARGV_PATH.unlink(missing_ok=True)
     ENV_PATH.unlink(missing_ok=True)
-    print(f"Original TypeScript T3 server is active at {state['host']}:{state['port']} (PID {process.pid}).")
+    print(f"Original TypeScript T3 server is active at {state['host']}:{state['port']} (PID {process_pid}).")
 
 
 def status() -> None:
