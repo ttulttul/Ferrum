@@ -7,7 +7,10 @@ use axum::{
     routing::{any, get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::{
     collections::HashMap,
     path::{Path as FsPath, PathBuf},
@@ -596,6 +599,7 @@ async fn webhook_handler(
         );
         return response;
     }
+    let headers = request.headers().clone();
     let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024 + 1).await {
         Ok(bytes) if bytes.len() <= 1024 * 1024 => bytes,
         _ => {
@@ -629,6 +633,17 @@ async fn webhook_handler(
             "disabled",
         );
     }
+    if let Some(signature) = task["schedule"]["signature"].as_object() {
+        let valid =
+            webhook_signature_valid(signature, task["_webhookSecret"].as_str(), &headers, &body);
+        if !valid {
+            return outcome(
+                StatusCode::UNAUTHORIZED,
+                serde_json::json!({"error":"invalid_signature"}),
+                "rejected_signature",
+            );
+        }
+    }
     let delivery_id = format!("delivery:{}", uuid::Uuid::new_v4());
     let _ = body;
     outcome(
@@ -636,6 +651,43 @@ async fn webhook_handler(
         serde_json::json!({"deliveryId":delivery_id}),
         "accepted",
     )
+}
+
+fn webhook_signature_valid(
+    signature: &serde_json::Map<String, serde_json::Value>,
+    secret: Option<&str>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> bool {
+    let Some(secret) = secret else { return false };
+    let Some(header) = signature["header"].as_str() else {
+        return false;
+    };
+    let Some(received) = headers.get(header).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let prefix = signature["prefix"].as_str().unwrap_or_default();
+    let value = received.trim();
+    if value.len() < prefix.len() {
+        return false;
+    }
+    let Some(head) = value.get(..prefix.len()) else {
+        return false;
+    };
+    if !head.eq_ignore_ascii_case(prefix) {
+        return false;
+    }
+    let candidate = &value[prefix.len()..];
+    let decoded = match signature["encoding"].as_str().unwrap_or("base64") {
+        "hex" => hex::decode(candidate.to_ascii_lowercase()).ok(),
+        _ => BASE64.decode(candidate).ok(),
+    };
+    let Some(decoded) = decoded else { return false };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    mac.verify_slice(&decoded).is_ok()
 }
 
 async fn contract_fallback(State(state): State<Arc<AppState>>, request: Request) -> Response {

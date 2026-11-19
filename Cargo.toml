@@ -26,6 +26,7 @@ url = "=2.4.1"
 axum = { version = "=0.7.9", features = ["ws", "multipart"] }
 clap = { version = "=4.5.23", features = ["derive", "env"] }
 futures-util = "0.3"
+hex = "0.4"
 indexmap = "=2.7.0"
 serde_yaml = "0.9"
 serde = { version = "1", features = ["derive"] }
