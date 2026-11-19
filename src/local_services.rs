@@ -1,6 +1,9 @@
 //! Host-backed RPC services. Each service owns the state shared by its clients.
+mod browser;
 mod device_actions;
 mod devices;
+pub(crate) mod discovery;
+pub(crate) mod git_workflow;
 pub(crate) mod media;
 mod previews;
 mod terminals;
@@ -13,6 +16,16 @@ pub use vcs::VcsService;
 
 use serde_json::{json, Value};
 
+fn base_directory(dir: &std::path::Path) -> &std::path::Path {
+    if dir
+        .file_name()
+        .is_some_and(|name| name == "userdata" || name == "dev")
+    {
+        dir.parent().unwrap_or(dir)
+    } else {
+        dir
+    }
+}
 type Reply = Result<Value, Value>;
 
 fn invalid(key: &str, message: &str) -> Value {

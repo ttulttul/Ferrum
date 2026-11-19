@@ -9,7 +9,7 @@ use std::{
 use tokio::process::Command;
 
 pub struct VcsService;
-async fn run(cwd: &str, args: &[&str]) -> std::io::Result<Output> {
+pub(super) async fn run(cwd: &str, args: &[&str]) -> std::io::Result<Output> {
     Command::new("git")
         .current_dir(cwd)
         .args(args)
@@ -20,7 +20,7 @@ async fn run(cwd: &str, args: &[&str]) -> std::io::Result<Output> {
         .output()
         .await
 }
-async fn read(cwd: &str, args: &[&str]) -> Option<String> {
+pub(super) async fn read(cwd: &str, args: &[&str]) -> Option<String> {
     let out = run(cwd, args).await.ok()?;
     out.status.success().then(|| {
         String::from_utf8_lossy(&out.stdout)
@@ -31,7 +31,12 @@ async fn read(cwd: &str, args: &[&str]) -> Option<String> {
 fn failure_context(op: &str, cwd: &str, args: &[&str]) -> Value {
     json!({"_tag":"GitCommandError","operation":format!("GitVcsDriver.{op}"),"command":"git","cwd":cwd,"argumentCount":args.len()})
 }
-async fn checked(cwd: &str, op: &str, args: &[&str], detail: &str) -> Result<String, Value> {
+pub(super) async fn checked(
+    cwd: &str,
+    op: &str,
+    args: &[&str],
+    detail: &str,
+) -> Result<String, Value> {
     let mut err = failure_context(op, cwd, args);
     match run(cwd, args).await {
         Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout)
@@ -100,10 +105,10 @@ fn numstat(text: &str) -> BTreeMap<String, (u64, u64)> {
 fn totals(map: &BTreeMap<String, (u64, u64)>) -> (u64, u64) {
     map.values().fold((0, 0), |(i, d), (a, b)| (i + a, d + b))
 }
-async fn branch(cwd: &str) -> Option<String> {
+pub(super) async fn branch(cwd: &str) -> Option<String> {
     read(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await
 }
-async fn default_ref(cwd: &str) -> Option<String> {
+pub(super) async fn default_ref(cwd: &str) -> Option<String> {
     read(
         cwd,
         &[
@@ -436,6 +441,13 @@ async fn checkout(cwd: &str, name: &str) -> Reply {
 }
 
 impl VcsService {
+    pub async fn branch_status(&self, input: &Value) -> Reply {
+        let cwd = string(input, "cwd")?;
+        let is_repo = read(cwd, &["rev-parse", "--git-dir"]).await.is_some();
+        let name = if is_repo { branch(cwd).await } else { None };
+        Ok(json!({"refName":name,"isRepo":is_repo}))
+    }
+
     pub async fn call(&self, method: &str, input: &Value, base_dir: &Path) -> Option<Reply> {
         if !matches!(
             method,
@@ -568,7 +580,7 @@ impl VcsService {
                     }
                     prefix.push(c);
                 }
-                let dir = base_dir
+                let dir = super::base_directory(base_dir)
                     .join("worktrees")
                     .join(Path::new(&root).file_name().unwrap_or_default());
                 let file = format!("{prefix}-{}", &hash[..16]);

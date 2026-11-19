@@ -62,7 +62,7 @@ def observe(server, page_url):
                             result["JPEG"] = message
                         elif message!=result["JPEG"]:
                             result.setdefault("page JPEG",message)
-                        if kind == "jpeg":
+                        if kind == "jpeg" or (kind == "loaded" and "page JPEG" in result):
                             return
                     else:
                         event = json.loads(message)
@@ -78,7 +78,7 @@ def observe(server, page_url):
 
             receive("jpeg")
             # The first frame can show the blank document preceding navigation.
-            receive("jpeg")
+            receive("loaded")
             click(25)
             chooser = receive("fileChooser")
             multipart = (b'--T3Fixture\r\nContent-Disposition: form-data; name="file"; '
