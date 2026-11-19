@@ -1,7 +1,7 @@
 #![recursion_limit = "512"]
 
 use axum::{
-    extract::{FromRequest, Request, State, WebSocketUpgrade},
+    extract::{FromRequest, Path, Request, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get, post},
@@ -473,7 +473,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(provider_http::routes())
         .route("/api/projects", get(projects::snapshot))
         .route("/api/projects/mutate", post(projects::mutate_http))
-        .route("/api/hooks/:hook_id/:token", any(webhook_not_found))
+        .route("/api/hooks/:hook_id/:token", any(webhook_handler))
         .route(
             "/api/orchestration/shell",
             get(environment_http::shell_snapshot),
@@ -512,12 +512,71 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-async fn webhook_not_found() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({"error":"hook_not_found"})),
+async fn webhook_handler(
+    State(state): State<Arc<AppState>>,
+    Path((hook_id, token)): Path<(String, String)>,
+    request: Request,
+) -> Response {
+    let outcome = |status: StatusCode, body: serde_json::Value, name: &'static str| {
+        let mut response = (status, Json(body)).into_response();
+        response.headers_mut().insert(
+            "x-t3-hook-outcome",
+            axum::http::HeaderValue::from_static(name),
+        );
+        response
+    };
+    if request.method() == axum::http::Method::HEAD {
+        let mut response = outcome(
+            StatusCode::METHOD_NOT_ALLOWED,
+            serde_json::json!({"error":"method_not_allowed"}),
+            "method_not_allowed",
+        );
+        response.headers_mut().insert(
+            axum::http::header::ALLOW,
+            axum::http::HeaderValue::from_static("GET, POST, PUT, PATCH"),
+        );
+        return response;
+    }
+    let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024 + 1).await {
+        Ok(bytes) if bytes.len() <= 1024 * 1024 => bytes,
+        _ => {
+            return outcome(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                serde_json::json!({"error":"body_too_large"}),
+                "body_too_large",
+            )
+        }
+    };
+    let tasks = state.scheduled_tasks.lock().await;
+    let task = tasks
+        .values()
+        .find(|task| {
+            task["schedule"]["type"] == "webhook"
+                && task["id"].as_str().is_some_and(|id| id == hook_id)
+                && task["_webhookToken"].as_str() == Some(token.as_str())
+        })
+        .cloned();
+    let Some(task) = task else {
+        return outcome(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"error":"hook_not_found"}),
+            "not_found",
+        );
+    };
+    if task["enabled"] != true {
+        return outcome(
+            StatusCode::CONFLICT,
+            serde_json::json!({"error":"hook_disabled"}),
+            "disabled",
+        );
+    }
+    let delivery_id = format!("delivery:{}", uuid::Uuid::new_v4());
+    let _ = body;
+    outcome(
+        StatusCode::ACCEPTED,
+        serde_json::json!({"deliveryId":delivery_id}),
+        "accepted",
     )
-        .into_response()
 }
 
 async fn contract_fallback(State(state): State<Arc<AppState>>, request: Request) -> Response {
