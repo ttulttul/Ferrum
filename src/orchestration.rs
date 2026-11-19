@@ -101,6 +101,7 @@ pub(crate) async fn dispatch_orchestration_command(
                     | "thread.active.reorder"
                     | "queue.resume"
                     | "queued-message.promote-to-steer"
+                    | "thread.pull-request-watch.sync"
                     | "thread.pull-request.sync"
             )
         {
@@ -470,11 +471,95 @@ async fn apply_command(
                 for link in links {
                     if let Some(watch) = link.get_mut("watch").and_then(Value::as_object_mut) {
                         watch.remove("checksPending");
-                        watch.remove("checksAwaitedSince");
-                        watch.remove("awaitingApproval");
-                        watch.remove("approvalAnnounced");
                     }
                 }
+            }
+            drop(store);
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.to_owned(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
+        "thread.pull-request-watch.sync" => {
+            let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
+            let store = state.store.read().await;
+            let thread = store
+                .threads
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            let mut row = thread.stored_row();
+            let host = command["host"].as_str().unwrap_or_default();
+            let repository = command["repository"].as_str().unwrap_or_default();
+            let number = command["number"].clone();
+            let Some(link) = row["pullRequests"].as_array_mut().and_then(|links| {
+                links.iter_mut().find(|link| {
+                    link["host"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .eq_ignore_ascii_case(host)
+                        && link["repository"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .eq_ignore_ascii_case(repository)
+                        && link["number"] == number
+                })
+            }) else {
+                drop(store);
+                return Ok(state
+                    .commit_receipted(
+                        Event::CommandDispatched {
+                            command_id: receipt.command_id.clone(),
+                            command_type: command_type.into(),
+                            thread_id: Some(id.to_owned()),
+                            payload: command.clone(),
+                        },
+                        Some(receipt.clone()),
+                    )
+                    .await?
+                    .id);
+            };
+            let existing_watch = link["watch"].clone();
+            if existing_watch["startedAt"] != command["startedAt"] {
+                drop(store);
+                return Ok(state
+                    .commit_receipted(
+                        Event::CommandDispatched {
+                            command_id: receipt.command_id.clone(),
+                            command_type: command_type.into(),
+                            thread_id: Some(id.to_owned()),
+                            payload: command.clone(),
+                        },
+                        Some(receipt.clone()),
+                    )
+                    .await?
+                    .id);
+            }
+            if command["watch"].is_null() {
+                let ended = command
+                    .get("endedWatch")
+                    .cloned()
+                    .or_else(|| (!existing_watch.is_null()).then_some(existing_watch));
+                link.as_object_mut().unwrap().remove("watch");
+                if let Some(ended) = ended {
+                    link["endedWatch"] = ended;
+                }
+            } else {
+                let mut watch = command["watch"].clone();
+                if command.get("checksPendingBefore").is_none()
+                    || existing_watch.get("checksPending").is_some()
+                {
+                    link["watch"] = watch;
+                } else if let Some(object) = watch.as_object_mut() {
+                    object.remove("checksPending");
+                    link["watch"] = Value::Object(object.clone());
+                }
+                link.as_object_mut().unwrap().remove("endedWatch");
             }
             drop(store);
             return Ok(state
@@ -587,7 +672,7 @@ async fn apply_command(
             let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
             let project_id = command["projectId"].as_str().unwrap_or_default();
             let store = state.store.read().await;
-            let _project = store
+            let project = store
                 .projects
                 .get(project_id)
                 .ok_or_else(|| anyhow::anyhow!(format!("Project {project_id} was not found.")))?;
@@ -595,8 +680,24 @@ async fn apply_command(
                 .threads
                 .get(id)
                 .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            if thread
+                .runs
+                .iter()
+                .any(|run| matches!(run.status.as_str(), "preparing" | "starting" | "running"))
+            {
+                return Err(anyhow::anyhow!(format!(
+                    "Thread {id} still has work in progress. Finish or stop it first."
+                )));
+            }
+            if thread.cwd != project.path {
+                return Err(anyhow::anyhow!(format!(
+                    "Thread {id} does not work in {}.",
+                    project.path
+                )));
+            }
             let mut row = thread.stored_row();
             row["projectId"] = json!(project_id);
+            row["worktreePath"] = Value::Null;
             drop(store);
             return Ok(state
                 .commit_receipted(
@@ -1868,16 +1969,98 @@ async fn apply_command(
                 .get(id)
                 .map(|t| t.stored_row())
                 .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
-            let key = if command_type == "secret_request.record" {
-                "secretRequests"
+            let now = crate::auth_service::iso(crate::auth_service::now());
+            let mut items = row["turnItems"].as_array().cloned().unwrap_or_default();
+            let turn_item_id = command["turnItemId"].as_str().unwrap_or_default();
+            let existing = items
+                .iter()
+                .find(|item| item["id"].as_str() == Some(turn_item_id))
+                .cloned();
+            let unchanged = existing.as_ref().is_some_and(|item| {
+                (command_type == "secret_request.record"
+                    && item["secretStatus"] != "pending"
+                    && command["secretStatus"] != "pending")
+                    || (command_type == "link_request.record"
+                        && item["linkStatus"] != "pending"
+                        && command["linkStatus"] != "pending")
+            });
+            let item = if unchanged {
+                existing.unwrap()
+            } else if command_type == "secret_request.record" {
+                let pending = command["secretStatus"] == "pending";
+                json!({
+                    "id":turn_item_id,
+                    "threadId":id,
+                    "runId":command["runId"],
+                    "nodeId":command["nodeId"],
+                    "providerThreadId":Value::Null,
+                    "providerTurnId":Value::Null,
+                    "nativeItemRef":Value::Null,
+                    "parentItemId":Value::Null,
+                    "ordinal":existing.as_ref().and_then(|item| item["ordinal"].as_u64()).unwrap_or(items.len() as u64),
+                    "status":if pending {"waiting"} else if command["secretStatus"] == "saved" {"completed"} else {"cancelled"},
+                    "title":command["label"],
+                    "startedAt":existing.as_ref().and_then(|item| item["startedAt"].as_str()).unwrap_or(&now),
+                    "completedAt":if pending {Value::Null} else {json!(now)},
+                    "updatedAt":now,
+                    "type":"secret_request",
+                    "label":command["label"],
+                    "reason":command["reason"],
+                    "url":command.get("url").cloned().unwrap_or(Value::Null),
+                    "placeholder":command.get("placeholder").cloned().unwrap_or(Value::Null),
+                    "delivery":command.get("delivery").cloned().unwrap_or(Value::Null),
+                    "secretStatus":command["secretStatus"]
+                })
             } else {
-                "linkRequests"
+                let pending = command["linkStatus"] == "pending";
+                let status = if pending {
+                    "waiting"
+                } else if command["linkStatus"] == "linked" {
+                    "completed"
+                } else if command["linkStatus"] == "failed" {
+                    "failed"
+                } else {
+                    "cancelled"
+                };
+                let mut item = json!({
+                    "id":turn_item_id,
+                    "threadId":id,
+                    "runId":command["runId"],
+                    "nodeId":command["nodeId"],
+                    "providerThreadId":Value::Null,
+                    "providerTurnId":Value::Null,
+                    "nativeItemRef":Value::Null,
+                    "parentItemId":Value::Null,
+                    "ordinal":existing.as_ref().and_then(|item| item["ordinal"].as_u64()).unwrap_or(items.len() as u64),
+                    "status":status,
+                    "title":command.get("label").cloned().unwrap_or_else(|| command.get("url").cloned().unwrap_or(json!("Link an environment"))),
+                    "startedAt":existing.as_ref().and_then(|item| item["startedAt"].as_str()).unwrap_or(&now),
+                    "completedAt":if pending {Value::Null} else {json!(now)},
+                    "updatedAt":now,
+                    "type":"link_request",
+                    "url":command.get("url").cloned().unwrap_or(Value::Null),
+                    "reason":command["reason"],
+                    "linkStatus":command["linkStatus"]
+                });
+                for key in [
+                    "environmentId",
+                    "label",
+                    "hint",
+                    "requestedAccess",
+                    "linkedEnvironmentId",
+                    "linkedLabel",
+                    "linkedAccess",
+                    "failure",
+                ] {
+                    if let Some(value) = command.get(key) {
+                        item[key] = value.clone();
+                    }
+                }
+                item
             };
-            let mut items = row[key].as_array().cloned().unwrap_or_default();
-            let item = command.clone();
-            items.retain(|candidate| candidate["turnItemId"] != item["turnItemId"]);
+            items.retain(|candidate| candidate["id"] != turn_item_id);
             items.push(item);
-            row[key] = json!(items);
+            row["turnItems"] = json!(items);
             return Ok(state
                 .commit_receipted(
                     Event::ThreadPatched {
