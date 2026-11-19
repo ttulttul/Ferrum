@@ -124,9 +124,7 @@ fn platform(error: &io::Error, method: &str, syscall: &str, path: &Path) -> Valu
         }
         _ => ("Unknown", "", ""),
     };
-    let node_message = if kind == io::ErrorKind::IsADirectory {
-        format!("{errno}: {description}, {syscall}")
-    } else if errno.is_empty() {
+    let node_message = if errno.is_empty() {
         error.to_string()
     } else {
         format!(
