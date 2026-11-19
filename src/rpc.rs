@@ -298,6 +298,32 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e})),
         };
     }
+    if method == "server.getSettings" {
+        return Reply::Success(state.settings.read().await.clone());
+    }
+    if method == "server.updateSettings" {
+        let Some(patch) = params["patch"].as_object() else {
+            return Reply::defect("Missing key\n  at [\"patch\"]".into());
+        };
+        let mut settings = state.settings.write().await;
+        let Some(current) = settings.as_object_mut() else {
+            *settings = serde_json::json!({});
+            return Reply::defect("Invalid settings object".into());
+        };
+        for (key, value) in patch {
+            if value.is_null() {
+                current.remove(key);
+            } else {
+                current.insert(key.clone(), value.clone());
+            }
+        }
+        if let Err(error) = crate::config::write_settings(&state.paths, &settings) {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ServerSettingsError","message":error.to_string()}}),
+            );
+        }
+        return Reply::Success(settings.clone());
+    }
     if matches!(
         method,
         "issues.linkedThreads" | "pullRequests.linkedThreads"

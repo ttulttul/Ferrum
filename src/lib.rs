@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 pub mod access_http;
 pub mod auth_service;
+pub mod config;
 mod contracts;
 mod environment_http;
 pub mod guest_service;
@@ -298,6 +299,9 @@ pub struct AppState {
     pub oauth: mcp_oauth::OAuth,
     connect: access_http::connect::Service,
     pub data_dir: PathBuf,
+    pub paths: config::ServerPaths,
+    pub runtime_config: config::RuntimeConfig,
+    pub settings: RwLock<serde_json::Value>,
     pub store: RwLock<Store>,
     pub events: broadcast::Sender<ServerEvent>,
     pub log: Mutex<tokio::fs::File>,
@@ -329,7 +333,10 @@ impl AppState {
         auth: auth_service::AuthService,
     ) -> anyhow::Result<Arc<Self>> {
         let dir = data_dir.into();
-        tokio::fs::create_dir_all(&dir).await?;
+        let paths = config::ServerPaths::from_state_dir(dir.clone());
+        paths.ensure()?;
+        let runtime_config = config::RuntimeConfig::load(&paths)?;
+        let settings = runtime_config.settings.clone();
         let log_path = dir.join("events.jsonl");
         let mut store = Store::default();
         let mut next_event_id = 0;
@@ -352,6 +359,9 @@ impl AppState {
             oauth: mcp_oauth::OAuth::open(&dir)?,
             connect: access_http::connect::Service::open(&dir)?,
             data_dir: dir.clone(),
+            paths,
+            runtime_config,
+            settings: RwLock::new(settings),
             store: RwLock::new(store),
             events,
             log: Mutex::new(log),
@@ -698,7 +708,7 @@ pub async fn run_server(state: Arc<AppState>, listen: std::net::SocketAddr) -> a
 pub fn default_data_dir() -> PathBuf {
     std::env::var_os("T3CODE_DATA_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".t3"))
+        .unwrap_or_else(|| config::default_base_dir().join("userdata"))
 }
 pub fn default_provider_command() -> Vec<String> {
     std::env::var("T3_PROVIDER_COMMAND")

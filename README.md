@@ -11,6 +11,8 @@ target/debug/t3code-server --listen 127.0.0.1:3773 --data-dir .t3
 
 An environment launcher can pass the desktop bootstrap envelope on an inherited file descriptor with `--bootstrap-fd`. It contains the bind address, port, T3 home directory, and desktop bootstrap credential. Exchange the credential at `POST /api/auth/browser-session` and send the resulting cookie to authenticated HTTP operations. For a separate standalone process, set `T3CODE_BOOTSTRAP_CREDENTIAL` to a fresh high-entropy credential before launching.
 
+The Rust binary follows the TypeScript server's configuration layout. `T3CODE_HOME` and `--base-dir` select a base directory, with mutable files under `userdata`. This includes `settings.json`, `keybindings.json`, `themes`, `attachments`, `browser-artifacts`, `logs`, `secrets`, `environment-id`, `anonymous-id`, and `server-runtime.json`. `T3CODE_HOST`, `T3CODE_PORT`, `T3CODE_MODE`, `T3CODE_NO_BROWSER`, `T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD`, `T3CODE_LOG_WS_EVENTS`, `T3CODE_DEV_ALLOWED_ORIGINS`, `T3CODE_TAILSCALE_SERVE`, and `T3CODE_TAILSCALE_SERVE_PORT` are loaded with the same environment names. `server.getSettings` reads the shared settings file and `server.updateSettings` persists an atomic JSON update.
+
 Connect to `/ws?orchestrationProtocol=2` with a session cookie or a WebSocket ticket. The client sends Effect RPC messages as JSON text frames. For example, the following request obtains the server probe response.
 
 ```json
