@@ -126,6 +126,11 @@ fn platform(error: &io::Error, method: &str, syscall: &str, path: &Path) -> Valu
     };
     let node_message = if errno.is_empty() {
         error.to_string()
+    } else if kind == io::ErrorKind::IsADirectory {
+        // Node's fs.readFile/writeFile error for a directory omits the path
+        // from the nested Error message. The path is retained by the outer
+        // PlatformError message above.
+        format!("{errno}: {description}, {syscall}")
     } else {
         format!(
             "{errno}: {description}, {syscall} '{}'{target}",
