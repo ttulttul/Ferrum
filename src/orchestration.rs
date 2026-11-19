@@ -451,8 +451,9 @@ async fn apply_command(
                         }
                     }
                     if command["expectedEmpty"] == true
-                        && existing_thread
-                            .is_some_and(|thread| !thread.messages.is_empty() || !thread.runs.is_empty())
+                        && existing_thread.is_some_and(|thread| {
+                            !thread.messages.is_empty() || !thread.runs.is_empty()
+                        })
                     {
                         return Err(anyhow::anyhow!(format!(
                             "Thread {thread_id} is no longer empty."

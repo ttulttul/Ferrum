@@ -90,9 +90,7 @@ fn sorted_entries(root: &Path, directory: &Path) -> std::io::Result<Vec<Value>> 
 }
 
 pub async fn list_entries(input: &Value) -> Option<Reply> {
-    if !input.get("cwd").is_some() {
-        return None;
-    }
+    input.get("cwd")?;
     let result = (|| {
         let root = root(input)?;
         let directory = input["directoryPath"].as_str().unwrap_or_default();
@@ -111,9 +109,7 @@ pub async fn list_entries(input: &Value) -> Option<Reply> {
 }
 
 pub async fn list_ignored_files(input: &Value) -> Option<Reply> {
-    if !input.get("cwd").is_some() {
-        return None;
-    }
+    input.get("cwd")?;
     let result = (|| {
         let root = root(input)?;
         let mut files = Vec::new();
@@ -183,9 +179,7 @@ fn walk(root: &Path, directory: &Path, output: &mut Vec<Value>, limit: usize) {
 }
 
 pub async fn search_entries(input: &Value) -> Option<Reply> {
-    if !input.get("cwd").is_some() {
-        return None;
-    }
+    input.get("cwd")?;
     let result = (|| {
         let root = root(input)?;
         let query = input["query"].as_str().unwrap_or_default().to_lowercase();
@@ -211,9 +205,7 @@ pub async fn search_entries(input: &Value) -> Option<Reply> {
 }
 
 pub async fn search_contents(input: &Value) -> Option<Reply> {
-    if !input.get("cwd").is_some() {
-        return None;
-    }
+    input.get("cwd")?;
     let result = (|| {
         let root = root(input)?;
         let query = input["query"].as_str().unwrap_or_default();
@@ -300,9 +292,7 @@ fn whole_word_match(text: &str, start: usize, end: usize) -> bool {
 }
 
 pub async fn read_file(input: &Value) -> Option<Reply> {
-    if !input.get("cwd").is_some() {
-        return None;
-    }
+    input.get("cwd")?;
     let result = (|| {
         let root = root(input)?;
         let relative_path = input["relativePath"].as_str().unwrap_or_default();
@@ -340,9 +330,7 @@ pub async fn read_file(input: &Value) -> Option<Reply> {
 }
 
 pub async fn write_file(input: &Value) -> Option<Reply> {
-    if !input.get("cwd").is_some() {
-        return None;
-    }
+    input.get("cwd")?;
     let result = (|| {
         let root = root(input)?;
         let relative_path = input["relativePath"].as_str().unwrap_or_default();
@@ -367,9 +355,7 @@ pub async fn write_file(input: &Value) -> Option<Reply> {
 }
 
 pub async fn metadata(input: &Value) -> Option<Reply> {
-    if !input.get("paths").is_some() {
-        return None;
-    }
+    input.get("paths")?;
     let entries = input["paths"].as_array().into_iter().flatten().map(|path| {
         let path = path.as_str().unwrap_or_default();
         std::fs::metadata(path).ok().map(|m| json!({"kind": if m.is_file() {"file"} else if m.is_dir() {"directory"} else {"other"}, "byteLength": m.len()}))
@@ -378,9 +364,7 @@ pub async fn metadata(input: &Value) -> Option<Reply> {
 }
 
 pub async fn browse(input: &Value) -> Option<Reply> {
-    if !input.get("partialPath").is_some() {
-        return None;
-    }
+    input.get("partialPath")?;
     let partial = input["partialPath"].as_str().unwrap_or_default();
     let base = input["cwd"]
         .as_str()

@@ -270,7 +270,9 @@ pub(crate) fn watch_patch(thread: &Thread, cmd: &Value, at: &str) -> Value {
             };
             let ended_watch = links
                 .iter()
-                .find(|candidate| key_matches(candidate) && candidate["source"] == "stack-dismissed")
+                .find(|candidate| {
+                    key_matches(candidate) && candidate["source"] == "stack-dismissed"
+                })
                 .and_then(|candidate| candidate.get("endedWatch").cloned());
             links.retain(|candidate| !key_matches(candidate));
             let mut created = json!({
