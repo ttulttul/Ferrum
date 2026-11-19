@@ -89,6 +89,7 @@ pub(crate) async fn dispatch_orchestration_command(
             && matches!(
                 kind,
                 "thread.settle"
+                    | "thread.auto-settle"
                     | "thread.unsettle"
                     | "thread.snooze"
                     | "thread.unsnooze"
@@ -360,6 +361,8 @@ async fn apply_command(
         | "thread.issue.unlink"
         | "thread.pull-request.link"
         | "thread.pull-request.unlink"
+        | "thread.pull-request.watch"
+        | "thread.pull-request.sync"
         | "thread.pull-request-link.sync" => {
             let id = &receipt.thread_id;
             let store = state.store.read().await;
@@ -367,11 +370,19 @@ async fn apply_command(
                 .threads
                 .get(id)
                 .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
-            let row = crate::thread_projection::link_patch(
-                thread,
-                command,
-                &crate::auth_service::iso(crate::auth_service::now()),
-            );
+            let at = crate::auth_service::iso(crate::auth_service::now());
+            let row = if command_type == "thread.pull-request.watch" {
+                crate::thread_projection::watch_patch(thread, command, &at)
+            } else if command_type == "thread.pull-request.sync" {
+                let mut row = thread.stored_row();
+                row["branchPullRequest"] = command["branchPullRequest"].clone();
+                if command.get("linkedPullRequest").is_some() {
+                    row["linkedPullRequest"] = command["linkedPullRequest"].clone();
+                }
+                row
+            } else {
+                crate::thread_projection::link_patch(thread, command, &at)
+            };
             drop(store);
             return Ok(state
                 .commit_receipted(
@@ -399,6 +410,7 @@ async fn apply_command(
         }
         "thread.archive"
         | "thread.unarchive"
+        | "thread.auto-settle"
         | "thread.settle"
         | "thread.unsettle"
         | "thread.pin"
@@ -408,6 +420,7 @@ async fn apply_command(
         | "thread.snooze"
         | "thread.unsnooze"
         | "thread.metadata.update"
+        | "thread.title.regeneration.complete"
         | "thread.runtime-mode.set"
         | "thread.interaction-mode.set"
         | "thread.model-selection.set"
@@ -430,6 +443,37 @@ async fn apply_command(
                     "thread.unarchive" => {
                         patch.insert("archived".into(), false.into());
                         row["archivedAt"] = Value::Null;
+                    }
+                    "thread.auto-settle" => {
+                        let snapshot = command["snapshotAt"].as_str().unwrap_or_default();
+                        let changed_at = state
+                            .store
+                            .read()
+                            .await
+                            .threads
+                            .get(thread_id)
+                            .map(|thread| {
+                                thread.stored_row()["updatedAt"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned()
+                            })
+                            .unwrap_or_default();
+                        if !snapshot.is_empty() && changed_at.as_str() > snapshot {
+                            return Err(anyhow::anyhow!(format!(
+                                "Thread {thread_id} changed before automatic settlement."
+                            )));
+                        }
+                        patch.insert("settled".into(), true.into());
+                        patch.insert("pinned".into(), false.into());
+                        row["settledOverride"] = "settled".into();
+                        row["settledAt"] = command.get("settledAt").cloned().unwrap_or(at.clone());
+                        row["unsettledAt"] = Value::Null;
+                        row["pinnedAt"] = Value::Null;
+                        row["pinOrderKey"] = Value::Null;
+                        row["activeOrderKey"] = Value::Null;
+                        row["snoozedUntil"] = Value::Null;
+                        row["snoozedAt"] = Value::Null;
                     }
                     "thread.settle" => {
                         patch.insert("settled".into(), true.into());
@@ -456,6 +500,18 @@ async fn apply_command(
                     "thread.pin" => {
                         patch.insert("pinned".into(), true.into());
                         row["pinnedAt"] = at;
+                        row["settledOverride"] = if row["settledOverride"] == "settled" {
+                            Value::String("active".into())
+                        } else {
+                            row["settledOverride"].clone()
+                        };
+                        if row["settledOverride"] == "active" {
+                            row["settledAt"] = Value::Null;
+                            row["unsettledAt"] =
+                                json!(crate::auth_service::iso(crate::auth_service::now()));
+                        }
+                        row["snoozedUntil"] = Value::Null;
+                        row["snoozedAt"] = Value::Null;
                         if let Some(key) = command.get("orderKey") {
                             row["pinOrderKey"] = key.clone();
                         }
@@ -468,20 +524,41 @@ async fn apply_command(
                     "thread.mark-unread" => {
                         patch.insert("unread".into(), true.into());
                     }
-                    "thread.visit" => {
-                        patch.insert("unread".into(), false.into());
-                    }
                     "thread.snooze" => {
-                        patch.insert(
-                            "snoozed_until".into(),
-                            command
-                                .get("snoozedUntil")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null),
-                        );
+                        let snoozed_until =
+                            command.get("snoozedUntil").cloned().unwrap_or(Value::Null);
+                        patch.insert("snoozed_until".into(), snoozed_until.clone());
+                        row["snoozedUntil"] = snoozed_until;
+                        row["snoozedAt"] = at.clone();
                     }
                     "thread.unsnooze" => {
                         patch.insert("snoozed_until".into(), serde_json::Value::Null);
+                        row["snoozedUntil"] = Value::Null;
+                        row["snoozedAt"] = Value::Null;
+                    }
+                    "thread.visit" => {
+                        if let Some(visited_at) = command.get("visitedAt") {
+                            row["lastVisitedAt"] = visited_at.clone();
+                        }
+                        patch.insert("unread".into(), false.into());
+                    }
+                    "thread.title.regeneration.complete" => {
+                        let request_id = command["requestId"].as_str().unwrap_or_default();
+                        if row["titleRegeneration"]["requestId"] == request_id {
+                            if let Some(title) = command.get("title") {
+                                row["title"] = title.clone();
+                                row["titleRenamed"] = false.into();
+                                patch.insert("title".into(), title.clone());
+                            }
+                            if let Some(outcome) = command.get("outcome") {
+                                row["lastTitleRegeneration"] = json!({
+                                    "requestId": request_id,
+                                    "completedAt": at,
+                                    "outcome": outcome
+                                });
+                            }
+                            row["titleRegeneration"] = Value::Null;
+                        }
                     }
                     "thread.metadata.update" => {
                         if let Some(title) = command.get("title") {
@@ -552,6 +629,32 @@ async fn apply_command(
         }
         "thread.delete" => {
             if let Some(thread_id) = thread_id {
+                if command["onlyIfUnused"] == true {
+                    let used =
+                        state
+                            .store
+                            .read()
+                            .await
+                            .threads
+                            .get(thread_id)
+                            .is_some_and(|thread| {
+                                !thread.messages.is_empty() || !thread.runs.is_empty()
+                            });
+                    if used {
+                        return Ok(state
+                            .commit_receipted(
+                                Event::CommandDispatched {
+                                    command_id: receipt.command_id.clone(),
+                                    command_type: command_type.into(),
+                                    thread_id: Some(thread_id.to_owned()),
+                                    payload: command.clone(),
+                                },
+                                Some(receipt.clone()),
+                            )
+                            .await?
+                            .id);
+                    }
+                }
                 return Ok(state
                     .commit_receipted(
                         Event::ThreadDeleted {

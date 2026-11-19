@@ -570,7 +570,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(provider_http::routes())
         .route("/api/projects", get(projects::snapshot))
         .route("/api/projects/mutate", post(projects::mutate_http))
-        .route("/api/hooks/:hook_id/:token", any(webhook_handler))
         .route("/api/observability/v1/traces", post(otlp_traces_proxy))
         .route(
             "/api/orchestration/shell",
@@ -596,6 +595,9 @@ pub fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_session,
         ))
+        // Hook credentials are carried in the URL. The public webhook route
+        // must bypass the environment session middleware above.
+        .route("/api/hooks/:hook_id/:token", any(webhook_handler))
         .merge(asset_http::routes())
         .merge(mcp_oauth::routes())
         .merge(access_http::routes())
@@ -621,6 +623,9 @@ async fn otlp_traces_proxy(
     };
     if !session.has("orchestration:operate") {
         return access_http::scope_error(&headers, "orchestration:operate");
+    }
+    if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
     }
     let endpoint = std::env::var("T3CODE_OTLP_TRACES_URL")
         .ok()

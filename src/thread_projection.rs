@@ -243,6 +243,60 @@ pub(crate) fn link_patch(thread: &Thread, cmd: &Value, at: &str) -> Value {
     Value::Object(patch)
 }
 
+pub(crate) fn watch_patch(thread: &Thread, cmd: &Value, at: &str) -> Value {
+    let mut links = thread.row["pullRequests"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let host = field(cmd, "host");
+    let repository = field(cmd, "repository");
+    let number = cmd["number"].clone();
+    let matches = |link: &Value| {
+        field(link, "host").eq_ignore_ascii_case(host)
+            && field(link, "repository").eq_ignore_ascii_case(repository)
+            && link["number"] == number
+            && link["source"] != "stack-dismissed"
+    };
+    let index = links.iter().position(matches);
+    if cmd["watching"] == true {
+        let index = if let Some(index) = index {
+            index
+        } else {
+            let Some(link) = cmd.get("link").cloned() else {
+                return json!({});
+            };
+            links.push(json!({
+                "host": host.to_lowercase(),
+                "repository": repository.to_lowercase(),
+                "number": number,
+                "url": link["url"],
+                "source": link["source"],
+                "linkedAt": at,
+                "snapshot": Value::Null,
+                "stack": Value::Null
+            }));
+            links.len() - 1
+        };
+        links[index]["watch"] = json!({
+            "startedAt": at,
+            "headSha": Value::Null,
+            "failedChecks": [],
+            "passed": false,
+            "passedChecks": [],
+            "conflicting": false,
+            "awaitingBaseline": "all",
+            "remarksThrough": at,
+            "remarkIds": [],
+            "wakes": 0
+        });
+    } else if let Some(index) = index {
+        links[index].as_object_mut().map(|link| {
+            link.remove("watch");
+        });
+    }
+    json!({"pullRequests":links,"updatedAt":at})
+}
+
 pub(crate) fn linked(store: &Store, input: &Value, issue: bool) -> Value {
     let key = if issue { "issues" } else { "pullRequests" };
     let mut rows: Vec<_> = store
