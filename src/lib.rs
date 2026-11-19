@@ -31,6 +31,7 @@ pub mod local_services;
 pub mod mcp_oauth;
 mod orchestration;
 mod projects;
+mod thread_projection;
 use orchestration::dispatch_orchestration_command;
 pub mod provider_http;
 pub mod provider_rpc;
@@ -76,6 +77,8 @@ pub struct Run {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Thread {
+    #[serde(default)]
+    row: serde_json::Value,
     pub id: String,
     pub project_id: String,
     pub title: String,
@@ -246,6 +249,11 @@ impl Store {
             Event::CommandDispatched { .. } => {}
             Event::ThreadPatched { thread_id, patch } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
+                    if let Some(fields) = patch["row"].as_object() {
+                        let mut row = thread.stored_row();
+                        row.as_object_mut().unwrap().extend(fields.clone());
+                        thread.row = row;
+                    }
                     if let Some(value) = patch.get("title").and_then(serde_json::Value::as_str) {
                         thread.title = value.to_owned();
                     }

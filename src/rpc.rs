@@ -298,6 +298,17 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e})),
         };
     }
+    if matches!(
+        method,
+        "issues.linkedThreads" | "pullRequests.linkedThreads"
+    ) {
+        let store = state.store.read().await;
+        return Reply::Success(crate::thread_projection::linked(
+            &store,
+            params,
+            method == "issues.linkedThreads",
+        ));
+    }
     let result = match host_rpc::dispatch(state, method, params).await {
         Some(result) => Some(result),
         None => provider_rpc::dispatch(state, method, params).await,
@@ -349,13 +360,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             Value::Object(items)
         }
         "orchestration.getThreadFamily" => {
-            json!({"snapshotSequence":sequence,"threads":thread(&params["threadId"]).into_iter().collect::<Vec<_>>()})
+            json!({"snapshotSequence":sequence,"threads":thread(&params["threadId"]).into_iter().map(|t|t.shell()).collect::<Vec<_>>()})
         }
         "orchestration.getWorktreeThreadIds" => {
             json!({"threadIds":store.threads.values().filter(|t| Some(t.cwd.as_str()) == params["worktreePath"].as_str()).map(|t|&t.id).collect::<Vec<_>>()})
         }
         "orchestration.getArchivedShellSnapshot" => {
-            json!({"schemaVersion":2,"snapshotSequence":sequence,"projects":[],"threads":store.threads.values().filter(|t|t.archived).collect::<Vec<_>>()})
+            json!({"schemaVersion":2,"snapshotSequence":sequence,"projects":[],"threads":store.threads.values().filter(|t|t.archived).map(|t|t.shell()).collect::<Vec<_>>()})
         }
         "orchestration.searchThreads" => {
             let query = params["query"].as_str().unwrap_or_default().to_lowercase();
@@ -367,8 +378,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         "orchestration.getOlderSettledThreads" => {
             json!({"snapshotSequence":sequence,"threads":[],"counts":[]})
         }
-        "orchestration.getThreadProjection"
-        | "orchestration.getFullThreadDiff"
+        "orchestration.getThreadProjection" => thread(&params["threadId"])
+            .map(|t| t.projection())
+            .unwrap_or(Value::Null),
+        "orchestration.getFullThreadDiff"
         | "orchestration.getTurnDiff"
         | "orchestration.stopWorkflow"
         | "orchestration.forceStopThread"
@@ -383,7 +396,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         "orchestration.subscribeThread" => {
             return Reply::Chunk(match thread(&params["threadId"]) {
                 Some(t) => {
-                    json!([{"kind":"snapshot","snapshotSequence":sequence,"projection":t},{"kind":"synchronized"}])
+                    json!([{"kind":"snapshot","snapshotSequence":sequence,"projection":t.projection()},{"kind":"synchronized"}])
                 }
                 None => json!([]),
             })

@@ -60,10 +60,12 @@ jobs:
           reference="node $GITHUB_WORKSPACE/reference/apps/server/src/bin.ts"
           server="$GITHUB_WORKSPACE/target/debug/t3code-server"
           python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$reference" --rust-command "$server"
-          python3 scripts/orchestration_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/orchestration_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
           python3 scripts/auth_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/mcp_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/github_provider_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+          python3 scripts/linear_provider_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/source_control_hosts_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/git_workflow_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/preview_provider_parity.py --original-command "$reference" --rust-command "$server" --browser-cache "$HOME/.cache/ms-playwright"
           python3 scripts/relay_parity.py --checkout "$GITHUB_WORKSPACE/reference" --rust "$server"

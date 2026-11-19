@@ -177,6 +177,10 @@ async fn apply_command(
                 .unwrap_or_default();
             let id = receipt.thread_id.clone();
             let thread = Thread {
+                row: crate::thread_projection::created(
+                    command,
+                    &crate::auth_service::iso(crate::auth_service::now()),
+                ),
                 id,
                 project_id,
                 title: command
@@ -250,6 +254,34 @@ async fn apply_command(
                     .id);
             }
         }
+        "thread.issue.link"
+        | "thread.issue.unlink"
+        | "thread.pull-request.link"
+        | "thread.pull-request.unlink"
+        | "thread.pull-request-link.sync" => {
+            let id = &receipt.thread_id;
+            let store = state.store.read().await;
+            let thread = store
+                .threads
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+            let row = crate::thread_projection::link_patch(
+                thread,
+                command,
+                &crate::auth_service::iso(crate::auth_service::now()),
+            );
+            drop(store);
+            return Ok(state
+                .commit_receipted(
+                    Event::ThreadPatched {
+                        thread_id: id.clone(),
+                        patch: json!({"row":row}),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id);
+        }
         "thread.guest-share.close" | "thread.guest-message.dismiss" => {
             let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
             if command_type == "thread.guest-share.close" {
@@ -277,27 +309,59 @@ async fn apply_command(
         | "thread.runtime-mode.set"
         | "thread.interaction-mode.set"
         | "thread.model-selection.set"
-        | "thread.tag.set" => {
+        | "thread.tag.set"
+        | "thread.auto-settle.set"
+        | "thread.pin.reorder"
+        | "thread.active.reorder"
+        | "provider.switch" => {
             if let Some(thread_id) = thread_id {
                 let mut patch = serde_json::Map::new();
+                let at = json!(crate::auth_service::iso(crate::auth_service::now()));
+                let mut row = json!({"updatedAt":at});
                 match command_type {
                     "thread.archive" => {
                         patch.insert("archived".into(), true.into());
+                        row["archivedAt"] = at;
+                        row["titleRegeneration"] = Value::Null;
+                        row["guestShare"] = Value::Null;
                     }
                     "thread.unarchive" => {
                         patch.insert("archived".into(), false.into());
+                        row["archivedAt"] = Value::Null;
                     }
                     "thread.settle" => {
                         patch.insert("settled".into(), true.into());
+                        patch.insert("pinned".into(), false.into());
+                        row["settledOverride"] = "settled".into();
+                        row["settledAt"] = command.get("settledAt").cloned().unwrap_or(at);
+                        for k in [
+                            "unsettledAt",
+                            "pinnedAt",
+                            "pinOrderKey",
+                            "activeOrderKey",
+                            "snoozedUntil",
+                            "snoozedAt",
+                        ] {
+                            row[k] = Value::Null;
+                        }
                     }
                     "thread.unsettle" => {
                         patch.insert("settled".into(), false.into());
+                        row["settledOverride"] = "active".into();
+                        row["settledAt"] = Value::Null;
+                        row["unsettledAt"] = at;
                     }
                     "thread.pin" => {
                         patch.insert("pinned".into(), true.into());
+                        row["pinnedAt"] = at;
+                        if let Some(key) = command.get("orderKey") {
+                            row["pinOrderKey"] = key.clone();
+                        }
                     }
                     "thread.unpin" => {
                         patch.insert("pinned".into(), false.into());
+                        row["pinnedAt"] = Value::Null;
+                        row["pinOrderKey"] = Value::Null;
                     }
                     "thread.mark-unread" => {
                         patch.insert("unread".into(), true.into());
@@ -320,8 +384,30 @@ async fn apply_command(
                     "thread.metadata.update" => {
                         if let Some(title) = command.get("title") {
                             patch.insert("title".into(), title.clone());
+                            row["title"] = title.clone();
+                            row["titleRenamed"] = true.into();
+                            row["titleRegeneration"] = Value::Null;
                         }
                     }
+                    "thread.runtime-mode.set" => {
+                        row["runtimeMode"] = command["runtimeMode"].clone()
+                    }
+                    "thread.interaction-mode.set" => {
+                        row["interactionMode"] = command["interactionMode"].clone()
+                    }
+                    "thread.model-selection.set" | "provider.switch" => {
+                        row["modelSelection"] = command["modelSelection"].clone();
+                        row["providerInstanceId"] = command["modelSelection"]["instanceId"].clone();
+                    }
+                    "thread.auto-settle.set" => {
+                        row["autoSettleDisabledAt"] = if command["enabled"] == true {
+                            Value::Null
+                        } else {
+                            at
+                        }
+                    }
+                    "thread.pin.reorder" => row["pinOrderKey"] = command["orderKey"].clone(),
+                    "thread.active.reorder" => row["activeOrderKey"] = command["orderKey"].clone(),
                     "thread.tag.set" => {
                         let tag = command.get("tag").and_then(serde_json::Value::as_str);
                         let tagged = command
@@ -344,10 +430,12 @@ async fn apply_command(
                                 tags.retain(|value| value != tag);
                             }
                         }
+                        row["tags"] = json!(tags);
                         patch.insert("tags".into(), serde_json::json!(tags));
                     }
                     _ => {}
                 }
+                patch.insert("row".into(), row);
                 return Ok(state
                     .commit_receipted(
                         Event::ThreadPatched {

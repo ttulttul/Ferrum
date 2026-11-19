@@ -4,6 +4,7 @@ fn main() {
     println!("cargo:rerun-if-changed=contracts/http.json");
     println!("cargo:rerun-if-changed=contracts/rpc.json");
     println!("cargo:rerun-if-changed=contracts/commands.json");
+    println!("cargo:rerun-if-changed=contracts/projections.json");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let http: Vec<serde_json::Value> = serde_json::from_str(
         &fs::read_to_string("contracts/http.json").expect("contracts/http.json"),
@@ -54,6 +55,13 @@ fn main() {
             })
             .collect::<String>()
     );
+    let projections: std::collections::BTreeMap<String, Vec<String>> =
+        serde_json::from_str(include_str!("contracts/projections.json"))
+            .expect("valid projection inventory");
+    for (name, fields) in projections {
+        fs::write(out.join(format!("{name}.rs")), format!("&{fields:?}"))
+            .expect("write projection fields");
+    }
     let commands: std::collections::BTreeMap<String, Vec<String>> =
         serde_json::from_str(include_str!("contracts/commands.json"))
             .expect("valid command inventory");

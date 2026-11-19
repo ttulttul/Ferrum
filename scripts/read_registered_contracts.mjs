@@ -38,4 +38,10 @@ for (const [source, name] of [
     }
   }
 }
-process.stdout.write(JSON.stringify({http, fields, commands}));
+const orchestration = await import(pathToFileURL(resolve(root, "packages/contracts/src/orchestrationV2.ts")));
+const projections = {};
+for (const name of ["OrchestrationV2AppThread", "OrchestrationV2ThreadShell"]) {
+  const ast = Schema.toEncoded(Schema.toCodecJson(orchestration[name])).ast;
+  projections[name] = ast.propertySignatures.map(field => field.name);
+}
+process.stdout.write(JSON.stringify({http, fields, commands, projections}));

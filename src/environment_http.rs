@@ -90,7 +90,7 @@ pub(super) fn shell(store: &Store, sequence: u64) -> Value {
             out
         })
         .collect::<Vec<_>>();
-    json!({"schemaVersion":2,"snapshotSequence":sequence,"threads":store.threads.values().filter(|t|!t.archived).collect::<Vec<_>>(),"archivedThreads":[],"projects":projects})
+    json!({"schemaVersion":2,"snapshotSequence":sequence,"threads":store.threads.values().filter(|t|!t.archived).map(|t|t.shell()).collect::<Vec<_>>(),"archivedThreads":[],"projects":projects})
 }
 pub(super) async fn shell_snapshot(
     State(state): State<Arc<AppState>>,
@@ -158,9 +158,14 @@ pub(super) async fn thread_snapshot(
         return (StatusCode::NOT_FOUND,Json(json!({"_tag":"EnvironmentResourceNotFoundError","code":"not_found","reason":"thread_not_found","traceId":crate::trace_id(&h)}))).into_response();
     };
     if uri.path().ends_with("/transcript") {
-        return Json(json!({"threadId":thread.id,"title":thread.title,"items":thread.messages}))
+        return Json(json!({"threadId":thread.id,"title":thread.title,"updatedAt":thread.stored_row()["updatedAt"],"items":thread.messages}))
             .into_response();
     }
-    Json(json!({"snapshotSequence":*state.next_event_id.lock().await,"projection":thread}))
-        .into_response()
+    let mut out = json!({"snapshotSequence":*state.next_event_id.lock().await,"projection":thread.projection()});
+    if uri.path().ends_with("/bounded") {
+        out["historyCursor"] = Value::Null;
+        out["hasMoreHistory"] = false.into();
+        out["latestLocalTurnOrdinal"] = Value::Null;
+    }
+    Json(out).into_response()
 }
