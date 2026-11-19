@@ -21,6 +21,7 @@ use tracing::info;
 use uuid::Uuid;
 
 pub mod access_http;
+pub mod asset_http;
 pub mod auth_service;
 pub mod config;
 mod config_rpc;
@@ -470,6 +471,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_session,
         ))
+        .merge(asset_http::routes())
         .merge(mcp_oauth::routes())
         .merge(access_http::routes())
         .merge(host_rpc::routes())

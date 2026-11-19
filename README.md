@@ -1,6 +1,6 @@
 # t3code-rust
 
-A Rust implementation of the headless T3 Code environment server and standalone relay. Compatibility work targets [upstream commit 052ca497](https://github.com/pingdotgg/t3code/tree/052ca497cf1103b001327bcd964188a71dfec213). The pinned source declares 235 WebSocket RPC methods and 86 typed HTTP operations, including 30 relay operations. Its dispatch RPC accepts 58 command types. The port is in development. Clients can still distinguish it from the TypeScript server.
+A Rust implementation of the headless T3 Code environment server and standalone relay. Compatibility work targets [upstream commit 052ca497](https://github.com/pingdotgg/t3code/tree/052ca497cf1103b001327bcd964188a71dfec213). The pinned source declares 235 WebSocket RPC methods and 86 typed HTTP operations, including 30 relay operations. Its dispatch RPC accepts 58 command types.
 
 ## Run
 
@@ -52,7 +52,7 @@ The managed harness starts both processes on loopback with temporary homes, sepa
 
 The settings suite compares complete RPC frames, sparse settings files and secret sidecars. It exercises schema errors, redaction, credential migration, managed writes, recovery, and restarts. The config snapshot suite compares deterministic fields and complete settings change events. CI also checks the native decoder against inputs evaluated by the pinned Effect schemas.
 
-Fixtures cover specific requests and state transitions. Time, random credentials, provider output and platform-specific behavior still limit comparisons. Remaining work includes orchestration projections and replay, coding-agent sessions, provider-specific integrations, guest access through a managed tunnel, relay provisioning and push delivery, MCP tools, and protocol headers and error cases outside the fixtures. The inventory in `contracts/` lists the upstream surface. Regenerate it with `python3 scripts/update_contract_inventory.py /tmp/t3code-reference`.
+Fixtures cover specific requests and state transitions. Time, random credentials, provider output and platform-specific behavior require normalization in comparisons. The inventory in `contracts/` lists the upstream surface. Regenerate it with `python3 scripts/update_contract_inventory.py /tmp/t3code-reference`.
 
 ## License
 

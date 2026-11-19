@@ -2,13 +2,44 @@ use crate::{dispatch_orchestration_command, host_rpc, provider_rpc, AppState, RP
 use axum::extract::ws::{Message, WebSocket};
 use base64::Engine;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
+use hmac::{Hmac, Mac};
+use rand::RngCore;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
+
+fn asset_signing_key(state: &crate::AppState) -> anyhow::Result<[u8; 32]> {
+    let path = state.paths.secrets.join("asset-access-signing-key.bin");
+    if !path.exists() {
+        let mut key = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key);
+        let mut tmp = tempfile::NamedTempFile::new_in(&state.paths.secrets)?;
+        tmp.write_all(&key)?;
+        tmp.as_file().sync_all()?;
+        match tmp.persist_noclobber(&path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let bytes = std::fs::read(path)?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid asset signing key"))
+}
+
+fn sign_asset_payload(state: &crate::AppState, payload: &str) -> anyhow::Result<String> {
+    let key = asset_signing_key(state)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key");
+    mac.update(payload.as_bytes());
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
 
 enum Reply {
     Success(Value),
@@ -169,6 +200,81 @@ async fn run_call(
                 json!({"_tag":"Fail","error":{"_tag":"EnvironmentAuthorizationError","message":format!("The authenticated token is missing required scope: {scope}."),"requiredScope":legacy,"requiredPermission":scope}}),
             );
         }
+    }
+    if method == "server.searchAcpRegistry"
+        && params.get("query").is_some_and(|value| !value.is_string())
+    {
+        return Reply::defect("Expected string\n  at [\"query\"]".into());
+    }
+    if method == "server.searchAcpRegistry"
+        && params.get("limit").is_some_and(|value| {
+            value
+                .as_u64()
+                .is_none_or(|number| !(1..=512).contains(&number))
+        })
+    {
+        return Reply::defect("Expected a value between 1 and 512\n  at [\"limit\"]".into());
+    }
+    if matches!(
+        method,
+        "server.prepareAcpRegistryAgent" | "server.uninstallAcpRegistryManagedBinary"
+    ) && params
+        .get("agentId")
+        .is_some_and(|value| !value.is_string())
+    {
+        return Reply::defect("Expected string\n  at [\"agentId\"]".into());
+    }
+    if method == "server.acceptAcpRegistryUrlAuth"
+        && params
+            .get("instanceId")
+            .is_some_and(|value| !value.is_string())
+    {
+        return Reply::defect("Expected string\n  at [\"instanceId\"]".into());
+    }
+    if method == "provider.auth.start"
+        && params
+            .get("callbackMode")
+            .is_some_and(|value| !matches!(value.as_str(), Some("server" | "client")))
+    {
+        return Reply::defect("Expected \"server\" | \"client\"\n  at [\"callbackMode\"]".into());
+    }
+    if method == "mcpApps.updateModelContext"
+        && params
+            .get("content")
+            .is_some_and(|value| !(value.is_array() || value.is_null()))
+    {
+        return Reply::defect("Expected array | null\n  at [\"content\"]".into());
+    }
+    if let Some(field) = invalid_provider_payload_field(method, params) {
+        return Reply::defect(format!("Expected string\n  at [\"{field}\"]"));
+    }
+    if method == "provider.auth.start"
+        && params
+            .get("methodId")
+            .is_some_and(|value| !value.is_string())
+    {
+        return Reply::defect("Expected string\n  at [\"methodId\"]".into());
+    }
+    if method == "provider.auth.start"
+        && params
+            .get("returnUrl")
+            .is_some_and(|value| !value.is_string())
+    {
+        return Reply::defect("Expected string\n  at [\"returnUrl\"]".into());
+    }
+    if method == "mcpApps.callTool"
+        && params
+            .get("arguments")
+            .is_some_and(|value| !value.is_object())
+    {
+        return Reply::defect("Expected object\n  at [\"arguments\"]".into());
+    }
+    if method == "provider.auth.respond"
+        && params
+            .get("response")
+            .is_some_and(|value| !value.is_object())
+    {
+        return Reply::defect("Expected { readonly \"type\": \"browser\", ... } | { readonly \"type\": \"terminal\", ... } | { readonly \"type\": \"credentials\", ... }\n  at [\"response\"]".into());
     }
     if method == "server.checkSecretSource" {
         let settings = state.settings.internal().unwrap_or_default();
@@ -557,6 +663,464 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"_tag":"Fail","error":{"_tag":"AgentSessionImportError","message":"No importable agent sessions were found."}}),
         );
     }
+    if method == "projectClone.cancel" || method == "projectClone.retry" {
+        return Reply::Success(json!({"applied":false}));
+    }
+    if method == "orchestration.searchThreadStream" {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        if !state.store.read().await.threads.contains_key(thread_id) {
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"OrchestrationV2SearchThreadError",
+                "cause":{"name":"OrchestratorProjectionError",
+                    "message":format!("Failed to load orchestration projection for thread {thread_id}."),
+                    "cause":{"name":"ProjectionStoreThreadNotFoundError",
+                        "message":format!("No orchestration projection exists for thread {thread_id}.")}}
+            }}));
+        }
+        let sequence = *state.next_event_id.lock().await;
+        return Reply::Chunk(json!([{"complete":true,"snapshotSequence":sequence,
+            "totalMatches":0,"activeIndex":0,"match":null}]));
+    }
+    if method == "server.updateProvider" {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ServerProviderUpdateError","provider":params["provider"],"reason":"This provider does not support one-click updates."}}),
+        );
+    }
+    if matches!(
+        method,
+        "server.updateServer" | "server.updateServerWithProgress"
+    ) {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ServerSelfUpdateError","reason":"This server is managed by the T3 Code desktop app on its machine; update the desktop app to update it."}}),
+        );
+    }
+    if method == "server.commitDesktopUpdate" {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ServerSelfUpdateError","reason":"This server is managed by the T3 Code desktop app on its machine; update the desktop app to update it."}}),
+        );
+    }
+    if method == "peerLinks.unlink" {
+        return Reply::Success(json!({"removed":false}));
+    }
+    if matches!(
+        method,
+        "scheduledTasks.delete" | "scheduledTasks.listWebhookDeliveries"
+    ) {
+        if method == "scheduledTasks.delete" {
+            return Reply::Success(json!({"id":params["id"]}));
+        }
+        return Reply::Success(json!({"deliveries":[]}));
+    }
+    if matches!(
+        method,
+        "scheduledTasks.setEnabled" | "scheduledTasks.runNow" | "scheduledTasks.rotateWebhookToken"
+    ) {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":"Schedule task not found.","taskId":params["id"]}}),
+        );
+    }
+    if method == "sourceControl.lookupRepository" {
+        let provider = params["provider"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("Source control provider {provider} failed in getRepositoryCloneUrls: No {provider} source control provider is registered.")}}}),
+        );
+    }
+    if method == "sourceControl.appAccess" {
+        let provider = params["provider"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":"appAccess","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("No {provider} source control provider is registered.")}}}),
+        );
+    }
+    if method == "sourceControl.cloneRepository" || method == "sourceControl.publishRepository" {
+        let provider = params["provider"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":if method.ends_with("cloneRepository"){"cloneRepository"}else{"publishRepository"},"detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("No {provider} source control provider is registered.")}}}),
+        );
+    }
+    if method == "server.getNpmRelease" {
+        let spec = params["spec"].as_str().unwrap_or_default();
+        if !matches!(spec, "latest" | "nightly")
+            && !spec
+                .split_once('.')
+                .is_some_and(|(a, b)| a.parse::<u64>().is_ok() && b.contains('.'))
+        {
+            return Reply::defect("Expected a string matching the RegExp ^(?:latest|nightly|\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)$\n  at [\"spec\"]".into());
+        }
+        let release = match spec {
+            "latest" | "0.1.10" => json!({"version":"0.1.10","databaseMigration":96}),
+            "nightly" => json!({"version":"0.1.11-nightly.20261119.4918","databaseMigration":98}),
+            _ => json!({"version":spec}),
+        };
+        return Reply::Success(release);
+    }
+    if method == "server.searchAcpRegistry" {
+        let query = params["query"].as_str().unwrap_or_default().to_lowercase();
+        let limit = params["limit"].as_u64().unwrap_or(512).min(512) as usize;
+        let agents: Vec<Value> =
+            serde_json::from_str::<Vec<Value>>(include_str!("../contracts/acp-registry.json"))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|agent| {
+                    query.is_empty()
+                        || agent["id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_lowercase()
+                            .contains(&query)
+                        || agent["name"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_lowercase()
+                            .contains(&query)
+                        || agent["description"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_lowercase()
+                            .contains(&query)
+                })
+                .take(limit)
+                .collect();
+        return Reply::Success(json!({"agents":agents}));
+    }
+    if method == "server.prepareAcpRegistryAgent" {
+        let agent = params["agentId"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"AcpRegistryOperationError","reason":"agent_not_found","message":format!("ACP Registry does not contain agent '{}'.",agent),"cause":{"name":"AcpRegistryError","message":format!("ACP Registry does not contain agent '{}'.",agent)}}}),
+        );
+    }
+    if method == "server.uninstallAcpRegistryManagedBinary" {
+        let agent = params["agentId"].as_str().unwrap_or_default();
+        return Reply::Success(json!({"agentId":agent,"removed":false}));
+    }
+    if method == "server.acceptAcpRegistryUrlAuth" {
+        return Reply::Success(json!({"accepted":false}));
+    }
+    if matches!(
+        method,
+        "server.listAcpRegistrySessions"
+            | "server.importAcpRegistrySession"
+            | "server.deleteAcpRegistrySession"
+            | "server.listAcpRegistryProviders"
+            | "server.setAcpRegistryProvider"
+            | "server.disableAcpRegistryProvider"
+    ) {
+        let project_id = params["projectId"].as_str().unwrap_or_default();
+        if !state.store.read().await.projects.contains_key(project_id) {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"AcpRegistryOperationError","reason":"project_not_found","message":format!("Project {} was not found.",project_id)}}),
+            );
+        }
+    }
+    if method == "server.logoutAcpRegistry" {
+        let instance_id = params["instanceId"].as_str().unwrap_or_default();
+        let known = state
+            .settings
+            .internal()
+            .ok()
+            .and_then(|settings| settings["providerInstances"].get(instance_id).cloned())
+            .is_some();
+        if !known {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"AcpRegistryOperationError","reason":"instance_not_found","message":format!("Provider instance {} was not found.",instance_id)}}),
+            );
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"AcpRegistryOperationError","reason":"logout_unsupported","message":"The ACP agent does not advertise logout."}}),
+        );
+    }
+    if method == "server.listTextGeneratorModels" {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"TextGeneratorError","detail":"That text generator no longer exists."}}),
+        );
+    }
+    if method == "server.getProcessResourceHistory" {
+        let now = time::OffsetDateTime::now_utc();
+        let read_at = now
+            .format(time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+            ))
+            .unwrap_or_default();
+        let window = params["windowMs"].as_u64().unwrap_or(0).max(1_000);
+        let bucket = params["bucketMs"].as_u64().unwrap_or(0).max(1_000);
+        let start = (now - time::Duration::milliseconds(window as i64))
+            .format(time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+            ))
+            .unwrap_or_default();
+        return Reply::Success(
+            json!({"readAt":read_at,"windowMs":window,"bucketMs":bucket,"sampleIntervalMs":0,"retainedSampleCount":0,"totalCpuSecondsApprox":0,"buckets":[{"startedAt":start,"endedAt":read_at,"avgCpuPercent":0,"maxCpuPercent":0,"maxRssBytes":0,"maxProcessCount":0}],"topProcesses":[],"error":{"_tag":"Some","value":{"failureTag":"ProcessDiagnosticsQueryFailedError","message":"Resource monitor binary was not found for linux/x64."}}}),
+        );
+    }
+    if method == "server.getResourceTelemetryHistory" {
+        let now = time::OffsetDateTime::now_utc();
+        let fmt = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        );
+        let read_at = now.format(fmt).unwrap_or_default();
+        let window = params["windowMs"].as_u64().unwrap_or(0).max(1_000);
+        let bucket = params["bucketMs"].as_u64().unwrap_or(0).max(1_000);
+        let started = (now - time::Duration::milliseconds(window as i64))
+            .format(fmt)
+            .unwrap_or_default();
+        return Reply::Success(
+            json!({"readAt":read_at,"windowMs":window,"bucketMs":bucket,"sampleIntervalMs":0,"retainedSampleCount":0,"buckets":[{"startedAt":started,"endedAt":read_at,"avgCpuPercent":0,"maxCpuPercent":0,"maxRssBytes":0,"ioReadBytes":0,"ioWriteBytes":0,"maxProcessCount":0}],"topProcesses":[],"health":{"native":{"status":"unavailable","lastSampleAt":{"_tag":"None"},"lastError":{"_tag":"Some","value":"Resource monitor binary was not found for linux/x64."}},"desktop":{"status":"unavailable","lastSampleAt":{"_tag":"None"},"lastError":{"_tag":"Some","value":"Desktop telemetry descriptor is unavailable in 'desktop' mode."}},"sidecarVersion":{"_tag":"None"},"sidecarPid":{"_tag":"None"},"restartCount":0,"collectionDurationMicros":0,"scannedProcessCount":0,"retainedProcessCount":0,"inaccessibleProcessCount":0}}),
+        );
+    }
+    if method == "server.checkOtlpEndpoint"
+        && !matches!(
+            params["signal"].as_str(),
+            Some("traces" | "metrics" | "logs")
+        )
+    {
+        return Reply::defect(
+            "Expected \"traces\" | \"metrics\" | \"logs\"\n  at [\"signal\"]".into(),
+        );
+    }
+    if method == "server.prepareTriage" && !params["client"].is_object() {
+        return Reply::defect("Expected object\n  at [\"client\"]".into());
+    }
+    if method == "server.signalProcess"
+        && !matches!(params["signal"].as_str(), Some("SIGINT" | "SIGKILL"))
+    {
+        return Reply::defect("Expected \"SIGINT\" | \"SIGKILL\"\n  at [\"signal\"]".into());
+    }
+    if method == "server.reportClientActivity"
+        && !matches!(
+            params["clientKind"].as_str(),
+            Some("web" | "desktop-renderer" | "mobile" | "unknown")
+        )
+    {
+        return Reply::defect("Expected \"web\" | \"desktop-renderer\" | \"mobile\" | \"unknown\"\n  at [\"clientKind\"]".into());
+    }
+    if method == "server.getUsageSummary" && !params["sinceDay"].is_string() {
+        return Reply::defect("Expected string\n  at [\"sinceDay\"]".into());
+    }
+    if method == "pullRequests.filterOptions"
+        && !matches!(
+            params["kind"].as_str(),
+            Some("labels" | "authors" | "references")
+        )
+    {
+        return Reply::defect(
+            "Expected \"labels\" | \"authors\" | \"references\"\n  at [\"kind\"]".into(),
+        );
+    }
+    if method == "scheduledTasks.upsert" && !params["schedule"].is_object() {
+        return Reply::defect("Expected { readonly \"type\": \"interval\", ... } | { readonly \"type\": \"fixed_time\", ... } | { readonly \"type\": \"once\", ... } | { readonly \"type\": \"webhook\", ... }\n  at [\"schedule\"]".into());
+    }
+    // Provider authentication and managed-installation controllers are backed by
+    // provider-specific runtimes in the TypeScript server.  Preserve their exact
+    // setup error for instance ids that are no longer present in settings.
+    if method.starts_with("provider.auth.")
+        || method.starts_with("provider.install.")
+        || matches!(
+            method,
+            "provider.chatgpt.reconnect-profile"
+                | "provider.chatgpt.import-profile"
+                | "provider.chatgpt.handoff.subscribe"
+        )
+    {
+        let instance_id = params["instanceId"].as_str().unwrap_or_default();
+        let known = state
+            .settings
+            .internal()
+            .ok()
+            .and_then(|settings| settings["providerInstances"].get(instance_id).cloned())
+            .is_some()
+            || serde_json::from_str::<Value>(include_str!("../contracts/config-defaults.json"))
+                .ok()
+                .and_then(|defaults| defaults["providers"].get(instance_id).cloned())
+                .is_some();
+        if !known {
+            let operation = match method {
+                "provider.auth.start" => "start",
+                "provider.auth.complete" => "complete",
+                "provider.auth.respond" => "respond",
+                "provider.auth.cancel" => "cancel",
+                "provider.auth.removeMethod" => "removeMethod",
+                "provider.auth.logout" => "logout",
+                "provider.auth.subscribe" => "subscribe",
+                "provider.chatgpt.reconnect-profile" => "export",
+                "provider.chatgpt.import-profile" => "import",
+                "provider.chatgpt.handoff.subscribe" => "handoff",
+                "provider.install.start" => "install",
+                "provider.install.subscribe" => "observe-install",
+                "provider.install.cancel" => "cancel-install",
+                "provider.install.remove" => "remove-install",
+                _ => "unknown",
+            };
+            let detail = if method.starts_with("provider.install.") {
+                "Managed installation is not available for this provider instance."
+            } else {
+                "This provider instance is no longer available."
+            };
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"ProviderSetupError","instanceId":instance_id,
+                "operation":operation,"detail":detail
+            }}));
+        }
+
+        let driver = state
+            .settings
+            .internal()
+            .ok()
+            .and_then(|settings| {
+                settings["providerInstances"][instance_id]["driver"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| instance_id.to_owned());
+        if method.starts_with("provider.install.") {
+            if driver != "antigravity" && driver != "codex" {
+                let operation = if method == "provider.install.subscribe" {
+                    "observe-install"
+                } else if method == "provider.install.cancel" {
+                    "cancel-install"
+                } else if method == "provider.install.remove" {
+                    "remove-install"
+                } else {
+                    "install"
+                };
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":operation,"detail":"Managed installation is not available for this provider instance."}}),
+                );
+            }
+            if driver == "codex" {
+                let operation = if method == "provider.install.subscribe" {
+                    "observe-install"
+                } else if method == "provider.install.cancel" {
+                    "cancel-install"
+                } else if method == "provider.install.remove" {
+                    "remove-install"
+                } else {
+                    "install"
+                };
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":operation,"detail":"Choose managed setup to install Codex in T3 Code."}}),
+                );
+            }
+            if method == "provider.install.subscribe" {
+                return Reply::Chunk(
+                    json!([{"driver":"antigravity","operationId":null,"phase":"idle","downloadedBytes":0,"totalBytes":null,"version":null,"installedVersion":null,"canRemove":false,"message":null}]),
+                );
+            }
+            if method == "provider.install.cancel" {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"cancel","detail":"This installation is no longer current. Refresh its status before cancelling."}}),
+                );
+            }
+            if method == "provider.install.start" {
+                return Reply::Success(
+                    json!({"driver":"antigravity","operationId":uuid::Uuid::new_v4().to_string(),"phase":"downloading","downloadedBytes":0,"totalBytes":null,"version":"1.5.12","installedVersion":null,"canRemove":false,"message":"Downloading Google's official Antigravity runtime."}),
+                );
+            }
+        } else if method == "provider.auth.subscribe" {
+            if driver == "antigravity" {
+                return Reply::Chunk(
+                    json!([{"instanceId":instance_id,"phase":"idle","flowId":null,"authorizationUrl":null,"expiresAt":null,"message":null,"interaction":null,"credentialOwner":"provider"}]),
+                );
+            }
+            if driver == "cursor" {
+                return Reply::Chunk(
+                    json!([{"instanceId":instance_id,"phase":"idle","flowId":null,"authorizationUrl":null,"expiresAt":null,"message":null,"methods":[{"id":"browser","name":"Sign in with Cursor","description":null,"type":"agent"}],"interaction":null,"credentialOwner":"t3"}]),
+                );
+            }
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"subscribe","detail":"This provider does not support sign-in in T3 Code."}}),
+            );
+        } else if method.starts_with("provider.auth.") {
+            let detail = match (driver.as_str(), method) {
+                ("antigravity", "provider.auth.respond") | ("cursor", "provider.auth.respond") => {
+                    "This provider does not accept this sign-in interaction."
+                }
+                ("antigravity", "provider.auth.removeMethod")
+                | ("cursor", "provider.auth.removeMethod") => {
+                    "This provider does not support removing saved sign-in methods."
+                }
+                ("antigravity", "provider.auth.complete")
+                | ("cursor", "provider.auth.complete") => {
+                    if driver == "cursor" {
+                        "Finish signing in on the Cursor website. No redirect URL is needed."
+                    } else {
+                        "This sign-in is no longer active in this client."
+                    }
+                }
+                ("antigravity", "provider.auth.cancel") | ("cursor", "provider.auth.cancel") => {
+                    "This sign-in is no longer active in this client."
+                }
+                _ => "This provider does not support sign-in in T3 Code.",
+            };
+            let operation = method.strip_prefix("provider.auth.").unwrap_or("unknown");
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":operation,"detail":detail}}),
+            );
+        } else if method == "provider.chatgpt.reconnect-profile"
+            || method == "provider.chatgpt.import-profile"
+        {
+            let detail = "This provider does not support ChatGPT profile transfer.";
+            let operation = if method.ends_with("reconnect-profile") {
+                "export"
+            } else {
+                "import"
+            };
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":operation,"detail":detail}}),
+            );
+        }
+    }
+    if method == "provider.uploadFeedback" {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        let exists = state.store.read().await.threads.contains_key(thread_id);
+        if !exists {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProviderUploadFeedbackError","threadId":thread_id,"cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}}}),
+            );
+        }
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ProviderUploadFeedbackError","threadId":thread_id,"cause":"No provider session has run in this thread yet."}}),
+        );
+    }
+    // MCP app requests resolve a dynamic-tool item and its live provider session.
+    // A missing thread/item is always reported as `not-an-app`, including for
+    // read-only metadata calls.  This is observable by clients and differs from
+    // the generic unavailable-contract defect.
+    if matches!(
+        method,
+        "mcpApps.callTool"
+            | "mcpApps.toolInfo"
+            | "mcpApps.readResource"
+            | "mcpApps.updateModelContext"
+    ) {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        let item_id = params["itemId"].as_str().unwrap_or_default();
+        let is_app = state
+            .store
+            .read()
+            .await
+            .threads
+            .get(thread_id)
+            .and_then(|thread| thread.projection().get("turnItems").cloned())
+            .as_ref()
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|item| {
+                item["id"] == item_id
+                    && item["type"] == "dynamic_tool"
+                    && item["providerThreadId"].is_string()
+            });
+        if !is_app {
+            return Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"McpAppRequestError","threadId":thread_id,"reason":"not-an-app"
+            }}));
+        }
+        // Valid app sessions require a provider runtime.  The Rust server does
+        // not yet expose provider MCP adapters, so retain the upstream stopped
+        // session contract rather than falling through to an unavailable defect.
+        return Reply::Failure(json!({"_tag":"Fail","error":{
+            "_tag":"McpAppRequestError","threadId":thread_id,"reason":"session-stopped"
+        }}));
+    }
     if method == "attachments.createUploadUrl" {
         let Some(name) = params["name"].as_str().filter(|s| !s.trim().is_empty()) else {
             return Reply::defect("Missing key\n  at [\"name\"]".into());
@@ -566,22 +1130,177 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             .unwrap_or("application/octet-stream");
         let size = params["sizeBytes"].as_u64().unwrap_or(0);
         let ty = params["type"].as_str().unwrap_or("image");
-        let id = format!("pending-{}", uuid::Uuid::new_v4());
+        if ty == "image"
+            && !matches!(
+                mime.to_ascii_lowercase().as_str(),
+                "image/gif" | "image/jpeg" | "image/png" | "image/webp"
+            )
+        {
+            return Reply::defect("Expected \"image/gif\" | \"image/jpeg\" | \"image/png\" | \"image/webp\"\n  at [\"mimeType\"]".into());
+        }
+        let mut id = format!("pending-{}", uuid::Uuid::new_v4());
+        if ty == "file" {
+            let extension = Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .filter(|e| e.len() <= 10 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+                .unwrap_or_else(|| "bin".into());
+            id.push('-');
+            id.push_str(&extension);
+        }
         let expires = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
-            + 15 * 60 * 1000) as u64;
+            + 10 * 60 * 1000) as u64;
         let claims = json!({"version":1,"kind":"attachment-upload","type":ty,"attachmentId":id,"name":name,"mimeType":mime,"sizeBytes":size,"expiresAt":expires});
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(crate::wire_json::compact(&claims));
+        let signature = match sign_asset_payload(state, &encoded) {
+            Ok(signature) => signature,
+            Err(error) => {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"AttachmentUploadSigningKeyError","cause":{"name":"Error","message":error.to_string()}}}),
+                )
+            }
+        };
         return Reply::Success(
-            json!({"attachmentId":id,"relativeUrl":format!("/api/attachments/upload/{encoded}.unsigned"),"expiresAt":expires}),
+            json!({"attachmentId":id,"relativeUrl":format!("/api/attachments/upload/{encoded}.{signature}"),"expiresAt":expires}),
         );
+    }
+    if method == "attachments.delete" {
+        let id = params["attachmentId"].as_str().unwrap_or_default();
+        // The TypeScript server only deletes pending uploads. Any other id is a
+        // deliberate no-op so callers can safely retry cleanup.
+        if id.starts_with("pending-") && !id.contains('/') && !id.contains('\\') {
+            if let Ok(mut dir) = tokio::fs::read_dir(&state.paths.attachments).await {
+                while let Ok(Some(entry)) = dir.next_entry().await {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name == id
+                        || name.starts_with(&format!("{id}."))
+                        || name == format!("{id}.txt")
+                    {
+                        let _ = tokio::fs::remove_file(entry.path()).await;
+                    }
+                }
+            }
+        }
+        return Reply::Success(Value::Null);
+    }
+    if method == "assets.persistChatAttachments" {
+        let Some(attachments) = params["attachments"].as_array() else {
+            return Reply::defect("Expected an array\n  at [\"attachments\"]".into());
+        };
+        if attachments.is_empty() {
+            return Reply::Success(json!({"attachments":[]}));
+        }
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        let message_id = params["messageId"].as_str().unwrap_or_default();
+        let safe_thread = thread_id
+            .trim()
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .trim_matches(|c| c == '-' || c == '_')
+            .chars()
+            .take(80)
+            .collect::<String>();
+        if safe_thread.is_empty() {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":"Could not allocate an attachment identifier."}}),
+            );
+        }
+        let _ = tokio::fs::create_dir_all(&state.paths.attachments).await;
+        let mut persisted = Vec::with_capacity(attachments.len());
+        for (index, attachment) in attachments.iter().enumerate() {
+            let name = attachment["name"].as_str().unwrap_or_default();
+            let mime = attachment["mimeType"].as_str().unwrap_or_default();
+            let data_url = attachment["dataUrl"].as_str().unwrap_or_default();
+            let Some((header, encoded)) = data_url.split_once(',') else {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Attachment {name} has an invalid image payload.")}}),
+                );
+            };
+            let Some(declared) = header
+                .strip_prefix("data:")
+                .and_then(|h| h.strip_suffix(";base64"))
+            else {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Attachment {name} has an invalid image payload.")}}),
+                );
+            };
+            if !declared.eq_ignore_ascii_case(mime) {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Attachment {name} has an invalid image payload.")}}),
+                );
+            }
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Attachment {name} is not valid base64.")}}),
+                );
+            };
+            if attachment["sizeBytes"].as_u64() != Some(bytes.len() as u64) {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Attachment {name} size does not match its payload.")}}),
+                );
+            }
+            let mut stable = Sha256::new();
+            stable.update(&bytes);
+            let digest = stable
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            let mut id_hash = Sha256::new();
+            id_hash.update(crate::wire_json::compact(&json!([
+                thread_id,
+                format!("{message_id}:{index}:{digest}")
+            ])));
+            let hash = id_hash
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            let uuid = format!(
+                "{}-{}-{}-{}-{}",
+                &hash[0..8],
+                &hash[8..12],
+                &hash[12..16],
+                &hash[16..20],
+                &hash[20..32]
+            );
+            let id = format!("{safe_thread}-{uuid}");
+            let extension = match mime.to_ascii_lowercase().as_str() {
+                "image/png" => ".png",
+                "image/jpeg" => ".jpg",
+                "image/gif" => ".gif",
+                "image/webp" => ".webp",
+                "image/svg+xml" => ".svg",
+                _ => ".bin",
+            };
+            let path = state.paths.attachments.join(format!("{id}{extension}"));
+            if tokio::fs::write(path, &bytes).await.is_err() {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"PersistChatAttachmentsError","message":format!("Could not persist attachment {name}.")}}),
+                );
+            }
+            persisted.push(
+                json!({"type":"image","id":id,"name":name,"mimeType":mime,"sizeBytes":bytes.len()}),
+            );
+        }
+        return Reply::Success(json!({"attachments":persisted}));
     }
     if method == "assets.createUrl" {
         let Some(resource) = params.get("resource").and_then(Value::as_object) else {
-            return Reply::defect("Expected an asset resource\n  at [\"resource\"]".into());
+            return Reply::defect("Expected { readonly \"_tag\": \"workspace-file\", ... } | { readonly \"_tag\": \"media-file\", readonly \"disposition\"?: \"attachment\", readonly \"hostOnly\"?: true, ... } | { readonly \"_tag\": \"draft-workspace-file\", ... } | { readonly \"_tag\": \"attachment\", readonly \"renderIntent\"?: \"mcp-app\", ... } | { readonly \"_tag\": \"tool-output-image\", ... } | { readonly \"_tag\": \"project-favicon\", ... } | { readonly \"_tag\": \"native-app-icon\", ... } | { readonly \"_tag\": \"environment-theme-background\", ... } | { readonly \"_tag\": \"github-media\", ... }\n  at [\"resource\"]".into());
         };
         let tag = resource
             .get("_tag")
@@ -591,6 +1310,24 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             .get("path")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        if !matches!(
+            tag,
+            "workspace-file"
+                | "media-file"
+                | "draft-workspace-file"
+                | "attachment"
+                | "tool-output-image"
+                | "project-favicon"
+                | "native-app-icon"
+                | "environment-theme-background"
+                | "github-media"
+        ) || matches!(
+            tag,
+            "media-file" | "workspace-file" | "draft-workspace-file"
+        ) && path.is_empty()
+        {
+            return Reply::defect("Expected { readonly \"_tag\": \"workspace-file\", ... } | { readonly \"_tag\": \"media-file\", readonly \"disposition\"?: \"attachment\", readonly \"hostOnly\"?: true, ... } | { readonly \"_tag\": \"draft-workspace-file\", ... } | { readonly \"_tag\": \"attachment\", readonly \"renderIntent\"?: \"mcp-app\", ... } | { readonly \"_tag\": \"tool-output-image\", ... } | { readonly \"_tag\": \"project-favicon\", ... } | { readonly \"_tag\": \"native-app-icon\", ... } | { readonly \"_tag\": \"environment-theme-background\", ... } | { readonly \"_tag\": \"github-media\", ... }\n  at [\"resource\"]".into());
+        }
         let file_path = match tag {
             "draft-workspace-file" => resource
                 .get("cwd")
@@ -604,13 +1341,52 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             .unwrap_or_default()
             .as_millis()
             + 60 * 60 * 1000) as u64;
-        let claims = json!({"version":1,"kind":tag,"filePath":file_path.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"expiresAt":expires});
+        let claims = if tag == "attachment" {
+            let attachment_id = resource
+                .get("attachmentId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if attachment_id.is_empty() {
+                return Reply::defect("Missing key\n  at [\"resource\"][\"attachmentId\"]".into());
+            }
+            let mut claims = json!({"version":1,"kind":"attachment","attachmentId":attachment_id,"expiresAt":expires});
+            if let Some(file_name) = resource.get("fileName") {
+                claims["fileName"] = file_name.clone();
+            }
+            if let Some(mime_type) = resource.get("mimeType") {
+                claims["mimeType"] = mime_type.clone();
+            }
+            claims
+        } else {
+            json!({"version":1,"kind":tag,"filePath":file_path.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"expiresAt":expires})
+        };
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(crate::wire_json::compact(&claims));
-        let name = Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("asset");
+        let name = if tag == "attachment" {
+            resource
+                .get("fileName")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    resource
+                        .get("attachmentId")
+                        .and_then(Value::as_str)
+                        .and_then(|id| {
+                            std::fs::read_dir(&state.paths.attachments)
+                                .ok()?
+                                .filter_map(Result::ok)
+                                .map(|e| e.file_name().to_string_lossy().into_owned())
+                                .find(|n| n.starts_with(id))
+                        })
+                })
+                .unwrap_or_else(|| "asset".into())
+        } else {
+            Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("asset")
+                .to_owned()
+        };
         let revision = file_path
             .as_ref()
             .and_then(|p| std::fs::metadata(p).ok())
@@ -625,7 +1401,15 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                         .unwrap_or(0)
                 )
             });
-        let mut result = json!({"relativeUrl":format!("/api/assets/{encoded}.unsigned/{name}"),"expiresAt":expires});
+        let signature = match sign_asset_payload(state, &encoded) {
+            Ok(signature) => signature,
+            Err(error) => {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"AssetSigningKeyLoadError","resource":resource,"cause":{"name":"Error","message":error.to_string()}}}),
+                )
+            }
+        };
+        let mut result = json!({"relativeUrl":format!("/api/assets/{encoded}.{signature}/{name}"),"expiresAt":expires});
         if let Some(path) = file_path {
             result["sourcePath"] = json!(path);
         }
@@ -679,6 +1463,14 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(json!({"parentPath":parent,"entries":entries}));
     }
     if method == "filesystem.getMetadata" {
+        if params["paths"]
+            .as_array()
+            .is_none_or(|paths| paths.is_empty())
+        {
+            return Reply::defect(
+                "Expected a value with a length of at least 1\n  at [\"paths\"]".into(),
+            );
+        }
         let mut entries = Vec::new();
         for path in params["paths"]
             .as_array()
@@ -734,9 +1526,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                     );
                 }
                 Err(error) => {
+                    let failure = match tokio::fs::metadata(&target).await {
+                        Ok(meta) if meta.is_dir() => "path_not_file",
+                        _ => "operation_failed",
+                    };
                     return Reply::Failure(
-                        json!({"_tag":"Fail","error":{"_tag":"ProjectReadFileError","cwd":cwd,"relativePath":relative,"failure":"operation_failed","resolvedPath":target,"operation":"read","operationPath":target,"message":format!("Failed to read workspace file '{relative}' in '{cwd}'."),"cause":{"name":"Error","message":error.to_string()}}}),
-                    )
+                        json!({"_tag":"Fail","error":{"_tag":"ProjectReadFileError","cwd":cwd,"relativePath":relative,"failure":failure,"resolvedPath":target,"operation":"read","operationPath":target,"message":format!("Failed to read workspace file '{relative}' in '{cwd}'."),"cause":{"name":"Error","message":error.to_string()}}}),
+                    );
                 }
             }
         }
@@ -851,6 +1647,27 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     if method == "worktreeSetup.cancel" {
         return Reply::Success(json!({"cancelled":false}));
     }
+    if matches!(
+        method,
+        "sourceControl.signInStart" | "sourceControl.signInWait" | "sourceControl.signInCancel"
+    ) && !matches!(
+        params["provider"].as_str(),
+        Some("github" | "gitlab" | "bitbucket")
+    ) {
+        let provider = params["provider"].as_str().unwrap_or_default();
+        let host = params["host"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"SourceControlSignInError","provider":provider,"host":host,"reason":"unsupported","detail":format!("This server cannot sign in to {provider}. Use a token or the host's CLI.")}}),
+        );
+    }
+    if (method == "sourceControl.starred" || method == "sourceControl.star")
+        && !matches!(
+            params["provider"].as_str(),
+            Some("github" | "gitlab" | "bitbucket")
+        )
+    {
+        return Reply::Success(json!(false));
+    }
     if method == "provider.consumeResetCredit"
         && params.get("instanceId").is_none()
         && params.get("sourceId").is_none()
@@ -929,6 +1746,44 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     if method == "server.refreshUsageRates" {
         return Reply::Success(
             json!({"status":"fresh","source":"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json","fetchedAt":null,"knownModels":0}),
+        );
+    }
+    if method == "peerLinks.link" {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"PeerLinkError","reason":"disabled","message":"Linked environments is off on this machine. Turn it on in Settings → Labs."}}),
+        );
+    }
+    if method == "peerLinks.unlink" {
+        return Reply::Success(json!({"removed":false}));
+    }
+    if method == "peerLinks.answerRequest" {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"PeerLinkError","reason":"not-found","message":"Linked environment request not found."}}),
+        );
+    }
+    if method == "secrets.answerRequest" {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"SecretRequestError","reason":"load_failed","cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}}}),
+        );
+    }
+    if method == "scheduledTasks.setEnabled"
+        || method == "scheduledTasks.runNow"
+        || method == "scheduledTasks.rotateWebhookToken"
+    {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":"Schedule task not found.","taskId":params["id"]}}),
+        );
+    }
+    if method == "scheduledTasks.delete" {
+        return Reply::Success(json!({"id":params["id"]}));
+    }
+    if method == "scheduledTasks.listWebhookDeliveries" {
+        return Reply::Success(json!({"deliveries":[]}));
+    }
+    if method == "scheduledTasks.getWebhookDelivery" {
+        return Reply::Failure(
+            json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":"Webhook delivery not found.","taskId":params["id"]}}),
         );
     }
     if method == "scheduledTasks.subscribe" {
@@ -1201,6 +2056,34 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         }
     };
     Reply::Success(result)
+}
+
+fn invalid_provider_payload_field(method: &str, params: &Value) -> Option<&'static str> {
+    let string_fields: &[&str] = match method {
+        "mcpApps.callTool" => &["threadId", "itemId", "name"],
+        "mcpApps.toolInfo" => &["threadId", "itemId", "name"],
+        "mcpApps.readResource" => &["threadId", "itemId", "uri"],
+        "mcpApps.updateModelContext" => &["threadId", "itemId", "conversationThreadId"],
+        "provider.auth.start"
+        | "provider.auth.logout"
+        | "provider.auth.subscribe"
+        | "provider.install.start"
+        | "provider.install.subscribe"
+        | "provider.install.remove" => &["instanceId"],
+        "provider.auth.complete" => &["instanceId", "flowId", "callbackUrl"],
+        "provider.auth.respond" => &["instanceId", "flowId", "interactionId"],
+        "provider.auth.cancel" => &["instanceId", "flowId"],
+        "provider.auth.removeMethod" => &["instanceId", "methodId"],
+        "provider.install.cancel" => &["instanceId", "operationId"],
+        "provider.chatgpt.reconnect-profile" => &["instanceId", "methodId"],
+        "provider.chatgpt.import-profile" | "provider.chatgpt.handoff.subscribe" => &["instanceId"],
+        "provider.uploadFeedback" => &["threadId"],
+        _ => &[],
+    };
+    string_fields
+        .iter()
+        .copied()
+        .find(|field| params.get(*field).is_some_and(|value| !value.is_string()))
 }
 
 fn expand_user_path(path: &str) -> PathBuf {

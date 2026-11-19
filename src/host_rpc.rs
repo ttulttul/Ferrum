@@ -13,6 +13,7 @@ pub async fn dispatch(
         "git" if matches!(name, "resolvePullRequest" | "preparePullRequestThread") => {
             Some(crate::local_services::git_workflow::pull_request(state, name, input).await)
         }
+        "review" => Some(crate::local_services::review::call(state, name, input).await),
         "vcs" => state.vcs.call(name, input, &state.data_dir).await,
         "terminal" => state.terminals.call(name, input).await,
         "preview" if name == "stopLocalServer" => {
