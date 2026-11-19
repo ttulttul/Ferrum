@@ -157,7 +157,7 @@ pub struct AuthService {
     bootstrap_expires: i64,
     port: u16,
     desktop: bool,
-    changes: tokio::sync::broadcast::Sender<access::Change>,
+    changes: Arc<access::Subscribers>,
     invalidations: tokio::sync::watch::Sender<()>,
 }
 impl Default for AuthService {
@@ -180,7 +180,7 @@ impl AuthService {
             bootstrap_expires: now() + DAY,
             port: 3773,
             desktop: true,
-            changes: tokio::sync::broadcast::channel(256).0,
+            changes: Arc::default(),
             invalidations: tokio::sync::watch::channel(()).0,
         }
     }

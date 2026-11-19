@@ -1,5 +1,31 @@
 use super::*;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
+
+// Upstream queues every access change for each active RPC subscription.
+#[derive(Default)]
+pub(super) struct Subscribers {
+    senders: Mutex<Vec<mpsc::UnboundedSender<Change>>>,
+}
+impl Subscribers {
+    fn subscribe(&self) -> mpsc::UnboundedReceiver<Change> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut senders = self.senders.lock().unwrap();
+        senders.retain(|s| !s.is_closed());
+        senders.push(tx);
+        rx
+    }
+    fn is_empty(&self) -> bool {
+        let mut senders = self.senders.lock().unwrap();
+        senders.retain(|s| !s.is_closed());
+        senders.is_empty()
+    }
+    fn send(&self, change: Change) {
+        self.senders
+            .lock()
+            .unwrap()
+            .retain(|s| s.send(change.clone()).is_ok());
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct Change {
@@ -113,7 +139,7 @@ impl AuthService {
         edit: impl FnOnce(&mut Credentials) -> Result<R, &'static str>,
     ) -> Result<R, &'static str> {
         self.records.update_observed(edit, |previous, committed| {
-            if self.changes.receiver_count() == 0 {
+            if self.changes.is_empty() {
                 return;
             }
             let at = now();
@@ -145,7 +171,7 @@ impl AuthService {
                     .iter()
                     .filter(|row| !new_ids.contains(row[id].as_str().unwrap()))
                 {
-                    let _ = self.changes.send(Change {
+                    self.changes.send(Change {
                         kind: remove,
                         payload: json!({id:row[id]}),
                     });
@@ -155,7 +181,7 @@ impl AuthService {
                     let presence_changed = table == "clientSessions"
                         && previous.open_sockets.get(row_id) != committed.open_sockets.get(row_id);
                     if presence_changed || old_by_id.get(row_id).copied() != Some(row) {
-                        let _ = self.changes.send(Change {
+                        self.changes.send(Change {
                             kind: upsert,
                             payload: row.clone(),
                         });
@@ -167,7 +193,7 @@ impl AuthService {
                             && !old_by_id.contains_key(s.as_str())
                             && !committed.open_sockets.contains_key(*s)
                     }) {
-                        let _ = self.changes.send(Change {
+                        self.changes.send(Change {
                             kind: remove,
                             payload: json!({id:session}),
                         });
@@ -175,14 +201,14 @@ impl AuthService {
                 }
             }
             if before["connectDevices"] != after["connectDevices"] {
-                let _ = self.changes.send(Change {
+                self.changes.send(Change {
                     kind: "snapshot",
                     payload: after,
                 });
             }
         })
     }
-    pub(crate) fn subscribe_access(&self) -> (Change, broadcast::Receiver<Change>) {
+    pub(crate) fn subscribe_access(&self) -> (Change, mpsc::UnboundedReceiver<Change>) {
         self.records.read(|r| {
             (
                 Change {

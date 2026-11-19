@@ -159,15 +159,10 @@ async fn run_call(
         let mut revision = 1;
         loop {
             send(json!([change.event(&principal.id, revision)])).await;
-            change = match changes.recv().await {
-                Ok(change) => change,
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let (current, subscribed) = state.auth.subscribe_access();
-                    changes = subscribed;
-                    current
-                }
-                Err(broadcast::error::RecvError::Closed) => return Reply::Success(Value::Null),
+            let Some(next) = changes.recv().await else {
+                return Reply::Success(Value::Null);
             };
+            change = next;
             revision += 1;
         }
     }
