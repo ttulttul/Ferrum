@@ -3192,4 +3192,33 @@ mod scheduled_task_tests {
             })
         );
     }
+
+    #[test]
+    fn webhook_schedule_keeps_signing_credentials_out_of_schedule() {
+        let schedule = scheduled_task_schedule(
+            &json!({
+                "type":"webhook",
+                "signature":{
+                    "header":"X-Hub-Signature-256",
+                    "encoding":"hex",
+                    "prefix":"sha256=",
+                    "secret":"secret",
+                    "secretRef":"secret-ref:1"
+                }
+            }),
+            None,
+        );
+        assert_eq!(
+            schedule,
+            json!({
+                "type":"webhook",
+                "signature":{
+                    "header":"x-hub-signature-256",
+                    "encoding":"hex",
+                    "prefix":"sha256="
+                },
+                "maxDeliveryAgeMinutes":null
+            })
+        );
+    }
 }
