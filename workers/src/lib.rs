@@ -171,11 +171,11 @@ impl DurableObject for T3EnvironmentDO {
             ws.close(Some(1011), Some("missing connection state"))?;
             return Ok(());
         };
-        for frame in self.plane.on_message(&mut connection, &text) {
+        for frame in self.plane.on_message(&mut connection, &text).await {
             ws.send_with_str(frame)?;
         }
         ws.serialize_attachment(&connection)?;
-        Ok(())
+        self.deliver().await
     }
 
     async fn websocket_close(
@@ -188,11 +188,28 @@ impl DurableObject for T3EnvironmentDO {
         if let Some(connection) = ws.deserialize_attachment::<Connection>()? {
             self.plane.disconnect(&connection);
         }
-        Ok(())
+        self.deliver().await
     }
 }
 
 impl T3EnvironmentDO {
+    /// Sends what the latest changes add to each open socket's streams.
+    async fn deliver(&self) -> Result<()> {
+        let signals = self.plane.take_signals();
+        if signals.is_empty() {
+            return Ok(());
+        }
+        for ws in self.state.get_websockets() {
+            let Some(connection) = ws.deserialize_attachment::<Connection>()? else {
+                continue;
+            };
+            for frame in self.plane.deliver(&connection, &signals).await {
+                ws.send_with_str(frame)?;
+            }
+        }
+        Ok(())
+    }
+
     async fn upgrade(&self, req: &Request) -> Result<Response> {
         let (headers, uri) = (http_headers(req)?, path_and_query(req)?);
         let connection = match self.plane.authorize_socket(&headers, &uri) {
@@ -204,6 +221,7 @@ impl T3EnvironmentDO {
         // the attachment carries the connection across.
         self.state.accept_web_socket(&pair.server);
         pair.server.serialize_attachment(&connection)?;
+        self.deliver().await?;
         Response::from_websocket(pair.client)
     }
 

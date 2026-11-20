@@ -28,7 +28,7 @@ impl Subscribers {
 }
 
 #[derive(Clone)]
-pub(crate) struct Change {
+pub struct Change {
     kind: &'static str,
     payload: Value,
 }

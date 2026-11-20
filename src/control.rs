@@ -9,24 +9,30 @@
 //!
 //! Unlike the native socket loop (`rpc::session`), the RPC handler here is
 //! message driven: [`ControlPlane::on_message`] takes one text frame and
-//! returns the frames to send. Open streams are recorded in a serializable
-//! [`Connection`], so a host can keep it with the socket and suspend
-//! between messages. Pushing later stream values (for example
-//! store changes) goes through [`ControlState::commit_now`] and the host's list of
-//! connections; this slice does not push any yet.
+//! returns the frames to send. Requests go through the same checks, stream
+//! records and workspace routing as the native server ([`crate::dispatch`],
+//! [`crate::subscription`]). A [`Connection`] is small and serializable: it
+//! names its open streams, and each stream's record (parameters and cursor)
+//! is a document in the state's [`DocumentStore`]. After each message the
+//! host takes the plane's pending signals ([`ControlPlane::take_signals`])
+//! and hands them to every connection ([`ControlPlane::deliver`]), which
+//! returns the frames to push.
 //!
 //! Platform neutral: the native build compiles and tests it too.
 use crate::{
     access_http::{self, AuthHost},
     auth_service::{self, AuthService, Session},
-    contracts::RPC_CONTRACTS,
     control_state::ControlState,
+    dispatch::{self, WorkspaceSettings},
     environment,
     event_log::EventLog,
     persistence::DocumentStore,
     rpc_protocol::{js_template_string, request_key, split_socket_frame, Reply},
     rpc_protocol::{SOCKET_FRAME_PARTS_QUERY_PARAM, SOCKET_FRAME_PART_BYTES},
-    server_config, Event, ServerEvent,
+    server_config,
+    subscription::{Signal, Subscription},
+    workspace::RemoteWorkspace,
+    Event, ServerEvent,
 };
 use axum::{
     extract::{Query, State},
@@ -39,8 +45,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::Arc,
+    path::PathBuf,
+    sync::{Arc, Mutex},
 };
+use tokio::sync::{broadcast, mpsc};
 
 /// Where the workspace lives on the `t3-agentd` side.
 pub const WORKSPACE_ROOT: &str = "/workspace";
@@ -61,6 +69,8 @@ pub struct ControlPlane {
     config: Config,
     started_at: String,
     state: ControlState,
+    workspace: RemoteWorkspace,
+    signals: Mutex<Signals>,
 }
 impl AuthHost for ControlPlane {
     fn auth(&self) -> &AuthService {
@@ -78,6 +88,9 @@ impl std::ops::Deref for ControlPlane {
 /// so a host can keep it with the socket while the process sleeps.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Connection {
+    /// Names this connection's stream records in the document store.
+    #[serde(default)]
+    id: String,
     pub principal: Session,
     pub frame_parts: bool,
     pub references: bool,
@@ -88,6 +101,55 @@ pub struct Connection {
 struct OpenStream {
     id: Value,
     method: String,
+    /// Whether the stream's record is stored (it reports later changes).
+    #[serde(default)]
+    live: bool,
+}
+
+/// The channels the plane learns of changes on, drained after each message.
+struct Signals {
+    events: broadcast::Receiver<ServerEvent>,
+    suggestions: broadcast::Receiver<Value>,
+    linked: broadcast::Receiver<u64>,
+    scheduled_tasks: broadcast::Receiver<()>,
+    access: mpsc::UnboundedReceiver<auth_service::access::Change>,
+}
+
+impl Signals {
+    fn new(state: &ControlState) -> Self {
+        Self {
+            events: state.events.subscribe(),
+            suggestions: state.prompt_suggestion_events.subscribe(),
+            linked: state.pull_request_linked_events.subscribe(),
+            scheduled_tasks: state.scheduled_task_events.subscribe(),
+            access: state.auth.subscribe_access().1,
+        }
+    }
+
+    fn drain(&mut self) -> Vec<Signal> {
+        use broadcast::error::TryRecvError::{Empty, Lagged};
+        let mut signals = Vec::new();
+        loop {
+            match self.events.try_recv() {
+                Ok(event) => signals.push(Signal::Committed(Box::new(event))),
+                Err(Lagged(_)) => signals.push(Signal::Resync),
+                Err(Empty | broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+        while let Ok(revision) = self.linked.try_recv() {
+            signals.push(Signal::LinkedRefresh(revision));
+        }
+        while let Ok(()) = self.scheduled_tasks.try_recv() {
+            signals.push(Signal::ScheduledTasks);
+        }
+        while let Ok(event) = self.suggestions.try_recv() {
+            signals.push(Signal::PromptSuggestion(event));
+        }
+        while let Ok(change) = self.access.try_recv() {
+            signals.push(Signal::AuthAccess(change));
+        }
+        signals
+    }
 }
 
 impl ControlPlane {
@@ -103,10 +165,13 @@ impl ControlPlane {
             .open_in(documents.clone(), std::path::Path::new(STATE_DIR))?;
         let started_at = auth_service::iso(auth_service::now());
         let state = ControlState::open(auth, documents, log, std::path::Path::new(STATE_DIR))?;
+        let signals = Mutex::new(Signals::new(&state));
         Ok(Self {
             config,
             started_at,
             state,
+            workspace: RemoteWorkspace::default(),
+            signals,
         })
     }
 
@@ -187,6 +252,7 @@ impl ControlPlane {
             .any(|(key, _)| key == SOCKET_FRAME_PARTS_QUERY_PARAM);
         self.auth.socket_presence(&principal.id, true);
         Ok(Connection {
+            id: crate::platform::uuid_v4().to_string(),
             principal,
             frame_parts,
             references,
@@ -195,11 +261,77 @@ impl ControlPlane {
     }
 
     pub fn disconnect(&self, connection: &Connection) {
+        for key in connection.open.keys() {
+            self.forget(connection, key);
+        }
         self.auth.socket_presence(&connection.principal.id, false);
     }
 
+    /// The changes since the last call, for [`deliver`](Self::deliver).
+    pub fn take_signals(&self) -> Vec<Signal> {
+        self.signals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+    }
+
+    /// The frames `signals` add to `connection`'s live streams, moving each
+    /// stream's stored cursor past them.
+    pub async fn deliver(&self, connection: &Connection, signals: &[Signal]) -> Vec<String> {
+        let mut frames = Vec::new();
+        for (key, stream) in connection.open.iter().filter(|(_, s)| s.live) {
+            let Some(mut subscription) = self.load(connection, key) else {
+                continue;
+            };
+            let before = subscription.cursor.clone();
+            for signal in signals {
+                for batch in subscription
+                    .advance(self, &connection.principal, signal.clone())
+                    .await
+                {
+                    frames.push(Reply::Chunk(batch).frame(&stream.id));
+                }
+            }
+            if subscription.cursor != before {
+                self.store(connection, key, &subscription);
+            }
+        }
+        encode(connection, &frames)
+    }
+
+    fn record_path(connection: &Connection, key: &str) -> PathBuf {
+        std::path::Path::new(STATE_DIR)
+            .join("streams")
+            .join(&connection.id)
+            .join(hex::encode(key))
+    }
+
+    fn load(&self, connection: &Connection, key: &str) -> Option<Subscription> {
+        let bytes = self
+            .documents
+            .read_optional(&Self::record_path(connection, key))
+            .ok()??;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn store(&self, connection: &Connection, key: &str, subscription: &Subscription) {
+        let path = Self::record_path(connection, key);
+        if let Ok(bytes) = serde_json::to_vec(subscription) {
+            if let Some(dir) = path.parent() {
+                let _ = self.documents.create_dir_all(dir);
+            }
+            let _ = self
+                .documents
+                .write(&path, &bytes, crate::persistence::WriteMode::Replace);
+        }
+    }
+
+    fn forget(&self, connection: &Connection, key: &str) {
+        let _ = self.documents.remove(&Self::record_path(connection, key));
+    }
+
     /// Handles one text frame from a client and returns the frames to send.
-    pub fn on_message(&self, connection: &mut Connection, text: &str) -> Vec<String> {
+    pub async fn on_message(&self, connection: &mut Connection, text: &str) -> Vec<String> {
         let Ok(request) = serde_json::from_str::<Value>(text) else {
             return Vec::new();
         };
@@ -208,30 +340,26 @@ impl ControlPlane {
             // Every stream here sends its values at once, so there is no
             // backpressure window to reopen.
             Some("Ack") => Vec::new(),
-            Some("Interrupt") => request_key(&request["requestId"])
-                .and_then(|key| connection.open.remove(&key))
-                .map(|stream| Reply::Failure(json!({"_tag":"Interrupt"})).frame(&stream.id))
-                .into_iter()
-                .collect(),
-            Some("Request") => self.request(connection, &request),
+            Some("Interrupt") => match request_key(&request["requestId"])
+                .and_then(|key| connection.open.remove(&key).map(|stream| (key, stream)))
+            {
+                Some((key, stream)) => {
+                    if stream.live {
+                        self.forget(connection, &key);
+                    }
+                    vec![Reply::Failure(json!({"_tag":"Interrupt"})).frame(&stream.id)]
+                }
+                None => Vec::new(),
+            },
+            Some("Request") => self.request(connection, &request).await,
             other => vec![
                 json!({"_tag":"Defect","defect":format!("Unknown request tag: {}", other.unwrap_or("undefined"))}),
             ],
         };
-        frames
-            .iter()
-            .flat_map(|frame| {
-                let text = crate::wire_json::compact(frame);
-                if connection.frame_parts {
-                    split_socket_frame(&text, SOCKET_FRAME_PART_BYTES)
-                } else {
-                    vec![text]
-                }
-            })
-            .collect()
+        encode(connection, &frames)
     }
 
-    fn request(&self, connection: &mut Connection, request: &Value) -> Vec<Value> {
+    async fn request(&self, connection: &mut Connection, request: &Value) -> Vec<Value> {
         let id = request.get("id").cloned().unwrap_or(Value::Null);
         let Some(key) = request_key(&id) else {
             let shown = if request.get("id").is_some() {
@@ -246,14 +374,30 @@ impl ControlPlane {
         }
         let method = request["tag"].as_str().unwrap_or("undefined");
         let params = &request["payload"];
-        match self.call(&connection.principal, connection.references, method, params) {
+        match self.call(&connection.principal, method, params).await {
             Call::Done(reply) => vec![reply.frame(&id)],
+            Call::Live(subscription, values) => {
+                self.store(connection, &key, &subscription);
+                connection.open.insert(
+                    key,
+                    OpenStream {
+                        id: id.clone(),
+                        method: method.to_owned(),
+                        live: true,
+                    },
+                );
+                values
+                    .into_iter()
+                    .map(|batch| Reply::Chunk(batch).frame(&id))
+                    .collect()
+            }
             Call::Stream(values) => {
                 connection.open.insert(
                     key,
                     OpenStream {
                         id: id.clone(),
                         method: method.to_owned(),
+                        live: false,
                     },
                 );
                 values
@@ -264,28 +408,41 @@ impl ControlPlane {
         }
     }
 
-    fn call(&self, principal: &Session, references: bool, method: &str, params: &Value) -> Call {
-        if let Some(contract) = RPC_CONTRACTS.iter().find(|c| c.tag == method) {
-            if let Some(key) = contract
-                .required
-                .into_iter()
-                .flatten()
-                .find(|key| params.get(**key).is_none())
-            {
-                return Call::Done(Reply::defect(format!("Missing key\n  at [{key:?}]")));
-            }
-            if let Some(scope) = auth_service::permissions::missing_rpc(principal, contract, params)
-            {
-                let legacy = auth_service::permissions::legacy_scope(scope);
-                return Call::Done(Reply::Failure(
-                    json!({"_tag":"Fail","error":{"_tag":"EnvironmentAuthorizationError","message":format!("The authenticated token is missing required scope: {scope}."),"requiredScope":legacy,"requiredPermission":scope}}),
-                ));
-            }
-        } else {
+    async fn call(&self, principal: &Session, method: &str, params: &Value) -> Call {
+        if !crate::rpc_known(method) {
             return Call::Done(Reply::defect(format!("Unknown request tag: {method}")));
         }
-        let _ = references;
-        match method {
+        let decoded = match dispatch::check(principal, method, params) {
+            Ok(decoded) => decoded,
+            Err(reply) => return Call::Done(reply),
+        };
+        let params = decoded.as_ref().unwrap_or(params);
+        if crate::subscription::serves(method) {
+            return match Subscription::open(self, principal, method, params, false).await {
+                Ok(opened) => Call::Live(opened.subscription, opened.first),
+                Err(reply) => Call::Done(reply),
+            };
+        }
+        if let Some(call) = self.host_call(method, params) {
+            return call;
+        }
+        let settings = WorkspaceSettings {
+            automatic_git_fetch: true,
+            ..Default::default()
+        };
+        match dispatch::workspace(&self.workspace, &settings, method, params).await {
+            Some(Ok(value)) => Call::Done(Reply::Success(value)),
+            Some(Err(error)) if error["_tag"] == "Die" => Call::Done(Reply::Failure(error)),
+            Some(Err(error)) => Call::Done(Reply::Failure(json!({"_tag":"Fail","error":error}))),
+            None => Call::Done(Reply::defect(format!(
+                "RPC contract is registered but unavailable in the control plane: {method}"
+            ))),
+        }
+    }
+
+    /// The methods this host answers itself.
+    fn host_call(&self, method: &str, params: &Value) -> Option<Call> {
+        Some(match method {
             "server.probe" => Call::Done(Reply::Success(json!({}))),
             "subscribeServerConfig" => {
                 let mut batches = vec![
@@ -312,10 +469,6 @@ impl ControlPlane {
                     {"version":1,"sequence":2,"type":"ready","payload":{"at":self.started_at,"environment":environment}}
                 ])])
             }
-            "subscribeAuthAccess" => {
-                let (change, _) = self.auth.subscribe_access();
-                Call::Stream(vec![json!([change.event(&principal.id, 1)])])
-            }
             "subscribeProjectClones" => Call::Stream(vec![json!([[]])]),
             "subscribeDeviceState" => Call::Stream(vec![json!([{
                 "supportsHostRetry": true, "supportsToolUpdate": true, "supportsToolInspection": true,
@@ -323,17 +476,7 @@ impl ControlPlane {
                 "hostStatuses": {}, "devices": [], "sessions": [], "onboardingCompleted": false,
                 "agentAccessEnabled": false, "hubBasePath": "/api/device-hub", "revision": 0, "hosts": []
             }])]),
-            "server.reportClientActivity" => {
-                if !matches!(
-                    params["clientKind"].as_str(),
-                    Some("web" | "desktop-renderer" | "mobile" | "unknown")
-                ) {
-                    return Call::Done(Reply::defect(
-                        "Expected \"web\" | \"desktop-renderer\" | \"mobile\" | \"unknown\"\n  at [\"clientKind\"]".into(),
-                    ));
-                }
-                Call::Done(Reply::Success(Value::Null))
-            }
+            "server.reportClientActivity" => Call::Done(Reply::Success(Value::Null)),
             "preview.reportProfiles" => Call::Done(Reply::Success(Value::Null)),
             "projects.mutate" => Call::Done(self.create_project(params)),
             "orchestration.subscribeShell" => {
@@ -342,7 +485,7 @@ impl ControlPlane {
                 let after = params.get("afterSequence").filter(|value| !value.is_null());
                 let resumable = after.and_then(Value::as_u64) == Some(sequence);
                 if after.is_some() && !resumable && params["httpSnapshotFallback"] == true {
-                    return Call::Stream(vec![json!([{"kind":"snapshot-required"}])]);
+                    return Some(Call::Stream(vec![json!([{"kind":"snapshot-required"}])]));
                 }
                 let mut items = Vec::new();
                 if !resumable {
@@ -359,23 +502,8 @@ impl ControlPlane {
                     vec![Value::Array(items)]
                 })
             }
-            "orchestration.subscribeThread" => {
-                let sequence = self.sequence_now();
-                let store = self.store_now();
-                Call::Stream(vec![match params["threadId"]
-                    .as_str()
-                    .and_then(|id| store.threads.get(id))
-                {
-                    Some(t) => {
-                        json!([{"kind":"snapshot","snapshotSequence":sequence,"projection":t.projection()},{"kind":"synchronized"}])
-                    }
-                    None => json!([]),
-                }])
-            }
-            _ => Call::Done(Reply::defect(format!(
-                "RPC contract is registered but unavailable in the control plane: {method}"
-            ))),
-        }
+            _ => return None,
+        })
     }
 
     /// `projects.mutate` with `project.create` only. The native server first
@@ -470,8 +598,25 @@ impl ControlPlane {
 
 enum Call {
     Done(Reply),
+    /// A stream that reports later changes: its record and first batches.
+    Live(Subscription, Vec<Value>),
     /// Stream batches sent now; the stream stays open until interrupted.
     Stream(Vec<Value>),
+}
+
+/// Frames as text, split into parts for clients that asked for them.
+fn encode(connection: &Connection, frames: &[Value]) -> Vec<String> {
+    frames
+        .iter()
+        .flat_map(|frame| {
+            let text = crate::wire_json::compact(frame);
+            if connection.frame_parts {
+                split_socket_frame(&text, SOCKET_FRAME_PART_BYTES)
+            } else {
+                vec![text]
+            }
+        })
+        .collect()
 }
 
 fn default_settings() -> Value {
@@ -557,12 +702,86 @@ mod tests {
             .unwrap()
     }
 
-    fn send(plane: &ControlPlane, connection: &mut Connection, frame: Value) -> Vec<Value> {
-        plane
-            .on_message(connection, &frame.to_string())
+    /// Runs `future` to completion without suspending, as a host that
+    /// handles one message at a time needs.
+    fn now<T>(future: impl std::future::Future<Output = T>) -> T {
+        futures_util::FutureExt::now_or_never(future).expect("completes without waiting")
+    }
+
+    fn parse(frames: Vec<String>) -> Vec<Value> {
+        frames
             .iter()
             .map(|text| serde_json::from_str(text).unwrap())
             .collect()
+    }
+
+    fn send(plane: &ControlPlane, connection: &mut Connection, frame: Value) -> Vec<Value> {
+        parse(now(plane.on_message(connection, &frame.to_string())))
+    }
+
+    #[test]
+    fn a_live_thread_stream_reports_later_commits() {
+        let plane = plane();
+        let mut connection = owner(&plane);
+        let project = send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":0,"tag":"projects.mutate","payload":{"type":"project.create","commandId":"c1","projectId":"p1","title":"One","workspaceRoot":"/workspace/one"},"headers":[]}),
+        );
+        assert_eq!(project[0]["exit"]["_tag"], "Success", "{project:?}");
+        plane
+            .commit(Event::ThreadCreated(
+                serde_json::from_value(json!({
+                    "id": "t1", "project_id": "p1", "title": "One", "cwd": "/workspace/one",
+                    "status": "idle", "messages": [], "runs": [], "created_at": 1,
+                    "archived": false, "settled": false, "snoozed_until": null,
+                    "pinned": false, "unread": false, "tags": []
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        plane.take_signals();
+        let first = send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":1,"tag":"orchestration.subscribeThread","payload":{"threadId":"t1","requestCompletionMarker":true},"headers":[]}),
+        );
+        assert_eq!(first[0]["values"][0]["kind"], "snapshot");
+        assert_eq!(first[0]["values"][1], json!({"kind":"synchronized"}));
+
+        plane
+            .commit(Event::ThreadPatched {
+                thread_id: "t1".into(),
+                patch: json!({"title":"Two"}),
+            })
+            .unwrap();
+        let signals = plane.take_signals();
+        let pushed = parse(now(plane.deliver(&connection, &signals)));
+        assert_eq!(pushed.len(), 1, "{pushed:?}");
+        assert_eq!(pushed[0]["_tag"], "Chunk");
+        assert_eq!(pushed[0]["requestId"], 1);
+        assert_eq!(
+            pushed[0]["values"][0]["projection"]["thread"]["title"],
+            "Two"
+        );
+        assert!(
+            now(plane.deliver(&connection, &signals)).is_empty(),
+            "the cursor moved past it"
+        );
+
+        send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Interrupt","requestId":1}),
+        );
+        plane
+            .commit(Event::ThreadPatched {
+                thread_id: "t1".into(),
+                patch: json!({"title":"Three"}),
+            })
+            .unwrap();
+        let signals = plane.take_signals();
+        assert!(now(plane.deliver(&connection, &signals)).is_empty());
     }
 
     #[test]
