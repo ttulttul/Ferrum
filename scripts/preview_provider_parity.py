@@ -35,7 +35,7 @@ class PreviewPage(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(b"""<!doctype html><title>Preview fixture</title>
-                <style>body {background: #793} input,a {display:block;width:250px;height:60px}</style>
+                <style>body {background: #fff} input,a {display:block;width:250px;height:60px}</style>
                 <input type=file><a href="/file" download="sample.txt">Download</a>
                 <script>
                   const colors = ["#357", "#a53", "#248"];
@@ -45,6 +45,10 @@ class PreviewPage(BaseHTTPRequestHandler):
                     if (!colors.length)
                       requestAnimationFrame(() => requestAnimationFrame(() => fetch("/painted")));
                   });
+                  // The ready colour comes from this script, after the listener is attached:
+                  // Chromium can paint a stylesheet colour before the parser runs this block,
+                  // and a click sent on that paint was lost on slow CI runners ("saw []").
+                  document.body.style.background = "#793";
                 </script>""")
 
     def log_message(self, *args):
