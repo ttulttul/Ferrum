@@ -1,4 +1,4 @@
-use crate::{AppState, Store};
+use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, Uri},
@@ -7,7 +7,6 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{collections::HashMap, fs, io::Write, sync::Arc};
 use uuid::Uuid;
 
@@ -42,131 +41,18 @@ pub(super) async fn descriptor(State(s): State<Arc<AppState>>) -> Json<Value> {
         "x86_64" => "x64",
         _ => "other",
     };
-    let mut capabilities = serde_json::Map::new();
-    macro_rules! capability {
-        ($name:literal, $value:expr) => {
-            capabilities.insert($name.to_owned(), json!($value));
-        };
-    }
-    capability!("repositoryIdentity", true);
-    capability!("connectionProbe", true);
-    capability!("accessTokenRenewal", true);
-    capability!("attachmentUploads", true);
-    capability!("questionAttachments", true);
-    capabilities.insert("fileAttachments".into(), json!({"maxUploadBytes":52428800}));
-    capability!("pullRequests", true);
-    capability!("pullRequestChecks", true);
-    capability!("issues", true);
-    capability!("sideChats", true);
-    capability!("vcsBranchStatus", true);
-    capability!("inlineMessageContext", true);
-    capability!("requiredWorktreeBootstrap", true);
-    capability!("threadSettlement", true);
-    capability!("threadAutoSettlement", true);
-    capability!("storageCleanup", true);
-    capability!("storageCleanupRun", true);
-    capability!("databaseStorage", true);
-    capability!("otlpEndpointCheck", true);
-    capability!("secretSourceCheck", true);
-    capability!("projectWorktreeCleanup", true);
-    capability!("settledWorktreeCleanup", true);
-    capability!("worktreesDirectory", true);
-    capability!("threadAutoSettlementScope", true);
-    capability!("threadRestartContinuation", true);
-    capability!("projectSettingsOverrides", true);
-    capability!("projectProviderInstanceOverrides", true);
-    capability!("threadSnooze", true);
-    capability!("threadForceStop", true);
-    capability!("environmentThemes", true);
-    capability!("usageLimitSources", true);
-    capability!("providerWorkspaceSnapshotsOnDemand", true);
-    capability!("modelCatalogRefresh", true);
-    capability!("usagePriceOverrides", true);
-    capability!("usageModelAliases", true);
-    capability!("threadPinning", true);
-    capability!("threadPinReorder", true);
-    capability!("threadActiveReorder", true);
-    capability!("threadAutoSettleOptOut", true);
-    capability!("threadProjectFromScratch", true);
-    capability!("threadTitleRegeneration", true);
-    capability!("threadVisitedTracking", true);
-    capability!("threadPullRequestLinking", true);
-    capability!("serverResolvedCommandContext", true);
-    capability!("threadStop", true);
-    capability!("localServerStop", true);
-    capability!("threadPullRequests", true);
-    capability!("threadPullRequestWatch", true);
-    capability!("pullRequestStackActions", true);
-    if s.runtime_config.mode == "desktop" {
-        capability!("serverSelfUpdate", "desktop-managed");
-    }
-    capability!("npmReleaseLookup", true);
-    capability!("agentActivityPublishing", false);
-    capability!("projectCloneTracking", true);
-    capability!("projectOrganization", true);
-    capability!("ignoredFileListing", true);
-    capability!("ignoredFileSearch", true);
-    capability!("environmentIcon", true);
-    capability!("commandOutputStreaming", true);
-    capability!("serverBrowser", true);
-    capability!("peerLinks", true);
-    capability!("mcpModeLimitHeader", true);
-    capability!("linkFence", true);
-    capability!("mcpApprovalCodes", true);
-    capability!("peerLinkPairingCodes", true);
-    capability!("mcpHostedApproval", true);
-    capability!("triage", true);
-    capability!("oneTimeSchedules", true);
-    capability!("freshContext", true);
-    capability!("scheduledTaskThreadModes", true);
-    capability!("voiceTranscription", true);
-    capability!("cloudVoiceTranscription", true);
-    capability!("shellThreadFamilies", true);
-    capability!("shellOlderSettled", true);
-    capability!("linkedThreadRefreshes", true);
-    capability!("issueLinkedThreads", true);
-    Json(
-        json!({"environmentId":s.environment_id,"label":label,"platform":{"os":os,"arch":arch,"machine":"desktop"},"serverVersion":"0.1.10","orchestrationProtocolVersion":2,"databaseMigration":98,"capabilities":capabilities}),
-    )
+    Json(crate::environment::descriptor(
+        &s.environment_id,
+        &label,
+        (os, arch),
+        s.runtime_config.mode == "desktop",
+    ))
 }
 fn valid_protocol(h: &HeaderMap) -> bool {
     h.get("x-t3-orchestration-protocol")
         .is_some_and(|v| v == "2")
 }
-pub(super) fn shell(store: &Store, sequence: u64) -> Value {
-    let projects = store
-        .project_rows
-        .values()
-        .filter(|r| r["deletedAt"].is_null())
-        .map(|row| {
-            let row = &crate::repository_identity::with_identity(row);
-            let mut out = serde_json::Map::new();
-            for k in [
-                "id",
-                "title",
-                "hasCustomTitle",
-                "workspaceRoot",
-                "repositoryIdentity",
-                "defaultModelSelection",
-                "defaultThreadEnvMode",
-                "autoPull",
-                "faviconPath",
-                "projectIcon",
-                "scripts",
-                "pinnedAt",
-                "archivedAt",
-                "createdAt",
-                "updatedAt",
-            ] {
-                if let Some(v) = row.get(k) {
-                    out.insert(k.to_owned(), v.clone());
-                }
-            }
-            out
-        })
-        .collect::<Vec<_>>();
-    json!({"schemaVersion":2,"snapshotSequence":sequence,"threads":store.threads.values().filter(|t|!t.archived).map(|t|t.shell()).collect::<Vec<_>>(),"archivedThreads":[],"projects":projects})
-}
+pub(super) use crate::environment::shell;
 pub(super) async fn shell_snapshot(
     State(state): State<Arc<AppState>>,
     h: HeaderMap,
@@ -180,15 +66,7 @@ pub(super) async fn shell_snapshot(
     if query.get("resumeFrom").and_then(|v| v.parse::<u64>().ok()) == Some(seq) {
         return Json(json!({"resumable":true})).into_response();
     }
-    let mut snapshot = shell(&store, seq);
-    let mut hash = Sha256::new();
-    for p in snapshot["projects"].as_array().unwrap() {
-        hash.update(json!([p["id"], p["repositoryIdentity"]]).to_string());
-    }
-    if query.get("omitOlderSettled").is_some_and(|v| v == "1") {
-        snapshot["olderSettled"] = json!({"before":crate::auth_service::iso(crate::auth_service::now()),"asOfSequence":seq,"counts":[]});
-    }
-    snapshot["projectIdentities"] = json!(URL_SAFE_NO_PAD.encode(hash.finalize()));
+    let snapshot = crate::environment::shell_snapshot(&store, seq, &query);
     Json(snapshot).into_response()
 }
 fn valid_cursor(value: &str) -> bool {

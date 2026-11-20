@@ -1,7 +1,7 @@
 use super::{header, HeaderMap, Request, Response};
 use crate::{
     auth_service::AuthService,
-    relay_service::tokens::{verify_proof, CheckedProof},
+    dpop_proof::{verify_proof, CheckedProof},
 };
 use axum::middleware::Next;
 use std::sync::OnceLock;
@@ -37,10 +37,14 @@ pub(crate) async fn contextualize(request: Request, next: Next) -> Response {
         url.set_path(request.uri().path());
         Some(url.to_string())
     });
+    #[cfg(feature = "native")]
     let peer = request
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|p| p.0.ip().to_canonical());
+    // Behind Cloudflare the peer is the edge; the client address is CF-Connecting-IP.
+    #[cfg(not(feature = "native"))]
+    let peer = header(h, "cf-connecting-ip").and_then(|ip| ip.parse::<std::net::IpAddr>().ok());
     let client = derive_client(h, peer);
     let context = RequestContext {
         client,

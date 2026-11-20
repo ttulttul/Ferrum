@@ -1,8 +1,6 @@
 //! Persistent relay state. Environment identities, cloud users and proof keys occupy separate namespaces.
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     env,
     net::SocketAddr,
@@ -22,9 +20,7 @@ pub struct RelayService {
     pub(crate) issuer: String,
 }
 
-pub(crate) fn hash(value: &str) -> String {
-    URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes()))
-}
+pub(crate) use crate::dpop_proof::hash;
 pub(crate) fn timestamp(dt: OffsetDateTime) -> String {
     dt.format(time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"

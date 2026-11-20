@@ -1,5 +1,5 @@
 use super::*;
-use crate::relay_service::tokens::CheckedProof;
+use crate::dpop_proof::CheckedProof;
 impl AuthService {
     pub(super) fn save_session(records: &mut Credentials, s: Session, at: i64) -> (Value, String) {
         let subject = if s.owner {

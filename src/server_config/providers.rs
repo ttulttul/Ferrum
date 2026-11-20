@@ -1,5 +1,4 @@
 use super::DEFAULTS;
-use crate::AppState;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -50,7 +49,24 @@ fn models(stock: &Value, config: &Value) -> Value {
     rows.into()
 }
 
-pub(super) fn list(state: &AppState, settings: &Value, options: &Value) -> Value {
+#[cfg(feature = "native")]
+pub(crate) fn list(state: &crate::AppState, settings: &Value, options: &Value) -> Value {
+    list_with(
+        &state.config_started_at,
+        |driver| state.settings.policy.provider_denial(driver),
+        settings,
+        options,
+    )
+}
+
+/// The provider rows of the config snapshot. `denial` is the managed policy's
+/// reason a driver is disallowed, if any.
+pub(crate) fn list_with(
+    started_at: &str,
+    denial: impl Fn(&str) -> Option<String>,
+    settings: &Value,
+    options: &Value,
+) -> Value {
     let stock = DEFAULTS["providers"].as_object().unwrap();
     let instances = settings["providerInstances"].as_object();
     let ids = stock.keys().chain(
@@ -69,7 +85,7 @@ pub(super) fn list(state: &AppState, settings: &Value, options: &Value) -> Value
         };
         let config = &entry["config"];
         let label = catalog["displayName"].as_str().unwrap_or(driver);
-        let denied = state.settings.policy.provider_denial(driver);
+        let denied = denial(driver);
         let enabled = entry["enabled"]
             .as_bool()
             .or(config["enabled"].as_bool())
@@ -101,7 +117,7 @@ pub(super) fn list(state: &AppState, settings: &Value, options: &Value) -> Value
             "antigravity" => json!({"status":"unknown","type":"oauth-personal"}),
             _ => json!({"status":"unknown"}),
         };
-        row["checkedAt"] = json!(state.config_started_at);
+        row["checkedAt"] = json!(started_at);
         row["message"] = json!(denied.unwrap_or_else(|| if enabled {
             format!("{label} provider status has not been checked in this session yet.")
         } else {
@@ -114,10 +130,11 @@ pub(super) fn list(state: &AppState, settings: &Value, options: &Value) -> Value
             row["workspaceSnapshots"] = json!([]);
         }
         if driver == "opencode" {
-            row["usageLimits"] = json!({"checkedAt":state.config_started_at,"windows":[],"unavailable":{"reason":"unsupported"}});
+            row["usageLimits"] =
+                json!({"checkedAt":started_at,"windows":[],"unavailable":{"reason":"unsupported"}});
         }
         if matches!(driver, "fx" | "kiro") {
-            row["versionAdvisory"] = json!({"status":"unknown","currentVersion":null,"latestVersion":null,"updateCommand":null,"canUpdate":false,"canInstallVersion":false,"checkedAt":state.config_started_at,"message":null});
+            row["versionAdvisory"] = json!({"status":"unknown","currentVersion":null,"latestVersion":null,"updateCommand":null,"canUpdate":false,"canInstallVersion":false,"checkedAt":started_at,"message":null});
         }
         if options["workspaceSnapshotsOnDemand"] == true
             && options["providerCatalogsOnDemand"] == true
