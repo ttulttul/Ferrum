@@ -44,6 +44,7 @@ mod orchestration;
 #[cfg(feature = "native")]
 mod projects;
 mod rpc_protocol;
+pub mod runtime;
 mod server_config;
 mod settings;
 mod wire_json;
