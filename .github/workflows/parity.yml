@@ -67,6 +67,7 @@ jobs:
           python3 scripts/config_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/config_snapshot_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
           python3 scripts/auth_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/cors_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/mcp_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/github_provider_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
           python3 scripts/linear_provider_parity.py --original-command "$reference" --rust-command "$server"

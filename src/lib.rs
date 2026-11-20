@@ -33,6 +33,7 @@ pub mod auth_service;
 pub mod config;
 mod config_rpc;
 mod contracts;
+pub mod cors;
 mod environment_http;
 pub mod guest_service;
 pub mod host_rpc;
@@ -692,6 +693,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/ws", get(websocket))
         .fallback(any(contract_fallback))
         .layer(axum::middleware::from_fn(access_http::contextualize))
+        // Outermost, like the reference's global CORS middleware: preflights
+        // never reach a route and every response, errors included, is tagged.
+        .layer(axum::middleware::from_fn(cors::browser_api))
         .with_state(state)
 }
 
