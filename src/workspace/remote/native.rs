@@ -110,26 +110,41 @@ async fn session(
                 workspace.receive(frame);
                 workspace.flush_acks();
             }
+            // Fail requests still waiting on this socket, so a handshake or
+            // `maintain` in progress returns.
+            workspace.disconnected();
         })
     };
+    let mut reader = reader;
+    let mut reader_done = false;
     let result = async {
-        workspace.connected(Arc::new(Outbox(tx))).await?;
+        tokio::select! {
+            connected = workspace.connected(Arc::new(Outbox(tx))) => connected?,
+            _ = &mut reader => {
+                reader_done = true;
+                anyhow::bail!("the workspace closed the connection during the handshake")
+            }
+        };
         tracing::info!(%url, "connected to the workspace");
-        let mut reader = reader;
         let mut tick = tokio::time::interval(MAINTAIN_EVERY);
         loop {
             tokio::select! {
-                _ = &mut reader => break,
-                _ = reconnect.notified() => {
-                    reader.abort();
+                _ = &mut reader => {
+                    reader_done = true;
                     break;
                 }
+                _ = reconnect.notified() => break,
                 _ = tick.tick() => workspace.maintain().await,
             }
         }
         anyhow::Ok(())
     }
     .await;
+    // Wait for the reader to stop, so it cannot touch the next connection.
+    if !reader_done {
+        reader.abort();
+        let _ = reader.await;
+    }
     writer.abort();
     workspace.disconnected();
     result
