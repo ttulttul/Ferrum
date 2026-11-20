@@ -52,12 +52,15 @@ impl ServerPaths {
         }
     }
 
-    /// Construct paths when an embedding caller already resolved the
-    /// TypeScript `userdata` directory. This preserves the existing library
-    /// API while keeping the public CLI base-directory semantics.
+    /// Construct paths when an embedding caller already resolved the state
+    /// directory (`--data-dir`). A directory named `userdata` or `dev` is the
+    /// reference layout, so its parent is the base. Any other data directory
+    /// is self-contained: base-level paths (`caches`, `worktrees`, scratch and
+    /// projects roots) live inside it rather than beside it, where the server
+    /// may have no permission to write (`--data-dir /data` used to need `/caches`).
     pub fn from_state_dir(state_dir: impl Into<PathBuf>) -> Self {
         let state_dir = state_dir.into();
-        let base_dir = state_dir.parent().unwrap_or(&state_dir).to_path_buf();
+        let base_dir = state_base_dir(&state_dir).to_path_buf();
         let mut paths = Self::from_base(base_dir);
         paths.state_dir = state_dir.clone();
         paths.settings = state_dir.join("settings.json");
@@ -91,6 +94,19 @@ impl ServerPaths {
             fs::create_dir_all(path)?;
         }
         Ok(())
+    }
+}
+
+/// The T3 home for a state directory: the parent of a reference-layout
+/// `userdata` or `dev` directory, otherwise the state directory itself.
+pub fn state_base_dir(state_dir: &Path) -> &Path {
+    if state_dir
+        .file_name()
+        .is_some_and(|name| name == "userdata" || name == "dev")
+    {
+        state_dir.parent().unwrap_or(state_dir)
+    } else {
+        state_dir
     }
 }
 
@@ -188,5 +204,16 @@ mod tests {
             state.terminal_logs,
             PathBuf::from("/tmp/t3-home/userdata/logs/terminals")
         );
+    }
+
+    #[test]
+    fn keeps_base_level_paths_inside_a_self_contained_data_dir() {
+        let paths = ServerPaths::from_state_dir("/data");
+        assert_eq!(paths.base_dir, PathBuf::from("/data"));
+        assert_eq!(paths.caches, PathBuf::from("/data/caches"));
+        assert_eq!(paths.worktrees, PathBuf::from("/data/worktrees"));
+        assert_eq!(paths.settings, PathBuf::from("/data/settings.json"));
+        let dev = ServerPaths::from_state_dir("/tmp/t3-home/dev");
+        assert_eq!(dev.caches, PathBuf::from("/tmp/t3-home/caches"));
     }
 }

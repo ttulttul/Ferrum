@@ -19,14 +19,7 @@ pub use vcs::VcsService;
 use serde_json::{json, Value};
 
 fn base_directory(dir: &std::path::Path) -> &std::path::Path {
-    if dir
-        .file_name()
-        .is_some_and(|name| name == "userdata" || name == "dev")
-    {
-        dir.parent().unwrap_or(dir)
-    } else {
-        dir
-    }
+    crate::config::state_base_dir(dir)
 }
 type Reply = Result<Value, Value>;
 
