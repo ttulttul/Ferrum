@@ -198,7 +198,7 @@ async fn submission(req: Request) -> Result<Submission, &'static str> {
                 } else {
                     &mime
                 };
-                let attachment = json!({"type":kind,"id":uuid::Uuid::new_v4().simple().to_string(),"name":if name.trim().is_empty(){kind}else{name.trim()},"mimeType":mime,"sizeBytes":data.len()});
+                let attachment = json!({"type":kind,"id":crate::platform::uuid_v4().simple().to_string(),"name":if name.trim().is_empty(){kind}else{name.trim()},"mimeType":mime,"sizeBytes":data.len()});
                 uploads.push((attachment, data.to_vec()));
             }
             _ => {}

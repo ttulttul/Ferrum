@@ -180,7 +180,7 @@ fn read_secret_string(dir: &Path, name: &str) -> Option<String> {
 fn write_secret(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let target = dir.join(format!("{name}.bin"));
-    let temporary = dir.join(format!("{name}.bin.{}.tmp", uuid::Uuid::new_v4()));
+    let temporary = dir.join(format!("{name}.bin.{}.tmp", crate::platform::uuid_v4()));
     let result = (|| {
         std::fs::write(&temporary, bytes)?;
         #[cfg(unix)]
@@ -197,11 +197,12 @@ fn write_secret(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 fn now_millis() -> i128 {
-    time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000
+    i128::from(crate::platform::now_ms())
 }
 
 fn iso_now() -> String {
-    time::OffsetDateTime::now_utc()
+    time::OffsetDateTime::from_unix_timestamp_nanos(now_millis() * 1_000_000)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
         .format(time::macros::format_description!(
             "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
         ))
@@ -479,7 +480,7 @@ impl Ledger {
         let written = std::fs::create_dir_all(&self.directory).and_then(|()| {
             let temporary = self
                 .directory
-                .join(format!(".{pid}.json.{}.tmp", uuid::Uuid::new_v4()));
+                .join(format!(".{pid}.json.{}.tmp", crate::platform::uuid_v4()));
             std::fs::write(&temporary, entry.to_string())?;
             std::fs::rename(&temporary, &path).inspect_err(|_| {
                 let _ = std::fs::remove_file(&temporary);

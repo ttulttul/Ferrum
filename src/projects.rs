@@ -1,4 +1,5 @@
-use crate::{AppState, Event, Project};
+pub(crate) use crate::store::wire_project as wire;
+use crate::{store::iso, AppState, Event, Project};
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -8,19 +9,6 @@ use axum::{
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc};
 
-fn iso(time: time::OffsetDateTime) -> String {
-    time.format(time::macros::format_description!(
-        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
-    ))
-    .expect("valid project timestamp")
-}
-pub(super) fn wire(p: &Project) -> Value {
-    let at = iso(
-        time::OffsetDateTime::from_unix_timestamp(p.created_at as i64)
-            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
-    );
-    json!({"id":p.id,"title":p.name,"hasCustomTitle":false,"workspaceRoot":p.path,"repositoryIdentity":null,"faviconPath":null,"projectIcon":null,"defaultModelSelection":null,"defaultThreadEnvMode":null,"autoPull":false,"scripts":[],"pinnedAt":null,"archivedAt":null,"createdAt":at,"updatedAt":at,"deletedAt":null})
-}
 pub async fn snapshot(State(s): State<Arc<AppState>>) -> Json<Value> {
     let store = s.store.read().await;
     Json(

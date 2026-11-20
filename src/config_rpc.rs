@@ -1,6 +1,5 @@
 mod discovery;
-mod keybindings;
-mod providers;
+use crate::server_config::{keybindings, providers, DEFAULTS};
 
 use crate::{
     auth_service::{iso, now},
@@ -10,22 +9,22 @@ use serde_json::{json, Value};
 use std::{
     env,
     path::Path,
-    sync::{Arc, LazyLock},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tokio::sync::broadcast;
-
-static DEFAULTS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../contracts/config-defaults.json"))
-        .expect("provider catalogs and keybinding defaults")
-});
 
 pub(crate) fn keybindings_mutate(
     state: &AppState,
     method: &str,
     input: &Value,
 ) -> Result<Value, Value> {
-    keybindings::mutate(&state.paths.keybindings, method, input)
+    keybindings::mutate(
+        state.documents.as_ref(),
+        &state.paths.keybindings,
+        method,
+        input,
+    )
 }
 
 fn observability(state: &AppState, settings: &Value) -> Value {
@@ -114,7 +113,8 @@ pub(crate) async fn snapshot(
     let hostname = hostname::get()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let (keybindings, issues) = keybindings::read(&state.paths.keybindings);
+    let (keybindings, issues) =
+        keybindings::read(state.documents.as_ref(), &state.paths.keybindings);
     let ((editors, reveal), targets, direct) = tokio::join!(
         discovery::editors(),
         discovery::targets(&hostname),
@@ -271,7 +271,7 @@ impl Subscription {
                     let keybindings_file=revision(&state.paths.keybindings);
                     if keybindings_file!=self.bindings_file{
                         self.bindings_file=keybindings_file;
-                        let (keys,issues)=keybindings::read(&state.paths.keybindings);
+                        let (keys,issues)=keybindings::read(state.documents.as_ref(), &state.paths.keybindings);
                         if self.config["keybindings"]!=keys || self.config["issues"]!=issues{
                             self.config["keybindings"]=keys.clone();self.config["issues"]=issues.clone();
                             return Ok(json!({"version":1,"type":"keybindingsUpdated","payload":{"keybindings":keys,"issues":issues}}));

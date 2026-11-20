@@ -35,7 +35,7 @@ class PreviewPage(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(b"""<!doctype html><title>Preview fixture</title>
-                <style>body {background: #793} input,a {display:block;width:250px;height:60px}</style>
+                <style>body {background: #fff} input,a {display:block;width:250px;height:60px}</style>
                 <input type=file><a href="/file" download="sample.txt">Download</a>
                 <script>
                   const colors = ["#357", "#a53", "#248"];
@@ -45,6 +45,10 @@ class PreviewPage(BaseHTTPRequestHandler):
                     if (!colors.length)
                       requestAnimationFrame(() => requestAnimationFrame(() => fetch("/painted")));
                   });
+                  // The ready colour comes from this script, after the listener is attached:
+                  // Chromium can paint a stylesheet colour before the parser runs this block,
+                  // and a click sent on that paint was lost on slow CI runners ("saw []").
+                  document.body.style.background = "#793";
                 </script>""")
 
     def log_message(self, *args):
@@ -69,10 +73,12 @@ def observe(name, server, page_url, painted):
         tab = {key: opened[key] for key in ("threadId", "tabId")}
         target = ws + "/api/preview-stream/ws?" + urlencode(tab)
         with connect(target, additional_headers=headers, proxy=None, compression=None) as viewer:
-            def receive(kind, *, color=None, size=None, hold=False):
+            def receive(kind, *, color=None, size=None, hold=False, wait=30):
                 # Chromium may emit a blank document, live frames, and full-size stills
                 # during navigation. Identify a paint before comparing its encoded bytes.
-                deadline = monotonic() + 10
+                # A shared CI runner can take well over 10 s to start Chromium and stream
+                # its first frame; matching returns at once, so a long wait costs nothing.
+                deadline = monotonic() + wait
                 observed = []
                 while (remaining := deadline - monotonic()) > 0:
                     try:
@@ -106,7 +112,7 @@ def observe(name, server, page_url, painted):
                     viewer.send(json.dumps(dict(type="mouse", action=action, x=30, y=y,
                                                 button="left", buttons=buttons, clickCount=1)))
 
-            receive("ready paint", color=(119, 153, 51))
+            receive("ready paint", color=(119, 153, 51), wait=60)
             click(200)
             result["first paint JPEG"] = receive("first paint", color=(51, 85, 119), size=(1280, 800))
             click(200)
@@ -115,7 +121,7 @@ def observe(name, server, page_url, painted):
             # Keep one live frame in flight through the final paint. Both servers
             # should deliver a full-resolution still once the burst settles.
             click(200)
-            if not painted.wait(10):
+            if not painted.wait(30):
                 raise RuntimeError("Page did not report its final paint")
             viewer.send('{"type":"ack"}')
             result["settled JPEG"] = receive("settled paint", color=(34, 68, 136), size=(2560, 1600))

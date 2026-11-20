@@ -39,7 +39,7 @@ impl fmt::Display for Step {
 }
 impl std::error::Error for Step {}
 
-pub(super) fn step(
+pub(crate) fn step(
     error: io::Error,
     method: &'static str,
     syscall: &'static str,
@@ -156,7 +156,7 @@ fn node_directory_error_includes_path() -> bool {
     })
 }
 
-pub(super) fn file(
+pub(crate) fn file(
     error: io::Error,
     operation: &'static str,
     method: &str,

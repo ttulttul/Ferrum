@@ -1,11 +1,12 @@
 mod access;
 mod connect;
+#[cfg(feature = "native")]
 mod external_pairing;
 pub(crate) mod permissions;
 pub(crate) mod storage;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hmac::{Hmac, Mac};
-use rand::{rngs::OsRng, Rng, RngCore};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -16,7 +17,6 @@ use std::{
 };
 use storage::Storage;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 pub const STANDARD: &[&str] = &[
     "orchestration:read",
@@ -50,7 +50,7 @@ const BROWSER: &str = "browser-session-cookie";
 const BEARER: &str = "bearer-access-token";
 const DAY: i64 = 86_400_000;
 pub(crate) fn now() -> i64 {
-    (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+    crate::platform::now_ms()
 }
 pub(crate) fn iso(ms: i64) -> String {
     OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
@@ -61,9 +61,7 @@ pub(crate) fn iso(ms: i64) -> String {
         .unwrap()
 }
 fn random_key() -> [u8; 32] {
-    let mut bytes = [0; 32];
-    OsRng.fill_bytes(&mut bytes);
-    bytes
+    crate::platform::random_bytes()
 }
 fn signed(secret: &[u8; 32], claims: &Value) -> String {
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
@@ -197,9 +195,33 @@ impl AuthService {
         self.desktop = desktop;
         self
     }
-    pub fn open(mut self, dir: &Path) -> anyhow::Result<Self> {
-        self.records = Arc::new(Storage::open(&dir.join("environment-auth.json"))?);
+    #[cfg(feature = "native")]
+    pub fn open(self, dir: &Path) -> anyhow::Result<Self> {
+        self.open_in(Arc::new(crate::persistence::FsStore), dir)
+    }
+    /// Keep sessions, grants and keys in `environment-auth.json` under `dir`
+    /// in `documents`, written through on every change.
+    pub fn open_in(
+        mut self,
+        documents: Arc<dyn crate::persistence::DocumentStore>,
+        dir: &Path,
+    ) -> anyhow::Result<Self> {
+        self.records = Arc::new(Storage::open_in(
+            documents,
+            &dir.join("environment-auth.json"),
+        )?);
         self.external_pairing = Some(dir.join("statev2.sqlite"));
+        Ok(self)
+    }
+    /// Sessions, grants and keys as JSON, for hosts that keep them outside a
+    /// state file (the workers control plane stores them in Durable Object storage).
+    pub fn records_json(&self) -> String {
+        self.records
+            .read(|r| serde_json::to_string(r).expect("credentials serialize"))
+    }
+    /// Restores what [`records_json`](Self::records_json) produced, in memory only.
+    pub fn with_records_json(mut self, json: &str) -> anyhow::Result<Self> {
+        self.records = Arc::new(Storage::in_memory(serde_json::from_str(json)?));
         Ok(self)
     }
     pub(crate) fn desktop(&self) -> bool {
@@ -347,7 +369,7 @@ impl AuthService {
             }
             let ttl = if proof.is_some() { 3_600_000 } else { 30 * DAY };
             let session = Session {
-                id: Uuid::new_v4().to_string(),
+                id: crate::platform::uuid_v4().to_string(),
                 owner,
                 issued: at,
                 client,
@@ -400,6 +422,13 @@ impl AuthService {
         let Some(db) = self.external_pairing.as_deref() else {
             return Err("invalid_credential");
         };
+        // SSH pairing reads the local TypeScript store; a hosted control plane has none.
+        #[cfg(not(feature = "native"))]
+        {
+            let _ = (db, credential, requested);
+            Err("invalid_credential")
+        }
+        #[cfg(feature = "native")]
         match external_pairing::consume(db, credential, requested, &iso(at)) {
             Ok(external_pairing::Outcome::Spent(grant)) => Ok(Grant {
                 created: at,
@@ -527,11 +556,11 @@ impl AuthService {
                     .ok_or("invalid_scope")
             })
             .transpose()?;
-        let id = Uuid::new_v4().to_string();
+        let id = crate::platform::uuid_v4().to_string();
         let expires = now() + 300_000;
         let alphabet = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
         let mut code: String = (0..12)
-            .map(|_| alphabet[OsRng.gen_range(0..alphabet.len())] as char)
+            .map(|_| alphabet[crate::platform::rng().gen_range(0..alphabet.len())] as char)
             .collect();
         if !prefix.is_empty() && purpose.is_none() {
             code = format!("{prefix}-{code}")

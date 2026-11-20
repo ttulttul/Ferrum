@@ -1,6 +1,9 @@
 use super::DEFAULTS;
+use crate::persistence::DocumentStore;
+#[cfg(feature = "native")]
+use crate::persistence::WriteMode;
 use serde_json::{json, Value};
-use std::{fs, path::Path};
+use std::path::Path;
 
 fn shortcut(key: &str) -> Option<Value> {
     let lower = key.to_lowercase();
@@ -135,7 +138,28 @@ fn compile(rule: &Value) -> Option<Value> {
     Some(value)
 }
 
-pub(super) fn read(path: &Path) -> (Value, Value) {
+/// The effective keybindings and issues for the file at `path` in `documents`.
+pub(crate) fn read(documents: &dyn DocumentStore, path: &Path) -> (Value, Value) {
+    resolve(match read_text(documents, path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    })
+}
+
+/// `fs::read_to_string` over a document store, with the same invalid-UTF-8 error.
+fn read_text(documents: &dyn DocumentStore, path: &Path) -> std::io::Result<String> {
+    String::from_utf8(documents.read(path)?).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )
+    })
+}
+
+/// The effective keybindings and config issues for the user's file: its text,
+/// `None` when there is no file, or the error reading it.
+pub(crate) fn resolve(file: Result<Option<String>, String>) -> (Value, Value) {
     let defaults = DEFAULTS["keybindings"]
         .as_array()
         .unwrap()
@@ -143,8 +167,8 @@ pub(super) fn read(path: &Path) -> (Value, Value) {
         .filter_map(compile);
     let mut issues = Vec::new();
     let mut custom = Vec::new();
-    match fs::read_to_string(path) {
-        Ok(text) => match crate::settings::parse(&text) {
+    match file {
+        Ok(Some(text)) => match crate::settings::parse(&text) {
             Ok(Value::Array(rows)) => {
                 for (index, rule) in rows.iter().enumerate() {
                     if let Some(binding) = compile(rule) {
@@ -158,9 +182,9 @@ pub(super) fn read(path: &Path) -> (Value, Value) {
                 json!({"kind":"keybindings.malformed-config","message":"expected JSON array"}),
             ),
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            issues.push(json!({"kind":"keybindings.malformed-config","message":e.to_string()}))
+        Ok(None) => {}
+        Err(message) => {
+            issues.push(json!({"kind":"keybindings.malformed-config","message":message}))
         }
     }
     let mut all = defaults
@@ -171,8 +195,9 @@ pub(super) fn read(path: &Path) -> (Value, Value) {
     (all.into(), issues.into())
 }
 
-fn raw_entries(path: &Path) -> Result<Vec<Value>, Value> {
-    match fs::read_to_string(path) {
+#[cfg(feature = "native")]
+fn raw_entries(documents: &dyn DocumentStore, path: &Path) -> Result<Vec<Value>, Value> {
+    match read_text(documents, path) {
         Ok(text) => match crate::settings::parse(&text) {
             Ok(Value::Array(rows)) => Ok(rows),
             _ => Err(json!({
@@ -191,6 +216,7 @@ fn raw_entries(path: &Path) -> Result<Vec<Value>, Value> {
     }
 }
 
+#[cfg(feature = "native")]
 fn same_rule(left: &Value, right: &Value) -> bool {
     match (compile(left), compile(right)) {
         (Some(left), Some(right)) => left == right,
@@ -198,9 +224,14 @@ fn same_rule(left: &Value, right: &Value) -> bool {
     }
 }
 
-fn write_entries(path: &Path, entries: &[Value]) -> Result<(), Value> {
+#[cfg(feature = "native")]
+fn write_entries(
+    documents: &dyn DocumentStore,
+    path: &Path,
+    entries: &[Value],
+) -> Result<(), Value> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| json!({
+        documents.create_dir_all(parent).map_err(|error| json!({
             "_tag":"Fail",
             "error":{"_tag":"KeybindingsConfigError","detail":"failed to prepare keybindings config directory","configPath":path,"cause":error.to_string()}
         }))?;
@@ -209,14 +240,20 @@ fn write_entries(path: &Path, entries: &[Value]) -> Result<(), Value> {
         "_tag":"Fail",
         "error":{"_tag":"KeybindingsConfigError","detail":"failed to encode keybindings config","configPath":path,"cause":error.to_string()}
     }))?;
-    fs::write(path, format!("{contents}\n")).map_err(|error| json!({
+    documents.write(path, format!("{contents}\n").as_bytes(), WriteMode::InPlace).map_err(|error| json!({
         "_tag":"Fail",
         "error":{"_tag":"KeybindingsConfigError","detail":"failed to write keybindings config","configPath":path,"cause":error.to_string()}
     }))
 }
 
-pub(super) fn mutate(path: &Path, method: &str, input: &Value) -> Result<Value, Value> {
-    let mut entries = raw_entries(path)?;
+#[cfg(feature = "native")]
+pub(crate) fn mutate(
+    documents: &dyn DocumentStore,
+    path: &Path,
+    method: &str,
+    input: &Value,
+) -> Result<Value, Value> {
+    let mut entries = raw_entries(documents, path)?;
     let target = if method == "server.removeKeybinding" {
         input.clone()
     } else {
@@ -246,7 +283,7 @@ pub(super) fn mutate(path: &Path, method: &str, input: &Value) -> Result<Value, 
     if entries.len() > MAX {
         entries = entries.split_off(entries.len() - MAX);
     }
-    write_entries(path, &entries)?;
-    let (keybindings, issues) = read(path);
+    write_entries(documents, path, &entries)?;
+    let (keybindings, issues) = read(documents, path);
     Ok(json!({"keybindings":keybindings,"issues":issues}))
 }

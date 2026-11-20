@@ -478,7 +478,7 @@ pub(super) fn persisted_field(name: &str, value: &Value) -> Option<Value> {
         .find(|(key, _)| key == name)?;
     CONTRACT.nodes[*node].decode(value, "").ok().flatten()
 }
-pub(super) fn normalize(v: &Value) -> Result<Value, String> {
+pub(crate) fn normalize(v: &Value) -> Result<Value, String> {
     decode(CONTRACT.settings, v)
 }
 // DurationFromMillis exposes infinity over RPC. JSON.stringify encodes the same
@@ -491,7 +491,7 @@ const DURATIONS: [&str; 6] = [
     "/backgroundActivity/overrides/hostPowerMonitorActiveInterval",
     "/backgroundActivity/overrides/hostPowerMonitorIdleInterval",
 ];
-pub(super) fn normalize_runtime(v: &Value) -> Result<Value, String> {
+pub(crate) fn normalize_runtime(v: &Value) -> Result<Value, String> {
     let infinities = DURATIONS
         .iter()
         .filter_map(|p| {

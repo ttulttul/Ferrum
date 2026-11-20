@@ -5465,7 +5465,8 @@
       "existingCoverage": [
         "client_initial_sync_parity.py",
         "client_thread_parity.py",
-        "cors_parity.py"
+        "cors_parity.py",
+        "workers_initial_sync_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [

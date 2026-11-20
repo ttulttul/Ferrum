@@ -281,7 +281,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 
 | Call | Trigger | Callers | Request | Response | Auth | Usage | Existing | Client harness |
 |---|---|---|---|---|---|---|---|---|
-| `GET /.well-known/t3/environment` | connect | `apps/desktop/src/backend/DesktopBackendManager.ts:53`<br>`apps/desktop/src/backend/tailscaleEndpointProvider.ts:81`<br>(+2) | metadata.descriptor | metadata.descriptor | none | client | client_initial_sync_parity.py, client_thread_parity.py, cors_parity.py | 1 case(s) |
+| `GET /.well-known/t3/environment` | connect | `apps/desktop/src/backend/DesktopBackendManager.ts:53`<br>`apps/desktop/src/backend/tailscaleEndpointProvider.ts:81`<br>(+2) | metadata.descriptor | metadata.descriptor | none | client | client_initial_sync_parity.py, client_thread_parity.py, cors_parity.py, workers_initial_sync_parity.py | 1 case(s) |
 | `GET /api/auth/session` | connect | `apps/web/src/environments/primary/auth.ts:188`<br>`packages/client-runtime/src/authorization/remote.ts:183`<br>(+2) | auth.session | auth.session | none | client | auth_parity.py, cors_parity.py | 1 case(s) |
 | `POST /api/auth/browser-session` | connect | `apps/web/src/environments/primary/auth.ts:231` | auth.browserSession | auth.browserSession | none | client | auth_parity.py, cors_parity.py | — |
 | `POST /oauth/token` | connect | `packages/client-runtime/src/authorization/remote.ts:130`<br>`packages/client-runtime/src/authorization/remote.ts:132`<br>(+5) | auth.token | auth.token | none | client | auth_parity.py, cors_parity.py | 1 case(s) |
