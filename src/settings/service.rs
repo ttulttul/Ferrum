@@ -111,8 +111,8 @@ impl Settings {
         paths: &ServerPaths,
         documents: Arc<dyn DocumentStore>,
     ) -> anyhow::Result<Self> {
-        secrets::ensure_dir(&paths.secrets)?;
-        let policy = policy::Policy::load()?;
+        secrets::ensure_dir(&*documents, &paths.secrets)?;
+        let policy = policy::Policy::load(&*documents)?;
         let defaults = schema::normalize(&policy.default_settings()).map_err(anyhow::Error::msg)?;
         let service = Self {
             changes: tokio::sync::broadcast::channel(64).0,
@@ -194,6 +194,7 @@ impl Settings {
             settings,
             prior_hosts,
             &raw,
+            &*self.documents,
             &self.paths.secrets,
             otherwise_changed,
             |disk| self.save(disk, &raw),
@@ -205,9 +206,11 @@ impl Settings {
         })
     }
     fn effective(&self, disk: &Value) -> anyhow::Result<Value> {
-        let mut value = self
-            .policy
-            .effective(&secrets::materialize(disk, &self.paths.secrets)?);
+        let mut value = self.policy.effective(&secrets::materialize(
+            &*self.documents,
+            disk,
+            &self.paths.secrets,
+        )?);
         mutations::effective_selection(&mut value, |driver| {
             self.policy.provider_denial(driver).is_none()
         });
@@ -297,7 +300,9 @@ impl Settings {
             })?;
         let prepared = secrets::prepare(current, next);
         prepared
-            .persist(&self.paths.secrets, |disk| self.save(disk, &loaded.raw))
+            .persist(&*self.documents, &self.paths.secrets, |disk| {
+                self.save(disk, &loaded.raw)
+            })
             .map_err(|e| self.io_failure(&e.into(), "write-file"))?;
         let effective = self
             .effective(&prepared.disk)

@@ -129,6 +129,19 @@ impl DocumentStore for SqlDocuments {
         Ok(())
     }
 
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        if self.row(path)?.is_none() {
+            return Err(persistence::not_found(path));
+        }
+        self.0
+            .exec(
+                "DELETE FROM documents WHERE path = ?",
+                vec![path.to_string_lossy().into_owned().into()],
+            )
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(())
+    }
+
     fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
         Ok(())
     }

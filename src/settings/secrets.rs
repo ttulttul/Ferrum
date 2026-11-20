@@ -1,11 +1,11 @@
 use super::failure;
+use crate::persistence::{DocumentStore, WriteMode};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 pub(super) use failure::rpc as rpc_error;
 use serde_json::{json, Map, Value};
 use std::{
     collections::{HashMap, HashSet},
-    fs,
-    io::{self, Write},
+    io,
     path::Path,
 };
 
@@ -286,7 +286,11 @@ pub(crate) fn redact(settings: &Value, secret_references: bool) -> Value {
     next
 }
 
-pub(crate) fn materialize(disk: &Value, secrets_dir: &Path) -> io::Result<Value> {
+pub(crate) fn materialize(
+    store: &dyn DocumentStore,
+    disk: &Value,
+    secrets_dir: &Path,
+) -> io::Result<Value> {
     let mut next = disk.clone();
     let mut error = None;
     map(&mut next, |s| {
@@ -296,7 +300,7 @@ pub(crate) fn materialize(disk: &Value, secrets_dir: &Path) -> io::Result<Value>
                 redacted: false,
             };
         }
-        match read(secrets_dir, s.name) {
+        match read(store, secrets_dir, s.name) {
             Ok(bytes) => {
                 let text = String::from_utf8_lossy(bytes.as_deref().unwrap_or_default());
                 Mapped {
@@ -325,58 +329,32 @@ pub(super) struct Prepared {
     environment: HashMap<String, (String, String)>,
 }
 
-pub(super) fn ensure_dir(dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
+pub(super) fn ensure_dir(store: &dyn DocumentStore, dir: &Path) -> io::Result<()> {
+    store.create_private_dir_all(dir)
 }
 
-fn read(dir: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
-    match fs::read(dir.join(format!("{name}.bin"))) {
-        Ok(v) => Ok(Some(v)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
+fn read(store: &dyn DocumentStore, dir: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
+    store.read_optional(&dir.join(format!("{name}.bin")))
 }
-fn write(dir: &Path, name: &str, bytes: Option<&[u8]>) -> io::Result<()> {
+fn write(
+    store: &dyn DocumentStore,
+    dir: &Path,
+    name: &str,
+    bytes: Option<&[u8]>,
+) -> io::Result<()> {
     let dest = dir.join(format!("{name}.bin"));
-    let Some(bytes) = bytes else {
-        return match fs::remove_file(dest) {
+    match bytes {
+        Some(bytes) => store.write(&dest, bytes, WriteMode::Private),
+        None => match store.remove(&dest) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             result => result,
-        };
-    };
-    let tmp = dir.join(format!("{name}.bin.{}.tmp", crate::platform::uuid_v4()));
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        },
     }
-    let result = (|| {
-        let mut f = opts
-            .open(&tmp)
-            .map_err(|e| failure::step(e, "writeFile", "open", &tmp, None))?;
-        f.write_all(bytes)
-            .map_err(|e| failure::step(e, "writeFile", "write", &tmp, None))?;
-        f.sync_all()
-            .map_err(|e| failure::step(e, "writeFile", "fsync", &tmp, None))?;
-        drop(f);
-        fs::rename(&tmp, &dest).map_err(|e| failure::step(e, "rename", "rename", &tmp, Some(&dest)))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
 }
 impl Prepared {
     pub(super) fn persist(
         &self,
+        store: &dyn DocumentStore,
         dir: &Path,
         write_settings: impl FnOnce(&Value) -> io::Result<()>,
     ) -> io::Result<()> {
@@ -391,21 +369,21 @@ impl Prepared {
                     .environment
                     .get(name)
                     .map(|(id, var)| (id.as_str(), var.as_str()));
-                let was = read(dir, name)
+                let was = read(store, dir, name)
                     .map_err(|e| failure::store(dir, name, "read-secret", env, e))?;
                 if was.is_none() && bytes.is_none() {
                     continue;
                 }
                 previous.push((name, was));
-                write(dir, name, bytes)
+                write(store, dir, name, bytes)
                     .map_err(|e| failure::store(dir, name, operation, env, e))?;
             }
-            materialize(&self.disk, dir)?;
+            materialize(store, &self.disk, dir)?;
             write_settings(&self.disk)
         })();
         if let Err(cause) = result {
             for (name, was) in previous.into_iter().rev() {
-                if let Err(e) = write(dir, name, was.as_deref()) {
+                if let Err(e) = write(store, dir, name, was.as_deref()) {
                     tracing::warn!(error = %e, "failed to roll back settings secret");
                 }
             }
@@ -456,6 +434,7 @@ pub(super) fn migrate(
     mut settings: Value,
     prior_hosts: Value,
     raw: &Value,
+    documents: &dyn DocumentStore,
     dir: &Path,
     otherwise_changed: bool,
     save: impl FnOnce(&Value) -> io::Result<()>,
@@ -463,14 +442,14 @@ pub(super) fn migrate(
     let moves = legacy_slots(raw);
     let mut previous = Vec::<(String, Option<Vec<u8>>)>::new();
     let mut store = |name: &str, value: &[u8]| -> io::Result<()> {
-        let old = read(dir, name)?;
-        write(dir, name, Some(value))?;
+        let old = read(documents, dir, name)?;
+        write(documents, dir, name, Some(value))?;
         previous.push((name.to_owned(), old));
         Ok(())
     };
     let mut copied = true;
     for (from, to) in &moves {
-        if let Err(e) = read(dir, from).and_then(|bytes| match bytes {
+        if let Err(e) = read(documents, dir, from).and_then(|bytes| match bytes {
             Some(value) => store(to, &value),
             None => Ok(()),
         }) {
@@ -507,7 +486,7 @@ pub(super) fn migrate(
     if changed {
         if let Err(e) = save(&settings) {
             for (name, old) in previous.into_iter().rev() {
-                if let Err(error) = write(dir, &name, old.as_deref()) {
+                if let Err(error) = write(documents, dir, &name, old.as_deref()) {
                     tracing::warn!(%error,"failed to roll back settings secret");
                 }
             }
@@ -515,7 +494,7 @@ pub(super) fn migrate(
         }
         if copied {
             for (from, _) in &moves {
-                let _ = write(dir, from, None);
+                let _ = write(documents, dir, from, None);
             }
         }
     }
@@ -801,6 +780,8 @@ async fn read_op(account: &str, field: &str, cli: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::FsStore;
+    use std::fs;
     use tempfile::tempdir;
     #[test]
     fn migration_and_failure_restore_the_exact_preceding_files() {
@@ -812,19 +793,27 @@ mod tests {
         });
         let raw = json!({"github":{"tokens":{"other.test":REDACTED}}});
         let old = format!("github-token-{}", encoded("other.test"));
-        write(dir.path(), &old, Some(b"old-token")).unwrap();
+        write(&FsStore, dir.path(), &old, Some(b"old-token")).unwrap();
         let apply = |save: fn(&Value) -> io::Result<()>| {
-            migrate(saved.clone(), json!({}), &raw, dir.path(), false, save)
+            migrate(
+                saved.clone(),
+                json!({}),
+                &raw,
+                &FsStore,
+                dir.path(),
+                false,
+                save,
+            )
         };
         assert!(apply(|_| Err(io::Error::other("test failure"))).is_err());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
         assert_eq!(
-            read(dir.path(), &old).unwrap().as_deref(),
+            read(&FsStore, dir.path(), &old).unwrap().as_deref(),
             Some(&b"old-token"[..])
         );
         let disk = apply(|_| Ok(())).unwrap();
-        assert!(read(dir.path(), &old).unwrap().is_none());
-        let plain = materialize(&disk, dir.path()).unwrap();
+        assert!(read(&FsStore, dir.path(), &old).unwrap().is_none());
+        let plain = materialize(&FsStore, &disk, dir.path()).unwrap();
         assert_eq!(
             plain["sourceControlHosts"]["github"]["tokens"]["example.test"],
             "host-token"
@@ -843,10 +832,12 @@ mod tests {
             json!({"cloudSpeechCredentials":{"openai":"replacement"}}),
         );
         assert!(update
-            .persist(dir.path(), |_| Err(io::Error::other("late error")))
+            .persist(&FsStore, dir.path(), |_| Err(io::Error::other(
+                "late error"
+            )))
             .is_err());
-        assert_eq!(materialize(&disk, dir.path()).unwrap(), plain);
-        update.persist(dir.path(), |_| Ok(())).unwrap();
+        assert_eq!(materialize(&FsStore, &disk, dir.path()).unwrap(), plain);
+        update.persist(&FsStore, dir.path(), |_| Ok(())).unwrap();
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
         #[cfg(unix)]
         {
@@ -872,24 +863,38 @@ mod tests {
         let speech_path = dir.path().join("voice-cloud-openai.bin");
         fs::create_dir(&old_path).unwrap();
         fs::create_dir(&speech_path).unwrap();
-        let during = migrate(folded.clone(), json!({}), &raw, dir.path(), false, |_| {
-            panic!("must leave the original settings alone")
-        })
+        let during = migrate(
+            folded.clone(),
+            json!({}),
+            &raw,
+            &FsStore,
+            dir.path(),
+            false,
+            |_| panic!("must leave the original settings alone"),
+        )
         .unwrap();
         assert_eq!(during["cloudSpeechCredentials"]["openai"], "fixture");
         assert_eq!(during["sourceControlHosts"], json!({}));
         assert!(old_path.is_dir());
         fs::remove_dir(&old_path).unwrap();
-        write(dir.path(), &old, Some(b"old-token")).unwrap();
+        write(&FsStore, dir.path(), &old, Some(b"old-token")).unwrap();
         fs::remove_dir(&speech_path).unwrap();
-        let after = migrate(folded, json!({}), &raw, dir.path(), false, |disk| {
-            assert_eq!(disk["cloudSpeechCredentials"]["openai"], REDACTED);
-            assert!(old_path.is_file());
-            Ok(())
-        })
+        let after = migrate(
+            folded,
+            json!({}),
+            &raw,
+            &FsStore,
+            dir.path(),
+            false,
+            |disk| {
+                assert_eq!(disk["cloudSpeechCredentials"]["openai"], REDACTED);
+                assert!(old_path.is_file());
+                Ok(())
+            },
+        )
         .unwrap();
         assert!(!old_path.exists());
-        let visible = materialize(&after, dir.path()).unwrap();
+        let visible = materialize(&FsStore, &after, dir.path()).unwrap();
         assert_eq!(visible["cloudSpeechCredentials"]["openai"], "fixture");
         assert_eq!(
             visible["sourceControlHosts"]["github"]["tokens"]["example.test"],
@@ -981,8 +986,8 @@ printf %s fixture-only
         );
         let prepared = prepare(&previous, next);
         // Unmarked duplicate removals cannot erase the redacted row's saved slot.
-        prepared.persist(dir.path(), |_| Ok(())).unwrap();
-        let materialized = materialize(&prepared.disk, dir.path()).unwrap();
+        prepared.persist(&FsStore, dir.path(), |_| Ok(())).unwrap();
+        let materialized = materialize(&FsStore, &prepared.disk, dir.path()).unwrap();
         let vars = &materialized["providerInstances"]["server"]["environment"];
         assert_eq!(vars[0]["value"], "new");
         assert_eq!(vars[1]["value"], "new");
