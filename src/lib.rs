@@ -39,7 +39,6 @@ pub mod mcp_oauth;
 mod native_child_work;
 #[cfg(feature = "native")]
 mod npm_release;
-#[cfg(feature = "native")]
 mod orchestration;
 #[cfg(feature = "native")]
 mod projects;
@@ -52,7 +51,6 @@ mod wire_json;
 #[cfg(feature = "native")]
 pub use settings::policy::ManagedPolicyFileError;
 mod thread_projection;
-#[cfg(feature = "native")]
 use orchestration::dispatch_orchestration_command;
 #[cfg(feature = "native")]
 pub mod provider_http;

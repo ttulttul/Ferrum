@@ -1,11 +1,49 @@
-use super::{execute_run, now, AppState, CommandReceipt, ConversationMessage, Event, Run, Thread};
+//! Orchestration commands (`orchestration.dispatchCommand`): checks, then the
+//! events each command commits. Dispatch runs over the control state; what
+//! it needs beyond that (policy, run execution, guest shares) comes from a
+//! [`CommandHost`].
+use super::{now, CommandReceipt, ConversationMessage, Event, Run, Thread};
+use crate::control_state::ControlState;
 use serde_json::{json, Value};
-use std::sync::Arc;
-use tokio::sync::oneshot;
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
-pub(crate) async fn dispatch_orchestration_command(
-    state: Arc<AppState>,
+/// What command dispatch needs from the server beyond the control state.
+pub(crate) trait CommandHost:
+    std::ops::Deref<Target = ControlState> + crate::workspace::MaybeSendSync + Sized
+{
+    /// Held while a command checks and commits, so commands apply one at a time.
+    fn mutation_lock(&self) -> &Mutex<()>;
+    /// The managed policy's summary, when a policy applies.
+    fn policy_summary(&self) -> Option<&Value>;
+    fn runtime_denial(&self, mode: &str) -> Option<String>;
+    fn provider_denial(&self, driver: &str) -> Option<String>;
+    /// The effective settings.
+    fn effective_settings(&self) -> anyhow::Result<Value>;
+    fn workspace(&self) -> &dyn crate::workspace::Workspace;
+    /// Running runs by id; resolving a sender stops its run.
+    fn cancellations(&self) -> &Mutex<HashMap<Uuid, oneshot::Sender<()>>>;
+    /// Execute `run` in the background until it ends or `cancel` resolves,
+    /// recording a failure to start or run as the run's end.
+    fn launch_run(
+        self: Arc<Self>,
+        run: Run,
+        cwd: String,
+        text: String,
+        cancel: oneshot::Receiver<()>,
+    );
+    fn close_guest_thread(&self, thread_id: &str) -> Result<(), String>;
+    fn resolve_guest_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        outcome: &str,
+    ) -> Result<(), String>;
+}
+
+pub(crate) async fn dispatch_orchestration_command<H: CommandHost>(
+    state: Arc<H>,
     command: Value,
 ) -> Result<u64, Value> {
     let kind = command["type"].as_str().unwrap_or_default();
@@ -26,7 +64,7 @@ pub(crate) async fn dispatch_orchestration_command(
             json!({"name":"OrchestratorDispatchError","message":format!("Failed to dispatch orchestration command {kind} ({command_id})."),"cause":detail}),
         )
     };
-    let _guard = state.project_mutation_lock.lock().await;
+    let _guard = state.mutation_lock().lock().await;
     let store = state.store.read().await;
     if let Some((prior_id, seq)) = store.command_receipts.get(command_id) {
         if id == prior_id {
@@ -124,7 +162,7 @@ pub(crate) async fn dispatch_orchestration_command(
             ));
         }
     }
-    if let Some(summary) = state.settings.policy.summary() {
+    if let Some(summary) = state.policy_summary() {
         let row = store
             .threads
             .get(id)
@@ -138,10 +176,7 @@ pub(crate) async fn dispatch_orchestration_command(
             } else {
                 &row["runtimeMode"]
             };
-            if let Some(mut message) = mode
-                .as_str()
-                .and_then(|mode| state.settings.policy.runtime_denial(mode))
-            {
+            if let Some(mut message) = mode.as_str().and_then(|mode| state.runtime_denial(mode)) {
                 if starts_work {
                     message.push_str(" Switch this thread's mode to continue.");
                 }
@@ -157,13 +192,12 @@ pub(crate) async fn dispatch_orchestration_command(
                 .or(row["providerInstanceId"].as_str())
                 .unwrap_or("codex");
             let settings = state
-                .settings
-                .internal()
+                .effective_settings()
                 .map_err(|e| dispatch_error(e.to_string()))?;
             let driver = settings["providerInstances"][id]["driver"]
                 .as_str()
                 .unwrap_or(id);
-            if let Some(reason) = state.settings.policy.provider_denial(driver) {
+            if let Some(reason) = state.provider_denial(driver) {
                 return Err(dispatch_error(reason));
             }
         }
@@ -178,8 +212,8 @@ pub(crate) async fn dispatch_orchestration_command(
         .map_err(|e| dispatch_error(e.to_string()))
 }
 
-async fn start_run(
-    state: Arc<AppState>,
+async fn start_run<H: CommandHost>(
+    state: Arc<H>,
     receipt: &CommandReceipt,
     thread_id: &str,
     text: String,
@@ -196,7 +230,7 @@ async fn start_run(
         .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
     let baseline = needs_baseline.then(|| cwd.clone());
     let run = Run {
-        id: Uuid::new_v4(),
+        id: crate::platform::uuid_v4(),
         thread_id: thread_id.to_owned(),
         provider: "default".into(),
         status: if queued { "queued" } else { "running" }.into(),
@@ -223,7 +257,7 @@ async fn start_run(
         .await?
         .id;
     if let Some(baseline_cwd) = baseline {
-        if let Some(tree) = state.workspace.capture_git_tree(&baseline_cwd).await {
+        if let Some(tree) = state.workspace().capture_git_tree(&baseline_cwd).await {
             let _ = state
                 .commit(Event::CheckpointCaptured {
                     thread_id: thread_id.to_owned(),
@@ -242,28 +276,13 @@ async fn start_run(
         return Ok(seq);
     }
     let (tx, rx) = oneshot::channel();
-    state.cancellations.lock().await.insert(run.id, tx);
-    tokio::spawn(async move {
-        if let Err(e) = execute_run(state.clone(), run.clone(), cwd, text, rx).await {
-            state.cancellations.lock().await.remove(&run.id);
-            if let Err(write) = state
-                .commit(Event::RunFinished {
-                    run_id: run.id,
-                    thread_id: run.thread_id,
-                    status: "failed".into(),
-                    error: Some(e.to_string()),
-                })
-                .await
-            {
-                tracing::error!(%write,"could not record provider failure");
-            }
-        }
-    });
+    state.cancellations().lock().await.insert(run.id, tx);
+    state.launch_run(run, cwd, text, rx);
     Ok(seq)
 }
 
-async fn start_queued_run(
-    state: Arc<AppState>,
+async fn start_queued_run<H: CommandHost>(
+    state: Arc<H>,
     receipt: &CommandReceipt,
     thread_id: &str,
     run_id: &str,
@@ -271,8 +290,8 @@ async fn start_queued_run(
     start_existing_run(state, receipt, thread_id, run_id, "running").await
 }
 
-async fn start_existing_run(
-    state: Arc<AppState>,
+async fn start_existing_run<H: CommandHost>(
+    state: Arc<H>,
     receipt: &CommandReceipt,
     thread_id: &str,
     run_id: &str,
@@ -321,25 +340,13 @@ async fn start_existing_run(
         .await?
         .id;
     let (tx, rx) = oneshot::channel();
-    state.cancellations.lock().await.insert(run.id, tx);
-    tokio::spawn(async move {
-        if let Err(error) = execute_run(state.clone(), run.clone(), cwd, text, rx).await {
-            state.cancellations.lock().await.remove(&run.id);
-            let _ = state
-                .commit(Event::RunFinished {
-                    run_id: run.id,
-                    thread_id: run.thread_id.clone(),
-                    status: "failed".into(),
-                    error: Some(error.to_string()),
-                })
-                .await;
-        }
-    });
+    state.cancellations().lock().await.insert(run.id, tx);
+    state.launch_run(run, cwd, text, rx);
     Ok(sequence)
 }
 
-async fn apply_command(
-    state: Arc<AppState>,
+async fn apply_command<H: CommandHost>(
+    state: Arc<H>,
     command: &Value,
     receipt: &CommandReceipt,
 ) -> anyhow::Result<u64> {
@@ -441,7 +448,7 @@ async fn apply_command(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let mut cancellations = state.cancellations.lock().await;
+                let mut cancellations = state.cancellations().lock().await;
                 for run_id in run_ids {
                     if let Some(cancel) = cancellations.remove(&run_id) {
                         let _ = cancel.send(());
@@ -614,9 +621,9 @@ async fn apply_command(
         "thread.guest-share.close" | "thread.guest-message.dismiss" => {
             let id = thread_id.ok_or_else(|| anyhow::anyhow!("Missing thread id."))?;
             if command_type == "thread.guest-share.close" {
-                state.guest.close_thread(id)
+                state.close_guest_thread(id)
             } else {
-                state.guest.resolve_message(
+                state.resolve_guest_message(
                     id,
                     command["guestMessageId"].as_str().unwrap_or(""),
                     "dismissed",
@@ -1428,7 +1435,7 @@ async fn apply_command(
                 ));
             }
             if target_run.status == "running" {
-                if let Some(cancel) = state.cancellations.lock().await.remove(&target_run.id) {
+                if let Some(cancel) = state.cancellations().lock().await.remove(&target_run.id) {
                     let _ = cancel.send(());
                 }
             }
