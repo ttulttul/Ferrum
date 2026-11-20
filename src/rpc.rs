@@ -2889,33 +2889,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(json!({"delivery":delivery}));
     }
     if method == "cloud.getRelayClientStatus" {
-        let found = std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths).find_map(|dir| {
-                let path = dir.join("cloudflared");
-                path.is_file().then_some(path)
-            })
-        });
-        let version = found
-            .as_ref()
-            .and_then(|path| {
-                std::process::Command::new(path)
-                    .arg("--version")
-                    .output()
-                    .ok()
-            })
-            .and_then(|text| {
-                let text = if text.stdout.is_empty() {
-                    String::from_utf8(text.stderr).ok()?
-                } else {
-                    String::from_utf8(text.stdout).ok()?
-                };
-                text.split_whitespace()
-                    .find(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
-                    .map(str::to_owned)
-            });
-        return Reply::Success(
-            json!({"status":if found.is_some(){"available"}else{"unavailable"},"executablePath":found,"source":found.as_ref().map(|_| "path"),"version":version}),
-        );
+        let options = crate::relay_client::Options::from_env(&state.paths.base_dir);
+        return Reply::Success(crate::relay_client::resolve(&options).await);
     }
     if method == "cloud.installRelayClient" {
         return Reply::Chunk(json!([{"type":"progress","stage":"checking"}]));

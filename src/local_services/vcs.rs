@@ -108,19 +108,29 @@ fn totals(map: &BTreeMap<String, (u64, u64)>) -> (u64, u64) {
 pub(super) async fn branch(cwd: &str) -> Option<String> {
     read(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await
 }
-pub(super) async fn default_ref(cwd: &str) -> Option<String> {
-    read(
+/// The branch `refs/remotes/<remote>/HEAD` names, as `resolveDefaultBranchName` reads it. Unlike
+/// `symbolic-ref`, `rev-parse --verify` fails when the remote deleted the branch HEAD points at.
+async fn remote_default_branch(cwd: &str, remote: &str) -> Option<String> {
+    let head = format!("refs/remotes/{remote}/HEAD");
+    let target = read(
         cwd,
         &[
-            "symbolic-ref",
+            "rev-parse",
+            "--verify",
             "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
+            "--symbolic-full-name",
+            &head,
         ],
     )
-    .await?
-    .strip_prefix("origin/")
-    .map(str::to_owned)
+    .await?;
+    let name = target
+        .trim()
+        .strip_prefix(&format!("refs/remotes/{remote}/"))?
+        .trim();
+    (!name.is_empty() && name != "HEAD").then(|| name.to_owned())
+}
+pub(super) async fn default_ref(cwd: &str) -> Option<String> {
+    remote_default_branch(cwd, "origin").await
 }
 fn nonrepo() -> Value {
     json!({"isRepo":false,"hasPrimaryRemote":false,"isDefaultRef":false,"refName":null,"hasWorkingTreeChanges":false,"workingTree":{"files":[],"insertions":0,"deletions":0},"hasUpstream":false,"aheadCount":0,"behindCount":0,"aheadOfDefaultCount":0,"pr":null})
@@ -449,6 +459,18 @@ impl VcsService {
     }
 
     pub async fn call(&self, method: &str, input: &Value, base_dir: &Path) -> Option<Reply> {
+        self.call_with(method, input, base_dir, true).await
+    }
+
+    /// `refresh_upstream` is false when the automatic Git fetch interval is zero; a status read
+    /// then reports the refs as last fetched, as the reference does.
+    pub async fn call_with(
+        &self,
+        method: &str,
+        input: &Value,
+        base_dir: &Path,
+        refresh_upstream: bool,
+    ) -> Option<Reply> {
         if !matches!(
             method,
             "init"
@@ -463,9 +485,15 @@ impl VcsService {
         ) {
             return None;
         }
-        Some(self.apply(method, input, base_dir).await)
+        Some(self.apply(method, input, base_dir, refresh_upstream).await)
     }
-    async fn apply(&self, method: &str, input: &Value, base_dir: &Path) -> Reply {
+    async fn apply(
+        &self,
+        method: &str,
+        input: &Value,
+        base_dir: &Path,
+        refresh_upstream: bool,
+    ) -> Reply {
         let cwd = string(input, "cwd")?;
         if method == "init" {
             if input.get("kind").is_some() && input["kind"] != "git" {
@@ -500,7 +528,12 @@ impl VcsService {
             };
         };
         match method {
-            "refreshStatus" => status(&root).await,
+            "refreshStatus" => {
+                if refresh_upstream {
+                    super::vcs_upstream::refresh_if_stale(cwd).await;
+                }
+                status(&root).await
+            }
             "listRefs" => refs(&root, cwd, input).await,
             "pull" => {
                 let head = branch(cwd).await;

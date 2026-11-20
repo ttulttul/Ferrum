@@ -28,7 +28,17 @@ pub async fn dispatch(
             Some(crate::local_services::git_workflow::pull_request(state, name, input).await)
         }
         "review" => Some(crate::local_services::review::call(state, name, input).await),
-        "vcs" => state.vcs.call(name, input, &state.data_dir).await,
+        "vcs" => {
+            state
+                .vcs
+                .call_with(
+                    name,
+                    input,
+                    &state.data_dir,
+                    name == "refreshStatus" && automatic_git_fetch(state),
+                )
+                .await
+        }
         "terminal" => state.terminals.call(name, input).await,
         "preview" if name == "stopLocalServer" => {
             Some(crate::local_services::discovery::stop(state, input).await)
@@ -66,6 +76,13 @@ pub async fn dispatch(
     }
 }
 
+/// `VcsAutomaticFetchInterval`: a zero interval turns off the fetch a status read starts.
+fn automatic_git_fetch(state: &AppState) -> bool {
+    state.settings.internal().map_or(true, |settings| {
+        settings["automaticGitFetchInterval"].as_f64() != Some(0.0)
+    })
+}
+
 pub async fn polled_stream(
     state: &AppState,
     method: &str,
@@ -82,7 +99,12 @@ pub async fn polled_stream(
     }
     let status = match state
         .vcs
-        .call("refreshStatus", input, &state.data_dir)
+        .call_with(
+            "refreshStatus",
+            input,
+            &state.data_dir,
+            automatic_git_fetch(state),
+        )
         .await?
     {
         Ok(status) => status,

@@ -52,6 +52,7 @@ use orchestration::dispatch_orchestration_command;
 pub mod provider_http;
 pub mod provider_rpc;
 pub mod pull_requests;
+pub mod relay_client;
 pub mod relay_http;
 pub mod relay_service;
 pub mod repository_identity;

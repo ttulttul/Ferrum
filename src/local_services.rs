@@ -10,6 +10,7 @@ mod previews;
 pub(crate) mod review;
 mod terminals;
 mod vcs;
+mod vcs_upstream;
 
 pub use devices::DeviceService;
 pub use previews::PreviewService;
@@ -125,6 +126,122 @@ mod tests {
         assert!(std::path::Path::new(path).join(".git").exists());
         call("removeWorktree", json!({"cwd":cwd,"path":path})).await;
         assert!(!std::path::Path::new(path).exists());
+    }
+
+    /// `vcs.listRefs` takes the default branch from `refs/remotes/origin/HEAD`, as the reference
+    /// does, and a status read fetches the tracked remote first. Git 2.48 and newer record
+    /// `origin/HEAD` during that fetch, so after a status read the default branch is whatever
+    /// Git itself now reports, on any Git version.
+    #[tokio::test]
+    async fn list_refs_default_branch_follows_origin_head_after_a_status_fetch() {
+        let root = Fixture::new();
+        let data = Fixture::new();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "Fixture")
+                .env("GIT_AUTHOR_EMAIL", "fixture@localhost")
+                .env("GIT_COMMITTER_NAME", "Fixture")
+                .env("GIT_COMMITTER_EMAIL", "fixture@localhost")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            output.status.success()
+        };
+        let remote = root.0.join("remote.git");
+        let repo = root.0.join("repo");
+        git(
+            &root.0,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(
+            &root.0,
+            &["init", "-q", "-b", "main", repo.to_str().unwrap()],
+        );
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "a"]);
+        git(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&repo, &["push", "-q", "-u", "origin", "main"]);
+        git(&repo, &["branch", "side"]);
+        let svc = VcsService;
+        let input = json!({"cwd":repo.to_str().unwrap()});
+        let refs = || async {
+            let refs = svc
+                .call("listRefs", &input, &data.0)
+                .await
+                .unwrap()
+                .unwrap();
+            refs["refs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    (
+                        r["name"].as_str().unwrap().to_owned(),
+                        r["isDefault"] == true,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        // A push never records origin/HEAD.
+        assert_eq!(
+            refs().await,
+            [("main".to_owned(), false), ("side".to_owned(), false)]
+        );
+
+        svc.call("refreshStatus", &input, &data.0)
+            .await
+            .unwrap()
+            .unwrap();
+        let origin_head = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/HEAD",
+            ])
+            .status()
+            .unwrap()
+            .success();
+        assert_eq!(
+            refs().await,
+            [("main".to_owned(), origin_head), ("side".to_owned(), false)]
+        );
+
+        git(&repo, &["remote", "set-head", "origin", "main"]);
+        assert_eq!(
+            refs().await,
+            [("main".to_owned(), true), ("side".to_owned(), false)]
+        );
+        // A HEAD that names a branch the remote deleted is no default, as `rev-parse --verify`
+        // fails where `symbolic-ref` would still answer.
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/side",
+            ],
+        );
+        assert_eq!(
+            refs().await,
+            [("main".to_owned(), false), ("side".to_owned(), false)]
+        );
     }
 
     #[test]
