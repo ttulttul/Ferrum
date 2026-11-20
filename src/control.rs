@@ -167,6 +167,7 @@ impl ControlPlane {
     /// Checks a `/ws` upgrade as the native server does: protocol 2, then a
     /// `wsTicket` or a session credential. On success returns the connection
     /// to keep with the socket.
+    #[allow(clippy::result_large_err)] // the rejection is the HTTP response to send
     pub fn authorize_socket(&self, headers: &HeaderMap, uri: &Uri) -> Result<Connection, Response> {
         let query = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes());
         if !query
@@ -189,7 +190,7 @@ impl ControlPlane {
                 .into_response());
         }
         let ticket = query
-            .clone()
+            .into_iter()
             .filter(|(key, _)| key == "wsTicket")
             .last()
             .map(|(_, value)| value.into_owned())

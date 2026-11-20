@@ -147,7 +147,7 @@ pub(crate) fn shell_snapshot(
     query: &HashMap<String, String>,
 ) -> Value {
     let seq = sequence;
-    let mut snapshot = shell(&store, seq);
+    let mut snapshot = shell(store, seq);
     let mut hash = Sha256::new();
     for p in snapshot["projects"].as_array().unwrap() {
         hash.update(json!([p["id"], p["repositoryIdentity"]]).to_string());
