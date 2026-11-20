@@ -1,5 +1,6 @@
 mod access;
 mod connect;
+#[cfg(feature = "native")]
 mod external_pairing;
 pub(crate) mod permissions;
 pub(crate) mod storage;
@@ -400,6 +401,13 @@ impl AuthService {
         let Some(db) = self.external_pairing.as_deref() else {
             return Err("invalid_credential");
         };
+        // SSH pairing reads the local TypeScript store; a hosted control plane has none.
+        #[cfg(not(feature = "native"))]
+        {
+            let _ = (db, credential, requested);
+            Err("invalid_credential")
+        }
+        #[cfg(feature = "native")]
         match external_pairing::consume(db, credential, requested, &iso(at)) {
             Ok(external_pairing::Outcome::Spent(grant)) => Ok(Grant {
                 created: at,
