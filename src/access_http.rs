@@ -405,7 +405,7 @@ pub fn trace_id(headers: &HeaderMap) -> String {
                 && id.bytes().any(|c| c != b'0')
         })
         .map(str::to_owned)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string())
+        .unwrap_or_else(|| crate::platform::uuid_v4().simple().to_string())
 }
 pub fn auth_error(headers: &HeaderMap, reason: &str) -> Response {
     let trace_id = trace_id(headers);
