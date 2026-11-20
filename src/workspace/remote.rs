@@ -1,32 +1,143 @@
-//! The workspace as a control plane without a local workspace sees it: a daemon in another
-//! process, reached over one connection. The wire protocol is not wired up
-//! yet, so every operation answers as unavailable, with the defect the
-//! WebAssembly build gives for workspace RPCs today.
-use super::{Reply, TurnEvent, TurnSpec, Workspace, WorkspaceFuture};
-use futures_util::FutureExt;
+//! A workspace in another process (`t3-agentd`), reached over the workspace
+//! protocol (see [`crate::workspace_protocol`]).
+//!
+//! [`RemoteWorkspace`] does not own a socket. Its host supplies a
+//! [`Transport`] that sends frames, feeds received frames to
+//! [`RemoteWorkspace::receive`] (then calls [`RemoteWorkspace::flush_acks`]),
+//! and reports the connection's life with [`RemoteWorkspace::connected`] and
+//! [`RemoteWorkspace::disconnected`]. It also calls
+//! [`RemoteWorkspace::maintain`] every few hundred milliseconds, which reopens
+//! streams that ended, closes idle watches and forwards turn cancellations.
+//! Natively, [`connect`] does all of this over a WebSocket.
+//!
+//! Until a connection is up, every operation answers as unavailable.
+use super::{GitTools, Reply, TurnEvent, TurnSpec, Workspace, WorkspaceFuture};
+use crate::workspace_protocol::{
+    self as proto, op, Ack, EndReason, ErrorCode, Frame, Hello, HelloReply, Inbound, Polled,
+    Request, Resume, ResumeReply, StreamBody, StreamRef, TurnStart, WireError, WireGitTools,
+    WireTurnEvent,
+};
 use serde_json::{json, Value};
 use std::{
+    collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, MutexGuard},
 };
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-/// A workspace daemon that is not connected.
+#[cfg(feature = "native")]
+mod native;
+#[cfg(feature = "native")]
+pub use native::{connect, NativeLink};
+
+/// Sends frames to agentd.
+pub trait Transport: super::MaybeSendSync {
+    /// Queue a frame. An error means the connection is gone.
+    fn send(&self, frame: Frame) -> Result<(), WireError>;
+}
+
+/// A watch no one has read for this long is closed.
+const WATCH_IDLE_MS: u64 = 10_000;
+
+/// The event streams that stay open for as long as a connection does.
+const BUS_OPS: [&str; 4] = [
+    op::TERM_EVENTS,
+    op::TERM_METADATA,
+    op::PREVIEW_EVENTS,
+    op::DEVICE_EVENTS,
+];
+
+/// A workspace served by `t3-agentd`. Clones share one connection.
+#[derive(Clone)]
 pub struct RemoteWorkspace {
-    // Held so subscriptions stay open rather than ending at once.
-    events: broadcast::Sender<Value>,
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    /// The server's epoch, which `hello` presents.
+    epoch: u64,
+    /// The token `hello` presents, for transports that cannot send it in
+    /// the upgrade request.
+    token: Option<String>,
+    state: Mutex<State>,
+    terminal_events: broadcast::Sender<Value>,
+    metadata_events: broadcast::Sender<Value>,
+    preview_events: broadcast::Sender<Value>,
+    device_events: broadcast::Sender<Value>,
+}
+
+#[derive(Default)]
+struct State {
+    transport: Option<Arc<dyn Transport>>,
+    /// Whether `hello` and `resume` have finished on this connection.
+    ready: bool,
+    next_id: u64,
+    pending: HashMap<u64, Pending>,
+    streams: HashMap<u64, Sink>,
+    /// The highest sequence number received per stream since the last flush.
+    acks: BTreeMap<u64, u64>,
+    buses: HashMap<&'static str, Bus>,
+    /// The terminals as `term.metadata` last described them.
+    terminals: Vec<Value>,
+    device_state: Value,
+    watches: HashMap<String, Watch>,
+    /// Turn cancellations `maintain` forwards (no spawned task can wait on
+    /// them in every build).
+    cancels: Vec<(u64, oneshot::Receiver<()>)>,
+}
+
+struct Pending {
+    reply: oneshot::Sender<Result<Value, WireError>>,
+    /// Installed as soon as the reply names a stream, before that stream's
+    /// first frame can be handled.
+    sink: Option<Sink>,
+}
+
+struct Sink {
+    last_seq: u64,
+    kind: SinkKind,
+}
+
+enum SinkKind {
+    Turn {
+        events: mpsc::UnboundedSender<TurnEvent>,
+        exited: bool,
+    },
+    Bus(&'static str),
+    Watch(String),
+    /// Frames for a caller that awaits them itself.
+    Items(mpsc::UnboundedSender<Item>),
+}
+
+/// A stream's event or end, for [`SinkKind::Items`].
+enum Item {
+    Event(Value),
+    End(EndReason),
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Bus {
+    #[default]
+    Closed,
+    Opening,
+    Open(u64),
+}
+
+struct Watch {
+    stream: Option<u64>,
+    opening: bool,
+    latest: watch::Sender<Option<Polled>>,
+    last_read: u64,
 }
 
 impl Default for RemoteWorkspace {
     fn default() -> Self {
-        Self {
-            events: broadcast::channel(1).0,
-        }
+        Self::new(0, None)
     }
 }
 
-/// The defect a workspace RPC answers with: the unavailable-contract message
-/// the WebAssembly build's dispatcher gives.
+/// The defect a workspace RPC answers with while agentd is not connected.
 pub fn unavailable(method: &str) -> Value {
     json!({
         "_tag": "Die",
@@ -34,133 +145,809 @@ pub fn unavailable(method: &str) -> Value {
     })
 }
 
-fn io_unavailable() -> io::Error {
-    io::Error::new(io::ErrorKind::Unsupported, "the workspace is not connected")
+fn not_connected() -> WireError {
+    WireError::new(ErrorCode::Unavailable, "the workspace is not connected")
+}
+
+fn rpc_error(method: &str, error: WireError) -> Value {
+    if error.code == ErrorCode::Unavailable {
+        unavailable(method)
+    } else {
+        proto::decode_reply(Err(error), method).unwrap_err()
+    }
+}
+
+fn routed(result: Result<Value, WireError>, method: &str) -> Option<Reply> {
+    match result {
+        Err(error) if error.code == ErrorCode::UnknownMethod => None,
+        Err(error) => Some(Err(rpc_error(method, error))),
+        Ok(value) => Some(Ok(value)),
+    }
+}
+
+fn reply(result: Result<Value, WireError>, method: &str) -> Reply {
+    result.map_err(|error| match error {
+        WireError {
+            code: ErrorCode::Rpc,
+            detail: Some(detail),
+            ..
+        } => detail,
+        error => rpc_error(method, error),
+    })
+}
+
+fn io_result(result: Result<Value, WireError>) -> io::Result<Value> {
+    result.map_err(|error| match error.code {
+        ErrorCode::Io => proto::decode_io_error(error),
+        _ => io::Error::new(io::ErrorKind::NotConnected, error.message),
+    })
+}
+
+fn stream_id(value: &Value) -> Option<u64> {
+    value["stream"].as_u64()
+}
+
+/// Order terminals as `LocalWorkspace` does: newest first.
+fn sort_terminals(items: &mut [Value]) {
+    items.sort_by(|a, b| {
+        b["updatedAt"]
+            .as_str()
+            .cmp(&a["updatedAt"].as_str())
+            .then_with(|| a["threadId"].as_str().cmp(&b["threadId"].as_str()))
+            .then_with(|| a["terminalId"].as_str().cmp(&b["terminalId"].as_str()))
+    });
 }
 
 #[cfg(feature = "native")]
-fn ready<'a, T: Send + 'a>(value: T) -> WorkspaceFuture<'a, T> {
-    futures_util::future::ready(value).boxed()
+fn boxed<'a, T: Send + 'a>(
+    future: impl std::future::Future<Output = T> + Send + 'a,
+) -> WorkspaceFuture<'a, T> {
+    Box::pin(future)
 }
 #[cfg(not(feature = "native"))]
-fn ready<'a, T: 'a>(value: T) -> WorkspaceFuture<'a, T> {
-    futures_util::future::ready(value).boxed_local()
+fn boxed<'a, T: 'a>(future: impl std::future::Future<Output = T> + 'a) -> WorkspaceFuture<'a, T> {
+    Box::pin(future)
 }
 
-fn reply<'a>(method: &str) -> WorkspaceFuture<'a, Reply> {
-    ready(Err(unavailable(method)))
+impl RemoteWorkspace {
+    /// A workspace for a server at `epoch`, not yet connected.
+    // In the single-threaded WebAssembly build the transport need not be
+    // `Send`, so neither is this `Arc`'s contents.
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn new(epoch: u64, token: Option<String>) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                epoch,
+                token,
+                state: Mutex::default(),
+                terminal_events: broadcast::channel(512).0,
+                metadata_events: broadcast::channel(128).0,
+                preview_events: broadcast::channel(512).0,
+                device_events: broadcast::channel(128).0,
+            }),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.inner.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether a connection is up and has finished its handshake.
+    pub fn is_ready(&self) -> bool {
+        self.lock().ready
+    }
+
+    /// Adopt a new connection: say hello, resume every stream this side
+    /// still reads, then open the event streams.
+    pub async fn connected(&self, transport: Arc<dyn Transport>) -> Result<HelloReply, WireError> {
+        {
+            let mut state = self.lock();
+            state.transport = Some(transport);
+            state.ready = false;
+        }
+        let hello = Hello {
+            version: proto::VERSION,
+            epoch: self.inner.epoch,
+            token: self.inner.token.clone(),
+        };
+        let hello: HelloReply = serde_json::from_value(
+            self.send_request(op::HELLO, json!(hello), None, false)
+                .await?,
+        )
+        .map_err(|e| WireError::new(ErrorCode::Internal, e.to_string()))?;
+        let resume = Resume {
+            streams: self
+                .lock()
+                .streams
+                .iter()
+                .map(|(&id, sink)| (id, sink.last_seq))
+                .collect(),
+        };
+        let resumed: ResumeReply = serde_json::from_value(
+            self.send_request(op::RESUME, json!(resume), None, false)
+                .await?,
+        )
+        .map_err(|e| WireError::new(ErrorCode::Internal, e.to_string()))?;
+        {
+            let mut state = self.lock();
+            for id in resumed.missing {
+                if let Some(sink) = state.streams.remove(&id) {
+                    end_sink(&mut state, sink, EndReason::Gap);
+                }
+            }
+            state.ready = true;
+        }
+        self.maintain().await;
+        Ok(hello)
+    }
+
+    /// The connection is gone. Requests in flight fail; streams wait for
+    /// the next connection to resume them.
+    pub fn disconnected(&self) {
+        let mut state = self.lock();
+        state.transport = None;
+        state.ready = false;
+        state.pending.clear();
+        state.acks.clear();
+        for bus in state.buses.values_mut() {
+            if *bus == Bus::Opening {
+                *bus = Bus::Closed;
+            }
+        }
+        // Readers waiting for a first value would wait forever.
+        state.watches.retain(|_, w| w.latest.borrow().is_some());
+        for watch in state.watches.values_mut() {
+            watch.opening = false;
+        }
+    }
+
+    /// Handle a frame from agentd.
+    pub fn receive(&self, frame: Frame) {
+        let inbound = match proto::decode_inbound(&frame) {
+            Ok(inbound) => inbound,
+            Err(error) => {
+                tracing::warn!(%error, "ignoring a frame the workspace sent");
+                return;
+            }
+        };
+        let mut state = self.lock();
+        match inbound {
+            Inbound::Response(response) => {
+                let Some(pending) = state.pending.remove(&response.id) else {
+                    return;
+                };
+                if let (Ok(value), Some(sink)) = (&response.result, pending.sink) {
+                    if let Some(id) = stream_id(value) {
+                        state.streams.insert(id, sink);
+                    }
+                }
+                let _ = pending.reply.send(response.result);
+            }
+            Inbound::Stream(frame) => {
+                let Some(sink) = state.streams.get_mut(&frame.stream) else {
+                    return;
+                };
+                if frame.seq <= sink.last_seq {
+                    return;
+                }
+                sink.last_seq = frame.seq;
+                state.acks.insert(frame.stream, frame.seq);
+                match frame.body {
+                    StreamBody::Event(event) => {
+                        deliver(&self.inner, &mut state, frame.stream, event)
+                    }
+                    StreamBody::End(end) => {
+                        if let Some(sink) = state.streams.remove(&frame.stream) {
+                            end_sink(&mut state, sink, end.reason);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Acknowledge every stream frame received so far.
+    pub fn flush_acks(&self) {
+        let mut state = self.lock();
+        let acks = std::mem::take(&mut state.acks);
+        let Some(transport) = state.transport.clone() else {
+            return;
+        };
+        drop(state);
+        for (stream, seq) in acks {
+            let _ = transport.send(proto::request_frame(&Request {
+                id: None,
+                op: op::ACK.into(),
+                args: json!(Ack { stream, seq }),
+            }));
+        }
+    }
+
+    /// Reopen event streams that ended, close idle watches and forward turn
+    /// cancellations. Hosts call this every few hundred milliseconds.
+    pub async fn maintain(&self) {
+        let (reopen, idle, cancels) = {
+            let mut state = self.lock();
+            if !state.ready {
+                return;
+            }
+            let mut reopen = Vec::new();
+            for op in BUS_OPS {
+                let bus = state.buses.entry(op).or_default();
+                if *bus == Bus::Closed {
+                    *bus = Bus::Opening;
+                    reopen.push(op);
+                }
+            }
+            let now = crate::platform::monotonic_ms();
+            let mut idle = Vec::new();
+            state.watches.retain(|_, watch| {
+                let keep = now.saturating_sub(watch.last_read) < WATCH_IDLE_MS;
+                if !keep {
+                    idle.extend(watch.stream);
+                }
+                keep
+            });
+            let mut cancels = Vec::new();
+            state.cancels.retain_mut(|(stream, cancel)| {
+                match cancel.try_recv() {
+                    Err(oneshot::error::TryRecvError::Empty) => true,
+                    // Sent or dropped: either way the turn stops, as it does
+                    // in-process.
+                    _ => {
+                        cancels.push(*stream);
+                        false
+                    }
+                }
+            });
+            (reopen, idle, cancels)
+        };
+        for stream in idle {
+            let _ = self
+                .request(op::STREAM_CLOSE, json!(StreamRef { stream }))
+                .await;
+        }
+        for stream in cancels {
+            let _ = self.cancel_turn(stream).await;
+        }
+        for op in reopen {
+            let opened = self
+                .send_request(
+                    op,
+                    Value::Null,
+                    Some(Sink {
+                        last_seq: 0,
+                        kind: SinkKind::Bus(op),
+                    }),
+                    true,
+                )
+                .await;
+            let mut state = self.lock();
+            let bus = state.buses.entry(op).or_default();
+            if *bus == Bus::Opening {
+                *bus = match opened.ok().as_ref().and_then(stream_id) {
+                    Some(id) => Bus::Open(id),
+                    None => Bus::Closed,
+                };
+            }
+        }
+    }
+
+    async fn cancel_turn(&self, stream: u64) -> Result<Value, WireError> {
+        self.request(op::TURN_CANCEL, json!(StreamRef { stream }))
+            .await
+    }
+
+    /// `agentd`'s idle state (see [`proto::IdleState`]).
+    pub async fn idle_state(&self) -> Result<proto::IdleState, WireError> {
+        let value = self.request(op::IDLE_STATE, Value::Null).await?;
+        serde_json::from_value(value)
+            .map_err(|e| WireError::new(ErrorCode::Internal, e.to_string()))
+    }
+
+    async fn request(&self, op: &str, args: Value) -> Result<Value, WireError> {
+        self.send_request(op, args, None, true).await
+    }
+
+    async fn send_request(
+        &self,
+        op: &str,
+        args: Value,
+        sink: Option<Sink>,
+        need_ready: bool,
+    ) -> Result<Value, WireError> {
+        let (reply, answer) = oneshot::channel();
+        let (transport, id) = {
+            let mut state = self.lock();
+            let transport = match &state.transport {
+                Some(transport) if state.ready || !need_ready => transport.clone(),
+                _ => return Err(not_connected()),
+            };
+            state.next_id += 1;
+            let id = state.next_id;
+            state.pending.insert(id, Pending { reply, sink });
+            (transport, id)
+        };
+        let frame = proto::request_frame(&Request {
+            id: Some(id),
+            op: op.into(),
+            args,
+        });
+        if let Err(error) = transport.send(frame) {
+            self.lock().pending.remove(&id);
+            return Err(error);
+        }
+        answer.await.unwrap_or_else(|_| Err(not_connected()))
+    }
+
+    async fn routed(&self, op: &str, args: Value, method: &str) -> Option<Reply> {
+        routed(self.request(op, args).await, method)
+    }
+
+    async fn method(&self, op: &str, method: &str, input: &Value, rpc: &str) -> Option<Reply> {
+        let args = json!({"method": method, "input": input});
+        routed(self.request(op, args).await, &format!("{rpc}.{method}"))
+    }
+
+    /// The latest reading of a watch, opening it on first use. agentd polls
+    /// and pushes changes, so repeated reads cost no round trip.
+    async fn polled(&self, op: &'static str, args: Value, method: &str) -> Option<Reply> {
+        let key = format!("{op} {args}");
+        let (open, mut latest) = {
+            let mut state = self.lock();
+            let ready = state.ready;
+            let watch = state.watches.entry(key.clone()).or_insert_with(|| Watch {
+                stream: None,
+                opening: false,
+                latest: watch::channel(None).0,
+                last_read: 0,
+            });
+            watch.last_read = crate::platform::monotonic_ms();
+            let open = ready && watch.stream.is_none() && !watch.opening;
+            if open {
+                watch.opening = true;
+            }
+            let latest = watch.latest.subscribe();
+            if !open {
+                if let Some(value) = latest.borrow().clone() {
+                    return value.into_routed();
+                }
+            }
+            if !ready && latest.borrow().is_none() {
+                state.watches.remove(&key);
+                return Some(Err(unavailable(method)));
+            }
+            (open, latest)
+        };
+        if open {
+            let sink = Sink {
+                last_seq: 0,
+                kind: SinkKind::Watch(key.clone()),
+            };
+            let opened = self.send_request(op, args, Some(sink), true).await;
+            let mut state = self.lock();
+            if let Some(watch) = state.watches.get_mut(&key) {
+                watch.opening = false;
+                watch.stream = opened.as_ref().ok().and_then(stream_id);
+            }
+            if let Err(error) = opened {
+                if latest.borrow().is_none() {
+                    state.watches.remove(&key);
+                }
+                drop(state);
+                return Some(Err(rpc_error(method, error)));
+            }
+        }
+        loop {
+            if let Some(value) = latest.borrow_and_update().clone() {
+                return value.into_routed();
+            }
+            if latest.changed().await.is_err() {
+                return Some(Err(unavailable(method)));
+            }
+        }
+    }
 }
-fn routed<'a>(method: &str) -> WorkspaceFuture<'a, Option<Reply>> {
-    ready(Some(Err(unavailable(method))))
+
+/// Hand a stream event to whoever reads that stream.
+fn deliver(inner: &Inner, state: &mut State, stream: u64, event: Value) {
+    enum Target {
+        Bus(&'static str),
+        Watch(String),
+    }
+    let target = match state.streams.get_mut(&stream).map(|sink| &mut sink.kind) {
+        None => return,
+        Some(SinkKind::Turn { events, exited }) => {
+            match serde_json::from_value::<WireTurnEvent>(event) {
+                Ok(event) => {
+                    let event = TurnEvent::from(event);
+                    *exited |= matches!(event, TurnEvent::Exited(_));
+                    let _ = events.send(event);
+                }
+                Err(error) => tracing::warn!(%error, "ignoring a malformed turn event"),
+            }
+            return;
+        }
+        Some(SinkKind::Items(items)) => {
+            let _ = items.send(Item::Event(event));
+            return;
+        }
+        Some(SinkKind::Bus(op)) => Target::Bus(op),
+        Some(SinkKind::Watch(key)) => Target::Watch(key.clone()),
+    };
+    match target {
+        Target::Bus(op) => match op {
+            op::TERM_EVENTS => {
+                let _ = inner.terminal_events.send(event);
+            }
+            op::TERM_METADATA => match event["type"].as_str() {
+                Some("snapshot") => {
+                    state.terminals = event["terminals"].as_array().cloned().unwrap_or_default();
+                }
+                Some("upsert") => {
+                    let terminal = &event["terminal"];
+                    state.terminals.retain(|t| {
+                        t["threadId"] != terminal["threadId"]
+                            || t["terminalId"] != terminal["terminalId"]
+                    });
+                    state.terminals.push(terminal.clone());
+                    sort_terminals(&mut state.terminals);
+                    let _ = inner.metadata_events.send(event);
+                }
+                Some("remove") => {
+                    state.terminals.retain(|t| {
+                        t["threadId"] != event["threadId"] || t["terminalId"] != event["terminalId"]
+                    });
+                    let _ = inner.metadata_events.send(event);
+                }
+                _ => {
+                    let _ = inner.metadata_events.send(event);
+                }
+            },
+            op::PREVIEW_EVENTS => {
+                let _ = inner.preview_events.send(event);
+            }
+            op::DEVICE_EVENTS if state.device_state != event => {
+                state.device_state = event.clone();
+                let _ = inner.device_events.send(event);
+            }
+            _ => {}
+        },
+        Target::Watch(key) => {
+            if let (Some(watch), Ok(reading)) = (
+                state.watches.get(&key),
+                serde_json::from_value::<Polled>(event),
+            ) {
+                watch.latest.send_replace(Some(reading));
+            }
+        }
+    }
+}
+
+/// A stream ended or was lost.
+fn end_sink(state: &mut State, sink: Sink, reason: EndReason) {
+    match sink.kind {
+        // A turn that ends without exiting (a gap, an error, a lost stream)
+        // was interrupted.
+        SinkKind::Turn { events, exited } => {
+            if !exited {
+                let _ = events.send(proto::interrupted_turn());
+            }
+        }
+        SinkKind::Items(items) => {
+            let _ = items.send(Item::End(reason));
+        }
+        SinkKind::Bus(op) => {
+            state.buses.insert(op, Bus::Closed);
+        }
+        SinkKind::Watch(key) => {
+            if let Some(watch) = state.watches.get_mut(&key) {
+                watch.stream = None;
+            }
+        }
+    }
 }
 
 impl Workspace for RemoteWorkspace {
-    fn list_entries<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed("projects.listEntries")
+    fn list_entries<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.routed(op::FS_LIST_ENTRIES, input.clone(), "projects.listEntries"))
     }
-    fn list_ignored_files<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed("projects.listIgnoredFiles")
+    fn list_ignored_files<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.routed(
+            op::FS_LIST_IGNORED_FILES,
+            input.clone(),
+            "projects.listIgnoredFiles",
+        ))
     }
-    fn search_entries<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed("projects.searchEntries")
+    fn search_entries<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.routed(
+            op::FS_SEARCH_ENTRIES,
+            input.clone(),
+            "projects.searchEntries",
+        ))
     }
-    fn search_contents<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed("projects.searchContents")
+    fn search_contents<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.routed(
+            op::FS_SEARCH_CONTENTS,
+            input.clone(),
+            "projects.searchContents",
+        ))
     }
-    fn read_file<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed("projects.readFile")
+    fn read_file<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.routed(op::FS_READ_FILE, input.clone(), "projects.readFile"))
     }
-    fn write_file<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed("projects.writeFile")
+    fn write_file<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.routed(op::FS_WRITE_FILE, input.clone(), "projects.writeFile"))
     }
-    fn file_metadata<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed("filesystem.getMetadata")
+    fn file_metadata<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.routed(op::FS_METADATA, input.clone(), "filesystem.getMetadata"))
     }
-    fn browse<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed("filesystem.browse")
+    fn browse<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.routed(op::FS_BROWSE, input.clone(), "filesystem.browse"))
     }
 
     fn vcs<'a>(
         &'a self,
         method: &'a str,
-        _: &'a Value,
-        _: bool,
+        input: &'a Value,
+        fetch_upstream: bool,
     ) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed(&format!("vcs.{method}"))
+        let args = json!({"method": method, "input": input, "fetchUpstream": fetch_upstream});
+        boxed(async move {
+            self.routed(op::GIT_VCS, args, &format!("vcs.{method}"))
+                .await
+        })
     }
-    fn vcs_branch<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Reply> {
-        reply("subscribeVcsBranch")
+    fn vcs_status<'a>(
+        &'a self,
+        input: &'a Value,
+        fetch_upstream: bool,
+    ) -> WorkspaceFuture<'a, Option<Reply>> {
+        let args = json!({"input": input, "fetchUpstream": fetch_upstream});
+        boxed(self.polled(op::WATCH_VCS_STATUS, args, "subscribeVcsStatus"))
     }
-    fn review<'a>(&'a self, method: &'a str, _: &'a Value) -> WorkspaceFuture<'a, Reply> {
-        reply(&format!("review.{method}"))
+    fn vcs_branch<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
+        boxed(async move {
+            self.polled(
+                op::WATCH_VCS_BRANCH,
+                json!({"input": input}),
+                "subscribeVcsBranch",
+            )
+            .await
+            .unwrap_or_else(|| Err(unavailable("subscribeVcsBranch")))
+        })
     }
-    fn capture_git_tree<'a>(&'a self, _: &'a str) -> WorkspaceFuture<'a, Option<String>> {
-        ready(None)
+    fn review<'a>(&'a self, method: &'a str, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
+        boxed(async move {
+            let args = json!({"method": method, "input": input});
+            reply(
+                self.request(op::GIT_REVIEW, args).await,
+                &format!("review.{method}"),
+            )
+        })
+    }
+    fn capture_git_tree<'a>(&'a self, cwd: &'a str) -> WorkspaceFuture<'a, Option<String>> {
+        boxed(async move {
+            self.request(op::GIT_CAPTURE_TREE, json!({"cwd": cwd}))
+                .await
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+        })
+    }
+    fn pull_request<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+        tools: &'a GitTools,
+    ) -> WorkspaceFuture<'a, Reply> {
+        boxed(async move {
+            let args =
+                json!({"method": method, "input": input, "tools": WireGitTools::from(tools)});
+            reply(
+                self.request(op::GIT_PULL_REQUEST, args).await,
+                &format!("git.{method}"),
+            )
+        })
+    }
+    fn stacked_action<'a>(
+        &'a self,
+        input: &'a Value,
+        tools: &'a GitTools,
+        progress: mpsc::Sender<Value>,
+    ) -> WorkspaceFuture<'a, Reply> {
+        boxed(async move {
+            let method = "git.runStackedAction";
+            let (items, mut received) = mpsc::unbounded_channel();
+            let sink = Sink {
+                last_seq: 0,
+                kind: SinkKind::Items(items),
+            };
+            let args = json!({"input": input, "tools": WireGitTools::from(tools)});
+            if let Err(error) = self
+                .send_request(op::GIT_STACKED_ACTION, args, Some(sink), true)
+                .await
+            {
+                return Err(rpc_error(method, error));
+            }
+            // Progress waits for its reader, as it does in-process.
+            while let Some(item) = received.recv().await {
+                match item {
+                    Item::Event(event) => {
+                        if let Some(batch) = event.get("progress") {
+                            let _ = progress.send(batch.clone()).await;
+                        } else if let Ok(reading) =
+                            serde_json::from_value::<Polled>(event["reply"].clone())
+                        {
+                            return reading
+                                .into_routed()
+                                .unwrap_or_else(|| Err(unavailable(method)));
+                        }
+                    }
+                    Item::End(reason) => {
+                        let message =
+                            format!("the action's stream ended ({reason:?}) without a reply");
+                        return Err(rpc_error(
+                            method,
+                            WireError::new(ErrorCode::Internal, message),
+                        ));
+                    }
+                }
+            }
+            Err(unavailable(method))
+        })
     }
 
-    fn terminal<'a>(&'a self, method: &'a str, _: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed(&format!("terminal.{method}"))
+    fn terminal<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+    ) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.method(op::TERM_CALL, method, input, "terminal"))
     }
     fn terminal_events(&self) -> broadcast::Receiver<Value> {
-        self.events.subscribe()
+        self.inner.terminal_events.subscribe()
     }
     fn terminal_metadata(&self) -> Value {
-        json!({"terminals":[]})
+        json!({"type": "snapshot", "terminals": self.lock().terminals})
     }
     fn terminal_metadata_events(&self) -> broadcast::Receiver<Value> {
-        self.events.subscribe()
+        self.inner.metadata_events.subscribe()
     }
 
     fn start_turn(
         &self,
-        _: TurnSpec,
-        _: oneshot::Receiver<()>,
+        spec: TurnSpec,
+        cancel: oneshot::Receiver<()>,
     ) -> WorkspaceFuture<'_, anyhow::Result<mpsc::UnboundedReceiver<TurnEvent>>> {
-        ready(Err(anyhow::anyhow!("the workspace is not connected")))
+        boxed(async move {
+            let (events, receiver) = mpsc::unbounded_channel();
+            let sink = Sink {
+                last_seq: 0,
+                kind: SinkKind::Turn {
+                    events,
+                    exited: false,
+                },
+            };
+            let opened = self
+                .send_request(
+                    op::TURN_START,
+                    json!(TurnStart::from(spec)),
+                    Some(sink),
+                    true,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!(e.message))?;
+            let stream = stream_id(&opened)
+                .ok_or_else(|| anyhow::anyhow!("the workspace did not name the turn's stream"))?;
+            #[cfg(feature = "native")]
+            {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    let _ = cancel.await;
+                    let _ = this.cancel_turn(stream).await;
+                });
+            }
+            #[cfg(not(feature = "native"))]
+            self.lock().cancels.push((stream, cancel));
+            Ok(receiver)
+        })
     }
-    fn local_servers<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Reply> {
-        reply("subscribeDiscoveredLocalServers")
+    fn local_servers<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
+        boxed(async move {
+            let method = "subscribeDiscoveredLocalServers";
+            self.polled(op::WATCH_LOCAL_SERVERS, json!({"input": input}), method)
+                .await
+                .unwrap_or_else(|| Err(unavailable(method)))
+        })
     }
-    fn stop_local_server<'a>(&'a self, _: &'a Value) -> WorkspaceFuture<'a, Reply> {
-        reply("preview.stopLocalServer")
+    fn stop_local_server<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
+        boxed(async move {
+            reply(
+                self.request(op::PROC_STOP_LOCAL_SERVER, json!({"input": input}))
+                    .await,
+                "preview.stopLocalServer",
+            )
+        })
     }
 
-    fn preview(&self, method: &str, _: &Value) -> Option<Reply> {
-        Some(Err(unavailable(&format!("preview.{method}"))))
+    fn preview<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+    ) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.method(op::PREVIEW_CALL, method, input, "preview"))
     }
-    fn preview_profile(&self, method: &str, _: &Value) -> Reply {
-        Err(unavailable(&format!("preview.{method}")))
+    fn preview_profile<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+    ) -> WorkspaceFuture<'a, Reply> {
+        boxed(async move {
+            let args = json!({"method": method, "input": input});
+            reply(
+                self.request(op::PREVIEW_PROFILE, args).await,
+                &format!("preview.{method}"),
+            )
+        })
     }
     fn close_preview_pages<'a>(
         &'a self,
-        _: Option<&'a str>,
-        _: Option<&'a str>,
-        _: Option<&'a str>,
+        thread: Option<&'a str>,
+        tab: Option<&'a str>,
+        profile: Option<&'a str>,
     ) -> WorkspaceFuture<'a, ()> {
-        ready(())
+        boxed(async move {
+            let args = json!({"thread": thread, "tab": tab, "profile": profile});
+            let _ = self.request(op::PREVIEW_CLOSE_PAGES, args).await;
+        })
     }
     fn preview_events(&self) -> broadcast::Receiver<Value> {
-        self.events.subscribe()
+        self.inner.preview_events.subscribe()
     }
 
-    fn device<'a>(&'a self, method: &'a str, _: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        routed(&format!("device.{method}"))
+    fn device<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+    ) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.method(op::DEVICE_CALL, method, input, "device"))
     }
     fn device_state(&self) -> Value {
-        Value::Null
+        self.lock().device_state.clone()
     }
     fn device_events(&self) -> broadcast::Receiver<Value> {
-        self.events.subscribe()
+        self.inner.device_events.subscribe()
     }
 
-    fn create_dir_all<'a>(&'a self, _: &'a Path) -> WorkspaceFuture<'a, io::Result<()>> {
-        ready(Err(io_unavailable()))
+    fn create_dir_all<'a>(&'a self, path: &'a Path) -> WorkspaceFuture<'a, io::Result<()>> {
+        boxed(async move {
+            io_result(
+                self.request(op::FS_CREATE_DIR_ALL, json!({"path": path}))
+                    .await,
+            )
+            .map(|_| ())
+        })
     }
-    fn canonicalize<'a>(&'a self, _: &'a Path) -> WorkspaceFuture<'a, io::Result<PathBuf>> {
-        ready(Err(io_unavailable()))
+    fn canonicalize<'a>(&'a self, path: &'a Path) -> WorkspaceFuture<'a, io::Result<PathBuf>> {
+        boxed(async move {
+            let value = io_result(
+                self.request(op::FS_CANONICALIZE, json!({"path": path}))
+                    .await,
+            )?;
+            value
+                .as_str()
+                .map(PathBuf::from)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not a path"))
+        })
     }
-    fn is_dir<'a>(&'a self, _: &'a Path) -> WorkspaceFuture<'a, bool> {
-        ready(false)
+    fn is_dir<'a>(&'a self, path: &'a Path) -> WorkspaceFuture<'a, bool> {
+        boxed(async move {
+            self.request(op::FS_IS_DIR, json!({"path": path}))
+                .await
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
     }
 }
 
@@ -169,7 +956,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn every_rpc_answers_unavailable() {
+    async fn every_rpc_answers_unavailable_until_connected() {
         let workspace = RemoteWorkspace::default();
         let input = json!({"cwd":"/workspace"});
         assert_eq!(
@@ -179,6 +966,10 @@ mod tests {
         assert_eq!(
             workspace.vcs("refreshStatus", &input, true).await,
             Some(Err(unavailable("vcs.refreshStatus")))
+        );
+        assert_eq!(
+            workspace.vcs_branch(&input).await,
+            Err(unavailable("subscribeVcsBranch"))
         );
         assert_eq!(
             unavailable("vcs.refreshStatus")["defect"],
@@ -196,5 +987,131 @@ mod tests {
             )
             .await
             .is_err());
+        assert_eq!(
+            workspace.terminal_metadata(),
+            json!({"type":"snapshot","terminals":[]})
+        );
+    }
+
+    /// A transport whose frames the test reads and answers by hand, as a
+    /// host without a socket of its own would.
+    struct Queue(std::sync::Mutex<Vec<Frame>>);
+    impl Transport for Queue {
+        fn send(&self, frame: Frame) -> Result<(), WireError> {
+            self.0.lock().unwrap().push(frame);
+            Ok(())
+        }
+    }
+
+    fn take(queue: &Queue) -> Vec<Request> {
+        std::mem::take(&mut *queue.0.lock().unwrap())
+            .iter()
+            .map(|f| proto::decode_request(f).unwrap())
+            .collect()
+    }
+
+    /// Let spawned tasks run until they send something.
+    async fn settle(queue: &Queue) -> Vec<Request> {
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            let requests = take(queue);
+            if !requests.is_empty() {
+                return requests;
+            }
+        }
+        panic!("nothing was sent")
+    }
+
+    fn answer(workspace: &RemoteWorkspace, id: Option<u64>, ok: Value) {
+        workspace.receive(proto::inbound_frame(&Inbound::Response(proto::Response {
+            id: id.unwrap(),
+            result: Ok(ok),
+        })));
+    }
+
+    fn event(workspace: &RemoteWorkspace, stream: u64, seq: u64, body: StreamBody) {
+        workspace.receive(proto::inbound_frame(&Inbound::Stream(proto::StreamFrame {
+            stream,
+            seq,
+            body,
+        })));
+    }
+
+    #[tokio::test]
+    async fn a_host_fed_queue_carries_a_turn() {
+        let workspace = RemoteWorkspace::new(4, Some("t".into()));
+        let queue = Arc::new(Queue(Default::default()));
+        let handshake = {
+            let workspace = workspace.clone();
+            let queue = queue.clone();
+            tokio::spawn(async move { workspace.connected(queue).await })
+        };
+        let hello = settle(&queue).await;
+        assert_eq!(hello[0].op, "hello");
+        assert_eq!(
+            hello[0].args,
+            json!({"version": proto::VERSION, "epoch": 4, "token": "t"})
+        );
+        answer(
+            &workspace,
+            hello[0].id,
+            json!({"version": proto::VERSION, "epoch": 4, "root": "/", "streams": []}),
+        );
+        let resume = settle(&queue).await;
+        assert_eq!(resume[0].op, "resume");
+        answer(&workspace, resume[0].id, json!({"missing": []}));
+        tokio::task::yield_now().await;
+        // The event streams open once the handshake is done.
+        for (i, stream) in (10..14).enumerate() {
+            let opens = settle(&queue).await;
+            assert_eq!(opens.len(), 1);
+            assert_eq!(opens[0].op, BUS_OPS[i]);
+            answer(&workspace, opens[0].id, json!({"stream": stream}));
+        }
+        handshake.await.unwrap().unwrap();
+        assert!(workspace.is_ready());
+
+        let (cancel, cancelled) = oneshot::channel();
+        let turn = {
+            let workspace = workspace.clone();
+            tokio::spawn(async move {
+                workspace
+                    .start_turn(
+                        TurnSpec {
+                            command: vec!["provider".into()],
+                            prompt: "hi".into(),
+                            cwd: "/".into(),
+                            env_remove: vec![],
+                        },
+                        cancelled,
+                    )
+                    .await
+            })
+        };
+        let start = settle(&queue).await;
+        assert_eq!(start[0].op, op::TURN_START);
+        answer(&workspace, start[0].id, json!({"stream": 20}));
+        // The stream's frames may follow the reply before the caller runs.
+        let stdout = json!(WireTurnEvent::Stdout { text: "a\n".into() });
+        event(&workspace, 20, 1, StreamBody::Event(stdout.clone()));
+        event(&workspace, 20, 1, StreamBody::Event(stdout));
+        let mut events = turn.await.unwrap().unwrap();
+        assert_eq!(events.recv().await, Some(TurnEvent::Stdout("a\n".into())));
+        workspace.flush_acks();
+        let acks = take(&queue);
+        assert_eq!(acks[0].op, "ack");
+        assert_eq!(acks[0].args, json!({"stream": 20, "seq": 1}));
+        // A gap ends the turn as interrupted.
+        event(
+            &workspace,
+            20,
+            2,
+            StreamBody::End(proto::StreamEnd {
+                reason: EndReason::Gap,
+                error: None,
+            }),
+        );
+        assert_eq!(events.recv().await, Some(proto::interrupted_turn()));
+        drop(cancel);
     }
 }

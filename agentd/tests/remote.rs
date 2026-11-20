@@ -1,0 +1,389 @@
+//! Run workspace operations through `RemoteWorkspace` → `t3-agentd` →
+//! `LocalWorkspace` and check they match calling `LocalWorkspace` directly.
+use serde_json::json;
+use std::{path::Path, process::Command, sync::Arc, time::Duration};
+use t3_agentd::{Agentd, Config};
+use t3code_server::workspace::{
+    connect, GitTools, LocalWorkspace, NativeLink, RemoteWorkspace, TurnEvent, TurnSpec, Workspace,
+};
+use tokio::sync::oneshot;
+
+const TOKEN: &str = "remote-test-token";
+
+struct Setup {
+    local: Arc<LocalWorkspace>,
+    remote: RemoteWorkspace,
+    link: NativeLink,
+    _dir: tempfile::TempDir,
+    root: std::path::PathBuf,
+}
+
+async fn setup() -> Setup {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let local = Arc::new(LocalWorkspace::open(&dir.path().join("state")).unwrap());
+    let agentd = Agentd::new(
+        local.clone(),
+        Config {
+            token: TOKEN.into(),
+            root: root.clone(),
+            buffer_dir: dir.path().join("streams"),
+            buffer_limit: 1 << 20,
+            poll_interval: Duration::from_millis(50),
+        },
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, agentd.router()).await });
+    let remote = RemoteWorkspace::new(1, None);
+    let link = connect(remote.clone(), format!("ws://{addr}/"), TOKEN.into());
+    wait_until(|| remote.is_ready()).await;
+    Setup {
+        local,
+        remote,
+        link,
+        _dir: dir,
+        root,
+    }
+}
+
+async fn wait_until(mut ready: impl FnMut() -> bool) {
+    for _ in 0..400 {
+        if ready() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("timed out waiting");
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+async fn run_turn(workspace: &dyn Workspace, spec: TurnSpec) -> Vec<TurnEvent> {
+    let (_cancel, cancelled) = oneshot::channel();
+    let mut events = workspace.start_turn(spec, cancelled).await.unwrap();
+    let mut seen = Vec::new();
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(20), events.recv())
+        .await
+        .expect("the turn finished in time")
+    {
+        let exited = matches!(event, TurnEvent::Exited(_));
+        seen.push(event);
+        if exited {
+            break;
+        }
+    }
+    seen
+}
+
+#[tokio::test]
+async fn file_operations_match_the_local_workspace() {
+    let s = setup().await;
+    let cwd = s.root.to_string_lossy().into_owned();
+    let big = "0123456789abcdef\n".repeat(4096);
+    let write = json!({"cwd": cwd, "relativePath": "src/big.txt", "contents": big});
+    // Writing is idempotent, so both sides can write the same file.
+    assert_eq!(
+        s.remote.write_file(&write).await,
+        s.local.write_file(&write).await
+    );
+    let small = json!({"cwd": cwd, "relativePath": "README.md", "contents": "# hi\n"});
+    assert!(matches!(s.remote.write_file(&small).await, Some(Ok(_))));
+    for input in [
+        json!({"cwd": cwd, "relativePath": "src/big.txt"}),
+        json!({"cwd": cwd, "relativePath": "../escape"}),
+        json!({"cwd": cwd, "relativePath": "missing.txt"}),
+    ] {
+        assert_eq!(
+            s.remote.read_file(&input).await,
+            s.local.read_file(&input).await
+        );
+    }
+    let list = json!({"cwd": cwd});
+    assert_eq!(
+        s.remote.list_entries(&list).await,
+        s.local.list_entries(&list).await
+    );
+    let search = json!({"cwd": cwd, "query": "big", "limit": 10});
+    assert_eq!(
+        s.remote.search_entries(&search).await,
+        s.local.search_entries(&search).await
+    );
+    let meta = json!({"path": s.root.join("README.md")});
+    assert_eq!(
+        s.remote.file_metadata(&meta).await,
+        s.local.file_metadata(&meta).await
+    );
+    let browse = json!({"partialPath": format!("{cwd}/")});
+    assert_eq!(
+        s.remote.browse(&browse).await,
+        s.local.browse(&browse).await
+    );
+
+    let nested = s.root.join("a/b/c");
+    s.remote.create_dir_all(&nested).await.unwrap();
+    assert!(s.remote.is_dir(&nested).await);
+    assert_eq!(
+        s.remote.canonicalize(&nested).await.unwrap(),
+        s.local.canonicalize(&nested).await.unwrap()
+    );
+    let missing = s.root.join("nope");
+    assert_eq!(
+        s.remote.canonicalize(&missing).await.unwrap_err().kind(),
+        s.local.canonicalize(&missing).await.unwrap_err().kind()
+    );
+    assert!(!s.remote.is_dir(&missing).await);
+    drop(s.link);
+}
+
+#[tokio::test]
+async fn vcs_status_matches_the_local_workspace() {
+    let s = setup().await;
+    git(&s.root, &["init", "-q", "-b", "main"]);
+    std::fs::write(s.root.join("a.txt"), "a\n").unwrap();
+    git(&s.root, &["add", "."]);
+    git(&s.root, &["commit", "-q", "-m", "first"]);
+    std::fs::write(s.root.join("b.txt"), "b\n").unwrap();
+    let input = json!({"cwd": s.root});
+    let local = s.local.vcs("refreshStatus", &input, false).await;
+    assert!(matches!(local, Some(Ok(_))));
+    assert_eq!(s.remote.vcs("refreshStatus", &input, false).await, local);
+    // The polled reading comes from agentd's watch.
+    assert_eq!(s.remote.vcs_status(&input, false).await, local);
+    assert_eq!(
+        s.remote.vcs_branch(&input).await,
+        s.local.vcs_branch(&input).await
+    );
+    assert_eq!(
+        s.remote.vcs("noSuchMethod", &input, false).await,
+        s.local.vcs("noSuchMethod", &input, false).await
+    );
+    // A change shows up in the watch without another request to agentd.
+    std::fs::write(s.root.join("c.txt"), "c\n").unwrap();
+    let changed = s.local.vcs("refreshStatus", &input, false).await;
+    for _ in 0..200 {
+        if s.remote.vcs_status(&input, false).await == changed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(s.remote.vcs_status(&input, false).await, changed);
+    assert_eq!(
+        s.remote.capture_git_tree(&s.root.to_string_lossy()).await,
+        s.local.capture_git_tree(&s.root.to_string_lossy()).await
+    );
+}
+
+#[tokio::test]
+async fn git_workflows_answer_like_the_local_workspace() {
+    let s = setup().await;
+    let tools = GitTools {
+        gh: "gh-not-installed".into(),
+        text_generation: vec![],
+    };
+    let input = json!({"cwd": s.root, "reference": "not-a-pull-request"});
+    assert_eq!(
+        s.remote
+            .pull_request("resolvePullRequest", &input, &tools)
+            .await,
+        s.local
+            .pull_request("resolvePullRequest", &input, &tools)
+            .await
+    );
+    let action = json!({"cwd": s.root, "action": "commit"});
+    let (remote_tx, mut remote_rx) = tokio::sync::mpsc::channel(16);
+    let (local_tx, mut local_rx) = tokio::sync::mpsc::channel(16);
+    let remote = s.remote.stacked_action(&action, &tools, remote_tx).await;
+    let local = s.local.stacked_action(&action, &tools, local_tx).await;
+    assert_eq!(remote, local);
+    let (mut remote_progress, mut local_progress) = (Vec::new(), Vec::new());
+    while let Some(batch) = remote_rx.recv().await {
+        remote_progress.push(batch);
+    }
+    while let Some(batch) = local_rx.recv().await {
+        local_progress.push(batch);
+    }
+    assert_eq!(remote_progress.len(), local_progress.len());
+}
+
+#[tokio::test]
+async fn a_terminal_runs_through_agentd() {
+    let s = setup().await;
+    let mut output = s.remote.terminal_events();
+    let open =
+        json!({"threadId": "t1", "terminalId": "term-1", "cwd": s.root, "cols": 80, "rows": 24});
+    let opened = s.remote.terminal("open", &open).await.unwrap().unwrap();
+    assert_eq!(opened["status"], "running");
+    // The metadata mirror catches up with the workspace's own.
+    for _ in 0..200 {
+        if s.remote.terminal_metadata() == s.local.terminal_metadata() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(s.remote.terminal_metadata(), s.local.terminal_metadata());
+    let write =
+        json!({"threadId": "t1", "terminalId": "term-1", "data": "echo agentd-$((40+2))\r"});
+    assert!(matches!(
+        s.remote.terminal("write", &write).await,
+        Some(Ok(_))
+    ));
+    let mut seen = String::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !seen.contains("agentd-42") {
+            let event = output.recv().await.unwrap();
+            seen.push_str(&event.to_string());
+        }
+    })
+    .await
+    .expect("the terminal echoed");
+    let close = json!({"threadId": "t1", "terminalId": "term-1"});
+    assert!(matches!(
+        s.remote.terminal("close", &close).await,
+        Some(Ok(_))
+    ));
+    assert_eq!(
+        s.remote.terminal("nope", &close).await,
+        s.local.terminal("nope", &close).await
+    );
+}
+
+#[tokio::test]
+async fn a_turn_matches_the_local_workspace() {
+    let s = setup().await;
+    let spec = TurnSpec {
+        command: vec![
+            "sh".into(),
+            "-c".into(),
+            "echo out $1; echo err $1 >&2; echo done; exit 3".into(),
+            "provider".into(),
+        ],
+        prompt: "prompt".into(),
+        cwd: s.root.to_string_lossy().into_owned(),
+        env_remove: vec!["HOME".into()],
+    };
+    let remote = run_turn(&s.remote, spec.clone()).await;
+    let local = run_turn(&*s.local, spec).await;
+    let sort = |events: &[TurnEvent]| {
+        // stdout and stderr interleave freely; compare each in order.
+        let mut out: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TurnEvent::Stdout(_)))
+            .cloned()
+            .collect();
+        out.extend(
+            events
+                .iter()
+                .filter(|e| matches!(e, TurnEvent::Stderr(_)))
+                .cloned(),
+        );
+        out.push(events.last().unwrap().clone());
+        out
+    };
+    assert_eq!(sort(&remote), sort(&local));
+    assert_eq!(remote.len(), 4);
+    assert!(matches!(
+        remote.last(),
+        Some(TurnEvent::Exited(exit)) if !exit.success && !exit.cancelled && exit.status == "exit status: 3"
+    ));
+
+    // Cancelling stops the process, as it does in-process.
+    let (cancel, cancelled) = oneshot::channel();
+    let mut events = s
+        .remote
+        .start_turn(
+            TurnSpec {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "echo started; exec sleep 30".into(),
+                ],
+                prompt: String::new(),
+                cwd: "/".into(),
+                env_remove: vec![],
+            },
+            cancelled,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        events.recv().await,
+        Some(TurnEvent::Stdout("started\n".into()))
+    );
+    cancel.send(()).unwrap();
+    let exit = tokio::time::timeout(Duration::from_secs(20), events.recv())
+        .await
+        .unwrap();
+    assert!(matches!(exit, Some(TurnEvent::Exited(exit)) if exit.cancelled));
+}
+
+#[tokio::test]
+async fn a_turn_survives_a_dropped_socket() {
+    let s = setup().await;
+    let (_cancel, cancelled) = oneshot::channel();
+    let mut events = s
+        .remote
+        .start_turn(
+            TurnSpec {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "for i in $(seq 1 60); do echo line $i; sleep 0.01; done".into(),
+                ],
+                prompt: String::new(),
+                cwd: "/".into(),
+                env_remove: vec![],
+            },
+            cancelled,
+        )
+        .await
+        .unwrap();
+    let mut lines = Vec::new();
+    let mut reconnects = 0;
+    let exit = loop {
+        let event = tokio::time::timeout(Duration::from_secs(20), events.recv())
+            .await
+            .expect("the turn kept reporting")
+            .expect("the turn's events kept coming");
+        match event {
+            TurnEvent::Stdout(line) => lines.push(line),
+            TurnEvent::Stderr(line) => panic!("unexpected stderr {line}"),
+            TurnEvent::Exited(exit) => break exit,
+        }
+        // Drop the socket twice mid-turn; the turn keeps running in agentd.
+        if matches!(lines.len(), 5 | 25) && reconnects < 2 {
+            reconnects += 1;
+            s.link.reconnect();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    };
+    assert_eq!(reconnects, 2);
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(
+        lines,
+        (1..=60).map(|i| format!("line {i}\n")).collect::<Vec<_>>()
+    );
+    // Everything was acknowledged once the connection settled.
+    wait_until(|| s.remote.is_ready()).await;
+    let mut idle = s.remote.idle_state().await.unwrap();
+    for _ in 0..200 {
+        if idle.unacked_frames == 0 && idle.running_turns == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        idle = s.remote.idle_state().await.unwrap();
+    }
+    assert_eq!(idle.running_turns, 0);
+    assert_eq!(idle.unacked_frames, 0);
+    assert!(idle.connected);
+}
