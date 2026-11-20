@@ -1,8 +1,9 @@
 //! The workspace on this machine (native): every operation runs in-process
 //! over the local filesystem, git, PTYs and child processes.
-use super::{Reply, TurnEvent, TurnExit, TurnSpec, Workspace, WorkspaceFuture};
+use super::{GitTools, Reply, TurnEvent, TurnExit, TurnSpec, Workspace, WorkspaceFuture};
 use crate::local_services::{
-    discovery, files, review, DeviceService, PreviewService, TerminalService, VcsService,
+    discovery, files, git_workflow, review, DeviceService, PreviewService, TerminalService,
+    VcsService,
 };
 use futures_util::FutureExt;
 use serde_json::Value;
@@ -83,6 +84,22 @@ impl Workspace for LocalWorkspace {
     }
     fn capture_git_tree<'a>(&'a self, cwd: &'a str) -> WorkspaceFuture<'a, Option<String>> {
         capture_git_tree(cwd).boxed()
+    }
+    fn pull_request<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+        tools: &'a GitTools,
+    ) -> WorkspaceFuture<'a, Reply> {
+        git_workflow::pull_request(self, tools, method, input).boxed()
+    }
+    fn stacked_action<'a>(
+        &'a self,
+        input: &'a Value,
+        tools: &'a GitTools,
+        progress: mpsc::Sender<Value>,
+    ) -> WorkspaceFuture<'a, Reply> {
+        git_workflow::stream(tools, input, progress).boxed()
     }
 
     fn terminal<'a>(

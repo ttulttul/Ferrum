@@ -2,7 +2,7 @@ use super::vcs::{branch, checked, default_ref, read};
 use super::{invalid, string, Reply};
 use crate::{
     provider_rpc::{valid_repository, Failure, Github},
-    AppState,
+    workspace::{GitTools, LocalWorkspace},
 };
 use serde_json::{json, Value};
 use std::path::Path;
@@ -166,7 +166,12 @@ fn fork_branch(head: &str, number: u64, branches: &[&str]) -> String {
     }
     name
 }
-pub async fn pull_request(state: &AppState, name: &str, input: &Value) -> Reply {
+pub async fn pull_request(
+    workspace: &LocalWorkspace,
+    tools: &GitTools,
+    name: &str,
+    input: &Value,
+) -> Reply {
     let cwd = string(input, "cwd")?;
     let reference = string(input, "reference")?;
     let reference = reference
@@ -198,8 +203,7 @@ pub async fn pull_request(state: &AppState, name: &str, input: &Value) -> Reply 
     let row = if let Some(host) = &host {
         host.read(cwd, reference).await?
     } else if let Some(repo) = repo {
-        let bin = state.issues.lock().await.gh.clone();
-        lookup(&Github::new(&bin, cwd), &repo, reference, false)
+        lookup(&Github::new(&tools.gh, cwd), &repo, reference, false)
             .await
             .and_then(|v| v.ok_or(Failure::NotFound))
             .map_err(|e| github_error(e, "getChangeRequest", cwd, reference))?
@@ -403,11 +407,12 @@ pub async fn pull_request(state: &AppState, name: &str, input: &Value) -> Reply 
         )
         .await?;
     } else if path.is_none() {
-        let worktree = state
-            .workspace
-            .vcs(
+        let worktree = workspace
+            .vcs
+            .call_with(
                 "createWorktree",
                 &json!({"cwd":cwd,"refName":local,"path":null}),
+                &workspace.data_dir,
                 true,
             )
             .await
