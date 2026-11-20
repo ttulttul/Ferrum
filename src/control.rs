@@ -21,6 +21,7 @@ use crate::{
     contracts::RPC_CONTRACTS,
     environment,
     event_log::EventLog,
+    persistence::DocumentStore,
     rpc_protocol::{js_template_string, request_key, split_socket_frame, Reply},
     rpc_protocol::{SOCKET_FRAME_PARTS_QUERY_PARAM, SOCKET_FRAME_PART_BYTES},
     server_config, Event, ServerEvent, Store,
@@ -41,6 +42,9 @@ use std::{
 
 /// Where a hosted environment's workspace lives inside the `t3-agentd` container.
 pub const WORKSPACE_ROOT: &str = "/workspace";
+/// Where the hosted environment's state documents live, as the native
+/// server's `userdata` directory (auth records, keybindings).
+pub const STATE_DIR: &str = "/home/t3/.t3/userdata";
 
 pub struct Config {
     pub environment_id: String,
@@ -61,6 +65,7 @@ pub struct ControlPlane {
     config: Config,
     started_at: String,
     auth: AuthService,
+    documents: Arc<dyn DocumentStore>,
     log: Mutex<Log>,
 }
 impl AuthHost for ControlPlane {
@@ -86,18 +91,16 @@ struct OpenStream {
 }
 
 impl ControlPlane {
-    /// Rebuilds the store from `log`. `auth_records` is what
-    /// [`auth_records`](Self::auth_records) returned before a restart.
+    /// Rebuilds the store from `log`. Auth records and other state documents
+    /// live in `documents` under [`STATE_DIR`], written through on change.
     pub fn open(
         config: Config,
-        auth_records: Option<&str>,
+        documents: Arc<dyn DocumentStore>,
         mut log: Box<dyn EventLog + Send>,
     ) -> anyhow::Result<Self> {
-        let mut auth = AuthService::with_bootstrap(config.bootstrap_credential.clone())
-            .with_port(config.cookie_port);
-        if let Some(records) = auth_records {
-            auth = auth.with_records_json(records)?;
-        }
+        let auth = AuthService::with_bootstrap(config.bootstrap_credential.clone())
+            .with_port(config.cookie_port)
+            .open_in(documents.clone(), std::path::Path::new(STATE_DIR))?;
         let mut store = Store::default();
         let mut sequence = 0;
         for record in log.load()? {
@@ -108,18 +111,13 @@ impl ControlPlane {
             config,
             started_at: auth_service::iso(auth_service::now()),
             auth,
+            documents,
             log: Mutex::new(Log {
                 store,
                 sequence,
                 log,
             }),
         })
-    }
-
-    /// The auth service's sessions and grants, for the host to persist after
-    /// any request that may have changed them.
-    pub fn auth_records(&self) -> String {
-        self.auth.records_json()
     }
 
     pub fn sequence(&self) -> u64 {
@@ -448,13 +446,15 @@ impl ControlPlane {
     /// the control plane's storage.
     fn config_snapshot(&self, options: &Value) -> Value {
         let settings = default_settings();
-        let (keybindings, issues) = server_config::keybindings::resolve(Ok(None));
+        let keybindings_path = std::path::Path::new(STATE_DIR).join("keybindings.json");
+        let (keybindings, issues) =
+            server_config::keybindings::read(self.documents.as_ref(), &keybindings_path);
         let mut config = json!({
             "environment": self.descriptor(),
             "auth": self.auth.descriptor(),
             "cwd": WORKSPACE_ROOT,
             "hostname": self.config.label,
-            "keybindingsConfigPath": "/home/t3/.t3/userdata/keybindings.json",
+            "keybindingsConfigPath": keybindings_path,
             "keybindings": keybindings,
             "issues": issues,
             "providers": server_config::providers::list_with(&self.started_at, |_| None, &settings, options),
@@ -546,6 +546,7 @@ async fn unavailable(uri: Uri) -> Response {
 mod tests {
     use super::*;
     use crate::event_log::MemoryLog;
+    use crate::persistence::MemoryStore;
 
     fn plane() -> ControlPlane {
         ControlPlane::open(
@@ -555,7 +556,7 @@ mod tests {
                 bootstrap_credential: "secret".into(),
                 cookie_port: 3773,
             },
-            None,
+            Arc::new(MemoryStore::new()),
             Box::new(MemoryLog::default()),
         )
         .unwrap()
@@ -623,6 +624,7 @@ mod tests {
     #[test]
     fn rebuilds_the_store_from_its_log() {
         let plane = plane();
+        owner(&plane);
         plane
             .commit(Event::ProjectCreated(crate::Project {
                 id: "p1".into(),
@@ -643,11 +645,16 @@ mod tests {
                 bootstrap_credential: "secret".into(),
                 cookie_port: 3773,
             },
-            Some(&plane.auth_records()),
+            plane.documents.clone(),
             Box::new(log),
         )
         .unwrap();
         assert_eq!(reopened.sequence(), 1);
+        assert_eq!(
+            reopened.auth.records_json(),
+            plane.auth.records_json(),
+            "sessions survive through the document store"
+        );
         assert!(reopened
             .log
             .lock()

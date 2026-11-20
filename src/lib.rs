@@ -80,6 +80,7 @@ pub use contracts::{http_known, rpc_known, HTTP_CONTRACTS, RPC_CONTRACTS};
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub mod event_log;
+pub mod persistence;
 pub mod platform;
 mod store;
 pub use store::*;

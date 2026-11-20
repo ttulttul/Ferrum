@@ -195,8 +195,21 @@ impl AuthService {
         self.desktop = desktop;
         self
     }
-    pub fn open(mut self, dir: &Path) -> anyhow::Result<Self> {
-        self.records = Arc::new(Storage::open(&dir.join("environment-auth.json"))?);
+    #[cfg(feature = "native")]
+    pub fn open(self, dir: &Path) -> anyhow::Result<Self> {
+        self.open_in(Arc::new(crate::persistence::FsStore), dir)
+    }
+    /// Keep sessions, grants and keys in `environment-auth.json` under `dir`
+    /// in `documents`, written through on every change.
+    pub fn open_in(
+        mut self,
+        documents: Arc<dyn crate::persistence::DocumentStore>,
+        dir: &Path,
+    ) -> anyhow::Result<Self> {
+        self.records = Arc::new(Storage::open_in(
+            documents,
+            &dir.join("environment-auth.json"),
+        )?);
         self.external_pairing = Some(dir.join("statev2.sqlite"));
         Ok(self)
     }

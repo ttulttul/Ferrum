@@ -99,7 +99,13 @@ impl DurableObject for T3EnvironmentDO {
             .var("T3_ENVIRONMENT_LABEL")
             .map(|v| v.to_string())
             .unwrap_or_else(|_| "T3 Cloud".into());
-        let auth_records = storage::get(&sql, "auth-records").expect("read kv");
+        let documents = storage::SqlDocuments(sql.clone());
+        storage::migrate_auth_records(
+            &sql,
+            &documents,
+            &std::path::Path::new(t3code_server::control::STATE_DIR).join("environment-auth.json"),
+        )
+        .expect("migrate auth records");
         let plane = Arc::new(
             ControlPlane::open(
                 Config {
@@ -108,7 +114,7 @@ impl DurableObject for T3EnvironmentDO {
                     bootstrap_credential,
                     cookie_port: 3773,
                 },
-                auth_records.as_deref(),
+                Arc::new(documents),
                 Box::new(storage::SqlLog(sql.clone())),
             )
             .expect("open control plane"),
@@ -149,9 +155,7 @@ impl DurableObject for T3EnvironmentDO {
         if path == "/ws" && upgrade {
             return self.upgrade(&req).await;
         }
-        let response = self.http(req).await;
-        self.persist_auth();
-        response
+        self.http(req).await
     }
 
     async fn websocket_message(
@@ -171,7 +175,6 @@ impl DurableObject for T3EnvironmentDO {
             ws.send_with_str(frame)?;
         }
         ws.serialize_attachment(&connection)?;
-        self.persist_auth();
         Ok(())
     }
 
@@ -184,7 +187,6 @@ impl DurableObject for T3EnvironmentDO {
     ) -> Result<()> {
         if let Some(connection) = ws.deserialize_attachment::<Connection>()? {
             self.plane.disconnect(&connection);
-            self.persist_auth();
         }
         Ok(())
     }
@@ -223,21 +225,6 @@ impl T3EnvironmentDO {
             .await
             .map_err(|e| Error::RustError(format!("{e:?}")))?;
         worker_response(response).await
-    }
-
-    /// Sessions and grants change on pairing, ticket use and socket presence.
-    fn persist_auth(&self) {
-        let records = self.plane.auth_records();
-        if storage::get(&self.sql, "auth-records")
-            .ok()
-            .flatten()
-            .as_deref()
-            != Some(&records)
-        {
-            if let Err(error) = storage::put(&self.sql, "auth-records", &records) {
-                console_error!("could not persist auth records: {error}");
-            }
-        }
     }
 }
 
