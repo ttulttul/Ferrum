@@ -1,5 +1,6 @@
 use super::DEFAULTS;
 use serde_json::{json, Value};
+#[cfg(feature = "native")]
 use std::{fs, path::Path};
 
 fn shortcut(key: &str) -> Option<Value> {
@@ -135,7 +136,18 @@ fn compile(rule: &Value) -> Option<Value> {
     Some(value)
 }
 
-pub(super) fn read(path: &Path) -> (Value, Value) {
+#[cfg(feature = "native")]
+pub(crate) fn read(path: &Path) -> (Value, Value) {
+    resolve(match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    })
+}
+
+/// The effective keybindings and config issues for the user's file: its text,
+/// `None` when there is no file, or the error reading it.
+pub(crate) fn resolve(file: Result<Option<String>, String>) -> (Value, Value) {
     let defaults = DEFAULTS["keybindings"]
         .as_array()
         .unwrap()
@@ -143,8 +155,8 @@ pub(super) fn read(path: &Path) -> (Value, Value) {
         .filter_map(compile);
     let mut issues = Vec::new();
     let mut custom = Vec::new();
-    match fs::read_to_string(path) {
-        Ok(text) => match crate::settings::parse(&text) {
+    match file {
+        Ok(Some(text)) => match crate::settings::parse(&text) {
             Ok(Value::Array(rows)) => {
                 for (index, rule) in rows.iter().enumerate() {
                     if let Some(binding) = compile(rule) {
@@ -158,9 +170,9 @@ pub(super) fn read(path: &Path) -> (Value, Value) {
                 json!({"kind":"keybindings.malformed-config","message":"expected JSON array"}),
             ),
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            issues.push(json!({"kind":"keybindings.malformed-config","message":e.to_string()}))
+        Ok(None) => {}
+        Err(message) => {
+            issues.push(json!({"kind":"keybindings.malformed-config","message":message}))
         }
     }
     let mut all = defaults
@@ -171,6 +183,7 @@ pub(super) fn read(path: &Path) -> (Value, Value) {
     (all.into(), issues.into())
 }
 
+#[cfg(feature = "native")]
 fn raw_entries(path: &Path) -> Result<Vec<Value>, Value> {
     match fs::read_to_string(path) {
         Ok(text) => match crate::settings::parse(&text) {
@@ -191,6 +204,7 @@ fn raw_entries(path: &Path) -> Result<Vec<Value>, Value> {
     }
 }
 
+#[cfg(feature = "native")]
 fn same_rule(left: &Value, right: &Value) -> bool {
     match (compile(left), compile(right)) {
         (Some(left), Some(right)) => left == right,
@@ -198,6 +212,7 @@ fn same_rule(left: &Value, right: &Value) -> bool {
     }
 }
 
+#[cfg(feature = "native")]
 fn write_entries(path: &Path, entries: &[Value]) -> Result<(), Value> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| json!({
@@ -215,7 +230,8 @@ fn write_entries(path: &Path, entries: &[Value]) -> Result<(), Value> {
     }))
 }
 
-pub(super) fn mutate(path: &Path, method: &str, input: &Value) -> Result<Value, Value> {
+#[cfg(feature = "native")]
+pub(crate) fn mutate(path: &Path, method: &str, input: &Value) -> Result<Value, Value> {
     let mut entries = raw_entries(path)?;
     let target = if method == "server.removeKeybinding" {
         input.clone()

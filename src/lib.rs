@@ -13,6 +13,7 @@ mod config_rpc;
 mod contracts;
 pub mod cors;
 mod dpop_proof;
+pub mod environment;
 #[cfg(feature = "native")]
 mod environment_http;
 #[cfg(feature = "native")]
@@ -33,6 +34,8 @@ mod npm_release;
 mod orchestration;
 #[cfg(feature = "native")]
 mod projects;
+mod rpc_protocol;
+mod server_config;
 mod settings;
 mod wire_json;
 #[cfg(feature = "native")]

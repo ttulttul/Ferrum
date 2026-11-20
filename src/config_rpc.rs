@@ -1,6 +1,5 @@
 mod discovery;
-mod keybindings;
-mod providers;
+use crate::server_config::{keybindings, providers, DEFAULTS};
 
 use crate::{
     auth_service::{iso, now},
@@ -10,15 +9,10 @@ use serde_json::{json, Value};
 use std::{
     env,
     path::Path,
-    sync::{Arc, LazyLock},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tokio::sync::broadcast;
-
-static DEFAULTS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../contracts/config-defaults.json"))
-        .expect("provider catalogs and keybinding defaults")
-});
 
 pub(crate) fn keybindings_mutate(
     state: &AppState,
