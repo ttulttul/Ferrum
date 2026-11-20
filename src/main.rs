@@ -130,6 +130,11 @@ async fn serve() -> anyhow::Result<()> {
         }
         .into()
     });
+    config.requested_host = args
+        .listen
+        .map(|listen| listen.ip())
+        .or(args.host)
+        .or_else(|| bootstrap.as_ref().map(|b| b.host));
     config.host = Some(listen.ip());
     config.port = Some(listen.port());
     config.no_browser = args.no_browser.or(config.no_browser);

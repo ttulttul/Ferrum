@@ -98,6 +98,12 @@ impl ServerPaths {
 pub struct RuntimeConfig {
     pub mode: String,
     pub host: Option<IpAddr>,
+    /// The host the operator asked for (`--listen`, `--host`/`T3CODE_HOST`
+    /// or the desktop bootstrap), as opposed to [`Self::host`], which always
+    /// names the bound address. `None` when the default bind was used, like
+    /// the reference's unset `config.host`; it decides the runtime record's
+    /// `host` and `origin`.
+    pub requested_host: Option<IpAddr>,
     pub port: Option<u16>,
     pub no_browser: Option<bool>,
     pub auto_bootstrap_project_from_cwd: Option<bool>,
@@ -128,9 +134,11 @@ impl RuntimeConfig {
             .filter(|v| !v.is_empty())
             .map(str::to_owned)
             .collect();
+        let host = env::var("T3CODE_HOST").ok().and_then(|v| v.parse().ok());
         Ok(Self {
             mode: env::var("T3CODE_MODE").unwrap_or_else(|_| "web".into()),
-            host: env::var("T3CODE_HOST").ok().and_then(|v| v.parse().ok()),
+            host,
+            requested_host: host,
             port: env::var("T3CODE_PORT").ok().and_then(|v| v.parse().ok()),
             no_browser: bool_env("T3CODE_NO_BROWSER"),
             auto_bootstrap_project_from_cwd: bool_env("T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD"),

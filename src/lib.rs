@@ -1376,7 +1376,7 @@ const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Serve on an already bound listener until `shutdown` resolves. When this
 /// process owns the state directory, the runtime record is published with
-/// the listener's real address (so port 0 records the chosen port) and is
+/// the listener's real port (so port 0 records the chosen one) and is
 /// cleared again, if still ours, when serving stops.
 pub async fn serve_bound<F>(
     state: Arc<AppState>,
@@ -1391,7 +1391,11 @@ where
     let bound = listener.local_addr()?;
     info!(listen = %bound, "t3code server listening");
     if let Some(owner) = &ownership {
-        let record = server_runtime::RuntimeRecord::for_listener(bound);
+        let record = server_runtime::RuntimeRecord::new(
+            state.runtime_config.requested_host,
+            bound.port(),
+            Some(state.settings.policy.loaded()),
+        );
         if let Err(error) = owner.publish(record) {
             tracing::warn!(
                 path = %owner.state_path().display(),
