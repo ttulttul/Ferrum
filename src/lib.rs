@@ -1,4 +1,9 @@
 #![recursion_limit = "512"]
+// The workers build compiles a slice of modules written for the full server.
+#![cfg_attr(
+    not(feature = "native"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 //! T3 Code environment server. The `native` feature (default) builds the full
 //! server; `workers` builds the platform-neutral control plane for wasm32.
 

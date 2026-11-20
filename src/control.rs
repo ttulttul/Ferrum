@@ -356,6 +356,7 @@ impl ControlPlane {
                 Call::Done(Reply::Success(Value::Null))
             }
             "preview.reportProfiles" => Call::Done(Reply::Success(Value::Null)),
+            "projects.mutate" => Call::Done(self.create_project(params)),
             "orchestration.subscribeShell" => {
                 let guard = self.log.lock().unwrap();
                 let sequence = guard.sequence;
@@ -393,6 +394,51 @@ impl ControlPlane {
             _ => Call::Done(Reply::defect(format!(
                 "RPC contract is registered but unavailable in the control plane: {method}"
             ))),
+        }
+    }
+
+    /// `projects.mutate` with `project.create` only. The native server first
+    /// creates and canonicalizes the workspace root; that check belongs to the
+    /// workspace plane, so the root is recorded as given.
+    fn create_project(&self, input: &Value) -> Reply {
+        let command = input["commandId"].as_str().unwrap_or_default();
+        let id = input["projectId"].as_str().unwrap_or_default();
+        let error = |msg: &str| {
+            Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ProjectMutationError","commandId":command,"message":msg}}),
+            )
+        };
+        if input["type"] != "project.create" {
+            return error("Only project.create is available in the control plane.");
+        }
+        let (Some(title), Some(root)) = (
+            input["title"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+            input["workspaceRoot"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+        ) else {
+            return error("A title and a workspace root are required.");
+        };
+        if command.trim().is_empty()
+            || id.trim().is_empty()
+            || self.log.lock().unwrap().store.project_rows.contains_key(id)
+        {
+            return error("Failed to mutate project.");
+        }
+        let project = crate::Project {
+            id: id.into(),
+            name: title.into(),
+            path: root.into(),
+            created_at: crate::now(),
+        };
+        let row = crate::store::wire_project(&project);
+        match self.commit(Event::ProjectCreated(project)) {
+            Ok(_) => Reply::Success(row),
+            Err(_) => error("Failed to mutate project."),
         }
     }
 
