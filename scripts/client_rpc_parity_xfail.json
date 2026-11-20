@@ -1,0 +1,215 @@
+{
+  "about": "Known client-visible Rust gaps found by client_rpc_parity.py against the pinned reference. Each case fails CI if it starts passing; remove it then. severity is for real client use: critical breaks a core flow, high breaks a feature, medium shows wrong data, low differs without visible effect.",
+  "cases": {
+    "attachments.assets.fetch.badToken": {
+      "area": "agent turns",
+      "severity": "low",
+      "reason": "rejected upload and asset URLs answer with an empty body",
+      "issue": "the reference answers 'Not Found' as text/plain"
+    },
+    "attachments.assets.fetchAttachment": {
+      "area": "agent turns",
+      "severity": "high",
+      "reason": "an uploaded attachment's asset URL returns 404",
+      "issue": "assets.createUrl for an uploaded attachment mints a URL Rust does not serve, so composer and transcript attachments do not load"
+    },
+    "attachments.assets.workspaceFile": {
+      "area": "agent turns",
+      "severity": "medium",
+      "reason": "assets.createUrl for a draft image lacks imageDimensions",
+      "issue": "the reference returns imageDimensions and omits fileRevision/sourcePath for draft-workspace-file images"
+    },
+    "attachments.upload.badToken": {
+      "area": "agent turns",
+      "severity": "low",
+      "reason": "rejected upload and asset URLs answer with an empty body",
+      "issue": "the reference answers 'Not Found' as text/plain"
+    },
+    "projects.filesystem.browse": {
+      "area": "projects/files",
+      "severity": "low",
+      "reason": "filesystem.browse keeps the trailing slash in parentPath",
+      "issue": "the reference normalizes parentPath to the directory without a trailing slash"
+    },
+    "projects.http.snapshot.afterDelete": {
+      "area": "projects/files",
+      "severity": "medium",
+      "reason": "GET /api/projects still lists a deleted project",
+      "issue": "the reference omits projects with deletedAt set"
+    },
+    "projects.listEntries": {
+      "area": "projects/files",
+      "severity": "high",
+      "reason": "projects.listEntries lists .git and gitignored paths, unsorted",
+      "issue": "the reference walks only tracked and untracked-unignored files, sorted; Rust returns .git/*, target/ and build.log"
+    },
+    "projects.listEntries.missingCwd": {
+      "area": "projects/files",
+      "severity": "low",
+      "reason": "projects.listEntries succeeds with no entries for a missing cwd",
+      "issue": "the reference fails with ProjectListEntriesError failure=workspace_root_not_found"
+    },
+    "projects.listIgnoredFiles": {
+      "area": "projects/files",
+      "severity": "medium",
+      "reason": "projects.listIgnoredFiles returns no files",
+      "issue": "the reference lists ignored files (build.log) with their byte length"
+    },
+    "projects.readFile": {
+      "area": "projects/files",
+      "severity": "low",
+      "reason": "projects.readFile adds an exists field",
+      "issue": "extra key not in ProjectReadFileResult; the client ignores it, but replies differ"
+    },
+    "projects.readFile.afterWrite": {
+      "area": "projects/files",
+      "severity": "low",
+      "reason": "projects.readFile adds an exists field",
+      "issue": "extra key not in ProjectReadFileResult; the client ignores it, but replies differ"
+    },
+    "projects.searchContents": {
+      "area": "projects/files",
+      "severity": "high",
+      "reason": "projects.searchContents returns empty matchRanges and searches ignored files",
+      "issue": "the reference highlights each match and skips .git and gitignored files"
+    },
+    "projects.searchContents.regex": {
+      "area": "projects/files",
+      "severity": "high",
+      "reason": "projects.searchContents ignores useRegex",
+      "issue": "a regex query matches nothing on Rust"
+    },
+    "projects.searchEntries": {
+      "area": "projects/files",
+      "severity": "high",
+      "reason": "projects.searchEntries does no fuzzy matching",
+      "issue": "for query 'read' the reference returns README.md, .gitignore, docs/guide.md and scratch.txt; Rust returns only README.md"
+    },
+    "projects.shellFollow.sawProject": {
+      "area": "connecting",
+      "severity": "critical",
+      "reason": "orchestration.subscribeShell sends nothing after its snapshot",
+      "issue": "a live shell subscriber never receives project.updated or thread.updated after a mutation, so an open client's sidebar does not change until it reconnects"
+    },
+    "raw.projects.listEntries#3": {
+      "area": "projects/files",
+      "severity": "high",
+      "reason": "projects.listEntries lists .git and gitignored paths, unsorted",
+      "issue": "the reference walks only tracked and untracked-unignored files, sorted; Rust returns .git/*, target/ and build.log"
+    },
+    "raw.projects.listEntries#4": {
+      "area": "projects/files",
+      "severity": "low",
+      "reason": "projects.listEntries succeeds with no entries for a missing cwd",
+      "issue": "the reference fails with ProjectListEntriesError failure=workspace_root_not_found"
+    },
+    "raw.projects.readFile#5": {
+      "area": "projects/files",
+      "severity": "low",
+      "reason": "projects.readFile adds an exists field",
+      "issue": "extra key not in ProjectReadFileResult; the client ignores it, but replies differ"
+    },
+    "raw.projects.readFile#6": {
+      "area": "projects/files",
+      "severity": "low",
+      "reason": "projects.readFile error for a missing file has a different operation and cause",
+      "issue": "the reference reports operation realpath-target with a WorkspaceFileSystemOperationError cause; Rust reports read and an io error string"
+    },
+    "raw.projects.searchEntries#7": {
+      "area": "projects/files",
+      "severity": "high",
+      "reason": "projects.searchEntries does no fuzzy matching",
+      "issue": "for query 'read' the reference returns README.md, .gitignore, docs/guide.md and scratch.txt; Rust returns only README.md"
+    },
+    "settings.server.getStorageCleanupReport": {
+      "area": "settings",
+      "severity": "medium",
+      "reason": "getStorageCleanupReport fails the client's decode",
+      "issue": "startedAt must be a string; the storage settings page cannot show the report"
+    },
+    "threads.getWorktreeThreadIds": {
+      "area": "threads",
+      "severity": "medium",
+      "reason": "getWorktreeThreadIds matches threads by project root",
+      "issue": "the reference returns only threads whose worktreePath is the given path; Rust also returns local threads of the project at that root"
+    },
+    "threads.searchThread": {
+      "area": "threads",
+      "severity": "medium",
+      "reason": "in-thread search replies have complete instead of navigation",
+      "issue": "searchThread adds a complete field and searchThreadStream omits navigation, which the client uses to step through matches"
+    },
+    "threads.searchThreadStream": {
+      "area": "threads",
+      "severity": "medium",
+      "reason": "in-thread search replies have complete instead of navigation",
+      "issue": "searchThread adds a complete field and searchThreadStream omits navigation, which the client uses to step through matches"
+    },
+    "threads.searchThreads": {
+      "area": "threads",
+      "severity": "high",
+      "reason": "orchestration.searchThreads replies fail the client's decode",
+      "issue": "matches[0].source must be \"user\" | \"assistant\""
+    },
+    "threads.shellFollow.sawThread": {
+      "area": "connecting",
+      "severity": "critical",
+      "reason": "orchestration.subscribeShell sends nothing after its snapshot",
+      "issue": "a live shell subscriber never receives project.updated or thread.updated after a mutation, so an open client's sidebar does not change until it reconnects"
+    },
+    "threads.threadFollow.sawRename": {
+      "area": "threads",
+      "severity": "medium",
+      "reason": "a live subscribeThread answers a rename with a full snapshot (about 15 s later) instead of a thread.metadata-updated event",
+      "issue": "the reference streams the metadata event within a few seconds of thread.meta.update"
+    },
+    "turns.getThreadProjection.afterMessage": {
+      "area": "agent turns",
+      "severity": "medium",
+      "reason": "the projection after a message lacks the reference's provider runtime records and uses other ids",
+      "issue": "no attempts, nodes or providerThreads; runs have UUID ids, not run:thread:<id>:ordinal:<n>, and messages carry no nodeId; extra checkpoint and checkpointScope records"
+    },
+    "turns.message.missingProvider": {
+      "area": "agent turns",
+      "severity": "high",
+      "reason": "message.dispatch accepts a disabled provider instance",
+      "issue": "the reference rejects the command with OrchestrationV2DispatchCommandError (provider instance disabled for the project); Rust records it and replies with a sequence"
+    },
+    "turns.subscribeCommandOutput.missing": {
+      "area": "agent turns",
+      "severity": "low",
+      "reason": "subscribeCommandOutput for an unknown item streams an empty replace",
+      "issue": "the reference fails with OrchestrationV2CommandOutputError"
+    },
+    "vcs.refreshStatus": {
+      "area": "git/VCS",
+      "severity": "medium",
+      "reason": "VCS status has no branchChanges.baseRef",
+      "issue": "the reference compares the branch with its upstream origin/main; Rust reports baseRef null"
+    },
+    "vcs.removeWorktree": {
+      "area": "git/VCS",
+      "severity": "high",
+      "reason": "vcs.removeWorktree fails on a worktree vcs.createWorktree made",
+      "issue": "git worktree remove exits 128 on Rust; the reference removes it"
+    },
+    "vcs.review.getDiffPreview": {
+      "area": "git/VCS",
+      "severity": "medium",
+      "reason": "review.getDiffPreview files lack changeType",
+      "issue": "the review panel's file list needs changeType for each file"
+    },
+    "vcs.subscribeVcsStatus": {
+      "area": "git/VCS",
+      "severity": "medium",
+      "reason": "VCS status has no branchChanges.baseRef",
+      "issue": "the reference compares the branch with its upstream origin/main; Rust reports baseRef null"
+    },
+    "vcs.subscribeVcsStatus.remote": {
+      "area": "git/VCS",
+      "severity": "medium",
+      "reason": "VCS status has no branchChanges.baseRef",
+      "issue": "the reference compares the branch with its upstream origin/main; Rust reports baseRef null"
+    }
+  }
+}

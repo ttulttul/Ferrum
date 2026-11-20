@@ -89,7 +89,44 @@ def session_cookie(url, secret):
     return headers["set-cookie"].split(";", 1)[0]
 
 
-def managed_server(stack, prefix, root, secret, signing_key):
+# The relay client a server would report from PATH (`cloud.getRelayClientStatus`).
+RELAY_TOOLS = {"cloudflared"}
+
+
+def isolated_git_env(directory):
+    """Git settings for parity processes: no system config, and a global config this run owns.
+
+    Host settings such as init.defaultBranch, url.*.insteadOf, commit signing or a newer system
+    default would otherwise reach the seeded fixtures and both servers.
+    """
+    config = Path(directory) / "gitconfig"
+    if not config.exists():
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("# Written by the parity harness; host Git configuration is not read.\n")
+    return {"GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1"}
+
+
+def path_without(names, scratch, path=None):
+    """PATH with every directory that holds one of `names` replaced by links to its other entries."""
+    directories = []
+    for index, directory in enumerate((os.environ.get("PATH", "") if path is None else path).split(os.pathsep)):
+        folder = Path(directory)
+        if not folder.is_dir():
+            continue
+        if not any((folder / name).exists() for name in names):
+            directories.append(directory)
+            continue
+        shim = Path(scratch) / f"path-{index}"
+        shim.mkdir(parents=True, exist_ok=True)
+        for entry in folder.iterdir():
+            if entry.name not in names and not (shim / entry.name).exists():
+                (shim / entry.name).symlink_to(entry)
+        directories.append(str(shim))
+    return os.pathsep.join(directories)
+
+
+def managed_server(stack, prefix, root, secret, signing_key, env=None):
+    """Launches one server in `root`. `env` adds variables (or replaces PATH) for the child."""
     secrets_dir = root / "userdata" / "secrets"
     secrets_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     key_file = secrets_dir / "mcp-oauth-signing-key.bin"
@@ -105,9 +142,9 @@ def managed_server(stack, prefix, root, secret, signing_key):
     bootstrap.seek(0)
     # Each child receives its own state directory, home and bootstrap descriptor.
     # Do not pass developer provider credentials into parity processes.
-    env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "SYSTEMROOT") if k in os.environ}
+    child_env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "SYSTEMROOT") if k in os.environ}
     stack.enter_context(launch(prefix + ["--bootstrap-fd", str(bootstrap.fileno())], url,
-                               env={**env, "HOME": str(root), "T3CODE_HOME": str(root)},
+                               env={**child_env, **(env or {}), "HOME": str(root), "T3CODE_HOME": str(root)},
                                cwd=root, pass_fds=(bootstrap.fileno(),)))
     return url, session_cookie(url, secret)
 
