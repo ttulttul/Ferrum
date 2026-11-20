@@ -20,6 +20,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 mod local;
 #[cfg(feature = "native")]
 pub use local::LocalWorkspace;
+mod remote;
+pub use remote::{unavailable, RemoteWorkspace};
 
 /// A reply payload: the success value, or the error value an RPC fails with.
 pub type Reply = Result<Value, Value>;

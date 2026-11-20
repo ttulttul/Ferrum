@@ -1,0 +1,141 @@
+//! The control plane's state: the event log and the store projected from it,
+//! the change broadcast, auth, and the state documents (scheduled tasks and
+//! webhook deliveries). It holds nothing that needs a local process, socket
+//! or filesystem, so it builds for the workers target as well as natively.
+//! The native server's `AppState` dereferences to it.
+use crate::{
+    auth_service::AuthService,
+    event_log::EventLog,
+    persistence::{DocumentStore, WriteMode},
+    CommandReceipt, Event, ServerEvent, Store,
+};
+use indexmap::IndexMap;
+use serde_json::Value;
+use std::{path::PathBuf, sync::Arc};
+use tokio::sync::{broadcast, Mutex, RwLock};
+
+pub struct ControlState {
+    pub auth: AuthService,
+    pub store: RwLock<Store>,
+    pub events: broadcast::Sender<ServerEvent>,
+    pub log: Mutex<Box<dyn EventLog + Send>>,
+    pub(crate) next_event_id: Mutex<u64>,
+    pub(crate) pull_request_linked_refresh: Mutex<u64>,
+    pub(crate) pull_request_linked_events: broadcast::Sender<u64>,
+    /// Where state documents live.
+    pub(crate) documents: Arc<dyn DocumentStore>,
+    pub(crate) scheduled_tasks: Mutex<IndexMap<String, Value>>,
+    pub(crate) scheduled_tasks_path: PathBuf,
+    pub(crate) scheduled_webhook_deliveries: Mutex<IndexMap<String, Value>>,
+    pub(crate) scheduled_webhook_deliveries_path: PathBuf,
+    pub(crate) scheduled_task_events: broadcast::Sender<()>,
+    pub(crate) prompt_suggestion_events: broadcast::Sender<Value>,
+}
+
+impl ControlState {
+    /// Rebuilds the store from `log` and reads the scheduled-task documents
+    /// kept in `dir`.
+    pub fn open(
+        auth: AuthService,
+        documents: Arc<dyn DocumentStore>,
+        mut log: Box<dyn EventLog + Send>,
+        dir: &std::path::Path,
+    ) -> anyhow::Result<Self> {
+        let mut store = Store::default();
+        let mut next_event_id = 0;
+        for record in log.load()? {
+            next_event_id = next_event_id.max(record.id);
+            store.apply_record(&record);
+        }
+        let scheduled_tasks_path = dir.join("scheduled-tasks.json");
+        let scheduled_tasks = read_by_id(&*documents, &scheduled_tasks_path);
+        let scheduled_webhook_deliveries_path = dir.join("scheduled-webhook-deliveries.json");
+        let scheduled_webhook_deliveries =
+            read_by_id(&*documents, &scheduled_webhook_deliveries_path);
+        Ok(Self {
+            auth,
+            store: RwLock::new(store),
+            events: broadcast::channel(512).0,
+            log: Mutex::new(log),
+            next_event_id: Mutex::new(next_event_id),
+            pull_request_linked_refresh: Mutex::new(0),
+            pull_request_linked_events: broadcast::channel(64).0,
+            documents,
+            scheduled_tasks: Mutex::new(scheduled_tasks),
+            scheduled_tasks_path,
+            scheduled_webhook_deliveries: Mutex::new(scheduled_webhook_deliveries),
+            scheduled_webhook_deliveries_path,
+            scheduled_task_events: broadcast::channel(64).0,
+            prompt_suggestion_events: broadcast::channel(64).0,
+        })
+    }
+
+    pub(crate) async fn persist_scheduled_tasks(&self) -> anyhow::Result<()> {
+        let tasks = self.scheduled_tasks.lock().await;
+        let bytes = serde_json::to_vec(&tasks.values().collect::<Vec<_>>())?;
+        drop(tasks);
+        self.documents
+            .write(&self.scheduled_tasks_path, &bytes, WriteMode::Replace)?;
+        Ok(())
+    }
+
+    pub(crate) async fn persist_scheduled_webhook_deliveries(&self) -> anyhow::Result<()> {
+        let deliveries = self.scheduled_webhook_deliveries.lock().await;
+        let bytes = serde_json::to_vec(&deliveries.values().collect::<Vec<_>>())?;
+        drop(deliveries);
+        self.documents.write(
+            &self.scheduled_webhook_deliveries_path,
+            &bytes,
+            WriteMode::Replace,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {
+        self.commit_receipted(event, None).await
+    }
+
+    /// Appends one event to the log, applies it to the store and broadcasts it.
+    pub(crate) async fn commit_receipted(
+        &self,
+        event: Event,
+        receipt: Option<CommandReceipt>,
+    ) -> anyhow::Result<ServerEvent> {
+        let mut store = self.store.write().await;
+        let mut next_event_id = self.next_event_id.lock().await;
+        let record = ServerEvent {
+            id: *next_event_id + 1,
+            at: crate::now(),
+            event,
+            receipt,
+        };
+        self.log.lock().await.append(&record)?;
+        *next_event_id = record.id;
+        store.apply_record(&record);
+        if let Event::ThreadPatched { ref patch, .. } = record.event {
+            if patch["row"].get("pullRequests").is_some() || patch["row"].get("issues").is_some() {
+                let mut revision = self.pull_request_linked_refresh.lock().await;
+                *revision = revision.saturating_add(1);
+                let _ = self.pull_request_linked_events.send(*revision);
+            }
+        }
+        let _ = self.events.send(record.clone());
+        Ok(record)
+    }
+}
+
+/// A JSON array document as a map by each entry's `id`; empty when the
+/// document is missing or unreadable.
+fn read_by_id(documents: &dyn DocumentStore, path: &std::path::Path) -> IndexMap<String, Value> {
+    documents
+        .read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<Value>>(&bytes).ok())
+        .map(|items| {
+            items
+                .into_iter()
+                .filter_map(|item| Some((item["id"].as_str()?.to_owned(), item)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
