@@ -156,8 +156,10 @@
       "stream": false,
       "auth": "session (relay:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "relay_client_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [
         "connect.cloud.getRelayClientStatus"
       ],
@@ -5463,7 +5465,8 @@
       "existingCoverage": [
         "client_initial_sync_parity.py",
         "client_thread_parity.py",
-        "cors_parity.py"
+        "cors_parity.py",
+        "workers_initial_sync_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -6651,6 +6654,7 @@
         "parity-fixtures.json",
         "preview_provider_parity.py",
         "provider-parity.json",
+        "relay_client_parity.py",
         "rpc_edge_parity.py",
         "settings_mutation_parity.py",
         "settings_secrets_parity.py",

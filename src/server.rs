@@ -920,7 +920,24 @@ where
             );
         }
     }
+    // T3 Connect: run the stored managed tunnel's relay client while this server listens.
+    let policy = &state.settings.policy;
+    let endpoint = crate::managed_endpoint::ManagedEndpointRuntime::open(
+        crate::managed_endpoint::RuntimeOptions::for_paths(
+            &state.paths,
+            policy.allows_connect() && policy.allows_client("remote"),
+        ),
+    )
+    .await;
+    let endpoint_startup = {
+        let endpoint = endpoint.clone();
+        let origin = crate::managed_endpoint::LocalOrigin::for_address(bound);
+        tokio::spawn(async move {
+            endpoint.start_stored_tunnel(&origin).await;
+        })
+    };
     let (stopping_tx, stopping_rx) = oneshot::channel::<()>();
+    let stopping_endpoint = endpoint.clone();
     let server = axum::serve(
         listener,
         router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -928,6 +945,7 @@ where
     .with_graceful_shutdown(async move {
         shutdown.await;
         info!("shutting down t3code server");
+        stopping_endpoint.begin_shutdown();
         let _ = stopping_tx.send(());
     });
     let grace = async move {
@@ -943,6 +961,8 @@ where
             Ok(())
         }
     };
+    endpoint_startup.abort();
+    endpoint.shutdown().await;
     drop(ownership);
     result
 }
