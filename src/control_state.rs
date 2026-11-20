@@ -91,6 +91,29 @@ impl ControlState {
         Ok(())
     }
 
+    /// `commit` for hosts that never hold this state's locks across an
+    /// await, such as a Durable Object handling one message at a time: the
+    /// locks are free, so the commit completes without suspending.
+    pub fn commit_now(&self, event: Event) -> anyhow::Result<ServerEvent> {
+        futures_util::FutureExt::now_or_never(self.commit(event))
+            .ok_or_else(|| anyhow::anyhow!("the control state is busy"))?
+    }
+
+    /// The last committed event's id, for hosts as `commit_now` describes.
+    pub fn sequence_now(&self) -> u64 {
+        *self
+            .next_event_id
+            .try_lock()
+            .expect("the control state is not locked between messages")
+    }
+
+    /// The store, for hosts as `commit_now` describes.
+    pub fn store_now(&self) -> tokio::sync::RwLockReadGuard<'_, Store> {
+        self.store
+            .try_read()
+            .expect("the control state is not locked between messages")
+    }
+
     pub(crate) async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {
         self.commit_receipted(event, None).await
     }

@@ -1,7 +1,8 @@
 //! The control plane: what a hosted environment runs without a workspace.
 //!
-//! It owns the auth service, the orchestration event log and its in-memory
-//! store, and answers HTTP routes and WebSocket RPCs that need nothing from a
+//! It holds the same [`ControlState`] as the native server (auth, the
+//! orchestration event log and its in-memory store, state documents) and
+//! answers HTTP routes and WebSocket RPCs that need nothing from a
 //! host. Workspace calls (files, git, terminals, provider processes) belong to
 //! the workspace plane, `t3-agentd`, and are not wired up yet; they answer as
 //! unavailable.
@@ -11,7 +12,7 @@
 //! returns the frames to send. Open streams are recorded in a serializable
 //! [`Connection`], so a Durable Object can keep it as a WebSocket attachment
 //! and hibernate between messages. Pushing later stream values (for example
-//! store changes) goes through [`ControlPlane::commit`] and the host's list of
+//! store changes) goes through [`ControlState::commit_now`] and the host's list of
 //! connections; this slice does not push any yet.
 //!
 //! Platform neutral: the native build compiles and tests it too.
@@ -19,12 +20,13 @@ use crate::{
     access_http::{self, AuthHost},
     auth_service::{self, AuthService, Session},
     contracts::RPC_CONTRACTS,
+    control_state::ControlState,
     environment,
     event_log::EventLog,
     persistence::DocumentStore,
     rpc_protocol::{js_template_string, request_key, split_socket_frame, Reply},
     rpc_protocol::{SOCKET_FRAME_PARTS_QUERY_PARAM, SOCKET_FRAME_PART_BYTES},
-    server_config, Event, ServerEvent, Store,
+    server_config, Event, ServerEvent,
 };
 use axum::{
     extract::{Query, State},
@@ -37,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 /// Where a hosted environment's workspace lives inside the `t3-agentd` container.
@@ -55,22 +57,20 @@ pub struct Config {
     pub cookie_port: u16,
 }
 
-struct Log {
-    store: Store,
-    sequence: u64,
-    log: Box<dyn EventLog + Send>,
-}
-
 pub struct ControlPlane {
     config: Config,
     started_at: String,
-    auth: AuthService,
-    documents: Arc<dyn DocumentStore>,
-    log: Mutex<Log>,
+    state: ControlState,
 }
 impl AuthHost for ControlPlane {
     fn auth(&self) -> &AuthService {
-        &self.auth
+        &self.state.auth
+    }
+}
+impl std::ops::Deref for ControlPlane {
+    type Target = ControlState;
+    fn deref(&self) -> &ControlState {
+        &self.state
     }
 }
 
@@ -96,47 +96,27 @@ impl ControlPlane {
     pub fn open(
         config: Config,
         documents: Arc<dyn DocumentStore>,
-        mut log: Box<dyn EventLog + Send>,
+        log: Box<dyn EventLog + Send>,
     ) -> anyhow::Result<Self> {
         let auth = AuthService::with_bootstrap(config.bootstrap_credential.clone())
             .with_port(config.cookie_port)
             .open_in(documents.clone(), std::path::Path::new(STATE_DIR))?;
-        let mut store = Store::default();
-        let mut sequence = 0;
-        for record in log.load()? {
-            sequence = sequence.max(record.id);
-            store.apply_record(&record);
-        }
+        let started_at = auth_service::iso(auth_service::now());
+        let state = ControlState::open(auth, documents, log, std::path::Path::new(STATE_DIR))?;
         Ok(Self {
             config,
-            started_at: auth_service::iso(auth_service::now()),
-            auth,
-            documents,
-            log: Mutex::new(Log {
-                store,
-                sequence,
-                log,
-            }),
+            started_at,
+            state,
         })
     }
 
     pub fn sequence(&self) -> u64 {
-        self.log.lock().unwrap().sequence
+        self.sequence_now()
     }
 
     /// Appends one event to the log, then applies it to the store.
     pub fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {
-        let mut guard = self.log.lock().unwrap();
-        let record = ServerEvent {
-            id: guard.sequence + 1,
-            at: crate::now(),
-            event,
-            receipt: None,
-        };
-        guard.log.append(&record)?;
-        guard.sequence = record.id;
-        guard.store.apply_record(&record);
-        Ok(record)
+        self.commit_now(event)
     }
 
     pub fn descriptor(&self) -> Value {
@@ -357,8 +337,8 @@ impl ControlPlane {
             "preview.reportProfiles" => Call::Done(Reply::Success(Value::Null)),
             "projects.mutate" => Call::Done(self.create_project(params)),
             "orchestration.subscribeShell" => {
-                let guard = self.log.lock().unwrap();
-                let sequence = guard.sequence;
+                let sequence = self.sequence_now();
+                let store = self.store_now();
                 let after = params.get("afterSequence").filter(|value| !value.is_null());
                 let resumable = after.and_then(Value::as_u64) == Some(sequence);
                 if after.is_some() && !resumable && params["httpSnapshotFallback"] == true {
@@ -366,7 +346,9 @@ impl ControlPlane {
                 }
                 let mut items = Vec::new();
                 if !resumable {
-                    items.push(json!({"kind":"snapshot","snapshot":environment::shell(&guard.store, sequence)}));
+                    items.push(
+                        json!({"kind":"snapshot","snapshot":environment::shell(&store, sequence)}),
+                    );
                 }
                 if params["requestCompletionMarker"] == true {
                     items.push(json!({"kind":"synchronized"}));
@@ -378,11 +360,11 @@ impl ControlPlane {
                 })
             }
             "orchestration.subscribeThread" => {
-                let guard = self.log.lock().unwrap();
-                let sequence = guard.sequence;
+                let sequence = self.sequence_now();
+                let store = self.store_now();
                 Call::Stream(vec![match params["threadId"]
                     .as_str()
-                    .and_then(|id| guard.store.threads.get(id))
+                    .and_then(|id| store.threads.get(id))
                 {
                     Some(t) => {
                         json!([{"kind":"snapshot","snapshotSequence":sequence,"projection":t.projection()},{"kind":"synchronized"}])
@@ -424,7 +406,7 @@ impl ControlPlane {
         };
         if command.trim().is_empty()
             || id.trim().is_empty()
-            || self.log.lock().unwrap().store.project_rows.contains_key(id)
+            || self.store_now().project_rows.contains_key(id)
         {
             return error("Failed to mutate project.");
         }
@@ -523,12 +505,12 @@ async fn shell_snapshot(
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let guard = plane.log.lock().unwrap();
-    let sequence = guard.sequence;
+    let sequence = plane.sequence_now();
+    let store = plane.store_now();
     if query.get("resumeFrom").and_then(|v| v.parse::<u64>().ok()) == Some(sequence) {
         return Json(json!({"resumable":true})).into_response();
     }
-    Json(environment::shell_snapshot(&guard.store, sequence, &query)).into_response()
+    Json(environment::shell_snapshot(&store, sequence, &query)).into_response()
 }
 
 async fn unavailable(uri: Uri) -> Response {
@@ -633,7 +615,7 @@ mod tests {
                 created_at: 1,
             }))
             .unwrap();
-        let records = plane.log.lock().unwrap().log.load().unwrap();
+        let records = plane.log.try_lock().unwrap().load().unwrap();
         let mut log = MemoryLog::default();
         for record in &records {
             log.append(record).unwrap();
@@ -655,12 +637,6 @@ mod tests {
             plane.auth.records_json(),
             "sessions survive through the document store"
         );
-        assert!(reopened
-            .log
-            .lock()
-            .unwrap()
-            .store
-            .projects
-            .contains_key("p1"));
+        assert!(reopened.store_now().projects.contains_key("p1"));
     }
 }
