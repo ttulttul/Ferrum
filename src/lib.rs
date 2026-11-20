@@ -75,6 +75,7 @@ mod static_http;
 #[cfg(feature = "native")]
 pub mod voice;
 pub mod workspace;
+pub mod workspace_protocol;
 #[cfg(feature = "native")]
 pub mod worktree_setup;
 
