@@ -10,7 +10,7 @@ from pathlib import Path
 import secrets
 import shlex
 from tempfile import TemporaryDirectory
-from threading import Event, Thread
+from threading import Condition, Event, Thread
 from time import monotonic
 from urllib.parse import urlencode
 
@@ -31,6 +31,11 @@ class PreviewPage(BaseHTTPRequestHandler):
         elif self.path == "/painted":
             self.end_headers()
             self.server.painted.set()
+        elif self.path == "/clicked":
+            self.end_headers()
+            with self.server.clicked:
+                self.server.clicks += 1
+                self.server.clicked.notify_all()
         else:
             self.send_header("Content-Type", "text/html")
             self.end_headers()
@@ -42,6 +47,7 @@ class PreviewPage(BaseHTTPRequestHandler):
                   document.addEventListener("click", event => {
                     if (event.clientY <= 150 || !colors.length) return;
                     document.body.style.background = colors.shift();
+                    fetch("/clicked");
                     if (!colors.length)
                       requestAnimationFrame(() => requestAnimationFrame(() => fetch("/painted")));
                   });
@@ -55,8 +61,11 @@ class PreviewPage(BaseHTTPRequestHandler):
         pass
 
 
-def observe(name, server, page_url, painted):
+def observe(name, server, page_url, page):
+    painted = page.painted
     painted.clear()
+    with page.clicked:
+        page.clicks = 0
     url, cookie = server
     headers = {"Cookie": cookie}
     ws = url.replace("http", "ws", 1)
@@ -112,15 +121,28 @@ def observe(name, server, page_url, painted):
                     viewer.send(json.dumps(dict(type="mouse", action=action, x=30, y=y,
                                                 button="left", buttons=buttons, clickCount=1)))
 
+            def recolor():
+                # Chromium can drop an input event that arrives before the page is ready
+                # for input, and then no frame follows ("saw []"). The page reports each
+                # click it handles, so a click is sent again only when the page never saw
+                # it, which keeps the colour sequence intact.
+                with page.clicked:
+                    expected = page.clicks + 1
+                    for _ in range(6):
+                        click(200)
+                        if page.clicked.wait_for(lambda: page.clicks >= expected, timeout=5):
+                            return
+                raise RuntimeError(f"{name}: the page did not register a click")
+
             receive("ready paint", color=(119, 153, 51), wait=60)
-            click(200)
+            recolor()
             result["first paint JPEG"] = receive("first paint", color=(51, 85, 119), size=(1280, 800))
-            click(200)
+            recolor()
             result["second paint JPEG"] = receive("second paint", color=(170, 85, 51),
                                                   size=(1280, 800), hold=True)
             # Keep one live frame in flight through the final paint. Both servers
             # should deliver a full-resolution still once the burst settles.
-            click(200)
+            recolor()
             if not painted.wait(30):
                 raise RuntimeError("Page did not report its final paint")
             viewer.send('{"type":"ack"}')
@@ -161,6 +183,8 @@ def main():
     with TemporaryDirectory() as directory, ExitStack() as stack:
         page = stack.enter_context(ThreadingHTTPServer(("127.0.0.1", 0), PreviewPage))
         page.painted = Event()
+        page.clicked = Condition()
+        page.clicks = 0
         Thread(target=page.serve_forever, daemon=True).start()
         stack.callback(page.shutdown)
         url = f"http://127.0.0.1:{page.server_port}/"
@@ -172,8 +196,8 @@ def main():
             (root / ".cache").mkdir(parents=True)
             (root / ".cache/ms-playwright").symlink_to(args.browser_cache.resolve(), target_is_directory=True)
             servers[name] = managed_server(stack, shlex.split(cmd), root, secret, signing_key)
-        original = observe("original", servers["original"], url, page.painted)
-        rust = observe("rust", servers["rust"], url, page.painted)
+        original = observe("original", servers["original"], url, page)
+        rust = observe("rust", servers["rust"], url, page)
         failed = 0
         for key in ("control", "viewport", "first paint JPEG", "second paint JPEG",
                     "settled JPEG", "upload", "download", "socket close"):
