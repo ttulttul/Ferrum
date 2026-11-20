@@ -382,7 +382,7 @@ def managed_ancestor(pid: int) -> str | None:
     return None
 
 
-def origin(runtime: dict[str, object]) -> tuple[str, int]:
+def origin(runtime: dict[str, object]) -> tuple[str, str, int]:
     raw_origin = runtime.get("origin")
     port = runtime.get("port")
     if not isinstance(raw_origin, str) or not isinstance(port, int) or not 1 <= port <= 65535:
@@ -390,11 +390,12 @@ def origin(runtime: dict[str, object]) -> tuple[str, int]:
     from urllib.parse import urlsplit
 
     parsed = urlsplit(raw_origin)
-    host = runtime.get("host") if isinstance(runtime.get("host"), str) else parsed.hostname
-    host = host or "127.0.0.1"
-    if host in {"0.0.0.0", "::"}:
-        host = "127.0.0.1"
-    return host, port
+    health_host = parsed.hostname or "127.0.0.1"
+    bind_host = runtime.get("host") if isinstance(runtime.get("host"), str) else health_host
+    bind_host = bind_host.strip() or health_host
+    if health_host in {"0.0.0.0", "::"}:
+        health_host = "127.0.0.1" if ":" not in bind_host else "::1"
+    return bind_host, health_host, port
 
 
 def health(host: str, port: int) -> bool:
@@ -424,10 +425,10 @@ def discover() -> dict[str, object]:
         if info is None or not is_typescript_server(info["argv"]):
             continue
         try:
-            host, port = origin(runtime)
+            bind_host, health_host, port = origin(runtime)
         except SwitchError:
             continue
-        if not health(host, port):
+        if not health(health_host, port):
             continue
         service = systemd_unit_for_pid(pid)
         candidate = {
@@ -435,7 +436,8 @@ def discover() -> dict[str, object]:
             "runtime": runtime,
             "pid": pid,
             "info": info,
-            "host": host,
+            "host": bind_host,
+            "healthHost": health_host,
             "port": port,
             "service": service,
         }
@@ -507,6 +509,7 @@ def save_original(candidate: dict[str, object]) -> None:
         "runtimePath": str(runtime_path),
         "baseDir": str(runtime_path.parent.parent),
         "host": candidate["host"],
+        "healthHost": candidate["healthHost"],
         "port": candidate["port"],
         "originalPid": candidate["pid"],
         "originalCwd": info["cwd"],
@@ -608,16 +611,11 @@ def wait_for_service(service: dict[str, object], host: str, port: int, label: st
     fail(f"the {label} server did not become ready on {host}:{port}. See {LOG_PATH}")
 
 
-def runtime_for_rust(path: Path, pid: int, host: str, port: int) -> None:
-    runtime = {
-        "version": 1,
-        "pid": pid,
-        "host": host,
-        "port": port,
-        "origin": f"http://{host}:{port}",
-        "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "serverVersion": "rust",
-    }
+def runtime_for_rust(path: Path, pid: int, original: dict[str, object] | None) -> None:
+    runtime = dict(original or {})
+    runtime["pid"] = pid
+    runtime["startedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    runtime["serverVersion"] = "rust"
     atomic_json(path, runtime)
 
 
@@ -643,8 +641,11 @@ def launch_rust(state: dict[str, object]) -> subprocess.Popen[bytes]:
         str(state["port"]),
     ]
     process = start_process(argv, environment, str(state["originalCwd"]), LOG_PATH)
-    wait_for_server(process, str(state["host"]), int(state["port"]), "Rust")
-    runtime_for_rust(Path(state["runtimePath"]), process.pid, str(state["host"]), int(state["port"]))
+    health_host = str(state.get("healthHost", state["host"]))
+    wait_for_server(process, health_host, int(state["port"]), "Rust")
+    backup = state.get("runtimeBackup")
+    original_runtime = read_json(Path(backup)) if isinstance(backup, str) else None
+    runtime_for_rust(Path(state["runtimePath"]), process.pid, original_runtime)
     state["mode"] = "rust"
     state["rustPid"] = process.pid
     state["rustStartedAt"] = time.time()
@@ -725,7 +726,12 @@ def restore_original(state: dict[str, object], rollback: bool = False) -> None:
     try:
         if isinstance(service, dict):
             systemd_restore(service, state)
-            wait_for_service(service, str(state["host"]), int(state["port"]), "TypeScript")
+            wait_for_service(
+                service,
+                str(state.get("healthHost", state["host"])),
+                int(state["port"]),
+                "TypeScript",
+            )
             process_pid = service.get("mainPid")
             current_pid = command_output(
                 systemd_prefix(service)
@@ -735,7 +741,12 @@ def restore_original(state: dict[str, object], rollback: bool = False) -> None:
                 process_pid = int(current_pid)
         else:
             process = start_process(argv, environment, str(state["originalCwd"]), LOG_PATH)
-            wait_for_server(process, str(state["host"]), int(state["port"]), "TypeScript")
+            wait_for_server(
+                process,
+                str(state.get("healthHost", state["host"])),
+                int(state["port"]),
+                "TypeScript",
+            )
             process_pid = process.pid
     except SwitchError:
         if rollback:
@@ -768,7 +779,10 @@ def status() -> None:
         except SwitchError as error:
             print(f"No switchable standalone TypeScript server found: {error}")
             return
-        print(f"Standalone TypeScript server found at {candidate['host']}:{candidate['port']} (PID {candidate['pid']}).")
+        print(
+            f"Standalone TypeScript server found on {candidate['host']} "
+            f"at {candidate['healthHost']}:{candidate['port']} (PID {candidate['pid']})."
+        )
         return
     print(json.dumps(state, indent=2))
 
