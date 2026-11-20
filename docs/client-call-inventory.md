@@ -20,13 +20,13 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 
 | Kind | Calls | Used by the client | Mobile only | Server-only / unused | Existing parity | Client harness | Either |
 |---|---|---|---|---|---|---|---|
-| rpc | 205 | 202 | 0 | 3 | 115 | 75 | 141 |
+| rpc | 205 | 202 | 0 | 3 | 116 | 75 | 141 |
 | rpc-stream | 30 | 30 | 0 | 0 | 17 | 23 | 25 |
 | http | 52 | 40 | 0 | 12 | 39 | 14 | 40 |
 | http-raw | 7 | 7 | 0 | 0 | 6 | 3 | 7 |
-| **all** | 294 | 279 | 0 | 15 | 177 | 115 | 213 |
+| **all** | 294 | 279 | 0 | 15 | 178 | 115 | 213 |
 
-Newly covered by the client harness (no earlier parity script): 36. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 24.
+Newly covered by the client harness (no earlier parity script): 35. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 24.
 
 Calls the harness does not make need credentials or hardware it cannot have in CI (GitHub, Linear,
 model providers, T3 Connect relay, voice models, simulators, a browser), are destructive to the host
@@ -42,7 +42,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `assets.persistChatAttachments` | user action | `packages/client-runtime/src/operations/commands.ts:373` | PersistChatAttachmentsInput | PersistChatAttachmentsResult | session (orchestration:operate) | client | rpc_edge_parity.py | — |
 | `attachments.createUploadUrl` | user action | `packages/client-runtime/src/state/attachments.ts:29` | AttachmentCreateUploadUrlInput | AttachmentCreateUploadUrlResult | session (orchestration:operate) | client | validation only | 2 case(s) |
 | `attachments.delete` | user action | `packages/client-runtime/src/state/attachments.ts:33` | AttachmentDeleteInput | void | session (orchestration:operate) | client | rpc_edge_parity.py | 2 case(s) |
-| `cloud.getRelayClientStatus` | user action | `apps/web/src/cloud/linkEnvironment.ts:64` | Struct{} | RelayClientStatusSchema | session (relay:read) | client | validation only | 1 case(s) |
+| `cloud.getRelayClientStatus` | user action | `apps/web/src/cloud/linkEnvironment.ts:64` | Struct{} | RelayClientStatusSchema | session (relay:read) | client | relay_client_parity.py | 1 case(s) |
 | `device.action` | user action | `packages/client-runtime/src/state/device.ts:91` | DeviceActionInput | DeviceDetail | session (orchestration:operate) | client | parity-fixtures.json | — |
 | `device.close` | user action | `packages/client-runtime/src/state/device.ts:73` | DeviceCloseInput | void | session (orchestration:operate) | client | host-parity.json | — |
 | `device.configure` | user action | `packages/client-runtime/src/state/device.ts:47` | DeviceConfigureInput | DeviceServiceState | session (settings:write) | client | host-parity.json | — |
@@ -338,7 +338,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 
 | Call | Trigger | Callers | Request | Response | Auth | Usage | Existing | Client harness |
 |---|---|---|---|---|---|---|---|---|
-| `GET /ws` | connect | `packages/client-runtime/src/rpc/session.ts:251`<br>`packages/client-runtime/src/rpc/session.ts:252` | websocket upgrade: orchestrationProtocol=2, frameParts=1, clientCapabilities; cookie, or wsTicket from a bearer/DPoP ticket |  | session | client | auth_parity.py, client_initial_sync_parity.py, config_parity.py, cors_parity.py, git_workflow_parity.py, github_provider_parity.py, linear_provider_parity.py, managed_policy_parity.py, orchestration_parity.py, parity-fixtures.json, preview_provider_parity.py, provider-parity.json, rpc_edge_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, source_control_hosts_parity.py | 1 case(s) |
+| `GET /ws` | connect | `packages/client-runtime/src/rpc/session.ts:251`<br>`packages/client-runtime/src/rpc/session.ts:252` | websocket upgrade: orchestrationProtocol=2, frameParts=1, clientCapabilities; cookie, or wsTicket from a bearer/DPoP ticket |  | session | client | auth_parity.py, client_initial_sync_parity.py, config_parity.py, cors_parity.py, git_workflow_parity.py, github_provider_parity.py, linear_provider_parity.py, managed_policy_parity.py, orchestration_parity.py, parity-fixtures.json, preview_provider_parity.py, provider-parity.json, relay_client_parity.py, rpc_edge_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, source_control_hosts_parity.py | 1 case(s) |
 | `GET /api/attachments/:id` | user action | `packages/client-runtime/src/pullRequestMarkdown.ts:361` | attachment bytes shown in the transcript |  | session | client | cors_parity.py | — |
 | `POST /api/attachments/upload/:token` | user action | `apps/web/src/lib/attachmentUploadQueue.ts:154` | unauthenticated XHR upload to the signed URL attachments.createUploadUrl returns |  | signed URL | client | cors_parity.py | 3 case(s), 1 xfail |
 | `GET /api/assets/:token` | user action | `packages/shared/src/preview.ts:16` | asset URLs from assets.createUrl |  | signed URL | client | — | 3 case(s), 2 xfail |

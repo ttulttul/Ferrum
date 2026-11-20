@@ -1,0 +1,33 @@
+{
+  "_note": "The connector spawn the pinned reference makes, recorded by scripts/fake_cloudflared.py through scripts/relay_client_parity.py --dump (scenario confirmed); pid and cwd dropped, TUNNEL_TOKEN replaced. referenceProcessEnv lists names the reference's own modules set on process.env, which every child it spawns inherits; they are not part of the relay client's spawn.",
+  "referenceProcessEnv": [
+    "CLAUDE_AGENT_SDK_VERSION",
+    "NoDefaultCurrentDirectoryInExePath"
+  ],
+  "spawn": {
+    "argv": [
+      "tunnel",
+      "--no-autoupdate",
+      "--loglevel",
+      "info",
+      "--output",
+      "default",
+      "--metrics",
+      "127.0.0.1:0",
+      "run"
+    ],
+    "envAdded": [
+      "CLAUDE_AGENT_SDK_VERSION",
+      "NoDefaultCurrentDirectoryInExePath",
+      "TUNNEL_TOKEN"
+    ],
+    "envChanged": [],
+    "envRemoved": [],
+    "sameProcessGroup": true,
+    "stderr": "pipe",
+    "stdin": "pipe",
+    "stdinOpen": true,
+    "stdout": "pipe",
+    "tunnelToken": "<token>"
+  }
+}
