@@ -54,11 +54,13 @@ pub mod provider_rpc;
 pub mod pull_requests;
 pub mod relay_http;
 pub mod relay_service;
+pub mod repository_identity;
 mod rpc;
 pub mod server_runtime;
 mod static_http;
 pub mod voice;
 mod workspace;
+pub mod worktree_setup;
 
 pub use contracts::{http_known, rpc_known, HTTP_CONTRACTS, RPC_CONTRACTS};
 
@@ -435,6 +437,7 @@ pub struct AppState {
     pub terminals: local_services::TerminalService,
     pub previews: local_services::PreviewService,
     pub devices: local_services::DeviceService,
+    pub worktree_setup: worktree_setup::WorktreeSetupTracker,
     project_mutation_lock: Mutex<()>,
     next_event_id: Mutex<u64>,
     pub(crate) storage_cleanup_report: Mutex<Option<serde_json::Value>>,
@@ -571,6 +574,7 @@ impl AppState {
             terminals: local_services::TerminalService::with_logs(dir.join("logs/terminals")),
             previews: local_services::PreviewService::default(),
             devices: local_services::DeviceService::new(settings.clone(), &dir)?,
+            worktree_setup: worktree_setup::WorktreeSetupTracker::default(),
             project_mutation_lock: Mutex::new(()),
             next_event_id: Mutex::new(next_event_id),
             storage_cleanup_report: Mutex::new(None),

@@ -135,14 +135,14 @@ pub(super) async fn handle(
                         .collect::<Vec<_>>();
                     let end = cursor.saturating_add(limit);
                     Ok(
-                        json!({"projects":rows.iter().skip(cursor).take(limit).collect::<Vec<_>>(),"nextCursor":(end<rows.len()).then_some(end)}),
+                        json!({"projects":rows.iter().skip(cursor).take(limit).map(|row| crate::repository_identity::with_identity(row)).collect::<Vec<_>>(),"nextCursor":(end<rows.len()).then_some(end)}),
                     )
                 }
                 "t3_project_read" => a["projectId"]
                     .as_str()
                     .and_then(|id| store.project_rows.get(id))
                     .filter(|r| r["deletedAt"].is_null())
-                    .cloned()
+                    .map(crate::repository_identity::with_identity)
                     .ok_or("The project was not found."),
                 _ => return rpc_error(id, -32602, &format!("Tool '{name}' not found")),
             };

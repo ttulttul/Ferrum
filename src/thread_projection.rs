@@ -13,6 +13,100 @@ fn ordered(fields: &[&str], row: &Value) -> Value {
     )
 }
 
+fn iso(seconds: u64) -> String {
+    auth_service::iso((seconds as i64).saturating_mul(1000))
+}
+
+/// JavaScript's encodeURIComponent, which the reference uses to nest ids in ids.
+pub(crate) fn uri_component(value: &str) -> String {
+    const RESERVED: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'!')
+        .remove(b'~')
+        .remove(b'*')
+        .remove(b'\'')
+        .remove(b'(')
+        .remove(b')');
+    percent_encoding::utf8_percent_encode(value, RESERVED).to_string()
+}
+
+fn merge(target: &mut Value, fields: Value) {
+    if let (Some(target), Value::Object(fields)) = (target.as_object_mut(), fields) {
+        target.extend(fields);
+    }
+}
+
+/// The reference's run statuses; older stores can hold others.
+fn run_status(status: &str) -> &'static str {
+    match status {
+        "preparing" => "preparing",
+        "queued" => "queued",
+        "starting" => "starting",
+        "running" => "running",
+        "waiting" => "waiting",
+        "completed" => "completed",
+        "interrupted" => "interrupted",
+        "cancelled" => "cancelled",
+        "rolled_back" => "rolled_back",
+        _ => "failed",
+    }
+}
+
+fn message_role(role: &str) -> &'static str {
+    match role {
+        "assistant" => "assistant",
+        "system" => "system",
+        _ => "user",
+    }
+}
+
+/// The thread's model selection; rows from before selections were stored name no model.
+fn model_selection(row: &Value) -> Value {
+    if row["modelSelection"]["instanceId"].is_string() && row["modelSelection"]["model"].is_string()
+    {
+        return row["modelSelection"].clone();
+    }
+    json!({"instanceId":row["providerInstanceId"].as_str().unwrap_or("codex"),"model":"default"})
+}
+
+/// The reference's dedupeSnapshotBodies: a message item repeats its message's text, so the
+/// item carries `textOmitted` instead and the client restores the text from the message.
+fn dedupe_bodies(projection: &mut Value) {
+    let texts: std::collections::HashMap<String, String> = projection["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| Some((m["id"].as_str()?.to_owned(), m["text"].as_str()?.to_owned())))
+        .collect();
+    let dedupe = |item: &mut Value| {
+        if !matches!(
+            item["type"].as_str(),
+            Some("user_message" | "assistant_message")
+        ) {
+            return;
+        }
+        let text = item["text"].as_str().unwrap_or_default();
+        if !text.is_empty()
+            && item["messageId"]
+                .as_str()
+                .and_then(|id| texts.get(id))
+                .map(String::as_str)
+                == Some(text)
+        {
+            item["text"] = json!("");
+            item["textOmitted"] = json!(true);
+        }
+    };
+    if let Some(items) = projection["turnItems"].as_array_mut() {
+        items.iter_mut().for_each(dedupe);
+    }
+    if let Some(rows) = projection["visibleTurnItems"].as_array_mut() {
+        rows.iter_mut().for_each(|row| dedupe(&mut row["item"]));
+    }
+}
+
 pub(crate) fn created(command: &Value, at: &str) -> Value {
     json!({"createdBy":command["createdBy"],"creationSource":command["creationSource"],
         "id":command["threadId"],"projectId":command["projectId"],"title":command["title"],
@@ -25,27 +119,135 @@ pub(crate) fn created(command: &Value, at: &str) -> Value {
 }
 
 impl Thread {
-    fn turn_items(&self) -> Vec<Value> {
-        self.messages
+    /// Each run as `OrchestrationV2Run`. Runs have no provider records here, so the ids of
+    /// those (provider thread, root node, attempt, checkpoint) are null.
+    fn run_rows(&self, row: &Value) -> Vec<Value> {
+        let selection = model_selection(row);
+        let instance = row["providerInstanceId"]
+            .as_str()
+            .or(selection["instanceId"].as_str())
+            .unwrap_or("codex")
+            .to_owned();
+        let mut queue_position = 0;
+        self.runs
             .iter()
             .enumerate()
-            .map(|(ordinal, message)| {
-                let at = auth_service::iso((message.created_at as i64).saturating_mul(1000));
+            .map(|(index, run)| {
+                let status = run_status(&run.status);
+                let waiting = matches!(status, "queued" | "preparing");
+                let requested_at = self
+                    .messages
+                    .iter()
+                    .find(|message| Some(&message.id) == run.user_message_id.as_ref())
+                    .map_or(run.started_at, |message| message.created_at);
+                let mut out = json!({
+                    "id": run.id.to_string(),
+                    "threadId": self.id,
+                    "ordinal": index + 1,
+                    "providerInstanceId": instance,
+                    "modelSelection": selection,
+                    "providerThreadId": null,
+                    "userMessageId": run.user_message_id.clone().filter(|id| !id.trim().is_empty()).unwrap_or_else(|| run.id.to_string()),
+                    "rootNodeId": null,
+                    "activeAttemptId": null,
+                    "status": status,
+                    "queuePosition": null,
+                    "requestedAt": iso(requested_at),
+                    "startedAt": if waiting { Value::Null } else { iso(run.started_at).into() },
+                    "completedAt": run.finished_at.map(iso),
+                    "checkpointId": null,
+                    "contextHandoffId": null
+                });
+                if status == "queued" {
+                    queue_position += 1;
+                    out["queuePosition"] = json!(queue_position);
+                    out["queueHeld"] = json!(run.queue_held);
+                }
+                out
+            })
+            .collect()
+    }
+
+    fn run_of(&self, message_id: &str) -> Option<(usize, &crate::Run)> {
+        self.runs
+            .iter()
+            .enumerate()
+            .find(|(_, run)| run.user_message_id.as_deref() == Some(message_id))
+    }
+
+    /// Each message as `OrchestrationV2ConversationMessage`.
+    fn message_rows(&self) -> Vec<Value> {
+        self.messages
+            .iter()
+            .map(|message| {
+                let at = iso(message.created_at);
                 json!({
+                    "createdBy": if message.role == "user" { "user" } else { "agent" },
+                    "creationSource": if message.role == "user" { "web" } else { "provider" },
                     "id": message.id,
                     "threadId": self.id,
-                    "runId": null,
+                    "runId": self.run_of(&message.id).map(|(_, run)| run.id.to_string()),
+                    "nodeId": null,
+                    "role": message_role(&message.role),
+                    "text": message.content,
+                    "attachments": [],
+                    "streaming": false,
+                    "createdAt": at,
+                    "updatedAt": at
+                })
+            })
+            .collect()
+    }
+
+    /// The timeline as `OrchestrationV2TurnItem`s: each message, then its run's failure.
+    /// Ordinals follow the reference's TurnItemPositionStore: a run's items start after
+    /// `ordinal * 1_000_000`, so items stay ordered when earlier runs gain items later.
+    fn turn_items(&self) -> Vec<Value> {
+        let mut items = Vec::new();
+        let mut ordinal: u64 = 0;
+        for message in &self.messages {
+            let run = self.run_of(&message.id);
+            ordinal = match run {
+                Some((index, _)) => ((index as u64 + 1) * 1_000_000).max(ordinal) + 1,
+                None => ordinal + 1,
+            };
+            let run_id = run.map(|(_, run)| run.id.to_string());
+            let at = iso(message.created_at);
+            let base = |id: String,
+                        ordinal: u64,
+                        status: &str,
+                        title: Value,
+                        started: &str,
+                        completed: Value,
+                        updated: &str| {
+                json!({
+                    "id": id,
+                    "threadId": self.id,
+                    "runId": run_id,
                     "nodeId": null,
                     "providerThreadId": null,
                     "providerTurnId": null,
                     "nativeItemRef": null,
                     "parentItemId": null,
                     "ordinal": ordinal,
-                    "status": "completed",
-                    "title": null,
-                    "startedAt": at,
-                    "completedAt": at,
-                    "updatedAt": at,
+                    "status": status,
+                    "title": title,
+                    "startedAt": started,
+                    "completedAt": completed,
+                    "updatedAt": updated
+                })
+            };
+            let mut item = base(
+                format!("turn-item:message:{}", uri_component(&message.id)),
+                ordinal,
+                "completed",
+                Value::Null,
+                &at,
+                at.clone().into(),
+                &at,
+            );
+            let fields = match message.role.as_str() {
+                "user" => json!({
                     "type": "user_message",
                     "createdBy": "user",
                     "creationSource": "web",
@@ -53,9 +255,52 @@ impl Thread {
                     "inputIntent": "turn_start",
                     "text": message.content,
                     "attachments": []
-                })
-            })
-            .collect()
+                }),
+                "assistant" => json!({
+                    "type": "assistant_message",
+                    "messageId": message.id,
+                    "text": message.content,
+                    "streaming": false
+                }),
+                _ => continue,
+            };
+            merge(&mut item, fields);
+            items.push(item);
+            let Some((_, run)) = run else { continue };
+            let Some(error) = run
+                .error
+                .as_deref()
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+            else {
+                continue;
+            };
+            ordinal += 1;
+            let failed_at = iso(run.finished_at.unwrap_or(run.started_at));
+            let mut failure = base(
+                format!(
+                    "turn-item:run:{}:signal:provider-failure",
+                    uri_component(&run.id.to_string())
+                ),
+                ordinal,
+                "failed",
+                json!("Provider failed"),
+                &failed_at,
+                failed_at.clone().into(),
+                &failed_at,
+            );
+            merge(
+                &mut failure,
+                json!({"type":"error","failure":{
+                    "class":"provider_error",
+                    "message": error.chars().take(4096).collect::<String>().trim_end(),
+                    "code":null,
+                    "retryable":null
+                }}),
+            );
+            items.push(failure);
+        }
+        items
     }
 
     pub(crate) fn stored_row(&self) -> Value {
@@ -69,6 +314,8 @@ impl Thread {
             &at,
         )
     }
+
+    /// `OrchestrationV2ThreadProjection`, as the reference's getThreadProjection returns it.
     pub(crate) fn projection(&self) -> Value {
         let row = self.stored_row();
         let array = |key: &str| {
@@ -93,7 +340,7 @@ impl Thread {
                     "ordinalWithinParent":0,
                     "advancesAppRunCount":true,
                     "cwd":checkpoint.cwd,
-                    "createdAt":auth_service::iso((checkpoint.captured_at as i64).saturating_mul(1000))
+                    "createdAt":iso(checkpoint.captured_at)
                 })]
             })
             .unwrap_or_default();
@@ -109,13 +356,68 @@ impl Thread {
             "ref":checkpoint.tree,
             "status":if checkpoint.ready {"ready"} else {"missing"},
             "files":[],
-            "capturedAt":auth_service::iso((checkpoint.captured_at as i64).saturating_mul(1000))
+            "capturedAt":iso(checkpoint.captured_at)
         })).collect::<Vec<_>>();
-        json!({"thread":ordered(APP_FIELDS,&row),"runs":self.runs,"attempts":array("attempts"),"nodes":array("nodes"),"subagents":array("subagents"),
+        let turn_items = self.turn_items();
+        let visible = turn_items
+            .iter()
+            .enumerate()
+            .map(|(position, item)| {
+                json!({"position":position,"visibility":"local","sourceThreadId":self.id,
+                    "sourceItemId":item["id"],"item":item})
+            })
+            .collect::<Vec<_>>();
+        json!({"thread":ordered(APP_FIELDS,&row),"runs":self.run_rows(&row),"attempts":array("attempts"),"nodes":array("nodes"),"subagents":array("subagents"),
             "providerSessions":array("providerSessions"),"providerThreads":array("providerThreads"),"providerTurns":array("providerTurns"),"runtimeRequests":array("runtimeRequests"),
-            "messages":self.messages,"plans":[],"turnItems":self.turn_items(),"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
-            "contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":[],"updatedAt":row["updatedAt"]})
+            "messages":self.message_rows(),"plans":[],"turnItems":turn_items,"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
+            "contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":visible,"updatedAt":row["updatedAt"]})
     }
+
+    /// The thread's whole timeline as `OrchestrationV2ThreadTranscript` items.
+    pub(crate) fn transcript(&self) -> Value {
+        let row = self.stored_row();
+        json!({"threadId":self.id,"title":self.title,"updatedAt":row["updatedAt"],
+            "items":self.projection()["visibleTurnItems"]})
+    }
+
+    /// One `snapshot` item of `orchestration.subscribeThread`, shaped by the options the
+    /// client sent as the reference's ThreadStream shapes it. The whole timeline always fits
+    /// one window, so a bounded snapshot has no earlier history.
+    pub(crate) fn stream_snapshot(&self, sequence: u64, options: &Value) -> Value {
+        let mut projection = self.projection();
+        if options["acceptBoundedSnapshot"] != true {
+            return json!({"kind":"snapshot","snapshotSequence":sequence,"projection":projection});
+        }
+        let latest_local_turn_ordinal = projection["turnItems"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["ordinal"].as_u64())
+            .max();
+        if options["acceptDedupedBodies"] == true {
+            dedupe_bodies(&mut projection);
+        }
+        let mut omitted = false;
+        if options["acceptCompactTurnItems"] == true {
+            // Every turn item is a local visible row, so the rows alone restore them.
+            let rows = projection["visibleTurnItems"]
+                .as_array()
+                .map_or(0, Vec::len);
+            if rows > 0 {
+                let items = projection["turnItems"].as_array_mut().expect("turn items");
+                items.drain(..rows.min(items.len()));
+                omitted = true;
+            }
+        }
+        // The reference's field order (ThreadStream.boundedSnapshotResponseFields).
+        let mut item = json!({"kind":"snapshot","snapshotSequence":sequence,"projection":projection,
+            "historyCursor":null,"hasMoreHistory":false,"latestLocalTurnOrdinal":latest_local_turn_ordinal});
+        if omitted {
+            item["turnItemsOmitLocalVisible"] = json!(true);
+        }
+        item
+    }
+
     pub(crate) fn shell(&self) -> Value {
         let mut row = self.stored_row();
         for key in [

@@ -231,6 +231,59 @@ fn row(p: &Project, repo: &str, raw: &Value, viewer: &str, at: u64) -> Option<Va
     }
     Some(row)
 }
+/// The reference's Bitbucket provider reads change requests with API credentials from settings.
+/// Bitbucket is not read here yet, so a Bitbucket project lists as the reference lists it with
+/// no credential: unauthenticated, each repository unreadable.
+const BITBUCKET_UNAUTHENTICATED: &str =
+    "Bitbucket rejected the configured credentials. Check them in Settings → Source control & issues.";
+
+/// The host and repository a Bitbucket project's identity names.
+fn bitbucket_repository(project: &Project) -> Option<(String, String)> {
+    let identity = crate::repository_identity::resolve(&project.path)?;
+    if identity["provider"] != "bitbucket" {
+        return None;
+    }
+    let host = identity["canonicalKey"]
+        .as_str()?
+        .split('/')
+        .next()?
+        .to_owned();
+    let repository = identity["displayName"].as_str()?.to_owned();
+    Some((host, repository))
+}
+
+/// Provider summaries and per-project errors for unreadable Bitbucket projects.
+fn bitbucket_unreadable(
+    projects: &[(Project, String, String)],
+    input: &Value,
+    has_cursor: impl Fn(&str) -> bool,
+) -> (Vec<Value>, Vec<Value>) {
+    let mut providers: Vec<Value> = Vec::new();
+    let mut errors = Vec::new();
+    for (project, host, repository) in projects {
+        match providers.iter_mut().find(|p| p["host"] == host.as_str()) {
+            Some(provider) => {
+                provider["projectCount"] = json!(provider["projectCount"].as_u64().unwrap_or(0) + 1)
+            }
+            None => providers.push(json!({"host":host,"kind":"bitbucket","searchesOnHost":true,
+                "actions":["merge","close"],"projectCount":1,"configured":false,"detail":BITBUCKET_UNAUTHENTICATED})),
+        }
+        if input.get("cursors").is_none()
+            || has_cursor(&format!("{host} {}", repository.to_lowercase()))
+        {
+            errors.push(json!({"projectId":project.id,"projectTitle":project.name,
+                "message":format!("{repository} could not be read.")}));
+        }
+    }
+    (providers, errors)
+}
+
+fn extend(target: &mut Value, values: &[Value]) {
+    if let Some(array) = target.as_array_mut() {
+        array.extend(values.iter().cloned());
+    }
+}
+
 pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
     let mut cursors = HashMap::new();
     if let Some(map) = input["cursors"].as_object() {
@@ -256,14 +309,27 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
         .collect::<Vec<_>>();
     projects.sort_by_key(|p| (p.created_at, p.id.clone()));
     let mut repos = Vec::new();
+    let mut bitbucket = Vec::new();
     for p in projects {
         if input["projectId"].as_str().is_some_and(|id| p.id != id)
             || input["projectIds"]
                 .as_array()
                 .is_some_and(|ids| !ids.iter().any(|id| id == &p.id))
-            || input["host"]
+        {
+            continue;
+        }
+        if let Some((host, repo)) = bitbucket_repository(&p) {
+            if input["host"]
                 .as_str()
-                .is_some_and(|h| !h.eq_ignore_ascii_case("github.com"))
+                .is_none_or(|h| h.trim().eq_ignore_ascii_case(&host))
+            {
+                bitbucket.push((p, host, repo));
+            }
+            continue;
+        }
+        if input["host"]
+            .as_str()
+            .is_some_and(|h| !h.eq_ignore_ascii_case("github.com"))
         {
             continue;
         }
@@ -272,8 +338,19 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
         }
     }
     let mut out = json!({"viewers":{},"providers":[],"entries":[],"errors":[],"truncated":false,"nextCursors":{}});
+    let (bitbucket_providers, bitbucket_errors) = bitbucket_unreadable(&bitbucket, input, |key| {
+        cursors.contains_key(&key.to_owned())
+    });
     let Some((first, _)) = repos.first() else {
-        return Ok(out);
+        out["providers"] = json!(bitbucket_providers);
+        out["errors"] = json!(bitbucket_errors);
+        if bitbucket_errors.is_empty() {
+            return Ok(out);
+        }
+        return Err(
+            json!({"_tag":"PullRequestUnavailableError","reason":"cli-unauthenticated",
+            "provider":"bitbucket","requirement":BITBUCKET_UNAUTHENTICATED,"listResult":out}),
+        );
     };
     let actions = [
         "merge",
@@ -296,6 +373,7 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
             provider["configured"] = json!(false);
             provider["detail"] = err.get("requirement").unwrap_or(&err["detail"]).clone();
             out["providers"] = json!([provider]);
+            extend(&mut out["providers"], &bitbucket_providers);
             let mut errors = Vec::new();
             for (p, repo) in &repos {
                 if input.get("cursors").is_none()
@@ -304,6 +382,7 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
                     errors.push(json!({"projectId":p.id,"projectTitle":p.name,"message":format!("{repo} could not be read.")}))
                 }
             }
+            errors.extend(bitbucket_errors.iter().cloned());
             out["errors"] = json!(errors);
             if !out["errors"].as_array().unwrap().is_empty() {
                 err["listResult"] = out;
@@ -315,6 +394,8 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
     let viewer = id["viewer"].as_str().unwrap();
     out["viewers"]["github.com"] = json!(viewer);
     out["providers"] = json!([provider]);
+    extend(&mut out["providers"], &bitbucket_providers);
+    extend(&mut out["errors"], &bitbucket_errors);
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
     for (p, repo) in repos {
