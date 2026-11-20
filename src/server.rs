@@ -20,11 +20,14 @@ use std::{
     path::{Path as FsPath, PathBuf},
     sync::Arc,
 };
-use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, oneshot, Mutex};
 use tracing::info;
 use uuid::Uuid;
 
 pub struct AppState {
+    /// The event log, store, auth and state documents; AppState dereferences
+    /// to it.
+    pub control: crate::control_state::ControlState,
     pub(crate) config_started_at: String,
     pub(crate) environment_id: String,
     pub oauth: mcp_oauth::OAuth,
@@ -33,12 +36,8 @@ pub struct AppState {
     pub paths: config::ServerPaths,
     pub runtime_config: config::RuntimeConfig,
     pub settings: Arc<settings::Settings>,
-    pub store: RwLock<Store>,
-    pub events: broadcast::Sender<ServerEvent>,
-    pub log: Mutex<Box<dyn event_log::EventLog + Send>>,
     pub provider_command: Vec<String>,
     pub cancellations: Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
-    pub auth: auth_service::AuthService,
     pub guest: guest_service::GuestService,
     pub voice: voice::VoiceService,
     pub pull_requests: pull_requests::PullRequestService,
@@ -50,19 +49,8 @@ pub struct AppState {
     pub(crate) local: Arc<crate::workspace::LocalWorkspace>,
     pub worktree_setup: worktree_setup::WorktreeSetupTracker,
     pub(crate) project_mutation_lock: Mutex<()>,
-    pub(crate) next_event_id: Mutex<u64>,
     pub(crate) storage_cleanup_report: Mutex<Option<serde_json::Value>>,
     pub(crate) pull_request_refresh: Mutex<u64>,
-    pub(crate) pull_request_linked_refresh: Mutex<u64>,
-    pub(crate) pull_request_linked_events: broadcast::Sender<u64>,
-    /// Where state documents live: the local filesystem.
-    pub(crate) documents: Arc<dyn persistence::DocumentStore>,
-    pub(crate) scheduled_tasks: Mutex<indexmap::IndexMap<String, serde_json::Value>>,
-    pub(crate) scheduled_tasks_path: PathBuf,
-    pub(crate) scheduled_webhook_deliveries: Mutex<indexmap::IndexMap<String, serde_json::Value>>,
-    pub(crate) scheduled_webhook_deliveries_path: PathBuf,
-    pub(crate) scheduled_task_events: broadcast::Sender<()>,
-    pub(crate) prompt_suggestion_events: broadcast::Sender<serde_json::Value>,
     pub(crate) provider_install_states: Mutex<HashMap<String, serde_json::Value>>,
     pub(crate) provider_auth_states: Mutex<HashMap<String, serde_json::Value>>,
     pub(crate) project_clone_states: Mutex<HashMap<String, serde_json::Value>>,
@@ -114,49 +102,10 @@ impl AppState {
             connect.clear_disabled_link()?;
             guest.set_tunnel_hostname(None);
         }
-        let mut log: Box<dyn event_log::EventLog + Send> =
+        let log: Box<dyn event_log::EventLog + Send> =
             Box::new(event_log::NdjsonLog::open(dir.join("events.jsonl"))?);
-        let mut store = Store::default();
-        let mut next_event_id = 0;
-        for record in log.load()? {
-            next_event_id = next_event_id.max(record.id);
-            store.apply_record(&record);
-        }
-        let (events, _) = broadcast::channel(512);
-        let (pull_request_linked_events, _) = broadcast::channel(64);
-        let (scheduled_task_events, _) = broadcast::channel(64);
-        let (prompt_suggestion_events, _) = broadcast::channel(64);
+        let control = crate::control_state::ControlState::open(auth, documents, log, &dir)?;
         let (project_clone_events, _) = broadcast::channel(64);
-        let scheduled_tasks_path = dir.join("scheduled-tasks.json");
-        let scheduled_tasks = documents
-            .read(&scheduled_tasks_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
-            .map(|items| {
-                items
-                    .into_iter()
-                    .filter_map(|task| {
-                        let id = task["id"].as_str()?.to_owned();
-                        Some((id, task))
-                    })
-                    .collect::<indexmap::IndexMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let scheduled_webhook_deliveries_path = dir.join("scheduled-webhook-deliveries.json");
-        let scheduled_webhook_deliveries = documents
-            .read(&scheduled_webhook_deliveries_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
-            .map(|items| {
-                items
-                    .into_iter()
-                    .filter_map(|delivery| {
-                        let id = delivery["id"].as_str()?.to_owned();
-                        Some((id, delivery))
-                    })
-                    .collect::<indexmap::IndexMap<_, _>>()
-            })
-            .unwrap_or_default();
         let local = Arc::new(crate::workspace::LocalWorkspace::new(
             dir.clone(),
             local_services::TerminalService::with_logs(dir.join("logs/terminals")),
@@ -164,6 +113,7 @@ impl AppState {
             local_services::DeviceService::new(settings.clone(), &dir)?,
         ));
         Ok(Arc::new(Self {
+            control,
             config_started_at: auth_service::iso(auth_service::now()),
             environment_id: environment_http::identity(&dir)?,
             oauth: mcp_oauth::OAuth::open(&dir)?,
@@ -172,12 +122,8 @@ impl AppState {
             paths,
             runtime_config,
             settings: settings.clone(),
-            store: RwLock::new(store),
-            events,
-            log: Mutex::new(log),
             provider_command,
             cancellations: Mutex::new(HashMap::new()),
-            auth,
             guest,
             voice: voice::VoiceService::new(settings.clone()),
             pull_requests: pull_requests::PullRequestService::default(),
@@ -186,18 +132,8 @@ impl AppState {
             local,
             worktree_setup: worktree_setup::WorktreeSetupTracker::default(),
             project_mutation_lock: Mutex::new(()),
-            next_event_id: Mutex::new(next_event_id),
             storage_cleanup_report: Mutex::new(None),
             pull_request_refresh: Mutex::new(0),
-            pull_request_linked_refresh: Mutex::new(0),
-            pull_request_linked_events,
-            scheduled_tasks: Mutex::new(scheduled_tasks),
-            documents,
-            scheduled_tasks_path,
-            scheduled_webhook_deliveries: Mutex::new(scheduled_webhook_deliveries),
-            scheduled_webhook_deliveries_path,
-            scheduled_task_events,
-            prompt_suggestion_events,
             provider_install_states: Mutex::new(HashMap::new()),
             provider_auth_states: Mutex::new(HashMap::new()),
             project_clone_states: Mutex::new(HashMap::new()),
@@ -206,58 +142,12 @@ impl AppState {
             project_clone_sequence: Mutex::new(0),
         }))
     }
+}
 
-    pub(crate) async fn persist_scheduled_tasks(&self) -> anyhow::Result<()> {
-        let tasks = self.scheduled_tasks.lock().await;
-        let bytes = serde_json::to_vec(&tasks.values().collect::<Vec<_>>())?;
-        drop(tasks);
-        self.documents.write(
-            &self.scheduled_tasks_path,
-            &bytes,
-            persistence::WriteMode::Replace,
-        )?;
-        Ok(())
-    }
-    pub(crate) async fn persist_scheduled_webhook_deliveries(&self) -> anyhow::Result<()> {
-        let deliveries = self.scheduled_webhook_deliveries.lock().await;
-        let bytes = serde_json::to_vec(&deliveries.values().collect::<Vec<_>>())?;
-        drop(deliveries);
-        self.documents.write(
-            &self.scheduled_webhook_deliveries_path,
-            &bytes,
-            persistence::WriteMode::Replace,
-        )?;
-        Ok(())
-    }
-    pub(crate) async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {
-        self.commit_receipted(event, None).await
-    }
-
-    pub(crate) async fn commit_receipted(
-        &self,
-        event: Event,
-        receipt: Option<CommandReceipt>,
-    ) -> anyhow::Result<ServerEvent> {
-        let mut store = self.store.write().await;
-        let mut next_event_id = self.next_event_id.lock().await;
-        let record = ServerEvent {
-            id: *next_event_id + 1,
-            at: now(),
-            event,
-            receipt,
-        };
-        self.log.lock().await.append(&record)?;
-        *next_event_id = record.id;
-        store.apply_record(&record);
-        if let Event::ThreadPatched { ref patch, .. } = record.event {
-            if patch["row"].get("pullRequests").is_some() || patch["row"].get("issues").is_some() {
-                let mut revision = self.pull_request_linked_refresh.lock().await;
-                *revision = revision.saturating_add(1);
-                let _ = self.pull_request_linked_events.send(*revision);
-            }
-        }
-        let _ = self.events.send(record.clone());
-        Ok(record)
+impl std::ops::Deref for AppState {
+    type Target = crate::control_state::ControlState;
+    fn deref(&self) -> &Self::Target {
+        &self.control
     }
 }
 
