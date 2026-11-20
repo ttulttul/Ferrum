@@ -31,7 +31,7 @@ use crate::{
     rpc_protocol::{SOCKET_FRAME_PARTS_QUERY_PARAM, SOCKET_FRAME_PART_BYTES},
     server_config,
     subscription::{Signal, Subscription},
-    workspace::RemoteWorkspace,
+    workspace::Workspace,
     Event, ServerEvent,
 };
 use axum::{
@@ -69,7 +69,6 @@ pub struct ControlPlane {
     config: Config,
     started_at: String,
     state: ControlState,
-    workspace: RemoteWorkspace,
     signals: Mutex<Signals>,
 }
 impl AuthHost for ControlPlane {
@@ -170,7 +169,6 @@ impl ControlPlane {
             config,
             started_at,
             state,
-            workspace: RemoteWorkspace::default(),
             signals,
         })
     }
@@ -331,7 +329,13 @@ impl ControlPlane {
     }
 
     /// Handles one text frame from a client and returns the frames to send.
-    pub async fn on_message(&self, connection: &mut Connection, text: &str) -> Vec<String> {
+    /// Workspace methods go to `workspace`.
+    pub async fn on_message(
+        &self,
+        workspace: &dyn Workspace,
+        connection: &mut Connection,
+        text: &str,
+    ) -> Vec<String> {
         let Ok(request) = serde_json::from_str::<Value>(text) else {
             return Vec::new();
         };
@@ -351,7 +355,7 @@ impl ControlPlane {
                 }
                 None => Vec::new(),
             },
-            Some("Request") => self.request(connection, &request).await,
+            Some("Request") => self.request(workspace, connection, &request).await,
             other => vec![
                 json!({"_tag":"Defect","defect":format!("Unknown request tag: {}", other.unwrap_or("undefined"))}),
             ],
@@ -359,7 +363,12 @@ impl ControlPlane {
         encode(connection, &frames)
     }
 
-    async fn request(&self, connection: &mut Connection, request: &Value) -> Vec<Value> {
+    async fn request(
+        &self,
+        workspace: &dyn Workspace,
+        connection: &mut Connection,
+        request: &Value,
+    ) -> Vec<Value> {
         let id = request.get("id").cloned().unwrap_or(Value::Null);
         let Some(key) = request_key(&id) else {
             let shown = if request.get("id").is_some() {
@@ -374,7 +383,10 @@ impl ControlPlane {
         }
         let method = request["tag"].as_str().unwrap_or("undefined");
         let params = &request["payload"];
-        match self.call(&connection.principal, method, params).await {
+        match self
+            .call(workspace, &connection.principal, method, params)
+            .await
+        {
             Call::Done(reply) => vec![reply.frame(&id)],
             Call::Live(subscription, values) => {
                 self.store(connection, &key, &subscription);
@@ -408,7 +420,13 @@ impl ControlPlane {
         }
     }
 
-    async fn call(&self, principal: &Session, method: &str, params: &Value) -> Call {
+    async fn call(
+        &self,
+        workspace: &dyn Workspace,
+        principal: &Session,
+        method: &str,
+        params: &Value,
+    ) -> Call {
         if !crate::rpc_known(method) {
             return Call::Done(Reply::defect(format!("Unknown request tag: {method}")));
         }
@@ -430,7 +448,7 @@ impl ControlPlane {
             automatic_git_fetch: true,
             ..Default::default()
         };
-        match dispatch::workspace(&self.workspace, &settings, method, params).await {
+        match dispatch::workspace(workspace, &settings, method, params).await {
             Some(Ok(value)) => Call::Done(Reply::Success(value)),
             Some(Err(error)) if error["_tag"] == "Die" => Call::Done(Reply::Failure(error)),
             Some(Err(error)) => Call::Done(Reply::Failure(json!({"_tag":"Fail","error":error}))),
@@ -716,7 +734,12 @@ mod tests {
     }
 
     fn send(plane: &ControlPlane, connection: &mut Connection, frame: Value) -> Vec<Value> {
-        parse(now(plane.on_message(connection, &frame.to_string())))
+        let workspace = crate::workspace::RemoteWorkspace::default();
+        parse(now(plane.on_message(
+            &workspace,
+            connection,
+            &frame.to_string(),
+        )))
     }
 
     #[test]

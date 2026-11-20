@@ -33,6 +33,7 @@ pub struct T3EnvironmentDO {
     state: State,
     sql: SqlStorage,
     plane: Arc<ControlPlane>,
+    workspace: t3code_server::workspace::RemoteWorkspace,
     router: axum::Router,
     started_ms: f64,
     init_ms: f64,
@@ -130,6 +131,7 @@ impl DurableObject for T3EnvironmentDO {
             state,
             sql,
             plane,
+            workspace: Default::default(),
             router,
             started_ms: started,
             init_ms,
@@ -171,7 +173,11 @@ impl DurableObject for T3EnvironmentDO {
             ws.close(Some(1011), Some("missing connection state"))?;
             return Ok(());
         };
-        for frame in self.plane.on_message(&mut connection, &text).await {
+        for frame in self
+            .plane
+            .on_message(&self.workspace, &mut connection, &text)
+            .await
+        {
             ws.send_with_str(frame)?;
         }
         ws.serialize_attachment(&connection)?;
