@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "agentd"]
+
 [package]
 name = "t3code-server"
 version = "0.1.0"

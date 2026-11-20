@@ -6,6 +6,9 @@ description = "WebAssembly entry point for the T3 Code control plane"
 license = "MIT"
 publish = false
 
+# Built on its own, with its own lockfile, outside the main workspace.
+[workspace]
+
 [lib]
 crate-type = ["cdylib"]
 
