@@ -223,7 +223,7 @@ async fn start_run(
         .await?
         .id;
     if let Some(baseline_cwd) = baseline {
-        if let Some(tree) = crate::capture_git_tree(&baseline_cwd).await {
+        if let Some(tree) = state.workspace.capture_git_tree(&baseline_cwd).await {
             let _ = state
                 .commit(Event::CheckpointCaptured {
                     thread_id: thread_id.to_owned(),

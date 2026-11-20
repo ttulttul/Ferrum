@@ -20,11 +20,7 @@ use std::{
     path::{Path as FsPath, PathBuf},
     sync::Arc,
 };
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-    sync::{broadcast, oneshot, Mutex, RwLock},
-};
+use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 use tracing::info;
 use uuid::Uuid;
 
@@ -47,10 +43,11 @@ pub struct AppState {
     pub voice: voice::VoiceService,
     pub pull_requests: pull_requests::PullRequestService,
     pub issues: tokio::sync::Mutex<issues::IssueService>,
-    pub vcs: local_services::VcsService,
-    pub terminals: local_services::TerminalService,
-    pub previews: local_services::PreviewService,
-    pub devices: local_services::DeviceService,
+    /// The workspace plane: files, git, terminals, processes and previews.
+    pub(crate) workspace: Arc<dyn crate::workspace::Workspace>,
+    /// The same workspace, for the native-only HTTP routes that reach into
+    /// its services (media, browser pages).
+    pub(crate) local: Arc<crate::workspace::LocalWorkspace>,
     pub worktree_setup: worktree_setup::WorktreeSetupTracker,
     pub(crate) project_mutation_lock: Mutex<()>,
     pub(crate) next_event_id: Mutex<u64>,
@@ -160,6 +157,12 @@ impl AppState {
                     .collect::<indexmap::IndexMap<_, _>>()
             })
             .unwrap_or_default();
+        let local = Arc::new(crate::workspace::LocalWorkspace::new(
+            dir.clone(),
+            local_services::TerminalService::with_logs(dir.join("logs/terminals")),
+            local_services::PreviewService::default(),
+            local_services::DeviceService::new(settings.clone(), &dir)?,
+        ));
         Ok(Arc::new(Self {
             config_started_at: auth_service::iso(auth_service::now()),
             environment_id: environment_http::identity(&dir)?,
@@ -179,10 +182,8 @@ impl AppState {
             voice: voice::VoiceService::new(settings.clone()),
             pull_requests: pull_requests::PullRequestService::default(),
             issues: tokio::sync::Mutex::new(issues::IssueService::new(dir.clone())),
-            vcs: local_services::VcsService,
-            terminals: local_services::TerminalService::with_logs(dir.join("logs/terminals")),
-            previews: local_services::PreviewService::default(),
-            devices: local_services::DeviceService::new(settings.clone(), &dir)?,
+            workspace: local.clone(),
+            local,
             worktree_setup: worktree_setup::WorktreeSetupTracker::default(),
             project_mutation_lock: Mutex::new(()),
             next_event_id: Mutex::new(next_event_id),
@@ -630,48 +631,36 @@ pub(crate) async fn execute_run(
     run: Run,
     cwd: String,
     prompt: String,
-    mut cancel_rx: oneshot::Receiver<()>,
+    cancel_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
-    let mut command = if state.provider_command.is_empty() {
+    let command = if state.provider_command.is_empty() {
         vec!["printf".into(), "%s\\n".into()]
     } else {
         state.provider_command.clone()
     };
-    let executable = command.remove(0);
-    let mut child_command = Command::new(executable);
-    if state.settings.policy.summary().is_some() {
-        for (k, _) in std::env::vars_os() {
-            if k.to_string_lossy()
-                .eq_ignore_ascii_case("T3CODE_CODEX_LAUNCH_ARGS")
-            {
-                child_command.env_remove(k);
-            }
-        }
-    }
-    let mut child = child_command
-        .args(command)
-        .arg(prompt)
-        .current_dir(&cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let stdout = child.stdout.take().map(BufReader::new);
-    let stderr = child.stderr.take().map(BufReader::new);
-    let mut output_tasks = Vec::new();
-    if let Some(mut reader) = stdout {
-        let s = state.clone();
-        let r = run.clone();
-        output_tasks.push(tokio::spawn(async move {
-            let mut line = String::new();
-            while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-                let text = std::mem::take(&mut line);
+    let env_remove = if state.settings.policy.summary().is_some() {
+        vec!["T3CODE_CODEX_LAUNCH_ARGS".into()]
+    } else {
+        vec![]
+    };
+    let spec = crate::workspace::TurnSpec {
+        command,
+        prompt,
+        cwd: cwd.clone(),
+        env_remove,
+    };
+    let mut turn = state.workspace.start_turn(spec, cancel_rx).await?;
+    let mut exit = None;
+    while let Some(event) = turn.recv().await {
+        let (stream, text) = match event {
+            crate::workspace::TurnEvent::Stdout(text) => {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(text.trim()) {
                     if event["type"] == "prompt_suggestion.updated"
                         && event["threadId"].is_string()
                         && event["runId"].is_string()
                         && event["text"].is_string()
                     {
-                        let _ = s.prompt_suggestion_events.send(serde_json::json!({
+                        let _ = state.prompt_suggestion_events.send(serde_json::json!({
                             "threadId": event["threadId"].clone(),
                             "runId": event["runId"].clone(),
                             "text": event["text"].clone(),
@@ -679,47 +668,33 @@ pub(crate) async fn execute_run(
                         continue;
                     }
                 }
-                let _ = s
-                    .commit(Event::RunOutput {
-                        run_id: r.id,
-                        thread_id: r.thread_id.clone(),
-                        stream: "stdout".into(),
-                        text,
-                    })
-                    .await;
+                ("stdout", text)
             }
-        }));
-    }
-    if let Some(mut reader) = stderr {
-        let s = state.clone();
-        let r = run.clone();
-        output_tasks.push(tokio::spawn(async move {
-            let mut line = String::new();
-            while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-                let text = std::mem::take(&mut line);
-                let _ = s
-                    .commit(Event::RunOutput {
-                        run_id: r.id,
-                        thread_id: r.thread_id.clone(),
-                        stream: "stderr".into(),
-                        text,
-                    })
-                    .await;
+            crate::workspace::TurnEvent::Stderr(text) => ("stderr", text),
+            crate::workspace::TurnEvent::Exited(status) => {
+                state.cancellations.lock().await.remove(&run.id);
+                exit = Some(status);
+                break;
             }
-        }));
+        };
+        let _ = state
+            .commit(Event::RunOutput {
+                run_id: run.id,
+                thread_id: run.thread_id.clone(),
+                stream: stream.into(),
+                text,
+            })
+            .await;
     }
-    let (status, cancelled) = tokio::select! {
-        result = child.wait() => (result?, false),
-        _ = &mut cancel_rx => {
-            child.kill().await?;
-            (child.wait().await?, true)
-        }
+    let Some(crate::workspace::TurnExit {
+        success: ok,
+        cancelled,
+        status,
+    }) = exit
+    else {
+        state.cancellations.lock().await.remove(&run.id);
+        anyhow::bail!("the provider process could not be waited for");
     };
-    state.cancellations.lock().await.remove(&run.id);
-    for task in output_tasks {
-        let _ = task.await;
-    }
-    let ok = status.success();
     let thread_id = run.thread_id.clone();
     state
         .commit(Event::RunFinished {
@@ -737,7 +712,7 @@ pub(crate) async fn execute_run(
         })
         .await?;
     if ok && !cancelled {
-        if let Some(tree) = capture_git_tree(&cwd).await {
+        if let Some(tree) = state.workspace.capture_git_tree(&cwd).await {
             let turn_count = state
                 .store
                 .read()
@@ -761,53 +736,6 @@ pub(crate) async fn execute_run(
         }
     }
     Ok(())
-}
-
-pub(crate) async fn capture_git_tree(cwd: &str) -> Option<String> {
-    let cwd = std::path::Path::new(cwd);
-    if !cwd.is_dir() {
-        return None;
-    }
-    let probe = Command::new("git")
-        .args(["-C", cwd.to_str()?, "rev-parse", "--show-toplevel"])
-        .output()
-        .await
-        .ok()?;
-    if !probe.status.success() {
-        return None;
-    }
-    let index = tempfile::NamedTempFile::new().ok()?;
-    let index_path = index.path().to_path_buf();
-    drop(index);
-    let _ = tokio::fs::remove_file(&index_path).await;
-    let index_text = index_path.to_str()?.to_owned();
-    let mut command = Command::new("git");
-    command
-        .args(["-C", cwd.to_str()?, "read-tree", "HEAD"])
-        .env("GIT_INDEX_FILE", &index_text);
-    if !command.status().await.ok()?.success() {
-        let _ = tokio::fs::remove_file(&index_path).await;
-        return None;
-    }
-    let mut add = Command::new("git");
-    add.args(["-C", cwd.to_str()?, "add", "-A", "--"])
-        .arg(".")
-        .env("GIT_INDEX_FILE", &index_text);
-    if !add.status().await.ok()?.success() {
-        let _ = tokio::fs::remove_file(&index_path).await;
-        return None;
-    }
-    let output = Command::new("git")
-        .args(["-C", cwd.to_str()?, "write-tree"])
-        .env("GIT_INDEX_FILE", &index_text)
-        .output()
-        .await
-        .ok()?;
-    let _ = tokio::fs::remove_file(&index_path).await;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 pub(crate) async fn require_session(

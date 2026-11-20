@@ -131,7 +131,7 @@ async fn hub(State(state): State<Arc<AppState>>, req: Request) -> Response {
         }
         (host, query.finish())
     };
-    let Some(origin) = state.devices.hub_origin(host.as_deref()).await else {
+    let Some(origin) = state.local.devices.hub_origin(host.as_deref()).await else {
         return text(StatusCode::SERVICE_UNAVAILABLE, "Device hub is not running");
     };
     let mut url = format!("{origin}{path}");
@@ -372,6 +372,7 @@ async fn preview(State(state): State<Arc<AppState>>, req: Request) -> Response {
     match path {
         "download" | "upload" => {
             let page = state
+                .local
                 .previews
                 .browsers
                 .lock()
@@ -397,8 +398,9 @@ async fn preview(State(state): State<Arc<AppState>>, req: Request) -> Response {
                 Ok(ws) => ws,
                 Err(e) => return e.into_response(),
             };
-            let mut browsers = state.previews.browsers.lock().await;
+            let mut browsers = state.local.previews.browsers.lock().await;
             let snapshot = state
+                .local
                 .previews
                 .tab(thread, tab)
                 .filter(|s| s["runtime"] == "server");

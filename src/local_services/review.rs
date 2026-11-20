@@ -1,14 +1,13 @@
-use crate::AppState;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use tokio::process::Command;
 
-pub async fn call(state: &AppState, method: &str, input: &Value) -> Result<Value, Value> {
+pub async fn call(method: &str, input: &Value) -> Result<Value, Value> {
     match method {
-        "getBranchCommits" => branch_commits(state, input).await,
-        "getDiffPreview" => diff_preview(state, input).await,
-        "getDiffFileContents" => diff_file_contents(state, input).await,
+        "getBranchCommits" => branch_commits(input).await,
+        "getDiffPreview" => diff_preview(input).await,
+        "getDiffFileContents" => diff_file_contents(input).await,
         _ => Err(json!({"_tag":"Die","defect":format!("Unknown review method: {method}")})),
     }
 }
@@ -67,7 +66,7 @@ fn parse_numstat(text: &str) -> Vec<Value> {
     }
     out
 }
-async fn branch_commits(_state: &AppState, input: &Value) -> Result<Value, Value> {
+async fn branch_commits(input: &Value) -> Result<Value, Value> {
     let cwd = cwd(input)?;
     let p = git(
         cwd,
@@ -145,7 +144,7 @@ async fn branch_commits(_state: &AppState, input: &Value) -> Result<Value, Value
     }
     Ok(json!({"commits":c,"truncated":c.len()>=100}))
 }
-async fn diff_preview(_state: &AppState, input: &Value) -> Result<Value, Value> {
+async fn diff_preview(input: &Value) -> Result<Value, Value> {
     let cwd = cwd(input)?;
     let p = git(cwd, &["rev-parse".into(), "--show-toplevel".into()]).await;
     if p.as_ref().is_err() || !p.as_ref().unwrap().status.success() {
@@ -400,7 +399,7 @@ async fn diff_preview(_state: &AppState, input: &Value) -> Result<Value, Value> 
     }
     Ok(result)
 }
-async fn diff_file_contents(_state: &AppState, input: &Value) -> Result<Value, Value> {
+async fn diff_file_contents(input: &Value) -> Result<Value, Value> {
     let cwd = cwd(input)?;
     let source = input["sourceKind"].as_str().unwrap_or("working-tree");
     let change = input["changeType"].as_str().unwrap_or("change");

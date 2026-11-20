@@ -886,20 +886,18 @@ async fn run_call(
     }
     let terminal = matches!(method, "terminal.observe" | "terminal.attach");
     let mut events = match method {
-        "terminal.observe" | "terminal.attach" => Some(state.terminals.subscribe()),
-        "subscribeTerminalMetadata" => Some(state.terminals.subscribe_metadata()),
-        "subscribePreviewEvents" => Some(state.previews.subscribe()),
-        "subscribeDeviceState" => Some(state.devices.subscribe()),
+        "terminal.observe" | "terminal.attach" => Some(state.workspace.terminal_events()),
+        "subscribeTerminalMetadata" => Some(state.workspace.terminal_metadata_events()),
+        "subscribePreviewEvents" => Some(state.workspace.preview_events()),
+        "subscribeDeviceState" => Some(state.workspace.device_events()),
         _ => None,
     };
     let initial = match method {
         "subscribeTerminalMetadata" => {
-            Some(Reply::Chunk(json!([state.terminals.metadata_snapshot()])))
+            Some(Reply::Chunk(json!([state.workspace.terminal_metadata()])))
         }
         "subscribePreviewEvents" => None,
-        "subscribeDeviceState" => Some(Reply::Chunk(json!([state
-            .devices
-            .snapshot(&state.data_dir)]))),
+        "subscribeDeviceState" => Some(Reply::Chunk(json!([state.workspace.device_state()]))),
         _ => Some(dispatch(state, method, params).await),
     };
     let mut last_seq = None;
@@ -920,7 +918,7 @@ async fn run_call(
             Ok(event) => event,
             Err(broadcast::error::RecvError::Closed) => return Reply::Success(Value::Null),
             Err(broadcast::error::RecvError::Lagged(_)) if terminal => {
-                match state.terminals.call("observe", params).await {
+                match state.workspace.terminal("observe", params).await {
                     Some(Ok(snapshot)) => snapshot,
                     Some(Err(error)) => {
                         return Reply::Failure(json!({"_tag":"Fail","error":error}))
@@ -972,12 +970,12 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     }
     if method == "projects.ensureScratch" {
         let root = state.paths.base_dir.join("scratch");
-        if let Err(error) = tokio::fs::create_dir_all(&root).await {
+        if let Err(error) = state.workspace.create_dir_all(&root).await {
             return Reply::Failure(
                 json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
             );
         }
-        let root = match tokio::fs::canonicalize(&root).await {
+        let root = match state.workspace.canonicalize(&root).await {
             Ok(path) => path,
             Err(error) => {
                 return Reply::Failure(
@@ -985,14 +983,22 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 );
             }
         };
-        let existing = state
+        let projects: Vec<_> = state
             .store
             .read()
             .await
             .projects
             .values()
-            .find(|p| std::fs::canonicalize(&p.path).ok().as_deref() == Some(root.as_path()))
-            .cloned();
+            .cloned()
+            .collect();
+        let mut existing = None;
+        for project in projects {
+            let path = std::path::Path::new(&project.path);
+            if state.workspace.canonicalize(path).await.ok().as_deref() == Some(root.as_path()) {
+                existing = Some(project);
+                break;
+            }
+        }
         let project_id = if let Some(project) = existing {
             project.id
         } else {
