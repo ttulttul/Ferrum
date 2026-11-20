@@ -30,7 +30,7 @@ import tempfile
 import time
 
 from client_initial_sync_parity import rpc
-from parity_harness import encode, http, managed_server
+from parity_harness import RELAY_TOOLS, encode, http, isolated_git_env, managed_server, path_without
 
 ROOT = Path(__file__).resolve().parents[1]
 THREAD = "thread:client-thread"
@@ -45,8 +45,12 @@ PROVIDER_CLIS = {"codex", "claude", "cursor-agent", "opencode", "gemini", "grok"
 GENERATED = re.compile(r"^(\d{4}-\d\d-\d\dT[\d:.]+Z|[0-9a-f]{40}|[0-9a-f-]{36}|.*:[0-9a-f-]{36}.*)$")
 
 
+# Set in main: the Git configuration both servers and the seeded checkouts use.
+GIT_ISOLATION = {}
+
+
 def git(*args, cwd=None):
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env={**os.environ, **GIT_ISOLATION})
 
 
 def make_checkout(path, remote):
@@ -55,25 +59,6 @@ def make_checkout(path, remote):
     (path / "README.md").write_text("fixture\n")
     git("-C", str(path), "add", "README.md")
     git("-C", str(path), "-c", "user.email=test@example.test", "-c", "user.name=Parity", "commit", "-qm", "Fixture")
-
-
-def provider_free_path(scratch):
-    """PATH with every directory that holds an agent CLI replaced by links to its other entries."""
-    directories = []
-    for index, directory in enumerate(os.environ.get("PATH", "").split(os.pathsep)):
-        folder = Path(directory)
-        if not folder.is_dir():
-            continue
-        if not any((folder / name).exists() for name in PROVIDER_CLIS):
-            directories.append(directory)
-            continue
-        shim = scratch / f"path-{index}"
-        shim.mkdir(parents=True)
-        for entry in folder.iterdir():
-            if entry.name not in PROVIDER_CLIS:
-                (shim / entry.name).symlink_to(entry)
-        directories.append(str(shim))
-    return os.pathsep.join(directories)
 
 
 def seed(url, cookie, root):
@@ -233,14 +218,15 @@ def main():
     credentials = secrets.token_urlsafe(32), secrets.token_bytes(32)
     outcomes, roots = {}, {}
     with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
-        os.environ["PATH"] = provider_free_path(Path(temporary) / "bin")
+        os.environ["PATH"] = path_without(PROVIDER_CLIS | RELAY_TOOLS, Path(temporary) / "bin")
+        GIT_ISOLATION.update(isolated_git_env(Path(temporary) / "git"))
         # Rust runs its provider command for a turn; one that fails ends the turn as the
         # reference's does without a provider CLI.
         commands = {"original": shlex.split(args.original_command),
                     "rust": shlex.split(args.rust_command) + ["--provider-command", "false"]}
         for name, command in commands.items():
             root = Path(temporary) / name
-            url, cookie = managed_server(stack, command, root, *credentials)
+            url, cookie = managed_server(stack, command, root, *credentials, env=GIT_ISOLATION)
             seeded = seed(url, cookie, Path(temporary) / f"{name}-checkouts")
             roots[name] = Path(temporary) / f"{name}-checkouts"
             time.sleep(2)

@@ -157,29 +157,17 @@
       "reason": "orchestration.subscribeShell sends nothing after its snapshot",
       "issue": "a live shell subscriber never receives project.updated or thread.updated after a mutation, so an open client's sidebar does not change until it reconnects"
     },
-    "threads.subscribeThread.missing": {
-      "area": "threads",
-      "severity": "medium",
-      "reason": "fixed in fix/thread-subscribe",
-      "issue": "subscribeThread for an unknown thread sends a value the client cannot decode (Missing key at [0]) instead of OrchestrationV2GetThreadProjectionError"
-    },
-    "threads.subscribeWorktreeSetup": {
-      "area": "threads",
-      "severity": "high",
-      "reason": "fixed in fix/thread-subscribe",
-      "issue": "subscribeWorktreeSetup is registered but unavailable, a defect where the reference sends null"
-    },
     "threads.threadFollow.sawRename": {
       "area": "threads",
-      "severity": "high",
-      "reason": "fixed in fix/thread-subscribe",
-      "issue": "a live orchestration.subscribeThread gets no event after thread.metadata.update; the reference streams kind=event"
+      "severity": "medium",
+      "reason": "a live subscribeThread answers a rename with a full snapshot (about 15 s later) instead of a thread.metadata-updated event",
+      "issue": "the reference streams the metadata event within a few seconds of thread.meta.update"
     },
     "turns.getThreadProjection.afterMessage": {
       "area": "agent turns",
-      "severity": "high",
-      "reason": "fixed in fix/thread-subscribe",
-      "issue": "getThreadProjection after a user message fails the client's decode: runs[0].threadId is missing (the same run rows subscribeThread sends)"
+      "severity": "medium",
+      "reason": "the projection after a message lacks the reference's provider runtime records and uses other ids",
+      "issue": "no attempts, nodes or providerThreads; runs have UUID ids, not run:thread:<id>:ordinal:<n>, and messages carry no nodeId; extra checkpoint and checkpointScope records"
     },
     "turns.message.missingProvider": {
       "area": "agent turns",
@@ -192,12 +180,6 @@
       "severity": "low",
       "reason": "subscribeCommandOutput for an unknown item streams an empty replace",
       "issue": "the reference fails with OrchestrationV2CommandOutputError"
-    },
-    "turns.subscribeThread.afterMessage": {
-      "area": "agent turns",
-      "severity": "critical",
-      "reason": "fixed in fix/thread-subscribe",
-      "issue": "after a user message, the subscribeThread snapshot fails the client's decode: runs[0].threadId is missing"
     },
     "vcs.refreshStatus": {
       "area": "git/VCS",

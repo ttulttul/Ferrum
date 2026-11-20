@@ -984,6 +984,7 @@
       "usage": "client",
       "existingCoverage": [
         "client_initial_sync_parity.py",
+        "client_thread_parity.py",
         "managed_policy_parity.py",
         "orchestration_parity.py",
         "parity-fixtures.json"
@@ -1521,6 +1522,7 @@
       "usage": "client",
       "existingCoverage": [
         "client_initial_sync_parity.py",
+        "client_thread_parity.py",
         "provider-parity.json"
       ],
       "validationOnly": false,
@@ -1553,7 +1555,8 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
-        "client_initial_sync_parity.py"
+        "client_initial_sync_parity.py",
+        "client_thread_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -1564,9 +1567,7 @@
         "turns.subscribeThread.afterMessage"
       ],
       "knownGaps": [
-        "threads.subscribeThread.missing",
-        "threads.threadFollow.sawRename",
-        "turns.subscribeThread.afterMessage"
+        "threads.threadFollow.sawRename"
       ]
     },
     {
@@ -2801,6 +2802,7 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
+        "client_thread_parity.py",
         "github-voice-parity.json"
       ],
       "validationOnly": false,
@@ -3010,6 +3012,7 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
+        "client_thread_parity.py",
         "github-voice-parity.json"
       ],
       "validationOnly": false,
@@ -5006,14 +5009,14 @@
       "stream": true,
       "auth": "session (orchestration:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "client_thread_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [
         "threads.subscribeWorktreeSetup"
       ],
-      "knownGaps": [
-        "threads.subscribeWorktreeSetup"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc-stream",
@@ -5430,8 +5433,10 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "client_thread_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [
         "threads.worktreeSetup.cancel"
       ],
@@ -5457,6 +5462,7 @@
       "usage": "client",
       "existingCoverage": [
         "client_initial_sync_parity.py",
+        "client_thread_parity.py",
         "cors_parity.py"
       ],
       "validationOnly": false,
@@ -6047,6 +6053,7 @@
       "existingCoverage": [
         "auth_parity.py",
         "client_initial_sync_parity.py",
+        "client_thread_parity.py",
         "cors_parity.py",
         "github_provider_parity.py",
         "linear_provider_parity.py",
@@ -6078,6 +6085,7 @@
       "existingCoverage": [
         "auth_parity.py",
         "client_initial_sync_parity.py",
+        "client_thread_parity.py",
         "github_provider_parity.py",
         "linear_provider_parity.py"
       ],

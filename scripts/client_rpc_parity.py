@@ -37,13 +37,12 @@ import tempfile
 import time
 import urllib.request
 
-from parity_harness import encode, managed_server, session_cookie
+from parity_harness import RELAY_TOOLS, encode, isolated_git_env, managed_server, path_without, session_cookie
 
 ROOT = Path(__file__).resolve().parents[1]
 GIT_ENV = {"GIT_AUTHOR_NAME": "Parity", "GIT_AUTHOR_EMAIL": "parity@example.test",
            "GIT_COMMITTER_NAME": "Parity", "GIT_COMMITTER_EMAIL": "parity@example.test",
-           "GIT_AUTHOR_DATE": "2026-11-11T10:12:13Z", "GIT_COMMITTER_DATE": "2026-11-11T10:12:13Z",
-           "GIT_CONFIG_NOSYSTEM": "1"}
+           "GIT_AUTHOR_DATE": "2026-11-11T10:12:13Z", "GIT_COMMITTER_DATE": "2026-11-11T10:12:13Z"}
 # Read-only calls replayed over a raw socket once the plan has run; the frames must match exactly.
 RAW_REPLAYS = [
     ("server.probe", {}),
@@ -74,13 +73,16 @@ VOLATILE_KEYS = re.compile(
     r"sequence|\w*Sequence)$", re.I)
 
 
-def git(*args, cwd):
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
-                   env={**os.environ, **GIT_ENV, "HOME": str(cwd)})
+def seed_fixture(home, isolation):
+    """The same workspace in each server's home. Commit dates are fixed, so commit ids match.
 
+    `isolation` is the Git configuration both servers run with, so host settings never shape
+    the fixture.
+    """
+    def git(*args, cwd):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
+                       env={**os.environ, **GIT_ENV, **isolation, "HOME": str(home)})
 
-def seed_fixture(home):
-    """The same workspace in each server's home. Commit dates are fixed, so commit ids match."""
     remote, repo, plain = home / "remote.git", home / "repo", home / "plain"
     plain.mkdir(parents=True)
     (plain / "notes.txt").write_text("not a repository\n")
@@ -256,11 +258,14 @@ def main():
     results, frames = {}, {}
     with tempfile.TemporaryDirectory(prefix="t3-client-rpc-") as temporary, contextlib.ExitStack() as stack:
         root = Path(temporary)
+        # Both servers and the fixture see the same Git configuration, written here, and a PATH
+        # without relay tooling, so the host's setup cannot decide a comparison.
+        isolation = {**isolated_git_env(root / "git"), "PATH": path_without(RELAY_TOOLS, root / "bin")}
         for name, command in (("original", args.original_command), ("rust", args.rust_command)):
             home = root / name
             home.mkdir()
-            variables = seed_fixture(home)
-            url, _ = managed_server(stack, shlex.split(command), home, credential, signing_key)
+            variables = seed_fixture(home, isolation)
+            url, _ = managed_server(stack, shlex.split(command), home, credential, signing_key, env=isolation)
             result = run_driver(args, url, credential, variables)
             with urllib.request.urlopen(url + "/.well-known/t3/environment", timeout=10) as response:
                 environment_id = json.load(response)["environmentId"]

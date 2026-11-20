@@ -237,7 +237,10 @@ def existing_coverage(tags_or_paths):
         if path.name == "client_rpc_parity.py":
             continue
         sources[path.name] = path.read_text()
-    initial_sync = (ROOT / "scripts/client_initial_sync.mjs").read_text()
+    # Node drivers that call the client runtime, by the suite that runs them.
+    drivers = {suite: (ROOT / "scripts" / driver).read_text() for driver, suite in (
+        ("client_initial_sync.mjs", "client_initial_sync_parity.py"),
+        ("client_thread.mjs", "client_thread_parity.py"))}
     covered = {}
     for key in tags_or_paths:
         needle = key.split(" ", 1)[-1]
@@ -246,8 +249,9 @@ def existing_coverage(tags_or_paths):
             if re.search(rf'["\']{re.escape(needle)}["\'?]', text) or (
                     "/" in needle and needle.split("/:")[0] in text and len(needle.split("/:")[0]) > 5):
                 found.append(name)
-        if re.search(rf'["\[.]{re.escape(needle)}["\]( ]', initial_sync):
-            found.append("client_initial_sync_parity.py")
+        for suite, text in drivers.items():
+            if re.search(rf'["\[.]{re.escape(needle)}["\]( ]', text):
+                found.append(suite)
         covered[key] = sorted(set(found))
     return covered
 
