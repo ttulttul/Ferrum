@@ -24,7 +24,6 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
-use uuid::Uuid;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Data {
@@ -71,7 +70,7 @@ impl Service {
     pub(crate) fn open(dir: &Path) -> anyhow::Result<Self> {
         let data = Storage::<Data>::open(&dir.join("cloud-link.json"))?;
         if data.read(|d| d.key.is_empty()) {
-            let k = Ed25519KeyPair::generate(&mut rand::rngs::OsRng)
+            let k = Ed25519KeyPair::generate(&mut crate::platform::rng())
                 .to_pkcs8_der()
                 .map_err(|_| anyhow::anyhow!("could not create signing key"))?;
             data.update(|d| {
@@ -456,7 +455,7 @@ async fn link_proof(state: &Arc<AppState>, input: &Value, owner: bool, h: &Heade
     let proof = sign(
         &key,
         "t3-env-link+jwt",
-        json!({"iss":format!("t3-env:{id}"),"aud":issuer.trim().trim_end_matches('/'),"sub":id,"jti":Uuid::new_v4(),"iat":issued,"exp":issued+300,"challenge":challenge,"descriptor":descriptor,"environmentId":id,"environmentPublicKey":pem,"endpoint":endpoint,"origin":origin,"scopes":scopes}),
+        json!({"iss":format!("t3-env:{id}"),"aud":issuer.trim().trim_end_matches('/'),"sub":id,"jti":crate::platform::uuid_v4(),"iat":issued,"exp":issued+300,"challenge":challenge,"descriptor":descriptor,"environmentId":id,"environmentPublicKey":pem,"endpoint":endpoint,"origin":origin,"scopes":scopes}),
     );
     (SECRET_HEADERS, Json(proof)).into_response()
 }
@@ -575,7 +574,7 @@ async fn signed_request(state: &Arc<AppState>, input: &Value, health: bool) -> R
         let jwt = sign(
             &key,
             "t3-env-mint+jwt",
-            json!({"iss":aud,"aud":c.issuer(),"sub":id,"jti":Uuid::new_v4(),"iat":at,"exp":expiry/1000,"environmentId":id,"clientProofKeyThumbprint":binding,"requestNonce":nonce,"credential":credential}),
+            json!({"iss":aud,"aud":c.issuer(),"sub":id,"jti":crate::platform::uuid_v4(),"iat":at,"exp":expiry/1000,"environmentId":id,"clientProofKeyThumbprint":binding,"requestNonce":nonce,"credential":credential}),
         );
         return (
             SECRET_HEADERS,
@@ -589,7 +588,7 @@ async fn signed_request(state: &Arc<AppState>, input: &Value, health: bool) -> R
     let jwt = sign(
         &key,
         "t3-env-health+jwt",
-        json!({"iss":aud,"aud":c.issuer(),"sub":id,"jti":Uuid::new_v4(),"iat":at,"exp":at+300,"environmentId":id,"requestNonce":nonce,"status":"online","descriptor":descriptor,"checkedAt":checked}),
+        json!({"iss":aud,"aud":c.issuer(),"sub":id,"jti":crate::platform::uuid_v4(),"iat":at,"exp":at+300,"environmentId":id,"requestNonce":nonce,"status":"online","descriptor":descriptor,"checkedAt":checked}),
     );
     (SECRET_HEADERS,Json(json!({"environmentId":id,"status":"online","descriptor":descriptor,"checkedAt":checked,"proof":jwt}))).into_response()
 }

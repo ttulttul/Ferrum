@@ -8,7 +8,6 @@ use std::{
     io::{self, Write},
     path::Path,
 };
-use uuid::Uuid;
 
 const REDACTED: &str = "••••••";
 
@@ -351,7 +350,7 @@ fn write(dir: &Path, name: &str, bytes: Option<&[u8]>) -> io::Result<()> {
             result => result,
         };
     };
-    let tmp = dir.join(format!("{name}.bin.{}.tmp", Uuid::new_v4()));
+    let tmp = dir.join(format!("{name}.bin.{}.tmp", crate::platform::uuid_v4()));
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
