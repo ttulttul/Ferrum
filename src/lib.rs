@@ -17,6 +17,7 @@ pub mod config;
 mod config_rpc;
 mod contracts;
 pub mod control;
+pub mod control_state;
 pub mod cors;
 mod dpop_proof;
 pub mod environment;
