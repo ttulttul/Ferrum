@@ -16,11 +16,11 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
 };
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use ring::{
-    rand::SystemRandom,
-    signature::{Ed25519KeyPair, KeyPair},
+use ed25519_dalek::{
+    pkcs8::{DecodePrivateKey, EncodePrivateKey},
+    Signer, SigningKey as Ed25519KeyPair,
 };
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
@@ -71,10 +71,11 @@ impl Service {
     pub(crate) fn open(dir: &Path) -> anyhow::Result<Self> {
         let data = Storage::<Data>::open(&dir.join("cloud-link.json"))?;
         if data.read(|d| d.key.is_empty()) {
-            let k = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+            let k = Ed25519KeyPair::generate(&mut rand::rngs::OsRng)
+                .to_pkcs8_der()
                 .map_err(|_| anyhow::anyhow!("could not create signing key"))?;
             data.update(|d| {
-                d.key = k.as_ref().to_vec();
+                d.key = k.as_bytes().to_vec();
                 Ok(())
             })
             .map_err(anyhow::Error::msg)?;
@@ -106,7 +107,8 @@ impl Service {
             .read(|d| d.public(self.latest.lock().unwrap().clone()))
     }
     fn key(&self) -> Option<Ed25519KeyPair> {
-        self.data.read(|d| Ed25519KeyPair::from_pkcs8(&d.key).ok())
+        self.data
+            .read(|d| Ed25519KeyPair::from_pkcs8_der(&d.key).ok())
     }
 }
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -380,7 +382,7 @@ fn sign(k: &Ed25519KeyPair, typ: &str, claims: Value) -> String {
     let message = format!("{h}.{p}");
     format!(
         "{message}.{}",
-        URL_SAFE_NO_PAD.encode(k.sign(message.as_bytes()).as_ref())
+        URL_SAFE_NO_PAD.encode(k.sign(message.as_bytes()).to_bytes())
     )
 }
 fn loopback(host: &str) -> bool {
@@ -431,7 +433,7 @@ async fn link_proof(state: &Arc<AppState>, input: &Value, owner: bool, h: &Heade
     let mut der = vec![
         0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0,
     ];
-    der.extend(key.public_key().as_ref());
+    der.extend(key.verifying_key().as_bytes());
     let pem = format!(
         "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
         STANDARD.encode(der)
