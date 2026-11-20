@@ -1,35 +1,41 @@
+use crate::persistence::{DocumentStore, WriteMode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
-    fs,
-    io::{self, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
-/// A small transactional state file. Publish the new in-memory snapshot only after rename succeeds.
+/// A small transactional state document. Publish the new in-memory snapshot
+/// only after the store accepts the write.
 pub(crate) struct Storage<T> {
-    path: Option<PathBuf>,
+    document: Option<(Arc<dyn DocumentStore>, PathBuf)>,
     state: Mutex<T>,
 }
 
 impl<T: Default> Default for Storage<T> {
     fn default() -> Self {
         Self {
-            path: None,
+            document: None,
             state: Mutex::default(),
         }
     }
 }
 
 impl<T: Default + DeserializeOwned + Serialize + Clone> Storage<T> {
+    /// The document at `path` on the local filesystem.
+    #[cfg(feature = "native")]
     pub(crate) fn open(path: &Path) -> anyhow::Result<Self> {
-        let state = match fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => T::default(),
-            Err(err) => return Err(err.into()),
+        Self::open_in(Arc::new(crate::persistence::FsStore), path)
+    }
+
+    /// The document at `path` in `documents`; missing means the default.
+    pub(crate) fn open_in(documents: Arc<dyn DocumentStore>, path: &Path) -> anyhow::Result<Self> {
+        let state = match documents.read_optional(path)? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => T::default(),
         };
         Ok(Self {
-            path: Some(path.to_owned()),
+            document: Some((documents, path.to_owned())),
             state: Mutex::new(state),
         })
     }
@@ -37,7 +43,7 @@ impl<T: Default + DeserializeOwned + Serialize + Clone> Storage<T> {
     /// State kept only in memory; its host persists it (see `AuthService::records_json`).
     pub(crate) fn in_memory(state: T) -> Self {
         Self {
-            path: None,
+            document: None,
             state: Mutex::new(state),
         }
     }
@@ -60,14 +66,11 @@ impl<T: Default + DeserializeOwned + Serialize + Clone> Storage<T> {
         let mut current = self.state.lock().unwrap();
         let mut next = current.clone();
         let result = edit(&mut next)?;
-        if let Some(path) = &self.path {
-            let dir = path.parent().ok_or("internal_error")?;
-            let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|_| "internal_error")?;
-            serde_json::to_writer(&mut tmp, &next).map_err(|_| "internal_error")?;
-            tmp.flush()
-                .and_then(|_| tmp.as_file().sync_all())
+        if let Some((documents, path)) = &self.document {
+            let bytes = serde_json::to_vec(&next).map_err(|_| "internal_error")?;
+            documents
+                .write(path, &bytes, WriteMode::Replace)
                 .map_err(|_| "internal_error")?;
-            tmp.persist(path).map_err(|_| "internal_error")?;
         }
         committed(&current, &next);
         *current = next;

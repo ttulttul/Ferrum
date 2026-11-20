@@ -1,7 +1,7 @@
 //! The shared settings file has three views: sparse, effective, and client-redacted.
 //! Serialize the complete read/modify/write transaction, including sidecar secrets.
 #[cfg(feature = "native")]
-mod failure;
+pub(crate) mod failure;
 #[cfg(feature = "native")]
 mod mutations;
 #[cfg(feature = "native")]

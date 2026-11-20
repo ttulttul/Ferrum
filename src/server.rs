@@ -58,6 +58,8 @@ pub struct AppState {
     pub(crate) pull_request_refresh: Mutex<u64>,
     pub(crate) pull_request_linked_refresh: Mutex<u64>,
     pub(crate) pull_request_linked_events: broadcast::Sender<u64>,
+    /// Where state documents live: the local filesystem.
+    pub(crate) documents: Arc<dyn persistence::DocumentStore>,
     pub(crate) scheduled_tasks: Mutex<indexmap::IndexMap<String, serde_json::Value>>,
     pub(crate) scheduled_tasks_path: PathBuf,
     pub(crate) scheduled_webhook_deliveries: Mutex<indexmap::IndexMap<String, serde_json::Value>>,
@@ -102,8 +104,9 @@ impl AppState {
         let dir = data_dir.into();
         let paths = config::ServerPaths::from_state_dir(dir.clone());
         paths.ensure()?;
-        let settings = Arc::new(settings::Settings::open(&paths)?);
-        let auth = auth.open(&dir)?;
+        let documents: Arc<dyn persistence::DocumentStore> = Arc::new(persistence::FsStore);
+        let settings = Arc::new(settings::Settings::open_in(&paths, documents.clone())?);
+        let auth = auth.open_in(documents.clone(), &dir)?;
         auth.revoke_disallowed(
             settings.policy.allows_client("remote"),
             settings.policy.allows_connect(),
@@ -128,8 +131,8 @@ impl AppState {
         let (prompt_suggestion_events, _) = broadcast::channel(64);
         let (project_clone_events, _) = broadcast::channel(64);
         let scheduled_tasks_path = dir.join("scheduled-tasks.json");
-        let scheduled_tasks = tokio::fs::read(&scheduled_tasks_path)
-            .await
+        let scheduled_tasks = documents
+            .read(&scheduled_tasks_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
             .map(|items| {
@@ -143,8 +146,8 @@ impl AppState {
             })
             .unwrap_or_default();
         let scheduled_webhook_deliveries_path = dir.join("scheduled-webhook-deliveries.json");
-        let scheduled_webhook_deliveries = tokio::fs::read(&scheduled_webhook_deliveries_path)
-            .await
+        let scheduled_webhook_deliveries = documents
+            .read(&scheduled_webhook_deliveries_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
             .map(|items| {
@@ -188,6 +191,7 @@ impl AppState {
             pull_request_linked_refresh: Mutex::new(0),
             pull_request_linked_events,
             scheduled_tasks: Mutex::new(scheduled_tasks),
+            documents,
             scheduled_tasks_path,
             scheduled_webhook_deliveries: Mutex::new(scheduled_webhook_deliveries),
             scheduled_webhook_deliveries_path,
@@ -206,20 +210,22 @@ impl AppState {
         let tasks = self.scheduled_tasks.lock().await;
         let bytes = serde_json::to_vec(&tasks.values().collect::<Vec<_>>())?;
         drop(tasks);
-        let temporary = self.scheduled_tasks_path.with_extension("json.tmp");
-        tokio::fs::write(&temporary, bytes).await?;
-        tokio::fs::rename(temporary, &self.scheduled_tasks_path).await?;
+        self.documents.write(
+            &self.scheduled_tasks_path,
+            &bytes,
+            persistence::WriteMode::Replace,
+        )?;
         Ok(())
     }
     pub(crate) async fn persist_scheduled_webhook_deliveries(&self) -> anyhow::Result<()> {
         let deliveries = self.scheduled_webhook_deliveries.lock().await;
         let bytes = serde_json::to_vec(&deliveries.values().collect::<Vec<_>>())?;
         drop(deliveries);
-        let temporary = self
-            .scheduled_webhook_deliveries_path
-            .with_extension("json.tmp");
-        tokio::fs::write(&temporary, bytes).await?;
-        tokio::fs::rename(temporary, &self.scheduled_webhook_deliveries_path).await?;
+        self.documents.write(
+            &self.scheduled_webhook_deliveries_path,
+            &bytes,
+            persistence::WriteMode::Replace,
+        )?;
         Ok(())
     }
     pub(crate) async fn commit(&self, event: Event) -> anyhow::Result<ServerEvent> {

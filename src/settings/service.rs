@@ -1,16 +1,16 @@
 //! The settings file service (native): reads, writes and watches settings.json.
 use super::*;
 use crate::config::ServerPaths;
+use crate::persistence::{DocumentStore, WriteMode};
 use serde_json::{json, Value};
 use std::{
-    fs,
-    io::{self, Write},
-    path::Path,
-    sync::Mutex,
+    io,
+    sync::{Arc, Mutex},
 };
 
 pub struct Settings {
     paths: ServerPaths,
+    documents: Arc<dyn DocumentStore>,
     pub(crate) resolver: secrets::Resolver,
     pub(crate) policy: policy::Policy,
     lock: Mutex<Option<LastWrite>>,
@@ -22,11 +22,7 @@ struct LastWrite {
     settings: Value,
     /// Platform monotonic milliseconds at the write.
     at: u64,
-    revision: Option<(std::time::SystemTime, u64)>,
-}
-fn revision(path: &Path) -> Option<(std::time::SystemTime, u64)> {
-    let meta = path.metadata().ok()?;
-    Some((meta.modified().ok()?, meta.len()))
+    revision: Option<crate::persistence::Revision>,
 }
 
 struct Loaded {
@@ -109,101 +105,19 @@ fn sparse_order(sparse: Value, normalized: &Value) -> Value {
         (value, _) => value,
     }
 }
-fn save(path: &Path, value: &Value) -> io::Result<()> {
-    let mut target = path.to_owned();
-    for _ in 0..=40 {
-        match fs::read_link(&target) {
-            Ok(next) => {
-                let parent = target.parent().unwrap_or(Path::new("."));
-                target = fs::canonicalize(parent)?.join(next);
-            }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::InvalidInput | io::ErrorKind::NotFound
-                ) =>
-            {
-                let parent = target.parent().unwrap_or(Path::new("."));
-                fs::create_dir_all(parent).map_err(|e| {
-                    failure::file(e, "write-file", "makeDirectory", "mkdir", parent)
-                })?;
-                let staging = tempfile::Builder::new()
-                    .prefix("t3-write-")
-                    .tempdir_in(parent)
-                    .map_err(|e| {
-                        failure::file(
-                            e,
-                            "write-file",
-                            "makeTempDirectory",
-                            "mkdtemp",
-                            &parent.join("t3-write-"),
-                        )
-                    })?;
-                let temp = staging.path().join("contents.tmp");
-                let mut file = fs::File::create(&temp)
-                    .map_err(|e| failure::file(e, "write-file", "writeFile", "open", &temp))?;
-                crate::wire_json::pretty(&mut file, value)?;
-                file.write_all(b"\n")?;
-                drop(file);
-                replace_settings_file(&temp, &target).map_err(|e| {
-                    let step = failure::step(e, "rename", "rename", &temp, Some(&target));
-                    failure::file(step, "write-file", "rename", "rename", &temp)
-                })?;
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err(io::Error::other("Too many levels of symbolic links"))
-}
-#[cfg(not(windows))]
-fn replace_settings_file(temp: &Path, target: &Path) -> io::Result<()> {
-    fs::rename(temp, target)
-}
-
-#[cfg(windows)]
-fn replace_settings_file(temp: &Path, target: &Path) -> io::Result<()> {
-    use std::os::windows::fs::MetadataExt;
-    let version = || match fs::metadata(target) {
-        Ok(m) => Ok(Some((
-            m.creation_time(),
-            m.last_write_time(),
-            m.file_size(),
-            m.permissions().readonly(),
-        ))),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    };
-    let initial = version();
-    for retry in 0..=20 {
-        match fs::rename(temp, target) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                let unchanged = initial.as_ref().is_ok_and(|v| {
-                    v.is_none_or(|(_, _, _, ro)| !ro)
-                        && version().is_ok_and(|current| &current == v)
-                });
-                if retry == 20 || !matches!(e.raw_os_error(), Some(5 | 32 | 33)) || !unchanged {
-                    return Err(e);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if version().ok().as_ref() != initial.as_ref().ok() {
-                    return Err(e);
-                }
-            }
-        }
-    }
-    unreachable!()
-}
-
 impl Settings {
-    pub(crate) fn open(paths: &ServerPaths) -> anyhow::Result<Self> {
+    /// The settings service over `documents`, which holds settings.json.
+    pub(crate) fn open_in(
+        paths: &ServerPaths,
+        documents: Arc<dyn DocumentStore>,
+    ) -> anyhow::Result<Self> {
         secrets::ensure_dir(&paths.secrets)?;
         let policy = policy::Policy::load()?;
         let defaults = schema::normalize(&policy.default_settings()).map_err(anyhow::Error::msg)?;
         let service = Self {
             changes: tokio::sync::broadcast::channel(64).0,
             paths: paths.clone(),
+            documents,
             resolver: Default::default(),
             policy,
             lock: Mutex::new(None),
@@ -224,16 +138,20 @@ impl Settings {
         let normalized = schema::normalize_runtime(settings).map_err(io::Error::other)?;
         let stripped = strip(&normalized, Some(&self.defaults), &schema::defaults())
             .unwrap_or_else(|| json!({}));
-        save(
-            &self.paths.settings,
+        let mut bytes = Vec::new();
+        crate::wire_json::pretty(
+            &mut bytes,
             &schema::encode_disk(sparse_order(
                 self.policy.keep_stored(&stripped, &normalized, raw),
                 &normalized,
             )),
-        )
+        )?;
+        bytes.push(b'\n');
+        self.documents
+            .write(&self.paths.settings, &bytes, WriteMode::ReplaceTarget)
     }
     fn load(&self) -> anyhow::Result<Loaded> {
-        let input = match fs::read(&self.paths.settings) {
+        let input = match self.documents.read(&self.paths.settings) {
             Ok(bytes) => json_syntax::parse_file(&bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(json!({})),
             Err(e) => {
@@ -300,7 +218,7 @@ impl Settings {
         // The upstream watcher debounces a writer's own filesystem events for 100 ms.
         if let Some(written) = guard.as_ref() {
             if crate::platform::monotonic_ms().saturating_sub(written.at) < 100
-                && written.revision == revision(&self.paths.settings)
+                && written.revision == self.documents.revision(&self.paths.settings)
             {
                 return self.effective(&written.settings);
             }
@@ -387,7 +305,7 @@ impl Settings {
         *guard = Some(LastWrite {
             settings: prepared.disk,
             at: crate::platform::monotonic_ms(),
-            revision: revision(&self.paths.settings),
+            revision: self.documents.revision(&self.paths.settings),
         });
         let view = secrets::redact(&effective, references);
         if self.changes.receiver_count() > 0 {

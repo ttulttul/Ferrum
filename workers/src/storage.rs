@@ -1,7 +1,13 @@
 //! Durable Object SQLite storage for the control plane: the orchestration
-//! event log and a small key/value table (environment id, auth records).
+//! event log, a small key/value table (environment id) and the state
+//! documents (auth records, keybindings) behind `DocumentStore`.
 use serde::Deserialize;
-use t3code_server::{event_log::EventLog, ServerEvent};
+use std::{io, path::Path};
+use t3code_server::{
+    event_log::EventLog,
+    persistence::{self, DocumentStore, Revision, WriteMode},
+    ServerEvent,
+};
 use worker::SqlStorage;
 
 pub fn migrate(sql: &SqlStorage) -> worker::Result<()> {
@@ -11,6 +17,10 @@ pub fn migrate(sql: &SqlStorage) -> worker::Result<()> {
     )?;
     sql.exec(
         "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        None,
+    )?;
+    sql.exec(
+        "CREATE TABLE IF NOT EXISTS documents (path TEXT PRIMARY KEY, body TEXT NOT NULL, revision INTEGER NOT NULL)",
         None,
     )?;
     Ok(())
@@ -67,4 +77,83 @@ impl EventLog for SqlLog {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }
+}
+
+/// State documents as rows of `documents`, keyed by path. Every write is one
+/// SQL statement, so it is atomic whatever the `WriteMode`; the revision is a
+/// per-document counter. Bodies are UTF-8 (the documents are JSON).
+pub struct SqlDocuments(pub SqlStorage);
+
+// SAFETY: a Durable Object runs on one thread of a single-threaded wasm
+// isolate, so the storage handle is never shared across threads.
+unsafe impl Send for SqlDocuments {}
+unsafe impl Sync for SqlDocuments {}
+
+#[derive(Deserialize)]
+struct Document {
+    body: String,
+    revision: i64,
+}
+
+impl SqlDocuments {
+    fn row(&self, path: &Path) -> io::Result<Option<Document>> {
+        let rows: Vec<Document> = self
+            .0
+            .exec(
+                "SELECT body, revision FROM documents WHERE path = ?",
+                vec![path.to_string_lossy().into_owned().into()],
+            )
+            .and_then(|cursor| cursor.to_array())
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(rows.into_iter().next())
+    }
+}
+
+impl DocumentStore for SqlDocuments {
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.row(path)?
+            .map(|row| row.body.into_bytes())
+            .ok_or_else(|| persistence::not_found(path))
+    }
+
+    fn write(&self, path: &Path, bytes: &[u8], _mode: WriteMode) -> io::Result<()> {
+        let body = std::str::from_utf8(bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.0
+            .exec(
+                "INSERT INTO documents (path, body, revision) VALUES (?, ?, 1) \
+                 ON CONFLICT(path) DO UPDATE SET body = excluded.body, revision = documents.revision + 1",
+                vec![path.to_string_lossy().into_owned().into(), body.into()],
+            )
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(())
+    }
+
+    fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn revision(&self, path: &Path) -> Option<Revision> {
+        self.row(path)
+            .ok()
+            .flatten()
+            .map(|row| Revision(row.revision.to_string()))
+    }
+}
+
+/// Moves the auth records the spike kept in `kv` into their document, once.
+pub fn migrate_auth_records(
+    sql: &SqlStorage,
+    documents: &SqlDocuments,
+    path: &Path,
+) -> io::Result<()> {
+    let legacy = get(sql, "auth-records").map_err(|e| io::Error::other(e.to_string()))?;
+    if let Some(records) = legacy {
+        if documents.read_optional(path)?.is_none() {
+            documents.write(path, records.as_bytes(), WriteMode::Replace)?;
+        }
+        sql.exec("DELETE FROM kv WHERE key = 'auth-records'", None)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+    }
+    Ok(())
 }
