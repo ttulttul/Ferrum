@@ -519,7 +519,9 @@ mod tests {
             ];
             for (body, expected) in cases {
                 let dir = tempfile::tempdir().unwrap();
-                let npm = service(fake(&dir, body), Duration::from_millis(500));
+                // Long enough for a fake npm to start on a loaded machine;
+                // shorter than the `sleep 5` case it must cut off.
+                let npm = service(fake(&dir, body), Duration::from_secs(2));
                 assert_eq!(&npm.get(VERSION).await, expected, "{body}");
             }
         }
