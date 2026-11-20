@@ -3,6 +3,7 @@ use crate::rpc_protocol::{
     js_template_string, request_key, split_socket_frame, Reply, SOCKET_FRAME_PART_BYTES,
 };
 use crate::runtime::Runtime;
+use crate::subscription::{scheduled_public_task, thread_projection_error};
 use crate::{
     auth_service, dispatch_orchestration_command, host_rpc, provider_rpc, AppState, RPC_CONTRACTS,
 };
@@ -704,34 +705,27 @@ async fn run_call(
             let _ = chunks.send((id.clone(), values)).await;
         }
     };
-    if method == "pullRequests.subscribeLinkedThreadRefreshes" {
-        let mut events = state.pull_request_linked_events.subscribe();
-        loop {
-            match events.recv().await {
-                Ok(revision) => send(json!([revision])).await,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Reply::Success(Value::Null)
-                }
+    if crate::subscription::serves(method) {
+        let opened =
+            match crate::subscription::Subscription::open(state, principal, method, params, true)
+                .await
+            {
+                Ok(opened) => opened,
+                Err(reply) => return reply,
+            };
+        let mut subscription = opened.subscription;
+        let mut source = opened
+            .source
+            .expect("a listening subscription has a source");
+        for batch in opened.first {
+            send(batch).await;
+        }
+        while let Some(signal) = source.next().await {
+            for batch in subscription.advance(state, principal, signal).await {
+                send(batch).await;
             }
         }
-    }
-    if method == "orchestration.subscribePromptSuggestion" {
-        let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
-        let mut events = state.prompt_suggestion_events.subscribe();
-        send(json!([Value::Null])).await;
-        loop {
-            match events.recv().await {
-                Ok(event) if event["threadId"].as_str() == Some(thread_id.as_str()) => {
-                    send(json!([{"runId":event["runId"],"text":event["text"]}])).await;
-                }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Reply::Success(Value::Null)
-                }
-            }
-        }
+        return Reply::Success(Value::Null);
     }
     if method == "subscribeWorktreeSetup" {
         let mut setup = state
@@ -741,59 +735,6 @@ async fn run_call(
             send(json!([value])).await;
         }
         return Reply::Success(Value::Null);
-    }
-    if method == "orchestration.subscribeThread" {
-        // The reference streams the thread's domain events after its snapshot. Threads here
-        // keep no domain event log, so each change is sent as a fresh snapshot, which the
-        // client applies the same way (EnvironmentThreadState.applyItemLocked).
-        let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
-        let mut events = state.events.subscribe();
-        let snapshot = || async {
-            let sequence = *state.next_event_id.lock().await;
-            let store = state.store.read().await;
-            store
-                .threads
-                .get(&thread_id)
-                .map(|thread| thread.stream_snapshot(sequence, params))
-        };
-        let Some(mut last) = snapshot().await else {
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":thread_projection_error(&params["threadId"])}),
-            );
-        };
-        let mut first = vec![last.clone()];
-        if params["requestCompletionMarker"] == true {
-            first.push(json!({"kind":"synchronized"}));
-        }
-        send(Value::Array(first)).await;
-        loop {
-            match events.recv().await {
-                // Provider output lines are not part of the projection.
-                Ok(event) if matches!(event.event, crate::Event::RunOutput { .. }) => continue,
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return Reply::Success(Value::Null),
-            }
-            let Some(next) = snapshot().await else {
-                continue;
-            };
-            if next["projection"] != last["projection"] {
-                send(json!([next.clone()])).await;
-                last = next;
-            }
-        }
-    }
-    if method == "scheduledTasks.subscribe" {
-        let mut events = state.scheduled_task_events.subscribe();
-        send(json!([scheduled_tasks_snapshot(state).await])).await;
-        loop {
-            match events.recv().await {
-                Ok(()) => send(json!([scheduled_tasks_snapshot(state).await])).await,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Reply::Success(Value::Null)
-                }
-            }
-        }
     }
     if method == "subscribeProjectClones" {
         let mut events = state.project_clone_events.subscribe();
@@ -823,18 +764,6 @@ async fn run_call(
                 Ok(event) => send(json!([event])).await,
                 Err(e) => return Reply::Failure(json!({"_tag":"Fail","error":e})),
             }
-        }
-    }
-    if method == "subscribeAuthAccess" {
-        let (mut change, mut changes) = state.auth.subscribe_access();
-        let mut revision = 1;
-        loop {
-            send(json!([change.event(&principal.id, revision)])).await;
-            let Some(next) = changes.recv().await else {
-                return Reply::Success(Value::Null);
-            };
-            change = next;
-            revision += 1;
         }
     }
     if method == "git.runStackedAction" {
@@ -3530,21 +3459,6 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     Reply::Success(result)
 }
 
-/// The reference's error for a thread with no projection, from getThreadProjection and
-/// subscribeThread alike.
-fn thread_projection_error(thread_id: &Value) -> Value {
-    let thread_id = thread_id.as_str().unwrap_or_default();
-    json!({
-        "_tag":"OrchestrationV2GetThreadProjectionError",
-        "threadId":thread_id,
-        "message":format!("Failed to load orchestration V2 thread {thread_id}"),
-        "cause":{"name":"OrchestratorProjectionError",
-            "message":format!("Failed to load orchestration projection for thread {thread_id}."),
-            "cause":{"name":"ProjectionStoreThreadNotFoundError",
-                "message":format!("No orchestration projection exists for thread {thread_id}.")}}
-    })
-}
-
 pub(crate) fn fold_project_rows_into_settings(
     settings: &mut Value,
     rows: &indexmap::IndexMap<String, Value>,
@@ -3699,46 +3613,6 @@ async fn git_diff_checkpoint(
         end -= 1;
     }
     format!("{}{}", &text[..end], MARKER)
-}
-
-async fn scheduled_tasks_snapshot(state: &Arc<AppState>) -> Value {
-    let tasks = state
-        .scheduled_tasks
-        .lock()
-        .await
-        .values()
-        .map(scheduled_public_task)
-        .collect::<Vec<_>>();
-    json!({"tasks":tasks,"timeZone":scheduled_task_time_zone()})
-}
-
-fn scheduled_task_time_zone() -> String {
-    std::env::var("TZ")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::fs::read_to_string("/etc/timezone")
-                .ok()
-                .map(|value| value.trim().to_owned())
-        })
-        .unwrap_or_else(|| "UTC".into())
-}
-
-fn scheduled_public_task(task: &Value) -> Value {
-    let mut task = task.clone();
-    if let Some(object) = task.as_object_mut() {
-        object.remove("_webhookToken");
-        object.remove("_webhookSecret");
-        if let Some(signature) = object
-            .get_mut("schedule")
-            .and_then(|schedule| schedule.get_mut("signature"))
-            .and_then(Value::as_object_mut)
-        {
-            signature.remove("secret");
-            signature.remove("secretRef");
-        }
-    }
-    task
 }
 
 fn scheduled_task_error(message: &str, task_id: Option<&str>) -> Reply {
