@@ -59,6 +59,14 @@ pub struct AppState {
     pub(crate) project_clone_sequence: Mutex<u64>,
 }
 impl AppState {
+    /// The programs the workspace's git workflows run, as configured now.
+    pub(crate) async fn git_tools(&self) -> crate::workspace::GitTools {
+        crate::workspace::GitTools {
+            gh: self.issues.lock().await.gh.clone(),
+            text_generation: self.provider_command.clone(),
+        }
+    }
+
     pub async fn new(
         data_dir: impl Into<PathBuf>,
         provider_command: Vec<String>,

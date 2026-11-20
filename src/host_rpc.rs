@@ -25,7 +25,8 @@ pub async fn dispatch(
             _ => None,
         },
         "git" if matches!(name, "resolvePullRequest" | "preparePullRequestThread") => {
-            Some(crate::local_services::git_workflow::pull_request(state, name, input).await)
+            let tools = state.git_tools().await;
+            Some(state.workspace.pull_request(name, input, &tools).await)
         }
         "review" => Some(state.workspace.review(name, input).await),
         "vcs" => {

@@ -65,6 +65,15 @@ pub enum TurnEvent {
     Exited(TurnExit),
 }
 
+/// The programs git workflows run besides git itself: the GitHub CLI, and
+/// the command that drafts commit messages and pull request descriptions
+/// (empty for the default).
+#[derive(Clone, Debug, Default)]
+pub struct GitTools {
+    pub gh: PathBuf,
+    pub text_generation: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnExit {
     pub success: bool,
@@ -72,6 +81,14 @@ pub struct TurnExit {
     pub cancelled: bool,
     /// The exit status as the platform describes it ("exit status: 1").
     pub status: String,
+}
+
+fn unavailable_reply<'a>(method: String) -> WorkspaceFuture<'a, Reply> {
+    let reply = futures_util::future::ready(Err(unavailable(&method)));
+    #[cfg(feature = "native")]
+    return futures_util::FutureExt::boxed(reply);
+    #[cfg(not(feature = "native"))]
+    return futures_util::FutureExt::boxed_local(reply);
 }
 
 /// The workspace operations the control plane uses, grouped as the workspace
@@ -103,6 +120,28 @@ pub trait Workspace: MaybeSendSync {
     /// The tree of `cwd`'s working copy (tracked and untracked files) as a
     /// git tree id, without touching the repository's index.
     fn capture_git_tree<'a>(&'a self, cwd: &'a str) -> WorkspaceFuture<'a, Option<String>>;
+    /// `git.resolvePullRequest` or `git.preparePullRequestThread` (`method`
+    /// without the `git.` prefix).
+    fn pull_request<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+        tools: &'a GitTools,
+    ) -> WorkspaceFuture<'a, Reply> {
+        let _ = (input, tools);
+        unavailable_reply(format!("git.{method}"))
+    }
+    /// `git.runStackedAction`: each progress batch goes to `progress`, and
+    /// the reply follows the last one.
+    fn stacked_action<'a>(
+        &'a self,
+        input: &'a Value,
+        tools: &'a GitTools,
+        progress: mpsc::Sender<Value>,
+    ) -> WorkspaceFuture<'a, Reply> {
+        let _ = (input, tools, progress);
+        unavailable_reply("git.runStackedAction".into())
+    }
 
     // term.*
     /// A `terminal.*` method.

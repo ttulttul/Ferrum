@@ -831,7 +831,8 @@ async fn run_call(
     }
     if method == "git.runStackedAction" {
         let (tx, mut events) = mpsc::channel(1);
-        let workflow = crate::local_services::git_workflow::stream(state, params, tx);
+        let tools = state.git_tools().await;
+        let workflow = state.workspace.stacked_action(params, &tools, tx);
         let forward = async {
             while let Some(batch) = events.recv().await {
                 send(batch).await;
