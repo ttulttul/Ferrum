@@ -194,6 +194,10 @@ fn start_turn(
             child_command.env_remove(k);
         }
     }
+    // The turn's process leads its own process group, so cancelling stops the
+    // programs it started too; they would otherwise keep its output open.
+    #[cfg(unix)]
+    child_command.process_group(0);
     let mut child = child_command
         .args(command)
         .arg(spec.prompt)
@@ -242,12 +246,29 @@ fn start_turn(
             let (status, cancelled) = tokio::select! {
                 result = child.wait() => (result?, false),
                 _ = &mut cancel => {
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+                        // SAFETY: kill(2) with a negative pid signals that
+                        // process group; it touches no memory of ours.
+                        unsafe { libc::kill(-pid, libc::SIGKILL) };
+                    }
                     child.kill().await?;
                     (child.wait().await?, true)
                 }
             };
-            for task in output_tasks {
-                let _ = task.await;
+            for mut task in output_tasks {
+                if cancelled {
+                    // A program that left the group may still hold the
+                    // output open; stop reading after a moment.
+                    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut task)
+                        .await
+                        .is_err()
+                    {
+                        task.abort();
+                    }
+                } else {
+                    let _ = task.await;
+                }
             }
             std::io::Result::Ok(TurnExit {
                 success: status.success(),
@@ -260,6 +281,40 @@ fn start_turn(
         }
     });
     Ok(receiver)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelling_a_turn_stops_the_programs_it_started() {
+        let (cancel, cancelled) = oneshot::channel();
+        let mut events = start_turn(
+            TurnSpec {
+                // The shell waits on a child that keeps the output open.
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "echo started; sleep 30; true".into(),
+                ],
+                prompt: String::new(),
+                cwd: "/".into(),
+                env_remove: vec![],
+            },
+            cancelled,
+        )
+        .unwrap();
+        assert_eq!(
+            events.recv().await,
+            Some(TurnEvent::Stdout("started\n".into()))
+        );
+        cancel.send(()).unwrap();
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("the cancelled turn exited promptly");
+        assert!(matches!(exit, Some(TurnEvent::Exited(exit)) if exit.cancelled));
+    }
 }
 
 /// Write the working copy into a scratch index and return its tree id.
