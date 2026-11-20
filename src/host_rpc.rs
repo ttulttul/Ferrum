@@ -11,37 +11,36 @@ pub async fn dispatch(
     let (service, name) = method.split_once('.')?;
     match service {
         "projects" => match name {
-            "listEntries" => crate::workspace::list_entries(input).await,
-            "listIgnoredFiles" => crate::workspace::list_ignored_files(input).await,
-            "searchEntries" => crate::workspace::search_entries(input).await,
-            "searchContents" => crate::workspace::search_contents(input).await,
-            "readFile" => crate::workspace::read_file(input).await,
-            "writeFile" => crate::workspace::write_file(input).await,
+            "listEntries" => state.workspace.list_entries(input).await,
+            "listIgnoredFiles" => state.workspace.list_ignored_files(input).await,
+            "searchEntries" => state.workspace.search_entries(input).await,
+            "searchContents" => state.workspace.search_contents(input).await,
+            "readFile" => state.workspace.read_file(input).await,
+            "writeFile" => state.workspace.write_file(input).await,
             _ => None,
         },
         "filesystem" => match name {
-            "getMetadata" => crate::workspace::metadata(input).await,
-            "browse" => crate::workspace::browse(input).await,
+            "getMetadata" => state.workspace.file_metadata(input).await,
+            "browse" => state.workspace.browse(input).await,
             _ => None,
         },
         "git" if matches!(name, "resolvePullRequest" | "preparePullRequestThread") => {
             Some(crate::local_services::git_workflow::pull_request(state, name, input).await)
         }
-        "review" => Some(crate::local_services::review::call(state, name, input).await),
+        "review" => Some(state.workspace.review(name, input).await),
         "vcs" => {
             state
-                .vcs
-                .call_with(
+                .workspace
+                .vcs(
                     name,
                     input,
-                    &state.data_dir,
                     name == "refreshStatus" && automatic_git_fetch(state),
                 )
                 .await
         }
-        "terminal" => state.terminals.call(name, input).await,
+        "terminal" => state.workspace.terminal(name, input).await,
         "preview" if name == "stopLocalServer" => {
-            Some(crate::local_services::discovery::stop(state, input).await)
+            Some(state.workspace.stop_local_server(input).await)
         }
         "preview" if matches!(name, "reportProfiles" | "clearProfile") => {
             if name == "clearProfile" {
@@ -50,19 +49,19 @@ pub async fn dispatch(
                     .filter(|s| !s.trim().is_empty() && *s != "incognito")
                 {
                     state
-                        .previews
-                        .close_pages(None, None, Some(id.trim()))
+                        .workspace
+                        .close_preview_pages(None, None, Some(id.trim()))
                         .await;
                 }
             }
-            Some(state.previews.profile(name, input, &state.data_dir))
+            Some(state.workspace.preview_profile(name, input))
         }
         "preview" => {
-            let reply = state.previews.call(name, input);
+            let reply = state.workspace.preview(name, input);
             if name == "close" && reply.as_ref().is_some_and(Result::is_ok) {
                 state
-                    .previews
-                    .close_pages(
+                    .workspace
+                    .close_preview_pages(
                         input["threadId"].as_str().map(str::trim),
                         input["tabId"].as_str().map(str::trim),
                         None,
@@ -71,7 +70,7 @@ pub async fn dispatch(
             }
             reply
         }
-        "device" => state.devices.call(name, input, &state.data_dir).await,
+        "device" => state.workspace.device(name, input).await,
         _ => None,
     }
 }
@@ -89,22 +88,17 @@ pub async fn polled_stream(
     input: &Value,
 ) -> Option<Result<Value, Value>> {
     if method == "subscribeDiscoveredLocalServers" {
-        return Some(crate::local_services::discovery::scan(state, input).await);
+        return Some(state.workspace.local_servers(input).await);
     }
     if !matches!(method, "subscribeVcsBranch" | "subscribeVcsStatus") {
         return None;
     }
     if method == "subscribeVcsBranch" {
-        return Some(state.vcs.branch_status(input).await);
+        return Some(state.workspace.vcs_branch(input).await);
     }
     let status = match state
-        .vcs
-        .call_with(
-            "refreshStatus",
-            input,
-            &state.data_dir,
-            automatic_git_fetch(state),
-        )
+        .workspace
+        .vcs("refreshStatus", input, automatic_git_fetch(state))
         .await?
     {
         Ok(status) => status,

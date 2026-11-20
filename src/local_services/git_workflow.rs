@@ -404,11 +404,11 @@ pub async fn pull_request(state: &AppState, name: &str, input: &Value) -> Reply 
         .await?;
     } else if path.is_none() {
         let worktree = state
-            .vcs
-            .call(
+            .workspace
+            .vcs(
                 "createWorktree",
                 &json!({"cwd":cwd,"refName":local,"path":null}),
-                Path::new(&state.data_dir),
+                true,
             )
             .await
             .unwrap()?;

@@ -61,14 +61,18 @@ pub(super) async fn mutate(state: &AppState, input: &Value) -> Result<Value, Val
             .ok_or_else(|| error("A workspace root is required."))?;
         let dir = PathBuf::from(raw.trim());
         if kind == "project.create" && input["createWorkspaceRootIfMissing"] == true {
-            tokio::fs::create_dir_all(&dir)
+            state
+                .workspace
+                .create_dir_all(&dir)
                 .await
                 .map_err(|_| error("Failed to mutate project."))?;
         }
-        let dir = tokio::fs::canonicalize(dir)
+        let dir = state
+            .workspace
+            .canonicalize(&dir)
             .await
             .map_err(|_| error("Failed to mutate project."))?;
-        if !dir.is_dir() {
+        if !state.workspace.is_dir(&dir).await {
             return Err(error("Failed to mutate project."));
         }
         let path = dir.to_string_lossy().into_owned();
