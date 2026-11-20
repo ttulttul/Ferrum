@@ -1467,6 +1467,16 @@ mod tests {
             .unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // A test thread that forks while the copy is open holds its write descriptor
+            // until it execs, and exec then fails with ETXTBSY; wait until it can run.
+            for _ in 0..200 {
+                match std::process::Command::new(&binary).arg("version").output() {
+                    Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    _ => break,
+                }
+            }
             Self { dir, binary }
         }
 

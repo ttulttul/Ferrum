@@ -149,12 +149,18 @@ def alive(pid):
 # Names the reference's own modules set on process.env, so every child it spawns inherits
 # them; they are not part of the relay client's spawn (see tests/relay-client-spawn.json).
 REFERENCE_PROCESS_ENV = {"CLAUDE_AGENT_SDK_VERSION", "NoDefaultCurrentDirectoryInExePath"}
+# The reference merges the login shell's PATH (with __MISE_DIFF and JAVA_HOME) into its own
+# process.env at startup (apps/server/src/os-jank.ts), server-wide; whether that changes
+# anything depends on the host's PATH, so these are left out of the spawn comparison.
+LOGIN_SHELL_ENV = {"PATH", "__MISE_DIFF", "JAVA_HOME"}
 
 
 def normalize_start(entry, root):
     entry = dict(entry)
     entry.pop("pid", None)
-    entry["envAdded"] = [name for name in entry.get("envAdded", []) if name not in REFERENCE_PROCESS_ENV]
+    ignored = REFERENCE_PROCESS_ENV | LOGIN_SHELL_ENV
+    for key in ("envAdded", "envChanged", "envRemoved"):
+        entry[key] = [name for name in entry.get(key, []) if name not in ignored]
     if entry.get("tunnelToken") == FAKE_TOKEN:
         entry["tunnelToken"] = "<token>"
     entry["cwd"] = entry.get("cwd", "").replace(str(root), "<root>")
