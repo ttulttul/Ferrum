@@ -1,0 +1,54 @@
+name: Workers control plane
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  workers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the wasm32 target and worker-build
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install --locked worker-build@0.9.0
+      - name: Check the workers feature for wasm32
+        run: |
+          cargo check --locked --no-default-features --features workers --target wasm32-unknown-unknown
+          cargo clippy --locked --no-default-features --features workers --target wasm32-unknown-unknown -- -D warnings
+      - name: Build the Durable Object worker
+        working-directory: workers
+        run: |
+          worker-build --release
+          ls -l build
+          gzip -9 -c build/index_bg.wasm | wc -c | xargs -I{} echo "wasm gzip bytes: {}"
+      - name: Fetch the pinned public reference
+        run: |
+          git init --quiet reference
+          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git 052ca497cf1103b001327bcd964188a71dfec213
+          git -C reference checkout --quiet --detach FETCH_HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.13.1
+      - name: Prepare the reference client runtime
+        run: |
+          npm install --global pnpm@12.14.0
+          pnpm --dir reference --filter @t3tools/client-runtime install --frozen-lockfile
+          python3 -m venv "$RUNNER_TEMP/parity-python"
+          "$RUNNER_TEMP/parity-python/bin/pip" install websockets==16.0 cryptography
+          echo "$RUNNER_TEMP/parity-python/bin" >> "$GITHUB_PATH"
+      - name: Compare the initial sync with native under wrangler dev
+        run: |
+          cargo build --locked
+          python3 scripts/workers_initial_sync_parity.py \
+            --rust-command "$GITHUB_WORKSPACE/target/debug/t3code-server" \
+            --reference-root "$GITHUB_WORKSPACE/reference" \
+            --wrangler "npx --yes wrangler@4.166.0"
