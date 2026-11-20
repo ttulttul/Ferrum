@@ -1,0 +1,28 @@
+[package]
+name = "t3-environment-worker"
+version = "0.1.0"
+edition = "2021"
+description = "T3 Code control plane in a Cloudflare Durable Object (spike)"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+t3code-server = { path = "..", default-features = false, features = ["workers"] }
+worker = "0.9"
+axum = { version = "=0.7.9", default-features = false }
+http = "1"
+tower-service = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+uuid = { version = "=1.11.0", features = ["v4", "js"] }
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

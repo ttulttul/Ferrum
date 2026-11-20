@@ -34,6 +34,14 @@ impl<T: Default + DeserializeOwned + Serialize + Clone> Storage<T> {
         })
     }
 
+    /// State kept only in memory; its host persists it (see `AuthService::records_json`).
+    pub(crate) fn in_memory(state: T) -> Self {
+        Self {
+            path: None,
+            state: Mutex::new(state),
+        }
+    }
+
     pub(crate) fn read<R>(&self, inspect: impl FnOnce(&T) -> R) -> R {
         inspect(&self.state.lock().unwrap())
     }

@@ -1,0 +1,17 @@
+name = "t3-environment-spike"
+main = "build/index.js"
+compatibility_date = "2026-11-01"
+
+[build]
+command = "worker-build --release"
+
+[vars]
+# Local development only. A real deployment provisions this as a secret per environment.
+T3_BOOTSTRAP_CREDENTIAL = "spike-secret"
+
+[durable_objects]
+bindings = [{ name = "T3_ENVIRONMENT", class_name = "T3EnvironmentDO" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["T3EnvironmentDO"]
