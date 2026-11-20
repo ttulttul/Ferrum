@@ -3,6 +3,7 @@ mod browser;
 mod device_actions;
 mod devices;
 pub(crate) mod discovery;
+pub(crate) mod files;
 pub(crate) mod git_workflow;
 pub(crate) mod local_ssh;
 pub(crate) mod media;
@@ -333,7 +334,7 @@ mod tests {
         let server = crate::AppState::new(data.0.clone(), Vec::new())
             .await
             .unwrap();
-        let service = &server.devices;
+        let service = &server.local.devices;
         let updated = service
             .call(
                 "configure",
@@ -354,6 +355,9 @@ mod tests {
         let fresh = crate::AppState::new(data.0.clone(), Vec::new())
             .await
             .unwrap();
-        assert_eq!(fresh.devices.snapshot(&data.0)["onboardingCompleted"], true);
+        assert_eq!(
+            fresh.local.devices.snapshot(&data.0)["onboardingCompleted"],
+            true
+        );
     }
 }

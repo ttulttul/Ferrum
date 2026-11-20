@@ -515,7 +515,11 @@ async fn stream(
     let quality = param("quality", 70, 100);
     let w = param("maxWidth", 1280, 7680);
     let h = param("maxHeight", 800, 4320);
-    let snap = state.previews.tab(&page.thread, &page.tab).ok_or(())?;
+    let snap = state
+        .local
+        .previews
+        .tab(&page.thread, &page.tab)
+        .ok_or(())?;
     let width = bounded(&snap["viewport"]["width"], 1280, 7680);
     let height = bounded(&snap["viewport"]["height"], 800, 4320);
     command(&mut cdp, &mut sequence, "Page.enable", json!({})).await?;
@@ -594,7 +598,7 @@ async fn stream(
                 }
                 if e["id"]==document{
                     if let Some(doc)=e["result"]["result"]["value"].as_str().and_then(|s|serde_json::from_str::<Value>(s).ok()){
-                        if let Some(url)=doc["url"].as_str().filter(|u|*u!="about:blank"){state.previews.page_status(&page.thread,&page.tab,json!({"_tag":if doc["ready"]=="complete"{"Success"}else{"Loading"},"url":url,"title":doc["title"].as_str().unwrap_or("")}));}
+                        if let Some(url)=doc["url"].as_str().filter(|u|*u!="about:blank"){state.local.previews.page_status(&page.thread,&page.tab,json!({"_tag":if doc["ready"]=="complete"{"Success"}else{"Loading"},"url":url,"title":doc["title"].as_str().unwrap_or("")}));}
                     }
                 }
                 match e["method"].as_str(){

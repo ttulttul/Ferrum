@@ -1,5 +1,5 @@
+use super::TerminalService;
 use super::{invalid, timestamp, Reply};
-use crate::AppState;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -42,9 +42,12 @@ fn ancestors(table: &HashMap<u32, Process>, mut id: u32) -> HashSet<u32> {
     }
     ids
 }
-async fn listeners(state: &AppState, table: &HashMap<u32, Process>) -> BTreeMap<u16, Value> {
+async fn listeners(
+    terminals: &TerminalService,
+    table: &HashMap<u32, Process>,
+) -> BTreeMap<u16, Value> {
     let mut sockets = BTreeMap::new();
-    let metadata = state.terminals.metadata_snapshot();
+    let metadata = terminals.metadata_snapshot();
     let terminals: HashMap<u32, _> = metadata["terminals"]
         .as_array()
         .into_iter()
@@ -105,9 +108,9 @@ async fn listeners(state: &AppState, table: &HashMap<u32, Process>) -> BTreeMap<
     }
     sockets
 }
-pub(crate) async fn scan(state: &AppState, input: &Value) -> Reply {
+pub(crate) async fn scan(terminals: &TerminalService, input: &Value) -> Reply {
     let table = process_table().await;
-    let sockets = listeners(state, &table).await;
+    let sockets = listeners(terminals, &table).await;
     let mut servers: BTreeMap<_, _> = sockets
         .iter()
         .filter(|(_, v)| !v["terminal"].is_null())
@@ -149,7 +152,7 @@ pub(crate) async fn scan(state: &AppState, input: &Value) -> Reply {
         json!({"servers":servers.into_values().collect::<Vec<_>>(),"scannedAt":timestamp(),"configuredUrlProbing":true}),
     )
 }
-pub(crate) async fn stop(state: &AppState, input: &Value) -> Reply {
+pub(crate) async fn stop(terminals: &TerminalService, input: &Value) -> Reply {
     let err = |s: &str| json!({"_tag":"PreviewStopLocalServerError","reason":s});
     if cfg!(windows) {
         return Err(err("unsupported"));
@@ -165,7 +168,7 @@ pub(crate) async fn stop(state: &AppState, input: &Value) -> Reply {
         .filter(|n| *n != 0)
         .ok_or_else(|| invalid("port", "Expected a positive port"))?;
     let table = process_table().await;
-    let sockets = listeners(state, &table).await;
+    let sockets = listeners(terminals, &table).await;
     if !sockets
         .get(&port)
         .is_some_and(|s| s["pid"] == pid && !s["terminal"].is_null())
