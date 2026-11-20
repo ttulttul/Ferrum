@@ -24,7 +24,7 @@ pub(super) fn wire(p: &Project) -> Value {
 pub async fn snapshot(State(s): State<Arc<AppState>>) -> Json<Value> {
     let store = s.store.read().await;
     Json(
-        json!({"projects":store.project_rows.values().collect::<Vec<_>>(),"updatedAt":iso(time::OffsetDateTime::now_utc())}),
+        json!({"projects":store.project_rows.values().map(crate::repository_identity::with_identity).collect::<Vec<_>>(),"updatedAt":iso(time::OffsetDateTime::now_utc())}),
     )
 }
 

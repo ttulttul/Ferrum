@@ -139,6 +139,7 @@ pub(super) fn shell(store: &Store, sequence: u64) -> Value {
         .values()
         .filter(|r| r["deletedAt"].is_null())
         .map(|row| {
+            let row = &crate::repository_identity::with_identity(row);
             let mut out = serde_json::Map::new();
             for k in [
                 "id",
@@ -232,14 +233,13 @@ pub(super) async fn thread_snapshot(
         return (StatusCode::NOT_FOUND,Json(json!({"_tag":"EnvironmentResourceNotFoundError","code":"not_found","reason":"thread_not_found","traceId":crate::trace_id(&h)}))).into_response();
     };
     if uri.path().ends_with("/transcript") {
-        return Json(json!({"threadId":thread.id,"title":thread.title,"updatedAt":thread.stored_row()["updatedAt"],"items":thread.messages}))
-            .into_response();
+        return Json(thread.transcript()).into_response();
     }
-    let mut out = json!({"snapshotSequence":*state.next_event_id.lock().await,"projection":thread.projection()});
+    let sequence = *state.next_event_id.lock().await;
     if uri.path().ends_with("/bounded") {
-        out["historyCursor"] = Value::Null;
-        out["hasMoreHistory"] = false.into();
-        out["latestLocalTurnOrdinal"] = Value::Null;
+        let mut out = thread.stream_snapshot(sequence, &json!({"acceptBoundedSnapshot":true}));
+        out.as_object_mut().expect("snapshot").shift_remove("kind");
+        return Json(out).into_response();
     }
-    Json(out).into_response()
+    Json(json!({"snapshotSequence":sequence,"projection":thread.projection()})).into_response()
 }

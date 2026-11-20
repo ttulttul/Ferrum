@@ -804,6 +804,55 @@ async fn run_call(
             }
         }
     }
+    if method == "subscribeWorktreeSetup" {
+        let mut setup = state
+            .worktree_setup
+            .subscribe(params["threadId"].as_str().unwrap_or_default());
+        while let Some(value) = setup.next().await {
+            send(json!([value])).await;
+        }
+        return Reply::Success(Value::Null);
+    }
+    if method == "orchestration.subscribeThread" {
+        // The reference streams the thread's domain events after its snapshot. Threads here
+        // keep no domain event log, so each change is sent as a fresh snapshot, which the
+        // client applies the same way (EnvironmentThreadState.applyItemLocked).
+        let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
+        let mut events = state.events.subscribe();
+        let snapshot = || async {
+            let sequence = *state.next_event_id.lock().await;
+            let store = state.store.read().await;
+            store
+                .threads
+                .get(&thread_id)
+                .map(|thread| thread.stream_snapshot(sequence, params))
+        };
+        let Some(mut last) = snapshot().await else {
+            return Reply::Failure(
+                json!({"_tag":"Fail","error":thread_projection_error(&params["threadId"])}),
+            );
+        };
+        let mut first = vec![last.clone()];
+        if params["requestCompletionMarker"] == true {
+            first.push(json!({"kind":"synchronized"}));
+        }
+        send(Value::Array(first)).await;
+        loop {
+            match events.recv().await {
+                // Provider output lines are not part of the projection.
+                Ok(event) if matches!(event.event, crate::Event::RunOutput { .. }) => continue,
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return Reply::Success(Value::Null),
+            }
+            let Some(next) = snapshot().await else {
+                continue;
+            };
+            if next["projection"] != last["projection"] {
+                send(json!([next.clone()])).await;
+                last = next;
+            }
+        }
+    }
     if method == "scheduledTasks.subscribe" {
         let mut events = state.scheduled_task_events.subscribe();
         send(json!([scheduled_tasks_snapshot(state).await])).await;
@@ -2541,7 +2590,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(json!({"candidates":[],"scannedAt":now}));
     }
     if method == "worktreeSetup.cancel" {
-        return Reply::Success(json!({"cancelled":false}));
+        let cancelled = state
+            .worktree_setup
+            .cancel(params["threadId"].as_str().unwrap_or_default());
+        return Reply::Success(json!({ "cancelled": cancelled }));
     }
     if matches!(
         method,
@@ -3091,6 +3143,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 .values()
                 .filter(|row| row["deletedAt"].is_null())
                 .map(|row| {
+                    let row = &crate::repository_identity::with_identity(row);
                     let mut out = serde_json::Map::new();
                     for key in [
                         "id",
@@ -3299,17 +3352,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"snapshotSequence":sequence,"threads":threads,"counts":counts.into_iter().map(|(project_id,count)|json!({"projectId":project_id,"count":count})).collect::<Vec<_>>()})
         }
         "orchestration.getThreadProjection" => {
-            let thread_id = params["threadId"].as_str().unwrap_or_default();
             let Some(thread) = thread(&params["threadId"]) else {
-                return Reply::Failure(json!({"_tag":"Fail","error":{
-                    "_tag":"OrchestrationV2GetThreadProjectionError",
-                    "threadId":thread_id,
-                    "message":format!("Failed to load orchestration V2 thread {thread_id}"),
-                    "cause":{"name":"OrchestratorProjectionError",
-                        "message":"Failed to load orchestration projection for thread ".to_owned()+thread_id+".",
-                        "cause":{"name":"ProjectionStoreThreadNotFoundError",
-                            "message":"No orchestration projection exists for thread ".to_owned()+thread_id+"."}}
-                }}));
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":thread_projection_error(&params["threadId"])}),
+                );
             };
             thread.projection()
         }
@@ -3558,14 +3604,6 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             }
             return Reply::Chunk(Value::Array(items));
         }
-        "orchestration.subscribeThread" => {
-            return Reply::Chunk(match thread(&params["threadId"]) {
-                Some(t) => {
-                    json!([{"kind":"snapshot","snapshotSequence":sequence,"projection":t.projection()},{"kind":"synchronized"}])
-                }
-                None => json!([]),
-            })
-        }
         "orchestration.subscribeCommandOutput" => {
             return Reply::Chunk(
                 json!([{"kind":"replace","text":"","truncated":false,"running":false}]),
@@ -3579,6 +3617,21 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         }
     };
     Reply::Success(result)
+}
+
+/// The reference's error for a thread with no projection, from getThreadProjection and
+/// subscribeThread alike.
+fn thread_projection_error(thread_id: &Value) -> Value {
+    let thread_id = thread_id.as_str().unwrap_or_default();
+    json!({
+        "_tag":"OrchestrationV2GetThreadProjectionError",
+        "threadId":thread_id,
+        "message":format!("Failed to load orchestration V2 thread {thread_id}"),
+        "cause":{"name":"OrchestratorProjectionError",
+            "message":format!("Failed to load orchestration projection for thread {thread_id}."),
+            "cause":{"name":"ProjectionStoreThreadNotFoundError",
+                "message":format!("No orchestration projection exists for thread {thread_id}.")}}
+    })
 }
 
 pub(crate) fn fold_project_rows_into_settings(
