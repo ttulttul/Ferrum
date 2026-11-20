@@ -78,3 +78,4 @@ jobs:
           python3 scripts/git_workflow_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/preview_provider_parity.py --original-command "$reference" --rust-command "$server" --browser-cache "$HOME/.cache/ms-playwright"
           python3 scripts/relay_parity.py --checkout "$GITHUB_WORKSPACE/reference" --rust "$server"
+          python3 scripts/relay_client_parity.py --original-command "$reference" --rust-command "$server"
