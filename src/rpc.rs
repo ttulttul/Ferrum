@@ -111,7 +111,7 @@ impl Reply {
         Self::Failure(json!({"_tag":"Die","defect":message}))
     }
 
-    fn frame(self, id: &str) -> Value {
+    fn frame(self, id: &Value) -> Value {
         let exit = match self {
             Self::Success(value) => json!({"_tag":"Success","value":value}),
             Self::Failure(reason) => json!({"_tag":"Failure","cause":[reason]}),
@@ -326,26 +326,89 @@ struct PendingCall {
     capacity: usize,
 }
 
+/// Effect RPC request ids are a string or a number, and every reply echoes the
+/// id exactly as the client sent it. Effect 4 clients, including the 0.1.10
+/// desktop and web apps, number their requests (`"id":0`). The key keeps the
+/// JSON type, so `0` and `"0"` are different requests, as they are in the
+/// reference server's `Map`.
+fn request_key(id: &Value) -> Option<String> {
+    matches!(id, Value::String(_) | Value::Number(_)).then(|| crate::wire_json::compact(id))
+}
+
+/// `${value}` in JavaScript, for the reference server's invalid-id defect.
+fn js_template_string(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::String(text) => text.clone(),
+        Value::Object(_) => "[object Object]".into(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Null => String::new(),
+                item => js_template_string(item),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        other => crate::wire_json::compact(other),
+    }
+}
+
+/// The client opts into frame parts with `frameParts` in the socket URL. Like
+/// the reference server's `splitLargeSocketFrames`, text frames whose UTF-8
+/// size may exceed one part go out as consecutive parts, so a slow link keeps
+/// delivering frames within the client's liveness timeout.
+pub(crate) const SOCKET_FRAME_PARTS_QUERY_PARAM: &str = "frameParts";
+const SOCKET_FRAME_PART_BYTES: usize = 48 * 1024;
+const SOCKET_FRAME_PART_PREFIX: char = '\u{1e}';
+
+/// Mirrors `splitSocketFrame` in packages/shared/src/socketFrameParts.ts. Every
+/// part but the last starts with a record separator.
+fn split_socket_frame(frame: &str, part_bytes: usize) -> Vec<String> {
+    // JavaScript measures `frame.length` in UTF-16 code units, each at most 3 UTF-8 bytes.
+    if frame.encode_utf16().count() * 3 <= part_bytes {
+        return vec![frame.to_owned()];
+    }
+    let prefix_bytes = SOCKET_FRAME_PART_PREFIX.len_utf8();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut bytes = prefix_bytes;
+    for (index, character) in frame.char_indices() {
+        let size = character.len_utf8();
+        if bytes + size > part_bytes {
+            parts.push(format!(
+                "{SOCKET_FRAME_PART_PREFIX}{}",
+                &frame[start..index]
+            ));
+            start = index;
+            bytes = prefix_bytes;
+        }
+        bytes += size;
+    }
+    parts.push(frame[start..].to_owned());
+    parts
+}
+
 pub async fn session(
     state: Arc<AppState>,
     mut socket: WebSocket,
     principal: crate::auth_service::Session,
     references: bool,
+    frame_parts: bool,
 ) {
     let principal = Arc::new(principal);
     state.auth.socket_presence(&principal.id, true);
     let invalidated = state.auth.invalidated(&principal);
     tokio::pin!(invalidated);
-    let mut calls = FuturesUnordered::<BoxFuture<'static, (String, Reply)>>::new();
+    let mut calls = FuturesUnordered::<BoxFuture<'static, (String, Value, Reply)>>::new();
     let mut pending = HashMap::<String, PendingCall>::new();
-    let (chunks, mut read_chunks) = mpsc::channel::<(String, Value)>(8);
+    let (chunks, mut read_chunks) = mpsc::channel::<(Value, Value)>(8);
     loop {
         let response = tokio::select! {
             biased;
             _ = &mut invalidated => break,
             Some((id, values)) = read_chunks.recv() => Reply::Chunk(values).frame(&id),
-            Some((id, reply)) = calls.next(), if !calls.is_empty() => {
-                pending.remove(&id);
+            Some((key, id, reply)) = calls.next(), if !calls.is_empty() => {
+                pending.remove(&key);
                 reply.frame(&id)
             }
             packet = socket.recv() => {
@@ -359,20 +422,26 @@ pub async fn session(
                 match request["_tag"].as_str() {
                     Some("Ping") => json!({"_tag":"Pong"}),
                     Some("Ack") => {
-                        if let Some(call) = request["requestId"].as_str().and_then(|id|pending.get(id)) {
+                        if let Some(call) = request_key(&request["requestId"]).and_then(|key|pending.get(&key)) {
                             if call.window.available_permits() < call.capacity { call.window.add_permits(1); }
                         }
                         continue
                     }
                     Some("Interrupt") => {
-                        if let Some(call) = request["requestId"].as_str().and_then(|id|pending.remove(id)) {
+                        if let Some(call) = request_key(&request["requestId"]).and_then(|key|pending.remove(&key)) {
                             let _ = call.interrupt.send(());
                         }
                         continue
                     }
                     Some("Request") => {
-                        let Some(id) = request["id"].as_str().map(str::to_owned) else { continue };
-                        if pending.contains_key(&id) { continue; }
+                        let id = request.get("id").cloned().unwrap_or(Value::Null);
+                        let Some(key) = request_key(&id) else {
+                            let shown = if request.get("id").is_some() { js_template_string(&id) } else { "undefined".into() };
+                            let defect = json!({"_tag":"Defect","defect":format!("Invalid request id: {shown}")});
+                            if send_frame(&mut socket, &defect, frame_parts).await.is_err() { break }
+                            continue
+                        };
+                        if pending.contains_key(&key) { continue; }
                         let method = request["tag"].as_str().unwrap_or("undefined").to_owned();
                         let capacity = match method.as_str() {
                             "terminal.observe"|"terminal.attach"|"orchestration.subscribeThread"|"orchestration.subscribeShell"|"subscribeServerConfig" => 8,
@@ -380,7 +449,7 @@ pub async fn session(
                         };
                         let window=Arc::new(Semaphore::new(capacity));
                         let (interrupt, rx) = oneshot::channel();
-                        pending.insert(id.clone(), PendingCall{interrupt,window:window.clone(),capacity});
+                        pending.insert(key.clone(), PendingCall{interrupt,window:window.clone(),capacity});
                         let state = state.clone();
                         let principal=principal.clone();
                         let chunks=chunks.clone();
@@ -389,7 +458,7 @@ pub async fn session(
                                 reply = run_call(&state,(&principal,references),&method,&request["payload"], &id, chunks, window) => reply,
                                 _ = rx => Reply::Failure(json!({"_tag":"Interrupt"})),
                             };
-                            (id, reply)
+                            (key, id, reply)
                         }.boxed());
                         continue
                     }
@@ -397,8 +466,7 @@ pub async fn session(
                 }
             }
         };
-        if socket
-            .send(Message::Text(crate::wire_json::compact(&response)))
+        if send_frame(&mut socket, &response, frame_parts)
             .await
             .is_err()
         {
@@ -408,14 +476,29 @@ pub async fn session(
     state.auth.socket_presence(&principal.id, false);
 }
 
+async fn send_frame(
+    socket: &mut WebSocket,
+    frame: &Value,
+    frame_parts: bool,
+) -> Result<(), axum::Error> {
+    let text = crate::wire_json::compact(frame);
+    if !frame_parts {
+        return socket.send(Message::Text(text)).await;
+    }
+    for part in split_socket_frame(&text, SOCKET_FRAME_PART_BYTES) {
+        socket.send(Message::Text(part)).await?;
+    }
+    Ok(())
+}
+
 // Subscribe before reading the initial snapshot so updates during the read are queued.
 async fn run_call(
     state: &Arc<AppState>,
     client: (&crate::auth_service::Session, bool),
     method: &str,
     params: &Value,
-    id: &str,
-    chunks: mpsc::Sender<(String, Value)>,
+    id: &Value,
+    chunks: mpsc::Sender<(Value, Value)>,
     window: Arc<Semaphore>,
 ) -> Reply {
     let (principal, references) = client;
@@ -689,7 +772,7 @@ async fn run_call(
     let send = |values| async {
         if let Ok(permit) = window.acquire().await {
             permit.forget();
-            let _ = chunks.send((id.to_owned(), values)).await;
+            let _ = chunks.send((id.clone(), values)).await;
         }
     };
     if method == "pullRequests.subscribeLinkedThreadRefreshes" {
@@ -2791,7 +2874,12 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(Value::Null);
     }
     if method == "pullRequests.subscribeRefreshes" {
-        let revision = (*state.pull_request_refresh.lock().await).max(3);
+        // `SubscriptionRef.changes(pullRequestRefreshes)` filtered to `revision > 0` in the
+        // reference PullRequestService: a server that has not refreshed yet sends nothing.
+        let revision = *state.pull_request_refresh.lock().await;
+        if revision == 0 {
+            return std::future::pending().await;
+        }
         return Reply::Chunk(json!([revision]));
     }
     if method == "subscribeProjectClones" {
@@ -2801,9 +2889,20 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         let environment = crate::environment_http::descriptor(axum::extract::State(state.clone()))
             .await
             .0;
-        return Reply::Chunk(
-            json!([{"version":1,"sequence":1,"type":"welcome","payload":{"environment":environment}}]),
-        );
+        // The reference server replays the welcome and ready events its startup published.
+        // The client's schema requires `cwd` and `projectName` on the welcome, and the
+        // first-run gate waits for it (serverRuntimeStartup.ts `resolveWelcomeBase`).
+        let cwd = std::env::current_dir().unwrap_or_else(|_| state.paths.base_dir.clone());
+        let cwd = cwd.to_string_lossy().into_owned();
+        let project_name = cwd
+            .split(['/', '\\'])
+            .rfind(|segment| !segment.is_empty())
+            .unwrap_or("project")
+            .to_owned();
+        return Reply::Chunk(json!([
+            {"version":1,"sequence":1,"type":"welcome","payload":{"environment":environment,"cwd":cwd,"projectName":project_name}},
+            {"version":1,"sequence":2,"type":"ready","payload":{"at":state.config_started_at,"environment":environment}}
+        ]));
     }
     if method == "subscribeResourceTelemetry" {
         return Reply::Chunk(json!([resource_snapshot()]));
@@ -3434,9 +3533,30 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"outcome":"released","sharedWithThreadIds":[]})
         }
         "orchestration.subscribeShell" => {
-            return Reply::Chunk(
-                json!([{"kind":"snapshot","snapshot":crate::environment_http::shell(&store,sequence)}]),
-            )
+            // As `subscribeOrchestrationV2Shell` in the reference ws.ts: a cursor at the
+            // head missed nothing and resumes without a snapshot; any other cursor gets an
+            // authoritative snapshot, since this server keeps no replayable shell events,
+            // unless the client offered to reload over HTTP instead. Clients that request
+            // it then get a `synchronized` marker, and the 0.1.10 client counts its shell
+            // as live only after that marker.
+            let after = params.get("afterSequence").filter(|value| !value.is_null());
+            let resumable = after.and_then(Value::as_u64) == Some(sequence);
+            if after.is_some() && !resumable && params["httpSnapshotFallback"] == true {
+                return Reply::Chunk(json!([{"kind":"snapshot-required"}]));
+            }
+            let mut items = Vec::new();
+            if !resumable {
+                items.push(json!({"kind":"snapshot","snapshot":crate::environment_http::shell(&store,sequence)}));
+            }
+            if params["requestCompletionMarker"] == true {
+                items.push(json!({"kind":"synchronized"}));
+            }
+            if items.is_empty() {
+                // Nothing to send until the client interrupts the subscription.
+                drop(store);
+                return std::future::pending().await;
+            }
+            return Reply::Chunk(Value::Array(items));
         }
         "orchestration.subscribeThread" => {
             return Reply::Chunk(match thread(&params["threadId"]) {
@@ -4086,6 +4206,53 @@ fn resolve_browse_path(params: &Value, partial: &str) -> PathBuf {
         expand_user_path(cwd).join(path)
     } else {
         PathBuf::from(partial)
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[test]
+    fn request_keys_keep_the_json_type_of_the_id() {
+        assert_eq!(request_key(&json!(0)).as_deref(), Some("0"));
+        assert_eq!(request_key(&json!("0")).as_deref(), Some("\"0\""));
+        assert_ne!(request_key(&json!(0)), request_key(&json!("0")));
+        for invalid in [Value::Null, json!(true), json!({}), json!([1])] {
+            assert_eq!(request_key(&invalid), None);
+        }
+    }
+
+    #[test]
+    fn invalid_ids_are_described_like_a_javascript_template() {
+        assert_eq!(js_template_string(&Value::Null), "null");
+        assert_eq!(js_template_string(&json!(false)), "false");
+        assert_eq!(js_template_string(&json!({"a":1})), "[object Object]");
+        assert_eq!(js_template_string(&json!([1, null, "x"])), "1,,x");
+    }
+
+    #[test]
+    fn frames_split_only_past_the_part_budget() {
+        // The fast path: 21 UTF-16 units can never pass 63 bytes.
+        let small = "é".repeat(21);
+        assert_eq!(split_socket_frame(&small, 64), vec![small.clone()]);
+        // Under the UTF-8 budget even though the fast path cannot tell.
+        let fits = "a".repeat(63);
+        assert_eq!(split_socket_frame(&fits, 64), vec![fits.clone()]);
+        let frame = format!("{{\"text\":\"{}\"}}", "é😀x".repeat(50));
+        let parts = split_socket_frame(&frame, 64);
+        assert!(parts.len() > 1);
+        let (last, marked) = parts.split_last().unwrap();
+        assert!(!last.starts_with(SOCKET_FRAME_PART_PREFIX));
+        let mut joined = String::new();
+        for part in marked {
+            assert!(part.starts_with(SOCKET_FRAME_PART_PREFIX));
+            assert!(part.len() <= 64, "{} bytes", part.len());
+            joined.push_str(&part[SOCKET_FRAME_PART_PREFIX.len_utf8()..]);
+        }
+        assert!(last.len() <= 64);
+        joined.push_str(last);
+        assert_eq!(joined, frame);
     }
 }
 

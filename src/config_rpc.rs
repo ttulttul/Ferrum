@@ -152,17 +152,30 @@ pub(crate) async fn snapshot(
     ] {
         config[key] = true.into();
     }
-    if !state
-        .paths
-        .base_dir
-        .ancestors()
-        .any(|p| p.join(".git").exists())
-    {
+    if !inside_git_work_tree(&state.paths.base_dir) {
         config["scratchWorkspaceRoot"] = json!(state.paths.base_dir.join("scratch"));
     }
     config["newProjectsRoot"] = json!(state.paths.base_dir.join("projects"));
     config["serverTime"] = json!(iso(now()));
     Ok(config)
+}
+
+/// Scratch folders inside a checkout would inherit its git status, so the
+/// reference server offers them only outside one. It asks git, as
+/// `GitVcsDriver.detectRepository` does: a missing git, a non-zero exit (such
+/// as a repository git refuses for its ownership) or any answer but `true`
+/// means the base directory is not in a work tree.
+fn inside_git_work_tree(dir: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        })
 }
 
 fn revision(path: &Path) -> Option<(SystemTime, u64)> {
@@ -178,6 +191,38 @@ pub(crate) struct Subscription {
     reload_at: Option<tokio::time::Instant>,
     timer: tokio::time::Interval,
     provider_event: Option<Value>,
+    initial_events: std::collections::VecDeque<Value>,
+}
+
+/// Events the reference server sends right after the snapshot to a client that
+/// opted in. Its theme and usage-limit-source services replay their current
+/// value first. This server publishes neither, so it answers only when that
+/// value is known to be empty: no theme files and no configured sources.
+fn initial_events(
+    state: &AppState,
+    config: &Value,
+    options: &Value,
+) -> std::collections::VecDeque<Value> {
+    let mut events = std::collections::VecDeque::new();
+    let no_sources = config["settings"]["usageLimitSources"]
+        .as_object()
+        .is_none_or(|sources| sources.is_empty());
+    if options["usageLimitSources"] == true && no_sources {
+        events.push_back(
+            json!({"version":1,"type":"usageLimitSourcesUpdated","payload":{"sources":[]}}),
+        );
+    }
+    let no_theme_files = std::fs::read_dir(&state.paths.themes).map_or(true, |entries| {
+        !entries
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+    });
+    if options["environmentThemes"] == true && no_theme_files {
+        events.push_back(
+            json!({"version":1,"type":"environmentThemesUpdated","payload":{"themes":[]}}),
+        );
+    }
+    events
 }
 impl Subscription {
     pub async fn open(
@@ -189,7 +234,9 @@ impl Subscription {
         let settings_file = revision(&state.paths.settings);
         let bindings_file = revision(&state.paths.keybindings);
         let config = snapshot(state, references, options).await?;
+        let initial_events = initial_events(state, &config, options);
         Ok(Self {
+            initial_events,
             config,
             changes,
             settings_file,
@@ -206,6 +253,9 @@ impl Subscription {
         references: bool,
         options: &Value,
     ) -> Result<Value, Value> {
+        if let Some(event) = self.initial_events.pop_front() {
+            return Ok(event);
+        }
         loop {
             if let Some(event) = self.provider_event.take() {
                 return Ok(event);

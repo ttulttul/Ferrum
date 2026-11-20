@@ -1292,6 +1292,10 @@ async fn websocket(State(state): State<Arc<AppState>>, request: Request) -> Resp
         .clone()
         .find(|(k, _)| k == "clientCapabilities")
         .is_some_and(|(_, v)| v.split(',').any(|c| c == "settingsSecretReferences"));
+    // The reference server checks only that the parameter is present.
+    let frame_parts = query
+        .clone()
+        .any(|(key, _)| key == rpc::SOCKET_FRAME_PARTS_QUERY_PARAM);
     let compatible = query
         .clone()
         .find(|(key, _)| key == "orchestrationProtocol")
@@ -1317,7 +1321,9 @@ async fn websocket(State(state): State<Arc<AppState>>, request: Request) -> Resp
     };
     match WebSocketUpgrade::from_request(request, &state).await {
         Ok(upgrade) => upgrade
-            .on_upgrade(move |socket| rpc::session(state, socket, principal, references))
+            .on_upgrade(move |socket| {
+                rpc::session(state, socket, principal, references, frame_parts)
+            })
             .into_response(),
         Err(rejection) => rejection.into_response(),
     }
