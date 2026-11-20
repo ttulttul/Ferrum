@@ -4,6 +4,7 @@
 use serde_json::{json, Value};
 
 /// How one call ends, or one batch of stream values.
+#[derive(Debug)]
 pub(crate) enum Reply {
     Success(Value),
     Failure(Value),

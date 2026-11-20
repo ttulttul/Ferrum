@@ -1,4 +1,4 @@
-mod access;
+pub(crate) mod access;
 mod connect;
 #[cfg(feature = "native")]
 mod external_pairing;

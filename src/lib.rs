@@ -47,6 +47,7 @@ mod rpc_protocol;
 pub mod runtime;
 mod server_config;
 mod settings;
+mod subscription;
 mod wire_json;
 #[cfg(feature = "native")]
 pub use settings::policy::ManagedPolicyFileError;
