@@ -108,7 +108,7 @@ pub(crate) fn shell(store: &Store, sequence: u64) -> Value {
         .filter(|r| r["deletedAt"].is_null())
         .map(|row| {
             // Native resolves the identity from the workspace's git remotes; a
-            // hosted control plane has no local workspace and keeps the stored value.
+            // build without a local workspace keeps the stored value.
             #[cfg(feature = "native")]
             let row = &crate::repository_identity::with_identity(row);
             let mut out = serde_json::Map::new();

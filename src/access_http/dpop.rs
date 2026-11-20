@@ -42,7 +42,7 @@ pub(crate) async fn contextualize(request: Request, next: Next) -> Response {
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|p| p.0.ip().to_canonical());
-    // Behind Cloudflare the peer is the edge; the client address is CF-Connecting-IP.
+    // Without a socket peer, the client address comes from the CF-Connecting-IP header.
     #[cfg(not(feature = "native"))]
     let peer = header(h, "cf-connecting-ip").and_then(|ip| ip.parse::<std::net::IpAddr>().ok());
     let client = derive_client(h, peer);

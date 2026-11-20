@@ -2,7 +2,7 @@
 name = "t3-environment-worker"
 version = "0.1.0"
 edition = "2021"
-description = "T3 Code control plane in a Cloudflare Durable Object (spike)"
+description = "WebAssembly entry point for the T3 Code control plane"
 license = "MIT"
 publish = false
 

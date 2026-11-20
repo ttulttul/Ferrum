@@ -1,4 +1,4 @@
-//! Durable Object SQLite storage for the control plane: the orchestration
+//! SQL storage for the control plane: the orchestration
 //! event log, a small key/value table (environment id) and the state
 //! documents (auth records, keybindings) behind `DocumentStore`.
 use serde::Deserialize;
@@ -84,8 +84,8 @@ impl EventLog for SqlLog {
 /// per-document counter. Bodies are UTF-8 (the documents are JSON).
 pub struct SqlDocuments(pub SqlStorage);
 
-// SAFETY: a Durable Object runs on one thread of a single-threaded wasm
-// isolate, so the storage handle is never shared across threads.
+// SAFETY: this build runs on one thread of a single-threaded wasm
+// runtime, so the storage handle is never shared across threads.
 unsafe impl Send for SqlDocuments {}
 unsafe impl Sync for SqlDocuments {}
 
@@ -154,7 +154,7 @@ impl DocumentStore for SqlDocuments {
     }
 }
 
-/// Moves the auth records the spike kept in `kv` into their document, once.
+/// Moves auth records kept in `kv` by earlier versions into their document, once.
 pub fn migrate_auth_records(
     sql: &SqlStorage,
     documents: &SqlDocuments,

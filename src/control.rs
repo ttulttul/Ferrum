@@ -1,4 +1,4 @@
-//! The control plane: what a hosted environment runs without a workspace.
+//! The control plane: what the server runs without a local workspace.
 //!
 //! It holds the same [`ControlState`] as the native server (auth, the
 //! orchestration event log and its in-memory store, state documents) and
@@ -10,8 +10,8 @@
 //! Unlike the native socket loop (`rpc::session`), the RPC handler here is
 //! message driven: [`ControlPlane::on_message`] takes one text frame and
 //! returns the frames to send. Open streams are recorded in a serializable
-//! [`Connection`], so a Durable Object can keep it as a WebSocket attachment
-//! and hibernate between messages. Pushing later stream values (for example
+//! [`Connection`], so a host can keep it with the socket and suspend
+//! between messages. Pushing later stream values (for example
 //! store changes) goes through [`ControlState::commit_now`] and the host's list of
 //! connections; this slice does not push any yet.
 //!
@@ -42,9 +42,9 @@ use std::{
     sync::Arc,
 };
 
-/// Where a hosted environment's workspace lives inside the `t3-agentd` container.
+/// Where the workspace lives on the `t3-agentd` side.
 pub const WORKSPACE_ROOT: &str = "/workspace";
-/// Where the hosted environment's state documents live, as the native
+/// Where the control plane's state documents live, as the native
 /// server's `userdata` directory (auth records, keybindings).
 pub const STATE_DIR: &str = "/home/t3/.t3/userdata";
 
@@ -424,7 +424,7 @@ impl ControlPlane {
     }
 
     /// The `subscribeServerConfig` snapshot. Host facts describe the
-    /// workspace container; settings are the defaults until settings move into
+    /// workspace process; settings are the defaults until settings move into
     /// the control plane's storage.
     fn config_snapshot(&self, options: &Value) -> Value {
         let settings = default_settings();

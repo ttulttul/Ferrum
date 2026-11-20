@@ -2,8 +2,8 @@
 //! the log at start-up, and each commit appends one record before the store
 //! applies it.
 //!
-//! The native server keeps an NDJSON file. The workers control plane keeps the
-//! log in Durable Object SQLite storage (see `workers/src/storage.rs`). Tests
+//! The native server keeps an NDJSON file. The WebAssembly build keeps the
+//! log in SQL storage (see `workers/src/storage.rs`). Tests
 //! and throwaway environments can use [`MemoryLog`].
 use crate::ServerEvent;
 

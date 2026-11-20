@@ -3,7 +3,7 @@
 //! Shared modules read the time and draw random bytes through these traits,
 //! never through `SystemTime`, `Instant`, `OsRng` or `Uuid::new_v4` directly.
 //! On wasm32-unknown-unknown `SystemTime::now` and `Instant::now` compile but
-//! panic, and a hosted control plane may want to substitute a deterministic
+//! panic, and other builds may want to substitute a deterministic
 //! source. The process-wide default ([`SystemClock`], [`SystemRandom`]) works
 //! on both builds. [`install`] replaces it once at start-up, and [`scoped`]
 //! overrides it on the current thread, which is how tests pin the time.

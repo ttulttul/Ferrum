@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Compare the pinned client's initial sync against the native Rust server and
-the Durable Object control plane served by `wrangler dev`.
+the WebAssembly build served locally by `wrangler dev`.
 
 The native server is the reference here ("original" in the step comparison);
 the workers build must answer every step the same way. Only the empty
-environment is compared: the hosted control plane has no local workspace yet
-(project.create needs a workspace plane, step 3 of the Phase 1 plan).
+environment is compared: the WebAssembly build has no local workspace yet
+(project.create needs a workspace).
 
   python3 scripts/workers_initial_sync_parity.py --rust-command target/debug/t3code-server \\
       --reference-root reference --wrangler "npx --yes wrangler@4.166.0"
@@ -33,7 +33,7 @@ from parity_harness import free_port, managed_server, session_cookie  # noqa: E4
 @contextlib.contextmanager
 def wrangler_dev(command, port, credential, log):
     # --var keeps the per-run credential out of wrangler.toml; it only reaches
-    # the local workerd process.
+    # the local development server.
     argv = shlex.split(command) + ["dev", "--port", str(port), "--ip", "127.0.0.1",
                                    "--var", f"T3_BOOTSTRAP_CREDENTIAL:{credential}"]
     process = subprocess.Popen(argv, cwd=ROOT / "workers", stdout=log, stderr=subprocess.STDOUT,
@@ -79,8 +79,8 @@ def main():
         try:
             native = managed_server(stack, shlex.split(args.rust_command), root / "native", credential, signing_key)
             url = stack.enter_context(wrangler_dev(args.wrangler, free_port(), credential, log))
-            hosted = (url, session_cookie(url, credential))
-            outcomes = {"original": run_client(args, *native), "rust": run_client(args, *hosted)}
+            wasm = (url, session_cookie(url, credential))
+            outcomes = {"original": run_client(args, *native), "rust": run_client(args, *wasm)}
         except Exception:
             log.flush()
             print(log_path.read_text(errors="replace")[-6000:], file=sys.stderr)
