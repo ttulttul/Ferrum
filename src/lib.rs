@@ -19,6 +19,7 @@ mod contracts;
 pub mod control;
 pub mod control_state;
 pub mod cors;
+mod dispatch;
 mod dpop_proof;
 pub mod environment;
 #[cfg(feature = "native")]

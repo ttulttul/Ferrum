@@ -61,12 +61,30 @@ pub struct AppState {
     pub(crate) runtime: Arc<crate::runtime::TokioRuntime>,
 }
 impl AppState {
-    /// The programs the workspace's git workflows run, as configured now.
-    pub(crate) async fn git_tools(&self) -> crate::workspace::GitTools {
-        crate::workspace::GitTools {
-            gh: self.issues.lock().await.gh.clone(),
-            text_generation: self.provider_command.clone(),
+    /// The settings workspace method `method` takes, as configured now. Only
+    /// the fields that method reads are filled in; reading them costs a
+    /// settings load or a lock.
+    pub(crate) async fn workspace_settings(
+        &self,
+        method: &str,
+    ) -> crate::dispatch::WorkspaceSettings {
+        let mut settings = crate::dispatch::WorkspaceSettings {
+            automatic_git_fetch: true,
+            ..Default::default()
+        };
+        if method.starts_with("git.") {
+            settings.git = crate::workspace::GitTools {
+                gh: self.issues.lock().await.gh.clone(),
+                text_generation: self.provider_command.clone(),
+            };
         }
+        if matches!(method, "vcs.refreshStatus" | "subscribeVcsStatus") {
+            // `VcsAutomaticFetchInterval`: a zero interval turns off the fetch a status read starts.
+            settings.automatic_git_fetch = self.settings.internal().map_or(true, |settings| {
+                settings["automaticGitFetchInterval"].as_f64() != Some(0.0)
+            });
+        }
+        settings
     }
 
     pub async fn new(
