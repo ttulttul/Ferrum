@@ -20,7 +20,8 @@ pub struct Settings {
 
 struct LastWrite {
     settings: Value,
-    at: std::time::Instant,
+    /// Platform monotonic milliseconds at the write.
+    at: u64,
     revision: Option<(std::time::SystemTime, u64)>,
 }
 fn revision(path: &Path) -> Option<(std::time::SystemTime, u64)> {
@@ -298,7 +299,7 @@ impl Settings {
         let mut guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         // The upstream watcher debounces a writer's own filesystem events for 100 ms.
         if let Some(written) = guard.as_ref() {
-            if written.at.elapsed() < std::time::Duration::from_millis(100)
+            if crate::platform::monotonic_ms().saturating_sub(written.at) < 100
                 && written.revision == revision(&self.paths.settings)
             {
                 return self.effective(&written.settings);
@@ -385,7 +386,7 @@ impl Settings {
             .map_err(|e| self.io_failure(&e, "read-secret"))?;
         *guard = Some(LastWrite {
             settings: prepared.disk,
-            at: std::time::Instant::now(),
+            at: crate::platform::monotonic_ms(),
             revision: revision(&self.paths.settings),
         });
         let view = secrets::redact(&effective, references);

@@ -4,7 +4,6 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use time::OffsetDateTime;
 
 pub(crate) fn hash(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes()))
@@ -71,7 +70,7 @@ pub(crate) fn verify_proof(
             return Err("token_mismatch");
         }
     }
-    if OffsetDateTime::now_utc().unix_timestamp().abs_diff(iat) > 300 {
+    if (crate::platform::now_secs() as i64).abs_diff(iat) > 300 {
         return Err("time_window");
     }
     Ok(CheckedProof {

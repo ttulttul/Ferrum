@@ -39,7 +39,35 @@ pub struct T3EnvironmentDO {
 }
 
 fn now_ms() -> f64 {
-    js_sys::Date::now()
+    t3code_server::platform::now_ms() as f64
+}
+
+/// The Workers clock: `Date.now()`, which the runtime advances only across
+/// I/O (Spectre mitigation), held at its highest reading for the monotonic one.
+struct WorkersClock {
+    highest: std::sync::atomic::AtomicU64,
+}
+
+impl t3code_server::platform::Clock for WorkersClock {
+    fn now_ms(&self) -> i64 {
+        js_sys::Date::now() as i64
+    }
+
+    fn monotonic_ms(&self) -> u64 {
+        let now = self.now_ms().max(0) as u64;
+        self.highest
+            .fetch_max(now, std::sync::atomic::Ordering::Relaxed)
+            .max(now)
+    }
+}
+
+/// Install the Workers clock (`crypto.getRandomValues` stays the random
+/// source) once per isolate; later Durable Object instances share it.
+fn install_platform() {
+    let _ = t3code_server::platform::install(t3code_server::platform::Platform {
+        clock: Arc::new(WorkersClock { highest: 0.into() }),
+        random: Arc::new(t3code_server::platform::SystemRandom),
+    });
 }
 
 /// Wasm linear memory only grows, so its size is this isolate's peak.
@@ -50,13 +78,14 @@ fn linear_memory_bytes() -> usize {
 impl DurableObject for T3EnvironmentDO {
     fn new(state: State, env: Env) -> Self {
         console_error_panic_hook::set_once();
+        install_platform();
         let started = now_ms();
         let sql = state.storage().sql();
         storage::migrate(&sql).expect("create control plane tables");
         let environment_id = match storage::get(&sql, "environment-id").expect("read kv") {
             Some(id) => id,
             None => {
-                let id = uuid::Uuid::new_v4().to_string();
+                let id = t3code_server::platform::uuid_v4().to_string();
                 storage::put(&sql, "environment-id", &id).expect("write kv");
                 id
             }

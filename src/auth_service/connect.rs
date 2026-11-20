@@ -107,12 +107,12 @@ impl AuthService {
             let expires = at + if wait { 600_000 } else { 120_000 };
             let alphabet = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
             let code: String = (0..12)
-                .map(|_| alphabet[OsRng.gen_range(0..alphabet.len())] as char)
+                .map(|_| alphabet[crate::platform::rng().gen_range(0..alphabet.len())] as char)
                 .collect();
             r.links.insert(
                 key(&code),
                 Grant {
-                    id: Uuid::new_v4().to_string(),
+                    id: crate::platform::uuid_v4().to_string(),
                     created: at,
                     label: Some("T3 Connect".into()),
                     requested_client: None,

@@ -4,10 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// Seconds since the epoch. Uses `time` rather than `SystemTime`, which
-/// panics on wasm32-unknown-unknown (the workers build reads `Date.now()`).
+/// Seconds since the epoch, from the platform clock.
 pub(crate) fn now() -> u64 {
-    time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64
+    crate::platform::now_secs()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
