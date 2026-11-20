@@ -29,7 +29,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y libfaketime
           npm install --global pnpm@12.14.0
-          pnpm --dir reference --filter t3 --filter t3code-relay install --frozen-lockfile
+          pnpm --dir reference --filter t3 --filter t3code-relay --filter @t3tools/client-runtime install --frozen-lockfile
           pnpm --dir reference --filter t3 exec playwright-core install --with-deps chromium
           # Permit the installed test browser to start its user-namespace sandbox on Ubuntu.
           shell_path=$(find "$HOME/.cache/ms-playwright" -type f -name chrome-headless-shell -print -quit)
@@ -61,6 +61,7 @@ jobs:
         run: |
           reference="node $GITHUB_WORKSPACE/reference/apps/server/src/bin.ts"
           server="$GITHUB_WORKSPACE/target/debug/t3code-server"
+          python3 scripts/client_initial_sync_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
           python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$reference" --rust-command "$server"
           python3 scripts/rpc_edge_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/orchestration_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
