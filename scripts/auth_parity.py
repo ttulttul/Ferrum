@@ -5,10 +5,12 @@ import base64
 from contextlib import ExitStack
 import hashlib
 import json
+import os
 from pathlib import Path
 import secrets
 import shlex
 import sqlite3
+import subprocess
 import tempfile
 import time
 import uuid
@@ -44,6 +46,66 @@ def seed_link(root, rust):
                 (id,credential,method,scopes,subject,label,created_at,expires_at)
                 values (?,?,?,?,?,?,?,?)""",(FIXED_LINK,FIXED_CODE,"one-time-token",json.dumps(FIXED_SCOPES),
                 "one-time-token",FIXED_LABEL,"2025-01-01T00:00:00.000Z","2100-01-01T00:00:00.000Z"))
+
+
+def reference_cli(cli, root, *args):
+    """Run the reference `t3` CLI against a home the way the desktop's SSH scripts do."""
+    env = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "LC_ALL", "SYSTEMROOT")}
+    return subprocess.run([*cli, *args, "--base-dir", str(root)], env={**env, "HOME": str(root), "T3CODE_HOME": str(root)},
+                          cwd=root, check=True, capture_output=True, text=True, timeout=120).stdout
+
+
+def migrate_reference_store(cli, root):
+    # A home the desktop pairs with over SSH already holds the reference database:
+    # `t3 auth pairing create` refuses to migrate it while another server owns the home.
+    reference_cli(cli, root, "auth", "pairing", "list", "--json")
+
+
+def exercise_cli_pairing(url, cli, root):
+    """The desktop's SSH pairing: the reference CLI issues a one-time token out of process
+    (REMOTE_PAIRING_SCRIPT in packages/ssh/src/tunnel.ts) and the desktop exchanges it for
+    a bearer session (bootstrapRemoteBearerSession) on whichever server owns the home."""
+    observations = {}
+    issued_link = json.loads(reference_cli(cli, root, "auth", "pairing", "create", "--json"))
+    credential = issued_link["credential"]
+    def exchange(token, scope=None):
+        return harness.http(url, "POST", "/oauth/token", urlencode({
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "subject_token": token,
+            "subject_token_type": "urn:t3:params:oauth:token-type:environment-bootstrap",
+            "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            **({"scope": scope} if scope else {}),
+        }).encode(), {"content-type": "application/x-www-form-urlencoded", "traceparent": harness.TRACE})
+    status, _, body = exchange(credential)
+    assert status == 200, (status, body)
+    issued = json.loads(body)
+    access = issued.pop("access_token")
+    assert 0 < issued.pop("expires_in") <= 30 * 86400
+    observations["CLI pairing token bearer exchange"] = status, issued
+    status, _, body = harness.http(url, "GET", "/api/auth/session",
+                                   headers={"authorization": "Bearer " + access, "traceparent": harness.TRACE})
+    state = json.loads(body)
+    assert state.pop("expiresAt")
+    state["auth"].pop("sessionCookieName")  # derived from each server's port
+    observations["CLI pairing bearer session"] = status, state
+    status, _, body = harness.http(url, "POST", "/api/auth/websocket-ticket/rpc",
+                                   headers={"authorization": "Bearer " + access, "traceparent": harness.TRACE})
+    observations["CLI pairing bearer ticket"] = status, sorted(json.loads(body))
+    observations["CLI pairing token is single use"] = exchange(credential)[::2]
+    expired = json.loads(reference_cli(cli, root, "auth", "pairing", "create", "--ttl", "1s", "--json"))["credential"]
+    time.sleep(1.5)
+    observations["expired CLI pairing token"] = exchange(expired)[::2]
+    scoped = json.loads(reference_cli(cli, root, "auth", "pairing", "create",
+                                      "--scope", "orchestration:read", "--json"))["credential"]
+    observations["CLI pairing token without the requested scope"] = exchange(scoped, "settings:write")[::2]
+    status, _, body = exchange(scoped, "orchestration:read settings:write")
+    narrowed = json.loads(body)
+    narrowed.pop("access_token", None)
+    narrowed.pop("expires_in", None)
+    observations["CLI pairing token narrows to granted scopes"] = status, narrowed
+    active = [link["id"] for link in json.loads(reference_cli(cli, root, "auth", "pairing", "list", "--json"))]
+    observations["reference CLI no longer lists the spent token"] = issued_link["id"] not in active
+    return observations
 
 
 def exercise(stack, url, owner_cookie, relay_key):
@@ -289,12 +351,16 @@ def main():
             root=Path(tmp)/str(i)
             (root/"userdata").mkdir(parents=True)
             (root/"userdata"/"settings.json").write_text('{"requireConnectDeviceApproval":true}')
+            cli = shlex.split(args.original_command)
             if i==1:
                 seed_link(root,True)
+                migrate_reference_store(cli, root)
             url, cookie = harness.managed_server(stack, shlex.split(cmd), root, seed, signing_key)
             if i==0:
                 seed_link(root,False)
-            outputs.append(exercise(stack, url, cookie, relay_key))
+            observations = exercise_cli_pairing(url, cli, root)
+            observations.update(exercise(stack, url, cookie, relay_key))
+            outputs.append(observations)
         failures = 0
         for name, original in outputs[0].items():
             rust = outputs[1][name]

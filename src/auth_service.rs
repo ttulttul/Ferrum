@@ -1,5 +1,6 @@
 mod access;
 mod connect;
+mod external_pairing;
 pub(crate) mod permissions;
 pub(crate) mod storage;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -10,7 +11,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use storage::Storage;
@@ -159,6 +160,9 @@ pub struct AuthService {
     desktop: bool,
     changes: Arc<access::Subscribers>,
     invalidations: tokio::sync::watch::Sender<()>,
+    /// The TypeScript `statev2.sqlite` beside our own state, where `t3 auth pairing create`
+    /// (the desktop's SSH pairing step) writes one-time links.
+    external_pairing: Option<PathBuf>,
 }
 impl Default for AuthService {
     fn default() -> Self {
@@ -182,6 +186,7 @@ impl AuthService {
             desktop: true,
             changes: Arc::default(),
             invalidations: tokio::sync::watch::channel(()).0,
+            external_pairing: None,
         }
     }
     pub fn with_port(mut self, port: u16) -> Self {
@@ -194,6 +199,7 @@ impl AuthService {
     }
     pub fn open(mut self, dir: &Path) -> anyhow::Result<Self> {
         self.records = Arc::new(Storage::open(&dir.join("environment-auth.json"))?);
+        self.external_pairing = Some(dir.join("statev2.sqlite"));
         Ok(self)
     }
     pub(crate) fn desktop(&self) -> bool {
@@ -286,17 +292,28 @@ impl AuthService {
         let owner = !credential.is_empty()
             && self.bootstrap_expires > at
             && key(&self.bootstrap) == key(credential);
+        let mut requested = requested;
         let result = self.update(|records| {
             let mut connect = false;
             let mut client = crate::access_http::client_metadata();
             let mut permissions = if owner {
                 STANDARD.iter().map(|s| s.to_string()).collect()
             } else {
-                let grant = records
-                    .links
-                    .remove(&key(&credential.to_ascii_uppercase()))
-                    .filter(|g| g.expires > at && g.purpose.is_none() && g.access.is_none())
-                    .ok_or("invalid_credential")?;
+                let grant = match records.links.remove(&key(&credential.to_ascii_uppercase())) {
+                    Some(grant) => Some(grant)
+                        .filter(|g| g.expires > at && g.purpose.is_none() && g.access.is_none())
+                        .ok_or("invalid_credential")?,
+                    None => {
+                        let grant =
+                            self.consume_external_pairing(credential, requested.as_deref(), at)?;
+                        // The TypeScript exchange grants the overlap of the requested scopes.
+                        if let Some(r) = requested.as_mut() {
+                            let mut seen = std::collections::HashSet::new();
+                            r.retain(|s| grant.scopes.contains(s) && seen.insert(s.clone()));
+                        }
+                        grant
+                    }
+                };
                 if let Some(label) = &grant.label {
                     let mut labeled = json!({"label":label});
                     labeled
@@ -369,6 +386,40 @@ impl AuthService {
             self.invalidations.send_replace(());
         }
         result
+    }
+    /// Spends a link that `t3 auth pairing create` wrote into the TypeScript store, which is
+    /// how the desktop pairs over SSH. Unknown, spent, expired or revoked links all read as
+    /// `invalid_credential`, and a link that grants none of the requested scopes as
+    /// `scope_not_granted` (unspent), as they do in the TypeScript server.
+    fn consume_external_pairing(
+        &self,
+        credential: &str,
+        requested: Option<&[String]>,
+        at: i64,
+    ) -> Result<Grant, &'static str> {
+        let Some(db) = self.external_pairing.as_deref() else {
+            return Err("invalid_credential");
+        };
+        match external_pairing::consume(db, credential, requested, &iso(at)) {
+            Ok(external_pairing::Outcome::Spent(grant)) => Ok(Grant {
+                created: at,
+                label: grant.label,
+                requested_client: None,
+                id: grant.id,
+                scopes: grant.scopes,
+                expires: at,
+                purpose: None,
+                access: None,
+                binding: None,
+                pending_code: None,
+            }),
+            Ok(external_pairing::Outcome::NotFound) => Err("invalid_credential"),
+            Ok(external_pairing::Outcome::ScopeNotGranted) => Err("scope_not_granted"),
+            Err(error) => {
+                tracing::warn!(%error, "could not read pairing links from statev2.sqlite");
+                Err("internal_error")
+            }
+        }
     }
     pub fn consume_approval_code(
         &self,

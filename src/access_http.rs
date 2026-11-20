@@ -116,7 +116,7 @@ fn auth_failure(h: &HeaderMap, e: &str) -> Response {
         return (StatusCode::FORBIDDEN,Json(json!({"_tag":"EnvironmentConnectApprovalPendingError","code":e,"traceId":trace_id(h)}))).into_response();
     }
     let (status, tag, code) = match e {
-        "invalid_scope" => (
+        "invalid_scope" | "scope_not_granted" => (
             StatusCode::BAD_REQUEST,
             "EnvironmentRequestInvalidError",
             "invalid_request",
