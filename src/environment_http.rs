@@ -129,14 +129,6 @@ pub(super) async fn descriptor(State(s): State<Arc<AppState>>) -> Json<Value> {
         json!({"environmentId":s.environment_id,"label":label,"platform":{"os":os,"arch":arch,"machine":"desktop"},"serverVersion":"0.1.10","orchestrationProtocolVersion":2,"databaseMigration":98,"capabilities":capabilities}),
     )
 }
-pub(super) fn no_assets() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [("content-type", "text/plain")],
-        "No static directory configured and no dev URL set.",
-    )
-        .into_response()
-}
 fn valid_protocol(h: &HeaderMap) -> bool {
     h.get("x-t3-orchestration-protocol")
         .is_some_and(|v| v == "2")

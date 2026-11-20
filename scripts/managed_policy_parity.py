@@ -10,6 +10,7 @@ import secrets
 import shlex
 import subprocess
 import tempfile
+import time
 
 from websockets.sync.client import connect
 
@@ -71,6 +72,20 @@ def exercise(prefix, root, policy_path, seed, signing):
         assert json.loads(observations["sparse settings"])["defaultAutoPull"] is True
         assert post("managed pairing","/api/auth/pairing-token",{})==403
         assert post("managed Connect","/api/connect/preferences",{"publishAgentActivity":True})==403
+        # server-runtime.json: same keys in the same order, and the same loaded
+        # policy (source, organization and document fingerprint) byte for byte.
+        record_path=state/"server-runtime.json"
+        deadline=time.monotonic()+10
+        while not record_path.exists() and time.monotonic()<deadline:
+            time.sleep(0.05)
+        raw=record_path.read_text()
+        record=json.loads(raw)
+        observations["runtime record keys"]=list(record)
+        observations["runtime record host and origin"]=(record.get("host"),record["origin"].replace(str(record["port"]),"PORT"))
+        observations["runtime record serverVersion"]=record["serverVersion"]
+        policy_field=raw.split('"managedPolicy":',1)[1]
+        _,end=json.JSONDecoder().raw_decode(policy_field)
+        observations["runtime record managedPolicy"]=policy_field[:end]
         return observations
 
 def run_policy(original_command,rust_command):

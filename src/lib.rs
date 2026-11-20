@@ -40,6 +40,7 @@ pub mod issues;
 pub mod local_services;
 pub mod mcp_oauth;
 mod native_child_work;
+mod npm_release;
 mod orchestration;
 mod projects;
 mod settings;
@@ -53,6 +54,8 @@ pub mod pull_requests;
 pub mod relay_http;
 pub mod relay_service;
 mod rpc;
+pub mod server_runtime;
+mod static_http;
 pub mod voice;
 mod workspace;
 
@@ -989,7 +992,12 @@ async fn contract_fallback(State(state): State<Arc<AppState>>, request: Request)
             "This contract endpoint is registered but its provider integration is unavailable.",
         )
     } else {
-        return environment_http::no_assets();
+        return static_http::client(
+            state.runtime_config.static_dir.as_deref(),
+            request.method(),
+            path,
+        )
+        .await;
     };
     let body = serde_json::json!({ "code": code, "message": message });
     Response::builder()
@@ -1311,6 +1319,17 @@ async fn websocket(State(state): State<Arc<AppState>>, request: Request) -> Resp
     }
 }
 pub async fn run_server(state: Arc<AppState>, listen: std::net::SocketAddr) -> anyhow::Result<()> {
+    run_server_owned(state, listen, None).await
+}
+
+/// [`run_server`] for a process that holds the state directory's ownership
+/// lock: the runtime record is published once listening and cleared on
+/// SIGINT/SIGTERM.
+pub async fn run_server_owned(
+    state: Arc<AppState>,
+    listen: std::net::SocketAddr,
+    ownership: Option<server_runtime::ServerOwnership>,
+) -> anyhow::Result<()> {
     let policy = &state.settings.policy;
     let client = if !listen.ip().is_loopback() {
         "remote"
@@ -1342,15 +1361,75 @@ pub async fn run_server(state: Arc<AppState>, listen: std::net::SocketAddr) -> a
         );
     }
     policy.close_tailscale_routes(listen).await?;
-    let app = router(state);
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    info!(%listen, "t3code server listening");
-    axum::serve(
+    serve_bound(
+        state,
         listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        ownership,
+        server_runtime::shutdown_signal(),
     )
-    .await?;
-    Ok(())
+    .await
+}
+
+/// How long a graceful shutdown waits for open connections before the
+/// process exits anyway.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Serve on an already bound listener until `shutdown` resolves. When this
+/// process owns the state directory, the runtime record is published with
+/// the listener's real port (so port 0 records the chosen one) and is
+/// cleared again, if still ours, when serving stops.
+pub async fn serve_bound<F>(
+    state: Arc<AppState>,
+    listener: tokio::net::TcpListener,
+    ownership: Option<server_runtime::ServerOwnership>,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    use std::future::IntoFuture;
+    let bound = listener.local_addr()?;
+    info!(listen = %bound, "t3code server listening");
+    if let Some(owner) = &ownership {
+        let record = server_runtime::RuntimeRecord::new(
+            state.runtime_config.requested_host,
+            bound.port(),
+            Some(state.settings.policy.loaded()),
+        );
+        if let Err(error) = owner.publish(record) {
+            tracing::warn!(
+                path = %owner.state_path().display(),
+                %error,
+                "failed to persist server runtime state"
+            );
+        }
+    }
+    let (stopping_tx, stopping_rx) = oneshot::channel::<()>();
+    let server = axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown.await;
+        info!("shutting down t3code server");
+        let _ = stopping_tx.send(());
+    });
+    let grace = async move {
+        match stopping_rx.await {
+            Ok(()) => tokio::time::sleep(SHUTDOWN_GRACE).await,
+            Err(_) => std::future::pending().await,
+        }
+    };
+    let result = tokio::select! {
+        result = server.into_future() => result.map_err(anyhow::Error::from),
+        () = grace => {
+            tracing::warn!("open connections did not close within the shutdown grace period");
+            Ok(())
+        }
+    };
+    drop(ownership);
+    result
 }
 pub fn default_data_dir() -> PathBuf {
     std::env::var_os("T3CODE_DATA_DIR")

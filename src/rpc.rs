@@ -1319,19 +1319,24 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     }
     if method == "server.getNpmRelease" {
         let spec = params["spec"].as_str().unwrap_or_default();
-        if !matches!(spec, "latest" | "nightly")
-            && !spec
-                .split_once('.')
-                .is_some_and(|(a, b)| a.parse::<u64>().is_ok() && b.contains('.'))
-        {
-            return Reply::defect("Expected a string matching the RegExp ^(?:latest|nightly|\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)$\n  at [\"spec\"]".into());
+        // `ServerNpmReleaseInput` checks the length before the pattern.
+        if spec.encode_utf16().count() > 64 {
+            return Reply::defect(
+                "Expected a string with a length of at most 64\n  at [\"spec\"]".into(),
+            );
         }
-        let release = match spec {
-            "latest" | "0.1.10" => json!({"version":"0.1.10","databaseMigration":96}),
-            "nightly" => json!({"version":"0.1.11-nightly.20261119.4918","databaseMigration":98}),
-            _ => json!({"version":spec}),
+        if !crate::npm_release::is_valid_spec(spec) {
+            return Reply::defect(format!(
+                "Expected a string matching the RegExp {}\n  at [\"spec\"]",
+                crate::npm_release::SPEC_PATTERN
+            ));
+        }
+        return match crate::npm_release::NpmRelease::global().get(spec).await {
+            Ok(release) => Reply::Success(release.unwrap_or(Value::Null)),
+            Err(reason) => Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"ServerNpmReleaseError","reason":reason}}),
+            ),
         };
-        return Reply::Success(release);
     }
     if method == "server.searchAcpRegistry" {
         let query = params["query"].as_str().unwrap_or_default().to_lowercase();

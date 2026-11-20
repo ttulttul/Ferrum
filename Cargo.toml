@@ -48,3 +48,6 @@ tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.10.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

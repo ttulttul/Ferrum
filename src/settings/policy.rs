@@ -19,6 +19,9 @@ impl std::error::Error for ManagedPolicyFileError {}
 #[derive(Default, Debug)]
 pub(crate) struct Policy {
     summary: Option<Value>,
+    /// `ManagedPolicy.loadedPolicy` in the reference: where the policy came
+    /// from and which document it was. `None` when no policy applies.
+    loaded: Option<Value>,
     defaults: Vec<Entry>,
     locks: Vec<Entry>,
     providers: providers::Rules,
@@ -125,6 +128,90 @@ fn above(mode: &Value, ceiling: &Value) -> bool {
     let rank = |v: &Value| MODES.iter().position(|m| v == *m);
     rank(ceiling).is_some_and(|limit| rank(mode).is_some_and(|r| r > limit))
 }
+/// The document as the reference's `Schema.encode(ManagedPolicyDocument)`
+/// leaves it before `loadedPolicy` hashes it: struct keys in schema order,
+/// `TrimmedNonEmptyString` fields trimmed, records and `Schema.Unknown`
+/// setting values as written. Called with a document `parse` accepts.
+fn encode_document(raw: &Value) -> Value {
+    type Field = (&'static str, fn(&Value) -> Value);
+    fn pick(v: &Value, fields: &[Field]) -> Value {
+        Value::Object(
+            fields
+                .iter()
+                .filter_map(|(key, encode)| Some(((*key).to_owned(), encode(v.get(*key)?))))
+                .collect(),
+        )
+    }
+    fn same(v: &Value) -> Value {
+        v.clone()
+    }
+    fn trimmed(v: &Value) -> Value {
+        v.as_str().map_or_else(|| v.clone(), |s| json!(s.trim()))
+    }
+    fn record(v: &Value, encode: fn(&Value) -> Value) -> Value {
+        Value::Object(dict(v).map(|(k, v)| (k.clone(), encode(v))).collect())
+    }
+    fn setting(v: &Value) -> Value {
+        pick(v, &[("value", same), ("locked", same)])
+    }
+    fn settings(v: &Value) -> Value {
+        record(v, setting)
+    }
+    fn variable(v: &Value) -> Value {
+        pick(v, &[("name", trimmed), ("value", same)])
+    }
+    fn environment(v: &Value) -> Value {
+        Value::Array(list(v).map(variable).collect())
+    }
+    fn instance(v: &Value) -> Value {
+        pick(
+            v,
+            &[
+                ("locked", same),
+                ("environment", environment),
+                ("binaryPath", trimmed),
+                ("launchArgs", trimmed),
+            ],
+        )
+    }
+    fn instances(v: &Value) -> Value {
+        record(v, instance)
+    }
+    fn providers(v: &Value) -> Value {
+        pick(v, &[("allowedDrivers", same), ("instances", instances)])
+    }
+    fn updates(v: &Value) -> Value {
+        pick(
+            v,
+            &[("mode", same), ("feedUrl", trimmed), ("allowNightly", same)],
+        )
+    }
+    fn limits(v: &Value) -> Value {
+        pick(
+            v,
+            &[
+                ("maxRuntimeMode", same),
+                ("clients", same),
+                ("connect", same),
+                ("webhookTasks", same),
+                ("telemetry", same),
+                ("browserCookieImport", same),
+                ("providers", providers),
+                ("updates", updates),
+            ],
+        )
+    }
+    pick(
+        raw,
+        &[
+            ("schemaVersion", same),
+            ("organization", trimmed),
+            ("supportUrl", trimmed),
+            ("settings", settings),
+            ("limits", limits),
+        ],
+    )
+}
 impl Policy {
     pub(crate) fn load() -> Result<Self> {
         Self::load_document().map_err(|e| ManagedPolicyFileError(e).into())
@@ -142,7 +229,7 @@ impl Policy {
                 "policy is set at both {source} and {}; deploy it in one place",
                 file.display()
             );
-            return Self::parse(doc)
+            return Self::parse_at(&source, doc)
                 .with_context(|| format!("T3 Code cannot use the managed policy at {source}"));
         }
         Self::from_path(file)
@@ -153,7 +240,18 @@ impl Policy {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e.into()),
         };
-        serde_json::from_slice(&bytes).map_err(anyhow::Error::from).and_then(Self::parse).map_err(|e|anyhow!("T3 Code cannot use the managed policy at {}: {e}. It will not start until an administrator fixes this.",path.display()))
+        serde_json::from_slice(&bytes).map_err(anyhow::Error::from).and_then(|doc|Self::parse_at(&path.display().to_string(),doc)).map_err(|e|anyhow!("T3 Code cannot use the managed policy at {}: {e}. It will not start until an administrator fixes this.",path.display()))
+    }
+    fn parse_at(source: &str, raw: Value) -> Result<Self> {
+        let encoded = encode_document(&raw);
+        let mut p = Self::parse(raw)?;
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(crate::wire_json::compact(&encoded));
+        p.loaded = Some(json!({
+            "source": source,
+            "organization": encoded["organization"],
+            "fingerprint": &hex::encode(digest)[..12],
+        }));
+        Ok(p)
     }
     fn parse(raw: Value) -> Result<Self> {
         // Optional fields, when present, still have to satisfy their schema.
@@ -338,6 +436,11 @@ impl Policy {
     }
     pub(crate) fn summary(&self) -> Option<&Value> {
         self.summary.as_ref()
+    }
+    /// The runtime record's `managedPolicy`: `{source, organization,
+    /// fingerprint}` for the loaded policy, `null` for none.
+    pub(crate) fn loaded(&self) -> Value {
+        self.loaded.clone().unwrap_or(Value::Null)
     }
     pub(crate) fn allows_connect(&self) -> bool {
         self.summary()
@@ -594,6 +697,42 @@ mod tests {
             .is_none());
         fs::write(dir.path().join("policy.json"), "{").unwrap();
         assert!(Policy::from_path(&dir.path().join("policy.json")).is_err());
+    }
+
+    #[test]
+    fn loaded_policy_fingerprints_the_schema_encoded_document() {
+        assert_eq!(Policy::default().loaded(), Value::Null);
+        // Keys out of schema order and untrimmed strings: the reference hashes
+        // JSON.stringify of the encoded document, so these are normalized.
+        // Expected digest: sha256 of the JSON below, first 12 hex digits.
+        // {"schemaVersion":1,"organization":"Example","limits":{"maxRuntimeMode":"auto",
+        //  "providers":{"allowedDrivers":["codex"],"instances":{"codex":{"locked":true,
+        //  "environment":[{"name":"CODEX_HOME","value":"/managed"}],"launchArgs":"--corp"}}},
+        //  "updates":{"mode":"auto","allowNightly":false}}}
+        let p = Policy::parse_at("/etc/t3code/policy.json", json!({
+            "limits":{"updates":{"allowNightly":false,"mode":"auto"},
+                "providers":{"instances":{"codex":{"environment":[{"value":"/managed","name":"CODEX_HOME"}],"launchArgs":" --corp ","locked":true}},"allowedDrivers":["codex"]},
+                "maxRuntimeMode":"auto"},
+            "organization":"  Example  ","schemaVersion":1
+        }))
+        .unwrap();
+        let loaded = p.loaded();
+        assert_eq!(
+            loaded.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["source", "organization", "fingerprint"]
+        );
+        assert_eq!(
+            loaded,
+            json!({"source":"/etc/t3code/policy.json","organization":"Example","fingerprint":"88197a117d2a"})
+        );
+        // {"schemaVersion":1,"organization":"Example","settings":{"defaultAutoPull":{"value":false,"locked":true}}}
+        let p = Policy::parse_at(
+            "/test/policy.json",
+            json!({"settings":{"defaultAutoPull":{"locked":true,"value":false}},"organization":"Example","schemaVersion":1}),
+        )
+        .unwrap();
+        assert_eq!(p.loaded()["fingerprint"], "dcac31e18105");
+        assert_eq!(p.loaded()["source"], "/test/policy.json");
     }
 
     #[test]

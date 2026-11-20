@@ -29,6 +29,8 @@ STATE_PATH = STATE_ROOT / "state.json"
 ARGV_PATH = STATE_ROOT / "original.argv"
 ENV_PATH = STATE_ROOT / "original.env"
 LOG_PATH = STATE_ROOT / "rust-server.log"
+# SERVER_EXIT_CODE_STATE_DIR_OWNED: another server holds userdata/server-owner.sqlite.
+EXIT_STATE_DIR_OWNED = 78
 SYSTEMD_UNIT_SUFFIX = ".service"
 
 
@@ -398,18 +400,37 @@ def origin(runtime: dict[str, object]) -> tuple[str, str, int]:
     return bind_host, health_host, port
 
 
-def health(host: str, port: int) -> bool:
+def http_status(host: str, port: int, path: str = "/") -> int | None:
+    """Status code of a plain GET, or None when nothing answers with HTTP."""
+    url_host = f"[{host}]" if ":" in host else host
     try:
         with socket.create_connection((host, port), timeout=1.5) as connection:
-            request = f"GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode()
+            request = f"GET {path} HTTP/1.1\r\nHost: {url_host}:{port}\r\nConnection: close\r\n\r\n".encode()
             connection.sendall(request)
-            response = connection.recv(128)
-        # A T3 server can legitimately return 503 from /health before its
-        # static/dev client is configured. Any complete HTTP status line proves
-        # that the intended process owns the listener and is responding.
-        return response.startswith(b"HTTP/") and b" " in response.split(b"\r\n", 1)[0]
-    except (OSError, ValueError):
+            response = b""
+            while b"\r\n" not in response and len(response) < 1024:
+                chunk = connection.recv(256)
+                if not chunk:
+                    break
+                response += chunk
+    except OSError:
+        return None
+    parts = response.split(b"\r\n", 1)[0].split(b" ", 2)
+    if len(parts) < 2 or not parts[0].startswith(b"HTTP/") or not parts[1].isdigit():
+        return None
+    return int(parts[1])
+
+
+def health(host: str, port: int, require_ok: bool = True) -> bool:
+    # The T3 desktop SSH launcher adopts an existing server only when `GET /`
+    # answers 2xx, so that is the readiness bar for a server the desktop app
+    # should find. `require_ok=False` accepts any HTTP status: it proves the
+    # intended process owns the listener, which is enough when restoring the
+    # original TypeScript server exactly as it was.
+    status = http_status(host, port, "/")
+    if status is None:
         return False
+    return 200 <= status < 300 if require_ok else True
 
 
 def discover() -> dict[str, object]:
@@ -587,36 +608,68 @@ def start_process(argv: list[str], environment: dict[str, str], cwd: str, log_pa
     return process
 
 
-def wait_for_server(process: subprocess.Popen[bytes], host: str, port: int, label: str) -> None:
+def wait_for_server(
+    process: subprocess.Popen[bytes], host: str, port: int, label: str, require_ok: bool = True
+) -> None:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if process is not None and process.poll() is not None:
+            if process.returncode == EXIT_STATE_DIR_OWNED:
+                fail(
+                    f"the {label} server refused to start because another T3 server still owns its "
+                    f"T3 home (exit status {EXIT_STATE_DIR_OWNED}). See {LOG_PATH}"
+                )
             fail(f"the {label} server exited with status {process.returncode}. See {LOG_PATH}")
-        if health(host, port):
+        if health(host, port, require_ok):
             return
         time.sleep(0.25)
+    if require_ok:
+        fail(f"the {label} server did not answer GET / with a 2xx status on {host}:{port}. See {LOG_PATH}")
     fail(f"the {label} server did not become ready on {host}:{port}. See {LOG_PATH}")
 
 
-def wait_for_service(service: dict[str, object], host: str, port: int, label: str) -> None:
+def wait_for_service(
+    service: dict[str, object], host: str, port: int, label: str, require_ok: bool = True
+) -> None:
     deadline = time.monotonic() + 30
     prefix = systemd_prefix(service)
     while time.monotonic() < deadline:
         active = command_output(prefix + ["show", str(service["unit"]), "-p", "ActiveState", "--value", "--no-pager"])
         if active in {"failed", "inactive"}:
             fail(f"the {label} systemd service {service['unit']} is {active}. See {LOG_PATH}")
-        if health(host, port):
+        if health(host, port, require_ok):
             return
         time.sleep(0.25)
     fail(f"the {label} server did not become ready on {host}:{port}. See {LOG_PATH}")
 
 
-def runtime_for_rust(path: Path, pid: int, original: dict[str, object] | None) -> None:
-    runtime = dict(original or {})
-    runtime["pid"] = pid
-    runtime["startedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    runtime["serverVersion"] = "rust"
-    atomic_json(path, runtime)
+def wait_for_rust_runtime(path: Path, pid: int, port: int, timeout: float = 10.0) -> None:
+    """Confirm the Rust server published its own runtime record.
+
+    The Rust server writes server-runtime.json itself, stamped with its own
+    ownerId, and clears it on shutdown only while that ownerId still matches.
+    Rewriting the record here would break that, so this only verifies it.
+    """
+    deadline = time.monotonic() + timeout
+    runtime: dict[str, object] | None = None
+    while time.monotonic() < deadline:
+        runtime = read_json(path)
+        if runtime is not None and runtime.get("pid") == pid:
+            break
+        time.sleep(0.1)
+    if runtime is None or runtime.get("pid") != pid:
+        found = "no record" if runtime is None else f"PID {runtime.get('pid')}"
+        fail(f"{path} does not name the Rust server (PID {pid}); found {found}. See {LOG_PATH}")
+    from urllib.parse import urlsplit
+
+    origin_host = urlsplit(str(runtime.get("origin", ""))).hostname
+    if runtime.get("port") != port or origin_host not in {"127.0.0.1", "localhost"}:
+        fail(
+            f"{path} names the Rust server but not a loopback origin on port {port} "
+            f"(origin {runtime.get('origin')!r}, port {runtime.get('port')!r}), so the desktop app would not adopt it"
+        )
+    if not isinstance(runtime.get("ownerId"), str):
+        fail(f"{path} names the Rust server but has no ownerId. Rebuild the Rust server from a current checkout")
 
 
 def launch_rust(state: dict[str, object]) -> subprocess.Popen[bytes]:
@@ -643,9 +696,7 @@ def launch_rust(state: dict[str, object]) -> subprocess.Popen[bytes]:
     process = start_process(argv, environment, str(state["originalCwd"]), LOG_PATH)
     health_host = str(state.get("healthHost", state["host"]))
     wait_for_server(process, health_host, int(state["port"]), "Rust")
-    backup = state.get("runtimeBackup")
-    original_runtime = read_json(Path(backup)) if isinstance(backup, str) else None
-    runtime_for_rust(Path(state["runtimePath"]), process.pid, original_runtime)
+    wait_for_rust_runtime(Path(state["runtimePath"]), process.pid, int(state["port"]))
     state["mode"] = "rust"
     state["rustPid"] = process.pid
     state["rustStartedAt"] = time.time()
@@ -731,6 +782,7 @@ def restore_original(state: dict[str, object], rollback: bool = False) -> None:
                 str(state.get("healthHost", state["host"])),
                 int(state["port"]),
                 "TypeScript",
+                require_ok=False,
             )
             process_pid = service.get("mainPid")
             current_pid = command_output(
@@ -746,6 +798,7 @@ def restore_original(state: dict[str, object], rollback: bool = False) -> None:
                 str(state.get("healthHost", state["host"])),
                 int(state["port"]),
                 "TypeScript",
+                require_ok=False,
             )
             process_pid = process.pid
     except SwitchError:
