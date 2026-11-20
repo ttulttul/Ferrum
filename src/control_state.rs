@@ -92,7 +92,7 @@ impl ControlState {
     }
 
     /// `commit` for hosts that never hold this state's locks across an
-    /// await, such as a Durable Object handling one message at a time: the
+    /// await, such as a host handling one message at a time: the
     /// locks are free, so the commit completes without suspending.
     pub fn commit_now(&self, event: Event) -> anyhow::Result<ServerEvent> {
         futures_util::FutureExt::now_or_never(self.commit(event))

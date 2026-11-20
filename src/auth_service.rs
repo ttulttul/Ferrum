@@ -214,7 +214,7 @@ impl AuthService {
         Ok(self)
     }
     /// Sessions, grants and keys as JSON, for hosts that keep them outside a
-    /// state file (the workers control plane stores them in Durable Object storage).
+    /// state file (the WebAssembly build stores them in its SQL storage).
     pub fn records_json(&self) -> String {
         self.records
             .read(|r| serde_json::to_string(r).expect("credentials serialize"))
@@ -422,7 +422,7 @@ impl AuthService {
         let Some(db) = self.external_pairing.as_deref() else {
             return Err("invalid_credential");
         };
-        // SSH pairing reads the local TypeScript store; a hosted control plane has none.
+        // SSH pairing reads the local TypeScript store; the WebAssembly build has none.
         #[cfg(not(feature = "native"))]
         {
             let _ = (db, credential, requested);

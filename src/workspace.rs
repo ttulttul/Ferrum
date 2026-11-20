@@ -4,8 +4,9 @@
 //!
 //! The control plane (auth, event log, projections, RPC dispatch and
 //! settings) reaches the workspace only through [`Workspace`]. Natively,
-//! [`LocalWorkspace`] runs every operation in this process. A hosted control
-//! plane talks to a workspace daemon over one connection instead.
+//! [`LocalWorkspace`] runs every operation in this process. A control plane
+//! without a local workspace talks to a workspace daemon over one connection
+//! instead.
 //!
 //! Requests and replies keep the RPC payloads' JSON shapes, so an operation
 //! can cross a process boundary unchanged. `Option<Reply>` is `None` when the
@@ -27,7 +28,7 @@ pub use remote::{unavailable, RemoteWorkspace};
 pub type Reply = Result<Value, Value>;
 
 /// A workspace operation in flight. Native workspaces run on a multi-threaded
-/// runtime, so their futures are `Send`; a Durable Object's are not.
+/// runtime, so their futures are `Send`; the WebAssembly build's are not.
 #[cfg(feature = "native")]
 pub type WorkspaceFuture<'a, T> = futures_util::future::BoxFuture<'a, T>;
 #[cfg(not(feature = "native"))]

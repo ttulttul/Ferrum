@@ -1,9 +1,9 @@
-//! Spike: the T3 Code control plane in a Cloudflare Durable Object.
+//! The WebAssembly build's entry point for the T3 Code control plane.
 //!
 //! The worker forwards every request to the `T3EnvironmentDO` named by the
 //! request's host, so each hostname is one environment. The object answers
 //! HTTP through the control plane's axum router and handles `/ws` itself with
-//! the hibernatable WebSocket API: each socket's `Connection` (principal and
+//! a WebSocket API that can suspend between messages: each socket's `Connection` (principal and
 //! open streams) lives in the socket's attachment, and every message is one
 //! call to `ControlPlane::on_message`.
 mod storage;
@@ -62,7 +62,7 @@ impl t3code_server::platform::Clock for WorkersClock {
 }
 
 /// Install the Workers clock (`crypto.getRandomValues` stays the random
-/// source) once per isolate; later Durable Object instances share it.
+/// source) once per process; later instances share it.
 fn install_platform() {
     let _ = t3code_server::platform::install(t3code_server::platform::Platform {
         clock: Arc::new(WorkersClock { highest: 0.into() }),
@@ -70,7 +70,7 @@ fn install_platform() {
     });
 }
 
-/// Wasm linear memory only grows, so its size is this isolate's peak.
+/// Wasm linear memory only grows, so its size is this process's peak.
 fn linear_memory_bytes() -> usize {
     core::arch::wasm32::memory_size(0) * 65536
 }
@@ -200,7 +200,7 @@ impl T3EnvironmentDO {
             Err(rejection) => return worker_response(rejection).await,
         };
         let pair = WebSocketPair::new()?;
-        // Hibernatable: the runtime may evict this object between messages;
+        // The runtime may evict this object between messages;
         // the attachment carries the connection across.
         self.state.accept_web_socket(&pair.server);
         pair.server.serialize_attachment(&connection)?;

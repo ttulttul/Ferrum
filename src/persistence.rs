@@ -5,8 +5,8 @@
 //! Documents are addressed by the path the native server keeps them at, so
 //! error payloads that name a path (`settingsPath`, `configPath`) read the
 //! same everywhere. [`FsStore`] (native) is the local filesystem with each
-//! document's existing write semantics. A hosted control plane implements
-//! [`DocumentStore`] over Durable Object storage (see `workers/src/storage.rs`),
+//! document's existing write semantics. The WebAssembly build implements
+//! [`DocumentStore`] over SQL storage (see `workers/src/storage.rs`),
 //! and [`MemoryStore`] keeps documents in memory for tests.
 use std::{
     collections::HashMap,

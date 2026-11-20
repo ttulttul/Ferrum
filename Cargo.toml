@@ -22,8 +22,8 @@ native = [
     "axum/ws",
     "reqwest/rustls-tls",
 ]
-# The control plane built for wasm32-unknown-unknown inside a Cloudflare
-# Durable Object (see workers/). Only the platform-neutral modules compile.
+# The control plane built for wasm32-unknown-unknown (see workers/). Only the
+# platform-neutral modules compile.
 workers = ["getrandom/js", "uuid/js", "time/wasm-bindgen"]
 
 [[bin]]

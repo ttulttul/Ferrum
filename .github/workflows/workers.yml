@@ -24,7 +24,7 @@ jobs:
         run: |
           cargo check --locked --no-default-features --features workers --target wasm32-unknown-unknown
           cargo clippy --locked --no-default-features --features workers --target wasm32-unknown-unknown -- -D warnings
-      - name: Build the Durable Object worker
+      - name: Build the WebAssembly entry point
         working-directory: workers
         run: |
           worker-build --release
@@ -45,7 +45,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/parity-python"
           "$RUNNER_TEMP/parity-python/bin/pip" install websockets==16.0 cryptography
           echo "$RUNNER_TEMP/parity-python/bin" >> "$GITHUB_PATH"
-      - name: Compare the initial sync with native under wrangler dev
+      - name: Compare the WebAssembly build's initial sync with native
         run: |
           cargo build --locked
           python3 scripts/workers_initial_sync_parity.py \

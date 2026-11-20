@@ -1,7 +1,7 @@
-//! The workspace as a hosted control plane sees it: a daemon in another
+//! The workspace as a control plane without a local workspace sees it: a daemon in another
 //! process, reached over one connection. The wire protocol is not wired up
 //! yet, so every operation answers as unavailable, with the defect the
-//! hosted control plane gives for workspace RPCs today.
+//! WebAssembly build gives for workspace RPCs today.
 use super::{Reply, TurnEvent, TurnSpec, Workspace, WorkspaceFuture};
 use futures_util::FutureExt;
 use serde_json::{json, Value};
@@ -26,7 +26,7 @@ impl Default for RemoteWorkspace {
 }
 
 /// The defect a workspace RPC answers with: the unavailable-contract message
-/// the hosted control plane's dispatcher gives.
+/// the WebAssembly build's dispatcher gives.
 pub fn unavailable(method: &str) -> Value {
     json!({
         "_tag": "Die",
