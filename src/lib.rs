@@ -11,6 +11,7 @@ pub mod config;
 #[cfg(feature = "native")]
 mod config_rpc;
 mod contracts;
+pub mod control;
 pub mod cors;
 mod dpop_proof;
 pub mod environment;

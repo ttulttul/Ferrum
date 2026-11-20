@@ -24,7 +24,7 @@ native = [
 ]
 # The control plane built for wasm32-unknown-unknown inside a Cloudflare
 # Durable Object (see workers/). Only the platform-neutral modules compile.
-workers = ["getrandom/js", "uuid/js"]
+workers = ["getrandom/js", "uuid/js", "time/wasm-bindgen"]
 
 [[bin]]
 name = "t3code-server"

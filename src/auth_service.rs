@@ -203,6 +203,17 @@ impl AuthService {
         self.external_pairing = Some(dir.join("statev2.sqlite"));
         Ok(self)
     }
+    /// Sessions, grants and keys as JSON, for hosts that keep them outside a
+    /// state file (the workers control plane stores them in Durable Object storage).
+    pub fn records_json(&self) -> String {
+        self.records
+            .read(|r| serde_json::to_string(r).expect("credentials serialize"))
+    }
+    /// Restores what [`records_json`](Self::records_json) produced, in memory only.
+    pub fn with_records_json(mut self, json: &str) -> anyhow::Result<Self> {
+        self.records = Arc::new(Storage::in_memory(serde_json::from_str(json)?));
+        Ok(self)
+    }
     pub(crate) fn desktop(&self) -> bool {
         self.desktop
     }

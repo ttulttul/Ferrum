@@ -1,17 +1,13 @@
 //! The orchestration event model and its in-memory projection. Platform
 //! neutral: compiled for the native server and the workers control plane.
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Seconds since the epoch. Uses `time` rather than `SystemTime`, which
+/// panics on wasm32-unknown-unknown (the workers build reads `Date.now()`).
 pub(crate) fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    time::OffsetDateTime::now_utc().unix_timestamp().max(0) as u64
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
