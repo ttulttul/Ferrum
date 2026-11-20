@@ -1,5 +1,6 @@
 //! Persistence for the server's small state documents: settings, auth and
-//! cloud-link records, guest shares, scheduled tasks and keybindings.
+//! cloud-link records, guest shares, scheduled tasks, keybindings, settings
+//! secrets and the managed policy.
 //!
 //! Documents are addressed by the path the native server keeps them at, so
 //! error payloads that name a path (`settingsPath`, `configPath`) read the
@@ -32,6 +33,10 @@ pub enum WriteMode {
     /// temporary directory beside it, then rename over it. Failures name the
     /// failing step and path as the reference's settings writer does.
     ReplaceTarget,
+    /// A credential: create a new temporary file only the owner can read
+    /// (mode 0600), write and sync it, then rename it over the document.
+    /// Failures name the failing step and path (settings secrets).
+    Private,
 }
 
 /// An opaque token that changes whenever a document is written. The
@@ -45,8 +50,19 @@ pub struct Revision(pub String);
 pub trait DocumentStore: Send + Sync {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
     fn write(&self, path: &Path, bytes: &[u8], mode: WriteMode) -> io::Result<()>;
+    /// Delete a document. A missing document is `io::ErrorKind::NotFound`.
+    fn remove(&self, path: &Path) -> io::Result<()>;
     /// Make `path` and its ancestors exist, for backends with directories.
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
+    /// `create_dir_all`, then restrict `path` to its owner (mode 0700) where
+    /// the backend has permissions. It holds `WriteMode::Private` documents.
+    fn create_private_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.create_dir_all(path)
+    }
+    /// Whether a document exists, failing when that cannot be determined.
+    fn exists(&self, path: &Path) -> io::Result<bool> {
+        self.read_optional(path).map(|bytes| bytes.is_some())
+    }
     /// The document's current revision, or `None` when it does not exist
     /// or cannot be inspected.
     fn revision(&self, path: &Path) -> Option<Revision>;
@@ -94,6 +110,15 @@ impl DocumentStore for MemoryStore {
         Ok(())
     }
 
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        self.documents
+            .lock()
+            .unwrap()
+            .remove(path)
+            .map(drop)
+            .ok_or_else(|| not_found(path))
+    }
+
     fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
         Ok(())
     }
@@ -135,6 +160,7 @@ mod tests {
             WriteMode::InPlace,
             WriteMode::Replace,
             WriteMode::ReplaceTarget,
+            WriteMode::Private,
         ]
         .into_iter()
         .enumerate()
@@ -147,6 +173,14 @@ mod tests {
             assert!(after.is_some());
             assert_ne!(before, after, "{mode:?} must change the revision");
         }
+        assert!(store.exists(&path).unwrap());
+        store.remove(&path).unwrap();
+        assert!(!store.exists(&path).unwrap());
+        assert_eq!(store.revision(&path), None);
+        assert_eq!(
+            store.remove(&path).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use super::schema;
+use crate::persistence::DocumentStore;
 use anyhow::{anyhow, ensure, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::{fs, path::Path};
+use std::path::Path;
 mod platform;
 mod providers;
 mod reachability;
@@ -213,32 +214,31 @@ fn encode_document(raw: &Value) -> Value {
     )
 }
 impl Policy {
-    pub(crate) fn load() -> Result<Self> {
-        Self::load_document().map_err(|e| ManagedPolicyFileError(e).into())
+    /// The managed policy, read from its system path in `documents`.
+    pub(crate) fn load(documents: &dyn DocumentStore) -> Result<Self> {
+        Self::load_document(documents).map_err(|e| ManagedPolicyFileError(e).into())
     }
-    fn load_document() -> Result<Self> {
+    fn load_document(documents: &dyn DocumentStore) -> Result<Self> {
         if cfg!(debug_assertions) {
             if let Some(path) = std::env::var_os("T3CODE_DEV_MANAGED_POLICY_PATH") {
-                return Self::from_path(Path::new(&path));
+                return Self::from_path(documents, Path::new(&path));
             }
         }
         let file = platform::system_path();
         if let Some((source, doc)) = platform::overlay()? {
             ensure!(
-                !file.try_exists()?,
+                !documents.exists(file)?,
                 "policy is set at both {source} and {}; deploy it in one place",
                 file.display()
             );
             return Self::parse_at(&source, doc)
                 .with_context(|| format!("T3 Code cannot use the managed policy at {source}"));
         }
-        Self::from_path(file)
+        Self::from_path(documents, file)
     }
-    fn from_path(path: &Path) -> Result<Self> {
-        let bytes = match fs::read(path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(e.into()),
+    fn from_path(documents: &dyn DocumentStore, path: &Path) -> Result<Self> {
+        let Some(bytes) = documents.read_optional(path)? else {
+            return Ok(Self::default());
         };
         serde_json::from_slice(&bytes).map_err(anyhow::Error::from).and_then(|doc|Self::parse_at(&path.display().to_string(),doc)).map_err(|e|anyhow!("T3 Code cannot use the managed policy at {}: {e}. It will not start until an administrator fixes this.",path.display()))
     }
@@ -611,6 +611,7 @@ fn restore(result: &mut Value, settings: &Value, stored: &Value, path: &[String]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::FsStore;
 
     #[test]
     fn restores_stored_values_for_echoed_locks_and_applies_project_ceiling() {
@@ -691,12 +692,12 @@ mod tests {
             assert!(Policy::parse(doc).is_err());
         }
         let dir = tempfile::tempdir().unwrap();
-        assert!(Policy::from_path(&dir.path().join("policy.json"))
+        assert!(Policy::from_path(&FsStore, &dir.path().join("policy.json"))
             .unwrap()
             .summary()
             .is_none());
-        fs::write(dir.path().join("policy.json"), "{").unwrap();
-        assert!(Policy::from_path(&dir.path().join("policy.json")).is_err());
+        std::fs::write(dir.path().join("policy.json"), "{").unwrap();
+        assert!(Policy::from_path(&FsStore, &dir.path().join("policy.json")).is_err());
     }
 
     #[test]

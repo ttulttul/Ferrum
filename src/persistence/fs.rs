@@ -21,11 +21,30 @@ impl DocumentStore for FsStore {
             WriteMode::InPlace => fs::write(path, bytes),
             WriteMode::Replace => replace(path, bytes),
             WriteMode::ReplaceTarget => replace_target(path, bytes),
+            WriteMode::Private => private(path, bytes),
         }
+    }
+
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        fs::remove_file(path)
     }
 
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         fs::create_dir_all(path)
+    }
+
+    fn create_private_dir_all(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir_all(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+
+    fn exists(&self, path: &Path) -> io::Result<bool> {
+        path.try_exists()
     }
 
     fn revision(&self, path: &Path) -> Option<Revision> {
@@ -51,6 +70,36 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// A new owner-only temporary file beside `path`, written, synced and
+/// renamed over it; removed again on failure. Each failure names its step.
+fn private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(format!(".{}.tmp", crate::platform::uuid_v4()));
+    let tmp = path.with_file_name(name);
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let result = (|| {
+        let mut f = opts
+            .open(&tmp)
+            .map_err(|e| failure::step(e, "writeFile", "open", &tmp, None))?;
+        f.write_all(bytes)
+            .map_err(|e| failure::step(e, "writeFile", "write", &tmp, None))?;
+        f.sync_all()
+            .map_err(|e| failure::step(e, "writeFile", "fsync", &tmp, None))?;
+        drop(f);
+        fs::rename(&tmp, path).map_err(|e| failure::step(e, "rename", "rename", &tmp, Some(path)))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// The reference's settings write: follow links to the final target, create
