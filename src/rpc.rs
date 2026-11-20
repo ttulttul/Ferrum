@@ -2,6 +2,7 @@ pub(crate) use crate::rpc_protocol::SOCKET_FRAME_PARTS_QUERY_PARAM;
 use crate::rpc_protocol::{
     js_template_string, request_key, split_socket_frame, Reply, SOCKET_FRAME_PART_BYTES,
 };
+use crate::runtime::Runtime;
 use crate::{
     auth_service, dispatch_orchestration_command, host_rpc, provider_rpc, AppState, RPC_CONTRACTS,
 };
@@ -149,19 +150,26 @@ async fn update_project_clone_snapshot(
 }
 
 fn retain_completed_project_clone(state: Arc<AppState>, project_id: String, sequence: u64) {
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        let removed = {
-            let mut states = state.project_clone_states.lock().await;
-            let should_remove = states.get(&project_id).is_some_and(|snapshot| {
-                snapshot["phase"] == "done" && snapshot["sequence"].as_u64() == Some(sequence)
-            });
-            should_remove && states.remove(&project_id).is_some()
-        };
-        if removed {
-            publish_project_clone_change(&state).await;
+    let runtime = state.runtime.clone();
+    runtime.spawn(
+        async move {
+            state
+                .runtime
+                .sleep(std::time::Duration::from_secs(30))
+                .await;
+            let removed = {
+                let mut states = state.project_clone_states.lock().await;
+                let should_remove = states.get(&project_id).is_some_and(|snapshot| {
+                    snapshot["phase"] == "done" && snapshot["sequence"].as_u64() == Some(sequence)
+                });
+                should_remove && states.remove(&project_id).is_some()
+            };
+            if removed {
+                publish_project_clone_change(&state).await;
+            }
         }
-    });
+        .boxed(),
+    );
 }
 
 async fn launch_project_clone(
@@ -839,7 +847,7 @@ async fn run_call(
         };
         let (result, ()) = tokio::join!(workflow, forward);
         // The last frame is queued on the connection. Let its writer flush it before Exit.
-        tokio::task::yield_now().await;
+        state.runtime.yield_now().await;
         return match result {
             Ok(value) => Reply::Success(value),
             Err(e) if e["_tag"] == "Die" => Reply::Failure(e),
@@ -881,7 +889,7 @@ async fn run_call(
                 _ => send(json!([snapshot])).await,
             }
             previous = Some(snapshot);
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            state.runtime.sleep(std::time::Duration::from_secs(2)).await;
         }
     }
     let terminal = matches!(method, "terminal.observe" | "terminal.attach");
@@ -1635,7 +1643,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             ("antigravity", home.join(".gemini/antigravity-backup")),
             ("antigravity", home.join(".config/antigravity")),
         ];
-        let scan_started = std::time::Instant::now();
+        let scan_started = crate::platform::monotonic_ms();
         let sources = dirs.into_iter().map(|(provider, path)| json!({
             "fingerprint":{"hostId":host,"provider":provider,"resolvedHomePath":path,"volumeId":""},
             "status":if path.exists(){"ok"}else{"missing"},"scannedFiles":0,"skippedFiles":0,"malformedRecords":0,"distinctSessions":0,
@@ -1643,7 +1651,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         })).collect::<Vec<_>>();
         let read_at = crate::auth_service::iso(crate::auth_service::now());
         return Reply::Success(
-            json!({"contractVersion":6,"readAt":read_at,"timeZone":params["timeZone"],"sinceDay":params["sinceDay"],"untilDay":params["untilDay"],"buckets":[],"sources":sources,"pricing":{"status":"fresh","source":"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json","fetchedAt":read_at,"knownModels":6246},"scanDurationMs":scan_started.elapsed().as_millis()}),
+            json!({"contractVersion":6,"readAt":read_at,"timeZone":params["timeZone"],"sinceDay":params["sinceDay"],"untilDay":params["untilDay"],"buckets":[],"sources":sources,"pricing":{"status":"fresh","source":"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json","fetchedAt":read_at,"knownModels":6246},"scanDurationMs":crate::platform::monotonic_ms() - scan_started}),
         );
     }
     if method == "pullRequests.filterOptions"

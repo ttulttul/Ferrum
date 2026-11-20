@@ -57,6 +57,8 @@ pub struct AppState {
     pub(crate) project_clone_events: broadcast::Sender<()>,
     pub(crate) project_clone_cancellations: Mutex<HashMap<String, (u64, oneshot::Sender<()>)>>,
     pub(crate) project_clone_sequence: Mutex<u64>,
+    /// Background tasks, timers and the open sockets.
+    pub(crate) runtime: Arc<crate::runtime::TokioRuntime>,
 }
 impl AppState {
     pub async fn new(
@@ -140,6 +142,7 @@ impl AppState {
             project_clone_events,
             project_clone_cancellations: Mutex::new(HashMap::new()),
             project_clone_sequence: Mutex::new(0),
+            runtime: Arc::default(),
         }))
     }
 }
