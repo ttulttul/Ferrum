@@ -1,7 +1,9 @@
 use super::DEFAULTS;
-use serde_json::{json, Value};
+use crate::persistence::DocumentStore;
 #[cfg(feature = "native")]
-use std::{fs, path::Path};
+use crate::persistence::WriteMode;
+use serde_json::{json, Value};
+use std::path::Path;
 
 fn shortcut(key: &str) -> Option<Value> {
     let lower = key.to_lowercase();
@@ -136,12 +138,22 @@ fn compile(rule: &Value) -> Option<Value> {
     Some(value)
 }
 
-#[cfg(feature = "native")]
-pub(crate) fn read(path: &Path) -> (Value, Value) {
-    resolve(match fs::read_to_string(path) {
+/// The effective keybindings and issues for the file at `path` in `documents`.
+pub(crate) fn read(documents: &dyn DocumentStore, path: &Path) -> (Value, Value) {
+    resolve(match read_text(documents, path) {
         Ok(text) => Ok(Some(text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
+    })
+}
+
+/// `fs::read_to_string` over a document store, with the same invalid-UTF-8 error.
+fn read_text(documents: &dyn DocumentStore, path: &Path) -> std::io::Result<String> {
+    String::from_utf8(documents.read(path)?).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )
     })
 }
 
@@ -184,8 +196,8 @@ pub(crate) fn resolve(file: Result<Option<String>, String>) -> (Value, Value) {
 }
 
 #[cfg(feature = "native")]
-fn raw_entries(path: &Path) -> Result<Vec<Value>, Value> {
-    match fs::read_to_string(path) {
+fn raw_entries(documents: &dyn DocumentStore, path: &Path) -> Result<Vec<Value>, Value> {
+    match read_text(documents, path) {
         Ok(text) => match crate::settings::parse(&text) {
             Ok(Value::Array(rows)) => Ok(rows),
             _ => Err(json!({
@@ -213,9 +225,13 @@ fn same_rule(left: &Value, right: &Value) -> bool {
 }
 
 #[cfg(feature = "native")]
-fn write_entries(path: &Path, entries: &[Value]) -> Result<(), Value> {
+fn write_entries(
+    documents: &dyn DocumentStore,
+    path: &Path,
+    entries: &[Value],
+) -> Result<(), Value> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| json!({
+        documents.create_dir_all(parent).map_err(|error| json!({
             "_tag":"Fail",
             "error":{"_tag":"KeybindingsConfigError","detail":"failed to prepare keybindings config directory","configPath":path,"cause":error.to_string()}
         }))?;
@@ -224,15 +240,20 @@ fn write_entries(path: &Path, entries: &[Value]) -> Result<(), Value> {
         "_tag":"Fail",
         "error":{"_tag":"KeybindingsConfigError","detail":"failed to encode keybindings config","configPath":path,"cause":error.to_string()}
     }))?;
-    fs::write(path, format!("{contents}\n")).map_err(|error| json!({
+    documents.write(path, format!("{contents}\n").as_bytes(), WriteMode::InPlace).map_err(|error| json!({
         "_tag":"Fail",
         "error":{"_tag":"KeybindingsConfigError","detail":"failed to write keybindings config","configPath":path,"cause":error.to_string()}
     }))
 }
 
 #[cfg(feature = "native")]
-pub(crate) fn mutate(path: &Path, method: &str, input: &Value) -> Result<Value, Value> {
-    let mut entries = raw_entries(path)?;
+pub(crate) fn mutate(
+    documents: &dyn DocumentStore,
+    path: &Path,
+    method: &str,
+    input: &Value,
+) -> Result<Value, Value> {
+    let mut entries = raw_entries(documents, path)?;
     let target = if method == "server.removeKeybinding" {
         input.clone()
     } else {
@@ -262,7 +283,7 @@ pub(crate) fn mutate(path: &Path, method: &str, input: &Value) -> Result<Value, 
     if entries.len() > MAX {
         entries = entries.split_off(entries.len() - MAX);
     }
-    write_entries(path, &entries)?;
-    let (keybindings, issues) = read(path);
+    write_entries(documents, path, &entries)?;
+    let (keybindings, issues) = read(documents, path);
     Ok(json!({"keybindings":keybindings,"issues":issues}))
 }
