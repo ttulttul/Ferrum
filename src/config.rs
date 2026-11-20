@@ -105,6 +105,8 @@ pub struct RuntimeConfig {
     pub tailscale_serve: Option<bool>,
     pub tailscale_serve_port: Option<u16>,
     pub dev_allowed_origins: Vec<String>,
+    /// Built web client to serve at `/` (the reference's `staticDir`).
+    pub static_dir: Option<PathBuf>,
 }
 
 fn bool_env(name: &str) -> Option<bool> {
@@ -138,6 +140,9 @@ impl RuntimeConfig {
                 .ok()
                 .and_then(|v| v.parse().ok()),
             dev_allowed_origins,
+            static_dir: env::var_os("T3CODE_STATIC_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
         })
     }
 }

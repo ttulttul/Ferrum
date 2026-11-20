@@ -29,7 +29,10 @@ fn read_bootstrap(fd: u32) -> anyhow::Result<Bootstrap> {
     };
     Ok(serde_json::from_reader(reader.take(65536))?)
 }
-use t3code_server::{default_provider_command, run_server, AppState};
+use t3code_server::server_runtime::{
+    ServerAlreadyRunningError, ServerOwnership, EXIT_CODE_STATE_DIR_OWNED,
+};
+use t3code_server::{default_provider_command, run_server_owned, AppState};
 #[derive(Parser, Debug)]
 #[command(
     name = "t3code-server",
@@ -59,6 +62,9 @@ struct Args {
     tailscale_serve: Option<bool>,
     #[arg(long)]
     tailscale_serve_port: Option<u16>,
+    /// Built web client directory to serve at `/`.
+    #[arg(long, env = "T3CODE_STATIC_DIR")]
+    static_dir: Option<PathBuf>,
     #[arg(long, env = "T3_PROVIDER_COMMAND", value_delimiter = ' ')]
     provider_command: Option<Vec<String>>,
 }
@@ -69,6 +75,10 @@ async fn main() -> anyhow::Result<()> {
         Err(error) if error.is::<t3code_server::ManagedPolicyFileError>() => {
             eprintln!("{error}");
             std::process::exit(77)
+        }
+        Err(error) if error.is::<ServerAlreadyRunningError>() => {
+            eprintln!("{error}");
+            std::process::exit(EXIT_CODE_STATE_DIR_OWNED)
         }
         result => result,
     }
@@ -104,7 +114,14 @@ async fn serve() -> anyhow::Result<()> {
         axum::serve(listener, t3code_server::relay_http::router(relay)).await?;
         return Ok(());
     }
+    // Before anything opens the database: one server per T3 home, shared
+    // with the TypeScript server's lock on userdata/server-owner.sqlite.
+    let ownership =
+        ServerOwnership::acquire(config::ServerPaths::from_state_dir(&dir).runtime_state)?;
     let mut config = config::RuntimeConfig::load()?;
+    if let Some(static_dir) = args.static_dir {
+        config.static_dir = Some(static_dir);
+    }
     config.mode = args.mode.unwrap_or_else(|| {
         if bootstrap.is_some() {
             "desktop"
@@ -138,5 +155,5 @@ async fn serve() -> anyhow::Result<()> {
         config,
     )
     .await?;
-    run_server(state, listen).await
+    run_server_owned(state, listen, Some(ownership)).await
 }
