@@ -41,7 +41,7 @@ jobs:
       - name: Prepare the reference client runtime
         run: |
           npm install --global pnpm@12.14.0
-          pnpm --dir reference --filter @t3tools/client-runtime install --frozen-lockfile
+          pnpm --dir reference --filter "@t3tools/client-runtime..." install --frozen-lockfile
           python3 -m venv "$RUNNER_TEMP/parity-python"
           "$RUNNER_TEMP/parity-python/bin/pip" install websockets==16.0 cryptography
           echo "$RUNNER_TEMP/parity-python/bin" >> "$GITHUB_PATH"
