@@ -7,11 +7,7 @@ use axum::{
     Json,
 };
 use serde_json::{json, Value};
-use std::sync::{Arc, LazyLock};
-
-static TOOLS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("project_tools.json")).expect("MCP project tool definitions")
-});
+use std::sync::Arc;
 
 fn body(value: Value) -> Response {
     (
@@ -43,7 +39,7 @@ pub(super) async fn handle<S: McpHost>(
     let granted = (!token.is_empty())
         .then(|| s.oauth().mcp_access(token, &issuer))
         .flatten();
-    let Some(_granted) = granted else {
+    let Some(granted) = granted else {
         let mut fields = Vec::new();
         if token.is_empty() || token.contains('.') {
             fields.push(format!(
@@ -103,7 +99,7 @@ pub(super) async fn handle<S: McpHost>(
     }
     let result = match operation {
         "ping" => json!({}),
-        "tools/list" => json!({"tools":*TOOLS}),
+        "tools/list" => json!({"tools":*super::tools::TOOLS}),
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or("");
             let a = &req["params"]["arguments"];
@@ -112,41 +108,20 @@ pub(super) async fn handle<S: McpHost>(
             {
                 return rpc_error(id, -32602, "Environment is unavailable.");
             }
-            let store = s.control_state().store.read().await;
-            let content = match name {
-                "t3_project_list" => {
-                    if a.get("cursor").is_some_and(|n| !n.is_u64())
-                        || a.get("limit")
-                            .is_some_and(|n| n.as_u64().is_none_or(|n| n == 0))
-                    {
-                        return rpc_error(id, -32602, "Invalid tool arguments");
-                    }
-                    let cursor = a["cursor"].as_u64().unwrap_or(0) as usize;
-                    let limit = a["limit"].as_u64().unwrap_or(20) as usize;
-                    let rows = store
-                        .project_rows
-                        .values()
-                        .filter(|r| r["deletedAt"].is_null())
-                        .collect::<Vec<_>>();
-                    let end = cursor.saturating_add(limit);
-                    Ok(
-                        json!({"projects":rows.iter().skip(cursor).take(limit).map(|row| s.project_row(row)).collect::<Vec<_>>(),"nextCursor":(end<rows.len()).then_some(end)}),
-                    )
-                }
-                "t3_project_read" => a["projectId"]
-                    .as_str()
-                    .and_then(|id| store.project_rows.get(id))
-                    .filter(|r| r["deletedAt"].is_null())
-                    .map(|row| s.project_row(row))
-                    .ok_or("The project was not found."),
-                _ => return rpc_error(id, -32602, &format!("Tool '{name}' not found")),
-            };
-            match content {
+            let limit = h
+                .get(super::tools::MODE_LIMIT_HEADER)
+                .and_then(|v| v.to_str().ok());
+            let caller = super::tools::Caller::new(granted, limit);
+            let outcome = super::on_this_thread(super::tools::call(&s, &caller, name, a)).await;
+            match outcome {
                 Ok(v) => {
                     json!({"content":[{"type":"text","text":v.to_string()}],"structuredContent":v,"isError":false})
                 }
-                Err(msg) => {
-                    json!({"content":[{"type":"text","text":json!({"_tag":"OrchestratorMcpFailure","code":"invalid_request","message":msg}).to_string()}],"isError":true})
+                Err(super::tools::Refusal::Rpc(code, message)) => {
+                    return rpc_error(id, code, &message)
+                }
+                Err(super::tools::Refusal::Failure(code, msg)) => {
+                    json!({"content":[{"type":"text","text":json!({"_tag":"OrchestratorMcpFailure","code":code,"message":msg}).to_string()}],"isError":true})
                 }
             }
         }

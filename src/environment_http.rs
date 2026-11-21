@@ -26,6 +26,10 @@ pub(crate) fn identity(dir: &std::path::Path) -> anyhow::Result<String> {
     Ok(id)
 }
 pub(super) async fn descriptor(State(s): State<Arc<AppState>>) -> Json<Value> {
+    Json(descriptor_value(&s))
+}
+/// This server's environment descriptor.
+pub(crate) fn descriptor_value(s: &AppState) -> Value {
     let label = hostname::get()
         .ok()
         .map(|s| s.to_string_lossy().into_owned())
@@ -41,12 +45,12 @@ pub(super) async fn descriptor(State(s): State<Arc<AppState>>) -> Json<Value> {
         "x86_64" => "x64",
         _ => "other",
     };
-    Json(crate::environment::descriptor(
+    crate::environment::descriptor(
         &s.environment_id,
         &label,
         (os, arch),
         s.runtime_config.mode == "desktop",
-    ))
+    )
 }
 fn valid_protocol(h: &HeaderMap) -> bool {
     h.get("x-t3-orchestration-protocol")

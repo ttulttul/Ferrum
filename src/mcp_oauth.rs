@@ -11,6 +11,7 @@ use crate::{
     control_state::ControlState,
     persistence::{DocumentStore, WriteMode},
 };
+mod tools;
 mod transport;
 use axum::{
     extract::{rejection::JsonRejection, OriginalUri, Query, State},
@@ -60,6 +61,54 @@ pub trait McpHost: AuthHost {
     fn project_row(&self, row: &Value) -> Value {
         row.clone()
     }
+    /// The environment descriptor (`/.well-known/t3/environment`).
+    fn descriptor(&self) -> Value;
+    /// The effective settings.
+    fn settings(&self) -> Value;
+    /// The provider instances, as `server.getConfig` lists them.
+    fn providers(&self) -> Value;
+    /// Runs one orchestration command as `orchestration.dispatchCommand`
+    /// does, returning the sequence it committed at or the failure.
+    fn dispatch(self: &Arc<Self>, command: Value) -> HostFuture<Result<u64, Value>>;
+    /// `projects.mutate` with a `project.create` command.
+    fn mutate_project(self: &Arc<Self>, command: Value) -> HostFuture<Result<Value, Value>>;
+    fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait;
+}
+
+/// A host's future. The WebAssembly build runs on one thread, so its
+/// futures need not be `Send`.
+#[cfg(feature = "native")]
+pub type HostFuture<T> = futures_util::future::BoxFuture<'static, T>;
+#[cfg(not(feature = "native"))]
+pub type HostFuture<T> = futures_util::future::LocalBoxFuture<'static, T>;
+
+/// Lets a router handler await a future that is not `Send`. Only the
+/// single-threaded WebAssembly build uses it, where nothing crosses threads.
+#[cfg(not(feature = "native"))]
+struct OneThread<F>(F);
+// SAFETY: the WebAssembly build has one thread, so the future is never sent.
+#[cfg(not(feature = "native"))]
+unsafe impl<F> Send for OneThread<F> {}
+#[cfg(not(feature = "native"))]
+impl<F: std::future::Future> std::future::Future for OneThread<F> {
+    type Output = F::Output;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        // SAFETY: the inner future is never moved out of the pinned wrapper.
+        unsafe { self.map_unchecked_mut(|s| &mut s.0) }.poll(cx)
+    }
+}
+#[cfg(not(feature = "native"))]
+fn on_this_thread<F: std::future::Future>(
+    future: F,
+) -> impl std::future::Future<Output = F::Output> + Send {
+    OneThread(future)
+}
+#[cfg(feature = "native")]
+fn on_this_thread<F: std::future::Future + Send>(future: F) -> F {
+    future
 }
 
 pub struct OAuth {
