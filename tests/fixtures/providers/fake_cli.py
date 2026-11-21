@@ -46,8 +46,11 @@ with open(log_path + ".args", "a") as out:
 # The launch as JSON: the arguments and the environment a server sets for its CLIs.
 LAUNCH_ENV = ("T3CODE_THREAD_ID", "CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CODEX_INTERNAL_", "ENABLE_CLAUDEAI_")
 with open(log_path + ".launch", "a") as out:
-    out.write(json.dumps({"argv": args, "env": {k: v for k, v in os.environ.items()
-                                                if k.startswith(LAUNCH_ENV)}}) + "\n")
+    env = {k: v for k, v in os.environ.items() if k.startswith(LAUNCH_ENV)}
+    # A login-shell scenario also records the PATH the server gave its CLI.
+    if os.environ.get("FAKE_PROVIDER_LAUNCH_PATH"):
+        env.update({k: os.environ[k] for k in ("PATH", "__MISE_DIFF", "JAVA_HOME") if k in os.environ})
+    out.write(json.dumps({"argv": args, "env": env}) + "\n")
 with open(os.environ["FAKE_PROVIDER_SCENARIO"]) as source:
     scenario = json.load(source)
 

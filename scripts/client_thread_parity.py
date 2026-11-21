@@ -89,6 +89,13 @@ PROVIDER_SCENARIOS = [
     {"name": "claude turn", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_turn.json"},
     {"name": "claude crash", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_crash.json"},
     {"name": "claude missing", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": None},
+    # Installed where the user's login shell, not the server's own PATH, finds it.
+    {"name": "claude in the login shell PATH", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_turn.json", "install": "login-shell", "status": True},
+    {"name": "codex in the login shell PATH", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
+     "install": "login-shell"},
+    {"name": "claude missing from the login shell", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": None, "install": "login-shell", "status": True},
     {"name": "claude interrupt", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_interrupt.json", "interrupt": True},
     {"name": "claude approval", "instance": "claudeAgent", "model": "claude-opus-5-5",
@@ -660,9 +667,40 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
         return outcome
 
 
+PROVIDER_STATUS_TIMES = {"checkedAt", "updatedAt", "lastCheckedAt"}
+
+
+def provider_status(url, cookie, instance, root, wait):
+    """The instance's provider status from server.getConfig, without probe times and with the
+    temporary home masked. With `wait`, once its probe has reported (for up to 20 seconds)."""
+    def settled(entry):
+        return not wait or (entry is not None and "has not been checked" not in str(entry.get("message")))
+    def strip(value):
+        if isinstance(value, dict):
+            return {key: strip(item) for key, item in value.items() if key not in PROVIDER_STATUS_TIMES}
+        if isinstance(value, list):
+            return [strip(item) for item in value]
+        if isinstance(value, str):
+            for server in ("original", "rust"):
+                value = value.replace(f"{root}/{server}", "<home>/<server>")
+            return value.replace(str(root), "<home>")
+        return value
+    deadline = time.monotonic() + 20
+    while True:
+        providers = rpc(url, cookie, "server.getConfig", {}).get("providers", [])
+        entry = next((p for p in providers if p.get("instanceId") == instance), None)
+        if settled(entry) or time.monotonic() > deadline:
+            return strip(entry)
+        time.sleep(0.5)
+
+
 def compare_turn(original, rust):
     """Problems with Rust's provider turn as the reference client sees it, by check name."""
     problems = {}
+    status = [original.get("status"), rust.get("status")]
+    if status[0] != status[1]:
+        problems["provider status"] = [f"original {json.dumps(status[0], sort_keys=True)}",
+                                       f"rust     {json.dumps(status[1], sort_keys=True)}"]
     launch = [original.get("launch", []), rust.get("launch", [])]
     if launch[0] != launch[1]:
         problems["cli launch"] = [f"original {line}" for line in launch[0]] + [f"rust     {line}" for line in launch[1]]
@@ -740,15 +778,27 @@ def provider_turns(args, credentials):
             drivers = set() if scenario["scenario"] is None else {"codex" if scenario["instance"] == "codex" else "claude"}
             for name, command in (("original", shlex.split(args.original_command)),
                                   ("rust", shlex.split(args.rust_command))):
-                # Each server has its own fake CLIs, which a restart scenario may remove.
-                fake_bin = temporary / f"{name}-fake-bin"
-                write_fake_clis(fake_bin, drivers)
-                path = os.pathsep.join([str(fake_bin), path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "bin")])
+                root = temporary / name
+                hidden = path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "bin")
+                login_shell = {}
+                if scenario.get("install") == "login-shell":
+                    # The CLI is in the server's ~/.local/bin, which only its login shell's
+                    # profile puts on PATH, as for a server a service manager starts.
+                    fake_bin = root / ".local/bin"
+                    write_fake_clis(fake_bin, drivers)
+                    fake_bin.mkdir(parents=True, exist_ok=True)
+                    (root / ".profile").write_text('PATH="$HOME/.local/bin:$PATH"\nexport PATH\n')
+                    path = hidden
+                    login_shell = {"SHELL": "/bin/bash", "FAKE_PROVIDER_LAUNCH_PATH": "1"}
+                else:
+                    # Each server has its own fake CLIs, which a restart scenario may remove.
+                    fake_bin = temporary / f"{name}-fake-bin"
+                    write_fake_clis(fake_bin, drivers)
+                    path = os.pathsep.join([str(fake_bin), hidden])
                 log = temporary / f"{name}-provider.log"
                 env = {**GIT_ISOLATION, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
-                       "FAKE_PROVIDER_LOG": str(log),
+                       "FAKE_PROVIDER_LOG": str(log), **login_shell,
                        "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}
-                root = temporary / name
                 if "restart" in scenario:
                     outcomes[name] = restart_turn(args, command, root, credentials, env,
                                                   temporary / f"{name}-checkouts", fake_bin, scenario)
@@ -757,6 +807,9 @@ def provider_turns(args, credentials):
                     url, cookie = managed_server(stack, command, root, *credentials, env=env)
                     seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
                     outcomes[name] = run_client(args, url, cookie, seeded)
+                    if scenario.get("status"):
+                        outcomes[name]["status"] = provider_status(url, cookie, scenario["instance"], temporary,
+                                                                   wait=name == "original")
                 outcomes[name]["cli"] = cli_approvals(log)
                 outcomes[name]["launch"] = cli_launch(log, temporary)
         if args.dump:

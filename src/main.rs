@@ -17,6 +17,7 @@ struct Bootstrap {
     desktop_bootstrap_token: String,
     tailscale_serve_enabled: Option<bool>,
     tailscale_serve_port: Option<u16>,
+    shell_environment_prepared: Option<bool>,
 }
 
 fn read_bootstrap(fd: u32) -> anyhow::Result<Bootstrap> {
@@ -68,8 +69,7 @@ struct Args {
     #[arg(long, env = "T3_PROVIDER_COMMAND", value_delimiter = ' ')]
     provider_command: Option<Vec<String>>,
 }
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     // The reference logs at Info by default; RUST_LOG still overrides.
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -78,7 +78,22 @@ async fn main() -> anyhow::Result<()> {
                 .from_env_lossy(),
         )
         .init();
-    match serve().await {
+    let args = Args::parse();
+    let bootstrap = args.bootstrap_fd.map(read_bootstrap).transpose()?;
+    if !args.relay {
+        // As the reference's fixPath: before any thread starts, take the
+        // login shell's PATH, which every provider launch and probe inherits.
+        t3code_server::login_shell::fix_path(
+            bootstrap
+                .as_ref()
+                .and_then(|b| b.shell_environment_prepared)
+                .unwrap_or(false),
+        );
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    match runtime.block_on(serve(args, bootstrap)) {
         Err(error) if error.is::<t3code_server::ManagedPolicyFileError>() => {
             eprintln!("{error}");
             std::process::exit(77)
@@ -91,9 +106,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn serve() -> anyhow::Result<()> {
-    let args = Args::parse();
-    let bootstrap = args.bootstrap_fd.map(read_bootstrap).transpose()?;
+async fn serve(args: Args, bootstrap: Option<Bootstrap>) -> anyhow::Result<()> {
     let listen = args.listen.unwrap_or_else(|| {
         SocketAddr::new(
             args.host

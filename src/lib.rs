@@ -36,6 +36,8 @@ pub mod issues;
 #[cfg(feature = "native")]
 pub mod local_services;
 #[cfg(feature = "native")]
+pub mod login_shell;
+#[cfg(feature = "native")]
 pub mod machine_kind;
 #[cfg(feature = "native")]
 pub mod managed_endpoint;
