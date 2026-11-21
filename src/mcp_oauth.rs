@@ -1,5 +1,16 @@
-//! Public-client OAuth flow for the MCP resource. Authorization codes live for one minute.
-use crate::{access_http, AppState};
+//! Public-client OAuth flow for the MCP resource, and the MCP transport.
+//! Authorization codes live for one minute.
+//!
+//! Every grant is a document in the server's [`DocumentStore`]: the signing
+//! key, pending authorization codes, issued tokens and MCP sessions. A
+//! server that stops between a sign-in's requests, or between MCP calls,
+//! picks them up again. Codes and tokens are stored under their SHA-256
+//! hashes, never in the clear.
+use crate::{
+    access_http::{self, AuthHost},
+    control_state::ControlState,
+    persistence::{DocumentStore, WriteMode},
+};
 mod transport;
 use axum::{
     extract::{rejection::JsonRejection, OriginalUri, Query, State},
@@ -10,18 +21,14 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
 use hmac::{Hmac, Mac};
-use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    io::Write,
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
-use tokio::sync::Mutex;
 use url::Url;
 
 const SCOPES: [&str; 2] = ["orchestration:read", "orchestration:operate"];
@@ -35,12 +42,32 @@ const ACCESS: [&str; 5] = [
 const SECRET_HEADERS: [(&str, &str); 2] = [("cache-control", "no-store"), ("pragma", "no-cache")];
 const UNKNOWN_CLIENT: &str =
     "This sign-in link names an unknown app. Start the sign-in again from it.";
+/// The `software_id` another T3 Code server registers with to link to this one.
+const PEER_LINK_SOFTWARE_ID: &str = "t3code-peer-link";
+const CODE_TTL_MS: i64 = 60_000;
+const TOKEN_TTL_SECS: i64 = 30 * 24 * 3600;
+const SESSION_TTL_MS: i64 = 1_800_000;
+
+/// What the MCP sign-in and transport need from their server.
+pub trait McpHost: AuthHost {
+    fn oauth(&self) -> &OAuth;
+    fn environment_id(&self) -> &str;
+    /// Whether another T3 Code server may link to this one
+    /// (`linkedEnvironmentsEnabled`).
+    fn linked_environments_enabled(&self) -> bool;
+    fn control_state(&self) -> &ControlState;
+    /// A project row as MCP tools return it.
+    fn project_row(&self, row: &Value) -> Value {
+        row.clone()
+    }
+}
 
 pub struct OAuth {
     key: [u8; 32],
-    sessions: Mutex<HashMap<String, (String, Instant)>>,
-    codes: Mutex<HashMap<String, Grant>>,
-    tokens: Mutex<HashMap<String, Grant>>,
+    documents: Arc<dyn DocumentStore>,
+    dir: PathBuf,
+    /// Serializes spending a code, so one code never yields two tokens.
+    spend: Mutex<()>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -48,6 +75,8 @@ struct Client {
     v: u8,
     n: String,
     r: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    p: Option<u8>,
 }
 #[derive(Deserialize, Default)]
 struct Authorization {
@@ -59,18 +88,46 @@ struct Authorization {
     state: Option<String>,
     resource: Option<String>,
 }
+#[derive(Clone, Deserialize, Serialize)]
 struct Verified {
     name: String,
     id: String,
+    #[serde(default)]
+    peer_link: bool,
+    #[serde(with = "url_text")]
     redirect: Url,
     challenge: String,
     state: Option<String>,
     issuer: String,
 }
+mod url_text {
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+    use url::Url;
+    pub fn serialize<S: Serializer>(url: &Url, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(url.as_str())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Url, D::Error> {
+        Url::parse(&String::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+/// A pending authorization code or an issued token.
+#[derive(Deserialize, Serialize)]
 struct Grant {
     request: Verified,
     access: String,
-    expires: Instant,
+    expires_ms: i64,
+}
+/// An MCP session, held by one token.
+#[derive(Deserialize, Serialize)]
+struct Session {
+    holder: String,
+    expires_ms: i64,
+}
+/// What an MCP token grants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpAccess {
+    pub access: String,
+    pub peer_link: bool,
 }
 enum Invalid {
     Page(&'static str),
@@ -78,34 +135,41 @@ enum Invalid {
 }
 
 fn random() -> [u8; 32] {
-    let mut bytes = [0; 32];
-    OsRng.fill_bytes(&mut bytes);
-    bytes
+    crate::platform::random_bytes()
+}
+fn now_ms() -> i64 {
+    crate::platform::now_ms()
+}
+fn hashed(secret: &str) -> String {
+    hex::encode(Sha256::digest(secret.as_bytes()))
 }
 
 impl OAuth {
-    pub fn open(dir: &Path) -> anyhow::Result<Self> {
-        let dir = dir.join("secrets");
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("mcp-oauth-signing-key.bin");
-        if !path.exists() {
-            let mut file = tempfile::NamedTempFile::new_in(&dir)?;
-            file.write_all(&random())?;
-            file.as_file().sync_all()?;
-            if let Err(error) = file.persist_noclobber(&path) {
-                if error.error.kind() != std::io::ErrorKind::AlreadyExists {
-                    return Err(error.into());
-                }
-            }
+    /// Reads the signing key from `secrets/mcp-oauth-signing-key.bin` under
+    /// `dir`, creating it on first use, and keeps grants under `dir`.
+    pub fn open(documents: Arc<dyn DocumentStore>, dir: &Path) -> anyhow::Result<Self> {
+        let secrets = dir.join("secrets");
+        let path = secrets.join("mcp-oauth-signing-key.bin");
+        if documents.read_optional(&path)?.is_none() {
+            // Written as base64url text, which every document store holds.
+            // A key written as its 32 raw bytes reads as well.
+            documents.create_private_dir_all(&secrets)?;
+            documents.write(&path, B64.encode(random()).as_bytes(), WriteMode::Private)?;
         }
-        let key = std::fs::read(path)?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid MCP OAuth signing key"))?;
+        let stored = documents.read(&path)?;
+        let key = match stored.len() {
+            32 => stored.try_into().ok(),
+            _ => B64
+                .decode(stored.trim_ascii())
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok()),
+        }
+        .ok_or_else(|| anyhow::anyhow!("invalid MCP OAuth signing key"))?;
         Ok(Self {
             key,
-            sessions: Mutex::default(),
-            codes: Mutex::default(),
-            tokens: Mutex::default(),
+            documents,
+            dir: dir.join("mcp-oauth"),
+            spend: Mutex::new(()),
         })
     }
     fn mac(&self, payload: &str) -> Hmac<Sha256> {
@@ -121,6 +185,53 @@ impl OAuth {
         let client: Client = serde_json::from_slice(&B64.decode(body).ok()?).ok()?;
         (client.v == 1).then_some(client)
     }
+
+    fn path(&self, kind: &str, name: &str) -> PathBuf {
+        self.dir.join(kind).join(format!("{name}.json"))
+    }
+    fn read<T: serde::de::DeserializeOwned>(&self, kind: &str, name: &str) -> Option<T> {
+        let bytes = self
+            .documents
+            .read_optional(&self.path(kind, name))
+            .ok()??;
+        serde_json::from_slice(&bytes).ok()
+    }
+    /// Stores `value`, first dropping this kind's records that expired.
+    fn write<T: Serialize>(&self, kind: &str, name: &str, value: &T) -> std::io::Result<()> {
+        let dir = self.dir.join(kind);
+        let now = now_ms();
+        for path in self.documents.list(&dir).unwrap_or_default() {
+            let expired = self
+                .documents
+                .read_optional(&path)
+                .ok()
+                .flatten()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_none_or(|record| record["expires_ms"].as_i64().is_none_or(|at| at <= now));
+            if expired {
+                let _ = self.documents.remove(&path);
+            }
+        }
+        self.documents.create_private_dir_all(&dir)?;
+        self.documents.write(
+            &self.path(kind, name),
+            &serde_json::to_vec(value)?,
+            WriteMode::Private,
+        )
+    }
+    fn remove(&self, kind: &str, name: &str) {
+        let _ = self.documents.remove(&self.path(kind, name));
+    }
+
+    /// Spends an authorization code: it is gone even when a later check fails.
+    fn take_code(&self, code: &str) -> Option<Grant> {
+        let _spending = self.spend.lock().unwrap_or_else(|e| e.into_inner());
+        let name = hashed(code);
+        let grant = self.read::<Grant>("codes", &name)?;
+        self.remove("codes", &name);
+        Some(grant)
+    }
+
     fn validate(&self, req: Authorization, issuer: String) -> Result<Verified, Invalid> {
         let id = req.client_id.unwrap_or_default();
         let client = self.client(&id).ok_or(Invalid::Page(UNKNOWN_CLIENT))?;
@@ -174,19 +285,42 @@ impl OAuth {
         Ok(Verified {
             name: client.n,
             id,
+            peer_link: client.p == Some(1),
             redirect,
             challenge,
             state: req.state,
             issuer,
         })
     }
-    /// The MCP transport alone may use this session; environment RPCs require an owner session.
-    pub async fn mcp_access(&self, token: &str, issuer: &str) -> Option<String> {
-        let tokens = self.tokens.lock().await;
-        tokens
-            .get(token)
-            .filter(|g| g.expires > Instant::now() && g.request.issuer == issuer)
-            .map(|g| g.access.clone())
+    /// The MCP transport alone may use this token; environment RPCs require an owner session.
+    pub fn mcp_access(&self, token: &str, issuer: &str) -> Option<McpAccess> {
+        self.read::<Grant>("tokens", &hashed(token))
+            .filter(|g| g.expires_ms > now_ms() && g.request.issuer == issuer)
+            .map(|g| McpAccess {
+                access: g.access,
+                peer_link: g.request.peer_link,
+            })
+    }
+
+    /// Opens an MCP session for the holder of `token` and returns its id.
+    fn open_session(&self, token: &str) -> std::io::Result<String> {
+        let id = crate::platform::uuid_v4().to_string();
+        let session = Session {
+            holder: hashed(token),
+            expires_ms: now_ms() + SESSION_TTL_MS,
+        };
+        self.write("sessions", &id, &session)?;
+        Ok(id)
+    }
+    /// Whether `id` is a live session of `token`'s holder.
+    fn session_held(&self, id: &str, token: &str) -> bool {
+        uuid::Uuid::parse_str(id).is_ok()
+            && self
+                .read::<Session>("sessions", id)
+                .is_some_and(|s| s.expires_ms > now_ms() && s.holder == hashed(token))
+    }
+    fn close_session(&self, id: &str) {
+        self.remove("sessions", id);
     }
 }
 
@@ -264,17 +398,17 @@ fn redirect_to(url: &Url, updates: &[(&str, Option<&str>)]) -> String {
     result.query_pairs_mut().extend_pairs(pairs);
     result.into()
 }
-pub fn routes() -> Router<Arc<AppState>> {
+pub fn routes<S: McpHost>() -> Router<Arc<S>> {
     Router::new()
         .route("/.well-known/oauth-protected-resource", get(resource))
-        .route("/mcp", axum::routing::any(transport::handle))
+        .route("/mcp", axum::routing::any(transport::handle::<S>))
         .route("/.well-known/oauth-protected-resource/mcp", get(resource))
         .route("/.well-known/oauth-authorization-server", get(metadata))
-        .route("/oauth/mcp/register", post(register))
-        .route("/oauth/mcp/authorize", get(authorize))
-        .route("/oauth/mcp/approval", post(approval))
-        .route("/oauth/mcp/decision", post(decision))
-        .route("/oauth/mcp/token", post(token))
+        .route("/oauth/mcp/register", post(register::<S>))
+        .route("/oauth/mcp/authorize", get(authorize::<S>))
+        .route("/oauth/mcp/approval", post(approval::<S>))
+        .route("/oauth/mcp/decision", post(decision::<S>))
+        .route("/oauth/mcp/token", post(token::<S>))
 }
 async fn resource(h: HeaderMap) -> Json<Value> {
     let i = origin(&h);
@@ -295,7 +429,7 @@ fn error(code: &str, desc: &str) -> Response {
     )
         .into_response()
 }
-async fn register(State(s): State<Arc<AppState>>, Json(input): Json<Value>) -> Response {
+async fn register<S: McpHost>(State(s): State<Arc<S>>, Json(input): Json<Value>) -> Response {
     let uris = input["redirect_uris"]
         .as_array()
         .cloned()
@@ -315,7 +449,8 @@ async fn register(State(s): State<Arc<AppState>>, Json(input): Json<Value>) -> R
             "Redirect URIs must be https, or http on localhost, 127.0.0.1 or [::1].",
         );
     }
-    if input["software_id"] == "t3code-peer-link" {
+    let peer_link = input["software_id"] == PEER_LINK_SOFTWARE_ID;
+    if peer_link && !s.linked_environments_enabled() {
         return error(
             "invalid_client_metadata",
             "Linked environments is off on that machine. Turn it on in its Settings → Labs.",
@@ -329,9 +464,13 @@ async fn register(State(s): State<Arc<AppState>>, Json(input): Json<Value>) -> R
         .chars()
         .take(100)
         .collect::<String>();
-    let body = B64.encode(json!({"v":1,"n":name,"r":uris}).to_string());
+    let mut client = json!({"v":1,"n":name,"r":uris});
+    if peer_link {
+        client["p"] = json!(1);
+    }
+    let body = B64.encode(client.to_string());
     let sig = B64.encode(
-        s.oauth
+        s.oauth()
             .mac(&format!("mcp-client-id.{body}"))
             .finalize()
             .into_bytes(),
@@ -345,13 +484,13 @@ async fn register(State(s): State<Arc<AppState>>, Json(input): Json<Value>) -> R
     }
     (StatusCode::CREATED,SECRET_HEADERS,Json(json!({"client_id":id,"client_name":name,"redirect_uris":uris,"grant_types":["authorization_code"],"response_types":["code"],"token_endpoint_auth_method":"none"}))).into_response()
 }
-async fn authorize(
-    State(s): State<Arc<AppState>>,
+async fn authorize<S: McpHost>(
+    State(s): State<Arc<S>>,
     h: HeaderMap,
     OriginalUri(uri): OriginalUri,
     Query(req): Query<Authorization>,
 ) -> Response {
-    let location = match s.oauth.validate(req, origin(&h)) {
+    let location = match s.oauth().validate(req, origin(&h)) {
         Ok(_) => format!(
             "/connect-agent{}",
             uri.query().map(|s| format!("?{s}")).unwrap_or_default()
@@ -399,16 +538,16 @@ fn invalid(e: Invalid) -> Response {
         Invalid::Redirect(r) => Json(json!({"redirectTo":r})).into_response(),
     }
 }
-async fn csrf(s: &AppState, h: &HeaderMap, v: &Verified) -> Option<Hmac<Sha256>> {
+async fn csrf<S: McpHost>(s: &S, h: &HeaderMap, v: &Verified) -> Option<Hmac<Sha256>> {
     access_http::authenticate_owner(s, h).await.ok()?;
     let holder = access_http::principal(s, h).ok()?.id;
-    Some(s.oauth.mac(&format!(
+    Some(s.oauth().mac(&format!(
         "mcp-csrf.{}",
         json!([holder, v.id, v.redirect.as_str(), v.challenge])
     )))
 }
-async fn approval(
-    State(s): State<Arc<AppState>>,
+async fn approval<S: McpHost>(
+    State(s): State<Arc<S>>,
     h: HeaderMap,
     req: Result<Json<Authorization>, JsonRejection>,
 ) -> Response {
@@ -416,12 +555,12 @@ async fn approval(
         Ok(req) => req,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let v = match s.oauth.validate(req, origin(&h)) {
+    let v = match s.oauth().validate(req, origin(&h)) {
         Ok(v) => v,
         Err(e) => return invalid(e),
     };
     let mut out = json!({"clientName":v.name,"redirectHost":v.redirect[url::Position::BeforeHost..url::Position::AfterPort],"environmentHost":Url::parse(&v.issuer).unwrap()[url::Position::BeforeHost..url::Position::AfterPort]});
-    if let Some(mac) = csrf(&s, &h, &v).await {
+    if let Some(mac) = csrf(&*s, &h, &v).await {
         out["csrfToken"] = json!(B64.encode(mac.finalize().into_bytes()));
         out["oneClickAccess"] = json!(ACCESS);
     }
@@ -432,8 +571,8 @@ struct Decision {
     authorization: Authorization,
     decision: Value,
 }
-async fn decision(
-    State(s): State<Arc<AppState>>,
+async fn decision<S: McpHost>(
+    State(s): State<Arc<S>>,
     h: HeaderMap,
     req: Result<Json<Decision>, JsonRejection>,
 ) -> Response {
@@ -441,7 +580,7 @@ async fn decision(
         Ok(req) => req,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let v = match s.oauth.validate(req.authorization, origin(&h)) {
+    let v = match s.oauth().validate(req.authorization, origin(&h)) {
         Ok(v) => v,
         Err(e) => return invalid(e),
     };
@@ -458,7 +597,15 @@ async fn decision(
             let access = req.decision["access"].as_str().unwrap_or("");
             if mode == "pairing-code" {
                 let supplied = req.decision["code"].as_str().unwrap_or("");
-                if let Err(reason) = s.auth.consume_approval_code(supplied, access, false) {
+                if v.peer_link && approval_code(supplied) {
+                    return approval_error(
+                        "Linking needs a plain pairing code, not an app approval code.",
+                    );
+                }
+                if let Err(reason) = s
+                    .auth()
+                    .consume_approval_code(supplied, access, v.peer_link)
+                {
                     return approval_error(match reason {
                         "insufficient_scope"=>"That pairing code cannot grant this access. It has not been used, so choose an access level it grants, or create a code with the standard scopes.",
                         "not_a_pairing_code"=>"That is not a one-time pairing code.",
@@ -471,7 +618,7 @@ async fn decision(
                     .decode(req.decision["csrfToken"].as_str().unwrap_or(""))
                     .unwrap_or_default();
                 if !ACCESS.contains(&access)
-                    || csrf(&s, &h, &v)
+                    || csrf(&*s, &h, &v)
                         .await
                         .is_none_or(|mac| mac.verify_slice(&tag).is_err())
                 {
@@ -489,16 +636,14 @@ async fn decision(
                     ("iss", Some(&v.issuer)),
                 ],
             );
-            let mut codes = s.oauth.codes.lock().await;
-            codes.retain(|_, g| g.expires > Instant::now());
-            codes.insert(
-                code,
-                Grant {
-                    request: v,
-                    access: access.into(),
-                    expires: Instant::now() + Duration::from_secs(60),
-                },
-            );
+            let grant = Grant {
+                request: v,
+                access: access.into(),
+                expires_ms: now_ms() + CODE_TTL_MS,
+            };
+            if s.oauth().write("codes", &hashed(&code), &grant).is_err() {
+                return approval_error("The code could not be checked. Try again.");
+            }
             target
         }
         _ => {
@@ -509,8 +654,8 @@ async fn decision(
     };
     (SECRET_HEADERS, Json(json!({"redirectTo":target}))).into_response()
 }
-async fn token(
-    State(s): State<Arc<AppState>>,
+async fn token<S: McpHost>(
+    State(s): State<Arc<S>>,
     h: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
@@ -534,13 +679,13 @@ async fn token(
             "code, redirect_uri, client_id and code_verifier are required.",
         );
     }
-    if s.oauth.client(id).is_none() {
+    if s.oauth().client(id).is_none() {
         return fail("invalid_client", "The client is unknown.");
     }
-    let grant = s.oauth.codes.lock().await.remove(code);
+    let grant = s.oauth().take_code(code);
     let issuer = origin(&h);
     let Some(mut grant) = grant.filter(|g| {
-        g.expires > Instant::now()
+        g.expires_ms > now_ms()
             && g.request.id == id
             && g.request.redirect.as_str() == redirect
             && g.request.issuer == issuer
@@ -564,21 +709,32 @@ async fn token(
         "read-only" => "orchestration:read",
         _ => "orchestration:read orchestration:operate",
     };
-    let ttl = 30 * 24 * 3600;
-    grant.expires = Instant::now() + Duration::from_secs(ttl);
-    let mut tokens = s.oauth.tokens.lock().await;
-    tokens.retain(|_, g| g.expires > Instant::now());
-    tokens.insert(token.clone(), grant);
+    grant.expires_ms = now_ms() + TOKEN_TTL_SECS * 1000;
+    if s.oauth().write("tokens", &hashed(&token), &grant).is_err() {
+        return fail("invalid_grant", "The session could not be issued.");
+    }
     (
         SECRET_HEADERS,
-        Json(json!({"access_token":token,"token_type":"Bearer","expires_in":ttl,"scope":scope})),
+        Json(json!({"access_token":token,"token_type":"Bearer","expires_in":TOKEN_TTL_SECS,"scope":scope})),
     )
         .into_response()
 }
 
-#[cfg(test)]
+/// An app approval code (`READ-…`, `FULL-…`), as opposed to a plain pairing code.
+fn approval_code(code: &str) -> bool {
+    code.trim().split_once('-').is_some_and(|(prefix, rest)| {
+        ["READ", "SUPERVISED", "EDITS", "AUTO", "FULL"]
+            .iter()
+            .any(|p| prefix.eq_ignore_ascii_case(p))
+            && rest.len() == 12
+            && rest.bytes().all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
+    use crate::AppState;
     use axum::{
         body::{to_bytes, Body},
         http::Request,
@@ -677,9 +833,8 @@ mod tests {
             state
                 .oauth
                 .mcp_access(token["access_token"].as_str().unwrap(), "http://localhost")
-                .await
-                .as_deref(),
-            Some("read-only")
+                .map(|granted| granted.access),
+            Some("read-only".to_owned())
         );
         assert_eq!(
             body(exchange().await.unwrap()).await["error"],
