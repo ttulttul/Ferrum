@@ -2063,6 +2063,36 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
         assert_eq!(sent["delivery"], "started", "{sent}");
         runtime.run();
         assert_eq!(agentd.turns().len(), 2);
+        // A linked caller's cursorless read starts at the newest message and
+        // pages back with `beforePosition`; `afterPosition` reads forward.
+        let text = |read: &Value| -> Vec<String> {
+            read["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["text"].as_str().unwrap_or_default().to_owned())
+                .collect()
+        };
+        let newest = tool(None, "t3_thread_read", json!({"threadId":thread,"limit":1}));
+        assert_eq!(text(&newest), ["more"], "{newest}");
+        assert_eq!(newest["hasMore"], false);
+        let earlier = newest["earlierPosition"].clone();
+        assert!(earlier.is_number(), "{newest}");
+        let older = tool(
+            None,
+            "t3_thread_read",
+            json!({"threadId":thread,"limit":1,"beforePosition":earlier}),
+        );
+        assert_eq!(text(&older), ["hello"], "{older}");
+        assert_eq!(older["hasMore"], true);
+        assert_eq!(older["earlierPosition"], Value::Null);
+        let forward = tool(
+            None,
+            "t3_thread_read",
+            json!({"threadId":thread,"limit":1,"afterPosition":-1}),
+        );
+        assert_eq!(text(&forward), ["hello"], "{forward}");
+        assert_eq!(forward["hasMore"], true);
         let interrupted = tool(None, "t3_thread_interrupt", json!({"threadId":thread}));
         assert_eq!(
             interrupted["status"], "interrupt_requested",
