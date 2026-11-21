@@ -54,6 +54,7 @@ pub(crate) fn list(state: &crate::AppState, settings: &Value, options: &Value) -
     list_with(
         &state.config_started_at,
         |driver| state.settings.policy.provider_denial(driver),
+        |_| None,
         settings,
         options,
         &state.model_manifest.current(),
@@ -62,10 +63,12 @@ pub(crate) fn list(state: &crate::AppState, settings: &Value, options: &Value) -
 
 /// The provider rows of the config snapshot. `denial` is the managed policy's
 /// reason a driver is disallowed, if any. Claude's built-in models come from
-/// the model `manifest`.
+/// the model `manifest`; a Codex instance's from `listed`, the models its CLI
+/// listed (`model/list`), with the manifest's Codex catalog applied.
 pub(crate) fn list_with(
     started_at: &str,
     denial: impl Fn(&str) -> Option<String>,
+    listed: impl Fn(&str) -> Option<Vec<Value>>,
     settings: &Value,
     options: &Value,
     manifest: &Value,
@@ -128,8 +131,14 @@ pub(crate) fn list_with(
         } else {
             format!("{label} is disabled in T3 Code settings.")
         }));
+        let listed_models = (driver == "codex")
+            .then(|| listed(id))
+            .flatten()
+            .map(|listed| Value::from(crate::codex_models::with_catalog(listed, manifest)));
         let stock_models = if driver == "claudeAgent" {
             &claude_models
+        } else if let Some(listed) = &listed_models {
+            listed
         } else {
             &catalog["models"]
         };

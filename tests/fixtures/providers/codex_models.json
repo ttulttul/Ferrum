@@ -1,0 +1,18 @@
+{
+  "steps": [
+    {"expect": "initialize"},
+    {"send": {"id": "$id", "result": {"codexHome": "/tmp/codex-home", "platformFamily": "unix", "platformOs": "linux", "userAgent": "codex_cli_rs/0.170.0"}}},
+    {"expect": "model/list"},
+    {"send": {"id": "$id", "result": {"data": [
+      {"id": "gpt-6-luna", "model": "gpt-6-luna", "displayName": "gpt-6-luna", "description": "", "hidden": false, "isDefault": true,
+       "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": ""}, {"reasoningEffort": "high", "description": ""}],
+       "defaultReasoningEffort": "high"}
+    ], "nextCursor": "page-2"}}},
+    {"expect": "model/list"},
+    {"send": {"id": "$id", "result": {"data": [
+      {"id": "gpt-5.6-sol", "model": "gpt-5.6-sol", "displayName": "gpt-5.6-sol", "description": "", "hidden": false, "isDefault": false,
+       "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": ""}],
+       "defaultReasoningEffort": "medium", "additionalSpeedTiers": ["fast"]}
+    ], "nextCursor": null}}}
+  ]
+}

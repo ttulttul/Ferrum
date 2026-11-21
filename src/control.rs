@@ -114,6 +114,9 @@ pub struct ControlPlane {
     host: Host,
     /// Whether changes are waiting for the host's next alarm to deliver.
     wake: std::sync::atomic::AtomicBool,
+    /// The models each Codex instance's CLI last listed, by instance, kept
+    /// in the state documents.
+    listed_models: Mutex<BTreeMap<String, Vec<Value>>>,
 }
 impl AuthHost for ControlPlane {
     fn auth(&self) -> &AuthService {
@@ -297,7 +300,20 @@ impl ControlPlane {
             cancellations: Default::default(),
             host,
             wake: Default::default(),
+            listed_models: Default::default(),
         });
+        let listed = plane
+            .documents
+            .read_optional(&Self::listed_models_path())
+            .ok()
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        if let Some(listed) = listed {
+            *plane
+                .listed_models
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = listed;
+        }
         plane.resume_turns();
         Ok(plane)
     }
@@ -378,12 +394,90 @@ impl ControlPlane {
     /// [`on_alarm`](Self::on_alarm) when [`next_alarm`](Self::next_alarm)
     /// says.
     pub async fn workspace_connected(
-        &self,
+        self: &Arc<Self>,
         transport: Arc<dyn Transport>,
     ) -> Result<HelloReply, WireError> {
         let hello = self.host.workspace.connected(transport).await;
         self.schedule();
+        if hello.is_ok() {
+            let plane = self.clone();
+            self.host
+                .runtime
+                .spawn(Box::pin(async move { plane.list_provider_models().await }));
+        }
         hello
+    }
+
+    fn listed_models_path() -> PathBuf {
+        std::path::Path::new(STATE_DIR).join("provider-models.json")
+    }
+
+    /// Ask each enabled Codex instance's CLI for its models, as the
+    /// reference's provider check does, and keep what it lists.
+    async fn list_provider_models(&self) {
+        let settings = self.settings();
+        let providers = server_config::providers::list_with(
+            &self.started_at,
+            |_| None,
+            |_| None,
+            &settings,
+            &Value::Null,
+            &Value::Null,
+        );
+        let instances: Vec<String> = providers
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["driver"] == "codex" && p["enabled"] == true)
+            .filter_map(|p| p["instanceId"].as_str().map(str::to_owned))
+            .collect();
+        let mut changed = false;
+        for id in instances {
+            let row = json!({"modelSelection": {"instanceId": id}});
+            let Some((provider, env)) = crate::provider_state::provider_turn(
+                &settings,
+                &crate::model_manifest::BUNDLED,
+                &row,
+                &Default::default(),
+            ) else {
+                continue;
+            };
+            let spec = crate::workspace::TurnSpec {
+                cwd: WORKSPACE_ROOT.into(),
+                env,
+                provider: Some(provider),
+                ..Default::default()
+            };
+            match self.host.workspace.provider_models(spec).await {
+                Ok(entries) if !entries.is_empty() => {
+                    let models = crate::codex_models::from_model_list(&entries);
+                    let mut listed = self.listed_models.lock().unwrap_or_else(|e| e.into_inner());
+                    changed |= listed.get(&id) != Some(&models);
+                    listed.insert(id, models);
+                }
+                Ok(_) => tracing::warn!(instance = %id, "Codex listed no models"),
+                Err(error) => {
+                    tracing::warn!(instance = %id, %error, "could not list Codex's models")
+                }
+            }
+        }
+        if changed {
+            let listed = self
+                .listed_models
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Ok(bytes) = serde_json::to_vec(&listed) {
+                let path = Self::listed_models_path();
+                if let Err(error) =
+                    self.documents
+                        .write(&path, &bytes, crate::persistence::WriteMode::Replace)
+                {
+                    tracing::error!(%error, "could not keep Codex's models");
+                }
+            }
+            self.wake();
+        }
     }
 
     /// A frame arrived from `t3-agentd`.
@@ -814,6 +908,14 @@ impl ControlPlane {
         if method == "projects.mutate" {
             return Call::Done(self.create_project(params).await);
         }
+        if method == "server.refreshProviders" {
+            if self.host.workspace.is_ready() {
+                self.list_provider_models().await;
+            }
+            return Call::Done(Reply::Success(
+                json!({"providers":self.config_snapshot(&Value::Null)["providers"]}),
+            ));
+        }
         if let Some(call) = self.host_call(method, params) {
             return call;
         }
@@ -850,9 +952,6 @@ impl ControlPlane {
                 Call::Stream(batches)
             }
             "server.getConfig" => Call::Done(Reply::Success(self.config_snapshot(&Value::Null))),
-            "server.refreshProviders" => Call::Done(Reply::Success(
-                json!({"providers":self.config_snapshot(&Value::Null)["providers"]}),
-            )),
             "subscribeServerLifecycle" => {
                 let environment = self.descriptor();
                 Call::Stream(vec![json!([
@@ -989,7 +1088,7 @@ impl ControlPlane {
             "keybindingsConfigPath": keybindings_path,
             "keybindings": keybindings,
             "issues": issues,
-            "providers": server_config::providers::list_with(&self.started_at, |_| None, &settings, options, &crate::model_manifest::BUNDLED),
+            "providers": server_config::providers::list_with(&self.started_at, |_| None, |id| self.listed_models.lock().ok()?.get(id).cloned(), &settings, options, &crate::model_manifest::BUNDLED),
             "availableEditors": [],
             "remoteOpenTargets": [],
             "directEndpoints": [],
@@ -1356,6 +1455,60 @@ mod tests {
         // Another project cannot take the same folder.
         let taken = create("c3", "p2", "/workspace/sandbox", true);
         assert_eq!(taken["_tag"], "Failure", "{taken}");
+    }
+
+    #[test]
+    fn lists_codex_models_from_the_workspace_and_keeps_them() {
+        let documents = Arc::new(MemoryStore::new());
+        let runtime = Arc::new(ManualRuntime::default());
+        let open = || {
+            ControlPlane::open(
+                config(),
+                documents.clone(),
+                Box::new(MemoryLog::default()),
+                host(&runtime),
+            )
+            .unwrap()
+        };
+        let codex_models = |plane: &ControlPlane| -> Vec<String> {
+            plane.config_snapshot(&Value::Null)["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["instanceId"] == "codex")
+                .unwrap()["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["slug"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let plane = open();
+        assert!(codex_models(&plane).is_empty());
+        let agentd = Arc::new(FakeAgentd::default());
+        agentd.set_reading(
+            op::PROVIDER_MODELS,
+            json!([{"model": "gpt-6-luna", "displayName": "gpt-6-luna", "isDefault": true,
+                "supportedReasoningEfforts": [{"reasoningEffort": "high"}], "defaultReasoningEffort": "high"}]),
+        );
+        now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+        runtime.run();
+        assert_eq!(codex_models(&plane), ["gpt-6-luna"]);
+        let snapshot = plane.config_snapshot(&Value::Null);
+        let codex = snapshot["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["instanceId"] == "codex")
+            .unwrap();
+        assert_eq!(codex["models"][0]["name"], "GPT-6-Luna");
+        assert_eq!(
+            codex["models"][0]["capabilities"]["optionDescriptors"][0]["currentValue"],
+            "high"
+        );
+        drop(plane);
+        // A restarted plane has them before the workspace connects again.
+        assert_eq!(codex_models(&open()), ["gpt-6-luna"]);
     }
 
     #[test]

@@ -422,6 +422,27 @@ async fn a_turn_in_a_missing_folder_says_the_folder_is_missing() {
 }
 
 #[tokio::test]
+async fn codex_lists_every_page_of_its_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let models = super::list_models(fake_spec(CODEX, "codex_models.json", &log, None))
+        .await
+        .unwrap();
+    let slugs: Vec<_> = models
+        .iter()
+        .map(|m| m["model"].as_str().unwrap())
+        .collect();
+    assert_eq!(slugs, ["gpt-6-luna", "gpt-5.6-sol"]);
+    let requests = received(&log);
+    let pages: Vec<_> = requests
+        .iter()
+        .filter(|m| m["method"] == "model/list")
+        .map(|m| m["params"].clone())
+        .collect();
+    assert_eq!(pages, [json!({}), json!({"cursor": "page-2"})]);
+}
+
+#[tokio::test]
 async fn claude_turn_streams_text_tool_calls_and_usage() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("in.jsonl");

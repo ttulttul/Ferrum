@@ -1052,6 +1052,18 @@ impl Workspace for RemoteWorkspace {
     ) -> WorkspaceFuture<'a, bool> {
         boxed(async move { self.respond(turn_id, response).await })
     }
+    fn provider_models<'a>(
+        &'a self,
+        spec: TurnSpec,
+    ) -> WorkspaceFuture<'a, anyhow::Result<Vec<Value>>> {
+        boxed(async move {
+            let models = self
+                .request(op::PROVIDER_MODELS, json!(TurnStart::from(spec)))
+                .await
+                .map_err(|e| anyhow::anyhow!(e.message))?;
+            Ok(models.as_array().cloned().unwrap_or_default())
+        })
+    }
     fn ack(&self, position: StreamPosition) {
         let (transport, seq) = {
             let mut state = self.lock();

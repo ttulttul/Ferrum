@@ -53,6 +53,19 @@ pub(crate) fn start(
     Ok(receiver)
 }
 
+/// The models the provider's CLI lists, launched as a turn of `spec` would
+/// launch it. Only Codex lists them (`model/list`).
+pub(crate) async fn list_models(spec: TurnSpec) -> anyhow::Result<Vec<serde_json::Value>> {
+    let provider = spec
+        .provider
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("the request names no provider"))?;
+    if provider.driver != CODEX {
+        anyhow::bail!("provider driver `{}` lists no models", provider.driver);
+    }
+    codex::list_models(&spec, &provider).await
+}
+
 /// Where a turn's events go.
 #[derive(Clone)]
 pub(crate) struct Sink {
