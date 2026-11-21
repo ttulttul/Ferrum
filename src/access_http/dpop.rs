@@ -18,7 +18,40 @@ tokio::task_local! {static CONTEXT:RequestContext;}
 // Request metadata comes from the server transport. The per-request cache lets several
 // authorization layers examine one proof while consuming its replay marker exactly once.
 pub(crate) async fn contextualize(request: Request, next: Next) -> Response {
-    let h = request.headers();
+    #[cfg(feature = "native")]
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|p| p.0.ip().to_canonical());
+    #[cfg(not(feature = "native"))]
+    let peer = None;
+    let context = request_context(
+        request.method().as_str(),
+        request.uri().path(),
+        request.headers(),
+        peer,
+    );
+    CONTEXT.scope(context, next.run(request)).await
+}
+
+/// Runs `f` with the request context of a request the router did not see,
+/// such as a socket upgrade a host accepts itself, so proofs it checks are
+/// verified against that request.
+pub(crate) fn with_request_context<T>(
+    method: &str,
+    uri: &axum::http::Uri,
+    headers: &HeaderMap,
+    f: impl FnOnce() -> T,
+) -> T {
+    CONTEXT.sync_scope(request_context(method, uri.path(), headers, None), f)
+}
+
+fn request_context(
+    method: &str,
+    path: &str,
+    h: &HeaderMap,
+    peer: Option<std::net::IpAddr>,
+) -> RequestContext {
     let scheme = if header(h, "x-forwarded-proto") == Some("https") {
         "https"
     } else {
@@ -34,25 +67,19 @@ pub(crate) async fn contextualize(request: Request, next: Next) -> Response {
         {
             return None;
         }
-        url.set_path(request.uri().path());
+        url.set_path(path);
         Some(url.to_string())
     });
-    #[cfg(feature = "native")]
-    let peer = request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|p| p.0.ip().to_canonical());
     // Without a socket peer, the client address comes from the CF-Connecting-IP header.
-    #[cfg(not(feature = "native"))]
-    let peer = header(h, "cf-connecting-ip").and_then(|ip| ip.parse::<std::net::IpAddr>().ok());
-    let client = derive_client(h, peer);
-    let context = RequestContext {
-        client,
-        method: request.method().to_string(),
+    let peer = peer.or_else(|| {
+        header(h, "cf-connecting-ip").and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+    });
+    RequestContext {
+        client: derive_client(h, peer),
+        method: method.to_owned(),
         url,
         validated: OnceLock::new(),
-    };
-    CONTEXT.scope(context, next.run(request)).await
+    }
 }
 
 pub(super) fn check(
