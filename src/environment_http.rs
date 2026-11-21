@@ -48,7 +48,7 @@ pub(crate) fn descriptor_value(s: &AppState) -> Value {
     crate::environment::descriptor(
         &s.environment_id,
         &label,
-        (os, arch),
+        (os, arch, crate::machine_kind::current()),
         s.runtime_config.mode == "desktop",
     )
 }

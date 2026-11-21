@@ -11,6 +11,8 @@ use crate::{
     control_state::ControlState,
     persistence::{DocumentStore, WriteMode},
 };
+#[cfg(feature = "native")]
+mod reference_sessions;
 mod tools;
 mod transport;
 use axum::{
@@ -117,6 +119,10 @@ pub struct OAuth {
     dir: PathBuf,
     /// Serializes spending a code, so one code never yields two tokens.
     spend: Mutex<()>,
+    /// The TypeScript server's session store in the same home, which holds
+    /// the MCP client sessions (and so the peer links) it issued.
+    #[cfg(feature = "native")]
+    reference: reference_sessions::ReferenceSessions,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -219,6 +225,8 @@ impl OAuth {
             documents,
             dir: dir.join("mcp-oauth"),
             spend: Mutex::new(()),
+            #[cfg(feature = "native")]
+            reference: reference_sessions::ReferenceSessions::new(dir),
         })
     }
     fn mac(&self, payload: &str) -> Hmac<Sha256> {
@@ -342,6 +350,9 @@ impl OAuth {
         })
     }
     /// The MCP transport alone may use this token; environment RPCs require an owner session.
+    ///
+    /// Besides this server's own tokens, it accepts the MCP client sessions the
+    /// TypeScript server keeps in the same home, as that server checks them.
     pub fn mcp_access(&self, token: &str, issuer: &str) -> Option<McpAccess> {
         self.read::<Grant>("tokens", &hashed(token))
             .filter(|g| g.expires_ms > now_ms() && g.request.issuer == issuer)
@@ -349,6 +360,20 @@ impl OAuth {
                 access: g.access,
                 peer_link: g.request.peer_link,
             })
+            .or_else(|| self.reference_access(token))
+    }
+    #[cfg(feature = "native")]
+    fn reference_access(&self, token: &str) -> Option<McpAccess> {
+        self.reference
+            .verify(token, now_ms())
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "MCP client authentication failed.");
+                None
+            })
+    }
+    #[cfg(not(feature = "native"))]
+    fn reference_access(&self, _token: &str) -> Option<McpAccess> {
+        None
     }
 
     /// Opens an MCP session for the holder of `token` and returns its id.
@@ -750,7 +775,6 @@ async fn token<S: McpHost>(
             "The authorization code is invalid or expired.",
         );
     };
-    let token = B64.encode(random());
     let scope = match grant.access.as_str() {
         "full-access" => {
             "orchestration:read orchestration:operate settings:write source-control:write"
@@ -758,6 +782,32 @@ async fn token<S: McpHost>(
         "read-only" => "orchestration:read",
         _ => "orchestration:read orchestration:operate",
     };
+    // On a home the TypeScript server shares, the session goes where that
+    // server keeps its own, so a link made here works there and is revoked
+    // there like any other client.
+    #[cfg(feature = "native")]
+    match s.oauth().reference.issue(
+        &grant.request.name,
+        &grant.access,
+        grant.request.peer_link,
+        &access_http::client_metadata(),
+        now_ms(),
+    ) {
+        Ok(Some(issued)) => {
+            let expires_in = ((issued.expires_ms - now_ms()) / 1000).max(0);
+            return (
+                SECRET_HEADERS,
+                Json(json!({"access_token":issued.token,"token_type":"Bearer","expires_in":expires_in,"scope":scope})),
+            )
+                .into_response();
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(%error, "Could not issue an MCP client session.");
+            return fail("invalid_grant", "The session could not be issued.");
+        }
+    }
+    let token = B64.encode(random());
     grant.expires_ms = now_ms() + TOKEN_TTL_SECS * 1000;
     if s.oauth().write("tokens", &hashed(&token), &grant).is_err() {
         return fail("invalid_grant", "The session could not be issued.");

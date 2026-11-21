@@ -621,7 +621,28 @@ impl AuthService {
             Ok(n != r.sessions.len())
         });
         self.invalidations.send_replace(());
-        result
+        let external = self.revoke_external_mcp_clients(Some(id));
+        match result {
+            Ok(revoked) => external.map(|ids| revoked || !ids.is_empty()),
+            Err(e) => Err(e),
+        }
+    }
+    /// Revokes the MCP client sessions the TypeScript store holds, so a link
+    /// revoked here is refused by both servers.
+    fn revoke_external_mcp_clients(&self, id: Option<&str>) -> Result<Vec<String>, &'static str> {
+        let Some(db) = self.external_pairing.as_deref() else {
+            return Ok(Vec::new());
+        };
+        #[cfg(not(feature = "native"))]
+        {
+            let _ = (db, id);
+            Ok(Vec::new())
+        }
+        #[cfg(feature = "native")]
+        external_pairing::revoke_mcp_clients(db, id, &iso(now())).map_err(|error| {
+            tracing::warn!(%error, "could not revoke MCP clients in statev2.sqlite");
+            "internal_error"
+        })
     }
     pub fn revoke_others(&self, current: &Session) -> Result<usize, &'static str> {
         let result = self.update(|r| {
@@ -644,7 +665,11 @@ impl AuthService {
             Ok(n.len())
         });
         self.invalidations.send_replace(());
-        result
+        let external = self.revoke_external_mcp_clients(None);
+        match result {
+            Ok(revoked) => external.map(|ids| revoked + ids.len()),
+            Err(e) => Err(e),
+        }
     }
     pub async fn authenticate_bearer(&self, token: &str) -> bool {
         self.principal(token).is_some_and(|s| s.proof_key.is_none())

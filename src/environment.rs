@@ -6,15 +6,20 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-/// `/.well-known/t3/environment`. `platform` is the workspace host's (os, arch)
-/// in the client's vocabulary; `desktop_managed` marks a desktop-owned server.
+/// `/.well-known/t3/environment`. `platform` is the workspace host's (os, arch,
+/// machine kind) in the client's vocabulary, with no `machine` key when the
+/// kind is unknown; `desktop_managed` marks a desktop-owned server.
 pub fn descriptor(
     environment_id: &str,
     label: &str,
-    platform: (&str, &str),
+    platform: (&str, &str, Option<&str>),
     desktop_managed: bool,
 ) -> Value {
-    let (os, arch) = platform;
+    let (os, arch, machine) = platform;
+    let mut platform = json!({"os":os,"arch":arch});
+    if let Some(machine) = machine {
+        platform["machine"] = json!(machine);
+    }
     let mut capabilities = serde_json::Map::new();
     macro_rules! capability {
         ($name:literal, $value:expr) => {
@@ -98,7 +103,7 @@ pub fn descriptor(
     capability!("shellOlderSettled", true);
     capability!("linkedThreadRefreshes", true);
     capability!("issueLinkedThreads", true);
-    json!({"environmentId":environment_id,"label":label,"platform":{"os":os,"arch":arch,"machine":"desktop"},"serverVersion":"0.1.10","orchestrationProtocolVersion":2,"databaseMigration":98,"capabilities":capabilities})
+    json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.10","orchestrationProtocolVersion":2,"databaseMigration":98,"capabilities":capabilities})
 }
 
 pub(crate) fn shell(store: &Store, sequence: u64) -> Value {
