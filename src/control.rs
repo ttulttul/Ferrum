@@ -105,6 +105,8 @@ pub struct ControlPlane {
     config: Config,
     started_at: String,
     state: ControlState,
+    /// The MCP sign-in's grants, kept in the state documents.
+    oauth: crate::mcp_oauth::OAuth,
     signals: Mutex<Signals>,
     /// Held while an orchestration command checks and commits.
     mutation_lock: tokio::sync::Mutex<()>,
@@ -116,6 +118,20 @@ pub struct ControlPlane {
 impl AuthHost for ControlPlane {
     fn auth(&self) -> &AuthService {
         &self.state.auth
+    }
+}
+impl crate::mcp_oauth::McpHost for ControlPlane {
+    fn oauth(&self) -> &crate::mcp_oauth::OAuth {
+        &self.oauth
+    }
+    fn environment_id(&self) -> &str {
+        &self.config.environment_id
+    }
+    fn linked_environments_enabled(&self) -> bool {
+        self.settings()["linkedEnvironmentsEnabled"] == true
+    }
+    fn control_state(&self) -> &ControlState {
+        &self.state
     }
 }
 impl std::ops::Deref for ControlPlane {
@@ -231,12 +247,15 @@ impl ControlPlane {
             .with_port(config.cookie_port)
             .open_in(documents.clone(), std::path::Path::new(STATE_DIR))?;
         let started_at = auth_service::iso(auth_service::now());
+        let oauth =
+            crate::mcp_oauth::OAuth::open(documents.clone(), std::path::Path::new(STATE_DIR))?;
         let state = ControlState::open(auth, documents, log, std::path::Path::new(STATE_DIR))?;
         let signals = Mutex::new(Signals::new(&state, &host.workspace));
         let plane = Arc::new(Self {
             config,
             started_at,
             state,
+            oauth,
             signals,
             mutation_lock: Default::default(),
             cancellations: Default::default(),
@@ -467,6 +486,7 @@ impl ControlPlane {
             .route("/.well-known/t3/environment", get(descriptor))
             .route("/api/orchestration/shell", get(shell_snapshot))
             .merge(access_http::auth_routes::<ControlPlane>())
+            .merge(crate::mcp_oauth::routes::<ControlPlane>())
             .fallback(unavailable)
             .layer(axum::middleware::from_fn(access_http::contextualize))
             .layer(axum::middleware::from_fn(crate::cors::browser_api))
@@ -1608,6 +1628,275 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             jsonwebtoken::crypto::sign(message.as_bytes(), &key, jsonwebtoken::Algorithm::ES256)
                 .unwrap();
         format!("{message}.{signature}")
+    }
+
+    /// One HTTP request to `plane`'s router, as `env.example.test` over https.
+    fn http(
+        plane: &Arc<ControlPlane>,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: String,
+    ) -> (u16, HeaderMap, Value) {
+        use tower::ServiceExt;
+        let mut request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", "env.example.test")
+            .header("x-forwarded-proto", "https");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = now(plane
+            .router()
+            .oneshot(request.body(axum::body::Body::from(body)).unwrap()))
+        .unwrap();
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let bytes = now(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+        (
+            status,
+            headers,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    fn enable_linked_environments(documents: &MemoryStore) {
+        let dir = std::path::Path::new(STATE_DIR);
+        documents.create_dir_all(dir).unwrap();
+        documents
+            .write(
+                &dir.join("settings.json"),
+                br#"{"linkedEnvironmentsEnabled":true}"#,
+                crate::persistence::WriteMode::Replace,
+            )
+            .unwrap();
+    }
+
+    /// The sign-in another server runs to link to this one: register as a
+    /// peer link, approve with a pairing code, exchange the code. Returns
+    /// the access token. The plane is reopened from storage between steps,
+    /// as a host that suspends between requests does.
+    fn peer_link_sign_in(
+        documents: &Arc<MemoryStore>,
+        access: &str,
+    ) -> (Arc<ControlPlane>, String) {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use sha2::Digest;
+        let open = || {
+            ControlPlane::open(
+                config(),
+                documents.clone(),
+                Box::new(MemoryLog::default()),
+                host(&Arc::default()),
+            )
+            .unwrap()
+        };
+        let json = [("content-type", "application/json")];
+        let redirect = "http://127.0.0.1/t3code/peer-link/callback";
+        let plane = open();
+        let (status, _, client) = http(
+            &plane,
+            "POST",
+            "/oauth/mcp/register",
+            &json,
+            json!({"client_name":"T3 Code · laptop","redirect_uris":[redirect],"software_id":"t3code-peer-link"}).to_string(),
+        );
+        assert_eq!(status, 201, "{client}");
+        let (_, owner) = plane.auth.browser_session("secret", None).unwrap();
+        let owner = plane.auth.principal(&owner).unwrap();
+        let code = plane
+            .auth
+            .pair(&owner, &json!({"purpose":"peer-link","access":access}))
+            .unwrap()["credential"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let verifier = "v".repeat(64);
+        let authorization = json!({
+            "response_type":"code","client_id":client["client_id"],"redirect_uri":redirect,
+            "code_challenge":URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
+            "code_challenge_method":"S256","state":"s1","resource":"https://env.example.test/mcp"
+        });
+        let plane = open();
+        let (status, _, decided) = http(
+            &plane,
+            "POST",
+            "/oauth/mcp/decision",
+            &json,
+            json!({"authorization":authorization,"decision":{"_tag":"pairing-code","access":access,"code":code}}).to_string(),
+        );
+        assert_eq!(status, 200, "{decided}");
+        let redirect_to = url::Url::parse(decided["redirectTo"].as_str().unwrap()).unwrap();
+        let query: HashMap<_, _> = redirect_to.query_pairs().into_owned().collect();
+        assert_eq!(query["state"], "s1");
+        assert_eq!(query["iss"], "https://env.example.test");
+        let form = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs([
+                ("grant_type", "authorization_code"),
+                ("code", query["code"].as_str()),
+                ("redirect_uri", redirect),
+                ("client_id", client["client_id"].as_str().unwrap()),
+                ("code_verifier", verifier.as_str()),
+                ("resource", "https://env.example.test/mcp"),
+            ])
+            .finish();
+        let plane = open();
+        let form_type = [("content-type", "application/x-www-form-urlencoded")];
+        let (status, _, token) = http(&plane, "POST", "/oauth/mcp/token", &form_type, form.clone());
+        assert_eq!(status, 200, "{token}");
+        assert_eq!(token["token_type"], "Bearer");
+        // A code is spent once.
+        let (status, _, again) = http(&plane, "POST", "/oauth/mcp/token", &form_type, form);
+        assert_eq!((status, &again["error"]), (400, &json!("invalid_grant")));
+        (plane, token["access_token"].as_str().unwrap().to_owned())
+    }
+
+    #[test]
+    fn a_peer_link_is_refused_while_linked_environments_are_off() {
+        let plane = plane();
+        let (status, _, refused) = http(
+            &plane,
+            "POST",
+            "/oauth/mcp/register",
+            &[("content-type", "application/json")],
+            json!({"redirect_uris":["http://127.0.0.1/cb"],"software_id":"t3code-peer-link"})
+                .to_string(),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(refused["error"], "invalid_client_metadata");
+        let (_, _, metadata) = http(
+            &plane,
+            "GET",
+            "/.well-known/oauth-authorization-server",
+            &[],
+            String::new(),
+        );
+        assert_eq!(
+            metadata["registration_endpoint"],
+            "https://env.example.test/oauth/mcp/register"
+        );
+    }
+
+    #[test]
+    fn a_peer_link_signs_in_and_calls_mcp_across_restarts() {
+        let documents = Arc::new(MemoryStore::new());
+        enable_linked_environments(&documents);
+        let (plane, token) = peer_link_sign_in(&documents, "full-access");
+        let bearer = format!("Bearer {token}");
+        let mcp = |plane: &Arc<ControlPlane>, session: Option<&str>, body: Value| {
+            let mut headers = vec![
+                ("authorization", bearer.as_str()),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+            ];
+            if let Some(session) = session {
+                headers.push(("mcp-session-id", session));
+            }
+            http(plane, "POST", "/mcp", &headers, body.to_string())
+        };
+        let (status, headers, initialized) = mcp(
+            &plane,
+            None,
+            json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t3code-peer","version":"1"}}}),
+        );
+        assert_eq!(status, 200, "{initialized}");
+        assert_eq!(initialized["result"]["serverInfo"]["name"], "T3 Code");
+        let session = headers["mcp-session-id"].to_str().unwrap().to_owned();
+
+        // The session and token outlive the process.
+        let plane = ControlPlane::open(
+            config(),
+            documents.clone(),
+            Box::new(MemoryLog::default()),
+            host(&Arc::default()),
+        )
+        .unwrap();
+        plane
+            .commit(Event::ProjectCreated(crate::Project {
+                id: "p1".into(),
+                name: "One".into(),
+                path: "/workspace/one".into(),
+                created_at: crate::now(),
+            }))
+            .unwrap();
+        let (status, _, listed) = mcp(
+            &plane,
+            Some(&session),
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t3_project_list","arguments":{}}}),
+        );
+        assert_eq!(status, 200, "{listed}");
+        let projects = &listed["result"]["structuredContent"]["projects"];
+        assert_eq!(projects[0]["id"], "p1", "{listed}");
+
+        // Another token's holder cannot use the session.
+        let (status, _, _) = http(
+            &plane,
+            "POST",
+            "/mcp",
+            &[
+                ("authorization", "Bearer someone-else"),
+                ("mcp-session-id", &session),
+            ],
+            json!({"jsonrpc":"2.0","id":2,"method":"ping"}).to_string(),
+        );
+        assert_eq!(status, 401);
+        let (status, _, _) = http(
+            &plane,
+            "DELETE",
+            "/mcp",
+            &[("authorization", &bearer), ("mcp-session-id", &session)],
+            String::new(),
+        );
+        assert_eq!(status, 204);
+        let (status, _, _) = mcp(
+            &plane,
+            Some(&session),
+            json!({"jsonrpc":"2.0","id":3,"method":"ping"}),
+        );
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn a_peer_link_needs_a_plain_pairing_code() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let documents = Arc::new(MemoryStore::new());
+        enable_linked_environments(&documents);
+        let plane = ControlPlane::open(
+            config(),
+            documents,
+            Box::new(MemoryLog::default()),
+            host(&Arc::default()),
+        )
+        .unwrap();
+        let json = [("content-type", "application/json")];
+        let (_, _, client) = http(
+            &plane,
+            "POST",
+            "/oauth/mcp/register",
+            &json,
+            json!({"redirect_uris":["http://127.0.0.1/cb"],"software_id":"t3code-peer-link"})
+                .to_string(),
+        );
+        let (_, owner) = plane.auth.browser_session("secret", None).unwrap();
+        let owner = plane.auth.principal(&owner).unwrap();
+        // A code made for an app's sign-in, not for linking.
+        let app_code = plane
+            .auth
+            .pair(&owner, &json!({"access":"read-only"}))
+            .unwrap();
+        let authorization = json!({"response_type":"code","client_id":client["client_id"],
+            "redirect_uri":"http://127.0.0.1/cb","code_challenge":URL_SAFE_NO_PAD.encode([7u8; 32]),
+            "code_challenge_method":"S256","state":"s"});
+        let (status, _, refused) = http(
+            &plane,
+            "POST",
+            "/oauth/mcp/decision",
+            &json,
+            json!({"authorization":authorization,"decision":{"_tag":"pairing-code","access":"read-only","code":app_code["credential"]}}).to_string(),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(refused["_tag"], "AuthMcpApprovalError");
     }
 
     #[test]

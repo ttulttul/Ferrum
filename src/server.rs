@@ -135,6 +135,7 @@ impl AppState {
         }
         let log: Box<dyn event_log::EventLog + Send> =
             Box::new(event_log::NdjsonLog::open(dir.join("events.jsonl"))?);
+        let oauth = mcp_oauth::OAuth::open(documents.clone(), &dir)?;
         let control = crate::control_state::ControlState::open(auth, documents, log, &dir)?;
         // Turns run as this process's children, so none survives a restart.
         let cut_off = crate::turn::running_runs(&control.store_now());
@@ -152,7 +153,7 @@ impl AppState {
             control,
             config_started_at: auth_service::iso(auth_service::now()),
             environment_id: environment_http::identity(&dir)?,
-            oauth: mcp_oauth::OAuth::open(&dir)?,
+            oauth,
             connect,
             data_dir: dir.clone(),
             paths: paths.clone(),
@@ -334,7 +335,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // must bypass the environment session middleware above.
         .route("/api/hooks/:hook_id/:token", any(webhook_handler))
         .merge(asset_http::routes())
-        .merge(mcp_oauth::routes())
+        .merge(mcp_oauth::routes::<AppState>())
         .merge(access_http::routes())
         .merge(host_rpc::routes())
         .route(
@@ -950,6 +951,26 @@ pub fn ensure_path(path: &str) -> anyhow::Result<()> {
         anyhow::bail!("working directory does not exist: {path}");
     }
     Ok(())
+}
+
+impl mcp_oauth::McpHost for AppState {
+    fn oauth(&self) -> &mcp_oauth::OAuth {
+        &self.oauth
+    }
+    fn environment_id(&self) -> &str {
+        &self.environment_id
+    }
+    fn linked_environments_enabled(&self) -> bool {
+        self.settings
+            .internal()
+            .is_ok_and(|settings| settings["linkedEnvironmentsEnabled"] == true)
+    }
+    fn control_state(&self) -> &crate::control_state::ControlState {
+        &self.control
+    }
+    fn project_row(&self, row: &serde_json::Value) -> serde_json::Value {
+        crate::repository_identity::with_identity(row)
+    }
 }
 
 impl access_http::AuthHost for AppState {

@@ -1,4 +1,4 @@
-use super::{origin, AppState};
+use super::{origin, McpHost};
 use axum::{
     body::Bytes,
     extract::State,
@@ -7,11 +7,7 @@ use axum::{
     Json,
 };
 use serde_json::{json, Value};
-use std::{
-    sync::{Arc, LazyLock},
-    time::{Duration, Instant},
-};
-use uuid::Uuid;
+use std::sync::{Arc, LazyLock};
 
 static TOOLS: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("project_tools.json")).expect("MCP project tool definitions")
@@ -27,8 +23,8 @@ fn body(value: Value) -> Response {
 fn rpc_error(id: &Value, code: i32, message: &str) -> Response {
     body(json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}))
 }
-pub(super) async fn handle(
-    State(s): State<Arc<AppState>>,
+pub(super) async fn handle<S: McpHost>(
+    State(s): State<Arc<S>>,
     h: HeaderMap,
     method: Method,
     bytes: Bytes,
@@ -44,7 +40,10 @@ pub(super) async fn handle(
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
         .map(|(_, t)| t.trim())
         .unwrap_or("");
-    if token.is_empty() || s.oauth.mcp_access(token, &issuer).await.is_none() {
+    let granted = (!token.is_empty())
+        .then(|| s.oauth().mcp_access(token, &issuer))
+        .flatten();
+    let Some(_granted) = granted else {
         let mut fields = Vec::new();
         if token.is_empty() || token.contains('.') {
             fields.push(format!(
@@ -61,18 +60,14 @@ pub(super) async fn handle(
         };
         return (StatusCode::UNAUTHORIZED,[("cache-control","no-store"),("vary","Accept-Encoding"),("www-authenticate",challenge.as_str())],
             Json(json!({"error":"invalid_mcp_credential","message":"A valid T3 Code MCP credential is required."}))).into_response();
-    }
+    };
     let sid = h.get("mcp-session-id").and_then(|v| v.to_str().ok());
-    let now = Instant::now();
-    let holder = crate::relay_service::hash(token);
-    let mut sessions = s.oauth.sessions.lock().await;
-    sessions.retain(|_, (_, expiry)| *expiry > now);
     if let Some(sid) = sid {
-        if sessions.get(sid).is_none_or(|(h, _)| *h != holder) {
+        if !s.oauth().session_held(sid, token) {
             return StatusCode::NOT_FOUND.into_response();
         }
         if method == Method::DELETE {
-            sessions.remove(sid);
+            s.oauth().close_session(sid);
             return StatusCode::NO_CONTENT.into_response();
         }
     } else if method == Method::DELETE {
@@ -90,8 +85,9 @@ pub(super) async fn handle(
         return StatusCode::BAD_REQUEST.into_response();
     }
     if operation == "initialize" {
-        let sid = Uuid::new_v4().to_string();
-        sessions.insert(sid.clone(), (holder, now + Duration::from_secs(1800)));
+        let Ok(sid) = s.oauth().open_session(token) else {
+            return rpc_error(id, -32603, "The session could not be opened.");
+        };
         let mut r = body(
             json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"logging":{},"tools":{"listChanged":true},"completions":{}},"serverInfo":{"name":"T3 Code","version":"0.1.10"}}}),
         );
@@ -99,7 +95,6 @@ pub(super) async fn handle(
             .insert("mcp-session-id", HeaderValue::from_str(&sid).unwrap());
         return r;
     }
-    drop(sessions);
     if sid.is_none() {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -113,11 +108,11 @@ pub(super) async fn handle(
             let name = req["params"]["name"].as_str().unwrap_or("");
             let a = &req["params"]["arguments"];
             if a.get("environmentId")
-                .is_some_and(|id| id != &s.environment_id)
+                .is_some_and(|id| id != s.environment_id())
             {
                 return rpc_error(id, -32602, "Environment is unavailable.");
             }
-            let store = s.store.read().await;
+            let store = s.control_state().store.read().await;
             let content = match name {
                 "t3_project_list" => {
                     if a.get("cursor").is_some_and(|n| !n.is_u64())
@@ -135,14 +130,14 @@ pub(super) async fn handle(
                         .collect::<Vec<_>>();
                     let end = cursor.saturating_add(limit);
                     Ok(
-                        json!({"projects":rows.iter().skip(cursor).take(limit).map(|row| crate::repository_identity::with_identity(row)).collect::<Vec<_>>(),"nextCursor":(end<rows.len()).then_some(end)}),
+                        json!({"projects":rows.iter().skip(cursor).take(limit).map(|row| s.project_row(row)).collect::<Vec<_>>(),"nextCursor":(end<rows.len()).then_some(end)}),
                     )
                 }
                 "t3_project_read" => a["projectId"]
                     .as_str()
                     .and_then(|id| store.project_rows.get(id))
                     .filter(|r| r["deletedAt"].is_null())
-                    .map(crate::repository_identity::with_identity)
+                    .map(|row| s.project_row(row))
                     .ok_or("The project was not found."),
                 _ => return rpc_error(id, -32602, &format!("Tool '{name}' not found")),
             };

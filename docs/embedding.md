@@ -78,8 +78,9 @@ pub trait EventLog {
 ```
 
 Paths are keys under `control::STATE_DIR`; a key-value store works. The plane
-keeps auth records, keybindings, client stream records, and one record per
-running turn there. `append` must be durable before it returns, because the
+keeps auth records, keybindings, client stream records, one record per
+running turn, and the MCP sign-in's signing key, pending codes, tokens and
+sessions there. `append` must be durable before it returns, because the
 plane acknowledges a turn's event to `t3-agentd` only after that. Each
 recorded turn output carries its stream position, which is what lets a
 restarted plane resume the turn without losing or repeating output.
