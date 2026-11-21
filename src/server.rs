@@ -629,9 +629,18 @@ pub(crate) async fn execute_run(
         cwd: cwd.clone(),
         env_remove,
     };
-    let mut turn = state.workspace.start_turn(spec, cancel_rx).await?;
+    let mut turn = state.workspace.start_tracked_turn(spec, cancel_rx).await?;
     let mut exit = None;
-    while let Some(event) = turn.recv().await {
+    // Each event is acknowledged once it is in the event log, so a
+    // workspace that keeps unacknowledged events redelivers the rest after a
+    // reconnect or a restart.
+    let ack = |position: Option<crate::workspace::StreamPosition>| {
+        if let Some(position) = position {
+            state.workspace.ack(position);
+        }
+    };
+    let mut exit_position = None;
+    while let Some(crate::workspace::TurnItem { event, position }) = turn.recv().await {
         let (stream, text) = match event {
             crate::workspace::TurnEvent::Stdout(text) => {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(text.trim()) {
@@ -645,6 +654,7 @@ pub(crate) async fn execute_run(
                             "runId": event["runId"].clone(),
                             "text": event["text"].clone(),
                         }));
+                        ack(position);
                         continue;
                     }
                 }
@@ -654,10 +664,11 @@ pub(crate) async fn execute_run(
             crate::workspace::TurnEvent::Exited(status) => {
                 state.cancellations.lock().await.remove(&run.id);
                 exit = Some(status);
+                exit_position = position;
                 break;
             }
         };
-        let _ = state
+        let committed = state
             .commit(Event::RunOutput {
                 run_id: run.id,
                 thread_id: run.thread_id.clone(),
@@ -665,6 +676,9 @@ pub(crate) async fn execute_run(
                 text,
             })
             .await;
+        if committed.is_ok() {
+            ack(position);
+        }
     }
     let Some(crate::workspace::TurnExit {
         success: ok,
@@ -691,6 +705,7 @@ pub(crate) async fn execute_run(
             error: (!ok && !cancelled).then(|| format!("provider exited with {status}")),
         })
         .await?;
+    ack(exit_position);
     if ok && !cancelled {
         if let Some(tree) = state.workspace.capture_git_tree(&cwd).await {
             let turn_count = state
