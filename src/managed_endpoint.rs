@@ -13,8 +13,9 @@
 //! `userdata/relay-clients/<pid>.json` so a crashed server's connector is stopped by the next
 //! one, and stopped when the server stops.
 //!
-//! Not ported: calls to T3 Connect (tunnel registration, recovery, release on shutdown, link
-//! reconcile) and installing a missing cloudflared. Recovery requests are logged only.
+//! The T3 Connect calls around it (registration, recovery, provisioning a CLI-desired link and
+//! releasing the tunnel on shutdown) are in `crate::cloud_link`, which consumes this runtime's
+//! recovery requests. Not ported: installing a missing cloudflared.
 
 use crate::relay_client;
 use serde_json::{json, Map, Value};
@@ -37,10 +38,6 @@ use tokio::{
 pub const RELAY_CLIENT_LOG_FILE: &str = "relay-client.ndjson";
 const CLOUD_ENDPOINT_RUNTIME_CONFIG: &str = "cloud-endpoint-runtime-config";
 const CLOUD_ENDPOINT_CONFIRMED_ORIGIN: &str = "cloud-endpoint-confirmed-origin";
-const CLOUD_CLI_DESIRED_LINK: &str = "cloud-cli-desired-link";
-const CLOUD_LINKED_USER_ID: &str = "cloud-linked-user-id";
-const RELAY_URL_SECRET: &str = "cloud-relay-url";
-const RELAY_ENVIRONMENT_CREDENTIAL_SECRET: &str = "cloud-relay-environment-credential";
 const HTTP2_FALLBACK_STATE: &str = "cloud-endpoint-http2-fallback";
 const HTTP2_FALLBACK_TTL_MS: i128 = 24 * 60 * 60_000;
 const TUNNEL_AUTHORIZATION_FAILURES_BEFORE_RECOVERY: u32 = 4;
@@ -93,7 +90,7 @@ impl RuntimeConfig {
         Self::from_value(&serde_json::from_str(text).ok()?)
     }
 
-    fn from_value(value: &Value) -> Option<Self> {
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
         let provider_kind = object.get("providerKind")?.as_str()?;
         if !matches!(provider_kind, "manual" | "cloudflare_tunnel" | "t3_relay") {
@@ -115,6 +112,19 @@ impl RuntimeConfig {
             tunnel_id: text("tunnelId").ok()?,
             tunnel_name: text("tunnelName").ok()?,
         })
+    }
+
+    /// `encodeEndpointRuntimeConfigJson`: the schema's fields, in its order.
+    pub fn encode(&self) -> String {
+        self.to_value().to_string()
+    }
+
+    pub(crate) fn to_value(&self) -> Value {
+        let mut map = Map::new();
+        map.insert("providerKind".into(), json!(self.provider_kind));
+        map.insert("connectorToken".into(), json!(self.connector_token));
+        self.add_tunnel(&mut map);
+        Value::Object(map)
     }
 
     /// `runtimeConfigKey`.
@@ -168,16 +178,16 @@ impl LocalOrigin {
     }
 }
 
-fn read_secret(dir: &Path, name: &str) -> Option<Vec<u8>> {
+pub(crate) fn read_secret(dir: &Path, name: &str) -> Option<Vec<u8>> {
     std::fs::read(dir.join(format!("{name}.bin"))).ok()
 }
 
-fn read_secret_string(dir: &Path, name: &str) -> Option<String> {
+pub(crate) fn read_secret_string(dir: &Path, name: &str) -> Option<String> {
     read_secret(dir, name).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// `ServerSecretStore.set`: a private temporary file renamed over the secret.
-fn write_secret(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_secret(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let target = dir.join(format!("{name}.bin"));
     let temporary = dir.join(format!("{name}.bin.{}.tmp", crate::platform::uuid_v4()));
@@ -194,6 +204,14 @@ fn write_secret(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+/// `ServerSecretStore.remove`: a missing secret is already removed.
+pub(crate) fn remove_secret(dir: &Path, name: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(dir.join(format!("{name}.bin"))) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 fn now_millis() -> i128 {
@@ -704,6 +722,11 @@ struct Inner {
     not_ready_threshold: AtomicU32,
     generations: AtomicU64,
     current_generation: AtomicU64,
+    /// `withLinkStateLock`.
+    link_state: Mutex<()>,
+    /// `recoveryRequests`: a sliding queue of one.
+    recovery: StdMutex<Option<RuntimeConfig>>,
+    recovery_ready: Notify,
 }
 
 /// `CloudManagedEndpointRuntime`.
@@ -745,6 +768,9 @@ impl ManagedEndpointRuntime {
                 not_ready_threshold: AtomicU32::new(CONNECTOR_NOT_READY_CHECKS_BEFORE_RESTART),
                 generations: AtomicU64::new(0),
                 current_generation: AtomicU64::new(0),
+                link_state: Mutex::new(()),
+                recovery: StdMutex::new(None),
+                recovery_ready: Notify::new(),
             }),
         }
     }
@@ -809,55 +835,98 @@ impl ManagedEndpointRuntime {
         self.apply_config(None).await;
     }
 
-    /// The startup half of `server.ts`'s cloud link fiber, without T3 Connect calls.
-    ///
-    /// A publish-only link never runs a tunnel. A stored tunnel whose confirmed origin is this
-    /// server's starts at once (`startManagedTunnelIfOriginConfirmed`). Otherwise the reference
-    /// asks T3 Connect to route the tunnel here and, while it cannot, starts the stored tunnel
-    /// anyway when the environment is linked; this server cannot ask, so it takes that fallback.
-    /// An unlinked stored tunnel stays down, as in the reference.
-    pub async fn start_stored_tunnel(&self, origin: &LocalOrigin) -> bool {
-        let secrets = &self.inner.options.secrets_dir;
-        if read_secret(secrets, CLOUD_CLI_DESIRED_LINK).as_deref() == Some(b"publish_only") {
-            return false;
+    /// `withLinkStateLock`: serializes changes to the stored link and the connector.
+    pub async fn lock_link_state(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.link_state.lock().await
+    }
+
+    /// `requestRecovery`: asks for a replacement tunnel; a newer request replaces a pending one.
+    pub fn request_recovery(&self, config: RuntimeConfig) {
+        *self
+            .inner
+            .recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(config);
+        self.inner.recovery_ready.notify_one();
+    }
+
+    /// The next `recoveryRequests` element.
+    pub async fn next_recovery_request(&self) -> RuntimeConfig {
+        loop {
+            let ready = self.inner.recovery_ready.notified();
+            if let Some(config) = self
+                .inner
+                .recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                return config;
+            }
+            ready.await;
         }
+    }
+
+    pub(crate) fn secrets_dir(&self) -> &Path {
+        &self.inner.options.secrets_dir
+    }
+
+    pub(crate) fn base_dir(&self) -> &Path {
+        &self.inner.options.base_dir
+    }
+
+    /// `CloudLink.startManagedTunnelIfOriginConfirmed`: runs the stored tunnel when T3 Connect
+    /// confirmed it for this server's origin or, with `require_confirmed_origin` off (the
+    /// fallback while T3 Connect stays unreachable), whenever one is stored. `Err` carries the
+    /// runtime status of a connector that did not start.
+    pub async fn start_if_origin_confirmed(
+        &self,
+        origin: &LocalOrigin,
+        require_confirmed_origin: bool,
+    ) -> Result<bool, Value> {
+        let _lock = self.lock_link_state().await;
+        self.start_if_origin_confirmed_locked(origin, require_confirmed_origin)
+            .await
+    }
+
+    async fn start_if_origin_confirmed_locked(
+        &self,
+        origin: &LocalOrigin,
+        require_confirmed_origin: bool,
+    ) -> Result<bool, Value> {
+        let secrets = &self.inner.options.secrets_dir;
         let Some(config) = read_secret_string(secrets, CLOUD_ENDPOINT_RUNTIME_CONFIG)
             .and_then(|text| RuntimeConfig::decode(&text))
             .filter(|config| config.provider_kind == "cloudflare_tunnel")
         else {
-            return false;
+            return Ok(false);
         };
-        let confirmed = read_secret_string(secrets, CLOUD_ENDPOINT_CONFIRMED_ORIGIN)
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .is_some_and(|marker| {
-                RuntimeConfig::from_value(&marker["config"]).as_ref() == Some(&config)
-                    && marker["origin"]["localHttpHost"].as_str().map(str::trim)
-                        == Some(origin.host.as_str())
-                    && marker["origin"]["localHttpPort"].as_u64() == Some(u64::from(origin.port))
-            });
-        let linked = [
-            RELAY_URL_SECRET,
-            CLOUD_LINKED_USER_ID,
-            RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
-        ]
-        .iter()
-        .all(|name| read_secret(secrets, name).is_some());
-        if !confirmed && !linked {
-            return false;
+        if require_confirmed_origin {
+            let confirmed = read_secret_string(secrets, CLOUD_ENDPOINT_CONFIRMED_ORIGIN)
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .is_some_and(|marker| {
+                    RuntimeConfig::from_value(&marker["config"])
+                        .is_some_and(|stored| stored.key() == config.key())
+                        && marker["origin"]["localHttpHost"].as_str().map(str::trim)
+                            == Some(origin.host.as_str())
+                        && marker["origin"]["localHttpPort"].as_u64()
+                            == Some(u64::from(origin.port))
+                });
+            if !confirmed {
+                return Ok(false);
+            }
         }
         let status = self.apply_config(Some(config)).await;
-        let started = status["status"] == "running";
-        if !started {
-            tracing::warn!(endpoint_runtime_status = %status, "{}", if confirmed {
-                "Failed to start the confirmed T3 Connect tunnel"
-            } else {
-                "Failed to start the stored T3 Connect tunnel"
-            });
-        } else if !confirmed {
-            tracing::warn!("T3 Connect started the stored tunnel without relay confirmation");
+        if status["status"] != "running" {
+            return Err(status);
         }
-        started
+        Ok(true)
     }
+}
+
+fn request_recovery(inner: &Inner, config: RuntimeConfig) {
+    *inner.recovery.lock().unwrap_or_else(|e| e.into_inner()) = Some(config);
+    inner.recovery_ready.notify_one();
 }
 
 fn running_status(connector: &Connector) -> Value {
@@ -1262,13 +1331,13 @@ fn observe_output(inner: &Arc<Inner>, connector: &Arc<Connector>, line: &str) {
                 let rejected = connector.rejected.fetch_add(1, Ordering::SeqCst) + 1;
                 if rejected >= TUNNEL_AUTHORIZATION_FAILURES_BEFORE_RECOVERY {
                     connector.rejected.store(0, Ordering::SeqCst);
-                    // Recovery asks T3 Connect for a new tunnel, which this server cannot do.
                     inner.log.write(
                         fiber,
                         Level::Warn,
                         "Relay client tunnel was rejected; requesting recovery",
                         attributes(),
                     );
+                    request_recovery(inner, connector.config.clone());
                     return;
                 }
             }
@@ -1366,13 +1435,13 @@ async fn watch_registration(inner: Arc<Inner>, connector: Arc<Connector>) {
         if connector.registered.load(Ordering::SeqCst) {
             return;
         }
-        // Recovery asks T3 Connect for a new tunnel, which this server cannot do.
         inner.log.write(
             connector.log_fiber,
             Level::Warn,
             "Relay client has not registered a tunnel connection; requesting recovery",
             connector.attributes(None),
         );
+        request_recovery(&inner, connector.config.clone());
     }
 }
 
@@ -1593,20 +1662,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_stored_credentials_no_connector_starts() {
+    async fn without_a_confirmed_origin_no_connector_starts() {
         let home = Home::new();
         let runtime = home.runtime().await;
-        assert!(!runtime.start_stored_tunnel(&origin(4000)).await);
+        assert_eq!(
+            runtime.start_if_origin_confirmed(&origin(4000), true).await,
+            Ok(false)
+        );
         assert_eq!(runtime.status().await, json!({"status": "disabled"}));
-        // A stored tunnel neither confirmed for this origin nor linked stays down too.
+        // A stored tunnel confirmed for no origin, or for another one, stays down too.
         home.secret(CLOUD_ENDPOINT_RUNTIME_CONFIG, &config_json());
-        assert!(!runtime.start_stored_tunnel(&origin(4000)).await);
+        assert_eq!(
+            runtime.start_if_origin_confirmed(&origin(4000), true).await,
+            Ok(false)
+        );
         home.seed(4001);
-        assert!(!runtime.start_stored_tunnel(&origin(4000)).await);
-        // Publish-only links never expose this host.
-        home.seed(4000);
-        home.secret(CLOUD_CLI_DESIRED_LINK, "publish_only");
-        assert!(!runtime.start_stored_tunnel(&origin(4000)).await);
+        assert_eq!(
+            runtime.start_if_origin_confirmed(&origin(4000), true).await,
+            Ok(false)
+        );
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(home.starts().is_empty());
         assert!(home.log().is_empty());
@@ -1621,24 +1695,42 @@ mod tests {
             ..home.options(Some(&home.binary))
         })
         .await;
-        assert!(!runtime.start_stored_tunnel(&origin(4000)).await);
+        let status = runtime.start_if_origin_confirmed(&origin(4000), true).await;
+        assert_eq!(status, Err(json!({"status": "disabled"})));
         assert_eq!(runtime.status().await, json!({"status": "disabled"}));
     }
 
     #[tokio::test]
-    async fn a_linked_but_unconfirmed_tunnel_starts_as_the_reference_falls_back() {
+    async fn an_unconfirmed_tunnel_starts_only_when_confirmation_is_not_required() {
         let home = Home::new();
         home.secret(CLOUD_ENDPOINT_RUNTIME_CONFIG, &config_json());
-        for name in [
-            RELAY_URL_SECRET,
-            CLOUD_LINKED_USER_ID,
-            RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
-        ] {
-            home.secret(name, "fake");
-        }
         let runtime = home.runtime().await;
-        assert!(runtime.start_stored_tunnel(&origin(4000)).await);
+        assert_eq!(
+            runtime.start_if_origin_confirmed(&origin(4000), true).await,
+            Ok(false)
+        );
+        assert_eq!(
+            runtime
+                .start_if_origin_confirmed(&origin(4000), false)
+                .await,
+            Ok(true)
+        );
         runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn recovery_requests_keep_only_the_newest() {
+        let home = Home::new();
+        let runtime = home.runtime().await;
+        let mut older = config();
+        older.connector_token = "older".into();
+        runtime.request_recovery(older);
+        runtime.request_recovery(config());
+        let next = tokio::time::timeout(Duration::from_secs(1), runtime.next_recovery_request());
+        assert_eq!(next.await.unwrap(), config());
+        let none =
+            tokio::time::timeout(Duration::from_millis(100), runtime.next_recovery_request());
+        assert!(none.await.is_err());
     }
 
     #[tokio::test]
@@ -1667,7 +1759,10 @@ mod tests {
         let home = Home::new();
         home.seed(4000);
         let runtime = home.runtime().await;
-        assert!(runtime.start_stored_tunnel(&origin(4000)).await);
+        assert_eq!(
+            runtime.start_if_origin_confirmed(&origin(4000), true).await,
+            Ok(true)
+        );
         wait_for("registration", || {
             home.messages()
                 .contains(&"Relay client tunnel connection registered".to_owned())

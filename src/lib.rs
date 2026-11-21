@@ -12,6 +12,8 @@ pub mod access_http;
 pub mod asset_http;
 pub mod auth_service;
 #[cfg(feature = "native")]
+pub mod cloud_link;
+#[cfg(feature = "native")]
 pub mod config;
 #[cfg(feature = "native")]
 mod config_rpc;
