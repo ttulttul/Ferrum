@@ -102,7 +102,10 @@ pub struct TurnItem {
 }
 
 /// The events of a turn started with [`Workspace::start_tracked_turn`].
-pub struct TurnItems(TurnItemSource);
+pub struct TurnItems {
+    source: TurnItemSource,
+    stream: Option<u64>,
+}
 
 enum TurnItemSource {
     Plain(mpsc::UnboundedReceiver<TurnEvent>),
@@ -112,14 +115,25 @@ enum TurnItemSource {
 impl TurnItems {
     /// Events from a workspace that does not track positions.
     pub fn untracked(events: mpsc::UnboundedReceiver<TurnEvent>) -> Self {
-        Self(TurnItemSource::Plain(events))
+        Self {
+            source: TurnItemSource::Plain(events),
+            stream: None,
+        }
     }
-    pub(crate) fn tracked(items: mpsc::UnboundedReceiver<TurnItem>) -> Self {
-        Self(TurnItemSource::Tracked(items))
+    pub(crate) fn tracked(stream: u64, items: mpsc::UnboundedReceiver<TurnItem>) -> Self {
+        Self {
+            source: TurnItemSource::Tracked(items),
+            stream: Some(stream),
+        }
+    }
+    /// The workspace stream the events come from, when it tracks positions:
+    /// what [`RemoteWorkspace::resume_turn`] takes after a restart.
+    pub fn stream(&self) -> Option<u64> {
+        self.stream
     }
     /// The next event, or `None` once the turn's events are done.
     pub async fn recv(&mut self) -> Option<TurnItem> {
-        match &mut self.0 {
+        match &mut self.source {
             TurnItemSource::Plain(events) => events.recv().await.map(|event| TurnItem {
                 event,
                 position: None,

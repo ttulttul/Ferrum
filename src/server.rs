@@ -136,6 +136,11 @@ impl AppState {
         let log: Box<dyn event_log::EventLog + Send> =
             Box::new(event_log::NdjsonLog::open(dir.join("events.jsonl"))?);
         let control = crate::control_state::ControlState::open(auth, documents, log, &dir)?;
+        // Turns run as this process's children, so none survives a restart.
+        let cut_off = crate::turn::running_runs(&control.store_now());
+        for (run, _) in cut_off {
+            control.commit_now(crate::turn::interrupted(&run))?;
+        }
         let (project_clone_events, _) = broadcast::channel(64);
         let local = Arc::new(crate::workspace::LocalWorkspace::new(
             dir.clone(),
