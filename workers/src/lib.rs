@@ -120,10 +120,18 @@ impl DurableObject for T3EnvironmentDO {
             )
             .expect("open control plane"),
         );
+        // Sockets can close without a close event; their stream records
+        // would stay forever. Keep only the records of sockets still open.
+        let open: Vec<Connection> = state
+            .get_websockets()
+            .iter()
+            .filter_map(|ws| ws.deserialize_attachment::<Connection>().ok().flatten())
+            .collect();
+        let pruned = plane.prune_streams(&open);
         let router = plane.router();
         let init_ms = now_ms() - started;
         console_log!(
-            "T3EnvironmentDO ready in {init_ms} ms: sequence {}, linear memory {} bytes",
+            "T3EnvironmentDO ready in {init_ms} ms: sequence {}, linear memory {} bytes, {pruned} stale stream records deleted",
             plane.sequence(),
             linear_memory_bytes()
         );

@@ -329,6 +329,39 @@ impl ControlPlane {
         }
     }
 
+    /// Delete the stored stream records of connections that are gone, which
+    /// a socket that closed without a close event leaves behind. A host
+    /// calls this when it rebuilds the plane from storage, with every
+    /// connection whose socket is still open. Returns how many it deleted.
+    pub fn prune_streams<'a>(&self, open: impl IntoIterator<Item = &'a Connection>) -> usize {
+        let open: std::collections::HashSet<&str> =
+            open.into_iter().map(|c| c.id.as_str()).collect();
+        let dir = std::path::Path::new(STATE_DIR).join("streams");
+        let Ok(paths) = self.documents.list(&dir) else {
+            return 0;
+        };
+        let mut removed = 0;
+        for path in paths {
+            let Ok(relative) = path.strip_prefix(&dir) else {
+                continue;
+            };
+            let mut parts = relative.components();
+            let (Some(first), Some(_)) = (parts.next(), parts.next()) else {
+                // Directly under `streams/`: a connection from before
+                // connections had ids. Keep it while one may still be open.
+                if !open.contains("") && self.documents.remove(&path).is_ok() {
+                    removed += 1;
+                }
+                continue;
+            };
+            let owner = first.as_os_str().to_string_lossy();
+            if !open.contains(owner.as_ref()) && self.documents.remove(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     fn forget(&self, connection: &Connection, key: &str) {
         let _ = self.documents.remove(&Self::record_path(connection, key));
     }
@@ -957,8 +990,13 @@ mod tests {
 
         fn plane(&mut self) -> &ControlPlane {
             let (documents, log) = (self.documents.clone(), self.log.clone());
+            let open: Vec<Connection> = self
+                .sockets
+                .values()
+                .map(|stored| serde_json::from_str(stored).unwrap())
+                .collect();
             self.plane.get_or_insert_with(|| {
-                ControlPlane::open(
+                let plane = ControlPlane::open(
                     Config {
                         environment_id: "env-test".into(),
                         label: "test".into(),
@@ -968,8 +1006,22 @@ mod tests {
                     documents,
                     Box::new(log),
                 )
-                .unwrap()
+                .unwrap();
+                // As the host does when it is rebuilt from storage.
+                plane.prune_streams(&open);
+                plane
             })
+        }
+
+        /// The socket dies without a close event: its records stay behind.
+        fn lose(&mut self, socket: u64) {
+            self.sockets.remove(&socket);
+        }
+
+        fn records(&self) -> Vec<PathBuf> {
+            self.documents
+                .list(&std::path::Path::new(STATE_DIR).join("streams"))
+                .unwrap()
         }
 
         fn suspend(&mut self) {
@@ -1093,6 +1145,44 @@ mod tests {
         let interrupted = host.message(1, json!({"_tag":"Interrupt","requestId":7}));
         assert_eq!(interrupted[0].1["exit"]["cause"][0]["_tag"], "Interrupt");
         assert!(host.commit(retitle("Four")).is_empty());
+    }
+
+    #[test]
+    fn a_rebuilt_plane_deletes_records_of_connections_that_are_gone() {
+        let mut host = SuspendingHost::new();
+        host.connect(1);
+        host.connect(2);
+        host.message(1, json!({"_tag":"Request","id":"a","tag":"subscribeAuthAccess","payload":{},"headers":[]}));
+        host.message(2, json!({"_tag":"Request","id":"b","tag":"subscribeAuthAccess","payload":{},"headers":[]}));
+        let records = host.records();
+        assert_eq!(records.len(), 2, "{records:?}");
+        let id = |socket: u64| -> String {
+            let connection: Connection = serde_json::from_str(&host.sockets[&socket]).unwrap();
+            connection.id
+        };
+        let (gone, kept) = (id(1), id(2));
+
+        // Socket 1 dies without a close event, so `disconnect` never runs.
+        host.lose(1);
+        host.suspend();
+        assert_eq!(host.records().len(), 2, "nothing deletes them yet");
+
+        // Rebuilding the plane keeps only the open socket's record...
+        host.plane();
+        let records = host.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        let owner = |path: &PathBuf| path.parent().unwrap().file_name().unwrap().to_owned();
+        assert_eq!(owner(&records[0]), kept.as_str());
+        assert_ne!(owner(&records[0]), gone.as_str());
+
+        // ...which still reports changes (a new session changes access).
+        host.plane().auth.browser_session("secret", None).unwrap();
+        let sent = host.fan_out();
+        assert!(sent.iter().all(|(socket, _)| *socket == 2), "{sent:?}");
+        assert!(
+            sent.iter().any(|(_, frame)| frame["requestId"] == "b"),
+            "{sent:?}"
+        );
     }
 
     #[test]

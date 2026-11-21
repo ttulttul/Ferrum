@@ -67,6 +67,9 @@ pub trait DocumentStore: Send + Sync {
     /// or cannot be inspected.
     fn revision(&self, path: &Path) -> Option<Revision>;
 
+    /// Every document under `dir`, at any depth. A missing `dir` has none.
+    fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>>;
+
     /// `read`, with a missing document as `None`.
     fn read_optional(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
         match self.read(path) {
@@ -123,6 +126,19 @@ impl DocumentStore for MemoryStore {
         Ok(())
     }
 
+    fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        let mut paths: Vec<_> = self
+            .documents
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|path| path.starts_with(dir) && path.as_path() != dir)
+            .cloned()
+            .collect();
+        paths.sort();
+        Ok(paths)
+    }
+
     fn revision(&self, path: &Path) -> Option<Revision> {
         self.documents
             .lock()
@@ -173,6 +189,17 @@ mod tests {
             assert!(after.is_some());
             assert_ne!(before, after, "{mode:?} must change the revision");
         }
+        assert!(store.exists(&path).unwrap());
+        let sibling = dir.join("nested/deeper/other.json");
+        store.create_dir_all(sibling.parent().unwrap()).unwrap();
+        store.write(&sibling, b"{}", WriteMode::Replace).unwrap();
+        let mut listed = store.list(&dir.join("nested")).unwrap();
+        listed.sort();
+        assert_eq!(listed, vec![sibling.clone(), path.clone()]);
+        assert!(store.list(&dir.join("nothing-here")).unwrap().is_empty());
+        // A name that only shares a prefix is not under the directory.
+        assert!(store.list(&dir.join("nest")).unwrap().is_empty());
+        store.remove(&sibling).unwrap();
         assert!(store.exists(&path).unwrap());
         store.remove(&path).unwrap();
         assert!(!store.exists(&path).unwrap());

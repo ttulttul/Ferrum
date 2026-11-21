@@ -146,6 +146,26 @@ impl DocumentStore for SqlDocuments {
         Ok(())
     }
 
+    fn list(&self, dir: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+        #[derive(Deserialize)]
+        struct Row {
+            path: String,
+        }
+        // Paths under `dir/`, matched as a range so `%` and `_` in names
+        // need no escaping. `0` follows `/` in byte order.
+        let dir = dir.to_string_lossy();
+        let dir = dir.trim_end_matches('/');
+        let rows: Vec<Row> = self
+            .0
+            .exec(
+                "SELECT path FROM documents WHERE path >= ? AND path < ? ORDER BY path",
+                vec![format!("{dir}/").into(), format!("{dir}0").into()],
+            )
+            .and_then(|cursor| cursor.to_array())
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(rows.into_iter().map(|row| row.path.into()).collect())
+    }
+
     fn revision(&self, path: &Path) -> Option<Revision> {
         self.row(path)
             .ok()
