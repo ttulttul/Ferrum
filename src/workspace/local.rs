@@ -40,6 +40,24 @@ impl LocalWorkspace {
     }
 }
 
+impl LocalWorkspace {
+    /// A workspace that keeps its state (settings, terminal logs, device
+    /// state) under `state_dir`, for a process that runs only the workspace.
+    pub fn open(state_dir: &Path) -> anyhow::Result<Self> {
+        let paths = crate::config::ServerPaths::from_state_dir(state_dir);
+        paths.ensure()?;
+        let documents: std::sync::Arc<dyn crate::persistence::DocumentStore> =
+            std::sync::Arc::new(crate::persistence::FsStore);
+        let settings = std::sync::Arc::new(crate::settings::Settings::open_in(&paths, documents)?);
+        Ok(Self::new(
+            state_dir.to_path_buf(),
+            TerminalService::with_logs(state_dir.join("logs/terminals")),
+            PreviewService::default(),
+            DeviceService::new(settings, state_dir)?,
+        ))
+    }
+}
+
 impl Workspace for LocalWorkspace {
     fn list_entries<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
         files::list_entries(input).boxed()

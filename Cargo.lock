@@ -2094,6 +2094,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "t3-agentd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "t3code-server",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "t3code-server"
 version = "0.1.0"
 dependencies = [

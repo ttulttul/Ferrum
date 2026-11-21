@@ -1,0 +1,28 @@
+[package]
+name = "t3-agentd"
+version = "0.1.0"
+edition = "2021"
+description = "Runs a T3 Code workspace (files, git, terminals, processes) for a server that reaches it over a WebSocket"
+license = "MIT"
+repository = "https://github.com/ttulttul/t3code-rust"
+publish = false
+
+[[bin]]
+name = "t3-agentd"
+path = "src/main.rs"
+
+[dependencies]
+t3code-server = { path = "..", default-features = false, features = ["native"] }
+anyhow = "1"
+axum = { version = "=0.7.9", features = ["ws"] }
+clap = { version = "=4.5.23", features = ["derive", "env"] }
+futures-util = "0.3"
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "=1.42.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio-tungstenite = "0.24"
