@@ -96,6 +96,17 @@ impl<'a> Attempt<'a> {
         }
         if let Some(resume) = resume {
             args.extend(["--resume".into(), resume.to_owned()]);
+        } else {
+            // The reference picks a new session's id itself, so the thread
+            // names its session even if the CLI never starts.
+            let session = uuid::Uuid::new_v4().to_string();
+            args.extend(["--session-id".into(), session.clone()]);
+            sink.send(ProviderEvent::ProviderThread {
+                driver: CLAUDE_AGENT.into(),
+                native_thread_id: session,
+                resumed: false,
+                model: Some(provider.model.clone()).filter(|model| !model.trim().is_empty()),
+            });
         }
         args.extend(provider.launch_args.iter().cloned());
         let mut extra_env = vec![];

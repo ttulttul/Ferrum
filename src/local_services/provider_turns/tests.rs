@@ -327,6 +327,9 @@ async fn claude_turn_streams_text_tool_calls_and_usage() {
         "{args}"
     );
     assert!(!args.contains("--resume"), "{args}");
+    // A new session's id is chosen before the CLI starts and named first.
+    let (first, _) = native_thread(&events);
+    assert!(args.contains(&format!("--session-id {first}")), "{args}");
 }
 
 #[tokio::test]
