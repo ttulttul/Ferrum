@@ -171,7 +171,7 @@
     {"name": "settings.server.getProcessResourceHistory", "rpc": "server.getProcessResourceHistory", "input": {"windowMs": 60000, "bucketMs": 10000}, "compare": "signature"},
     {"name": "settings.server.getResourceTelemetryHistory", "rpc": "server.getResourceTelemetryHistory", "input": {"windowMs": 60000, "bucketMs": 10000}, "compare": "signature"},
     {"name": "settings.server.getDatabaseStorage", "rpc": "server.getDatabaseStorage", "input": {}, "stream": {"take": 1}, "compare": "kinds"},
-    {"name": "settings.server.discoverSourceControl", "rpc": "server.discoverSourceControl", "input": {}},
+    {"name": "settings.server.discoverSourceControl", "rpc": "server.discoverSourceControl", "input": {}, "timeoutMs": 30000},
     {"name": "settings.server.getStorageCleanupReport", "rpc": "server.getStorageCleanupReport", "input": {}, "stream": {"take": 1}, "compare": "kinds"},
 
     {"name": "auth.http.createPairingCredential", "http": true, "group": "auth", "endpoint": "pairingCredential", "method": "POST", "path": "/api/auth/pairing-token", "args": {"payload": {"label": "Client RPC parity"}}, "compare": "shape"},
