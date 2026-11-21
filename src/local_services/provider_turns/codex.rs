@@ -84,6 +84,86 @@ pub(super) async fn run(
     sink.finish(end);
 }
 
+/// How long listing Codex's models may take, start-up included.
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Codex's `model/list` entries, every page, from an app-server launched as
+/// a turn of `spec` would launch it.
+pub(super) async fn list_models(
+    spec: &TurnSpec,
+    provider: &ProviderTurn,
+) -> anyhow::Result<Vec<Value>> {
+    let binary = program(&provider.binary_path, "codex");
+    let mut args = vec!["app-server".to_string()];
+    args.extend(provider.launch_args.iter().cloned());
+    let mut cli = Cli::spawn(
+        spec,
+        Launch {
+            program: binary.clone(),
+            args,
+            home_var: "CODEX_HOME",
+            home: &provider.home_path,
+            extra_env: vec![(
+                "CODEX_INTERNAL_ORIGINATOR_OVERRIDE".into(),
+                "T3 Code".into(),
+            )],
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("could not start {binary} app-server: {e}"))?;
+    let listed = tokio::time::timeout(MODEL_LIST_TIMEOUT, async {
+        let mut next_id = 1u64;
+        let mut call = async |cli: &mut Cli, method: &str, params: Value| {
+            let id = next_id;
+            next_id += 1;
+            cli.write(&json!({"id": id, "method": method, "params": params}))
+                .await?;
+            while let Some(line) = cli.next_line().await {
+                let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if message.get("method").is_none() && message["id"].as_u64() == Some(id) {
+                    return match message.get("error") {
+                        Some(error) => Err(anyhow::anyhow!(
+                            "{method}: {}",
+                            error["message"].as_str().unwrap_or("Codex refused it")
+                        )),
+                        None => Ok(message["result"].clone()),
+                    };
+                }
+            }
+            Err(anyhow::anyhow!("Codex closed before answering {method}"))
+        };
+        call(
+            &mut cli,
+            "initialize",
+            json!({"clientInfo": {"name": "T3 Code", "title": "T3 Code", "version": SERVER_VERSION},
+                "capabilities": {"experimentalApi": true}}),
+        )
+        .await?;
+        cli.write(&json!({"method": "initialized"})).await?;
+        let mut models = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let params = match &cursor {
+                Some(cursor) => json!({"cursor": cursor}),
+                None => json!({}),
+            };
+            let page = call(&mut cli, "model/list", params).await?;
+            models.extend(page["data"].as_array().cloned().unwrap_or_default());
+            cursor = page["nextCursor"]
+                .as_str()
+                .filter(|c| !c.is_empty())
+                .map(str::to_owned);
+            if cursor.is_none() {
+                break Ok::<_, anyhow::Error>(models);
+            }
+        }
+    })
+    .await;
+    cli.stop().await;
+    listed.map_err(|_| anyhow::anyhow!("Codex did not list its models in time"))?
+}
+
 struct Session {
     cli: Cli,
     sink: Sink,

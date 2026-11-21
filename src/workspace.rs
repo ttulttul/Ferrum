@@ -280,6 +280,14 @@ pub trait Workspace: MaybeSendSync {
     }
     /// Acknowledge a tracked event and those before it in its stream.
     fn ack(&self, _position: StreamPosition) {}
+    /// The models the CLI of `spec`'s provider lists, launched as a turn of
+    /// `spec` would launch it: Codex's raw `model/list` entries.
+    fn provider_models<'a>(
+        &'a self,
+        _spec: TurnSpec,
+    ) -> WorkspaceFuture<'a, anyhow::Result<Vec<Value>>> {
+        boxed_future(async { Err(anyhow::anyhow!("this workspace lists no provider models")) })
+    }
     /// Deliver the user's answer to a runtime request of the running turn
     /// `turn_id` ([`TurnSpec::turn_id`]). False when no running turn of this
     /// workspace waits for it.

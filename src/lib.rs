@@ -13,6 +13,7 @@ pub mod asset_http;
 pub mod auth_service;
 #[cfg(feature = "native")]
 pub mod cloud_link;
+mod codex_models;
 #[cfg(feature = "native")]
 pub mod config;
 #[cfg(feature = "native")]

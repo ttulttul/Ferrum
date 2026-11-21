@@ -113,6 +113,9 @@ pub mod op {
     pub const TURN_RESPOND: &str = "turn.respond";
     /// `{input}`: `preview.stopLocalServer`.
     pub const PROC_STOP_LOCAL_SERVER: &str = "proc.stopLocalServer";
+    /// The models a provider's CLI lists, run as a turn of the given spec
+    /// would run it (`TurnStart`); answers the CLI's raw model entries.
+    pub const PROVIDER_MODELS: &str = "provider.models";
 
     // watch.*: streams agentd feeds by polling every POLL_INTERVAL_MS. Each
     // event is a [`super::Polled`] and is sent only when it changed.

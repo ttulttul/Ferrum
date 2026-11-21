@@ -158,6 +158,12 @@ impl Workspace for LocalWorkspace {
     ) -> WorkspaceFuture<'a, bool> {
         async move { crate::local_services::provider_turns::respond(turn_id, response) }.boxed()
     }
+    fn provider_models<'a>(
+        &'a self,
+        spec: TurnSpec,
+    ) -> WorkspaceFuture<'a, anyhow::Result<Vec<Value>>> {
+        crate::local_services::provider_turns::list_models(spec).boxed()
+    }
     fn local_servers<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
         discovery::scan(&self.terminals, input).boxed()
     }

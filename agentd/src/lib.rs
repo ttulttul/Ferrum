@@ -781,6 +781,14 @@ async fn call(workspace: &dyn Workspace, op: &str, args: &Value) -> OpResult {
             .map(|p| json!(p.to_string_lossy()))
             .map_err(|e| proto::io_error(&e)),
         op::FS_IS_DIR => Ok(json!(workspace.is_dir(path()?).await)),
+        op::PROVIDER_MODELS => {
+            let start: proto::TurnStart = parse(args)?;
+            workspace
+                .provider_models(start.into())
+                .await
+                .map(Value::from)
+                .map_err(|e| WireError::new(ErrorCode::Internal, e.to_string()))
+        }
         op::GIT_VCS => proto::encode_routed(
             workspace
                 .vcs(

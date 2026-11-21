@@ -294,6 +294,13 @@ impl FakeAgentd {
             op::FS_IS_DIR => Ok(json!(
                 self.has_dir(request.args["path"].as_str().unwrap_or_default())
             )),
+            // The model entries `set_reading` gave for it.
+            op::PROVIDER_MODELS => self
+                .lock()
+                .readings
+                .get(op::PROVIDER_MODELS)
+                .cloned()
+                .ok_or_else(|| WireError::new(ErrorCode::UnknownMethod, "no models")),
             // `terminal.observe`: the snapshot `set_reading` gave for it.
             op::TERM_CALL if request.args["method"] == "observe" => self
                 .lock()
