@@ -282,6 +282,7 @@ impl Agentd {
                 let initial = self.workspace.device_state();
                 self.open_bus(&opener, &op, Some(initial), events)
             }
+            op::GIT_STACKED_ACTION => self.open_stacked_action(&opener, args),
             op::WATCH_VCS_STATUS | op::WATCH_VCS_BRANCH | op::WATCH_LOCAL_SERVERS => {
                 self.open_watch(&opener, &op, args)
             }
@@ -618,6 +619,34 @@ impl Agentd {
         Ok(Value::Null)
     }
 
+    /// `git.runStackedAction`: progress batches, then the reply.
+    fn open_stacked_action(self: &Arc<Self>, opener: &Opener, args: Value) -> OpResult {
+        let tools: t3code_server::workspace::GitTools =
+            parse::<proto::WireGitTools>(&args["tools"])?.into();
+        let id = self.register(opener.conn, op::GIT_STACKED_ACTION, None)?;
+        opener.opened(id);
+        let this = self.clone();
+        let task = tokio::spawn(async move {
+            let (progress, mut batches) = mpsc::channel(16);
+            let action = this
+                .workspace
+                .stacked_action(&args["input"], &tools, progress);
+            let forward = async {
+                while let Some(batch) = batches.recv().await {
+                    this.emit(id, StreamBody::Event(json!({"progress": batch})));
+                }
+            };
+            let (reply, ()) = tokio::join!(action, forward);
+            let reply =
+                serde_json::to_value(Polled::from_routed(Some(reply))).expect("readings serialize");
+            if this.emit(id, StreamBody::Event(json!({"reply": reply}))) {
+                this.end(id, EndReason::Done, None);
+            }
+        });
+        self.set_task(id, task.abort_handle());
+        Ok(Value::Null)
+    }
+
     fn open_watch(self: &Arc<Self>, opener: &Opener, op: &str, args: Value) -> OpResult {
         let id = self.register(opener.conn, op, None)?;
         opener.opened(id);
@@ -681,6 +710,7 @@ fn is_stream_op(op: &str) -> bool {
             | op::WATCH_VCS_STATUS
             | op::WATCH_VCS_BRANCH
             | op::WATCH_LOCAL_SERVERS
+            | op::GIT_STACKED_ACTION
     )
 }
 
@@ -739,13 +769,20 @@ async fn call(workspace: &dyn Workspace, op: &str, args: &Value) -> OpResult {
                 .await,
         ),
         op::GIT_REVIEW => proto::encode_reply(workspace.review(method()?, input).await),
+        op::GIT_PULL_REQUEST => {
+            let tools: t3code_server::workspace::GitTools =
+                parse::<proto::WireGitTools>(&args["tools"])?.into();
+            proto::encode_reply(workspace.pull_request(method()?, input, &tools).await)
+        }
         op::GIT_CAPTURE_TREE => Ok(json!(
             workspace.capture_git_tree(str_arg(args, "cwd")?).await
         )),
         op::TERM_CALL => proto::encode_routed(workspace.terminal(method()?, input).await),
         op::PROC_STOP_LOCAL_SERVER => proto::encode_reply(workspace.stop_local_server(input).await),
-        op::PREVIEW_CALL => proto::encode_routed(workspace.preview(method()?, input)),
-        op::PREVIEW_PROFILE => proto::encode_reply(workspace.preview_profile(method()?, input)),
+        op::PREVIEW_CALL => proto::encode_routed(workspace.preview(method()?, input).await),
+        op::PREVIEW_PROFILE => {
+            proto::encode_reply(workspace.preview_profile(method()?, input).await)
+        }
         op::PREVIEW_CLOSE_PAGES => {
             workspace
                 .close_preview_pages(

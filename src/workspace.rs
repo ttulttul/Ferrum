@@ -4,9 +4,9 @@
 //!
 //! The control plane (auth, event log, projections, RPC dispatch and
 //! settings) reaches the workspace only through [`Workspace`]. Natively,
-//! [`LocalWorkspace`] runs every operation in this process. A control plane
-//! without a local workspace talks to a workspace daemon over one connection
-//! instead.
+//! [`LocalWorkspace`] runs every operation in this process. A server that has
+//! no local filesystem or processes uses [`RemoteWorkspace`], which reaches
+//! `t3-agentd` over one connection instead.
 //!
 //! Requests and replies keep the RPC payloads' JSON shapes, so an operation
 //! can cross a process boundary unchanged. `Option<Reply>` is `None` when the
@@ -22,7 +22,9 @@ mod local;
 #[cfg(feature = "native")]
 pub use local::LocalWorkspace;
 mod remote;
-pub use remote::{unavailable, RemoteWorkspace};
+#[cfg(feature = "native")]
+pub use remote::{connect, NativeLink};
+pub use remote::{unavailable, RemoteWorkspace, Transport};
 
 /// A reply payload: the success value, or the error value an RPC fails with.
 pub type Reply = Result<Value, Value>;
@@ -114,6 +116,15 @@ pub trait Workspace: MaybeSendSync {
         input: &'a Value,
         fetch_upstream: bool,
     ) -> WorkspaceFuture<'a, Option<Reply>>;
+    /// The status a `subscribeVcsStatus` stream polls: `vcs.refreshStatus`
+    /// unless the workspace keeps a fresher reading of its own.
+    fn vcs_status<'a>(
+        &'a self,
+        input: &'a Value,
+        fetch_upstream: bool,
+    ) -> WorkspaceFuture<'a, Option<Reply>> {
+        self.vcs("refreshStatus", input, fetch_upstream)
+    }
     /// The branch a `subscribeVcsBranch` stream reports.
     fn vcs_branch<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply>;
     /// A `review.*` method.
@@ -171,9 +182,17 @@ pub trait Workspace: MaybeSendSync {
 
     // preview.*
     /// A `preview.*` tab method.
-    fn preview(&self, method: &str, input: &Value) -> Option<Reply>;
+    fn preview<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+    ) -> WorkspaceFuture<'a, Option<Reply>>;
     /// `preview.reportProfiles` and `preview.clearProfile`.
-    fn preview_profile(&self, method: &str, input: &Value) -> Reply;
+    fn preview_profile<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+    ) -> WorkspaceFuture<'a, Reply>;
     /// Close the browser pages that match every given filter.
     fn close_preview_pages<'a>(
         &'a self,

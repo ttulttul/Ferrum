@@ -151,11 +151,19 @@ impl Workspace for LocalWorkspace {
         discovery::stop(&self.terminals, input).boxed()
     }
 
-    fn preview(&self, method: &str, input: &Value) -> Option<Reply> {
-        self.previews.call(method, input)
+    fn preview<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+    ) -> WorkspaceFuture<'a, Option<Reply>> {
+        futures_util::future::ready(self.previews.call(method, input)).boxed()
     }
-    fn preview_profile(&self, method: &str, input: &Value) -> Reply {
-        self.previews.profile(method, input, &self.data_dir)
+    fn preview_profile<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+    ) -> WorkspaceFuture<'a, Reply> {
+        futures_util::future::ready(self.previews.profile(method, input, &self.data_dir)).boxed()
     }
     fn close_preview_pages<'a>(
         &'a self,

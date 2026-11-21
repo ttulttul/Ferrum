@@ -88,6 +88,12 @@ pub mod op {
     pub const GIT_REVIEW: &str = "git.review";
     /// `{cwd}`; answers a tree id or `null`.
     pub const GIT_CAPTURE_TREE: &str = "git.captureTree";
+    /// `{method, input, tools}`: `git.resolvePullRequest` or
+    /// `git.preparePullRequestThread`. `tools` is a [`super::WireGitTools`].
+    pub const GIT_PULL_REQUEST: &str = "git.pullRequest";
+    /// `{input, tools}`: `git.runStackedAction`, as a stream of
+    /// `{"progress": batch}` events and a last `{"reply": Polled}` event.
+    pub const GIT_STACKED_ACTION: &str = "git.stackedAction";
 
     // term.*
     /// `{method, input}`: a `terminal.*` method.
@@ -328,6 +334,35 @@ pub struct IdleState {
     pub connected: bool,
     /// Milliseconds since the last request or stream frame.
     pub idle_ms: u64,
+}
+
+/// The programs git workflows run besides git, as [`GitTools`] names them.
+///
+/// [`GitTools`]: crate::workspace::GitTools
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireGitTools {
+    pub gh: String,
+    #[serde(default)]
+    pub text_generation: Vec<String>,
+}
+
+impl From<&crate::workspace::GitTools> for WireGitTools {
+    fn from(tools: &crate::workspace::GitTools) -> Self {
+        Self {
+            gh: tools.gh.to_string_lossy().into_owned(),
+            text_generation: tools.text_generation.clone(),
+        }
+    }
+}
+
+impl From<WireGitTools> for crate::workspace::GitTools {
+    fn from(tools: WireGitTools) -> Self {
+        Self {
+            gh: tools.gh.into(),
+            text_generation: tools.text_generation,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

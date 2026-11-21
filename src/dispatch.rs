@@ -492,10 +492,10 @@ pub(crate) async fn workspace(
                         .await;
                 }
             }
-            Some(workspace.preview_profile(name, input))
+            Some(workspace.preview_profile(name, input).await)
         }
         "preview" => {
-            let reply = workspace.preview(name, input);
+            let reply = workspace.preview(name, input).await;
             if name == "close" && reply.as_ref().is_some_and(Result::is_ok) {
                 workspace
                     .close_preview_pages(
@@ -528,7 +528,7 @@ pub(crate) async fn polled_stream(
         return Some(workspace.vcs_branch(input).await);
     }
     let status = match workspace
-        .vcs("refreshStatus", input, host.automatic_git_fetch)
+        .vcs_status(input, host.automatic_git_fetch)
         .await?
     {
         Ok(status) => status,

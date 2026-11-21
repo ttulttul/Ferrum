@@ -25,6 +25,8 @@ Connect to `/ws?orchestrationProtocol=2` with a session cookie or a WebSocket ti
 {"_tag":"Exit","requestId":"1","exit":{"_tag":"Success","value":{}}}
 ```
 
+Workspace operations (files, git, terminals, provider turns, previews and devices) can also run in a separate `t3-agentd` process that the server reaches over a WebSocket, so the server core can run where it has no local filesystem or processes. See [`docs/agentd.md`](docs/agentd.md).
+
 ## Evaluate the Rust server in place
 
 From this repository's root, use the switcher to replace a running standalone TypeScript server and restore it later.
