@@ -202,22 +202,27 @@ impl crate::orchestration::CommandHost for AppState {
         text: String,
         cancel: oneshot::Receiver<()>,
     ) {
-        tokio::spawn(async move {
-            if let Err(error) = execute_run(self.clone(), run.clone(), cwd, text, cancel).await {
-                self.cancellations.lock().await.remove(&run.id);
-                if let Err(write) = self
-                    .commit(Event::RunFinished {
-                        run_id: run.id,
-                        thread_id: run.thread_id,
-                        status: "failed".into(),
-                        error: Some(error.to_string()),
-                    })
-                    .await
-                {
-                    tracing::error!(%write, "could not record provider failure");
-                }
-            }
-        });
+        let command = if self.provider_command.is_empty() {
+            crate::turn::echo_command()
+        } else {
+            self.provider_command.clone()
+        };
+        let env_remove = if self.settings.policy.summary().is_some() {
+            vec!["T3CODE_CODEX_LAUNCH_ARGS".into()]
+        } else {
+            vec![]
+        };
+        let spec = crate::workspace::TurnSpec {
+            command,
+            prompt: text,
+            cwd,
+            env_remove,
+        };
+        let runtime = self.runtime.clone();
+        crate::runtime::Runtime::spawn(
+            &*runtime,
+            Box::pin(crate::turn::launch(self, run, spec, cancel)),
+        );
     }
     fn close_guest_thread(&self, thread_id: &str) -> Result<(), String> {
         self.guest.close_thread(thread_id).map_err(str::to_owned)
@@ -231,6 +236,15 @@ impl crate::orchestration::CommandHost for AppState {
         self.guest
             .resolve_message(thread_id, message_id, outcome)
             .map_err(|error| error.to_string())
+    }
+}
+
+impl crate::turn::TurnHost for AppState {
+    fn workspace(&self) -> &dyn crate::workspace::Workspace {
+        &*self.workspace
+    }
+    fn cancellations(&self) -> &Mutex<HashMap<Uuid, oneshot::Sender<()>>> {
+        &self.cancellations
     }
 }
 
@@ -606,133 +620,6 @@ pub(crate) async fn contract_fallback(
         .body(body.to_string().into())
         .expect("valid response")
 }
-pub(crate) async fn execute_run(
-    state: Arc<AppState>,
-    run: Run,
-    cwd: String,
-    prompt: String,
-    cancel_rx: oneshot::Receiver<()>,
-) -> anyhow::Result<()> {
-    let command = if state.provider_command.is_empty() {
-        vec!["printf".into(), "%s\\n".into()]
-    } else {
-        state.provider_command.clone()
-    };
-    let env_remove = if state.settings.policy.summary().is_some() {
-        vec!["T3CODE_CODEX_LAUNCH_ARGS".into()]
-    } else {
-        vec![]
-    };
-    let spec = crate::workspace::TurnSpec {
-        command,
-        prompt,
-        cwd: cwd.clone(),
-        env_remove,
-    };
-    let mut turn = state.workspace.start_tracked_turn(spec, cancel_rx).await?;
-    let mut exit = None;
-    // Each event is acknowledged once it is in the event log, so a
-    // workspace that keeps unacknowledged events redelivers the rest after a
-    // reconnect or a restart.
-    let ack = |position: Option<crate::workspace::StreamPosition>| {
-        if let Some(position) = position {
-            state.workspace.ack(position);
-        }
-    };
-    let mut exit_position = None;
-    while let Some(crate::workspace::TurnItem { event, position }) = turn.recv().await {
-        let (stream, text) = match event {
-            crate::workspace::TurnEvent::Stdout(text) => {
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(text.trim()) {
-                    if event["type"] == "prompt_suggestion.updated"
-                        && event["threadId"].is_string()
-                        && event["runId"].is_string()
-                        && event["text"].is_string()
-                    {
-                        let _ = state.prompt_suggestion_events.send(serde_json::json!({
-                            "threadId": event["threadId"].clone(),
-                            "runId": event["runId"].clone(),
-                            "text": event["text"].clone(),
-                        }));
-                        ack(position);
-                        continue;
-                    }
-                }
-                ("stdout", text)
-            }
-            crate::workspace::TurnEvent::Stderr(text) => ("stderr", text),
-            crate::workspace::TurnEvent::Exited(status) => {
-                state.cancellations.lock().await.remove(&run.id);
-                exit = Some(status);
-                exit_position = position;
-                break;
-            }
-        };
-        let committed = state
-            .commit(Event::RunOutput {
-                run_id: run.id,
-                thread_id: run.thread_id.clone(),
-                stream: stream.into(),
-                text,
-            })
-            .await;
-        if committed.is_ok() {
-            ack(position);
-        }
-    }
-    let Some(crate::workspace::TurnExit {
-        success: ok,
-        cancelled,
-        status,
-    }) = exit
-    else {
-        state.cancellations.lock().await.remove(&run.id);
-        anyhow::bail!("the provider process could not be waited for");
-    };
-    let thread_id = run.thread_id.clone();
-    state
-        .commit(Event::RunFinished {
-            run_id: run.id,
-            thread_id: thread_id.clone(),
-            status: if cancelled {
-                "cancelled"
-            } else if ok {
-                "completed"
-            } else {
-                "failed"
-            }
-            .into(),
-            error: (!ok && !cancelled).then(|| format!("provider exited with {status}")),
-        })
-        .await?;
-    ack(exit_position);
-    if ok && !cancelled {
-        if let Some(tree) = state.workspace.capture_git_tree(&cwd).await {
-            let turn_count = state
-                .store
-                .read()
-                .await
-                .threads
-                .get(&thread_id)
-                .map(|thread| thread.messages.len() as u64)
-                .unwrap_or_default();
-            let _ = state
-                .commit(Event::CheckpointCaptured {
-                    thread_id,
-                    checkpoint: CheckpointRecord {
-                        turn_count,
-                        tree,
-                        cwd,
-                        captured_at: now(),
-                        ready: true,
-                    },
-                })
-                .await;
-        }
-    }
-    Ok(())
-}
-
 pub(crate) async fn require_session(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -998,7 +885,7 @@ pub fn default_provider_command() -> Vec<String> {
     std::env::var("T3_PROVIDER_COMMAND")
         .ok()
         .map(|s| s.split_whitespace().map(str::to_owned).collect())
-        .unwrap_or_else(|| vec!["printf".into(), "%s\\n".into()])
+        .unwrap_or_else(crate::turn::echo_command)
 }
 pub fn ensure_path(path: &str) -> anyhow::Result<()> {
     let p = FsPath::new(path);
