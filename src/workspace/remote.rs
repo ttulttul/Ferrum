@@ -1300,7 +1300,7 @@ mod tests {
             command: vec!["provider".into()],
             prompt: String::new(),
             cwd: "/".into(),
-            env_remove: vec![],
+            ..Default::default()
         };
         let mut cancels = Vec::new();
         for stream in [20, 21] {

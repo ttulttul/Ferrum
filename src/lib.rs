@@ -38,6 +38,7 @@ pub mod local_services;
 pub mod managed_endpoint;
 #[cfg(feature = "native")]
 pub mod mcp_oauth;
+mod model_manifest;
 #[cfg(feature = "native")]
 mod native_child_work;
 #[cfg(feature = "native")]

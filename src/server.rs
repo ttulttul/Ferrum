@@ -57,6 +57,9 @@ pub struct AppState {
     pub(crate) project_clone_events: broadcast::Sender<()>,
     pub(crate) project_clone_cancellations: Mutex<HashMap<String, (u64, oneshot::Sender<()>)>>,
     pub(crate) project_clone_sequence: Mutex<u64>,
+    /// The provider model manifest, refreshed from upstream.
+    pub(crate) model_manifest:
+        Arc<crate::model_manifest::ModelManifest<crate::model_manifest::NativeHost>>,
     /// Background tasks, timers and the open sockets.
     pub(crate) runtime: Arc<crate::runtime::TokioRuntime>,
 }
@@ -147,7 +150,7 @@ impl AppState {
             oauth: mcp_oauth::OAuth::open(&dir)?,
             connect,
             data_dir: dir.clone(),
-            paths,
+            paths: paths.clone(),
             runtime_config,
             settings: settings.clone(),
             provider_command,
@@ -168,6 +171,9 @@ impl AppState {
             project_clone_events,
             project_clone_cancellations: Mutex::new(HashMap::new()),
             project_clone_sequence: Mutex::new(0),
+            model_manifest: Arc::new(crate::model_manifest::ModelManifest::new(
+                crate::model_manifest::NativeHost::new(&paths.state_dir, settings.clone()),
+            )),
             runtime: Arc::default(),
         }))
     }
@@ -803,6 +809,17 @@ where
             );
         }
     }
+    // Refresh the model manifest now and then on the provider-check cadence;
+    // each refresh is TTL-gated, so most ticks read nothing.
+    let manifest = state.model_manifest.clone();
+    let manifest_refresh = tokio::spawn(async move {
+        let period =
+            std::time::Duration::from_millis(crate::model_manifest::MANIFEST_RETRY_MS as u64);
+        loop {
+            manifest.refresh().await;
+            tokio::time::sleep(period).await;
+        }
+    });
     // T3 Connect: run the stored managed tunnel's relay client while this server listens.
     let policy = &state.settings.policy;
     let endpoint = crate::managed_endpoint::ManagedEndpointRuntime::open(
@@ -866,6 +883,7 @@ where
             Ok(())
         }
     };
+    manifest_refresh.abort();
     if let Some(startup) = endpoint_startup {
         startup.abort();
     }

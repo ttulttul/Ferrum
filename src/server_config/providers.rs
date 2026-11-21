@@ -56,17 +56,22 @@ pub(crate) fn list(state: &crate::AppState, settings: &Value, options: &Value) -
         |driver| state.settings.policy.provider_denial(driver),
         settings,
         options,
+        &state.model_manifest.current(),
     )
 }
 
 /// The provider rows of the config snapshot. `denial` is the managed policy's
-/// reason a driver is disallowed, if any.
+/// reason a driver is disallowed, if any. Claude's built-in models come from
+/// the model `manifest`.
 pub(crate) fn list_with(
     started_at: &str,
     denial: impl Fn(&str) -> Option<String>,
     settings: &Value,
     options: &Value,
+    manifest: &Value,
 ) -> Value {
+    let claude_models: Value =
+        crate::model_manifest::claude_models(manifest, crate::platform::now_ms()).into();
     let stock = DEFAULTS["providers"].as_object().unwrap();
     let instances = settings["providerInstances"].as_object();
     let ids = stock.keys().chain(
@@ -123,7 +128,12 @@ pub(crate) fn list_with(
         } else {
             format!("{label} is disabled in T3 Code settings.")
         }));
-        row["models"] = models(&catalog["models"], config);
+        let stock_models = if driver == "claudeAgent" {
+            &claude_models
+        } else {
+            &catalog["models"]
+        };
+        row["models"] = models(stock_models, config);
         row["slashCommands"] = catalog["slashCommands"].clone();
         row["skills"] = catalog["skills"].clone();
         if driver == "antigravity" && options["workspaceSnapshotsOnDemand"] != true {

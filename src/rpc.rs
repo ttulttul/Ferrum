@@ -2272,6 +2272,20 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         );
     }
     if method == "server.refreshProviders" {
+        // As `ws.ts`: a catalog-only refresh reads the manifest on demand, a
+        // model refresh forces it, and a provider check starts the TTL-gated one.
+        if params["modelCatalogOnly"] == true {
+            state.model_manifest.refresh_on_demand().await;
+            return Reply::Success(json!({"providers":[]}));
+        }
+        if params["refreshModels"] == true {
+            state.model_manifest.force_refresh().await;
+        } else {
+            let manifest = state.model_manifest.clone();
+            tokio::spawn(async move {
+                manifest.refresh().await;
+            });
+        }
         return match crate::config_rpc::snapshot(state, false, &Value::Null).await {
             Ok(config) => Reply::Success(json!({"providers":config["providers"]})),
             Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),

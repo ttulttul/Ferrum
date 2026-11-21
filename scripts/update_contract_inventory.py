@@ -34,6 +34,9 @@ for entry in rpc:
     entry["scope"] = scope_by_method[entry["name"]]
 Path("contracts/http.json").write_text(json.dumps(http, indent=2) + "\n")
 Path("contracts/rpc.json").write_text(json.dumps(rpc, indent=2) + "\n")
+# The bundled model manifest the server falls back to, as the reference bundles it.
+Path("contracts/model-manifest.json").write_bytes(
+    (root / "apps/server/src/provider/model-manifest.json").read_bytes())
 Path("contracts/commands.json").write_text(json.dumps(registered["commands"], indent=2) + "\n")
 Path("contracts/projections.json").write_text(json.dumps(registered["projections"], indent=2) + "\n")
 Path("contracts/settings.json").write_bytes(subprocess.check_output([
