@@ -4,7 +4,7 @@ use crate::settings::failure;
 use std::{
     fs,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 /// Documents at their paths on the local filesystem.
@@ -31,6 +31,28 @@ impl DocumentStore for FsStore {
 
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         fs::create_dir_all(path)
+    }
+
+    fn list(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    paths.push(entry.path());
+                }
+            }
+        }
+        paths.sort();
+        Ok(paths)
     }
 
     fn create_private_dir_all(&self, path: &Path) -> io::Result<()> {
