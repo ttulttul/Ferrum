@@ -271,6 +271,7 @@ async fn a_message_runs_a_turn_in_agentd() {
     std::fs::create_dir_all(&root).unwrap();
     let url = agentd(dir.path(), &root).await;
     let documents = Arc::new(MemoryStore::new());
+    write_settings(&documents, &stub_settings());
     let log = SharedLog::default();
     let server = Server::start(1, &url, &documents, &log, stub_provider("0")).await;
     server
@@ -288,6 +289,7 @@ async fn a_turn_keeps_going_across_a_server_restart() {
     std::fs::create_dir_all(&root).unwrap();
     let url = agentd(dir.path(), &root).await;
     let documents = Arc::new(MemoryStore::new());
+    write_settings(&documents, &stub_settings());
     let log = SharedLog::default();
     let words: Vec<String> = (1..=8).map(|i| format!("w{i}")).collect();
     let server = Server::start(1, &url, &documents, &log, stub_provider("0.2")).await;
@@ -333,6 +335,13 @@ fn fake_cli_settings(scenario: &std::path::Path, log: &std::path::Path) -> Value
         })
     };
     json!({"providerInstances": {"codex": instance("codex"), "claudeAgent": instance("claudeAgent")}})
+}
+
+/// Settings with an enabled `stub` instance, whose turns run the plane's
+/// configured command (a provider instance must be enabled to take a
+/// message).
+fn stub_settings() -> Value {
+    json!({"providerInstances": {"stub": {"driver": "stub", "enabled": true}}})
 }
 
 fn fixture(name: &str) -> std::path::PathBuf {
