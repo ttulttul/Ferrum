@@ -58,6 +58,7 @@ pub use settings::policy::ManagedPolicyFileError;
 mod thread_events;
 mod thread_projection;
 mod turn;
+mod wire_items;
 use orchestration::dispatch_orchestration_command;
 #[cfg(feature = "native")]
 pub mod provider_http;

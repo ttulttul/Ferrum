@@ -286,6 +286,21 @@ const program = Effect.gen(function* () {
     );
     yield* record("orchestration.subscribeThread", untilSynchronized(client["orchestration.subscribeThread"](threadInput(seed.threadId))));
     yield* record("orchestration.getThreadProjection", client["orchestration.getThreadProjection"]({ threadId: seed.threadId }));
+    // What a client fetches for each item whose output the projection left out.
+    const projection = results.steps["orchestration.getThreadProjection"]?.value;
+    const omitted = (projection?.turnItems ?? []).filter((item) => item.outputOmitted === true);
+    yield* record(
+      "orchestration.getTurnItem (omitted output)",
+      Effect.forEach(omitted, (item) =>
+        client["orchestration.getTurnItem"]({ threadId: seed.threadId, itemId: item.id }).pipe(
+          Effect.map(({ item: detail }) => ({
+            type: item.type,
+            output: detail?.output ?? null,
+            diffStr: detail?.diffStr ?? null,
+          })),
+        ),
+      ),
+    );
     return;
   }
   const steps = [];

@@ -597,7 +597,29 @@ impl<'a> Attempt<'a> {
                 }
                 "file_change" => {}
                 _ => {
-                    item.fields.insert("output".into(), text.into());
+                    // The reference keeps a lone result's structured
+                    // `tool_use_result` (a Read's file, ...), else the raw
+                    // result content.
+                    let results = message["message"]["content"]
+                        .as_array()
+                        .map_or(0, |blocks| {
+                            blocks.iter().filter(|b| b["type"] == "tool_result").count()
+                        });
+                    let structured = &message["tool_use_result"];
+                    let present = match structured {
+                        Value::Object(map) => !map.is_empty(),
+                        Value::Array(items) => !items.is_empty(),
+                        Value::Null => false,
+                        _ => true,
+                    };
+                    let output = if results == 1 && present {
+                        structured.clone()
+                    } else if block["content"].is_null() {
+                        Value::from(text)
+                    } else {
+                        block["content"].clone()
+                    };
+                    item.fields.insert("output".into(), output);
                 }
             }
             self.sink.send(ProviderEvent::TurnItem { item });
@@ -805,10 +827,8 @@ fn tool_item(id: &str, name: &str, input: &Value) -> ProviderItem {
                 .as_str()
                 .or(input["notebook_path"].as_str())
                 .unwrap_or_default();
-            let operation = if name == "Write" { "add" } else { "update" };
-            let mut item = ProviderItem::new(id, "file_change", "running")
-                .with("fileName", path)
-                .with("changes", json!([{"operation": operation, "path": path}]));
+            // The reference's Claude file changes name the file only.
+            let mut item = ProviderItem::new(id, "file_change", "running").with("fileName", path);
             if let Some(old) = input["old_string"].as_str() {
                 item = item.with("oldStr", old);
             }
@@ -1099,6 +1119,47 @@ fn dynamic_tool_title(name: &str, input: &Value) -> Option<String> {
     if name == "Skill" {
         return text("skill").map(|skill| format!("Skill: {skill}"));
     }
+    // The reference's formatSearchToolLabel for Grep, Glob and LS.
+    let normalized: String = name
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '_' && *c != '-')
+        .collect();
+    if matches!(normalized.as_str(), "grep" | "glob" | "ls") {
+        let first = |keys: &[&str]| keys.iter().find_map(|key| text(key));
+        let query = first(&["pattern", "query", "searchTerm", "regex", "grep", "needle"]);
+        let glob = first(&[
+            "glob",
+            "globPattern",
+            "glob_pattern",
+            "include",
+            "filePattern",
+            "file_pattern",
+        ]);
+        let target = first(&[
+            "path",
+            "target_directory",
+            "targetDirectory",
+            "directory",
+            "cwd",
+            "root",
+        ])
+        .and_then(|path| {
+            path.split(['/', '\\'])
+                .rfind(|part| !part.is_empty() && *part != ".")
+        });
+        let title = match (query, glob, target) {
+            (Some(query), _, Some(target)) => Some(format!("Searched {query} in {target}")),
+            (None, Some(glob), Some(target)) => Some(format!("Searched files {glob} in {target}")),
+            (None, Some(glob), None) => Some(format!("Searched files {glob}")),
+            (Some(query), _, None) => Some(format!("Searched {query}")),
+            (None, None, Some(target)) => Some(format!("Searched in {target}")),
+            (None, None, None) => None,
+        };
+        if title.is_some() {
+            return title;
+        }
+    }
     matches!(name.to_ascii_lowercase().as_str(), "read" | "read file").then(|| {
         match text("file_path").or_else(|| text("path")) {
             Some(path) => format!("Read {path}"),
@@ -1117,5 +1178,27 @@ fn result_text(content: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod search_title_tests {
+    use super::*;
+
+    #[test]
+    fn search_tools_are_titled_as_the_reference_titles_them() {
+        assert_eq!(
+            dynamic_tool_title("Grep", &json!({"pattern": "todo", "path": "/w/src"})).as_deref(),
+            Some("Searched todo in src")
+        );
+        assert_eq!(
+            dynamic_tool_title("Glob", &json!({"pattern": "**/*.rs"})).as_deref(),
+            Some("Searched **/*.rs")
+        );
+        assert_eq!(
+            dynamic_tool_title("LS", &json!({"path": "/w/"})).as_deref(),
+            Some("Searched in w")
+        );
+        assert_eq!(dynamic_tool_title("Grep", &json!({})), None);
     }
 }

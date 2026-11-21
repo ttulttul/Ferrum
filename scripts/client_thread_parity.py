@@ -424,6 +424,10 @@ def compare_turn(original, rust):
                             rust["steps"]["orchestration.subscribeThread"]["value"])
     if shapes:
         problems["shape"] = shapes
+    fetched = [side["steps"].get("orchestration.getTurnItem (omitted output)", {}).get("value")
+               for side in (original, rust)]
+    if fetched[0] != fetched[1]:
+        problems["omitted output"] = [f"original {fetched[0]}", f"rust     {fetched[1]}"]
     rendered = [rendered_turn(side["steps"]["orchestration.getThreadProjection"]["value"])
                 for side in (original, rust)]
     for key in rendered[0]:

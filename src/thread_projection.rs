@@ -365,6 +365,22 @@ impl Thread {
 
     /// `OrchestrationV2ThreadProjection`, as the reference's getThreadProjection returns it.
     pub(crate) fn projection(&self) -> Value {
+        self.projection_with(true)
+    }
+
+    /// A turn item with everything it holds, bounded for transport, as
+    /// `orchestration.getTurnItem` returns it.
+    pub(crate) fn turn_item_detail(&self, item_id: &str) -> Option<Value> {
+        self.projection_with(false)["turnItems"]
+            .as_array()?
+            .iter()
+            .find(|item| item["id"] == item_id)
+            .map(crate::wire_items::detail_item)
+    }
+
+    /// The projection; with `wire`, its turn items as snapshots and events
+    /// carry them (output omitted).
+    fn projection_with(&self, wire: bool) -> Value {
         let row = self.stored_row();
         let array = |key: &str| {
             row.get(key)
@@ -467,7 +483,13 @@ impl Thread {
                 }),
             ));
         }
-        let turn_items = self.turn_items_with(provider.items);
+        let mut turn_items = self.turn_items_with(provider.items);
+        if wire {
+            turn_items = turn_items
+                .iter()
+                .map(crate::wire_items::wire_item)
+                .collect();
+        }
         let mut app = ordered(APP_FIELDS, &row);
         if let Some(id) = self.provider_thread_id() {
             app["activeProviderThreadId"] = json!(id);
