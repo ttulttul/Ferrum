@@ -31,12 +31,14 @@ server told the fake CLI: the runtime policy of its thread and turn, and its
 answer to each request.
 
 Restart scenarios (those with "restart") stop the server the way a service
-manager does (SIGTERM) once the turn is running or has settled, change what
-the scenario says (settings, or the CLI removed), start the server again on the
-same home, wait for whatever it continues to settle, and then compare the
-thread: how the cut-off run ended, the notice and the continuation run, the
-provider session, and each turn launch of the CLI (`cli launches`: a new
-session or a resumed one). Known differences are listed
+manager does (SIGTERM) once the turn has started, is running or has settled
+(after queueing more messages, if the scenario says), change what the scenario
+says (settings, or the CLI removed), start the server again on the same home,
+wait for whatever it continues to settle (putting the CLI back for a retry, if
+the scenario says), and then compare the thread: how the cut-off run ended, the
+notice and the continuation run, the provider session, each turn launch of the
+CLI (`cli launches`: a new session or a resumed one), and how soon after the
+server listened it sent the continuation (`continuation timing`). Known differences are listed
 in client_thread_parity_xfail.json; an entry that starts matching fails the
 suite until it is removed.
 """
@@ -50,6 +52,7 @@ import secrets
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
 
 from client_initial_sync_parity import rpc
@@ -77,6 +80,9 @@ PROVIDER_SCENARIOS = [
     {"name": "codex user input", "instance": "codex", "model": "fixture", "scenario": "codex_user_input.json",
      "respond": {"answers": {"color": "Blue"}}},
     {"name": "codex crash", "instance": "codex", "model": "fixture", "scenario": "codex_crash.json"},
+    # A turn that completes while its command still runs: the command is background work.
+    {"name": "codex background command", "instance": "codex", "model": "fixture",
+     "scenario": "codex_background.json"},
     {"name": "codex missing", "instance": "codex", "model": "fixture", "scenario": None},
     {"name": "codex interrupt", "instance": "codex", "model": "fixture", "scenario": "codex_interrupt.json",
      "interrupt": True},
@@ -110,6 +116,38 @@ PROVIDER_SCENARIOS = [
          "providerInstances": {"claudeAgent": {"driver": "claudeAgent", "enabled": False}}}}},
     {"name": "claude restart cli missing", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_restart.json", "restart": {"after": "running", "removeCli": True}},
+    # A continuation that fails to start (no CLI) is tried again a minute later.
+    {"name": "claude restart cli restored", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_restart.json", "restart": {"after": "running", "removeCli": True, "restoreCli": True}},
+    # What a client watching the thread sees when the server stops mid-turn.
+    {"name": "claude restart live", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_restart.json", "restart": {"after": "running", "live": True}},
+    {"name": "codex restart live", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart.json", "restart": {"after": "running", "live": True}},
+    {"name": "codex restart mid-turn", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart.json", "restart": {"after": "running"}},
+    {"name": "codex restart idle", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart_idle.json", "restart": {"after": "settled"}},
+    # A run whose provider never took its prompt is sent again: a user's message waits in the
+    # queue, held; an agent's is sent again.
+    {"name": "codex restart unaccepted", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart_unaccepted.json", "restart": {"after": "started"}},
+    # The reference takes a client's message as a user's, wherever it came from.
+    {"name": "codex restart unaccepted mcp", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart_unaccepted.json", "restart": {"after": "started"},
+     "dispatch": {"createdBy": "agent", "creationSource": "mcp"}},
+    # A command still running after its turn completed is background work the restart cuts off.
+    # Queued messages wait, held, behind a cut-off turn or one put back in the queue.
+    {"name": "codex restart queued", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart.json", "restart": {"after": "running", "queue": ["and then this"]}},
+    {"name": "codex restart unaccepted queued", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart_unaccepted.json",
+     "restart": {"after": "started", "queue": ["and then this"]}},
+    {"name": "codex restart background", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart_background.json", "restart": {"after": "settled"}},
+    {"name": "codex restart continuation off", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart.json",
+     "restart": {"after": "running", "settings": {"continueThreadsAfterServerUpdate": False}}},
 ]
 # The fake CLIs: version probes answer as a supported release would, and protocol sessions replay
 # the scenario. Anything else exits quietly.
@@ -323,7 +361,8 @@ def seed_turn(url, cookie, root, scenario):
             "respond": scenario.get("respond"), "dispatch": {
         "type": "message.dispatch", "commandId": "turn-message", "threadId": THREAD,
         "messageId": "message:turn", "text": "Run echo hi and write notes.txt", "attachments": [],
-        "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}}}
+        "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"},
+        **scenario.get("dispatch", {})}}
 
 
 def rendered_turn(projection):
@@ -446,7 +485,7 @@ def cli_launch(log, root):
     # The reference also starts a Codex app-server to read the provider's status; the turn's
     # session is the last one started.
     out.extend(launches[-1:])
-    initializes = []
+    initializes, sessions = [], []
     for line in (Path(log).read_text().splitlines() if Path(log).exists() else []):
         try:
             message = json.loads(line)
@@ -455,6 +494,10 @@ def cli_launch(log, root):
         if message.get("method") == "initialize":
             initializes.append(message)
             continue
+        if message.get("method") in ("thread/start", "thread/resume"):
+            # The session's own initialize, not a later status probe's (a restarted server
+            # probes again).
+            sessions.append(initializes[-1] if initializes else None)
         if message.get("method") in ("thread/start", "thread/resume", "turn/start"):
             params = dict(message.get("params") or {})
             params.pop("input", None)
@@ -463,7 +506,7 @@ def cli_launch(log, root):
             if isinstance(config, dict):
                 params["config"] = {k: v for k, v in config.items() if not k.startswith("mcp_servers.t3-code")}
             out.append(f"{message['method']} {json.dumps(mask(params), sort_keys=True)}")
-    for message in initializes[-1:]:
+    for message in ([m for m in sessions if m is not None] or initializes)[-1:]:
         out.insert(1, f"initialize {json.dumps(mask(message.get('params')), sort_keys=True)}")
     return out
 
@@ -502,14 +545,69 @@ def wait_for(url, cookie, done, seconds):
         time.sleep(0.5)
 
 
+def reconcile_events(live):
+    """The events a watching client got from the stop's reconciliation: from the cut-off run's
+    update on, with each turn item's type and status."""
+    out, started = [], False
+    for item in (live or {}).get("items", []):
+        event = item.get("event") or {}
+        payload = event.get("payload") or {}
+        if event.get("type") == "run.updated" and payload.get("status") == "cancelled":
+            started = True
+        if not started:
+            continue
+        if item["kind"] != "event":
+            out.append(item["kind"])
+            continue
+        label = event.get("type")
+        if label == "turn-item.updated":
+            label += f" {payload.get('type')} {payload.get('status')}"
+        elif label in ("run.updated", "run-attempt.updated", "node.updated", "provider-turn.updated",
+                       "provider-thread.updated", "provider-session.updated"):
+            label += f" {payload.get('status')}"
+        out.append(label)
+    return out
+
+
+def continuation_delay(projection, listening):
+    """Seconds from the restarted server listening to its first restart continuation run."""
+    import datetime
+    for run in projection.get("runs", []):
+        if run.get("restartContinuationOfRunId") is not None:
+            requested = datetime.datetime.fromisoformat(run["requestedAt"].replace("Z", "+00:00"))
+            return round(requested.timestamp() - listening, 2)
+    return None
+
+
 def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, scenario):
     """A turn on a server that is stopped and started again: what the client sees afterwards."""
     restart = scenario["restart"]
+    watched = {}
     with contextlib.ExitStack() as first:
         url, cookie = managed_server(first, command, root, *credentials, env=env)
         seeded = seed_turn(url, cookie, checkouts, scenario)
-        rpc(url, cookie, "orchestration.dispatchCommand", seeded["dispatch"])
-        if restart["after"] == "running":
+        if restart.get("live"):
+            # A client watches the thread, sends the message, and sees what the stop does.
+            watcher = threading.Thread(target=lambda: watched.update(
+                run_client(args, url, cookie, {**seeded, "turnMs": 60000})))
+            watcher.start()
+            wait_for(url, cookie, lambda p: bool(p.get("runs")), 30)
+        else:
+            rpc(url, cookie, "orchestration.dispatchCommand", seeded["dispatch"])
+        for index, text in enumerate(restart.get("queue", [])):
+            # Another message, queued behind the first.
+            time.sleep(1)
+            rpc(url, cookie, "orchestration.dispatchCommand", {
+                **seeded["dispatch"], "commandId": f"queued-message-{index}",
+                "messageId": f"message:queued-{index}", "text": text,
+                "dispatchMode": {"type": "queue_after_active"}})
+        if restart["after"] == "dispatched":
+            wait_for(url, cookie, lambda p: bool(p.get("runs")), 30)
+        elif restart["after"] == "started":
+            # The run started, but its provider has not taken the prompt.
+            wait_for(url, cookie, lambda p: any(r.get("status") == "running" for r in p.get("runs", [])), 30)
+            time.sleep(2)
+        elif restart["after"] == "running":
             # The turn has run a command and holds on.
             wait_for(url, cookie, lambda p: any(i.get("type") == "command_execution"
                                                 for i in p.get("turnItems", [])), 30)
@@ -520,17 +618,37 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
         if restart.get("settings"):
             rpc(url, cookie, "server.updateSettings", {"patch": restart["settings"]})
     # Stopped as a service manager stops it.
+    if restart.get("live"):
+        watcher.join(90)
     if restart.get("removeCli"):
         for cli in fake_bin.iterdir():
             cli.unlink()
     with contextlib.ExitStack() as second:
         url, cookie = managed_server(second, command, root, *credentials, env=env)
-        # The reference continues a turn a few seconds after it starts; let that run settle.
+        listening = time.time()
+        if restart.get("restoreCli"):
+            # The continuation fails without its CLI; put the CLI back for its retry, a minute
+            # later.
+            failed = wait_for(url, cookie, lambda p: any(
+                r.get("restartContinuationOfRunId") and r.get("status") == "failed"
+                for r in p.get("runs", [])), 30)
+            write_fake_clis(fake_bin, {"codex" if scenario["instance"] == "codex" else "claude"})
+            source = next((r["id"] for r in failed.get("runs", [])
+                           if r.get("restartContinuationOfRunId") and r.get("status") == "failed"), None)
+            wait_for(url, cookie, lambda p: any(
+                r.get("restartContinuationOfRunId") == source and r.get("status") not in ACTIVE_RUN
+                for r in p.get("runs", [])), 100)
+        # The reference continues a turn as it starts; let that run settle.
         started = time.monotonic()
         wait_for(url, cookie, lambda p: time.monotonic() - started > 8 and not any(
             r.get("status") in ACTIVE_RUN for r in p.get("runs", [])), 40)
         time.sleep(1)
-        return run_client(args, url, cookie, {"threadId": THREAD, "inspect": True})
+        outcome = run_client(args, url, cookie, {"threadId": THREAD, "inspect": True})
+        outcome["continuationDelay"] = continuation_delay(thread_projection(url, cookie), listening)
+        if restart.get("live"):
+            outcome["reconcileLive"] = reconcile_events(
+                watched.get("steps", {}).get("orchestration.subscribeThread (live turn)", {}).get("value"))
+        return outcome
 
 
 def compare_turn(original, rust):
@@ -542,6 +660,15 @@ def compare_turn(original, rust):
     cli = [original.get("cli", []), rust.get("cli", [])]
     if cli[0] != cli[1]:
         problems["cli approvals"] = [f"original {line}" for line in cli[0]] + [f"rust     {line}" for line in cli[1]]
+    # The reference sends a continuation as it starts listening; so must Rust (whose times are
+    # whole seconds).
+    delays = [original.get("continuationDelay"), rust.get("continuationDelay")]
+    if (delays[0] is None) != (delays[1] is None) or any(
+            delay is not None and not -1.5 <= delay <= 3 for delay in delays):
+        problems["continuation timing"] = [f"seconds after listening: original {delays[0]} rust {delays[1]}"]
+    watched = [original.get("reconcileLive"), rust.get("reconcileLive")]
+    if watched[0] != watched[1]:
+        problems["live reconcile"] = [f"original {watched[0]}", f"rust     {watched[1]}"]
     launches = [original.get("launches", []), rust.get("launches", [])]
     if launches[0] != launches[1]:
         problems["cli launches"] = [f"original {launches[0]}", f"rust     {launches[1]}"]

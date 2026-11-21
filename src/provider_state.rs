@@ -30,6 +30,9 @@ pub struct ProviderState {
     /// When a server restart stopped the provider session, until a turn
     /// starts it again.
     pub session_stopped_at: Option<u64>,
+    /// Items a restart cancelled while they ran after their turn (run,
+    /// native item id), with when.
+    pub cancelled_items: HashMap<(Uuid, String), u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +70,10 @@ pub struct RunRecord {
     /// provider turn record.
     pub turn_started: bool,
     pub native_turn_id: Option<String>,
+    /// The native thread the turn ran on.
+    pub native_thread_id: Option<String>,
+    /// The turn resumed the native thread it ran on.
+    pub resumed: bool,
     pub usage: Option<(TokenUsage, u64)>,
     /// The whole turn's usage (`turnTokenUsage`).
     pub turn_usage: Option<Value>,
@@ -138,6 +145,8 @@ impl ProviderState {
             started_at: at,
             turn_started: false,
             native_turn_id: None,
+            native_thread_id: None,
+            resumed: false,
             usage: None,
             turn_usage: None,
             model: None,
@@ -155,6 +164,8 @@ impl ProviderState {
                 ..
             } => {
                 record.driver = driver.clone();
+                record.native_thread_id = Some(native_thread_id.clone());
+                record.resumed = *resumed;
                 // A run that starts a new native session starts a new
                 // attachment budget.
                 if !resumed && !record.prompt_delivered {

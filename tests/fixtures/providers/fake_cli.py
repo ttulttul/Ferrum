@@ -16,6 +16,12 @@ Steps:
   {"expect": "turn/start"}   read until a message whose method, type or
                              request.subtype matches; remember it
   {"expectReply": "id"}      read until the reply to request "id"
+  {"branch": {"thread/start": "codex_turn.json",
+              "thread/resume": "codex_resume.json"}}
+                             read until a message one of the keys matches,
+                             then play the named scenario from the step after
+                             its first {"expect"} of that key (so one Codex
+                             session can start or resume its thread)
   {"send": {...}}            write a message; "$id" becomes the remembered
                              message's id and "$params.x" its params.x
   {"stderr": "text"}         write a line to standard error
@@ -122,8 +128,35 @@ def fill(value):
     return value
 
 
-for step in steps:
-    if "expect" in step:
+def load(name):
+    directory = os.path.dirname(os.path.abspath(os.environ["FAKE_PROVIDER_SCENARIO"]))
+    with open(os.path.join(directory, name)) as source:
+        return json.load(source)
+
+
+index = 0
+while index < len(steps):
+    step = steps[index]
+    index += 1
+    if "branch" in step:
+        while True:
+            message = receive()
+            names = (
+                message.get("method"),
+                message.get("type"),
+                (message.get("request") or {}).get("subtype"),
+            )
+            matched = next((name for name in names if name in step["branch"]), None)
+            if matched is not None:
+                remembered = message
+                break
+            answer(message)
+        played = load(step["branch"][matched])
+        SIDE_REPLIES.update(played.get("replies", {}))
+        CONTROL_REPLIES.update(played.get("controlReplies", {}))
+        after = next(i for i, s in enumerate(played["steps"]) if s.get("expect") == matched)
+        steps, index = played["steps"], after + 1
+    elif "expect" in step:
         while True:
             message = receive()
             names = (

@@ -22,6 +22,10 @@ pub struct ConversationMessage {
     pub role: String,
     pub content: String,
     pub created_at: u64,
+    /// Where a user's message came from (`creationSource`), when not the
+    /// web client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_source: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Run {
@@ -42,6 +46,27 @@ pub struct Run {
     /// The run a restart cut off that this run continues.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_continuation_of: Option<Uuid>,
+    /// When a restart put the run back in the queue, because its provider
+    /// never took its prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requeued_at: Option<u64>,
+    /// Background work a restart cut off that the run's next turn is told
+    /// about (`restartCancelledBackgroundWork`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_work: Vec<serde_json::Value>,
+    /// A restart continuation is owed to this settled run, with the lost
+    /// processes it counts (the reference's `processLossCount`). A run a
+    /// restart cut off keeps it in [`RestartCut::continuation`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<u32>,
+}
+
+impl Run {
+    /// The continuation a restart owes the run, with its lost processes.
+    pub(crate) fn owed_continuation(&self) -> Option<u32> {
+        self.continuation
+            .or_else(|| self.restart_cut.as_ref()?.continuation)
+    }
 }
 
 /// A run that a server restart cut off, as the reference's
@@ -177,6 +202,19 @@ pub enum Event {
         cut: Vec<(Uuid, RestartCut)>,
         #[serde(default)]
         held: Vec<Uuid>,
+        /// Runs whose provider never took the prompt, back in the queue.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        requeued: Vec<Uuid>,
+        /// Items of earlier turns still running in the background (run,
+        /// native item id), cancelled.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stale_items: Vec<(Uuid, String)>,
+        /// The background work cancelled, on the run whose next turn is told.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        background: Vec<(Uuid, Vec<serde_json::Value>)>,
+        /// A settled run owed a continuation, with its lost processes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continued: Option<(Uuid, u32)>,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -450,6 +488,10 @@ impl Store {
                 thread_id,
                 cut,
                 held,
+                requeued,
+                stale_items,
+                background,
+                continued,
             } => {
                 for (run_id, _) in cut {
                     self.turn_positions.remove(run_id);
@@ -464,6 +506,29 @@ impl Store {
                     }
                     for run in thread.runs.iter_mut().filter(|r| held.contains(&r.id)) {
                         run.queue_held = true;
+                    }
+                    for run in thread.runs.iter_mut().filter(|r| requeued.contains(&r.id)) {
+                        run.status = "queued".into();
+                        run.queue_held = true;
+                        run.requeued_at = Some(at);
+                        run.finished_at = None;
+                    }
+                    for (run, item) in stale_items {
+                        thread
+                            .provider
+                            .cancelled_items
+                            .insert((*run, item.clone()), at);
+                    }
+                    for (run_id, work) in background {
+                        if let Some(run) = thread.runs.iter_mut().find(|r| r.id == *run_id) {
+                            run.background_work =
+                                crate::runtime_recovery::merge_work(&run.background_work, work);
+                        }
+                    }
+                    if let Some((run_id, losses)) = continued {
+                        if let Some(run) = thread.runs.iter_mut().find(|r| r.id == *run_id) {
+                            run.continuation = Some(*losses);
+                        }
                     }
                     if !cut.is_empty() {
                         thread.status = "cancelled".into();

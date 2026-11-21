@@ -37,7 +37,7 @@ pub(crate) struct RunIds {
     pub driver: String,
 }
 
-fn item_id(prefix: &str, driver: &str, native: &str) -> String {
+pub(crate) fn item_id(prefix: &str, driver: &str, native: &str) -> String {
     format!(
         "{prefix}:provider:{}:native-item:{}",
         uri_component(driver),
@@ -290,7 +290,8 @@ impl Thread {
 
     /// The provider thread's context usage, as the reference sets it when a
     /// turn starts on a thread whose earlier turns reported usage: the
-    /// usage they reported last (`latestNativeContextUsage`).
+    /// usage they reported last on the same native thread
+    /// (`latestNativeContextUsage`, `contextUsageForHandoff`).
     fn context_usage(&self) -> Value {
         let Some(last) = self
             .runs
@@ -299,9 +300,21 @@ impl Thread {
         else {
             return Value::Null;
         };
+        // Only turns on the native thread the turn runs on count: a thread
+        // that could not be resumed starts with no usage. Claude resumes the
+        // session it names up front, whatever id the CLI reports.
+        let current = &self.provider.runs[&self.runs[last].id];
+        let native = current.native_thread_id.as_ref();
+        // A Claude turn continues the session unless it started a new one.
+        let claude_resumed = current.driver == provider::CLAUDE_AGENT
+            && (current.resumed || current.native_thread_id.is_none());
         self.runs[..last]
             .iter()
-            .filter_map(|run| self.provider.runs.get(&run.id)?.usage.as_ref())
+            .filter_map(|run| self.provider.runs.get(&run.id))
+            .filter(|record| {
+                claude_resumed || (native.is_some() && record.native_thread_id.as_ref() == native)
+            })
+            .filter_map(|record| record.usage.as_ref())
             .max_by_key(|(_, at)| *at)
             .map_or(Value::Null, |(usage, _)| {
                 let mut out = json!({"usedTokens": usage.used_tokens});
@@ -418,8 +431,16 @@ impl Thread {
             Some(TurnStatus::Interrupted) => "interrupted",
             Some(TurnStatus::Failed) => "failed",
         };
+        // A run a restart put back in the queue waits to start again.
+        let requeued = run.status == "queued" && run.requeued_at.is_some();
+        let status = if requeued { "pending" } else { status };
         let started = iso(record.started_at);
         let completed = ended.map(iso);
+        let started_value = if requeued {
+            Value::Null
+        } else {
+            json!(started)
+        };
         out.attempts.push(json!({
             "id": ids.attempt,
             "runId": ids.run,
@@ -430,7 +451,7 @@ impl Thread {
             "providerTurnId": null,
             "reason": "initial",
             "status": status,
-            "startedAt": started,
+            "startedAt": started_value,
             "completedAt": completed,
             "nativeThreadId": self.provider.thread.as_ref().and_then(|t| t.native_id.clone())
         }));
@@ -448,7 +469,7 @@ impl Thread {
             "nativeItemRef": null,
             "runtimeRequestId": null,
             "checkpointScopeId": null,
-            "startedAt": started,
+            "startedAt": started_value,
             "completedAt": completed
         }));
         let native_turn = record
@@ -509,7 +530,19 @@ impl Thread {
                     .push((index, json!({"requestSlot": item.item.id})));
                 continue;
             }
-            self.provider_item(out, index, ids, item, terminal.map(|t| t.status), cut);
+            self.provider_item(
+                out,
+                index,
+                ids,
+                item,
+                terminal.map(|t| t.status),
+                cut.or_else(|| {
+                    self.provider
+                        .cancelled_items
+                        .get(&(run.id, item.item.id.clone()))
+                        .copied()
+                }),
+            );
         }
         if let Some(plan) = &record.plan {
             let native = format!("turn-plan:{native_turn}");
@@ -935,12 +968,15 @@ impl Thread {
             return;
         }
         let native = item.id.as_str();
-        // An item still running when its turn ended ends with the turn.
+        // An item still running when its turn ended ends with the turn, but
+        // a Codex command can run on after a completed turn, as background
+        // work, until a restart cancels it.
+        let background = driver == provider::CODEX && item.kind == "command_execution";
         let status = match (item.status.as_str(), ended) {
+            ("pending" | "running" | "waiting", _) if cut.is_some() => "cancelled",
             ("running", Some(TurnStatus::Interrupted)) => "interrupted",
             ("running", Some(TurnStatus::Failed)) => "failed",
-            ("running", Some(TurnStatus::Completed)) => "completed",
-            ("pending" | "running" | "waiting", None) if cut.is_some() => "cancelled",
+            ("running", Some(TurnStatus::Completed)) if !background => "completed",
             (status, _) => status,
         }
         .to_owned();
@@ -1094,6 +1130,9 @@ mod tests {
             queue_held: false,
             restart_cut: None,
             restart_continuation_of: None,
+            requeued_at: None,
+            background_work: vec![],
+            continuation: None,
         };
         let mut live = thread(run.clone());
         for event in [

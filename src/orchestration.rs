@@ -293,6 +293,7 @@ pub(crate) fn provider_instance_enabled(settings: &Value, project: &str, instanc
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_run<H: CommandHost>(
     state: Arc<H>,
     receipt: &CommandReceipt,
@@ -301,6 +302,7 @@ async fn start_run<H: CommandHost>(
     message_id: &Value,
     queued: bool,
     continues: Option<Uuid>,
+    creation_source: Option<String>,
 ) -> anyhow::Result<u64> {
     let (cwd, needs_baseline) = state
         .store
@@ -323,6 +325,9 @@ async fn start_run<H: CommandHost>(
         queue_held: queued,
         restart_cut: None,
         restart_continuation_of: continues,
+        requeued_at: None,
+        background_work: vec![],
+        continuation: None,
     };
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),
@@ -335,6 +340,7 @@ async fn start_run<H: CommandHost>(
         .into(),
         content: text.clone(),
         created_at: now(),
+        creation_source: creation_source.filter(|_| continues.is_none()),
     };
     let seq = state
         .commit_receipted(
@@ -521,6 +527,10 @@ async fn apply_command<H: CommandHost>(
                 &command["messageId"],
                 queued,
                 continues,
+                command["creationSource"]
+                    .as_str()
+                    .filter(|source| *source != "web")
+                    .map(str::to_owned),
             )
             .await;
         }
@@ -1811,6 +1821,7 @@ async fn apply_command<H: CommandHost>(
                 role: "user".into(),
                 content: prompt.into(),
                 created_at: now(),
+                creation_source: None,
             };
             let thread = Thread {
                 row,

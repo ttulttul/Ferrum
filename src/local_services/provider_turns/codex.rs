@@ -351,6 +351,8 @@ impl Session {
         if let Some(resume) = provider.resume.as_deref().filter(|id| !id.is_empty()) {
             let mut params = thread_params.clone();
             params["threadId"] = json!(resume);
+            // The reference resumes without replaying the thread's turns.
+            params["excludeTurns"] = json!(true);
             match self.request("thread/resume", params).await {
                 Ok(reply) => {
                     resumed = true;
@@ -981,7 +983,9 @@ fn map_item(item: &Value, completed: bool) -> Option<ProviderItem> {
             if let Some(code) = item["exitCode"].as_i64() {
                 mapped = mapped.with("exitCode", code);
             }
-            mapped
+            // The reference wakes the agent when a command outlives its
+            // turn, and marks the command so.
+            mapped.with("completionWake", "always")
         }
         "fileChange" => {
             let changes = item["changes"].as_array()?;
@@ -1120,7 +1124,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&command).unwrap(),
             json!({"id":"c1","type":"command_execution","status":"completed","title":null,
-                "input":"ls","output":"a\n","exitCode":0})
+                "input":"ls","output":"a\n","exitCode":0,"completionWake":"always"})
         );
         let file = map_item(
             &json!({"type":"fileChange","id":"f1","status":"completed",
