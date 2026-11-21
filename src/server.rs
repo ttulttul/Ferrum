@@ -924,13 +924,35 @@ where
         ),
     )
     .await;
-    let endpoint_startup = {
-        let endpoint = endpoint.clone();
+    // `server.ts`'s cloud link fiber: register (or provision) the tunnel with T3 Connect,
+    // serve recovery requests, and release a CLI-provisioned tunnel on shutdown.
+    let cloud_link = policy.allows_connect().then(|| {
+        let descriptor_state = state.clone();
+        Arc::new(crate::cloud_link::CloudLink::new(
+            endpoint.clone(),
+            crate::cloud_link::CloudLinkOptions {
+                environment_id: state.environment_id.clone(),
+                public: crate::cloud_link::PublicConfig::from_env(),
+                descriptor: Arc::new(move || {
+                    let state = descriptor_state.clone();
+                    Box::pin(async move {
+                        crate::environment_http::descriptor(axum::extract::State(state))
+                            .await
+                            .0
+                    })
+                }),
+                timings: crate::cloud_link::Timings::default(),
+            },
+        ))
+    });
+    let endpoint_startup = cloud_link.clone().map(|cloud_link| {
         let origin = crate::managed_endpoint::LocalOrigin::for_address(bound);
         tokio::spawn(async move {
-            endpoint.start_stored_tunnel(&origin).await;
+            let recoveries = cloud_link.serve_recovery_requests(origin.clone());
+            let startup = cloud_link.run_startup(&origin);
+            tokio::join!(recoveries, startup);
         })
-    };
+    });
     let (stopping_tx, stopping_rx) = oneshot::channel::<()>();
     let stopping_endpoint = endpoint.clone();
     let server = axum::serve(
@@ -956,7 +978,13 @@ where
             Ok(())
         }
     };
-    endpoint_startup.abort();
+    if let Some(startup) = endpoint_startup {
+        startup.abort();
+    }
+    if let Some(cloud_link) = &cloud_link {
+        endpoint.begin_shutdown();
+        cloud_link.release_on_shutdown_logged().await;
+    }
     endpoint.shutdown().await;
     drop(ownership);
     result
