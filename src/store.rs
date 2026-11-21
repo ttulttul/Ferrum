@@ -155,6 +155,33 @@ pub struct ServerEvent {
     pub event: Event,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) receipt: Option<CommandReceipt>,
+    /// The domain events a live thread subscriber gets for this commit. The
+    /// commit takes one sequence number per event, ending at `id`. Not
+    /// logged: a subscriber that resumes later gets a snapshot.
+    #[serde(skip)]
+    pub(crate) thread_events: Option<std::sync::Arc<crate::thread_events::ThreadEvents>>,
+}
+
+impl Event {
+    /// The thread whose projection this event can change.
+    pub(crate) fn thread_id(&self) -> Option<&str> {
+        match self {
+            Event::ThreadCreated(thread) => Some(&thread.id),
+            Event::MessageAdded { thread_id, .. }
+            | Event::MessageEdited { thread_id, .. }
+            | Event::RunReordered { thread_id, .. }
+            | Event::RunProvider { thread_id, .. }
+            | Event::RunFinished { thread_id, .. }
+            | Event::CheckpointCaptured { thread_id, .. }
+            | Event::ThreadPatched { thread_id, .. } => Some(thread_id),
+            Event::RunStarted(run) | Event::RunUpdated(run) | Event::RunQueued { run, .. } => {
+                Some(&run.thread_id)
+            }
+            Event::CommandDispatched { thread_id, .. } => thread_id.as_deref(),
+            // Output lines are not part of the projection.
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

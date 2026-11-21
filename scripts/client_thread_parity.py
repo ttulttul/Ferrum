@@ -409,6 +409,11 @@ def compare_turn(original, rust):
         summaries = [live_summary(side) for side in live]
         if summaries[0] != summaries[1]:
             problems["live"] = [f"original {summaries[0]}", f"rust     {summaries[1]}"]
+        # The kinds of item a client applies, whatever their order and grouping.
+        kinds = [sorted(set(summary)) for summary in summaries]
+        if kinds[0] != kinds[1]:
+            problems["live kinds"] = [f"original only {sorted(set(kinds[0]) - set(kinds[1]))}",
+                                      f"rust only     {sorted(set(kinds[1]) - set(kinds[0]))}"]
     shapes = compare_thread(original["steps"]["orchestration.subscribeThread"]["value"],
                             rust["steps"]["orchestration.subscribeThread"]["value"])
     if shapes:

@@ -406,7 +406,12 @@ impl Thread {
                 })]
             })
             .unwrap_or_default();
-        let checkpoints = self.checkpoints.iter().enumerate().map(|(position, checkpoint)| json!({
+        // The reference records the baseline with the first turn's checkpoint,
+        // when a run ends; until then only the scope exists.
+        let captured_turn = self.checkpoints.iter().any(|c| c.turn_count > 0);
+        let checkpoints = self.checkpoints.iter().enumerate()
+            .filter(|(_, checkpoint)| captured_turn || checkpoint.turn_count > 0)
+            .map(|(position, checkpoint)| json!({
             "id":checkpoint_id(&self.id, checkpoint.turn_count),
             "threadId":self.id,
             "scopeId":scope_id,

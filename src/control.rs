@@ -1278,10 +1278,11 @@ mod tests {
         assert_eq!(pushed.len(), 1, "{pushed:?}");
         assert_eq!(pushed[0]["_tag"], "Chunk");
         assert_eq!(pushed[0]["requestId"], 1);
-        assert_eq!(
-            pushed[0]["values"][0]["projection"]["thread"]["title"],
-            "Two"
-        );
+        // A rename arrives as the reference's domain event, not a snapshot.
+        let event = &pushed[0]["values"][0];
+        assert_eq!(event["kind"], "event", "{event:#}");
+        assert_eq!(event["event"]["type"], "thread.metadata-updated");
+        assert_eq!(event["event"]["payload"]["title"], "Two");
         assert!(
             now(plane.deliver(&connection, &signals)).is_empty(),
             "the cursor moved past it"
@@ -1480,10 +1481,7 @@ mod tests {
         let thread: Vec<_> = changed.iter().filter(|(socket, _)| *socket == 1).collect();
         assert_eq!(thread.len(), 1, "{changed:?}");
         assert_eq!(thread[0].1["requestId"], 7);
-        assert_eq!(
-            thread[0].1["values"][0]["projection"]["thread"]["title"],
-            "Two"
-        );
+        assert_eq!(thread[0].1["values"][0]["event"]["payload"]["title"], "Two");
 
         host.suspend();
 

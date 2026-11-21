@@ -20,7 +20,6 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
 
 /// The methods this module serves.
@@ -92,12 +91,12 @@ impl Subscription {
         let (source, first) = match method {
             "orchestration.subscribeThread" => {
                 let source = listen.then(|| Source::Events(control.events.subscribe()));
-                let Some(snapshot) = thread_snapshot(control, params).await else {
+                let Some((snapshot, cursor)) = thread_snapshot(control, params).await else {
                     return Err(Reply::Failure(
                         json!({"_tag":"Fail","error":thread_projection_error(&params["threadId"])}),
                     ));
                 };
-                subscription.cursor = json!({"projection": digest(&snapshot["projection"])});
+                subscription.cursor = cursor;
                 let mut first = vec![snapshot];
                 if params["requestCompletionMarker"] == true {
                     first.push(json!({"kind":"synchronized"}));
@@ -150,17 +149,47 @@ impl Subscription {
                 // Provider output lines are not part of the projection.
                 Vec::new()
             }
+            ("orchestration.subscribeThread", Signal::Committed(event))
+                if event.event.thread_id().is_some()
+                    && event.event.thread_id() != self.params["threadId"].as_str() =>
+            {
+                // Another thread's change.
+                Vec::new()
+            }
+            ("orchestration.subscribeThread", Signal::Committed(event))
+                if self.cursor["sequence"]
+                    .as_u64()
+                    .is_some_and(|seen| event.id <= seen) =>
+            {
+                // Already in the snapshot this subscriber was last sent.
+                Vec::new()
+            }
+            ("orchestration.subscribeThread", Signal::Committed(event))
+                if event.thread_events.as_ref().is_some_and(|events| {
+                    events.items.is_some() && self.cursor["projection"] == events.before.as_str()
+                }) =>
+            {
+                // The subscriber has seen the projection this commit started
+                // from: send what it changed as domain events.
+                let events = event.thread_events.as_ref().expect("checked above");
+                self.cursor = json!({"projection": events.after, "sequence": event.id});
+                match events.items.as_deref() {
+                    Some(items) if !items.is_empty() => vec![Value::Array(items.to_vec())],
+                    _ => Vec::new(),
+                }
+            }
             ("orchestration.subscribeThread", Signal::Committed(_) | Signal::Resync) => {
-                // Threads keep no domain event log, so each change is sent as
-                // a fresh snapshot, which the client applies the same way.
-                let Some(next) = thread_snapshot(control, &self.params).await else {
+                // A change no event expresses, or one the subscriber is not
+                // ready for: a fresh snapshot, which the client applies the
+                // same way.
+                let Some((next, cursor)) = thread_snapshot(control, &self.params).await else {
                     return Vec::new();
                 };
-                let projection = digest(&next["projection"]);
-                if self.cursor["projection"] == projection {
+                let unchanged = self.cursor["projection"] == cursor["projection"];
+                self.cursor = cursor;
+                if unchanged {
                     return Vec::new();
                 }
-                self.cursor = json!({ "projection": projection });
                 vec![json!([next])]
             }
             ("orchestration.subscribePromptSuggestion", Signal::PromptSuggestion(event))
@@ -227,21 +256,21 @@ impl Source {
     }
 }
 
-/// A short, stable digest of a JSON value, for cursors that only need to
-/// know whether a value changed.
-fn digest(value: &Value) -> String {
-    let hash = Sha256::digest(crate::wire_json::compact(value).as_bytes());
-    hex::encode(&hash[..16])
-}
-
-async fn thread_snapshot(control: &ControlState, params: &Value) -> Option<Value> {
+/// The thread's snapshot item and the stream cursor it leaves: the digest of
+/// its projection, as commits name it (see [`crate::thread_events`]), and
+/// the last commit it includes.
+async fn thread_snapshot(control: &ControlState, params: &Value) -> Option<(Value, Value)> {
     let thread_id = params["threadId"].as_str()?;
-    let sequence = *control.next_event_id.lock().await;
+    // The store first: a commit holds it while it numbers itself, so the
+    // sequence read under it is the snapshot's.
     let store = control.store.read().await;
-    store
-        .threads
-        .get(thread_id)
-        .map(|thread| thread.stream_snapshot(sequence, params))
+    let sequence = *control.next_event_id.lock().await;
+    let thread = store.threads.get(thread_id)?;
+    let cursor = json!({
+        "projection": crate::thread_events::digest(&thread.projection()),
+        "sequence": sequence,
+    });
+    Some((thread.stream_snapshot(sequence, params), cursor))
 }
 
 /// The reference's error for a thread with no projection, from getThreadProjection and
