@@ -55,11 +55,14 @@ async fn main() -> anyhow::Result<()> {
     };
     std::fs::create_dir_all(&state_dir)?;
     let workspace = Arc::new(LocalWorkspace::open(&state_dir)?);
+    // Worktrees are created under the state directory.
+    let worktrees = t3code_server::config::state_base_dir(&state_dir).join("worktrees");
     let agentd = Agentd::new(
         workspace,
         Config {
             token: token()?,
             root,
+            extra_roots: vec![worktrees],
             buffer_dir: state_dir.join("streams"),
             buffer_limit: args.buffer_limit,
             poll_interval: Duration::from_millis(POLL_INTERVAL_MS),

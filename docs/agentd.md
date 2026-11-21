@@ -18,9 +18,18 @@ T3_AGENTD_TOKEN=$(openssl rand -hex 32) \
 | --- | --- | --- |
 | `--listen`, `T3_AGENTD_LISTEN` | `127.0.0.1:7790` | Address to accept the server's WebSocket on (path `/`). |
 | `T3_AGENTD_TOKEN` or `T3_AGENTD_TOKEN_FILE` | required | Bearer token the server must present. |
-| `--root`, `T3_AGENTD_ROOT` | current directory | Where projects live; reported in `hello`. |
+| `--root`, `T3_AGENTD_ROOT` | current directory | Where projects live; reported in `hello`. Operations may not reach outside it. |
 | `--state-dir`, `T3_AGENTD_STATE_DIR` | `~/.t3/agentd` | Settings, terminal logs, device state, stream buffers. |
 | `--buffer-limit`, `T3_AGENTD_BUFFER_LIMIT` | 64 MiB | Unacknowledged bytes one stream may hold. |
+
+agentd refuses, with error code `outside_root`, any operation that names a
+path or working directory outside `--root` or the worktrees directory under
+the state directory. That covers file operations, git, terminals, provider
+turns and every other op. Paths are resolved with symlinks followed, so
+`..` and links that point out of the root are refused too; a path that does
+not exist yet is judged by its nearest existing ancestor. This limits what
+requests can name; it does not sandbox the programs that turns and terminals
+start, which can reach whatever the agentd user can.
 
 Settings that workspace services read (device support, tokens for device
 providers) come from `settings.json` in the state directory.
