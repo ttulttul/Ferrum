@@ -136,6 +136,15 @@ PROVIDER_SCENARIOS = [
     {"name": "codex restart unaccepted mcp", "instance": "codex", "model": "fixture",
      "scenario": "codex_restart_unaccepted.json", "restart": {"after": "started"},
      "dispatch": {"createdBy": "agent", "creationSource": "mcp"}},
+    # Nobody reviews a scheduled prompt, so the reference sends it again instead of holding it,
+    # unless continuation is off.
+    {"name": "codex restart unaccepted scheduled", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart_unaccepted.json", "restart": {"after": "started"},
+     "dispatch": {"scheduledTaskId": "scheduled-task:fixture"}},
+    {"name": "codex restart unaccepted scheduled continuation off", "instance": "codex",
+     "model": "fixture", "scenario": "codex_restart_unaccepted.json",
+     "restart": {"after": "started", "settings": {"continueThreadsAfterServerUpdate": False}},
+     "dispatch": {"scheduledTaskId": "scheduled-task:fixture"}},
     # A command still running after its turn completed is background work the restart cuts off.
     # Queued messages wait, held, behind a cut-off turn or one put back in the queue.
     {"name": "codex restart queued", "instance": "codex", "model": "fixture",

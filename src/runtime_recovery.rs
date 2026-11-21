@@ -46,6 +46,10 @@ const CONTINUATION_LOOP_WINDOW: u64 = 5 * 60;
 /// how many have failed in a row (`continuationStartRetryDelayMs`).
 const CONTINUATION_START_RETRY_DELAYS: [u64; 2] = [60, 180];
 
+/// A scheduled prompt whose start restarts cut off this many times is not
+/// sent again (the reference's `MAX_RESENDS`).
+const MAX_RESENDS: u32 = 3;
+
 /// The summary of the notification that sends `text`, a continuation's
 /// prompt: a turn resumed, or only a note of background work stopped.
 pub(crate) fn continuation_summary(text: &str) -> &'static str {
@@ -289,24 +293,49 @@ fn reconcile_thread(
             )
         })
         .collect();
-    // A user's message the provider never took waits in the queue again;
-    // nobody reviews anyone else's, so the reference would send it again,
-    // but every message a client sends is a user's.
-    let requeued: Vec<Uuid> = nonterminal
+    // Runs whose provider never took the prompt, with the message they send.
+    let unstarted: Vec<(&Run, &crate::ConversationMessage)> = nonterminal
         .iter()
         .filter(|run| {
-            view.status(run) == "starting"
-                && view.never_started(run)
-                && !pending_request(run)
-                && thread.messages.iter().any(|message| {
-                    Some(&message.id) == run.user_message_id.as_ref() && message.role == "user"
-                })
+            view.status(run) == "starting" && view.never_started(run) && !pending_request(run)
         })
-        .map(|run| run.id)
+        .filter_map(|run| {
+            let message = thread.messages.iter().find(|message| {
+                Some(&message.id) == run.user_message_id.as_ref() && message.role == "user"
+            })?;
+            Some((*run, message))
+        })
         .collect();
+    // A user's message waits in the queue again, where its sender sees it.
+    let requeued: Vec<Uuid> = unstarted
+        .iter()
+        .filter(|(_, message)| message.scheduled_task_id.is_none())
+        .map(|(run, _)| run.id)
+        .collect();
+    // Nobody reviews a scheduled prompt, so it is sent again instead, unless
+    // the thread was put away or restarts keep cutting it off.
+    let resent: Vec<Uuid> = unstarted
+        .iter()
+        .filter(|(run, message)| {
+            message.scheduled_task_id.is_some()
+                && continue_after_restart
+                && !put_away(thread, now_iso)
+                && run.resends < MAX_RESENDS
+        })
+        .map(|(run, _)| run.id)
+        .collect();
+    for (run, message) in &unstarted {
+        if message.scheduled_task_id.is_some() && run.resends >= MAX_RESENDS {
+            tracing::warn!(
+                thread_id = %thread.id,
+                run_id = %run.id,
+                "Not resending a prompt that restarts cut too many times"
+            );
+        }
+    }
     let cut_runs: Vec<&Run> = nonterminal
         .into_iter()
-        .filter(|run| !requeued.contains(&run.id))
+        .filter(|run| !requeued.contains(&run.id) && !resent.contains(&run.id))
         .collect();
 
     // What the restart cuts off that the next turn should hear of.
@@ -399,6 +428,7 @@ fn reconcile_thread(
     if cut.is_empty()
         && held.is_empty()
         && requeued.is_empty()
+        && resent.is_empty()
         && stale_items.is_empty()
         && continued.is_none()
         && !session_open
@@ -410,6 +440,7 @@ fn reconcile_thread(
         cut,
         held,
         requeued,
+        resent,
         stale_items,
         background,
         continued,
@@ -643,6 +674,26 @@ pub(crate) fn continuations(store: &Store, settings: &Value, now_iso: &str) -> V
     out
 }
 
+/// The runs a restart owes their prompt again, by thread, as the reference's
+/// restart resend effects send them once the server is up.
+pub(crate) fn resends(store: &Store) -> Vec<(String, Uuid)> {
+    let mut threads: Vec<&Thread> = store.threads.values().collect();
+    threads.sort_by(|a, b| a.id.cmp(&b.id));
+    threads
+        .into_iter()
+        .flat_map(|thread| {
+            thread
+                .runs
+                .iter()
+                .filter(|run| {
+                    run.resend_owed
+                        && matches!(run.status.as_str(), "running" | "starting" | "preparing")
+                })
+                .map(|run| (thread.id.clone(), run.id))
+        })
+        .collect()
+}
+
 /// How many continuations in a row led to `source` within the loop window.
 fn chain_length(thread: &Thread, source: &Run) -> u32 {
     let window_start = source
@@ -754,6 +805,8 @@ mod tests {
             requeued_at: None,
             background_work: vec![],
             continuation: None,
+            resend_owed: false,
+            resends: 0,
         }
     }
 
@@ -1002,6 +1055,8 @@ mod tests {
             content: "hi".into(),
             created_at: 10,
             creation_source: None,
+            scheduled_task_id: None,
+            follows_thread_selection: false,
         });
         accepted_thread_only(&mut a, id);
         let mut store = store(a);
@@ -1128,6 +1183,8 @@ mod tests {
             content: CONTINUE_PROMPT.into(),
             created_at: 90,
             creation_source: None,
+            scheduled_task_id: None,
+            follows_thread_selection: false,
         });
         let commands = continuations(&store(a.clone()), &json!({}), "2026-01-01T00:00:00Z");
         assert_eq!(commands.len(), 1);
@@ -1144,5 +1201,83 @@ mod tests {
         third.restart_continuation_of = Some(second.id);
         a.runs.push(third.clone());
         assert_eq!(retry_delay(&a, &third), None);
+    }
+
+    #[test]
+    fn a_scheduled_prompt_the_provider_never_took_is_sent_again_three_times() {
+        let mut first = run("running");
+        first.user_message_id = Some("message:a".into());
+        let id = first.id;
+        let mut a = thread(vec![first]);
+        a.messages.push(crate::ConversationMessage {
+            id: "message:a".into(),
+            role: "user".into(),
+            content: "hi".into(),
+            created_at: 10,
+            creation_source: None,
+            scheduled_task_id: Some("scheduled-task:a".into()),
+            follows_thread_selection: true,
+        });
+        accepted_thread_only(&mut a, id);
+        let mut store = store(a);
+        let events = reconcile(&store, "shutdown", 20, "2026-01-01T00:00:00Z", &json!({}));
+        let [Event::ProviderRuntimeReconciled {
+            cut,
+            requeued,
+            resent,
+            ..
+        }] = &events[..]
+        else {
+            panic!("one reconcile event");
+        };
+        assert!(cut.is_empty() && requeued.is_empty());
+        assert_eq!(resent, &[id]);
+        apply(&mut store, events);
+        let thread = &store.threads["thread:a"];
+        assert!(thread.runs[0].resend_owed);
+        assert_eq!(thread.projection()["attempts"][0]["status"], "pending");
+        assert_eq!(resends(&store), [("thread:a".to_owned(), id)]);
+
+        // With continuation off, it is cut off instead.
+        let off = json!({"continueThreadsAfterServerUpdate": false});
+        let mut thread = store.threads["thread:a"].clone();
+        thread.runs[0].resend_owed = false;
+        let mut fresh = super::tests::store(thread);
+        let events = reconcile(&fresh, "shutdown", 20, "2026-01-01T00:00:00Z", &off);
+        let [Event::ProviderRuntimeReconciled { cut, resent, .. }] = &events[..] else {
+            panic!("one reconcile event");
+        };
+        assert!(resent.is_empty());
+        assert_eq!(cut.len(), 1);
+
+        // After three resends restarts cut off, it is cut off too.
+        let run = &mut fresh.threads.get_mut("thread:a").unwrap().runs[0];
+        run.resends = MAX_RESENDS;
+        let events = reconcile(&fresh, "shutdown", 20, "2026-01-01T00:00:00Z", &json!({}));
+        let [Event::ProviderRuntimeReconciled { cut, resent, .. }] = &events[..] else {
+            panic!("one reconcile event");
+        };
+        assert!(resent.is_empty());
+        assert_eq!(cut.len(), 1);
+    }
+
+    #[test]
+    fn a_subagent_the_cut_turn_waited_on_wakes_its_parent_when_it_finishes() {
+        let first = run("running");
+        let id = first.id;
+        let mut a = thread(vec![first]);
+        started(&mut a, id);
+        a.row["subagents"] = json!([
+            {"id": "node:delegated-task:1", "origin": "app_owned", "runId": id.to_string(),
+             "completionWake": "settled_only", "status": "running"},
+            {"id": "node:delegated-task:2", "origin": "app_owned", "runId": id.to_string(),
+             "completionWake": "settled_only", "status": "completed"}
+        ]);
+        let mut store = store(a);
+        let events = reconcile(&store, "shutdown", 20, "2026-01-01T00:00:00Z", &json!({}));
+        apply(&mut store, events);
+        let tasks = &store.threads["thread:a"].row["subagents"];
+        assert_eq!(tasks[0]["completionWake"], "always");
+        assert_eq!(tasks[1]["completionWake"], "settled_only");
     }
 }

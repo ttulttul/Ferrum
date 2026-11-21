@@ -240,7 +240,7 @@ impl Thread {
             .filter(|message| message.role != NOTIFICATION_ROLE)
             .map(|message| {
                 let at = iso(message.created_at);
-                json!({
+                let mut row = json!({
                     "createdBy": if message.role == "user" { "user" } else { "agent" },
                     "creationSource": if message.role == "user" { message.creation_source.as_deref().unwrap_or("web") } else { "provider" },
                     "id": message.id,
@@ -253,7 +253,14 @@ impl Thread {
                     "streaming": false,
                     "createdAt": at,
                     "updatedAt": at
-                })
+                });
+                if let Some(task) = &message.scheduled_task_id {
+                    row["scheduledTaskId"] = json!(task);
+                }
+                if message.follows_thread_selection {
+                    row["followsThreadSelection"] = json!(true);
+                }
+                row
             })
             .collect()
     }
@@ -340,6 +347,13 @@ impl Thread {
                 _ => continue,
             };
             merge(&mut item, fields);
+            if let Some(task) = message
+                .scheduled_task_id
+                .as_ref()
+                .filter(|_| message.role == "user")
+            {
+                item["scheduledTaskId"] = json!(task);
+            }
             // A queued message waits out of the timeline, as the reference's
             // queued input does.
             if message.role == "user" && run.is_some_and(|(_, run)| queued(run)) {

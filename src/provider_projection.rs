@@ -432,7 +432,8 @@ impl Thread {
             Some(TurnStatus::Failed) => "failed",
         };
         // A run a restart put back in the queue waits to start again.
-        let requeued = run.status == "queued" && run.requeued_at.is_some();
+        // So does one whose scheduled prompt a restart owes it again.
+        let requeued = (run.status == "queued" && run.requeued_at.is_some()) || run.resend_owed;
         let status = if requeued { "pending" } else { status };
         let started = iso(record.started_at);
         let completed = ended.map(iso);
@@ -1133,6 +1134,8 @@ mod tests {
             requeued_at: None,
             background_work: vec![],
             continuation: None,
+            resend_owed: false,
+            resends: 0,
         };
         let mut live = thread(run.clone());
         for event in [

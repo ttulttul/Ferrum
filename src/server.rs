@@ -111,6 +111,19 @@ impl AppState {
                 return;
             }
         };
+        // A scheduled prompt its provider never took is sent again.
+        let resends = if only.is_none() {
+            crate::runtime_recovery::resends(&*self.store.read().await)
+        } else {
+            vec![]
+        };
+        for (thread_id, run_id) in resends {
+            if let Err(error) =
+                crate::orchestration::resend_run(self.clone(), &thread_id, run_id).await
+            {
+                tracing::info!(%thread_id, %run_id, %error, "orchestration-v2.restart-resend.not-sent");
+            }
+        }
         let commands = {
             let store = self.store.read().await;
             crate::runtime_recovery::continuations(

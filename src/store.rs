@@ -26,6 +26,13 @@ pub struct ConversationMessage {
     /// web client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_source: Option<String>,
+    /// The scheduled task that sent the message (`scheduledTaskId`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_task_id: Option<String>,
+    /// A scheduled delivery that named no model, so it runs on the thread's
+    /// selection when it starts (`followsThreadSelection`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub follows_thread_selection: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Run {
@@ -59,6 +66,18 @@ pub struct Run {
     /// restart cut off keeps it in [`RestartCut::continuation`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<u32>,
+    /// A restart owes the run its prompt again: nobody reviews a scheduled
+    /// prompt its provider never took, so it is sent again rather than held
+    /// (the reference's `provider-turn.start` restart resend).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resend_owed: bool,
+    /// How many times a restart sent the run's prompt again.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub resends: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl Run {
@@ -205,6 +224,10 @@ pub enum Event {
         /// Runs whose provider never took the prompt, back in the queue.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         requeued: Vec<Uuid>,
+        /// Runs whose provider never took a scheduled prompt, to be sent
+        /// again once the server is up.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        resent: Vec<Uuid>,
         /// Items of earlier turns still running in the background (run,
         /// native item id), cancelled.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -489,6 +512,7 @@ impl Store {
                 cut,
                 held,
                 requeued,
+                resent,
                 stale_items,
                 background,
                 continued,
@@ -512,6 +536,30 @@ impl Store {
                         run.queue_held = true;
                         run.requeued_at = Some(at);
                         run.finished_at = None;
+                    }
+                    for run in thread.runs.iter_mut().filter(|r| resent.contains(&r.id)) {
+                        run.resend_owed = true;
+                    }
+                    // A blocking wait dies with its turn: an app-owned
+                    // subagent the cut run waited on wakes its parent's
+                    // continuation when it finishes, as an async task.
+                    let cut_ids: Vec<String> = cut.iter().map(|(id, _)| id.to_string()).collect();
+                    if let Some(tasks) = thread.row["subagents"].as_array_mut() {
+                        for task in tasks.iter_mut().filter(|task| {
+                            task["origin"] == "app_owned"
+                                && task["completionWake"] == "settled_only"
+                                && task["runId"]
+                                    .as_str()
+                                    .is_some_and(|id| cut_ids.iter().any(|c| c == id))
+                                && matches!(
+                                    task["status"].as_str(),
+                                    Some("pending" | "running" | "waiting")
+                                )
+                        }) {
+                            task["completionWake"] = serde_json::json!("always");
+                            task["updatedAt"] =
+                                serde_json::json!(crate::auth_service::iso(at as i64 * 1000));
+                        }
                     }
                     for (run, item) in stale_items {
                         thread

@@ -303,6 +303,8 @@ async fn start_run<H: CommandHost>(
     queued: bool,
     continues: Option<Uuid>,
     creation_source: Option<String>,
+    scheduled_task_id: Option<String>,
+    follows_thread_selection: bool,
 ) -> anyhow::Result<u64> {
     let (cwd, needs_baseline) = state
         .store
@@ -328,6 +330,8 @@ async fn start_run<H: CommandHost>(
         requeued_at: None,
         background_work: vec![],
         continuation: None,
+        resend_owed: false,
+        resends: 0,
     };
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),
@@ -341,6 +345,8 @@ async fn start_run<H: CommandHost>(
         content: text.clone(),
         created_at: now(),
         creation_source: creation_source.filter(|_| continues.is_none()),
+        scheduled_task_id: scheduled_task_id.filter(|_| continues.is_none()),
+        follows_thread_selection,
     };
     let seq = state
         .commit_receipted(
@@ -441,6 +447,45 @@ async fn start_existing_run<H: CommandHost>(
     Ok(sequence)
 }
 
+/// Send again the prompt of `run_id`, a run whose provider never took a
+/// scheduled prompt before a restart cut it off, as the reference's restart
+/// resend (`provider-turn.start`) does.
+pub(crate) async fn resend_run<H: CommandHost>(
+    state: Arc<H>,
+    thread_id: &str,
+    run_id: Uuid,
+) -> anyhow::Result<()> {
+    let (mut run, cwd, text) = {
+        let store = state.store.read().await;
+        let thread = store
+            .threads
+            .get(thread_id)
+            .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+        let run = thread
+            .runs
+            .iter()
+            .find(|candidate| candidate.id == run_id && candidate.resend_owed)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} is not owed a resend.")))?;
+        let text = thread
+            .messages
+            .iter()
+            .find(|message| Some(&message.id) == run.user_message_id.as_ref())
+            .map(|message| message.content.clone())
+            .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} has no message.")))?;
+        (run, thread.cwd.clone(), text)
+    };
+    run.status = "running".into();
+    run.resend_owed = false;
+    run.resends += 1;
+    run.finished_at = None;
+    state.commit(Event::RunStarted(run.clone())).await?;
+    let (tx, rx) = oneshot::channel();
+    state.cancellations().lock().await.insert(run.id, tx);
+    state.launch_run(run, cwd, text, rx);
+    Ok(())
+}
+
 async fn apply_command<H: CommandHost>(
     state: Arc<H>,
     command: &Value,
@@ -531,6 +576,8 @@ async fn apply_command<H: CommandHost>(
                     .as_str()
                     .filter(|source| *source != "web")
                     .map(str::to_owned),
+                command["scheduledTaskId"].as_str().map(str::to_owned),
+                command["scheduledTaskId"].is_string() && command["modelSelection"].is_null(),
             )
             .await;
         }
@@ -1822,6 +1869,8 @@ async fn apply_command<H: CommandHost>(
                 content: prompt.into(),
                 created_at: now(),
                 creation_source: None,
+                scheduled_task_id: None,
+                follows_thread_selection: false,
             };
             let thread = Thread {
                 row,
