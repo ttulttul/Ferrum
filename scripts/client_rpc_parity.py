@@ -59,6 +59,8 @@ RAW_REPLAYS = [
     ("orchestration.getTurnDiff", {"threadId": "thread:client-rpc-a", "fromTurnCount": 0, "toTurnCount": 0}),
     ("preview.list", {"threadId": "thread:client-rpc-a"}),
     ("pullRequests.listStats", {"refs": []}),
+    # Every provider auth needs account, host and detail; the 0.1.10 client rejects the reply without them.
+    ("server.discoverSourceControl", {}),
 ]
 ISO_TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)")
 UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
