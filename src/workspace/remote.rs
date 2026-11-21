@@ -446,12 +446,14 @@ impl RemoteWorkspace {
             state.cancels.retain_mut(|(stream, cancel)| {
                 match cancel.try_recv() {
                     Err(oneshot::error::TryRecvError::Empty) => true,
-                    // Sent or dropped: either way the turn stops, as it does
-                    // in-process.
-                    _ => {
+                    Ok(()) => {
                         cancels.push(*stream);
                         false
                     }
+                    // Dropped, as when the server that started the turn
+                    // stops: the turn keeps running for the next one to
+                    // resume.
+                    Err(oneshot::error::TryRecvError::Closed) => false,
                 }
             });
             (reopen, idle, cancels)
@@ -511,8 +513,9 @@ impl RemoteWorkspace {
         {
             let this = self.clone();
             tokio::spawn(async move {
-                let _ = cancel.await;
-                let _ = this.cancel_turn(stream).await;
+                if cancel.await.is_ok() {
+                    let _ = this.cancel_turn(stream).await;
+                }
             });
         }
         #[cfg(not(feature = "native"))]
@@ -1267,5 +1270,60 @@ mod tests {
         );
         assert_eq!(events.recv().await, Some(proto::interrupted_turn()));
         drop(cancel);
+    }
+
+    #[tokio::test]
+    async fn only_a_sent_cancellation_stops_a_turn() {
+        let workspace = RemoteWorkspace::new(1, None);
+        let queue = Arc::new(Queue(Default::default()));
+        let handshake = {
+            let workspace = workspace.clone();
+            let queue = queue.clone();
+            tokio::spawn(async move { workspace.connected(queue).await })
+        };
+        let hello = settle(&queue).await;
+        answer(
+            &workspace,
+            hello[0].id,
+            json!({"version": proto::VERSION, "epoch": 1, "root": "/", "streams": []}),
+        );
+        let resume = settle(&queue).await;
+        answer(&workspace, resume[0].id, json!({"missing": []}));
+        for stream in 10..14 {
+            let opens = settle(&queue).await;
+            answer(&workspace, opens[0].id, json!({"stream": stream}));
+        }
+        handshake.await.unwrap().unwrap();
+        let spec = TurnSpec {
+            command: vec!["provider".into()],
+            prompt: String::new(),
+            cwd: "/".into(),
+            env_remove: vec![],
+        };
+        let mut cancels = Vec::new();
+        for stream in [20, 21] {
+            let (cancel, cancelled) = oneshot::channel();
+            cancels.push(cancel);
+            let turn = {
+                let workspace = workspace.clone();
+                let spec = spec.clone();
+                tokio::spawn(async move { workspace.start_turn(spec, cancelled).await })
+            };
+            let start = settle(&queue).await;
+            answer(&workspace, start[0].id, json!({"stream": stream}));
+            turn.await.unwrap().unwrap();
+        }
+        // A server that stops drops its senders; its turns keep running
+        // for the server that resumes them.
+        let sent = cancels.remove(1);
+        drop(cancels);
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(take(&queue).is_empty(), "a dropped sender cancels nothing");
+        sent.send(()).unwrap();
+        let cancel = settle(&queue).await;
+        assert_eq!(cancel[0].op, op::TURN_CANCEL);
+        assert_eq!(cancel[0].args, json!({"stream": 21}));
     }
 }
