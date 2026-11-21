@@ -173,6 +173,67 @@ impl AppState {
     }
 }
 
+impl crate::orchestration::CommandHost for AppState {
+    fn mutation_lock(&self) -> &Mutex<()> {
+        &self.project_mutation_lock
+    }
+    fn policy_summary(&self) -> Option<&serde_json::Value> {
+        self.settings.policy.summary()
+    }
+    fn runtime_denial(&self, mode: &str) -> Option<String> {
+        self.settings.policy.runtime_denial(mode)
+    }
+    fn provider_denial(&self, driver: &str) -> Option<String> {
+        self.settings.policy.provider_denial(driver)
+    }
+    fn effective_settings(&self) -> anyhow::Result<serde_json::Value> {
+        self.settings.internal()
+    }
+    fn workspace(&self) -> &dyn crate::workspace::Workspace {
+        &*self.workspace
+    }
+    fn cancellations(&self) -> &Mutex<HashMap<Uuid, oneshot::Sender<()>>> {
+        &self.cancellations
+    }
+    fn launch_run(
+        self: Arc<Self>,
+        run: Run,
+        cwd: String,
+        text: String,
+        cancel: oneshot::Receiver<()>,
+    ) {
+        tokio::spawn(async move {
+            if let Err(error) = execute_run(self.clone(), run.clone(), cwd, text, cancel).await {
+                self.cancellations.lock().await.remove(&run.id);
+                if let Err(write) = self
+                    .commit(Event::RunFinished {
+                        run_id: run.id,
+                        thread_id: run.thread_id,
+                        status: "failed".into(),
+                        error: Some(error.to_string()),
+                    })
+                    .await
+                {
+                    tracing::error!(%write, "could not record provider failure");
+                }
+            }
+        });
+    }
+    fn close_guest_thread(&self, thread_id: &str) -> Result<(), String> {
+        self.guest.close_thread(thread_id).map_err(str::to_owned)
+    }
+    fn resolve_guest_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        outcome: &str,
+    ) -> Result<(), String> {
+        self.guest
+            .resolve_message(thread_id, message_id, outcome)
+            .map_err(|error| error.to_string())
+    }
+}
+
 impl std::ops::Deref for AppState {
     type Target = crate::control_state::ControlState;
     fn deref(&self) -> &Self::Target {
