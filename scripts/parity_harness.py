@@ -125,8 +125,35 @@ def path_without(names, scratch, path=None):
     return os.pathsep.join(directories)
 
 
+# Where the reference keeps its server entry point, relative to its checkout.
+REFERENCE_ENTRY = Path("apps") / "server" / "src" / "bin.ts"
+# The model manifest the reference bundles, relative to its checkout.
+REFERENCE_MANIFEST = Path("apps") / "server" / "src" / "provider" / "model-manifest.json"
+
+
+def pin_model_manifest(prefix, state_dir):
+    """Keep the reference on the model manifest it bundles.
+
+    The reference refreshes its model manifest from the upstream repository's
+    default branch and prefers it over the bundled one when it is newer. Parity
+    compares against the pinned reference, so seed the reference's manifest
+    cache with the bundled manifest, dated so that no fetched manifest
+    replaces it. Commands other than the reference are left alone.
+    """
+    entry = next((Path(arg) for arg in prefix if Path(arg).parts[-len(REFERENCE_ENTRY.parts):] == REFERENCE_ENTRY.parts), None)
+    if entry is None:
+        return
+    checkout = entry.parents[len(REFERENCE_ENTRY.parts) - 1]
+    manifest = json.loads((checkout / REFERENCE_MANIFEST).read_text())
+    manifest["updatedAt"] = "2999-01-01T00:00:00Z"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "model-manifest.json").write_text(
+        json.dumps({"fetchedAtMs": int(time.time() * 1000), "manifest": manifest}))
+
+
 def managed_server(stack, prefix, root, secret, signing_key, env=None):
     """Launches one server in `root`. `env` adds variables (or replaces PATH) for the child."""
+    pin_model_manifest(prefix, root / "userdata")
     secrets_dir = root / "userdata" / "secrets"
     secrets_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     key_file = secrets_dir / "mcp-oauth-signing-key.bin"
