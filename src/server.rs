@@ -217,6 +217,7 @@ impl crate::orchestration::CommandHost for AppState {
             prompt: text,
             cwd,
             env_remove,
+            ..Default::default()
         };
         let runtime = self.runtime.clone();
         crate::runtime::Runtime::spawn(

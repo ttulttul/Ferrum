@@ -21,7 +21,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 mod local;
 #[cfg(feature = "native")]
 pub use local::LocalWorkspace;
+pub mod provider;
 mod remote;
+pub use provider::{ProviderEvent, ProviderTurn};
 #[cfg(feature = "native")]
 pub use remote::{connect, NativeLink};
 pub use remote::{unavailable, RemoteWorkspace, Transport};
@@ -47,24 +49,34 @@ impl<T> MaybeSendSync for T {}
 
 /// One provider turn: a process started in `cwd` whose output becomes the
 /// run's output.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TurnSpec {
     /// The executable and its leading arguments; the prompt follows them.
+    /// Unused when `provider` is set.
     pub command: Vec<String>,
     pub prompt: String,
     pub cwd: String,
     /// Environment variables (matched case-insensitively) the process must
     /// not inherit.
     pub env_remove: Vec<String>,
+    /// Environment variables to set, after `env_remove`: the provider
+    /// instance's configured environment.
+    pub env: Vec<(String, String)>,
+    /// Run a provider's CLI instead of `command`. Its events arrive as
+    /// [`TurnEvent::Provider`].
+    pub provider: Option<ProviderTurn>,
 }
 
 /// What a turn reports, in order. `Exited` is last and follows all output.
+/// A command turn reports `Stdout` and `Stderr`; a provider turn reports
+/// `Provider` events, ending with [`ProviderEvent::TurnTerminal`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnEvent {
     /// One line of standard output, with its line ending.
     Stdout(String),
     /// One line of standard error, with its line ending.
     Stderr(String),
+    Provider(ProviderEvent),
     Exited(TurnExit),
 }
 

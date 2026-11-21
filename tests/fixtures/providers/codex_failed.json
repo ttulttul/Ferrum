@@ -1,0 +1,121 @@
+{
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "userAgent": "codex_cli_rs/0.170.0"
+    }
+   }
+  },
+  {
+   "expect": "thread/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "thread": {
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "cwd": "/workspace",
+      "status": {
+       "type": "idle"
+      }
+     },
+     "model": "gpt-6.1-sol",
+     "cwd": "/workspace",
+     "approvalPolicy": "never",
+     "sandbox": {
+      "type": "dangerFullAccess"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "thread/started",
+    "params": {
+     "thread": {
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     }
+    }
+   }
+  },
+  {
+   "expect": "turn/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": null,
+      "durationMs": null
+     }
+    },
+    "emittedAtMs": 1795225881428
+   }
+  },
+  {
+   "send": {
+    "method": "error",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "willRetry": false,
+     "error": {
+      "message": "You've hit your usage limit.",
+      "codexErrorInfo": "usageLimitExceeded"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "status": "failed",
+      "error": {
+       "message": "You've hit your usage limit.",
+       "codexErrorInfo": "usageLimitExceeded"
+      }
+     }
+    }
+   }
+  }
+ ]
+}

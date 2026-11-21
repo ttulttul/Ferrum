@@ -1,0 +1,246 @@
+{
+ "steps": [
+  {
+   "expect": "user"
+  },
+  {
+   "send": {
+    "type": "system",
+    "subtype": "init",
+    "session_id": "sess-saved",
+    "model": "claude-opus-5-5",
+    "cwd": "/workspace",
+    "permissionMode": "bypassPermissions",
+    "uuid": "b0c3f5d0-f688-4a3d-bc71-165edce3a1b1",
+    "tools": [
+     "Bash",
+     "Edit",
+     "Read",
+     "Write",
+     "TodoWrite"
+    ]
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_start",
+     "message": {
+      "model": "claude-opus-5-5",
+      "id": "msg_011ChFEiLFQWQ8UVp1koVDdn",
+      "type": "message",
+      "role": "assistant",
+      "content": [],
+      "container": null,
+      "stop_reason": null,
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+       "input_tokens": 4,
+       "cache_creation_input_tokens": 10686,
+       "cache_read_input_tokens": 19844,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 10686
+       },
+       "output_tokens": 3,
+       "service_tier": "standard",
+       "inference_geo": "global",
+       "speed": "standard"
+      },
+      "input_transformations": [
+       {
+        "type": "thinking_dropped",
+        "path": "messages.3.content.0",
+        "reason": "prefix_binding_mismatch"
+       }
+      ],
+      "diagnostics": null,
+      "context_management": null
+     }
+    },
+    "session_id": "sess-saved",
+    "parent_tool_use_id": null,
+    "uuid": "e7a796b4-2b93-4948-8854-a366bcff1bc0",
+    "ttft_ms": 2418,
+    "thinking_display": "updates",
+    "api_message_id": "msg_011ChFEiLFQWQ8UVp1koVDdn"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_start",
+     "index": 0,
+     "content_block": {
+      "type": "text",
+      "text": ""
+     }
+    },
+    "session_id": "sess-saved",
+    "parent_tool_use_id": null,
+    "uuid": "31c6d26d-88f3-482f-9954-6b285ceee923",
+    "api_message_id": "msg_011ChFEiLFQWQ8UVp1koVDdn"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_delta",
+     "index": 0,
+     "delta": {
+      "type": "text_delta",
+      "text": "there"
+     }
+    },
+    "session_id": "sess-saved",
+    "parent_tool_use_id": null,
+    "uuid": "004a23a0-23ea-4563-a9f5-bb00fc6299ef",
+    "api_message_id": "msg_011ChFEiLFQWQ8UVp1koVDdn"
+   }
+  },
+  {
+   "send": {
+    "type": "assistant",
+    "message": {
+     "model": "claude-opus-5-5",
+     "id": "msg_011ChFEiLFQWQ8UVp1koVDdn",
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "there"
+      }
+     ],
+     "container": null,
+     "stop_reason": null,
+     "stop_sequence": null,
+     "stop_details": null,
+     "usage": {
+      "input_tokens": 4,
+      "cache_creation_input_tokens": 10686,
+      "cache_read_input_tokens": 19844,
+      "cache_creation": {
+       "ephemeral_5m_input_tokens": 0,
+       "ephemeral_1h_input_tokens": 10686
+      },
+      "output_tokens": 3,
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+     },
+     "input_transformations": [
+      {
+       "type": "thinking_dropped",
+       "path": "messages.3.content.0",
+       "reason": "prefix_binding_mismatch"
+      }
+     ],
+     "diagnostics": null,
+     "context_management": null
+    },
+    "parent_tool_use_id": null,
+    "session_id": "sess-saved",
+    "uuid": "779cc2f0-7350-42dc-a438-a04e2743d9d4"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_stop",
+     "index": 0
+    },
+    "session_id": "sess-saved",
+    "parent_tool_use_id": null,
+    "uuid": "a9882ae0-b332-4b21-9349-ebeb0f614a0f",
+    "api_message_id": "msg_011ChFEiLFQWQ8UVp1koVDdn"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_delta",
+     "delta": {
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "container": null
+     },
+     "usage": {
+      "input_tokens": 4,
+      "cache_creation_input_tokens": 10686,
+      "cache_read_input_tokens": 19844,
+      "output_tokens": 3,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "iterations": [
+       {
+        "input_tokens": 4,
+        "output_tokens": 3,
+        "cache_read_input_tokens": 19844,
+        "cache_creation_input_tokens": 10686,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 10686
+        },
+        "type": "message"
+       }
+      ]
+     },
+     "context_management": {
+      "applied_edits": []
+     }
+    },
+    "session_id": "sess-saved",
+    "parent_tool_use_id": null,
+    "uuid": "54f242f9-0e74-4ec9-b9ae-8ed8cf963517",
+    "api_message_id": "msg_011ChFEiLFQWQ8UVp1koVDdn"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_stop"
+    },
+    "session_id": "sess-saved",
+    "parent_tool_use_id": null,
+    "uuid": "90aede49-30fc-4250-8e54-8dc8f8d2cc3b",
+    "api_message_id": "msg_011ChFEiLFQWQ8UVp1koVDdn"
+   }
+  },
+  {
+   "send": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "duration_ms": 2906,
+    "num_turns": 1,
+    "result": "there",
+    "stop_reason": "end_turn",
+    "session_id": "sess-saved",
+    "usage": {
+     "input_tokens": 4,
+     "cache_creation_input_tokens": 10686,
+     "cache_read_input_tokens": 19844,
+     "output_tokens": 3
+    },
+    "modelUsage": {
+     "claude-opus-5-5": {
+      "inputTokens": 12,
+      "outputTokens": 731,
+      "contextWindow": 1000000
+     }
+    },
+    "uuid": "87adb763-bbe6-4e41-a589-7437ec38a661"
+   }
+  }
+ ]
+}

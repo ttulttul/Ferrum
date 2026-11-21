@@ -1136,6 +1136,7 @@ mod tests {
                     prompt: String::new(),
                     cwd: "/".into(),
                     env_remove: vec![],
+                    ..TurnSpec::default()
                 },
                 oneshot::channel().1,
             )
@@ -1236,6 +1237,7 @@ mod tests {
                             prompt: "hi".into(),
                             cwd: "/".into(),
                             env_remove: vec![],
+                            ..TurnSpec::default()
                         },
                         cancelled,
                     )

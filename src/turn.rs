@@ -106,6 +106,12 @@ fn recorded(run: &Run, event: TurnEvent) -> Recorded {
             output("stdout", text)
         }
         TurnEvent::Stderr(text) => output("stderr", text),
+        // Provider turns are not started here yet; keep their events as
+        // JSON lines until they are projected.
+        TurnEvent::Provider(event) => output(
+            "provider",
+            serde_json::to_string(&event).expect("provider events serialize") + "\n",
+        ),
         TurnEvent::Exited(exit) => Recorded::End(exit),
     }
 }
