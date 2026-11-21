@@ -26,6 +26,11 @@ struct State {
     turns: BTreeMap<u64, TurnStart>,
     /// The connected server side, if any.
     peer: Option<RemoteWorkspace>,
+    /// The latest stream each event-stream op opened.
+    buses: BTreeMap<String, u64>,
+    /// Open watches by op, and the reading each op reports.
+    watches: Vec<(String, u64)>,
+    readings: BTreeMap<String, Value>,
 }
 
 #[derive(Default)]
@@ -73,6 +78,37 @@ impl FakeAgentd {
     /// Lose `stream`, as an agentd that restarted does.
     pub(crate) fn forget(&self, stream: u64) {
         self.lock().streams.remove(&stream);
+    }
+
+    /// The event stream `op` (such as `device.events`) reports `event`.
+    pub(crate) fn emit_bus(&self, op: &str, event: Value) {
+        let stream = self
+            .lock()
+            .buses
+            .get(op)
+            .copied()
+            .expect("the stream is open");
+        self.push(stream, StreamBody::Event(event));
+    }
+
+    /// The polled state a watch `op` reads is now `reading`.
+    pub(crate) fn set_reading(&self, op: &str, reading: Value) {
+        let streams: Vec<u64> = {
+            let mut state = self.lock();
+            state.readings.insert(op.into(), reading.clone());
+            state
+                .watches
+                .iter()
+                .filter(|(watched, _)| watched == op)
+                .map(|(_, stream)| *stream)
+                .collect()
+        };
+        for stream in streams {
+            self.push(
+                stream,
+                StreamBody::Event(json!(proto::Polled::Ok(reading.clone()))),
+            );
+        }
     }
 
     /// The turns started so far, by stream.
@@ -195,9 +231,37 @@ impl FakeAgentd {
                 return;
             }
             op::TERM_EVENTS | op::TERM_METADATA | op::PREVIEW_EVENTS | op::DEVICE_EVENTS => {
-                Ok(json!({ "stream": self.open(false) }))
+                let stream = self.open(false);
+                self.lock().buses.insert(request.op.clone(), stream);
+                Ok(json!({ "stream": stream }))
+            }
+            op::WATCH_VCS_STATUS | op::WATCH_VCS_BRANCH | op::WATCH_LOCAL_SERVERS => {
+                let stream = self.open(false);
+                let reading = {
+                    let mut state = self.lock();
+                    state.watches.push((request.op.clone(), stream));
+                    state.readings.get(&request.op).cloned()
+                };
+                if let Some(reading) = reading {
+                    let body = StreamBody::Event(json!(proto::Polled::Ok(reading)));
+                    self.lock()
+                        .streams
+                        .get_mut(&stream)
+                        .unwrap()
+                        .frames
+                        .push(body.clone());
+                    replay.push(stream_frame(stream, 1, body));
+                }
+                Ok(json!({ "stream": stream }))
             }
             op::STREAM_CLOSE => Ok(Value::Null),
+            // `terminal.observe`: the snapshot `set_reading` gave for it.
+            op::TERM_CALL if request.args["method"] == "observe" => self
+                .lock()
+                .readings
+                .get(op::TERM_CALL)
+                .cloned()
+                .ok_or_else(|| WireError::new(ErrorCode::UnknownMethod, "no terminal")),
             _ => Err(WireError::new(ErrorCode::UnknownMethod, "not in the fake")),
         };
         if let Some(id) = request.id {

@@ -28,7 +28,7 @@ mod remote;
 pub use provider::{ProviderEvent, ProviderTurn};
 #[cfg(feature = "native")]
 pub use remote::{connect, NativeLink};
-pub use remote::{unavailable, RemoteWorkspace, Transport};
+pub use remote::{unavailable, BusFrame, RemoteWorkspace, Transport};
 
 /// A reply payload: the success value, or the error value an RPC fails with.
 pub type Reply = Result<Value, Value>;

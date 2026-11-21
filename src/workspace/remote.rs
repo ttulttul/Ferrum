@@ -68,6 +68,20 @@ struct Inner {
     metadata_events: broadcast::Sender<Value>,
     preview_events: broadcast::Sender<Value>,
     device_events: broadcast::Sender<Value>,
+    bus_frames: broadcast::Sender<BusFrame>,
+}
+
+/// One event of a stream that stays open for as long as the connection
+/// does (terminal, terminal metadata, preview and device events), with its
+/// place in that stream. A reconnect opens new streams, so `stream` changes
+/// after one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BusFrame {
+    /// The op that opened the stream, such as `term.events`.
+    pub op: &'static str,
+    pub stream: u64,
+    pub seq: u64,
+    pub event: Value,
 }
 
 #[derive(Default)]
@@ -268,12 +282,29 @@ impl RemoteWorkspace {
                 metadata_events: broadcast::channel(128).0,
                 preview_events: broadcast::channel(512).0,
                 device_events: broadcast::channel(128).0,
+                bus_frames: broadcast::channel(1024).0,
             }),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.inner.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Every event-stream frame as it arrives, for a consumer that keeps its
+    /// own position in each stream.
+    pub fn bus_frames(&self) -> broadcast::Receiver<BusFrame> {
+        self.inner.bus_frames.subscribe()
+    }
+
+    /// The stream event-stream op `op` (such as `term.events`) is open as
+    /// on the current connection, the one [`bus_frames`](Self::bus_frames)
+    /// frames name.
+    pub fn bus_stream(&self, op: &str) -> Option<u64> {
+        match self.lock().buses.get(op) {
+            Some(Bus::Open(stream)) => Some(*stream),
+            _ => None,
+        }
     }
 
     /// Whether a connection is up and has finished its handshake.
@@ -725,43 +756,15 @@ fn deliver(inner: &Inner, state: &mut State, stream: u64, seq: u64, event: Value
         Some(SinkKind::Watch(key)) => Target::Watch(key.clone()),
     };
     match target {
-        Target::Bus(op) => match op {
-            op::TERM_EVENTS => {
-                let _ = inner.terminal_events.send(event);
-            }
-            op::TERM_METADATA => match event["type"].as_str() {
-                Some("snapshot") => {
-                    state.terminals = event["terminals"].as_array().cloned().unwrap_or_default();
-                }
-                Some("upsert") => {
-                    let terminal = &event["terminal"];
-                    state.terminals.retain(|t| {
-                        t["threadId"] != terminal["threadId"]
-                            || t["terminalId"] != terminal["terminalId"]
-                    });
-                    state.terminals.push(terminal.clone());
-                    sort_terminals(&mut state.terminals);
-                    let _ = inner.metadata_events.send(event);
-                }
-                Some("remove") => {
-                    state.terminals.retain(|t| {
-                        t["threadId"] != event["threadId"] || t["terminalId"] != event["terminalId"]
-                    });
-                    let _ = inner.metadata_events.send(event);
-                }
-                _ => {
-                    let _ = inner.metadata_events.send(event);
-                }
-            },
-            op::PREVIEW_EVENTS => {
-                let _ = inner.preview_events.send(event);
-            }
-            op::DEVICE_EVENTS if state.device_state != event => {
-                state.device_state = event.clone();
-                let _ = inner.device_events.send(event);
-            }
-            _ => {}
-        },
+        Target::Bus(op) => {
+            let _ = inner.bus_frames.send(BusFrame {
+                op,
+                stream,
+                seq,
+                event: event.clone(),
+            });
+            deliver_bus(inner, state, op, event)
+        }
         Target::Watch(key) => {
             if let (Some(watch), Ok(reading)) = (
                 state.watches.get(&key),
@@ -770,6 +773,46 @@ fn deliver(inner: &Inner, state: &mut State, stream: u64, seq: u64, event: Value
                 watch.latest.send_replace(Some(reading));
             }
         }
+    }
+}
+
+fn deliver_bus(inner: &Inner, state: &mut State, op: &'static str, event: Value) {
+    match op {
+        op::TERM_EVENTS => {
+            let _ = inner.terminal_events.send(event);
+        }
+        op::TERM_METADATA => match event["type"].as_str() {
+            Some("snapshot") => {
+                state.terminals = event["terminals"].as_array().cloned().unwrap_or_default();
+            }
+            Some("upsert") => {
+                let terminal = &event["terminal"];
+                state.terminals.retain(|t| {
+                    t["threadId"] != terminal["threadId"]
+                        || t["terminalId"] != terminal["terminalId"]
+                });
+                state.terminals.push(terminal.clone());
+                sort_terminals(&mut state.terminals);
+                let _ = inner.metadata_events.send(event);
+            }
+            Some("remove") => {
+                state.terminals.retain(|t| {
+                    t["threadId"] != event["threadId"] || t["terminalId"] != event["terminalId"]
+                });
+                let _ = inner.metadata_events.send(event);
+            }
+            _ => {
+                let _ = inner.metadata_events.send(event);
+            }
+        },
+        op::PREVIEW_EVENTS => {
+            let _ = inner.preview_events.send(event);
+        }
+        op::DEVICE_EVENTS if state.device_state != event => {
+            state.device_state = event.clone();
+            let _ = inner.device_events.send(event);
+        }
+        _ => {}
     }
 }
 

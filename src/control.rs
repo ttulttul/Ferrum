@@ -154,11 +154,16 @@ struct Signals {
     linked: broadcast::Receiver<u64>,
     scheduled_tasks: broadcast::Receiver<()>,
     access: mpsc::UnboundedReceiver<auth_service::access::Change>,
+    workspace: broadcast::Receiver<crate::workspace::BusFrame>,
+    /// Whether polled workspace state is due for another reading.
+    poll: bool,
 }
 
 impl Signals {
-    fn new(state: &ControlState) -> Self {
+    fn new(state: &ControlState, workspace: &RemoteWorkspace) -> Self {
         Self {
+            workspace: workspace.bus_frames(),
+            poll: false,
             events: state.events.subscribe(),
             suggestions: state.prompt_suggestion_events.subscribe(),
             linked: state.pull_request_linked_events.subscribe(),
@@ -189,6 +194,17 @@ impl Signals {
         while let Ok(change) = self.access.try_recv() {
             signals.push(Signal::AuthAccess(change));
         }
+        loop {
+            match self.workspace.try_recv() {
+                Ok(frame) => signals.push(Signal::Workspace(Box::new(frame))),
+                // Records catch up when they see a frame of the next stream.
+                Err(Lagged(_)) => {}
+                Err(Empty | broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+        if std::mem::take(&mut self.poll) {
+            signals.push(Signal::Poll);
+        }
         signals
     }
 }
@@ -216,7 +232,7 @@ impl ControlPlane {
             .open_in(documents.clone(), std::path::Path::new(STATE_DIR))?;
         let started_at = auth_service::iso(auth_service::now());
         let state = ControlState::open(auth, documents, log, std::path::Path::new(STATE_DIR))?;
-        let signals = Mutex::new(Signals::new(&state));
+        let signals = Mutex::new(Signals::new(&state, &host.workspace));
         let plane = Arc::new(Self {
             config,
             started_at,
@@ -347,6 +363,7 @@ impl ControlPlane {
     /// [`deliver`](Self::deliver)) to every connection.
     pub async fn on_alarm(&self) {
         self.wake.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.signals.lock().unwrap_or_else(|e| e.into_inner()).poll = true;
         self.host.workspace.maintain().await;
         self.host.workspace.flush_acks();
         self.schedule();
@@ -477,11 +494,17 @@ impl ControlPlane {
                 continue;
             };
             let before = subscription.cursor.clone();
+            let workspace_stream = crate::control_streams::serves(&subscription.method);
             for signal in signals {
-                for batch in subscription
-                    .advance(self, &connection.principal, signal.clone())
-                    .await
-                {
+                let batches = if workspace_stream {
+                    crate::control_streams::advance(&self.host.workspace, &mut subscription, signal)
+                        .await
+                } else {
+                    subscription
+                        .advance(self, &connection.principal, signal.clone())
+                        .await
+                };
+                for batch in batches {
                     frames.push(Reply::Chunk(batch).frame(&stream.id));
                 }
             }
@@ -648,6 +671,12 @@ impl ControlPlane {
             Err(reply) => return Call::Done(reply),
         };
         let params = decoded.as_ref().unwrap_or(params);
+        if crate::control_streams::serves(method) {
+            return match crate::control_streams::open(&self.host.workspace, method, params).await {
+                Ok((subscription, first)) => Call::Live(subscription, first),
+                Err(reply) => Call::Done(reply),
+            };
+        }
         if crate::subscription::serves(method) {
             return match Subscription::open(self, principal, method, params, false).await {
                 Ok(opened) => Call::Live(opened.subscription, opened.first),
@@ -717,12 +746,6 @@ impl ControlPlane {
             "subscribeProjectClones" => Call::Stream(vec![json!([[]])]),
             // As native before any refresh: the stream stays open and silent.
             "pullRequests.subscribeRefreshes" => Call::Stream(Vec::new()),
-            "subscribeDeviceState" => Call::Stream(vec![json!([{
-                "supportsHostRetry": true, "supportsToolUpdate": true, "supportsToolInspection": true,
-                "supportsEasHosts": true, "supportsSimlockHosts": true, "hostStatus": "disabled",
-                "hostStatuses": {}, "devices": [], "sessions": [], "onboardingCompleted": false,
-                "agentAccessEnabled": false, "hubBasePath": "/api/device-hub", "revision": 0, "hosts": []
-            }])]),
             "server.reportClientActivity" => Call::Done(Reply::Success(Value::Null)),
             "preview.reportProfiles" => Call::Done(Reply::Success(Value::Null)),
             "projects.mutate" => Call::Done(self.create_project(params)),
@@ -1042,7 +1065,7 @@ mod tests {
     use crate::persistence::MemoryStore;
     use crate::runtime::{Task, Wait};
     use crate::workspace::fake_agentd::FakeAgentd;
-    use crate::workspace_protocol::WireTurnEvent;
+    use crate::workspace_protocol::{op, WireTurnEvent};
     use futures_util::{stream::FuturesUnordered, StreamExt};
 
     /// A runtime the test drives by hand: spawned tasks run when
@@ -1985,5 +2008,164 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
                 .contains("interrupted"),
             "{run:?}"
         );
+    }
+
+    /// The host's alarm: the plane's upkeep, then what changed for `connection`.
+    fn alarm(plane: &Arc<ControlPlane>, connection: &Connection) -> Vec<Value> {
+        now(plane.on_alarm());
+        let signals = plane.take_signals();
+        parse(now(plane.deliver(connection, &signals)))
+    }
+
+    fn values_for(frames: &[Value], id: &str) -> Vec<Value> {
+        frames
+            .iter()
+            .filter(|frame| frame["requestId"] == id)
+            .flat_map(|frame| frame["values"].as_array().cloned().unwrap_or_default())
+            .collect()
+    }
+
+    fn subscribe(
+        plane: &Arc<ControlPlane>,
+        connection: &mut Connection,
+        id: &str,
+        tag: &str,
+        payload: Value,
+    ) -> Vec<Value> {
+        let frames = send(
+            plane,
+            connection,
+            json!({"_tag":"Request","id":id,"tag":tag,"payload":payload,"headers":[]}),
+        );
+        values_for(&frames, id)
+    }
+
+    #[test]
+    fn workspace_event_streams_resume_after_a_restart_without_repeats() {
+        let agentd = Arc::new(FakeAgentd::default());
+        let mut host = Restartable::new(&agentd);
+        let mut connection = owner(&host.plane);
+        let device = subscribe(
+            &host.plane,
+            &mut connection,
+            "d",
+            "subscribeDeviceState",
+            json!({}),
+        );
+        assert_eq!(device[0]["hostStatus"], "disabled", "{device:?}");
+        let preview = subscribe(
+            &host.plane,
+            &mut connection,
+            "p",
+            "subscribePreviewEvents",
+            json!({}),
+        );
+        assert!(preview.is_empty());
+        host.plane.take_signals();
+
+        agentd.emit_bus(op::DEVICE_EVENTS, json!({"revision": 1}));
+        agentd.emit_bus(op::PREVIEW_EVENTS, json!({"type": "opened"}));
+        let sent = alarm(&host.plane, &connection);
+        assert_eq!(values_for(&sent, "d"), vec![json!({"revision": 1})]);
+        assert_eq!(values_for(&sent, "p"), vec![json!({"type": "opened"})]);
+        assert!(alarm(&host.plane, &connection).is_empty(), "nothing twice");
+
+        // The connection outlives the plane, as a socket's stored state does.
+        let stored = serde_json::to_string(&connection).unwrap();
+        host.restart(&agentd);
+        let connection: Connection = serde_json::from_str(&stored).unwrap();
+        host.plane.take_signals();
+        // The new workspace connection reports the same device state again.
+        agentd.emit_bus(op::DEVICE_EVENTS, json!({"revision": 1}));
+        agentd.emit_bus(op::PREVIEW_EVENTS, json!({"type": "closed"}));
+        let sent = alarm(&host.plane, &connection);
+        assert!(values_for(&sent, "d").is_empty(), "{sent:?}");
+        assert_eq!(values_for(&sent, "p"), vec![json!({"type": "closed"})]);
+        agentd.emit_bus(op::DEVICE_EVENTS, json!({"revision": 2}));
+        let sent = alarm(&host.plane, &connection);
+        assert_eq!(values_for(&sent, "d"), vec![json!({"revision": 2})]);
+    }
+
+    #[test]
+    fn vcs_status_streams_report_only_changes_across_a_restart() {
+        let agentd = Arc::new(FakeAgentd::default());
+        let status = |branch: &str| json!({"isRepo": true, "branch": branch, "hasUpstream": false});
+        agentd.set_reading(op::WATCH_VCS_STATUS, status("main"));
+        let mut host = Restartable::new(&agentd);
+        let mut connection = owner(&host.plane);
+        let first = subscribe(
+            &host.plane,
+            &mut connection,
+            "v",
+            "subscribeVcsStatus",
+            json!({"cwd": "/workspace/one"}),
+        );
+        assert_eq!(first[0]["local"]["branch"], "main", "{first:?}");
+        assert_eq!(first[0]["remote"], Value::Null);
+        assert_eq!(first[1]["_tag"], "remoteUpdated");
+        host.plane.take_signals();
+        assert!(alarm(&host.plane, &connection).is_empty());
+
+        agentd.set_reading(op::WATCH_VCS_STATUS, status("dev"));
+        let sent = values_for(&alarm(&host.plane, &connection), "v");
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0]["_tag"], "localUpdated");
+        assert_eq!(sent[0]["local"]["branch"], "dev");
+
+        let stored = serde_json::to_string(&connection).unwrap();
+        host.restart(&agentd);
+        let connection: Connection = serde_json::from_str(&stored).unwrap();
+        host.plane.take_signals();
+        assert!(
+            values_for(&alarm(&host.plane, &connection), "v").is_empty(),
+            "the restarted plane reads the same status and sends nothing"
+        );
+        agentd.set_reading(op::WATCH_VCS_STATUS, status("topic"));
+        let sent = values_for(&alarm(&host.plane, &connection), "v");
+        assert_eq!(sent[0]["local"]["branch"], "topic", "{sent:?}");
+    }
+
+    #[test]
+    fn terminal_streams_catch_up_after_a_restart() {
+        let agentd = Arc::new(FakeAgentd::default());
+        let snapshot = |sequence: u64, text: &str| json!({"type": "snapshot", "snapshot": {"threadId": "t1", "terminalId": "a", "sequence": sequence, "history": text}});
+        let output = |sequence: u64, data: &str| json!({"type": "output", "threadId": "t1", "terminalId": "a", "sequence": sequence, "data": data});
+        agentd.set_reading(op::TERM_CALL, snapshot(1, "$ "));
+        let mut host = Restartable::new(&agentd);
+        let mut connection = owner(&host.plane);
+        let first = subscribe(
+            &host.plane,
+            &mut connection,
+            "t",
+            "terminal.observe",
+            json!({"threadId": "t1", "terminalId": "a"}),
+        );
+        assert_eq!(first, vec![snapshot(1, "$ ")]);
+        host.plane.take_signals();
+
+        agentd.emit_bus(op::TERM_EVENTS, output(2, "ls\n"));
+        // Another terminal's output is not this stream's.
+        agentd.emit_bus(
+            op::TERM_EVENTS,
+            json!({"type": "output", "threadId": "t1", "terminalId": "b", "sequence": 9, "data": "x"}),
+        );
+        let sent = values_for(&alarm(&host.plane, &connection), "t");
+        assert_eq!(sent, vec![output(2, "ls\n")]);
+
+        let stored = serde_json::to_string(&connection).unwrap();
+        host.restart(&agentd);
+        let connection: Connection = serde_json::from_str(&stored).unwrap();
+        host.plane.take_signals();
+        // Output came while no server was connected; the first frame of the
+        // new stream makes the record read the terminal again.
+        agentd.set_reading(op::TERM_CALL, snapshot(4, "$ ls\nfile\n$ "));
+        agentd.emit_bus(op::TERM_EVENTS, output(4, "$ "));
+        let sent = values_for(&alarm(&host.plane, &connection), "t");
+        assert_eq!(sent, vec![snapshot(4, "$ ls\nfile\n$ ")]);
+        agentd.emit_bus(op::TERM_EVENTS, output(4, "$ "));
+        assert!(values_for(&alarm(&host.plane, &connection), "t").is_empty());
+        agentd.emit_bus(op::TERM_EVENTS, output(5, "pwd\n"));
+        let sent = values_for(&alarm(&host.plane, &connection), "t");
+        assert_eq!(sent, vec![output(5, "pwd\n")]);
     }
 }
