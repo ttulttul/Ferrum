@@ -640,7 +640,7 @@ impl ControlPlane {
             "keybindingsConfigPath": keybindings_path,
             "keybindings": keybindings,
             "issues": issues,
-            "providers": server_config::providers::list_with(&self.started_at, |_| None, &settings, options),
+            "providers": server_config::providers::list_with(&self.started_at, |_| None, &settings, options, &crate::model_manifest::BUNDLED),
             "availableEditors": [],
             "remoteOpenTargets": [],
             "directEndpoints": [],
