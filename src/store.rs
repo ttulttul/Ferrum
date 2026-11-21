@@ -176,7 +176,7 @@ pub struct Store {
 }
 impl Store {
     pub(crate) fn apply_record(&mut self, record: &ServerEvent) {
-        self.apply(&record.event);
+        self.apply_at(&record.event, record.at);
         if let Some(receipt) = &record.receipt {
             self.command_receipts.insert(
                 receipt.command_id.clone(),
@@ -185,7 +185,8 @@ impl Store {
         }
     }
 
-    pub(crate) fn apply(&mut self, event: &Event) {
+    /// Apply `event`, committed at `at` (seconds).
+    fn apply_at(&mut self, event: &Event, at: u64) {
         match event {
             Event::ProjectCreated(p) => {
                 self.project_rows.insert(p.id.clone(), wire_project(p));
@@ -300,7 +301,7 @@ impl Store {
                     self.turn_positions.insert(*run_id, *position);
                 }
                 if let Some(thread) = self.threads.get_mut(thread_id) {
-                    thread.provider.apply(*run_id, event);
+                    thread.provider.apply(*run_id, event, at);
                 }
             }
             Event::RunFinished {

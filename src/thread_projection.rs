@@ -13,7 +13,7 @@ fn ordered(fields: &[&str], row: &Value) -> Value {
     )
 }
 
-fn iso(seconds: u64) -> String {
+pub(crate) fn iso(seconds: u64) -> String {
     auth_service::iso((seconds as i64).saturating_mul(1000))
 }
 
@@ -158,6 +158,11 @@ impl Thread {
                     "checkpointId": null,
                     "contextHandoffId": null
                 });
+                if let Some(ids) = self.provider_run_ids(run) {
+                    out["providerThreadId"] = json!(ids.provider_thread);
+                    out["rootNodeId"] = json!(ids.root_node);
+                    out["activeAttemptId"] = json!(ids.attempt);
+                }
                 if status == "queued" {
                     queue_position += 1;
                     out["queuePosition"] = json!(queue_position);
@@ -199,10 +204,12 @@ impl Thread {
             .collect()
     }
 
-    /// The timeline as `OrchestrationV2TurnItem`s: each message, then its run's failure.
+    /// The timeline as `OrchestrationV2TurnItem`s: each message, then its run's failure,
+    /// then the `provider` items (by run index) the run's provider turn reported.
     /// Ordinals follow the reference's TurnItemPositionStore: a run's items start after
-    /// `ordinal * 1_000_000`, so items stay ordered when earlier runs gain items later.
-    fn turn_items(&self) -> Vec<Value> {
+    /// `ordinal * 1_000_000`, so items stay ordered when earlier runs gain items later;
+    /// each provider item takes the next free slot of its run.
+    fn turn_items_with(&self, provider: Vec<(usize, Value)>) -> Vec<Value> {
         let mut items = Vec::new();
         let mut ordinal: u64 = 0;
         for message in &self.messages {
@@ -267,6 +274,10 @@ impl Thread {
             merge(&mut item, fields);
             items.push(item);
             let Some((_, run)) = run else { continue };
+            // A provider turn's end adds its own items.
+            if self.provider.terminals.contains_key(&run.id) {
+                continue;
+            }
             let Some(error) = run
                 .error
                 .as_deref()
@@ -300,6 +311,23 @@ impl Thread {
             );
             items.push(failure);
         }
+        for (index, mut item) in provider {
+            let lower = (index as u64 + 1) * 1_000_000;
+            let upper = lower + 999_999;
+            let next = items
+                .iter()
+                .filter_map(|i| i["ordinal"].as_u64())
+                .filter(|o| (lower..=upper).contains(o))
+                .max()
+                .unwrap_or(lower)
+                + 1;
+            item["ordinal"] = json!(next);
+            items.push(item);
+        }
+        items.sort_by(|a, b| {
+            (a["ordinal"].as_u64(), a["id"].as_str())
+                .cmp(&(b["ordinal"].as_u64(), b["id"].as_str()))
+        });
         items
     }
 
@@ -358,7 +386,19 @@ impl Thread {
             "files":[],
             "capturedAt":iso(checkpoint.captured_at)
         })).collect::<Vec<_>>();
-        let turn_items = self.turn_items();
+        let provider = self.provider_records();
+        let turn_items = self.turn_items_with(provider.items);
+        let mut app = ordered(APP_FIELDS, &row);
+        if let Some(id) = self.provider_thread_id() {
+            app["activeProviderThreadId"] = json!(id);
+        }
+        let with = |key: &str, extra: Vec<Value>| {
+            let mut records = array(key);
+            records.extend(extra);
+            Value::Array(records)
+        };
+        let mut messages = self.message_rows();
+        messages.extend(provider.messages);
         let visible = turn_items
             .iter()
             .enumerate()
@@ -367,9 +407,9 @@ impl Thread {
                     "sourceItemId":item["id"],"item":item})
             })
             .collect::<Vec<_>>();
-        json!({"thread":ordered(APP_FIELDS,&row),"runs":self.run_rows(&row),"attempts":array("attempts"),"nodes":array("nodes"),"subagents":array("subagents"),
-            "providerSessions":array("providerSessions"),"providerThreads":array("providerThreads"),"providerTurns":array("providerTurns"),"runtimeRequests":array("runtimeRequests"),
-            "messages":self.message_rows(),"plans":[],"turnItems":turn_items,"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
+        json!({"thread":app,"runs":self.run_rows(&row),"attempts":with("attempts",provider.attempts),"nodes":with("nodes",provider.nodes),"subagents":array("subagents"),
+            "providerSessions":array("providerSessions"),"providerThreads":with("providerThreads",provider.provider_threads),"providerTurns":with("providerTurns",provider.provider_turns),"runtimeRequests":array("runtimeRequests"),
+            "messages":messages,"plans":provider.plans,"turnItems":turn_items,"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
             "contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":visible,"updatedAt":row["updatedAt"]})
     }
 

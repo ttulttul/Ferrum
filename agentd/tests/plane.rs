@@ -47,6 +47,34 @@ impl SharedLog {
             .collect()
     }
 
+    fn provider_event_values(&self) -> Vec<Value> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::RunProvider { event, .. } => Some(serde_json::to_value(event).unwrap()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn provider_seqs(&self) -> Vec<u64> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::RunProvider { position, .. } => Some(position.expect("tracked").seq),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn provider_events(&self) -> usize {
+        self.provider_event_values().len()
+    }
+
     fn run_status(&self) -> Option<String> {
         self.0
             .lock()
@@ -164,6 +192,12 @@ impl Server {
     /// A project rooted at `root`, a thread in it, and a message that
     /// starts a run.
     async fn start_run(&self, root: &str, text: &str) {
+        self.start_thread(root, "stub", text).await;
+    }
+
+    /// A project rooted at `root`, a thread on provider instance
+    /// `instance`, and a message that starts a run.
+    async fn start_thread(&self, root: &str, instance: &str, text: &str) {
         let mut connection = self.connection();
         let project = self
             .send(
@@ -175,7 +209,7 @@ impl Server {
         assert_eq!(project["exit"]["_tag"], "Success", "{project}");
         for command in [
             json!({"type":"thread.create","commandId":"c2","threadId":"t1","projectId":"p1","title":"Draft",
-                "modelSelection":{"instanceId":"stub","model":"fixture"},"runtimeMode":"full-access",
+                "modelSelection":{"instanceId":instance,"model":"fixture"},"runtimeMode":"full-access",
                 "interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"}),
             json!({"type":"message.dispatch","commandId":"c3","threadId":"t1","messageId":"message:1","text":text,
                 "attachments":[],"createdBy":"user","creationSource":"web","dispatchMode":{"type":"start_immediately"}}),
@@ -279,4 +313,233 @@ async fn a_turn_keeps_going_across_a_server_restart() {
     assert_eq!(log.run_status().as_deref(), Some("completed"));
     let expected: Vec<String> = words.iter().map(|w| format!("{w}\n")).collect();
     assert_eq!(log.output(), expected, "nothing lost or repeated");
+}
+
+// ---- Provider turns through the fake Codex and Claude CLIs ----
+
+/// Settings whose `codex` and `claudeAgent` instances run the fake CLI
+/// playing `scenario` (from `tests/fixtures/providers`).
+fn fake_cli_settings(scenario: &std::path::Path, log: &std::path::Path) -> Value {
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/providers");
+    let instance = |driver: &str| {
+        json!({
+            "driver": driver,
+            "config": {"binaryPath": fixtures.join("fake_cli.py").display().to_string()},
+            "environment": [
+                {"name": "FAKE_PROVIDER_SCENARIO", "value": scenario.display().to_string(), "sensitive": false},
+                {"name": "FAKE_PROVIDER_LOG", "value": log.display().to_string(), "sensitive": false}
+            ]
+        })
+    };
+    json!({"providerInstances": {"codex": instance("codex"), "claudeAgent": instance("claudeAgent")}})
+}
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/fixtures/providers")
+        .join(name)
+}
+
+fn write_settings(documents: &MemoryStore, settings: &Value) {
+    use t3code_server::persistence::{DocumentStore, WriteMode};
+    let path = std::path::Path::new(control::STATE_DIR).join("settings.json");
+    documents.create_dir_all(path.parent().unwrap()).unwrap();
+    documents
+        .write(&path, settings.to_string().as_bytes(), WriteMode::Replace)
+        .unwrap();
+}
+
+impl Server {
+    /// The thread's projection as `getThreadProjection` returns it, and as
+    /// a `subscribeThread` snapshot carries it.
+    async fn projections(&self) -> (Value, Value) {
+        let mut connection = self.connection();
+        let got = self
+            .send(
+                &mut connection,
+                "orchestration.getThreadProjection",
+                json!({"threadId": "t1"}),
+            )
+            .await;
+        assert_eq!(got["exit"]["_tag"], "Success", "{got}");
+        let subscribed = self
+            .send(
+                &mut connection,
+                "orchestration.subscribeThread",
+                json!({"threadId": "t1", "requestCompletionMarker": true}),
+            )
+            .await;
+        assert_eq!(subscribed["_tag"], "Chunk", "{subscribed}");
+        (
+            got["exit"]["value"].clone(),
+            subscribed["values"][0]["projection"].clone(),
+        )
+    }
+}
+
+/// What a client renders of a finished provider turn.
+fn assert_rendered_turn(projection: &Value, status: &str) {
+    let runs = projection["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1, "{projection:#}");
+    assert_eq!(runs[0]["status"], status, "{projection:#}");
+    let assistant: Vec<&Value> = projection["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .collect();
+    assert!(
+        assistant
+            .iter()
+            .any(|m| m["text"].as_str().is_some_and(|t| !t.is_empty()) && m["streaming"] == false),
+        "an assistant message: {projection:#}"
+    );
+    let items = projection["turnItems"].as_array().unwrap();
+    let kinds: Vec<&str> = items.iter().filter_map(|i| i["type"].as_str()).collect();
+    assert!(kinds.contains(&"user_message"), "{kinds:?}");
+    assert!(kinds.contains(&"assistant_message"), "{kinds:?}");
+    if status == "completed" {
+        assert!(
+            kinds.contains(&"command_execution") || kinds.contains(&"dynamic_tool"),
+            "a tool item: {kinds:?}"
+        );
+    }
+    for item in items {
+        assert_eq!(item["threadId"], "t1");
+        assert_eq!(item["runId"], runs[0]["id"], "{item:#}");
+    }
+}
+
+async fn provider_turn(driver: &str, scenario: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let url = agentd(dir.path(), &root).await;
+    let documents = Arc::new(MemoryStore::new());
+    write_settings(
+        &documents,
+        &fake_cli_settings(&fixture(scenario), &dir.path().join("cli.jsonl")),
+    );
+    let log = SharedLog::default();
+    let server = Server::start(1, &url, &documents, &log, Vec::new()).await;
+    server
+        .start_thread(root.to_str().unwrap(), driver, "Say hello")
+        .await;
+    wait_until(|| log.run_status().is_some()).await;
+    let (got, subscribed) = server.projections().await;
+    assert_rendered_turn(&got, "completed");
+    assert_eq!(got["turnItems"], subscribed["turnItems"]);
+    assert_eq!(got["runs"], subscribed["runs"]);
+}
+
+#[tokio::test]
+async fn a_codex_turn_projects_what_a_client_renders() {
+    provider_turn("codex", "codex_turn.json").await;
+}
+
+#[tokio::test]
+async fn a_claude_turn_projects_what_a_client_renders() {
+    provider_turn("claudeAgent", "claude_turn.json").await;
+}
+
+#[tokio::test]
+async fn stopping_a_thread_interrupts_its_provider_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let url = agentd(dir.path(), &root).await;
+    let documents = Arc::new(MemoryStore::new());
+    let cli_log = dir.path().join("cli.jsonl");
+    write_settings(
+        &documents,
+        &fake_cli_settings(&fixture("codex_interrupt.json"), &cli_log),
+    );
+    let log = SharedLog::default();
+    let server = Server::start(1, &url, &documents, &log, Vec::new()).await;
+    server
+        .start_thread(root.to_str().unwrap(), "codex", "Say hello")
+        .await;
+    // The scenario waits for the interrupt once it has streamed some text.
+    wait_until(|| log.provider_events() >= 10).await;
+    let mut connection = server.connection();
+    let stopped = server
+        .send(
+            &mut connection,
+            "orchestration.dispatchCommand",
+            json!({"type":"thread.stop","commandId":"c4","threadId":"t1","createdBy":"user","creationSource":"web"}),
+        )
+        .await;
+    assert_eq!(stopped["exit"]["_tag"], "Success", "{stopped}");
+    wait_until(|| log.run_status().is_some()).await;
+    let (got, _) = server.projections().await;
+    assert_rendered_turn(&got, "interrupted");
+    assert!(std::fs::read_to_string(&cli_log)
+        .unwrap()
+        .contains("turn/interrupt"));
+}
+
+/// `scenario` with a pause after each message the CLI sends, so a test can
+/// restart the server in the middle of the turn.
+fn slowed(scenario: &str, dir: &std::path::Path) -> std::path::PathBuf {
+    let mut value: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture(scenario)).unwrap()).unwrap();
+    let steps = value["steps"].as_array_mut().unwrap();
+    let paced: Vec<Value> = steps
+        .drain(..)
+        .flat_map(|step| {
+            let pause = step.get("send").is_some();
+            std::iter::once(step).chain(pause.then(|| json!({"sleep": 0.05})))
+        })
+        .collect();
+    *steps = paced;
+    let path = dir.join(scenario);
+    std::fs::write(&path, value.to_string()).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn a_provider_turn_keeps_going_across_a_server_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let url = agentd(dir.path(), &root).await;
+    let documents = Arc::new(MemoryStore::new());
+    let scenario = slowed("codex_turn.json", dir.path());
+    write_settings(
+        &documents,
+        &fake_cli_settings(&scenario, &dir.path().join("cli.jsonl")),
+    );
+    let log = SharedLog::default();
+    let server = Server::start(1, &url, &documents, &log, Vec::new()).await;
+    server
+        .start_thread(root.to_str().unwrap(), "codex", "Say hello")
+        .await;
+    wait_until(|| log.provider_events() >= 8).await;
+    drop(server);
+    let before = log.provider_events();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        log.provider_events(),
+        before,
+        "the stopped server records nothing"
+    );
+    let server = Server::start(2, &url, &documents, &log, Vec::new()).await;
+    wait_until(|| log.run_status().is_some()).await;
+    assert_eq!(log.run_status().as_deref(), Some("completed"));
+    let (got, _) = server.projections().await;
+    assert_rendered_turn(&got, "completed");
+    // Every event of the turn is recorded once, in order: the recorded
+    // stream positions run 1, 2, 3, ... without a gap or a repeat.
+    let seqs = log.provider_seqs();
+    assert!(seqs.len() > 20, "{seqs:?}");
+    assert_eq!(seqs, (1..=seqs.len() as u64).collect::<Vec<_>>());
+    let recorded = log.provider_event_values();
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|e| e["type"] == "turn.terminal")
+            .count(),
+        1
+    );
 }
