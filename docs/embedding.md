@@ -149,7 +149,10 @@ pub fn ControlPlane::prune_streams<'a>(&self, open: impl IntoIterator<Item = &'a
   suspends between messages can store it with the socket. On failure, send
   the returned response.
 - For each text frame, call `on_message` and send the frames it returns.
-  Store the connection again afterwards, because it changes.
+  Store the connection again afterwards, because it changes. If a socket's
+  messages can be handled concurrently, read its connection only once the
+  previous message's call has returned; a copy read earlier lacks the streams
+  that call opened, and storing it would close them.
 - After each message, alarm and workspace frame, deliver: call
   `take_signals()` once, then `deliver(connection, &signals)` for every open
   socket, and send what each returns.

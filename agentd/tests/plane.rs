@@ -543,3 +543,66 @@ async fn a_provider_turn_keeps_going_across_a_server_restart() {
         1
     );
 }
+
+/// The frames the plane delivers to `connection` over `rounds` alarms, as a
+/// host's alarm loop sends them.
+async fn deliveries(server: &Server, connection: &Connection, rounds: usize) -> Vec<String> {
+    let mut sent = Vec::new();
+    for _ in 0..rounds {
+        server.plane.on_alarm().await;
+        let signals = server.plane.take_signals();
+        sent.extend(server.plane.deliver(connection, &signals).await);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    sent
+}
+
+#[tokio::test]
+async fn a_terminal_stream_reports_output_as_it_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let url = agentd(dir.path(), &root).await;
+    let documents = Arc::new(MemoryStore::new());
+    let log = SharedLog::default();
+    let server = Server::start(1, &url, &documents, &log, Vec::new()).await;
+    let mut connection = server.connection();
+    let cwd = root.to_str().unwrap();
+    let ids = json!({"threadId":"t1","terminalId":"term"});
+    let opened = server
+        .send(
+            &mut connection,
+            "terminal.open",
+            json!({"threadId":"t1","terminalId":"term","cwd":cwd,"cols":80,"rows":24}),
+        )
+        .await;
+    assert_eq!(opened["exit"]["_tag"], "Success", "{opened}");
+    let frame =
+        json!({"_tag":"Request","id":"attach","tag":"terminal.attach","payload":ids,"headers":[]});
+    let first = server
+        .plane
+        .on_message(&mut connection, &frame.to_string())
+        .await;
+    assert!(first.iter().any(|f| f.contains("snapshot")), "{first:?}");
+    // Kept with the socket between messages, as a host that suspends does.
+    let mut connection: Connection =
+        serde_json::from_str(&serde_json::to_string(&connection).unwrap()).unwrap();
+    // A while later, the terminal is written to.
+    deliveries(&server, &connection, 10).await;
+    let written = server
+        .send(
+            &mut connection,
+            "terminal.write",
+            json!({"threadId":"t1","terminalId":"term","data":"echo MARK_$((3+4))\n"}),
+        )
+        .await;
+    assert_eq!(written["exit"]["_tag"], "Success", "{written}");
+    let mut sent = Vec::new();
+    for _ in 0..40 {
+        sent.extend(deliveries(&server, &connection, 5).await);
+        if sent.iter().any(|f| f.contains("MARK_7")) {
+            return;
+        }
+    }
+    panic!("no output on the stream: {sent:?}");
+}
