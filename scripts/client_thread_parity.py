@@ -326,6 +326,12 @@ def rendered_turn(projection):
         "providerThreads": [thread.get("status") for thread in projection.get("providerThreads", [])],
         "providerSessions": [session.get("status") for session in projection.get("providerSessions", [])],
         "plans": [plan.get("kind") for plan in projection.get("plans", [])],
+        # Token usage as the client's context meter and usage views read it, without times.
+        "usage": [{"model": turn.get("model"), "turnTokenUsage": turn.get("turnTokenUsage"),
+                   "tokenUsage": {k: v for k, v in (turn.get("tokenUsage") or {}).items()
+                                  if k not in ("updatedAt", "promptCacheExpiresAt")} or None}
+                  for turn in projection.get("providerTurns", [])],
+        "nativeMetadata": [thread.get("nativeMetadata") for thread in projection.get("providerThreads", [])],
     }
 
 

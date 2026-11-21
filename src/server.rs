@@ -231,6 +231,7 @@ impl crate::orchestration::CommandHost for AppState {
                         store.threads.get(&run.thread_id).and_then(|thread| {
                             crate::provider_state::provider_turn(
                                 &settings,
+                                &self.model_manifest.current(),
                                 &thread.stored_row(),
                                 &thread.provider,
                             )

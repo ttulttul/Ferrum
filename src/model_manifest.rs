@@ -440,6 +440,60 @@ pub(crate) fn provider_models(manifest: &Value, driver: &str, now_ms: i64) -> Op
     Some(models)
 }
 
+/// The reference's resolveClaudeCatalogContextWindowTokens: the context
+/// window of the Claude model `selection` names (by slug or alias), from its
+/// profile's fixed window or the window its `contextWindow` option picks.
+pub(crate) fn claude_context_window(manifest: &Value, selection: &Value) -> Option<u64> {
+    let model = selection["model"].as_str()?.trim();
+    let catalog = &manifest["providers"]["claudeAgent"];
+    let models = catalog["models"].as_array()?;
+    let entry = models
+        .iter()
+        .find(|entry| entry["slug"] == model)
+        .or_else(|| {
+            models.iter().find(|entry| {
+                entry["aliases"].as_array().is_some_and(|aliases| {
+                    aliases
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|alias| alias.eq_ignore_ascii_case(model))
+                })
+            })
+        })?;
+    let profile = &catalog["profiles"][entry["profile"].as_str()?];
+    let runtime = &profile["adapter"]["claudeCode"];
+    if let Some(fixed) = runtime["fixedContextWindowTokens"]
+        .as_u64()
+        .filter(|n| *n > 0)
+    {
+        return Some(fixed);
+    }
+    let windows = runtime["contextWindowTokens"].as_object()?;
+    let descriptor = profile["capabilities"]["optionDescriptors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|descriptor| descriptor["id"] == "contextWindow");
+    let chosen = selection["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|option| option["id"] == "contextWindow")
+        .and_then(|option| option["value"].as_str())
+        .filter(|value| windows.contains_key(*value))
+        .or_else(|| {
+            let descriptor = descriptor?;
+            descriptor["currentValue"].as_str().or_else(|| {
+                descriptor["options"]
+                    .as_array()?
+                    .iter()
+                    .find(|option| option["isDefault"] == true)
+                    .and_then(|option| option["id"].as_str())
+            })
+        })?;
+    windows.get(chosen)?.as_u64()
+}
+
 /// `withUltracodeToggle`: the manifest keeps Ultracode as an effort level;
 /// servers present it as a separate toggle beside the effort select.
 pub(crate) fn with_ultracode_toggle(capabilities: &Value) -> Value {

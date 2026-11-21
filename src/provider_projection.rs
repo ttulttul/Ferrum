@@ -255,10 +255,7 @@ impl Thread {
                 "forkedFrom": null,
                 "pendingBackgroundTasks": [],
                 "contextUsage": null,
-                // A Claude session is titled after its thread.
-                "nativeMetadata": Some(self.title.trim())
-                    .filter(|title| thread.driver == provider::CLAUDE_AGENT && !title.is_empty())
-                    .map_or(Value::Null, |title| json!({"title": title})),
+                "nativeMetadata": self.claude_native_metadata(&thread.driver),
                 "goal": null,
                 "createdAt": iso(thread.created_at),
                 "updatedAt": iso(thread.updated_at)
@@ -269,6 +266,30 @@ impl Thread {
         out.items
             .retain(|(_, item)| item.get("requestSlot").is_none());
         out
+    }
+
+    /// A Claude session's metadata: its title (the thread's) and what its
+    /// prompts used of its attachment budget.
+    fn claude_native_metadata(&self, driver: &str) -> Value {
+        if driver != provider::CLAUDE_AGENT {
+            return Value::Null;
+        }
+        let mut metadata = Map::new();
+        if let Some((bytes, pages)) = self.provider.attachment_budget {
+            metadata.insert(
+                "claudeAttachmentBudget".into(),
+                json!({"bytesUsed": bytes, "pagesUsed": pages}),
+            );
+        }
+        let title = self.title.trim();
+        if !title.is_empty() {
+            metadata.insert("title".into(), json!(title));
+        }
+        if metadata.is_empty() {
+            Value::Null
+        } else {
+            Value::Object(metadata)
+        }
     }
 
     /// The provider session the thread's turns ran in, once one opened: the
@@ -405,6 +426,18 @@ impl Thread {
                 "reasoningOutputTokens": usage.reasoning_output_tokens,
                 "updatedAt": iso(*at)
             });
+            if let Some(ttl) = usage.prompt_cache_ttl_ms {
+                turn["tokenUsage"]["promptCacheTtlMs"] = json!(ttl);
+            }
+            if let Some(expires) = &usage.prompt_cache_expires_at {
+                turn["tokenUsage"]["promptCacheExpiresAt"] = json!(expires);
+            }
+        }
+        if let Some(usage) = &record.turn_usage {
+            turn["turnTokenUsage"] = usage.clone();
+        }
+        if let Some(model) = &record.model {
+            turn["model"] = json!(model);
         }
         // The reference records a provider turn once the CLI starts one.
         if record.turn_started || record.native_turn_id.is_some() || !record.items.is_empty() {
@@ -981,6 +1014,7 @@ mod tests {
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
                 status: TurnStatus::Running,
+                model: None,
             },
             opened("a", "command"),
             opened("q", "user_input"),
