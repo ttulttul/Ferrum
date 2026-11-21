@@ -19,6 +19,10 @@ arguments (or that has none) plays. Steps:
   {"sleep": seconds}
   {"exit": code}
 
+A request the scenario does not expect is answered from SIDE_REPLIES (or the
+scenario's own "replies" by method), so a client that reads its config or
+account first still reaches the scripted steps.
+
 After the last step the CLI waits for its input to close, as the real ones do.
 """
 import json
@@ -43,6 +47,36 @@ else:
     steps = scenario["steps"]
 
 remembered = {}
+
+# Answers to requests a client may make between the scripted ones.
+SIDE_REPLIES = {
+    "account/read": {"account": {"type": "apiKey"}, "requiresOpenaiAuth": False},
+    "config/read": {"config": {}, "origins": {}},
+    "thread/unsubscribe": {},
+    **scenario.get("replies", {}),
+}
+# Answers to Claude control requests by subtype; any other succeeds empty.
+CONTROL_REPLIES = {
+    "initialize": {"commands": [], "agents": [], "output_style": "default", "available_output_styles": ["default"],
+                   "models": [], "account": {}},
+    "mcp_set_servers": {"added": [], "removed": [], "errors": {}},
+    **scenario.get("controlReplies", {}),
+}
+
+
+def answer(message):
+    """Reply to an unscripted request this CLI knows an answer to."""
+    method = message.get("method")
+    if "id" in message and method in SIDE_REPLIES:
+        sys.stdout.write(json.dumps({"id": message["id"], "result": SIDE_REPLIES[method]}) + "\n")
+        sys.stdout.flush()
+    subtype = (message.get("request") or {}).get("subtype")
+    if message.get("type") == "control_request":
+        reply = {"type": "control_response", "response": {
+            "subtype": "success", "request_id": message.get("request_id"),
+            "response": CONTROL_REPLIES.get(subtype, {})}}
+        sys.stdout.write(json.dumps(reply) + "\n")
+        sys.stdout.flush()
 
 
 def receive():
@@ -83,11 +117,13 @@ for step in steps:
             if step["expect"] in names:
                 remembered = message
                 break
+            answer(message)
     elif "expectReply" in step:
         while True:
             message = receive()
             if message.get("id") == step["expectReply"] and "method" not in message:
                 break
+            answer(message)
     elif "send" in step:
         sys.stdout.write(json.dumps(fill(step["send"])) + "\n")
         sys.stdout.flush()
@@ -100,4 +136,4 @@ for step in steps:
         sys.exit(step["exit"])
 
 while True:
-    receive()
+    answer(receive())

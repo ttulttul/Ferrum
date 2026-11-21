@@ -1,6 +1,6 @@
 //! Claude turns over the Claude Code CLI's stream-json protocol, the one the
 //! Claude Agent SDK speaks and the reference's Claude adapter runs through.
-use super::{cancelled, crashed, program, sleep_until, Cli, Launch, Sink, TurnEnd};
+use super::{cancelled, claude_crashed, program, sleep_until, Cli, Launch, Sink, TurnEnd};
 use crate::workspace::provider::{
     PlanStep, ProviderFailure, ProviderItem, ProviderTurn, ThreadDisposition, TokenUsage,
     TurnStatus, CLAUDE_AGENT,
@@ -115,12 +115,12 @@ impl<'a> Attempt<'a> {
         ) {
             Ok(cli) => cli,
             Err(_) => {
-                // The Claude Agent SDK's error for a missing native binary.
+                // What the reference reports when the SDK cannot start
+                // Claude Code (its own error names the missing binary).
+                tracing::warn!(%binary, "Claude Code could not be started");
                 let failure = ProviderFailure::new(
                     "provider_error",
-                    format!(
-                        "Claude Code native binary not found at {binary}. Please ensure Claude Code is installed via native installer or specify a valid path with options.pathToClaudeCodeExecutable."
-                    ),
+                    "The provider could not start this turn. Retry the turn; if it keeps failing, check the provider setup and server logs.",
                 );
                 return Outcome::Ended(TurnEnd::failed(failure, ThreadDisposition::Reusable));
             }
@@ -195,7 +195,7 @@ impl<'a> Attempt<'a> {
             return Outcome::ConversationMissing;
         }
         Outcome::Ended(TurnEnd::failed(
-            crashed("Claude Code", status),
+            claude_crashed(status),
             ThreadDisposition::Reusable,
         ))
     }

@@ -249,7 +249,10 @@ impl Thread {
                 "updatedAt": iso(*at)
             });
         }
-        out.provider_turns.push(turn);
+        // The reference records a provider turn once the CLI starts one.
+        if record.turn_started || record.native_turn_id.is_some() || !record.items.is_empty() {
+            out.provider_turns.push(turn);
+        }
 
         for item in &record.items {
             self.provider_item(out, index, ids, item, terminal.map(|t| t.status));
@@ -324,6 +327,42 @@ impl Thread {
         let Some(terminal) = terminal else { return };
         let at = completed.clone().unwrap_or_else(|| started.clone());
         match terminal.status {
+            // A Codex turn whose app-server never opened a session: the
+            // reference reports the session, not the turn, as failed.
+            TurnStatus::Failed
+                if driver == provider::CODEX
+                    && !record.turn_started
+                    && self
+                        .provider
+                        .thread
+                        .as_ref()
+                        .is_some_and(|thread| thread.native_id.is_none()) =>
+            {
+                let session = join("provider-session:provider-instance", &[instance]) + ":shared";
+                out.items.push((index, json!({
+                    "id": join("turn-item:run", &[&ids.run]) + ":signal:provider-session-open-failure",
+                    "threadId": self.id,
+                    "runId": ids.run,
+                    "nodeId": ids.root_node,
+                    "providerThreadId": ids.provider_thread,
+                    "providerTurnId": null,
+                    "nativeItemRef": null,
+                    "parentItemId": null,
+                    "ordinal": 0,
+                    "status": "failed",
+                    "title": "Provider session failed to open",
+                    "startedAt": at,
+                    "completedAt": at,
+                    "updatedAt": at,
+                    "type": "error",
+                    "failure": {
+                        "class": "provider_error",
+                        "message": format!("Failed to open {driver} provider session {session}."),
+                        "code": null,
+                        "retryable": null
+                    }
+                })));
+            }
             TurnStatus::Failed => {
                 let failure = terminal.failure.clone().unwrap_or_else(|| {
                     provider::ProviderFailure::new("unknown", "Provider turn failed.")
@@ -411,6 +450,16 @@ impl Thread {
     ) {
         let driver = ids.driver.as_str();
         let item = &record.item;
+        // The reference shows no reasoning that has no text.
+        if item.kind == "reasoning"
+            && item
+                .fields
+                .get("text")
+                .and_then(Value::as_str)
+                .is_none_or(|text| text.trim().is_empty())
+        {
+            return;
+        }
         let native = item.id.as_str();
         // An item still running when its turn ended ends with the turn.
         let status = match (item.status.as_str(), ended) {

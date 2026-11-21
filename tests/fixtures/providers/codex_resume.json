@@ -7,6 +7,9 @@
    "send": {
     "id": "$id",
     "result": {
+     "codexHome": "/tmp/codex-home",
+     "platformFamily": "unix",
+     "platformOs": "linux",
      "userAgent": "codex_cli_rs/0.170.0"
     }
    }
@@ -29,19 +32,30 @@
     "id": "$id",
     "result": {
      "thread": {
-      "id": "thr_saved",
-      "sessionId": "thr_saved",
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
       "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "thr_saved",
+      "source": "appServer",
       "status": {
        "type": "idle"
-      }
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "thr_saved"
      },
      "model": "gpt-6.1-sol",
      "cwd": "/workspace",
      "approvalPolicy": "never",
      "sandbox": {
       "type": "dangerFullAccess"
-     }
+     },
+     "approvalsReviewer": "user",
+     "modelProvider": "openai"
     }
    }
   },

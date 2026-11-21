@@ -38,6 +38,8 @@ const Option = await load("effect/Option");
 const Stream = await load("effect/Stream");
 const Socket = await load("effect/socket/Socket");
 const FetchHttpClient = await load("effect/http/FetchHttpClient");
+const Deferred = await load("effect/Deferred");
+const Fiber = await load("effect/Fiber");
 const RpcSession = await loadSource("rpc/session.ts");
 
 const authHeaders = cookie ? { Cookie: cookie } : {};
@@ -134,6 +136,40 @@ const threadInput = (threadId) => ({
   acceptDedupedBodies: true,
 });
 
+const TERMINAL_RUN = new Set(["completed", "failed", "interrupted", "cancelled"]);
+
+/** Whether a stream item shows the thread's run settled. */
+const settles = (item) =>
+  (item.kind === "event" && item.event.type === "run.updated" && TERMINAL_RUN.has(item.event.payload?.status)) ||
+  (item.kind === "snapshot" && (item.projection?.runs ?? []).some((run) => TERMINAL_RUN.has(run.status)));
+
+/** subscribeThread's items from before a message is dispatched until its run settles. */
+const liveTurn = (client, seed) =>
+  Effect.gen(function* () {
+    const items = [];
+    const synchronized = yield* Deferred.make();
+    const settled = yield* Deferred.make();
+    let dispatched = false;
+    const fiber = yield* client["orchestration.subscribeThread"](threadInput(seed.threadId)).pipe(
+      Stream.runForEach((item) =>
+        Effect.gen(function* () {
+          items.push({ ...plain(item), dispatched });
+          if (item.kind === "synchronized") yield* Deferred.succeed(synchronized, undefined);
+          if (dispatched && settles(item)) yield* Deferred.succeed(settled, undefined);
+        }),
+      ),
+      Effect.forkScoped,
+    );
+    yield* Deferred.await(synchronized);
+    dispatched = true;
+    const reply = yield* client["orchestration.dispatchCommand"](seed.dispatch);
+    yield* Deferred.await(settled);
+    // Let the run's last events arrive.
+    yield* Effect.sleep(1500);
+    yield* Fiber.interrupt(fiber);
+    return { dispatchReply: plain(reply), items };
+  });
+
 const program = Effect.gen(function* () {
   const factory = yield* RpcSession.make({ environmentThemes: true, usageLimitSources: true, usageLimitsCommand: true });
   const session = yield* factory.connect({
@@ -146,6 +182,17 @@ const program = Effect.gen(function* () {
   });
   yield* session.ready;
   const client = session.client;
+  if (seed.dispatch) {
+    // A provider turn: subscribe first, dispatch the message once synchronized, and keep what
+    // streams in until the run settles (or the wait ends). Then read the thread afresh.
+    yield* record(
+      "orchestration.subscribeThread (live turn)",
+      liveTurn(client, seed).pipe(Effect.timeoutOption(seed.turnMs ?? 30000), Effect.map(Option.getOrNull)),
+    );
+    yield* record("orchestration.subscribeThread", untilSynchronized(client["orchestration.subscribeThread"](threadInput(seed.threadId))));
+    yield* record("orchestration.getThreadProjection", client["orchestration.getThreadProjection"]({ threadId: seed.threadId }));
+    return;
+  }
   const steps = [];
   if (seed.threadId) {
     steps.push(
@@ -196,5 +243,5 @@ const program = Effect.gen(function* () {
 );
 
 await Effect.runPromise(program);
-process.stdout.write(JSON.stringify(results) + "\n");
-process.exit(0);
+// Exit only once a large result is flushed to the pipe.
+process.stdout.write(JSON.stringify(results) + "\n", () => process.exit(0));

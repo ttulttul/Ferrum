@@ -30,7 +30,7 @@ pub(crate) fn start(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("the turn names no provider"))?;
     let (events, receiver) = mpsc::unbounded_channel();
-    let sink = Sink::new(events);
+    let sink = Sink::new(events, provider.driver.clone());
     match provider.driver.as_str() {
         CODEX => {
             tokio::spawn(codex::run(spec, provider, cancel, sink));
@@ -47,14 +47,16 @@ pub(crate) fn start(
 #[derive(Clone)]
 pub(crate) struct Sink {
     events: mpsc::UnboundedSender<TurnEvent>,
+    driver: String,
     /// Items reported as running and not finished since, in order.
     open: std::sync::Arc<std::sync::Mutex<Vec<ProviderItem>>>,
 }
 
 impl Sink {
-    fn new(events: mpsc::UnboundedSender<TurnEvent>) -> Self {
+    fn new(events: mpsc::UnboundedSender<TurnEvent>, driver: String) -> Self {
         Self {
             events,
+            driver,
             open: std::sync::Arc::default(),
         }
     }
@@ -94,6 +96,7 @@ impl Sink {
             status: end.status,
             failure: end.failure,
             thread_disposition: end.disposition,
+            driver: Some(self.driver.clone()),
         });
         let _ = self.events.send(TurnEvent::Exited(TurnExit {
             success,
@@ -293,15 +296,26 @@ async fn log_stderr(
 }
 
 /// The failure of a CLI that exited before the turn ended.
-fn crashed(name: &str, status: Option<std::process::ExitStatus>) -> ProviderFailure {
+/// The reference's failure when Codex's app-server closes mid-turn: its
+/// event stream ends, whatever the exit status.
+fn codex_crashed(status: Option<std::process::ExitStatus>) -> ProviderFailure {
+    tracing::warn!(?status, "Codex app-server exited during a turn");
+    ProviderFailure::new(
+        "unknown",
+        "The provider event stream closed unexpectedly. Retry the turn; if it keeps failing, check the provider and server logs.",
+    )
+}
+
+/// The Claude Agent SDK's failure when Claude Code exits mid-turn.
+fn claude_crashed(status: Option<std::process::ExitStatus>) -> ProviderFailure {
     let mut failure = ProviderFailure::new(
         "transport_error",
         match status.and_then(|s| s.code()) {
-            Some(code) => format!("{name} exited unexpectedly with code {code}."),
-            None => format!("{name} exited unexpectedly."),
+            Some(code) => format!("Claude Code process exited with code {code}."),
+            None => "Claude Code process exited unexpectedly.".into(),
         },
     );
-    failure.retryable = Some(true);
+    failure.code = Some("process_exited_nonzero".into());
     failure
 }
 

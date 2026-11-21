@@ -213,27 +213,55 @@ impl crate::orchestration::CommandHost for AppState {
         text: String,
         cancel: oneshot::Receiver<()>,
     ) {
-        let command = if self.provider_command.is_empty() {
-            crate::turn::echo_command()
-        } else {
-            self.provider_command.clone()
-        };
         let env_remove = if self.settings.policy.summary().is_some() {
             vec!["T3CODE_CODEX_LAUNCH_ARGS".into()]
         } else {
             vec![]
         };
-        let spec = crate::workspace::TurnSpec {
-            command,
-            prompt: text,
-            cwd,
-            env_remove,
-            ..Default::default()
-        };
         let runtime = self.runtime.clone();
         crate::runtime::Runtime::spawn(
             &*runtime,
-            Box::pin(crate::turn::launch(self, run, spec, cancel)),
+            Box::pin(async move {
+                // A thread whose provider instance runs Codex or Claude runs
+                // that CLI, as the control plane does; any other runs the
+                // configured command.
+                let provider = match self.settings.internal() {
+                    Ok(settings) => {
+                        let store = self.store.read().await;
+                        store.threads.get(&run.thread_id).and_then(|thread| {
+                            crate::provider_state::provider_turn(
+                                &settings,
+                                &thread.stored_row(),
+                                &thread.provider,
+                            )
+                        })
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not read settings for a turn");
+                        None
+                    }
+                };
+                let mut spec = crate::workspace::TurnSpec {
+                    prompt: text,
+                    cwd,
+                    env_remove,
+                    ..Default::default()
+                };
+                match provider {
+                    Some((provider, env)) => {
+                        spec.provider = Some(provider);
+                        spec.env = env;
+                    }
+                    None => {
+                        spec.command = if self.provider_command.is_empty() {
+                            crate::turn::echo_command()
+                        } else {
+                            self.provider_command.clone()
+                        };
+                    }
+                }
+                crate::turn::launch(self, run, spec, cancel).await
+            }),
         );
     }
     fn close_guest_thread(&self, thread_id: &str) -> Result<(), String> {
