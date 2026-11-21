@@ -27,5 +27,13 @@
   },
   "claude missing": {
     "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events."
+  },
+  "codex interrupt": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "The provider turn has no turnTokenUsage record."
+  },
+  "claude interrupt": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "No Claude attachment budget in nativeMetadata, no turnTokenUsage, model or prompt cache fields on the provider turn, and command output is projected where the reference omits it."
   }
 }

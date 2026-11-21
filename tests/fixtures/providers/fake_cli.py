@@ -53,6 +53,7 @@ SIDE_REPLIES = {
     "account/read": {"account": {"type": "apiKey"}, "requiresOpenaiAuth": False},
     "config/read": {"config": {}, "origins": {}},
     "thread/unsubscribe": {},
+    "turn/interrupt": {},
     **scenario.get("replies", {}),
 }
 # Answers to Claude control requests by subtype; any other succeeds empty.

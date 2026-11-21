@@ -494,15 +494,6 @@
    }
   },
   {
-   "expect": "turn/interrupt"
-  },
-  {
-   "send": {
-    "id": "$id",
-    "result": {}
-   }
-  },
-  {
    "send": {
     "method": "turn/completed",
     "params": {
