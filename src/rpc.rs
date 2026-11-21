@@ -2360,21 +2360,27 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             } else {
                 "missing"
             };
-            let auth_status = if matches!(kind, "github" | "bitbucket") {
-                "unauthenticated"
-            } else {
-                "unknown"
+            let none = json!({"_tag":"None"});
+            let some = |value: &str| json!({"_tag":"Some","value":value});
+            let auth = |status: &str, account: Option<&str>, host: Option<&str>, detail: &str| {
+                // Every key of SourceControlProviderAuth but `accounts` is required, absent as None.
+                json!({"status":status,"account":account.map_or(none.clone(),some),"host":host.map_or(none.clone(),some),"detail":some(detail)})
             };
-            let mut row = if let Some(executable) = executable {
-                json!({"kind":kind,"label":label,"executable":executable,"status":status,"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":{"status":auth_status,"account":{"_tag":"None"},"detail":{"_tag":"Some","value":auth_detail}}})
-            } else {
-                json!({"kind":kind,"label":label,"status":status,"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":{"status":auth_status,"account":{"_tag":"None"},"detail":{"_tag":"Some","value":auth_detail}}})
+            let auth = match (kind, executable, version.is_some()) {
+                // A CLI provider whose version probe failed reports unknown sign-in with its install hint.
+                (_, Some(_), false) => auth("unknown", None, None, install),
+                ("azure-devops", Some(executable), true) => azure_devops_auth(executable, &cwd),
+                ("github", _, _) => {
+                    let mut auth = auth("unauthenticated", None, host, auth_detail);
+                    auth["accounts"] = json!([]);
+                    auth
+                }
+                ("bitbucket", _, _) => auth("unauthenticated", None, host, auth_detail),
+                _ => auth("unknown", None, host, auth_detail),
             };
-            if kind == "github" {
-                row["auth"]["accounts"] = json!([]);
-            }
-            if let Some(host) = host {
-                row["auth"]["host"] = json!({"_tag":"Some","value":host});
+            let mut row = json!({"kind":kind,"label":label,"status":status,"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":auth});
+            if let Some(executable) = executable {
+                row["executable"] = json!(executable);
             }
             row
         };
@@ -3785,5 +3791,106 @@ mod scheduled_task_tests {
                 "maxDeliveryAgeMinutes":null
             })
         );
+    }
+}
+
+/// Azure DevOps sign-in as the reference reads `az account show --query user.name -o tsv`.
+fn azure_devops_auth(executable: &str, cwd: &Path) -> Value {
+    let output = std::process::Command::new(executable)
+        .args(["account", "show", "--query", "user.name", "-o", "tsv"])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .output();
+    let Ok(output) = output else {
+        return json!({"status":"unknown","account":{"_tag":"None"},"host":{"_tag":"None"},"detail":{"_tag":"None"}});
+    };
+    azure_devops_auth_from(
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+fn azure_devops_auth_from(exit_code: Option<i32>, stdout: &str, stderr: &str) -> Value {
+    let option = |value: Option<&str>| {
+        value.map_or(
+            json!({"_tag":"None"}),
+            |value| json!({"_tag":"Some","value":value}),
+        )
+    };
+    let account = stdout
+        .trim()
+        .split('\n')
+        .next()
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+    if exit_code != Some(0) {
+        let combined = [stdout, stderr]
+            .into_iter()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let detail = first_safe_auth_line(&combined)
+            .unwrap_or_else(|| "Run `az login` to authenticate Azure CLI.".to_owned());
+        return json!({"status":"unauthenticated","account":option(None),"host":option(None),"detail":option(Some(&detail))});
+    }
+    if let Some(account) = account {
+        return json!({"status":"authenticated","account":option(Some(account)),"host":option(Some("dev.azure.com")),"detail":option(None)});
+    }
+    json!({"status":"unknown","account":option(None),"host":option(Some("dev.azure.com")),"detail":option(Some("Azure CLI account status could not be parsed."))})
+}
+
+/// The first non-blank line of CLI auth output that is not a token line.
+fn first_safe_auth_line(text: &str) -> Option<String> {
+    static TOKEN_LINE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)^[-\s]*token(?:\s+scopes?)?:").expect("token line pattern")
+    });
+    text.split('\n')
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !TOKEN_LINE.is_match(line))
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod source_control_discovery_tests {
+    use super::*;
+
+    #[test]
+    fn azure_devops_auth_matches_the_reference_parser() {
+        let signed_out = azure_devops_auth_from(
+            Some(1),
+            "",
+            "ERROR: Please run 'az login' to setup account.\n",
+        );
+        assert_eq!(
+            signed_out,
+            json!({"status":"unauthenticated","account":{"_tag":"None"},"host":{"_tag":"None"},"detail":{"_tag":"Some","value":"ERROR: Please run 'az login' to setup account."}})
+        );
+        let silent = azure_devops_auth_from(Some(1), "", "  \n");
+        assert_eq!(
+            silent["detail"]["value"],
+            "Run `az login` to authenticate Azure CLI."
+        );
+        let signed_in = azure_devops_auth_from(Some(0), "ada@example.test\n", "");
+        assert_eq!(
+            signed_in,
+            json!({"status":"authenticated","account":{"_tag":"Some","value":"ada@example.test"},"host":{"_tag":"Some","value":"dev.azure.com"},"detail":{"_tag":"None"}})
+        );
+        let unparsed = azure_devops_auth_from(Some(0), "\n", "");
+        assert_eq!(unparsed["status"], "unknown");
+        assert_eq!(unparsed["host"]["value"], "dev.azure.com");
+    }
+
+    #[test]
+    fn first_safe_auth_line_skips_token_lines() {
+        assert_eq!(
+            first_safe_auth_line("\n  - Token: gho_secret\nToken scopes: repo\n  Logged in\n"),
+            Some("Logged in".to_owned())
+        );
+        assert_eq!(
+            first_safe_auth_line("tokenizer: ok"),
+            Some("tokenizer: ok".to_owned())
+        );
+        assert_eq!(first_safe_auth_line(" \n"), None);
     }
 }
