@@ -73,6 +73,21 @@ pub struct ControlPlane {
     /// Held while an orchestration command checks and commits.
     mutation_lock: tokio::sync::Mutex<()>,
     cancellations: tokio::sync::Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>>,
+    /// Whether the host executes runs ([`with_host_runs`](Self::with_host_runs)).
+    host_runs: bool,
+    /// Runs started since the host last took them.
+    started: Mutex<Vec<StartedRun>>,
+}
+
+/// A run the plane started, for its host to execute: the provider turn for
+/// `text` in `cwd`, stopped when `cancel` resolves. The host records what
+/// the turn produces and how it ended (`RunOutput`, `RunFinished`) with
+/// [`ControlPlane::commit`], then calls [`ControlPlane::release_run`].
+pub struct StartedRun {
+    pub run: crate::Run,
+    pub cwd: String,
+    pub text: String,
+    pub cancel: tokio::sync::oneshot::Receiver<()>,
 }
 impl AuthHost for ControlPlane {
     fn auth(&self) -> &AuthService {
@@ -175,7 +190,35 @@ impl ControlPlane {
             signals,
             mutation_lock: Default::default(),
             cancellations: Default::default(),
+            host_runs: false,
+            started: Default::default(),
         })
+    }
+
+    /// Have the host execute the runs commands start: they queue for
+    /// [`take_started_runs`](Self::take_started_runs) instead of ending at
+    /// once as failed.
+    pub fn with_host_runs(mut self) -> Self {
+        self.host_runs = true;
+        self
+    }
+
+    /// The runs started since the last call, oldest first.
+    pub fn take_started_runs(&self) -> Vec<StartedRun> {
+        std::mem::take(&mut *self.started.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Forget a run's cancellation once the host has recorded its end.
+    pub async fn release_run(&self, run_id: uuid::Uuid) {
+        self.cancellations.lock().await.remove(&run_id);
+    }
+
+    /// Register a cancellation for a run the host carries on after it was
+    /// rebuilt from storage, so interrupting the thread stops it again.
+    pub async fn adopt_run(&self, run_id: uuid::Uuid) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.cancellations.lock().await.insert(run_id, tx);
+        rx
     }
 
     pub fn sequence(&self) -> u64 {
@@ -670,9 +713,9 @@ impl ControlPlane {
 }
 
 /// Orchestration commands as this plane runs them: over its control state,
-/// with no managed policy, default settings and no guest shares. Runs need
-/// a process to execute in, which the plane does not start yet, so a run
-/// that would start ends at once as failed.
+/// with no managed policy, default settings and no guest shares. A run that
+/// starts goes to the host when it executes runs, and otherwise ends at once
+/// as failed.
 struct PlaneCommands<'a> {
     plane: &'a ControlPlane,
     workspace: &'a dyn Workspace,
@@ -712,10 +755,23 @@ impl crate::orchestration::CommandHost for PlaneCommands<'_> {
     fn launch_run(
         self: Arc<Self>,
         run: crate::Run,
-        _cwd: String,
-        _text: String,
-        _cancel: tokio::sync::oneshot::Receiver<()>,
+        cwd: String,
+        text: String,
+        cancel: tokio::sync::oneshot::Receiver<()>,
     ) {
+        if self.plane.host_runs {
+            self.plane
+                .started
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(StartedRun {
+                    run,
+                    cwd,
+                    text,
+                    cancel,
+                });
+            return;
+        }
         if let Ok(mut cancellations) = self.plane.cancellations.try_lock() {
             cancellations.remove(&run.id);
         }
@@ -1216,6 +1272,57 @@ mod tests {
             "Draft"
         );
         assert_eq!(thread[0]["values"][1], json!({"kind":"synchronized"}));
+    }
+
+    #[test]
+    fn hands_started_runs_to_a_host_that_executes_them() {
+        let plane = plane().with_host_runs();
+        let mut connection = owner(&plane);
+        send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":0,"tag":"projects.mutate","payload":{"type":"project.create","commandId":"c1","projectId":"p1","title":"One","workspaceRoot":"/workspace/one"},"headers":[]}),
+        );
+        send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":1,"tag":"orchestration.dispatchCommand","payload":{
+                "type":"thread.create","commandId":"c2","threadId":"t1","projectId":"p1","title":"Draft",
+                "modelSelection":{"instanceId":"codex","model":"fixture"},"runtimeMode":"full-access",
+                "interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"
+            },"headers":[]}),
+        );
+        let dispatched = send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":2,"tag":"orchestration.dispatchCommand","payload":{
+                "type":"message.dispatch","commandId":"c3","threadId":"t1","messageId":"m1","text":"hello",
+                "attachments":[],"createdBy":"user","creationSource":"web","dispatchMode":{"type":"start_immediately"}
+            },"headers":[]}),
+        );
+        assert_eq!(dispatched[0]["exit"]["_tag"], "Success", "{dispatched:?}");
+        let started = plane.take_started_runs();
+        assert_eq!(started.len(), 1);
+        let run = &started[0];
+        assert_eq!(
+            (run.run.thread_id.as_str(), run.text.as_str()),
+            ("t1", "hello")
+        );
+        let status = |plane: &ControlPlane| plane.store_now().threads["t1"].runs[0].status.clone();
+        assert_eq!(status(&plane), "running", "the host ends it, not the plane");
+        assert!(plane.take_started_runs().is_empty());
+
+        plane
+            .commit(Event::RunFinished {
+                run_id: run.run.id,
+                thread_id: "t1".into(),
+                status: "completed".into(),
+                error: None,
+            })
+            .unwrap();
+        now(plane.release_run(run.run.id));
+        assert_eq!(status(&plane), "completed");
+        assert!(now(plane.cancellations.lock()).is_empty());
     }
 
     #[test]
