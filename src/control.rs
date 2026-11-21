@@ -29,9 +29,11 @@ use crate::{
     persistence::DocumentStore,
     rpc_protocol::{js_template_string, request_key, split_socket_frame, Reply},
     rpc_protocol::{SOCKET_FRAME_PARTS_QUERY_PARAM, SOCKET_FRAME_PART_BYTES},
+    runtime::Runtime,
     server_config,
     subscription::{Signal, Subscription},
-    workspace::Workspace,
+    workspace::{RemoteWorkspace, Transport, Workspace},
+    workspace_protocol::{Frame, HelloReply, WireError},
     Event, ServerEvent,
 };
 use axum::{
@@ -56,6 +58,7 @@ pub const WORKSPACE_ROOT: &str = "/workspace";
 /// server's `userdata` directory (auth records, keybindings).
 pub const STATE_DIR: &str = "/home/t3/.t3/userdata";
 
+#[derive(Clone, Default)]
 pub struct Config {
     pub environment_id: String,
     pub label: String,
@@ -63,7 +66,40 @@ pub struct Config {
     pub bootstrap_credential: String,
     /// The port in the session cookie name (`t3_session_<port>`).
     pub cookie_port: u16,
+    /// The executable and leading arguments of a provider turn; the prompt
+    /// follows them. Empty for one that echoes the prompt.
+    pub provider_command: Vec<String>,
 }
+
+/// What the plane runs on: the host's event loop and the workspace it
+/// reaches `t3-agentd` through.
+pub struct Host {
+    pub runtime: Arc<dyn Runtime>,
+    /// Starts disconnected; the host reports its connection with
+    /// [`ControlPlane::workspace_connected`] and feeds it frames with
+    /// [`ControlPlane::workspace_frame`].
+    pub workspace: RemoteWorkspace,
+}
+
+// The plane is shared with the HTTP router, whose state must be `Send` and
+// `Sync`. In the WebAssembly build the runtime and the transport are not,
+// but that build has one thread, so nothing is ever sent or shared across
+// threads.
+#[cfg(all(
+    not(feature = "native"),
+    target_arch = "wasm32",
+    not(target_feature = "atomics")
+))]
+unsafe impl Send for Host {}
+#[cfg(all(
+    not(feature = "native"),
+    target_arch = "wasm32",
+    not(target_feature = "atomics")
+))]
+unsafe impl Sync for Host {}
+
+/// How often a connected workspace needs [`RemoteWorkspace::maintain`].
+pub const MAINTAIN_INTERVAL_MS: i64 = 250;
 
 pub struct ControlPlane {
     config: Config,
@@ -73,6 +109,9 @@ pub struct ControlPlane {
     /// Held while an orchestration command checks and commits.
     mutation_lock: tokio::sync::Mutex<()>,
     cancellations: tokio::sync::Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>>,
+    host: Host,
+    /// Whether changes are waiting for the host's next alarm to deliver.
+    wake: std::sync::atomic::AtomicBool,
 }
 impl AuthHost for ControlPlane {
     fn auth(&self) -> &AuthService {
@@ -161,6 +200,7 @@ impl ControlPlane {
         config: Config,
         documents: Arc<dyn DocumentStore>,
         log: Box<dyn EventLog + Send>,
+        host: Host,
     ) -> anyhow::Result<Self> {
         let auth = AuthService::with_bootstrap(config.bootstrap_credential.clone())
             .with_port(config.cookie_port)
@@ -175,7 +215,78 @@ impl ControlPlane {
             signals,
             mutation_lock: Default::default(),
             cancellations: Default::default(),
+            host,
+            wake: Default::default(),
         })
+    }
+
+    /// The workspace this plane runs turns and workspace methods in.
+    pub fn workspace(&self) -> &RemoteWorkspace {
+        &self.host.workspace
+    }
+
+    /// The host opened a connection to `t3-agentd`: say hello and resume
+    /// the streams this plane still reads. Then keep calling
+    /// [`on_alarm`](Self::on_alarm) when [`next_alarm`](Self::next_alarm)
+    /// says.
+    pub async fn workspace_connected(
+        &self,
+        transport: Arc<dyn Transport>,
+    ) -> Result<HelloReply, WireError> {
+        let hello = self.host.workspace.connected(transport).await;
+        self.schedule();
+        hello
+    }
+
+    /// A frame arrived from `t3-agentd`.
+    pub fn workspace_frame(&self, frame: Frame) {
+        self.host.workspace.receive(frame);
+        self.host.workspace.flush_acks();
+    }
+
+    /// The connection to `t3-agentd` closed. Turns wait for the next one.
+    pub fn workspace_disconnected(&self) {
+        self.host.workspace.disconnected();
+    }
+
+    /// When the host should next call [`on_alarm`](Self::on_alarm), in
+    /// wall-clock milliseconds: now when changes are waiting to be
+    /// delivered, every [`MAINTAIN_INTERVAL_MS`] while the workspace is
+    /// connected, otherwise never.
+    pub fn next_alarm(&self) -> Option<i64> {
+        let now = self.host.runtime.now_ms();
+        if self.wake.load(std::sync::atomic::Ordering::Relaxed) {
+            Some(now)
+        } else if self.host.workspace.is_ready() {
+            Some(now + MAINTAIN_INTERVAL_MS)
+        } else {
+            None
+        }
+    }
+
+    /// The alarm the plane asked for is due: keep the workspace connection
+    /// healthy and ask for the next alarm. The host then delivers what
+    /// changed ([`take_signals`](Self::take_signals) and
+    /// [`deliver`](Self::deliver)) to every connection.
+    pub async fn on_alarm(&self) {
+        self.wake.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.host.workspace.maintain().await;
+        self.host.workspace.flush_acks();
+        self.schedule();
+    }
+
+    /// Ask the runtime for the alarm [`next_alarm`](Self::next_alarm) names.
+    fn schedule(&self) {
+        if let Some(at) = self.next_alarm() {
+            self.host.runtime.set_alarm(at);
+        }
+    }
+
+    /// Something changed outside a client message; ask to deliver it soon.
+    fn wake(&self) {
+        if !self.wake.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            self.host.runtime.set_alarm(self.host.runtime.now_ms());
+        }
     }
 
     pub fn sequence(&self) -> u64 {
@@ -371,8 +482,7 @@ impl ControlPlane {
     /// Handles one text frame from a client and returns the frames to send.
     /// Workspace methods go to `workspace`.
     pub async fn on_message(
-        &self,
-        workspace: &dyn Workspace,
+        self: &Arc<Self>,
         connection: &mut Connection,
         text: &str,
     ) -> Vec<String> {
@@ -395,7 +505,7 @@ impl ControlPlane {
                 }
                 None => Vec::new(),
             },
-            Some("Request") => self.request(workspace, connection, &request).await,
+            Some("Request") => self.request(connection, &request).await,
             other => vec![
                 json!({"_tag":"Defect","defect":format!("Unknown request tag: {}", other.unwrap_or("undefined"))}),
             ],
@@ -403,12 +513,7 @@ impl ControlPlane {
         encode(connection, &frames)
     }
 
-    async fn request(
-        &self,
-        workspace: &dyn Workspace,
-        connection: &mut Connection,
-        request: &Value,
-    ) -> Vec<Value> {
+    async fn request(self: &Arc<Self>, connection: &mut Connection, request: &Value) -> Vec<Value> {
         let id = request.get("id").cloned().unwrap_or(Value::Null);
         let Some(key) = request_key(&id) else {
             let shown = if request.get("id").is_some() {
@@ -423,10 +528,7 @@ impl ControlPlane {
         }
         let method = request["tag"].as_str().unwrap_or("undefined");
         let params = &request["payload"];
-        match self
-            .call(workspace, &connection.principal, method, params)
-            .await
-        {
+        match self.call(&connection.principal, method, params).await {
             Call::Done(reply) => vec![reply.frame(&id)],
             Call::Live(subscription, values) => {
                 self.store(connection, &key, &subscription);
@@ -460,13 +562,7 @@ impl ControlPlane {
         }
     }
 
-    async fn call(
-        &self,
-        workspace: &dyn Workspace,
-        principal: &Session,
-        method: &str,
-        params: &Value,
-    ) -> Call {
+    async fn call(self: &Arc<Self>, principal: &Session, method: &str, params: &Value) -> Call {
         if !crate::rpc_known(method) {
             return Call::Done(Reply::defect(format!("Unknown request tag: {method}")));
         }
@@ -483,11 +579,10 @@ impl ControlPlane {
         }
         if method == "orchestration.dispatchCommand" {
             // Command dispatch takes its host by `Arc`. In the single-threaded
-            // WebAssembly build the workspace need not be `Send`.
+            // WebAssembly build the plane need not be `Send`.
             #[allow(clippy::arc_with_non_send_sync)]
             let host = Arc::new(PlaneCommands {
-                plane: self,
-                workspace,
+                plane: self.clone(),
             });
             return Call::Done(
                 match crate::dispatch_orchestration_command(host, params.clone()).await {
@@ -503,7 +598,7 @@ impl ControlPlane {
             automatic_git_fetch: true,
             ..Default::default()
         };
-        match dispatch::workspace(workspace, &settings, method, params).await {
+        match dispatch::workspace(&self.host.workspace, &settings, method, params).await {
             Some(Ok(value)) => Call::Done(Reply::Success(value)),
             Some(Err(error)) if error["_tag"] == "Die" => Call::Done(Reply::Failure(error)),
             Some(Err(error)) => Call::Done(Reply::Failure(json!({"_tag":"Fail","error":error}))),
@@ -672,22 +767,20 @@ impl ControlPlane {
 }
 
 /// Orchestration commands as this plane runs them: over its control state,
-/// with no managed policy, default settings and no guest shares. Runs need
-/// a process to execute in, which the plane does not start yet, so a run
-/// that would start ends at once as failed.
-struct PlaneCommands<'a> {
-    plane: &'a ControlPlane,
-    workspace: &'a dyn Workspace,
+/// with no managed policy, default settings and no guest shares. Turns run
+/// in its workspace.
+struct PlaneCommands {
+    plane: Arc<ControlPlane>,
 }
 
-impl std::ops::Deref for PlaneCommands<'_> {
+impl std::ops::Deref for PlaneCommands {
     type Target = ControlState;
     fn deref(&self) -> &ControlState {
         &self.plane.state
     }
 }
 
-impl crate::orchestration::CommandHost for PlaneCommands<'_> {
+impl crate::orchestration::CommandHost for PlaneCommands {
     fn mutation_lock(&self) -> &tokio::sync::Mutex<()> {
         &self.plane.mutation_lock
     }
@@ -704,7 +797,7 @@ impl crate::orchestration::CommandHost for PlaneCommands<'_> {
         Ok(default_settings())
     }
     fn workspace(&self) -> &dyn Workspace {
-        self.workspace
+        &self.plane.host.workspace
     }
     fn cancellations(
         &self,
@@ -714,25 +807,52 @@ impl crate::orchestration::CommandHost for PlaneCommands<'_> {
     fn launch_run(
         self: Arc<Self>,
         run: crate::Run,
-        _cwd: String,
-        _text: String,
-        _cancel: tokio::sync::oneshot::Receiver<()>,
+        cwd: String,
+        text: String,
+        cancel: tokio::sync::oneshot::Receiver<()>,
     ) {
-        if let Ok(mut cancellations) = self.plane.cancellations.try_lock() {
-            cancellations.remove(&run.id);
-        }
-        let _ = self.commit_now(Event::RunFinished {
-            run_id: run.id,
-            thread_id: run.thread_id,
-            status: "failed".into(),
-            error: Some("Turns cannot run here yet.".into()),
-        });
+        let plane = self.plane.clone();
+        let command = if plane.config.provider_command.is_empty() {
+            crate::turn::echo_command()
+        } else {
+            plane.config.provider_command.clone()
+        };
+        let spec = crate::workspace::TurnSpec {
+            command,
+            prompt: text,
+            cwd,
+            env_remove: Vec::new(),
+            ..Default::default()
+        };
+        let runtime = plane.host.runtime.clone();
+        runtime.spawn(Box::pin(crate::turn::launch(plane, run, spec, cancel)));
     }
     fn close_guest_thread(&self, _: &str) -> Result<(), String> {
         Err("Guest shares are not available here.".into())
     }
     fn resolve_guest_message(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
         Err("Guest shares are not available here.".into())
+    }
+}
+
+impl crate::turn::TurnHost for ControlPlane {
+    fn workspace(&self) -> &dyn Workspace {
+        &self.host.workspace
+    }
+    fn cancellations(
+        &self,
+    ) -> &tokio::sync::Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>> {
+        &self.cancellations
+    }
+    fn turn_recorded(
+        &self,
+        _run: &crate::Run,
+        _position: Option<crate::workspace::StreamPosition>,
+    ) {
+        self.wake();
+    }
+    fn turn_finished(&self, _run: &crate::Run) {
+        self.wake();
     }
 }
 
@@ -814,19 +934,90 @@ mod tests {
     use super::*;
     use crate::event_log::MemoryLog;
     use crate::persistence::MemoryStore;
+    use crate::runtime::{Task, Wait};
+    use crate::workspace::fake_agentd::FakeAgentd;
+    use crate::workspace_protocol::WireTurnEvent;
+    use futures_util::{stream::FuturesUnordered, StreamExt};
 
-    fn plane() -> ControlPlane {
-        ControlPlane::open(
-            Config {
-                environment_id: "env-test".into(),
-                label: "test".into(),
-                bootstrap_credential: "secret".into(),
-                cookie_port: 3773,
-            },
-            Arc::new(MemoryStore::new()),
-            Box::new(MemoryLog::default()),
+    /// A runtime the test drives by hand: spawned tasks run when
+    /// [`run`](Self::run) polls them, and the alarm is a stored time.
+    #[derive(Default)]
+    struct ManualRuntime {
+        spawned: std::sync::Mutex<Vec<Task>>,
+        tasks: std::sync::Mutex<FuturesUnordered<Task>>,
+        alarm: std::sync::Mutex<Option<i64>>,
+    }
+
+    impl Runtime for ManualRuntime {
+        fn spawn(&self, task: Task) {
+            self.spawned.lock().unwrap().push(task);
+        }
+        fn sleep(&self, _: std::time::Duration) -> Wait {
+            Box::pin(futures_util::future::ready(()))
+        }
+        fn yield_now(&self) -> Wait {
+            Box::pin(futures_util::future::ready(()))
+        }
+        fn set_alarm(&self, at_ms: i64) {
+            *self.alarm.lock().unwrap() = Some(at_ms);
+        }
+        fn push(&self, _: crate::runtime::ConnId, _: Vec<Value>) {}
+        fn connections(&self) -> Vec<crate::runtime::ConnId> {
+            Vec::new()
+        }
+    }
+
+    impl ManualRuntime {
+        /// Poll every task until none can make progress.
+        fn run(&self) {
+            let mut context = std::task::Context::from_waker(futures_util::task::noop_waker_ref());
+            loop {
+                let spawned = std::mem::take(&mut *self.spawned.lock().unwrap());
+                let mut tasks = self.tasks.lock().unwrap();
+                tasks.extend(spawned);
+                let progressed = matches!(
+                    tasks.poll_next_unpin(&mut context),
+                    std::task::Poll::Ready(Some(()))
+                );
+                drop(tasks);
+                if !progressed && self.spawned.lock().unwrap().is_empty() {
+                    return;
+                }
+            }
+        }
+
+        fn take_alarm(&self) -> Option<i64> {
+            self.alarm.lock().unwrap().take()
+        }
+    }
+
+    fn config() -> Config {
+        Config {
+            environment_id: "env-test".into(),
+            label: "test".into(),
+            bootstrap_credential: "secret".into(),
+            cookie_port: 3773,
+            provider_command: vec!["provider".into()],
+        }
+    }
+
+    fn host(runtime: &Arc<ManualRuntime>) -> Host {
+        Host {
+            runtime: runtime.clone(),
+            workspace: RemoteWorkspace::default(),
+        }
+    }
+
+    fn plane() -> Arc<ControlPlane> {
+        Arc::new(
+            ControlPlane::open(
+                config(),
+                Arc::new(MemoryStore::new()),
+                Box::new(MemoryLog::default()),
+                host(&Arc::default()),
+            )
+            .unwrap(),
         )
-        .unwrap()
     }
 
     fn owner(plane: &ControlPlane) -> Connection {
@@ -855,13 +1046,8 @@ mod tests {
             .collect()
     }
 
-    fn send(plane: &ControlPlane, connection: &mut Connection, frame: Value) -> Vec<Value> {
-        let workspace = crate::workspace::RemoteWorkspace::default();
-        parse(now(plane.on_message(
-            &workspace,
-            connection,
-            &frame.to_string(),
-        )))
+    fn send(plane: &Arc<ControlPlane>, connection: &mut Connection, frame: Value) -> Vec<Value> {
+        parse(now(plane.on_message(connection, &frame.to_string())))
     }
 
     #[test]
@@ -977,7 +1163,7 @@ mod tests {
         documents: Arc<crate::persistence::MemoryStore>,
         log: SharedLog,
         sockets: BTreeMap<u64, String>,
-        plane: Option<ControlPlane>,
+        plane: Option<Arc<ControlPlane>>,
     }
 
     impl SuspendingHost {
@@ -990,7 +1176,7 @@ mod tests {
             }
         }
 
-        fn plane(&mut self) -> &ControlPlane {
+        fn plane(&mut self) -> &Arc<ControlPlane> {
             let (documents, log) = (self.documents.clone(), self.log.clone());
             let open: Vec<Connection> = self
                 .sockets
@@ -998,20 +1184,12 @@ mod tests {
                 .map(|stored| serde_json::from_str(stored).unwrap())
                 .collect();
             self.plane.get_or_insert_with(|| {
-                let plane = ControlPlane::open(
-                    Config {
-                        environment_id: "env-test".into(),
-                        label: "test".into(),
-                        bootstrap_credential: "secret".into(),
-                        cookie_port: 3773,
-                    },
-                    documents,
-                    Box::new(log),
-                )
-                .unwrap();
+                let plane =
+                    ControlPlane::open(config(), documents, Box::new(log), host(&Arc::default()))
+                        .unwrap();
                 // As the host does when it is rebuilt from storage.
                 plane.prune_streams(&open);
-                plane
+                Arc::new(plane)
             })
         }
 
@@ -1041,12 +1219,9 @@ mod tests {
         /// socket. Returns the frames sent, by socket.
         fn message(&mut self, socket: u64, frame: Value) -> Vec<(u64, Value)> {
             let mut connection: Connection = serde_json::from_str(&self.sockets[&socket]).unwrap();
-            let workspace = crate::workspace::RemoteWorkspace::default();
-            let replies = parse(now(self.plane().on_message(
-                &workspace,
-                &mut connection,
-                &frame.to_string(),
-            )));
+            let replies = parse(now(self
+                .plane()
+                .on_message(&mut connection, &frame.to_string())));
             self.sockets
                 .insert(socket, serde_json::to_string(&connection).unwrap());
             let mut sent: Vec<_> = replies.into_iter().map(|frame| (socket, frame)).collect();
@@ -1360,14 +1535,10 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             log.append(record).unwrap();
         }
         let reopened = ControlPlane::open(
-            Config {
-                environment_id: "env-test".into(),
-                label: "test".into(),
-                bootstrap_credential: "secret".into(),
-                cookie_port: 3773,
-            },
+            config(),
             plane.documents.clone(),
             Box::new(log),
+            host(&Arc::default()),
         )
         .unwrap();
         assert_eq!(reopened.sequence(), 1);
@@ -1377,5 +1548,200 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             "sessions survive through the document store"
         );
         assert!(reopened.store_now().projects.contains_key("p1"));
+    }
+
+    fn thread_runs(plane: &ControlPlane) -> Vec<crate::Run> {
+        plane.store_now().threads["t1"].runs.clone()
+    }
+
+    fn output(plane: &ControlPlane) -> Vec<String> {
+        plane
+            .log
+            .try_lock()
+            .unwrap()
+            .load()
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| match record.event {
+                Event::RunOutput { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A project and a thread, created as a client would.
+    fn seed(plane: &Arc<ControlPlane>, connection: &mut Connection) {
+        send(
+            plane,
+            connection,
+            json!({"_tag":"Request","id":"p","tag":"projects.mutate","payload":{"type":"project.create","commandId":"c1","projectId":"p1","title":"One","workspaceRoot":"/workspace/one"},"headers":[]}),
+        );
+        let created = send(
+            plane,
+            connection,
+            json!({"_tag":"Request","id":"t","tag":"orchestration.dispatchCommand","payload":{
+                "type":"thread.create","commandId":"c2","threadId":"t1","projectId":"p1","title":"Draft",
+                "modelSelection":{"instanceId":"codex","model":"fixture"},"runtimeMode":"full-access",
+                "interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"
+            },"headers":[]}),
+        );
+        assert_eq!(created[0]["exit"]["_tag"], "Success", "{created:?}");
+    }
+
+    fn dispatch_message(plane: &Arc<ControlPlane>, connection: &mut Connection, text: &str) {
+        let sent = send(
+            plane,
+            connection,
+            json!({"_tag":"Request","id":"m","tag":"orchestration.dispatchCommand","payload":{
+                "type":"message.dispatch","commandId":"c3","threadId":"t1","messageId":"message:1","text":text,
+                "attachments":[],"createdBy":"user","creationSource":"web","dispatchMode":{"type":"start_immediately"}
+            },"headers":[]}),
+        );
+        assert_eq!(sent[0]["exit"]["_tag"], "Success", "{sent:?}");
+    }
+
+    #[test]
+    fn runs_a_turn_in_its_workspace_and_acknowledges_what_it_records() {
+        let runtime = Arc::new(ManualRuntime::default());
+        let plane = Arc::new(
+            ControlPlane::open(
+                config(),
+                Arc::new(MemoryStore::new()),
+                Box::new(MemoryLog::default()),
+                host(&runtime),
+            )
+            .unwrap(),
+        );
+        let agentd = Arc::new(FakeAgentd::default());
+        now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+        assert!(
+            runtime.take_alarm().is_some(),
+            "a connected workspace is maintained"
+        );
+        let mut connection = owner(&plane);
+        seed(&plane, &mut connection);
+        let thread = send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":"s","tag":"orchestration.subscribeThread","payload":{"threadId":"t1"},"headers":[]}),
+        );
+        assert_eq!(thread[0]["_tag"], "Chunk");
+        plane.take_signals();
+
+        dispatch_message(&plane, &mut connection, "hello");
+        runtime.run();
+        let turns = agentd.turns();
+        let (&stream, start) = turns
+            .iter()
+            .next()
+            .expect("the turn started in the workspace");
+        assert_eq!(start.command, vec!["provider".to_string()]);
+        assert_eq!(start.prompt, "hello");
+        assert_eq!(start.cwd, "/workspace/one");
+
+        agentd.emit(
+            stream,
+            WireTurnEvent::Stdout {
+                text: "hi\n".into(),
+            },
+        );
+        agentd.emit(
+            stream,
+            WireTurnEvent::Stderr {
+                text: "note\n".into(),
+            },
+        );
+        // Nothing is acknowledged before it is recorded.
+        assert_eq!(agentd.acked(stream), 0);
+        runtime.run();
+        assert_eq!(output(&plane), vec!["hi\n", "note\n"]);
+        assert_eq!(agentd.acked(stream), 2);
+        // The host is asked to deliver what the turn recorded.
+        let due = runtime
+            .take_alarm()
+            .expect("an alarm to deliver the output");
+        assert!(due <= plane.host.runtime.now_ms());
+        now(plane.on_alarm());
+        let signals = plane.take_signals();
+        let pushed = parse(now(plane.deliver(&connection, &signals)));
+        assert!(
+            pushed.iter().any(|frame| frame["requestId"] == "s"),
+            "{pushed:?}"
+        );
+
+        agentd.emit(
+            stream,
+            WireTurnEvent::Exited {
+                success: true,
+                cancelled: false,
+                status: "exit status: 0".into(),
+            },
+        );
+        runtime.run();
+        let runs = thread_runs(&plane);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "completed");
+        assert!(
+            agentd.turns_acked(),
+            "the end is acknowledged once recorded"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_cannot_start_ends_as_failed() {
+        let runtime = Arc::new(ManualRuntime::default());
+        let plane = Arc::new(
+            ControlPlane::open(
+                config(),
+                Arc::new(MemoryStore::new()),
+                Box::new(MemoryLog::default()),
+                host(&runtime),
+            )
+            .unwrap(),
+        );
+        let mut connection = owner(&plane);
+        seed(&plane, &mut connection);
+        dispatch_message(&plane, &mut connection, "hello");
+        runtime.run();
+        let runs = thread_runs(&plane);
+        assert_eq!(runs[0].status, "failed");
+        assert_eq!(
+            runs[0].error.as_deref(),
+            Some("the workspace is not connected")
+        );
+        assert!(runtime.take_alarm().is_some(), "the failure is delivered");
+    }
+
+    #[test]
+    fn stopping_a_thread_cancels_its_turn_on_the_next_alarm() {
+        let runtime = Arc::new(ManualRuntime::default());
+        let plane = Arc::new(
+            ControlPlane::open(
+                config(),
+                Arc::new(MemoryStore::new()),
+                Box::new(MemoryLog::default()),
+                host(&runtime),
+            )
+            .unwrap(),
+        );
+        let agentd = Arc::new(FakeAgentd::default());
+        now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+        let mut connection = owner(&plane);
+        seed(&plane, &mut connection);
+        dispatch_message(&plane, &mut connection, "hello");
+        runtime.run();
+        let stopped = send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":"x","tag":"orchestration.dispatchCommand","payload":{
+                "type":"thread.stop","commandId":"c4","threadId":"t1","createdBy":"user","creationSource":"web"
+            },"headers":[]}),
+        );
+        assert_eq!(stopped[0]["exit"]["_tag"], "Success", "{stopped:?}");
+        // Without a task of its own to wait on the cancellation, the
+        // workspace forwards it when the host calls back.
+        now(plane.on_alarm());
+        runtime.run();
+        assert_eq!(thread_runs(&plane)[0].status, "cancelled");
     }
 }
