@@ -1045,6 +1045,32 @@ impl mcp_oauth::McpHost for AppState {
     fn project_row(&self, row: &serde_json::Value) -> serde_json::Value {
         crate::repository_identity::with_identity(row)
     }
+    fn descriptor(&self) -> serde_json::Value {
+        environment_http::descriptor_value(self)
+    }
+    fn settings(&self) -> serde_json::Value {
+        self.settings.internal().unwrap_or_default()
+    }
+    fn providers(&self) -> serde_json::Value {
+        let settings = mcp_oauth::McpHost::settings(self);
+        crate::server_config::providers::list(self, &settings, &serde_json::Value::Null)
+    }
+    fn dispatch(
+        self: &Arc<Self>,
+        command: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<u64, serde_json::Value>> {
+        Box::pin(crate::dispatch_orchestration_command(self.clone(), command))
+    }
+    fn mutate_project(
+        self: &Arc<Self>,
+        command: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, serde_json::Value>> {
+        let state = self.clone();
+        Box::pin(async move { crate::projects::mutate(&state, &command).await })
+    }
+    fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait {
+        crate::runtime::Runtime::sleep(&*self.runtime, duration)
+    }
 }
 
 impl access_http::AuthHost for AppState {

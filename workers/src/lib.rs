@@ -101,6 +101,17 @@ impl DurableObject for T3EnvironmentDO {
             .map(|v| v.to_string())
             .unwrap_or_else(|_| "T3 Cloud".into());
         let documents = storage::SqlDocuments(sql.clone());
+        // Settings a new environment starts with, as the native server's
+        // settings.json, when it has none yet.
+        if let Ok(initial) = env.var("T3_INITIAL_SETTINGS") {
+            use t3code_server::persistence::{DocumentStore, WriteMode};
+            let path = std::path::Path::new(t3code_server::control::STATE_DIR).join("settings.json");
+            if matches!(documents.read_optional(&path), Ok(None)) {
+                documents
+                    .write(&path, initial.to_string().as_bytes(), WriteMode::Replace)
+                    .expect("write initial settings");
+            }
+        }
         storage::migrate_auth_records(
             &sql,
             &documents,

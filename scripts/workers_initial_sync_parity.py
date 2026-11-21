@@ -32,11 +32,13 @@ from parity_harness import free_port, managed_server, session_cookie  # noqa: E4
 
 
 @contextlib.contextmanager
-def wrangler_dev(command, port, credential, log):
+def wrangler_dev(command, port, credential, log, variables=()):
     # --var keeps the per-run credential out of wrangler.toml; it only reaches
     # the local development server.
     argv = shlex.split(command) + ["dev", "--port", str(port), "--ip", "127.0.0.1",
                                    "--var", f"T3_BOOTSTRAP_CREDENTIAL:{credential}"]
+    for variable in variables:
+        argv += ["--var", variable]
     process = subprocess.Popen(argv, cwd=ROOT / "workers", stdout=log, stderr=subprocess.STDOUT,
                                stdin=subprocess.DEVNULL, start_new_session=True)
     url = f"http://127.0.0.1:{port}"

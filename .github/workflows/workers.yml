@@ -52,3 +52,9 @@ jobs:
             --rust-command "$GITHUB_WORKSPACE/target/debug/t3code-server" \
             --reference-root "$GITHUB_WORKSPACE/reference" \
             --wrangler "npx --yes wrangler@4.166.0"
+      - name: Link to the WebAssembly build as the reference links another machine
+        run: |
+          python3 scripts/workers_peer_link_parity.py \
+            --rust-command "$GITHUB_WORKSPACE/target/debug/t3code-server" \
+            --reference-root "$GITHUB_WORKSPACE/reference" \
+            --wrangler "npx --yes wrangler@4.166.0"

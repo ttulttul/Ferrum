@@ -144,7 +144,11 @@ pub fn ControlPlane::prune_streams<'a>(&self, open: impl IntoIterator<Item = &'a
     -> usize
 ```
 
-- Serve HTTP with `router()`. It answers everything except `/ws`.
+- Serve HTTP with `router()`. It answers everything except `/ws`. That includes
+  the MCP sign-in (`/oauth/mcp/*`, `/.well-known/oauth-*`) and `/mcp`, whose
+  thread and project tools dispatch orchestration commands as
+  `orchestration.dispatchCommand` does. Another server links to this one
+  through them when `linkedEnvironmentsEnabled` is on in its settings.
 - On a `/ws` upgrade, call `authorize_socket`. On success, keep the
   `Connection` with the socket. It is small and serializable, so a host that
   suspends between messages can store it with the socket. On failure, send
@@ -218,7 +222,9 @@ added later are recorded the same way.
 
 `workers/` builds the plane for `wasm32-unknown-unknown`. Its runtime spawns
 tasks on the JavaScript event loop and keeps one storage alarm, and its
-alarm handler calls `on_alarm` and then delivers. It holds a
+alarm handler calls `on_alarm` and then delivers. Its optional `T3_INITIAL_SETTINGS`
+variable is written to `settings.json` when the environment has none, for
+example `{"linkedEnvironmentsEnabled":true}` to let other servers link to it. It holds a
 `RemoteWorkspace` with no transport, so workspace methods answer as
 unavailable and a turn ends as failed. A host that embeds the library adds
 the transport as described above.

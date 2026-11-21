@@ -133,6 +133,40 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
     fn control_state(&self) -> &ControlState {
         &self.state
     }
+    fn descriptor(&self) -> Value {
+        ControlPlane::descriptor(self)
+    }
+    fn settings(&self) -> Value {
+        ControlPlane::settings(self)
+    }
+    fn providers(&self) -> Value {
+        self.config_snapshot(&Value::Null)["providers"].take()
+    }
+    fn dispatch(
+        self: &Arc<Self>,
+        command: Value,
+    ) -> crate::mcp_oauth::HostFuture<Result<u64, Value>> {
+        // As `orchestration.dispatchCommand` runs it; see `call`.
+        #[allow(clippy::arc_with_non_send_sync)]
+        let host = Arc::new(PlaneCommands {
+            plane: self.clone(),
+        });
+        Box::pin(crate::dispatch_orchestration_command(host, command))
+    }
+    fn mutate_project(
+        self: &Arc<Self>,
+        command: Value,
+    ) -> crate::mcp_oauth::HostFuture<Result<Value, Value>> {
+        let reply = match self.create_project(&command) {
+            Reply::Success(row) => Ok(row),
+            Reply::Failure(mut error) => Err(error["error"].take()),
+            _ => Err(json!({"message":"Failed to mutate project."})),
+        };
+        Box::pin(futures_util::future::ready(reply))
+    }
+    fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait {
+        self.host.runtime.sleep(duration)
+    }
 }
 impl std::ops::Deref for ControlPlane {
     type Target = ControlState;
@@ -1855,6 +1889,192 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             json!({"jsonrpc":"2.0","id":3,"method":"ping"}),
         );
         assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn a_peer_link_launches_and_follows_a_thread_over_mcp() {
+        let documents = Arc::new(MemoryStore::new());
+        enable_linked_environments(&documents);
+        let (_, token) = peer_link_sign_in(&documents, "auto");
+        let runtime = Arc::new(ManualRuntime::default());
+        let plane = ControlPlane::open(
+            config(),
+            documents.clone(),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
+        let agentd = Arc::new(FakeAgentd::default());
+        now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+        plane
+            .commit(Event::ProjectCreated(crate::Project {
+                id: "p1".into(),
+                name: "One".into(),
+                path: "/workspace/one".into(),
+                created_at: crate::now(),
+            }))
+            .unwrap();
+        let bearer = format!("Bearer {token}");
+        let rpc = |session: Option<&str>, limit: Option<&str>, method: &str, params: Value| {
+            let mut headers = vec![
+                ("authorization", bearer.as_str()),
+                ("content-type", "application/json"),
+            ];
+            if let Some(session) = session {
+                headers.push(("mcp-session-id", session));
+            }
+            if let Some(limit) = limit {
+                headers.push(("t3-mode-limit", limit));
+            }
+            let body = json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
+            http(&plane, "POST", "/mcp", &headers, body.to_string())
+        };
+        let (_, headers, _) = rpc(
+            None,
+            None,
+            "initialize",
+            json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t3code-peer","version":"1"}}),
+        );
+        let session = headers["mcp-session-id"].to_str().unwrap().to_owned();
+        let tool = |limit: Option<&str>, name: &str, arguments: Value| -> Value {
+            let (status, _, reply) = rpc(
+                Some(&session),
+                limit,
+                "tools/call",
+                json!({"name":name,"arguments":arguments}),
+            );
+            assert_eq!(status, 200, "{reply}");
+            let result = &reply["result"];
+            if result["isError"] == true {
+                return serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            }
+            result["structuredContent"].clone()
+        };
+
+        let (_, _, listed) = rpc(Some(&session), None, "tools/list", json!({}));
+        let names: Vec<&str> = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for name in [
+            "orchestrator_capabilities",
+            "t3_thread_launch",
+            "t3_thread_read",
+            "t3_thread_wait",
+            "t3_thread_send",
+            "t3_project_list",
+        ] {
+            assert!(names.contains(&name), "{name} in {names:?}");
+        }
+        let capabilities = tool(None, "orchestrator_capabilities", json!({}));
+        assert_eq!(capabilities["runtimeMode"], "auto");
+        assert!(capabilities["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["providerInstanceId"] == "codex"));
+
+        // The link was approved for auto, so full access is refused.
+        let refused = tool(
+            None,
+            "t3_thread_launch",
+            json!({"projectId":"p1","title":"Too broad","runtimeMode":"full-access",
+                "modelSelection":{"instanceId":"codex","model":"fixture"}}),
+        );
+        assert_eq!(
+            refused["code"], "runtime_mode_escalation_denied",
+            "{refused}"
+        );
+
+        let launched = tool(
+            None,
+            "t3_thread_launch",
+            json!({"projectId":"p1","title":"Remote work","message":"hello",
+                "modelSelection":{"instanceId":"codex","model":"fixture"},"clientRequestId":"k1"}),
+        );
+        let thread = launched["threadId"].as_str().expect("a thread").to_owned();
+        assert_eq!(launched["projectId"], "p1");
+        assert!(launched["runId"].is_string(), "{launched}");
+        assert_eq!(
+            launched["link"],
+            format!("[Remote work](t3-thread://v2/env-test/{thread})")
+        );
+        // A retry with the same key reports the same launch.
+        let again = tool(
+            None,
+            "t3_thread_launch",
+            json!({"projectId":"p1","title":"Remote work","message":"hello",
+                "modelSelection":{"instanceId":"codex","model":"fixture"},"clientRequestId":"k1"}),
+        );
+        assert_eq!(again["runId"], launched["runId"]);
+
+        runtime.run();
+        let turns = agentd.turns();
+        assert_eq!(turns.len(), 1, "one turn, the retry started none");
+        let (&stream, start) = turns.iter().next().unwrap();
+        assert_eq!(start.prompt, "hello");
+        assert_eq!(start.cwd, "/workspace/one");
+        let waiting = tool(
+            None,
+            "t3_thread_wait",
+            json!({"threadId":thread,"timeoutMs":1}),
+        );
+        assert_eq!(waiting["timedOut"], true, "{waiting}");
+        agentd.emit(
+            stream,
+            WireTurnEvent::Exited {
+                success: true,
+                cancelled: false,
+                status: "exit status: 0".into(),
+            },
+        );
+        runtime.run();
+        let waited = tool(None, "t3_thread_wait", json!({"threadId":thread}));
+        assert_eq!(
+            (waited["status"].as_str(), waited["timedOut"].as_bool()),
+            (Some("completed"), Some(false)),
+            "{waited}"
+        );
+        assert_eq!(waited["runId"], launched["runId"]);
+
+        let read = tool(None, "t3_thread_read", json!({"threadId":thread}));
+        assert_eq!(read["thread"]["runtimeMode"], "auto");
+        assert_eq!(read["thread"]["creationSource"], "mcp");
+        assert_eq!(read["thread"]["status"], "completed");
+        assert_eq!(read["recentRuns"][0]["status"], "completed");
+        assert_eq!(read["items"][0]["type"], "user_message", "{read}");
+        assert_eq!(read["items"][0]["text"], "hello");
+
+        // The caller's own modes narrow what it may do.
+        let narrowed = tool(
+            Some("approval-required/default"),
+            "t3_thread_send",
+            json!({"threadId":thread,"message":"more"}),
+        );
+        assert_eq!(narrowed["code"], "runtime_mode_escalation_denied");
+        let sent = tool(
+            None,
+            "t3_thread_send",
+            json!({"threadId":thread,"message":"more"}),
+        );
+        assert_eq!(sent["delivery"], "started", "{sent}");
+        runtime.run();
+        assert_eq!(agentd.turns().len(), 2);
+        let interrupted = tool(None, "t3_thread_interrupt", json!({"threadId":thread}));
+        assert_eq!(
+            interrupted["status"], "interrupt_requested",
+            "{interrupted}"
+        );
+        assert_eq!(interrupted["runId"], sent["runId"]);
+
+        let listed = tool(None, "t3_thread_list", json!({"allProjects":true}));
+        assert_eq!(listed["total"], 1);
+        assert_eq!(listed["threads"][0]["threadId"], thread.as_str());
+        let environment = tool(None, "t3_environment_read", json!({}));
+        assert_eq!(environment["environmentId"], "env-test");
     }
 
     #[test]
