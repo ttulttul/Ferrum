@@ -1,0 +1,165 @@
+{
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "codexHome": "/tmp/codex-home",
+     "platformFamily": "unix",
+     "platformOs": "linux",
+     "userAgent": "codex_cli_rs/0.170.0"
+    }
+   }
+  },
+  {
+   "expect": "thread/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     },
+     "model": "gpt-6.1-sol",
+     "cwd": "/workspace",
+     "approvalPolicy": "never",
+     "sandbox": {
+      "type": "dangerFullAccess"
+     },
+     "approvalsReviewer": "user",
+     "modelProvider": "openai"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "thread/started",
+    "params": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     }
+    }
+   }
+  },
+  {
+   "expect": "turn/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": null,
+      "durationMs": null
+     }
+    },
+    "emittedAtMs": 1795225881428
+   }
+  },
+  {
+   "send": {
+    "id": "input-1",
+    "method": "item/tool/requestUserInput",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "call_q",
+     "questions": [
+      {
+       "id": "color",
+       "header": "Color",
+       "question": "Which color?",
+       "isOther": false,
+       "isSecret": false,
+       "options": [
+        {
+         "label": "Red",
+         "description": "Warm"
+        },
+        {
+         "label": "Blue",
+         "description": "Cool"
+        }
+       ]
+      }
+     ],
+     "isBlocking": true
+    }
+   }
+  },
+  {
+   "expectReply": "input-1"
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  }
+ ]
+}

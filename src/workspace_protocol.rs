@@ -108,6 +108,9 @@ pub mod op {
     pub const TURN_START: &str = "turn.start";
     /// `{stream}`: stop a turn's process. Its stream ends after `exited`.
     pub const TURN_CANCEL: &str = "turn.cancel";
+    /// [`super::TurnRespond`]: answer a runtime request of a running turn.
+    /// Answers `true` when a turn waited for it.
+    pub const TURN_RESPOND: &str = "turn.respond";
     /// `{input}`: `preview.stopLocalServer`.
     pub const PROC_STOP_LOCAL_SERVER: &str = "proc.stopLocalServer";
 
@@ -382,6 +385,16 @@ pub struct TurnStart {
     pub env: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<crate::workspace::ProviderTurn>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub turn_id: String,
+}
+
+/// `turn.respond`'s arguments.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnRespond {
+    pub turn_id: String,
+    pub response: crate::workspace::provider::RuntimeResponse,
 }
 
 impl From<crate::workspace::TurnSpec> for TurnStart {
@@ -393,6 +406,7 @@ impl From<crate::workspace::TurnSpec> for TurnStart {
             env_remove: spec.env_remove,
             env: spec.env,
             provider: spec.provider,
+            turn_id: spec.turn_id,
         }
     }
 }
@@ -406,6 +420,7 @@ impl From<TurnStart> for crate::workspace::TurnSpec {
             env_remove: start.env_remove,
             env: start.env,
             provider: start.provider,
+            turn_id: start.turn_id,
         }
     }
 }

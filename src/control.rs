@@ -407,6 +407,7 @@ impl ControlPlane {
         let mut spec = crate::workspace::TurnSpec {
             prompt,
             cwd,
+            turn_id: run.id.to_string(),
             ..Default::default()
         };
         match provider {

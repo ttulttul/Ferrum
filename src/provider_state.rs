@@ -5,8 +5,8 @@
 //! into the reference's projection records.
 use crate::workspace::provider::{self, ProviderTurn};
 use crate::workspace::provider::{
-    PlanStep, ProviderEvent, ProviderFailure, ProviderItem, ThreadDisposition, TokenUsage,
-    TurnStatus,
+    PlanStep, ProviderEvent, ProviderFailure, ProviderItem, RuntimeRequestOpen, ThreadDisposition,
+    TokenUsage, TurnStatus,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -66,6 +66,30 @@ pub struct RunRecord {
     pub items: Vec<ItemRecord>,
     pub plan: Option<PlanRecord>,
     pub ended_at: Option<u64>,
+    /// Runtime requests the CLI made, in order.
+    pub requests: Vec<RequestRecord>,
+}
+
+/// A runtime request and what became of it.
+#[derive(Clone, Debug)]
+pub struct RequestRecord {
+    pub request: RuntimeRequestOpen,
+    pub created_at: u64,
+    /// `pending`, `resolved` or `cancelled`.
+    pub status: &'static str,
+    pub resolved_at: Option<u64>,
+    pub decision: Option<String>,
+    pub feedback: Option<String>,
+    pub answers: Option<Value>,
+    /// When the answer could not be handed to the turn.
+    pub delivery_failed_at: Option<u64>,
+}
+
+impl RequestRecord {
+    /// Whether the request still waits for the user.
+    pub fn pending(&self) -> bool {
+        self.status == "pending"
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +128,7 @@ impl ProviderState {
             items: Vec::new(),
             plan: None,
             ended_at: None,
+            requests: Vec::new(),
         });
         match event {
             ProviderEvent::ProviderThread {
@@ -216,8 +241,89 @@ impl ProviderState {
                     thread.updated_at = at;
                 }
             }
+            ProviderEvent::RuntimeRequestOpened { request } => {
+                record.requests.push(RequestRecord {
+                    request: request.clone(),
+                    created_at: at,
+                    status: "pending",
+                    resolved_at: None,
+                    decision: None,
+                    feedback: None,
+                    answers: None,
+                    delivery_failed_at: None,
+                });
+                // A question or approval takes the next item slot, as the
+                // reference orders it among the turn's items.
+                let kind = if request.kind == "user_input" {
+                    "user_input_request"
+                } else {
+                    "approval_request"
+                };
+                record.items.push(ItemRecord {
+                    item: ProviderItem::new(format!("request:{}", request.id), kind, "waiting"),
+                    first_at: at,
+                    updated_at: at,
+                });
+            }
+            ProviderEvent::RuntimeRequestAnswered {
+                id,
+                decision,
+                feedback,
+                answers,
+            } => {
+                if let Some(request) = record
+                    .requests
+                    .iter_mut()
+                    .find(|known| &known.request.id == id && known.pending())
+                {
+                    request.status = "resolved";
+                    request.resolved_at = Some(at);
+                    request.decision = decision.clone();
+                    request.feedback = feedback.clone();
+                    request.answers = answers.clone();
+                }
+            }
+            ProviderEvent::RuntimeRequestDeliveryFailed { id } => {
+                if let Some(request) = record
+                    .requests
+                    .iter_mut()
+                    .find(|known| &known.request.id == id && known.delivery_failed_at.is_none())
+                {
+                    request.delivery_failed_at = Some(at);
+                    record.items.push(ItemRecord {
+                        item: ProviderItem::new(
+                            format!("delivery:{id}"),
+                            "approval_request",
+                            "failed",
+                        ),
+                        first_at: at,
+                        updated_at: at,
+                    });
+                }
+            }
+            ProviderEvent::RuntimeRequestClosed { id, .. } => {
+                if let Some(request) = record
+                    .requests
+                    .iter_mut()
+                    .find(|known| &known.request.id == id && known.pending())
+                {
+                    request.status = "cancelled";
+                    request.resolved_at = Some(at);
+                }
+            }
             ProviderEvent::CommandOutputDelta { .. } | ProviderEvent::RuntimeRequest { .. } => {}
         }
+    }
+
+    /// The run and record of the request `id`.
+    pub fn request(&self, id: &str) -> Option<(Uuid, &RequestRecord)> {
+        self.runs.iter().find_map(|(run, record)| {
+            record
+                .requests
+                .iter()
+                .find(|request| request.request.id == id)
+                .map(|request| (*run, request))
+        })
     }
 
     /// The native thread a turn of `driver` resumes.
@@ -284,6 +390,7 @@ pub(crate) fn provider_turn(
             .to_owned(),
         reasoning_effort,
         resume: state.resume_for(driver),
+        runtime_mode: row["runtimeMode"].as_str().unwrap_or_default().to_owned(),
     };
     Some((turn, env))
 }

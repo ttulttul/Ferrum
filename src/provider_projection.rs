@@ -11,7 +11,7 @@
 //! first slot and each later item the next free one, in the order the items
 //! were first seen.
 use crate::{
-    provider_state::{ItemRecord, RunRecord, Terminal},
+    provider_state::{ItemRecord, RequestRecord, RunRecord, Terminal},
     thread_projection::{iso, uri_component},
     workspace::provider::{self, TurnStatus},
     Run, Thread,
@@ -59,8 +59,100 @@ pub(crate) struct ProviderRecords {
     pub provider_turns: Vec<Value>,
     pub messages: Vec<Value>,
     pub plans: Vec<Value>,
+    pub runtime_requests: Vec<Value>,
     /// Turn items by the index of their run, in the order they take slots.
     pub items: Vec<(usize, Value)>,
+}
+
+/// The reference's RUNTIME_REQUEST_DELIVERY_FAILED_MESSAGE.
+const DELIVERY_FAILED: &str = "T3 Code could not confirm that your answer reached the agent. If the run stays stuck, stop it and try again.";
+
+/// What the server says when a restart cut off the turn a request waited in.
+const RESTART_REASON: &str = "The server restarted before this runtime request was resolved.";
+
+/// How a request stands, after a restart may have cut its turn off: its
+/// status, how it can be answered, and when it stopped waiting.
+pub(crate) struct RequestState {
+    pub status: &'static str,
+    pub capability: Value,
+    pub resolved_at: Option<u64>,
+}
+
+impl Thread {
+    /// `request`'s state in `run`, whose session is `session_id`. A restart
+    /// loses the CLI that waited for it: an approval expires, and a question
+    /// stays open to be answered by a message, as the reference recovers
+    /// them.
+    pub(crate) fn request_state(
+        &self,
+        run: &Run,
+        request: &RequestRecord,
+        session_id: &Value,
+    ) -> RequestState {
+        let restarted =
+            request.pending() && run.error.as_deref() == Some(crate::turn::RESTART_INTERRUPTION);
+        if restarted && request.request.kind == "user_input" {
+            return RequestState {
+                status: "pending",
+                capability: json!({"type": "message"}),
+                resolved_at: None,
+            };
+        }
+        if restarted {
+            return RequestState {
+                status: "expired",
+                capability: json!({"type": "not_resumable", "reason": RESTART_REASON}),
+                resolved_at: run.finished_at.or(Some(request.created_at)),
+            };
+        }
+        let mut capability = json!({"type": "live", "providerSessionId": session_id});
+        if request.request.supports_feedback {
+            capability["supportsFeedback"] = json!(true);
+        }
+        RequestState {
+            status: request.status,
+            capability,
+            resolved_at: request.resolved_at,
+        }
+    }
+
+    /// The reference's pendingRuntimeRequestSummary: the newest pending
+    /// approval, or else the newest pending question.
+    pub(crate) fn pending_runtime_request(&self) -> Option<Value> {
+        let records = self.provider_records();
+        records
+            .runtime_requests
+            .iter()
+            .filter(|request| request["status"] == "pending")
+            .min_by(|a, b| {
+                let question = |r: &Value| r["kind"] == "user_input";
+                question(a)
+                    .cmp(&question(b))
+                    .then_with(|| b["createdAt"].as_str().cmp(&a["createdAt"].as_str()))
+            })
+            .map(|request| {
+                json!({"id": request["id"], "kind": request["kind"], "createdAt": request["createdAt"],
+                    "blocking": request["responseCapability"]["type"] != "message"})
+            })
+    }
+
+    /// The projection id of a request of `run`.
+    pub(crate) fn request_id(&self, ids: &RunIds, request: &RequestRecord) -> String {
+        format!(
+            "{}:{}",
+            join(
+                "runtime-request:provider",
+                &[
+                    &ids.driver,
+                    "provider-turn",
+                    &ids.provider_turn,
+                    "native-request",
+                    &request.request.native_request_id
+                ]
+            ),
+            request.request.id
+        )
+    }
 }
 
 impl Thread {
@@ -113,6 +205,10 @@ impl Thread {
     pub(crate) fn provider_records(&self) -> ProviderRecords {
         let mut out = ProviderRecords::default();
         let instance = self.instance_id();
+        let session = self.provider_session(&instance);
+        let session_id = session
+            .as_ref()
+            .map_or(Value::Null, |session| session["id"].clone());
         let mut turn_ordinal = 0;
         let mut first_ordinal = None;
         let mut last_ordinal = 0;
@@ -136,9 +232,10 @@ impl Thread {
                 &instance,
                 turn_ordinal,
             );
+            for request in &record.requests {
+                self.provider_request(&mut out, index, run, &ids, request, &session_id);
+            }
         }
-        let session = self.provider_session(&instance);
-        let session_id = session.as_ref().map(|session| session["id"].clone());
         out.provider_sessions.extend(session);
         if let (Some(thread), Some(id)) = (&self.provider.thread, self.provider_thread_id()) {
             out.provider_threads.push(json!({
@@ -169,6 +266,8 @@ impl Thread {
         }
         out.messages
             .sort_by(|a, b| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()));
+        out.items
+            .retain(|(_, item)| item.get("requestSlot").is_none());
         out
     }
 
@@ -313,6 +412,15 @@ impl Thread {
         }
 
         for item in &record.items {
+            if matches!(
+                item.item.kind.as_str(),
+                "approval_request" | "user_input_request"
+            ) {
+                // Placed by provider_request, in this slot.
+                out.items
+                    .push((index, json!({"requestSlot": item.item.id})));
+                continue;
+            }
             self.provider_item(out, index, ids, item, terminal.map(|t| t.status));
         }
         if let Some(plan) = &record.plan {
@@ -498,6 +606,194 @@ impl Thread {
         let _ = run;
     }
 
+    /// A runtime request's record, node and turn item, as the reference's
+    /// adapters build them (`buildApprovalRequestArtifacts`,
+    /// `buildUserInputRequestArtifacts`) and its respond command updates
+    /// them.
+    fn provider_request(
+        &self,
+        out: &mut ProviderRecords,
+        index: usize,
+        run: &Run,
+        ids: &RunIds,
+        request: &RequestRecord,
+        session_id: &Value,
+    ) {
+        let driver = ids.driver.as_str();
+        let open = &request.request;
+        let id = self.request_id(ids, request);
+        let state = self.request_state(run, request, session_id);
+        let question = open.kind == "user_input";
+        // Codex questions are items of their tool call; everything else
+        // hangs under the call it asks about.
+        let codex_question = question && driver == provider::CODEX;
+        let (item_row_id, node_id, parent) = if codex_question {
+            (
+                item_id("turn-item", driver, &open.native_item_id),
+                item_id("node", driver, &open.native_item_id),
+                ids.root_node.clone(),
+            )
+        } else {
+            (
+                join("turn-item:runtime-request", &[&id]),
+                join("node:runtime-request", &[&id]),
+                item_id("node", driver, &open.native_item_id),
+            )
+        };
+        let native_item = if driver == provider::CODEX {
+            &open.native_item_id
+        } else {
+            &open.native_request_id
+        };
+        let reference = native_ref(driver, native_item, "strong");
+        // The node and item end with the answer: completed when accepted or
+        // answered, cancelled when declined, withdrawn or expired.
+        let done = match state.status {
+            "resolved" => Some(
+                if matches!(request.decision.as_deref(), Some("decline" | "cancel")) {
+                    "cancelled"
+                } else {
+                    "completed"
+                },
+            ),
+            "cancelled" | "expired" => Some("cancelled"),
+            _ => None,
+        };
+        let status = done.unwrap_or("waiting");
+        let created = iso(request.created_at);
+        let completed = done.and(state.resolved_at).map(iso);
+        let updated = completed.clone().unwrap_or_else(|| created.clone());
+        let mut record = json!({
+            "id": id,
+            "nodeId": node_id,
+            "providerTurnId": ids.provider_turn,
+            "nativeRequestRef": native_ref(driver, &open.native_request_id, "strong"),
+            "kind": open.kind,
+            "status": state.status,
+            "responseCapability": state.capability,
+            "createdAt": created,
+            "resolvedAt": state.resolved_at.map(iso)
+        });
+        if state.status == "resolved" {
+            for (key, value) in [
+                ("decision", &request.decision),
+                ("feedback", &request.feedback),
+            ] {
+                if let Some(value) = value {
+                    record[key] = json!(value);
+                }
+            }
+            if let Some(answers) = &request.answers {
+                record["answers"] = answers.clone();
+            }
+        }
+        out.runtime_requests.push(record);
+        out.nodes.push(json!({
+            "id": node_id,
+            "threadId": self.id,
+            "runId": ids.run,
+            "parentNodeId": parent,
+            "rootNodeId": ids.root_node,
+            "kind": if question { "user_input_request" } else { "approval_request" },
+            "status": status,
+            "countsForRun": false,
+            "providerThreadId": ids.provider_thread,
+            "providerTurnId": ids.provider_turn,
+            "nativeItemRef": reference,
+            "runtimeRequestId": id,
+            "checkpointScopeId": null,
+            "startedAt": created,
+            "completedAt": completed
+        }));
+        let mut item = Map::new();
+        for (key, value) in [
+            ("id", json!(item_row_id)),
+            ("threadId", json!(self.id)),
+            ("runId", json!(ids.run)),
+            ("nodeId", json!(node_id)),
+            ("providerThreadId", json!(ids.provider_thread)),
+            ("providerTurnId", json!(ids.provider_turn)),
+            ("nativeItemRef", reference),
+            ("parentItemId", Value::Null),
+            ("ordinal", json!(0)),
+            ("status", json!(status)),
+            ("title", Value::Null),
+            ("startedAt", json!(created)),
+            ("completedAt", json!(completed)),
+            ("updatedAt", json!(updated)),
+            (
+                "type",
+                json!(if question {
+                    "user_input_request"
+                } else {
+                    "approval_request"
+                }),
+            ),
+            ("requestId", json!(id)),
+        ] {
+            item.insert(key.into(), value);
+        }
+        if !question {
+            item.insert("requestKind".into(), json!(open.kind));
+        }
+        for (key, value) in &open.fields {
+            item.insert(key.clone(), value.clone());
+        }
+        if let (true, "resolved", Some(answers)) = (question, state.status, &request.answers) {
+            let texts: Map<String, Value> = open.fields["questions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|q| Some((q["id"].as_str()?.to_owned(), q["question"].clone())))
+                .collect();
+            item.insert(
+                "questionAnswer".into(),
+                json!({"requestId": id, "answers": answers, "attachmentsByQuestionId": {},
+                    "questionTextById": texts}),
+            );
+        }
+        if let Some(at) = request.delivery_failed_at {
+            let at = iso(at);
+            let failure = json!({
+                "id": format!("turn-item:runtime-request-delivery-failure:{id}"),
+                "threadId": self.id,
+                "runId": ids.run,
+                "nodeId": node_id,
+                "providerThreadId": ids.provider_thread,
+                "providerTurnId": ids.provider_turn,
+                "nativeItemRef": null,
+                "parentItemId": null,
+                "ordinal": 0,
+                "status": "failed",
+                "title": "Answer delivery not confirmed",
+                "startedAt": at,
+                "completedAt": at,
+                "updatedAt": at,
+                "type": "error",
+                "failure": {"class": "transport_error", "message": DELIVERY_FAILED, "code": null, "retryable": null}
+            });
+            let slot = format!("delivery:{}", open.id);
+            if let Some(existing) = out
+                .items
+                .iter_mut()
+                .find(|(_, existing)| existing["requestSlot"] == slot.as_str())
+            {
+                existing.1 = failure;
+            }
+        }
+        // Into the slot the request took among its run's items.
+        let slot = format!("request:{}", open.id);
+        let row = Value::Object(item);
+        match out
+            .items
+            .iter_mut()
+            .find(|(_, existing)| existing["requestSlot"] == slot.as_str())
+        {
+            Some(existing) => existing.1 = row,
+            None => out.items.push((index, row)),
+        }
+    }
+
     fn provider_item(
         &self,
         out: &mut ProviderRecords,
@@ -608,5 +904,142 @@ impl Thread {
             "completedAt": completed
         }));
         out.items.push((index, Value::Object(row)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::workspace::provider::{ProviderEvent, RuntimeRequestOpen, TurnStatus};
+    use crate::{Run, Thread};
+    use serde_json::{json, Map, Value};
+    use uuid::Uuid;
+
+    fn thread(run: Run) -> Thread {
+        Thread {
+            row: json!({"modelSelection": {"instanceId": "codex", "model": "m"}}),
+            id: "t1".into(),
+            project_id: "p1".into(),
+            title: "T".into(),
+            cwd: "/w".into(),
+            status: "running".into(),
+            messages: vec![],
+            runs: vec![run],
+            created_at: 1,
+            archived: false,
+            settled: false,
+            snoozed_until: None,
+            pinned: false,
+            unread: false,
+            tags: vec![],
+            checkpoints: vec![],
+            provider: Box::default(),
+        }
+    }
+
+    fn opened(id: &str, kind: &str) -> ProviderEvent {
+        let mut fields = Map::new();
+        fields.insert("prompt".into(), json!("touch x"));
+        ProviderEvent::RuntimeRequestOpened {
+            request: RuntimeRequestOpen {
+                id: id.into(),
+                native_request_id: format!("call_{id}"),
+                native_item_id: format!("call_{id}"),
+                kind: kind.into(),
+                runtime_mode: "full-access".into(),
+                supports_feedback: false,
+                fields,
+            },
+        }
+    }
+
+    fn requests(thread: &Thread) -> Vec<Value> {
+        thread.provider_records().runtime_requests
+    }
+
+    #[test]
+    fn requests_wait_resolve_and_expire_as_the_reference_records_them() {
+        let run_id = Uuid::new_v4();
+        let mut run = Run {
+            id: run_id,
+            thread_id: "t1".into(),
+            provider: "codex".into(),
+            status: "running".into(),
+            started_at: 1,
+            finished_at: None,
+            error: None,
+            user_message_id: None,
+            queue_held: false,
+        };
+        let mut live = thread(run.clone());
+        for event in [
+            ProviderEvent::ProviderThread {
+                driver: "codex".into(),
+                native_thread_id: "thr".into(),
+                resumed: false,
+                model: None,
+            },
+            ProviderEvent::ProviderTurn {
+                native_turn_id: Some("turn".into()),
+                status: TurnStatus::Running,
+            },
+            opened("a", "command"),
+            opened("q", "user_input"),
+        ] {
+            live.provider.apply(run_id, &event, 2);
+        }
+        let pending = requests(&live);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0]["status"], "pending");
+        assert_eq!(
+            pending[0]["id"],
+            "runtime-request:provider:codex:provider-turn:provider-turn%3Aprovider%3Acodex%3Anative-turn%3Aturn:native-request:call_a:a"
+        );
+        assert_eq!(pending[0]["responseCapability"]["type"], "live");
+        // An approval comes before a question in the shell's summary.
+        assert_eq!(live.pending_runtime_request().unwrap()["kind"], "command");
+        let items = live.provider_records().items;
+        let approval = items
+            .iter()
+            .find(|(_, item)| item["type"] == "approval_request")
+            .unwrap();
+        assert_eq!(approval.1["status"], "waiting");
+        assert_eq!(approval.1["prompt"], "touch x");
+
+        // A restart: the approval expires and the question waits for a message.
+        run.status = "failed".into();
+        run.finished_at = Some(5);
+        run.error = Some(crate::turn::RESTART_INTERRUPTION.into());
+        let mut restarted = thread(run);
+        restarted.provider = live.provider.clone();
+        let after = requests(&restarted);
+        assert_eq!(after[0]["status"], "expired");
+        assert_eq!(after[0]["responseCapability"]["type"], "not_resumable");
+        assert_eq!(after[1]["status"], "pending");
+        assert_eq!(after[1]["responseCapability"], json!({"type": "message"}));
+
+        // An answer resolves the request and completes or cancels its card.
+        live.provider.apply(
+            run_id,
+            &ProviderEvent::RuntimeRequestAnswered {
+                id: "a".into(),
+                decision: Some("decline".into()),
+                feedback: None,
+                answers: None,
+            },
+            3,
+        );
+        let answered = requests(&live);
+        assert_eq!(answered[0]["status"], "resolved");
+        assert_eq!(answered[0]["decision"], "decline");
+        let items = live.provider_records().items;
+        let approval = items
+            .iter()
+            .find(|(_, item)| item["type"] == "approval_request")
+            .unwrap();
+        assert_eq!(approval.1["status"], "cancelled");
+        assert_eq!(
+            live.pending_runtime_request().unwrap()["kind"],
+            "user_input"
+        );
     }
 }

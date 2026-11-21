@@ -85,13 +85,16 @@ pub(crate) fn running_runs(store: &crate::Store) -> Vec<(Run, Option<StreamPosit
     runs
 }
 
+/// The error of a run a restart cut off.
+pub(crate) const RESTART_INTERRUPTION: &str = "interrupted: the server restarted during the turn";
+
 /// End a run that a restart cut off and that cannot be picked up again.
 pub(crate) fn interrupted(run: &Run) -> Event {
     Event::RunFinished {
         run_id: run.id,
         thread_id: run.thread_id.clone(),
         status: "failed".into(),
-        error: Some("interrupted: the server restarted during the turn".into()),
+        error: Some(RESTART_INTERRUPTION.into()),
     }
 }
 

@@ -44,6 +44,22 @@ pub struct ProviderTurn {
     /// last [`ProviderEvent::ProviderThread`] of the thread's previous turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<String>,
+    /// The thread's runtime mode (`approval-required`, `auto-accept-edits`,
+    /// `auto` or `full-access`), which decides what the CLI may do without
+    /// asking. Empty means `full-access`, the reference's default. Every
+    /// request the CLI still makes goes to the user, in every mode.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime_mode: String,
+}
+
+impl ProviderTurn {
+    /// The runtime mode, `full-access` when unset.
+    pub fn runtime_mode(&self) -> &str {
+        match self.runtime_mode.as_str() {
+            "" => "full-access",
+            mode => mode,
+        }
+    }
 }
 
 /// One translated provider event. Events of a turn arrive in order and end
@@ -96,15 +112,39 @@ pub enum ProviderEvent {
     /// Token usage so far, in the reference's `tokenUsage` shape.
     #[serde(rename = "usage.updated")]
     Usage { usage: TokenUsage },
-    /// The workspace answered a permission or approval request itself. Every
-    /// request is approved, as the reference does in full-access mode.
+    /// Recorded by earlier builds, which approved every request themselves.
+    /// Kept so their event logs still load; it changes nothing.
     #[serde(rename = "runtime_request.resolved", rename_all = "camelCase")]
     RuntimeRequest {
         native_request_id: String,
-        /// `command`, `file_change` or `permissions`.
         kind: String,
         decision: String,
     },
+    /// The CLI asked the user something (an approval or a question) and the
+    /// turn waits for the answer, which arrives through
+    /// [`crate::workspace::Workspace::respond_turn`].
+    #[serde(rename = "runtime_request.opened")]
+    RuntimeRequestOpened { request: RuntimeRequestOpen },
+    /// The user answered a request. Recorded by the control plane when the
+    /// client answers, before the answer goes to the workspace.
+    #[serde(rename = "runtime_request.answered", rename_all = "camelCase")]
+    RuntimeRequestAnswered {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Value>,
+    },
+    /// The answer to a request could not be handed to its turn (it no
+    /// longer runs in this workspace).
+    #[serde(rename = "runtime_request.delivery_failed")]
+    RuntimeRequestDeliveryFailed { id: String },
+    /// The CLI withdrew a request, or the turn stopped waiting for it:
+    /// `status` is `cancelled`.
+    #[serde(rename = "runtime_request.closed")]
+    RuntimeRequestClosed { id: String, status: String },
     /// How the turn ended. Always the last provider event of a turn.
     #[serde(rename = "turn.terminal", rename_all = "camelCase")]
     TurnTerminal {
@@ -119,6 +159,47 @@ pub enum ProviderEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         driver: Option<String>,
     },
+}
+
+/// A request the CLI made that waits for the user, in the reference's
+/// `runtime_request.updated` / `approval_request` terms.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRequestOpen {
+    /// The workspace's id for the request; answers name it.
+    pub id: String,
+    /// The CLI's id for the request.
+    pub native_request_id: String,
+    /// The tool call the request is about.
+    pub native_item_id: String,
+    /// `command`, `file-read`, `file-change`, `mcp-elicitation`,
+    /// `permission` or `user_input`.
+    pub kind: String,
+    /// The runtime mode the turn ran in when the request was made.
+    #[serde(default)]
+    pub runtime_mode: String,
+    /// Whether a decline may carry feedback for the agent.
+    #[serde(default)]
+    pub supports_feedback: bool,
+    /// The request's own turn item fields: `prompt`, `reason`,
+    /// `fullAccessOverride`, `appName` and `options` for an approval,
+    /// `questions` for a question.
+    #[serde(default)]
+    pub fields: Map<String, Value>,
+}
+
+/// The user's answer to a [`RuntimeRequestOpen`], as the workspace gets it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeResponse {
+    /// [`RuntimeRequestOpen::id`].
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

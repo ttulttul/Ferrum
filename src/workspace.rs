@@ -67,6 +67,9 @@ pub struct TurnSpec {
     /// Run a provider's CLI instead of `command`. Its events arrive as
     /// [`TurnEvent::Provider`].
     pub provider: Option<ProviderTurn>,
+    /// The run the turn belongs to; answers to its runtime requests name it
+    /// (see [`Workspace::respond_turn`]).
+    pub turn_id: String,
 }
 
 /// What a turn reports, in order. `Exited` is last and follows all output.
@@ -277,6 +280,16 @@ pub trait Workspace: MaybeSendSync {
     }
     /// Acknowledge a tracked event and those before it in its stream.
     fn ack(&self, _position: StreamPosition) {}
+    /// Deliver the user's answer to a runtime request of the running turn
+    /// `turn_id` ([`TurnSpec::turn_id`]). False when no running turn of this
+    /// workspace waits for it.
+    fn respond_turn<'a>(
+        &'a self,
+        _turn_id: &'a str,
+        _response: provider::RuntimeResponse,
+    ) -> WorkspaceFuture<'a, bool> {
+        boxed_future(async { false })
+    }
     /// The local servers a `subscribeDiscoveredLocalServers` stream reports.
     fn local_servers<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply>;
     /// `preview.stopLocalServer`.
