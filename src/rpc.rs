@@ -3124,12 +3124,11 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 }}));
             }
             let item_id = params["itemId"].as_str().unwrap_or_default();
+            // The whole item, output included, which snapshots leave out.
             let item = store
                 .threads
                 .get(thread_id)
-                .and_then(|thread| thread.projection().get("turnItems").cloned())
-                .and_then(|items| items.as_array().cloned())
-                .and_then(|items| items.into_iter().find(|item| item["id"] == item_id));
+                .and_then(|thread| thread.turn_item_detail(item_id));
             json!({"item":item})
         }
         "orchestration.getNativeChildWork" => {

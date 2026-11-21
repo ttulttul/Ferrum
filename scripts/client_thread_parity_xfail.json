@@ -1,7 +1,7 @@
 {
   "codex turn": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Command output is projected where the reference omits it (outputOmitted), file_change keeps diffStr, and commands lack completionWake."
+    "shape": "Codex commands lack completionWake: Rust does not wake the agent when a command finishes after its turn."
   },
   "codex failed turn": {
     "orchestration.subscribeThread (live turn)": "On a usage-limit error the reference keeps the run waiting for the limit to reset; Rust fails the run."
@@ -18,8 +18,7 @@
     "live kinds": "Rust creates the attempt already failed, where the reference creates it pending and then updates it."
   },
   "claude turn": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "claude crash": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
@@ -31,8 +30,7 @@
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "claude interrupt": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "codex approval for session": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
@@ -55,20 +53,16 @@
     "live kinds": "The reference captures a checkpoint after a turn interrupted while an approval waits; Rust captures one only after a completed turn."
   },
   "claude approval": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "claude approval declined": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "claude approval-required": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "claude auto-accept-edits": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "claude approval interrupted": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
