@@ -440,6 +440,92 @@ pub(crate) fn provider_models(manifest: &Value, driver: &str, now_ms: i64) -> Op
     Some(models)
 }
 
+/// The catalog entry and profile of the Claude model `model` (slug or
+/// alias).
+fn claude_entry<'a>(manifest: &'a Value, model: &str) -> Option<(&'a Value, &'a Value)> {
+    let catalog = &manifest["providers"]["claudeAgent"];
+    let models = catalog["models"].as_array()?;
+    let model = model.trim();
+    let entry = models
+        .iter()
+        .find(|entry| entry["slug"] == model)
+        .or_else(|| {
+            models.iter().find(|entry| {
+                entry["aliases"].as_array().is_some_and(|aliases| {
+                    aliases
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|alias| alias.eq_ignore_ascii_case(model))
+                })
+            })
+        })?;
+    Some((entry, &catalog["profiles"][entry["profile"].as_str()?]))
+}
+
+/// What the reference's compileClaudeModelSelection launches a Claude turn
+/// with: the `--effort` level, if any, and the `--settings` it sets
+/// (`fastMode` for models that offer it).
+pub(crate) fn claude_launch(manifest: &Value, selection: &Value) -> (Option<String>, Value) {
+    let option = |id: &str| {
+        selection["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|option| option["id"] == id)
+            .map(|option| option["value"].clone())
+    };
+    let raw = option("effort").and_then(|v| v.as_str().map(|s| s.trim().to_owned()));
+    let Some((_, profile)) =
+        claude_entry(manifest, selection["model"].as_str().unwrap_or_default())
+    else {
+        // A model outside the catalog takes a known effort level as is.
+        let effort =
+            raw.filter(|e| ["low", "medium", "high", "xhigh", "max"].contains(&e.as_str()));
+        return (effort, json!({}));
+    };
+    let capabilities = with_ultracode_toggle(&profile["capabilities"]);
+    let descriptors = capabilities["optionDescriptors"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let effort_descriptor = descriptors.iter().find(|d| d["id"] == "effort");
+    let effort = effort_descriptor.and_then(|descriptor| {
+        let options = descriptor["options"].as_array()?;
+        let valid = |id: &str| options.iter().any(|option| option["id"] == id);
+        raw.clone().filter(|raw| valid(raw)).or_else(|| {
+            descriptor["currentValue"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| {
+                    options
+                        .iter()
+                        .find(|option| option["isDefault"] == true)
+                        .and_then(|option| option["id"].as_str())
+                        .map(str::to_owned)
+                })
+        })
+    });
+    // The catalog maps some levels to Claude Code's own; null means the
+    // level goes in the prompt instead.
+    let effort_map = &profile["adapter"]["claudeCode"]["effortMap"];
+    let effort = effort.and_then(|effort| match effort_map.get(&effort) {
+        Some(Value::String(mapped)) => Some(mapped.clone()),
+        Some(_) => None,
+        None => Some(effort),
+    });
+    let mut settings = Map::new();
+    if descriptors
+        .iter()
+        .any(|d| d["id"] == "fastMode" && d["type"] == "boolean")
+    {
+        let fast = option("fastMode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        settings.insert("fastMode".into(), json!(fast));
+    }
+    (effort, Value::Object(settings))
+}
+
 /// The reference's resolveClaudeCatalogContextWindowTokens: the context
 /// window of the Claude model `selection` names (by slug or alias), from its
 /// profile's fixed window or the window its `contextWindow` option picks.

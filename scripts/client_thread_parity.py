@@ -390,18 +390,78 @@ def cli_approvals(log):
     return out
 
 
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def cli_launch(log, root):
+    """How a server launched the fake CLI for the turn: its arguments, the environment it set,
+    and the Codex initialize, thread and turn parameters, with generated ids and the server's
+    temporary home masked. The reference's own agent MCP server (`mcp__t3-code__*`,
+    `mcp_servers.t3-code*`) and the orchestration context that describes its tools are left out:
+    Rust serves no agent MCP tools, so it does not offer them."""
+    def mask(value):
+        if isinstance(value, str):
+            for server in ("original", "rust"):
+                value = value.replace(f"{root}/{server}", "<home>/<server>")
+            return UUID.sub("<uuid>", value.replace(str(root), "<home>"))
+        if isinstance(value, list):
+            return [mask(item) for item in value]
+        if isinstance(value, dict):
+            return {key: mask(item) for key, item in value.items()}
+        return value
+    out = []
+    launch = Path(str(log) + ".launch")
+    launches = []
+    for line in (launch.read_text().splitlines() if launch.exists() else []):
+        entry = json.loads(line)
+        # Claude Code probes at startup, not for a turn.
+        if "--no-session-persistence" in entry["argv"]:
+            continue
+        argv = [arg for arg in entry["argv"] if "mcp__t3-code" not in arg]
+        env = {k: v for k, v in entry["env"].items() if k != "T3CODE_HOME"}
+        launches.append(f"launch {json.dumps(mask(argv))} env {json.dumps(mask(env), sort_keys=True)}")
+    # The reference also starts a Codex app-server to read the provider's status; the turn's
+    # session is the last one started.
+    out.extend(launches[-1:])
+    initializes = []
+    for line in (Path(log).read_text().splitlines() if Path(log).exists() else []):
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("method") == "initialize":
+            initializes.append(message)
+            continue
+        if message.get("method") in ("thread/start", "thread/resume", "turn/start"):
+            params = dict(message.get("params") or {})
+            params.pop("input", None)
+            params.pop("additionalContext", None)
+            config = params.get("config")
+            if isinstance(config, dict):
+                params["config"] = {k: v for k, v in config.items() if not k.startswith("mcp_servers.t3-code")}
+            out.append(f"{message['method']} {json.dumps(mask(params), sort_keys=True)}")
+    for message in initializes[-1:]:
+        out.insert(1, f"initialize {json.dumps(mask(message.get('params')), sort_keys=True)}")
+    return out
+
+
 def compare_turn(original, rust):
     """Problems with Rust's provider turn as the reference client sees it, by check name."""
     problems = {}
+    launch = [original.get("launch", []), rust.get("launch", [])]
+    if launch[0] != launch[1]:
+        problems["cli launch"] = [f"original {line}" for line in launch[0]] + [f"rust     {line}" for line in launch[1]]
     cli = [original.get("cli", []), rust.get("cli", [])]
     if cli[0] != cli[1]:
         problems["cli approvals"] = [f"original {line}" for line in cli[0]] + [f"rust     {line}" for line in cli[1]]
+    failed_steps = False
     for step in ("orchestration.subscribeThread (live turn)", "orchestration.subscribeThread",
                  "orchestration.getThreadProjection"):
         a, b = original["steps"].get(step), rust["steps"].get(step)
         if a is None or b is None or a["outcome"] != b["outcome"]:
+            failed_steps = True
             problems[step] = [f"outcome {a and a['outcome']} != {b and b['outcome']}: {(b or {}).get('message', '')[:600]}"]
-    if problems:
+    if failed_steps:
         return problems
     live = [original["steps"]["orchestration.subscribeThread (live turn)"]["value"],
             rust["steps"]["orchestration.subscribeThread (live turn)"]["value"]]
@@ -460,6 +520,7 @@ def provider_turns(args, credentials):
                 seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
                 outcomes[name] = run_client(args, url, cookie, seeded)
                 outcomes[name]["cli"] = cli_approvals(log)
+                outcomes[name]["launch"] = cli_launch(log, temporary)
         if args.dump:
             for name, outcome in outcomes.items():
                 slug = scenario["name"].replace(" ", "-")

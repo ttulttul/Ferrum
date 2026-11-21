@@ -14,6 +14,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+/// The server version the reference reports to Codex.
+const SERVER_VERSION: &str = "0.1.10";
+
 /// How long an interrupted turn may take to report that it stopped.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 
@@ -38,7 +41,11 @@ pub(super) async fn run(
             args,
             home_var: "CODEX_HOME",
             home: &provider.home_path,
-            extra_env: vec![],
+            // Codex names the client in its requests, as for the reference.
+            extra_env: vec![(
+                "CODEX_INTERNAL_ORIGINATOR_OVERRIDE".into(),
+                "T3 Code".into(),
+            )],
         },
     ) {
         Ok(cli) => cli,
@@ -309,16 +316,30 @@ impl Session {
         self.request(
             "initialize",
             json!({
-                "clientInfo": {"name": "T3 Code", "title": "T3 Code", "version": env!("CARGO_PKG_VERSION")},
-                "capabilities": {"experimentalApi": true},
+                "clientInfo": {"name": "T3 Code", "title": "T3 Code", "version": SERVER_VERSION},
+                "capabilities": {
+                    "experimentalApi": true,
+                    "extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}},
+                    "optOutNotificationMethods": ["turn/diff/updated"],
+                },
             }),
         )
         .await?;
         self.notify("initialized").await?;
 
         let model = (!provider.model.trim().is_empty()).then(|| provider.model.clone());
-        // The turn carries the runtime policy, as the reference sends it.
-        let mut thread_params = json!({"cwd": spec.cwd});
+        // The turn carries the runtime policy, as the reference sends it; the
+        // thread carries the reference's thread config, with the app thread
+        // the CLI's shells report as theirs.
+        let mut config = json!({
+            "tools.update_plan.enabled": true,
+            "mcp_optional_startup_grace_ms": 10_000,
+            "features.concurrent_reasoning_summaries": true,
+        });
+        if !provider.app_thread_id.is_empty() {
+            config["shell_environment_policy.set.T3CODE_THREAD_ID"] = json!(provider.app_thread_id);
+        }
+        let mut thread_params = json!({"config": config, "cwd": spec.cwd});
         if let Some(model) = &model {
             thread_params["model"] = json!(model);
         }
@@ -374,6 +395,14 @@ impl Session {
         if let Some(effort) = &provider.reasoning_effort {
             turn_params["effort"] = json!(effort);
         }
+        // Codex supplies its own mode instructions; both modes go, so
+        // leaving Plan clears it.
+        let mut settings = json!({"model": provider.model});
+        if let Some(effort) = &provider.reasoning_effort {
+            settings["reasoning_effort"] = json!(effort);
+        }
+        turn_params["collaborationMode"] =
+            json!({"mode": provider.interaction_mode(), "settings": settings});
         let started = self.request("turn/start", turn_params).await?;
         if let Some(id) = started["turn"]["id"].as_str() {
             self.turn_started(id);
