@@ -507,7 +507,7 @@ impl ControlPlane {
         environment::descriptor(
             &self.config.environment_id,
             &self.config.label,
-            ("linux", "x64"),
+            ("linux", "x64", Some("desktop")),
             true,
         )
     }

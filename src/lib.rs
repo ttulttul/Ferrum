@@ -36,6 +36,8 @@ pub mod issues;
 #[cfg(feature = "native")]
 pub mod local_services;
 #[cfg(feature = "native")]
+pub mod machine_kind;
+#[cfg(feature = "native")]
 pub mod managed_endpoint;
 pub mod mcp_oauth;
 mod model_manifest;
