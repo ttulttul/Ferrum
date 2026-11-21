@@ -196,19 +196,28 @@ impl Signals {
 impl ControlPlane {
     /// Rebuilds the store from `log`. Auth records and other state documents
     /// live in `documents` under [`STATE_DIR`], written through on change.
+    ///
+    /// Turns that were running when the plane last stopped are picked up
+    /// again: each is resumed in `host.workspace` from the last event the
+    /// log recorded, so pass a workspace that is not connected yet and
+    /// connect it afterwards with
+    /// [`workspace_connected`](Self::workspace_connected). A running run
+    /// whose turn cannot be resumed is recorded as failed.
+    // One thread in the WebAssembly build: the plane need not be `Send`.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn open(
         config: Config,
         documents: Arc<dyn DocumentStore>,
         log: Box<dyn EventLog + Send>,
         host: Host,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<Arc<Self>> {
         let auth = AuthService::with_bootstrap(config.bootstrap_credential.clone())
             .with_port(config.cookie_port)
             .open_in(documents.clone(), std::path::Path::new(STATE_DIR))?;
         let started_at = auth_service::iso(auth_service::now());
         let state = ControlState::open(auth, documents, log, std::path::Path::new(STATE_DIR))?;
         let signals = Mutex::new(Signals::new(&state));
-        Ok(Self {
+        let plane = Arc::new(Self {
             config,
             started_at,
             state,
@@ -217,7 +226,75 @@ impl ControlPlane {
             cancellations: Default::default(),
             host,
             wake: Default::default(),
-        })
+        });
+        plane.resume_turns();
+        Ok(plane)
+    }
+
+    fn turn_path(run: &uuid::Uuid) -> PathBuf {
+        std::path::Path::new(STATE_DIR)
+            .join("turns")
+            .join(format!("{run}.json"))
+    }
+
+    /// Pick up the turns of runs still running, or end them as failed.
+    fn resume_turns(self: &Arc<Self>) {
+        let running = crate::turn::running_runs(&self.store_now());
+        let mut kept = std::collections::HashSet::new();
+        for (run, recorded) in running {
+            let record = self
+                .documents
+                .read_optional(&Self::turn_path(&run.id))
+                .ok()
+                .flatten()
+                .and_then(|bytes| serde_json::from_slice::<TurnRecord>(&bytes).ok());
+            let Some(TurnRecord { stream, cwd }) = record else {
+                // The turn never reached the workspace, or a host that
+                // cannot resume turns ran it.
+                if let Err(error) = self.commit_now(crate::turn::interrupted(&run)) {
+                    tracing::error!(%error, "could not end an interrupted run");
+                }
+                self.wake();
+                continue;
+            };
+            kept.insert(run.id);
+            let position = crate::workspace::StreamPosition {
+                stream,
+                seq: recorded
+                    .filter(|position| position.stream == stream)
+                    .map_or(0, |position| position.seq),
+            };
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            if let Ok(mut cancellations) = self.cancellations.try_lock() {
+                cancellations.insert(run.id, cancel);
+            }
+            // Before the workspace connects, this completes at once, so the
+            // connection's first `resume` names the stream.
+            let workspace = self.host.workspace.clone();
+            let mut resumed =
+                Box::pin(async move { workspace.resume_turn(position, cancelled).await });
+            let plane = self.clone();
+            let task: crate::runtime::Task =
+                match futures_util::FutureExt::now_or_never(resumed.as_mut()) {
+                    Some(turn) => Box::pin(crate::turn::resume(plane, run, cwd, turn)),
+                    None => Box::pin(async move {
+                        let turn = resumed.await;
+                        crate::turn::resume(plane, run, cwd, turn).await
+                    }),
+                };
+            self.host.runtime.spawn(task);
+        }
+        // Records of turns that ended while their end was being recorded.
+        let dir = std::path::Path::new(STATE_DIR).join("turns");
+        for path in self.documents.list(&dir).unwrap_or_default() {
+            let run = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| stem.parse::<uuid::Uuid>().ok());
+            if !run.is_some_and(|run| kept.contains(&run)) {
+                let _ = self.documents.remove(&path);
+            }
+        }
     }
 
     /// The workspace this plane runs turns and workspace methods in.
@@ -844,6 +921,25 @@ impl crate::turn::TurnHost for ControlPlane {
     ) -> &tokio::sync::Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>> {
         &self.cancellations
     }
+    fn turn_started(&self, run: &crate::Run, cwd: &str, stream: u64) {
+        let record = TurnRecord {
+            stream,
+            cwd: cwd.to_owned(),
+        };
+        let path = Self::turn_path(&run.id);
+        if let Some(dir) = path.parent() {
+            let _ = self.documents.create_dir_all(dir);
+        }
+        let written = serde_json::to_vec(&record)
+            .map_err(std::io::Error::from)
+            .and_then(|bytes| {
+                self.documents
+                    .write(&path, &bytes, crate::persistence::WriteMode::Replace)
+            });
+        if let Err(error) = written {
+            tracing::error!(%error, "could not record a turn's stream; a restart will end it");
+        }
+    }
     fn turn_recorded(
         &self,
         _run: &crate::Run,
@@ -851,9 +947,19 @@ impl crate::turn::TurnHost for ControlPlane {
     ) {
         self.wake();
     }
-    fn turn_finished(&self, _run: &crate::Run) {
+    fn turn_finished(&self, run: &crate::Run) {
+        let _ = self.documents.remove(&Self::turn_path(&run.id));
         self.wake();
     }
+}
+
+/// What a restarted plane needs to resume a running turn, kept in its
+/// documents while the turn runs. The last recorded position comes from the
+/// event log, which records it with each output.
+#[derive(Serialize, Deserialize)]
+struct TurnRecord {
+    stream: u64,
+    cwd: String,
 }
 
 enum Call {
@@ -1009,15 +1115,13 @@ mod tests {
     }
 
     fn plane() -> Arc<ControlPlane> {
-        Arc::new(
-            ControlPlane::open(
-                config(),
-                Arc::new(MemoryStore::new()),
-                Box::new(MemoryLog::default()),
-                host(&Arc::default()),
-            )
-            .unwrap(),
+        ControlPlane::open(
+            config(),
+            Arc::new(MemoryStore::new()),
+            Box::new(MemoryLog::default()),
+            host(&Arc::default()),
         )
+        .unwrap()
     }
 
     fn owner(plane: &ControlPlane) -> Connection {
@@ -1189,7 +1293,7 @@ mod tests {
                         .unwrap();
                 // As the host does when it is rebuilt from storage.
                 plane.prune_streams(&open);
-                Arc::new(plane)
+                plane
             })
         }
 
@@ -1603,15 +1707,13 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
     #[test]
     fn runs_a_turn_in_its_workspace_and_acknowledges_what_it_records() {
         let runtime = Arc::new(ManualRuntime::default());
-        let plane = Arc::new(
-            ControlPlane::open(
-                config(),
-                Arc::new(MemoryStore::new()),
-                Box::new(MemoryLog::default()),
-                host(&runtime),
-            )
-            .unwrap(),
-        );
+        let plane = ControlPlane::open(
+            config(),
+            Arc::new(MemoryStore::new()),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
         let agentd = Arc::new(FakeAgentd::default());
         now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
         assert!(
@@ -1690,15 +1792,13 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
     #[test]
     fn a_turn_that_cannot_start_ends_as_failed() {
         let runtime = Arc::new(ManualRuntime::default());
-        let plane = Arc::new(
-            ControlPlane::open(
-                config(),
-                Arc::new(MemoryStore::new()),
-                Box::new(MemoryLog::default()),
-                host(&runtime),
-            )
-            .unwrap(),
-        );
+        let plane = ControlPlane::open(
+            config(),
+            Arc::new(MemoryStore::new()),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
         let mut connection = owner(&plane);
         seed(&plane, &mut connection);
         dispatch_message(&plane, &mut connection, "hello");
@@ -1715,15 +1815,13 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
     #[test]
     fn stopping_a_thread_cancels_its_turn_on_the_next_alarm() {
         let runtime = Arc::new(ManualRuntime::default());
-        let plane = Arc::new(
-            ControlPlane::open(
-                config(),
-                Arc::new(MemoryStore::new()),
-                Box::new(MemoryLog::default()),
-                host(&runtime),
-            )
-            .unwrap(),
-        );
+        let plane = ControlPlane::open(
+            config(),
+            Arc::new(MemoryStore::new()),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
         let agentd = Arc::new(FakeAgentd::default());
         now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
         let mut connection = owner(&plane);
@@ -1743,5 +1841,149 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
         now(plane.on_alarm());
         runtime.run();
         assert_eq!(thread_runs(&plane)[0].status, "cancelled");
+    }
+
+    /// Storage that outlives a plane, and a plane over it.
+    struct Restartable {
+        documents: Arc<MemoryStore>,
+        log: SharedLog,
+        runtime: Arc<ManualRuntime>,
+        plane: Arc<ControlPlane>,
+    }
+
+    impl Restartable {
+        fn new(agentd: &Arc<FakeAgentd>) -> Self {
+            let documents = Arc::new(MemoryStore::new());
+            let log = SharedLog::default();
+            let (runtime, plane) = Self::open(&documents, &log, agentd);
+            Self {
+                documents,
+                log,
+                runtime,
+                plane,
+            }
+        }
+
+        fn open(
+            documents: &Arc<MemoryStore>,
+            log: &SharedLog,
+            agentd: &Arc<FakeAgentd>,
+        ) -> (Arc<ManualRuntime>, Arc<ControlPlane>) {
+            let runtime = Arc::new(ManualRuntime::default());
+            let plane = ControlPlane::open(
+                config(),
+                documents.clone(),
+                Box::new(log.clone()),
+                host(&runtime),
+            )
+            .unwrap();
+            now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+            runtime.run();
+            (runtime, plane)
+        }
+
+        /// Stop the plane with whatever it had in memory, then rebuild it
+        /// from storage and reconnect it to the same agentd.
+        fn restart(&mut self, agentd: &Arc<FakeAgentd>) {
+            agentd.disconnect();
+            let (runtime, plane) = Self::open(&self.documents, &self.log, agentd);
+            self.runtime = runtime;
+            self.plane = plane;
+        }
+
+        fn output(&self) -> Vec<String> {
+            self.log
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|record| match &record.event {
+                    Event::RunOutput { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    fn line(text: &str) -> WireTurnEvent {
+        WireTurnEvent::Stdout {
+            text: format!("{text}\n"),
+        }
+    }
+
+    fn exit_ok() -> WireTurnEvent {
+        WireTurnEvent::Exited {
+            success: true,
+            cancelled: false,
+            status: "exit status: 0".into(),
+        }
+    }
+
+    #[test]
+    fn a_turn_keeps_going_across_a_restart_without_losing_or_repeating_output() {
+        let agentd = Arc::new(FakeAgentd::default());
+        let mut host = Restartable::new(&agentd);
+        let mut connection = owner(&host.plane);
+        seed(&host.plane, &mut connection);
+        dispatch_message(&host.plane, &mut connection, "hello");
+        host.runtime.run();
+        let stream = *agentd.turns().keys().next().unwrap();
+        agentd.emit(stream, line("one"));
+        agentd.emit(stream, line("two"));
+        host.runtime.run();
+        assert_eq!(agentd.acked(stream), 2);
+
+        // Recorded but not acknowledged: the connection drops first.
+        agentd.emit(stream, line("three"));
+        agentd.disconnect();
+        host.runtime.run();
+        assert_eq!(agentd.acked(stream), 2);
+        // Produced while the server is down.
+        agentd.emit(stream, line("four"));
+
+        host.restart(&agentd);
+        assert_eq!(agentd.turns().len(), 1, "the turn is not started again");
+        assert_eq!(host.output(), vec!["one\n", "two\n", "three\n", "four\n"]);
+        assert_eq!(agentd.acked(stream), 4);
+        assert_eq!(thread_runs(&host.plane)[0].status, "running");
+
+        agentd.emit(stream, line("five"));
+        agentd.emit(stream, exit_ok());
+        host.runtime.run();
+        assert_eq!(host.output().len(), 5);
+        assert_eq!(thread_runs(&host.plane)[0].status, "completed");
+        assert!(agentd.turns_acked());
+        assert!(
+            host.documents
+                .list(&std::path::Path::new(STATE_DIR).join("turns"))
+                .unwrap()
+                .is_empty(),
+            "the turn's record is gone once it ends"
+        );
+    }
+
+    #[test]
+    fn a_restart_ends_runs_whose_turn_is_lost() {
+        let agentd = Arc::new(FakeAgentd::default());
+        let mut host = Restartable::new(&agentd);
+        let mut connection = owner(&host.plane);
+        seed(&host.plane, &mut connection);
+        dispatch_message(&host.plane, &mut connection, "hello");
+        host.runtime.run();
+        let stream = *agentd.turns().keys().next().unwrap();
+        agentd.emit(stream, line("one"));
+        host.runtime.run();
+        // agentd restarts too and forgets the stream.
+        agentd.forget(stream);
+        host.restart(&agentd);
+        let run = &thread_runs(&host.plane)[0];
+        assert_eq!(run.status, "failed");
+        assert!(
+            run.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("interrupted"),
+            "{run:?}"
+        );
     }
 }

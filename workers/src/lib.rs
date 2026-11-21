@@ -110,27 +110,25 @@ impl DurableObject for T3EnvironmentDO {
         // One thread: the runtime need not be `Send`.
         #[allow(clippy::arc_with_non_send_sync)]
         let runtime = Arc::new(runtime::WorkersRuntime::new(state.storage()));
-        let plane = Arc::new(
-            ControlPlane::open(
-                Config {
-                    environment_id,
-                    label,
-                    bootstrap_credential,
-                    cookie_port: 3773,
-                    provider_command: Vec::new(),
-                },
-                Arc::new(documents),
-                Box::new(storage::SqlLog(sql.clone())),
-                Host {
-                    runtime,
-                    // No transport here: workspace methods answer as
-                    // unavailable and turns end as failed. A host that
-                    // embeds the library connects it (see docs/embedding.md).
-                    workspace: Default::default(),
-                },
-            )
-            .expect("open control plane"),
-        );
+        let plane = ControlPlane::open(
+            Config {
+                environment_id,
+                label,
+                bootstrap_credential,
+                cookie_port: 3773,
+                provider_command: Vec::new(),
+            },
+            Arc::new(documents),
+            Box::new(storage::SqlLog(sql.clone())),
+            Host {
+                runtime,
+                // No transport here: workspace methods answer as
+                // unavailable and turns end as failed. A host that
+                // embeds the library connects it (see docs/embedding.md).
+                workspace: Default::default(),
+            },
+        )
+        .expect("open control plane");
         // Sockets can close without a close event; their stream records
         // would stay forever. Keep only the records of sockets still open.
         let open: Vec<Connection> = state

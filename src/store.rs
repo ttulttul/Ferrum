@@ -106,6 +106,11 @@ pub enum Event {
         thread_id: String,
         stream: String,
         text: String,
+        /// Where the output sits in the workspace's stream for the turn,
+        /// when the workspace tracks positions. A restarted server resumes
+        /// the turn after the last one recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<crate::workspace::StreamPosition>,
     },
     RunFinished {
         run_id: Uuid,
@@ -154,6 +159,8 @@ pub struct Store {
     pub(crate) deleted_thread_ids: std::collections::HashSet<String>,
     pub(crate) command_receipts: HashMap<String, (String, u64)>,
     pub threads: HashMap<String, Thread>,
+    /// The last recorded workspace stream position of each running run.
+    pub(crate) turn_positions: HashMap<Uuid, crate::workspace::StreamPosition>,
 }
 impl Store {
     pub(crate) fn apply_record(&mut self, record: &ServerEvent) {
@@ -264,13 +271,20 @@ impl Store {
                     t.runs.insert(target, run);
                 }
             }
-            Event::RunOutput { .. } => {}
+            Event::RunOutput {
+                run_id, position, ..
+            } => {
+                if let Some(position) = position {
+                    self.turn_positions.insert(*run_id, *position);
+                }
+            }
             Event::RunFinished {
                 run_id,
                 thread_id,
                 status,
                 error,
             } => {
+                self.turn_positions.remove(run_id);
                 if let Some(t) = self.threads.get_mut(thread_id) {
                     t.status = if status == "completed" {
                         "idle".into()

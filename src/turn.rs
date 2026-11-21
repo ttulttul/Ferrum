@@ -27,6 +27,10 @@ pub(crate) trait TurnHost:
     fn workspace(&self) -> &dyn Workspace;
     /// Running runs by id; resolving a sender stops its run.
     fn cancellations(&self) -> &Mutex<HashMap<Uuid, oneshot::Sender<()>>>;
+    /// `run`'s turn started on workspace stream `stream`, before any of its
+    /// events are recorded. A host that resumes turns after a restart keeps
+    /// it with the run until [`turn_finished`](Self::turn_finished).
+    fn turn_started(&self, _run: &Run, _cwd: &str, _stream: u64) {}
     /// A turn event is recorded (or deliberately not recorded). With a
     /// `position`, the run's events up to it need not arrive again; this is
     /// called before the workspace is told, so a host that keeps positions
@@ -46,11 +50,47 @@ pub(crate) async fn launch<H: TurnHost>(
 ) {
     let cwd = spec.cwd.clone();
     let result = match host.workspace().start_tracked_turn(spec, cancel).await {
-        Ok(turn) => record(&*host, &run, cwd, turn).await,
+        Ok(turn) => {
+            if let Some(stream) = turn.stream() {
+                host.turn_started(&run, &cwd, stream);
+            }
+            record(&*host, &run, cwd, turn).await
+        }
         Err(error) => Err(error),
     };
     if let Err(error) = result {
         fail(&*host, &run, error).await;
+    }
+}
+
+/// Record a turn started before a restart, picked up again with
+/// [`crate::workspace::RemoteWorkspace::resume_turn`].
+pub(crate) async fn resume<H: TurnHost>(host: Arc<H>, run: Run, cwd: String, turn: TurnItems) {
+    if let Err(error) = record(&*host, &run, cwd, turn).await {
+        fail(&*host, &run, error).await;
+    }
+}
+
+/// The runs a restart left running, with the position each last recorded.
+pub(crate) fn running_runs(store: &crate::Store) -> Vec<(Run, Option<StreamPosition>)> {
+    let mut runs: Vec<_> = store
+        .threads
+        .values()
+        .flat_map(|thread| thread.runs.iter())
+        .filter(|run| run.status == "running")
+        .map(|run| (run.clone(), store.turn_positions.get(&run.id).copied()))
+        .collect();
+    runs.sort_by_key(|(run, _)| run.started_at);
+    runs
+}
+
+/// End a run that a restart cut off and that cannot be picked up again.
+pub(crate) fn interrupted(run: &Run) -> Event {
+    Event::RunFinished {
+        run_id: run.id,
+        thread_id: run.thread_id.clone(),
+        status: "failed".into(),
+        error: Some("interrupted: the server restarted during the turn".into()),
     }
 }
 
@@ -79,13 +119,14 @@ enum Recorded {
     End(TurnExit),
 }
 
-fn recorded(run: &Run, event: TurnEvent) -> Recorded {
+fn recorded(run: &Run, event: TurnEvent, position: Option<StreamPosition>) -> Recorded {
     let output = |stream: &str, text: String| {
         Recorded::Event(Box::new(Event::RunOutput {
             run_id: run.id,
             thread_id: run.thread_id.clone(),
             stream: stream.into(),
             text,
+            position,
         }))
     };
     match event {
@@ -133,7 +174,7 @@ async fn record<H: TurnHost>(
     };
     let mut exit = None;
     while let Some(TurnItem { event, position }) = turn.recv().await {
-        match recorded(run, event) {
+        match recorded(run, event, position) {
             Recorded::Event(event) => {
                 // An event that could not be recorded is not acknowledged,
                 // so the workspace offers it again after a reconnect.

@@ -566,7 +566,7 @@ impl RemoteWorkspace {
             }
         }
         self.forward_cancel(position.stream, cancel);
-        TurnItems::tracked(receiver)
+        TurnItems::tracked(position.stream, receiver)
     }
 
     /// The last acknowledged position of every tracked stream still open.
@@ -979,9 +979,10 @@ impl Workspace for RemoteWorkspace {
     ) -> WorkspaceFuture<'_, anyhow::Result<TurnItems>> {
         boxed(async move {
             let (items, receiver) = mpsc::unbounded_channel();
-            self.open_turn(spec, cancel, TurnSender::Tracked(items), true)
+            let stream = self
+                .open_turn(spec, cancel, TurnSender::Tracked(items), true)
                 .await?;
-            Ok(TurnItems::tracked(receiver))
+            Ok(TurnItems::tracked(stream, receiver))
         })
     }
     fn ack(&self, position: StreamPosition) {

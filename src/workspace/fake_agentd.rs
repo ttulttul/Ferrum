@@ -59,7 +59,6 @@ impl FakeAgentd {
     }
 
     /// Drop the connection, as a server restart does.
-    #[allow(dead_code)] // for the restart tests to come
     pub(crate) fn disconnect(&self) {
         let peer = self.lock().peer.take();
         if let Some(peer) = peer {
@@ -69,6 +68,11 @@ impl FakeAgentd {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Lose `stream`, as an agentd that restarted does.
+    pub(crate) fn forget(&self, stream: u64) {
+        self.lock().streams.remove(&stream);
     }
 
     /// The turns started so far, by stream.
