@@ -241,10 +241,12 @@ impl ControlPlane {
             .last()
             .map(|(_, value)| value.into_owned())
             .filter(|v| !v.trim().is_empty());
-        let principal = match ticket {
+        // The host accepts the upgrade itself, outside the router whose middleware
+        // records the request a DPoP proof must match, so record it here.
+        let principal = access_http::with_request_context("GET", uri, headers, || match ticket {
             Some(ticket) => access_http::authenticate_ticket(self, headers, uri, &ticket, "rpc"),
             None => access_http::principal(self, headers),
-        }
+        })
         .map_err(|reason| crate::auth_error(headers, reason))?;
         let references = query
             .clone()
@@ -1216,6 +1218,117 @@ mod tests {
             "Draft"
         );
         assert_eq!(thread[0]["values"][1], json!({"kind":"synchronized"}));
+    }
+
+    /// A desktop client's DPoP key (a fixed P-256 test key).
+    const TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgZliUoRhEGT671J/s
+nAXKuByunnPT+6q5wiJ8eoRZJbChRANCAATsNcEJTRae+VunFX1XZc4WLj05fQ1B
+xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
+-----END PRIVATE KEY-----";
+
+    fn dpop(method: &str, url: &str, access: Option<&str>) -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use sha2::Digest;
+        let header = json!({"alg":"ES256","typ":"dpop+jwt","jwk":{"crv":"P-256","kty":"EC",
+            "x":"7DXBCU0WnvlbpxV9V2XOFi49OX0NQcY8CB0RO0uX8fY","y":"b1kElj1AqoBVnBgTC4dmlyKSQcYJzgYfr-tEUck3sFA"}});
+        let mut claims = json!({"htm":method,"htu":url,"jti":crate::platform::uuid_v4().to_string(),
+            "iat":crate::platform::now_ms() / 1000});
+        if let Some(access) = access {
+            claims["ath"] = json!(URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(access.as_bytes())));
+        }
+        let message = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(header.to_string()),
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        );
+        let key = jsonwebtoken::EncodingKey::from_ec_pem(TEST_KEY.as_bytes()).unwrap();
+        let signature =
+            jsonwebtoken::crypto::sign(message.as_bytes(), &key, jsonwebtoken::Algorithm::ES256)
+                .unwrap();
+        format!("{message}.{signature}")
+    }
+
+    #[test]
+    fn accepts_a_socket_ticket_with_its_dpop_proof() {
+        use tower::ServiceExt;
+        let plane = Arc::new(plane());
+        let base = "https://env.example.test";
+        let request = |method: &str, path: &str, headers: Vec<(&str, String)>, body: String| {
+            let mut builder = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "env.example.test")
+                .header("x-forwarded-proto", "https");
+            for (name, value) in headers {
+                builder = builder.header(name, value);
+            }
+            builder.body(axum::body::Body::from(body)).unwrap()
+        };
+        let read = |response: Response| -> Value {
+            let bytes = now(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        let form = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=secret&subject_token_type=urn%3At3%3Aparams%3Aoauth%3Atoken-type%3Aenvironment-bootstrap&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token";
+        let token = read(
+            now(plane.router().oneshot(request(
+                "POST",
+                "/oauth/token",
+                vec![
+                    ("content-type", "application/x-www-form-urlencoded".into()),
+                    ("dpop", dpop("POST", &format!("{base}/oauth/token"), None)),
+                ],
+                form.into(),
+            )))
+            .unwrap(),
+        );
+        let access = token["access_token"]
+            .as_str()
+            .expect("an access token")
+            .to_owned();
+        let ticket = read(
+            now(plane.router().oneshot(request(
+                "POST",
+                "/api/auth/websocket-ticket/rpc",
+                vec![
+                    ("authorization", format!("DPoP {access}")),
+                    (
+                        "dpop",
+                        dpop(
+                            "POST",
+                            &format!("{base}/api/auth/websocket-ticket/rpc"),
+                            Some(&access),
+                        ),
+                    ),
+                ],
+                String::new(),
+            )))
+            .unwrap(),
+        );
+        let ticket = ticket["ticket"].as_str().expect("a ticket").to_owned();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "env.example.test".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        let socket = |ticket: &str, proof: &str| -> Uri {
+            let query: String = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("orchestrationProtocol", "2")
+                .append_pair("wsTicket", ticket)
+                .append_pair("dpop", proof)
+                .finish();
+            format!("/ws?{query}").parse().unwrap()
+        };
+        // A proof for another URL is refused.
+        let wrong = socket(
+            &ticket,
+            &dpop("GET", &format!("{base}/other"), Some(&ticket)),
+        );
+        assert!(plane.authorize_socket(&headers, &wrong).is_err());
+        let uri = socket(&ticket, &dpop("GET", &format!("{base}/ws"), Some(&ticket)));
+        assert!(
+            plane.authorize_socket(&headers, &uri).is_ok(),
+            "the ticket and its proof open the socket"
+        );
     }
 
     #[test]

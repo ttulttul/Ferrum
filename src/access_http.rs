@@ -18,7 +18,9 @@ pub(crate) mod connect;
 mod dpop;
 #[cfg(feature = "native")]
 mod guest;
-pub(crate) use dpop::{client_metadata, contextualize, reason as proof_failure, uses_proof};
+pub(crate) use dpop::{
+    client_metadata, contextualize, reason as proof_failure, uses_proof, with_request_context,
+};
 
 /// What the session, pairing and ticket routes need from their server: only
 /// the auth service. The native AppState and the workers control plane both
