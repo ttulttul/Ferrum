@@ -57,6 +57,15 @@ pub(super) async fn handle<S: McpHost>(
         return (StatusCode::UNAUTHORIZED,[("cache-control","no-store"),("vary","Accept-Encoding"),("www-authenticate",challenge.as_str())],
             Json(json!({"error":"invalid_mcp_credential","message":"A valid T3 Code MCP credential is required."}))).into_response();
     };
+    // The Linked environments beta is off here: links wait until it is on again.
+    if granted.peer_link && !s.linked_environments_enabled() {
+        return (
+            StatusCode::FORBIDDEN,
+            [("cache-control", "no-store"), ("vary", "Accept-Encoding")],
+            Json(json!({"error":"linked_environments_off","message":"Linked environments is off on this machine. Turn it on in its Settings → Labs."})),
+        )
+            .into_response();
+    }
     let sid = h.get("mcp-session-id").and_then(|v| v.to_str().ok());
     if let Some(sid) = sid {
         if !s.oauth().session_held(sid, token) {

@@ -161,6 +161,39 @@ pub(crate) fn consume(
     Ok(Outcome::NotFound)
 }
 
+/// Revokes MCP client sessions (linked environments and outside agents) that the
+/// TypeScript server, or this one on a shared home, keeps in `auth_sessions`, as
+/// `AuthSessions.revoke` does: `revoked_at` is set once and never cleared. `id`
+/// picks one session; `None` revokes them all (revoking every other client).
+/// Returns the session ids it revoked.
+pub(crate) fn revoke_mcp_clients(
+    db: &Path,
+    id: Option<&str>,
+    now: &str,
+) -> rusqlite::Result<Vec<String>> {
+    if !db.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open_with_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    if !has_table(&conn, "auth_sessions")? {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn.prepare(
+        "UPDATE auth_sessions SET revoked_at = ?1
+         WHERE subject = 'mcp-client' AND revoked_at IS NULL
+           AND (?2 IS NULL OR session_id = ?2)
+         RETURNING session_id",
+    )?;
+    let ids = statement
+        .query_map(params![now, id], |row| row.get::<_, String>(0))?
+        .collect();
+    ids
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
