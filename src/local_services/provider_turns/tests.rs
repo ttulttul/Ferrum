@@ -327,6 +327,11 @@ async fn claude_turn_streams_text_tool_calls_and_usage() {
         "{args}"
     );
     assert!(!args.contains("--resume"), "{args}");
+    // The Read tool is titled as the reference titles it.
+    assert!(items(&events, "dynamic_tool").iter().any(|item| item
+        .title
+        .as_deref()
+        .is_some_and(|t| t.starts_with("Read /"))));
     // A new session's id is chosen before the CLI starts and named first.
     let (first, _) = native_thread(&events);
     assert!(args.contains(&format!("--session-id {first}")), "{args}");
