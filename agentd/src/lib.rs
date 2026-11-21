@@ -560,7 +560,7 @@ impl Agentd {
 
     async fn start_turn(self: &Arc<Self>, opener: &Opener, args: &Value) -> OpResult {
         let start: TurnStart = parse(args)?;
-        if start.command.is_empty() {
+        if start.command.is_empty() && start.provider.is_none() {
             return Err(bad_request("`command` is empty"));
         }
         let (cancel, cancelled) = oneshot::channel();

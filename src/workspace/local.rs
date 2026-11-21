@@ -142,7 +142,14 @@ impl Workspace for LocalWorkspace {
         spec: TurnSpec,
         cancel: oneshot::Receiver<()>,
     ) -> WorkspaceFuture<'_, anyhow::Result<mpsc::UnboundedReceiver<TurnEvent>>> {
-        async move { start_turn(spec, cancel) }.boxed()
+        async move {
+            if spec.provider.is_some() {
+                crate::local_services::provider_turns::start(spec, cancel)
+            } else {
+                start_turn(spec, cancel)
+            }
+        }
+        .boxed()
     }
     fn local_servers<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
         discovery::scan(&self.terminals, input).boxed()
@@ -326,7 +333,7 @@ mod tests {
                 ],
                 prompt: String::new(),
                 cwd: "/".into(),
-                env_remove: vec![],
+                ..TurnSpec::default()
             },
             cancelled,
         )

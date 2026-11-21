@@ -3,9 +3,10 @@
 use serde_json::json;
 use std::{path::Path, process::Command, sync::Arc, time::Duration};
 use t3_agentd::{Agentd, Config};
+use t3code_server::workspace::provider::TurnStatus;
 use t3code_server::workspace::{
-    connect, GitTools, LocalWorkspace, NativeLink, RemoteWorkspace, TurnEvent, TurnItem, TurnItems,
-    TurnSpec, Workspace,
+    connect, GitTools, LocalWorkspace, NativeLink, ProviderEvent, ProviderTurn, RemoteWorkspace,
+    TurnEvent, TurnItem, TurnItems, TurnSpec, Workspace,
 };
 use tokio::sync::oneshot;
 
@@ -279,6 +280,7 @@ async fn a_turn_matches_the_local_workspace() {
         prompt: "prompt".into(),
         cwd: s.root.to_string_lossy().into_owned(),
         env_remove: vec!["HOME".into()],
+        ..TurnSpec::default()
     };
     let remote = run_turn(&s.remote, spec.clone()).await;
     let local = run_turn(&*s.local, spec).await;
@@ -319,6 +321,7 @@ async fn a_turn_matches_the_local_workspace() {
                 prompt: String::new(),
                 cwd: s.root.to_string_lossy().into_owned(),
                 env_remove: vec![],
+                ..TurnSpec::default()
             },
             cancelled,
         )
@@ -351,6 +354,7 @@ async fn a_turn_survives_a_dropped_socket() {
                 prompt: String::new(),
                 cwd: s.root.to_string_lossy().into_owned(),
                 env_remove: vec![],
+                ..TurnSpec::default()
             },
             cancelled,
         )
@@ -366,6 +370,7 @@ async fn a_turn_survives_a_dropped_socket() {
         match event {
             TurnEvent::Stdout(line) => lines.push(line),
             TurnEvent::Stderr(line) => panic!("unexpected stderr {line}"),
+            TurnEvent::Provider(event) => panic!("unexpected provider event {event:?}"),
             TurnEvent::Exited(exit) => break exit,
         }
         // Drop the socket twice mid-turn; the turn keeps running in agentd.
@@ -419,6 +424,7 @@ async fn a_restarted_consumer_gets_unacknowledged_events_again_once() {
                 prompt: String::new(),
                 cwd: s.root.to_string_lossy().into_owned(),
                 env_remove: vec![],
+                ..TurnSpec::default()
             },
             cancelled,
         )
@@ -464,6 +470,7 @@ async fn a_restarted_consumer_gets_unacknowledged_events_again_once() {
         match item.event {
             TurnEvent::Stdout(line) => recorded.push(line),
             TurnEvent::Stderr(line) => panic!("unexpected stderr {line}"),
+            TurnEvent::Provider(event) => panic!("unexpected provider event {event:?}"),
             TurnEvent::Exited(exit) => {
                 remote.ack(position);
                 break exit;
@@ -503,6 +510,7 @@ async fn a_tracked_turn_holds_frames_until_they_are_acknowledged() {
                 prompt: String::new(),
                 cwd: s.root.to_string_lossy().into_owned(),
                 env_remove: vec![],
+                ..TurnSpec::default()
             },
             cancelled,
         )
@@ -529,4 +537,101 @@ async fn a_tracked_turn_holds_frames_until_they_are_acknowledged() {
         idle = s.remote.idle_state().await.unwrap();
     }
     assert_eq!(idle.unacked_frames, 0);
+}
+
+/// A Codex turn played by the fake CLI from `tests/fixtures/providers`.
+fn provider_spec(root: &Path, scenario: &str, log: &Path) -> TurnSpec {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/providers");
+    TurnSpec {
+        prompt: "Say hello".into(),
+        cwd: root.to_string_lossy().into_owned(),
+        env: vec![
+            (
+                "FAKE_PROVIDER_SCENARIO".into(),
+                fixtures.join(scenario).display().to_string(),
+            ),
+            ("FAKE_PROVIDER_LOG".into(), log.display().to_string()),
+        ],
+        provider: Some(ProviderTurn {
+            driver: "codex".into(),
+            binary_path: fixtures.join("fake_cli.py").display().to_string(),
+            ..ProviderTurn::default()
+        }),
+        ..TurnSpec::default()
+    }
+}
+
+#[tokio::test]
+async fn provider_turn_events_survive_the_protocol_acks_and_reconnects() {
+    let s = setup().await;
+    let log = s.root.join("local.jsonl");
+    let local = run_turn(&*s.local, provider_spec(&s.root, "codex_turn.json", &log)).await;
+    assert!(local.len() > 20, "{local:?}");
+
+    let log = s.root.join("remote.jsonl");
+    let (_cancel, cancelled) = oneshot::channel();
+    let mut items = s
+        .remote
+        .start_tracked_turn(provider_spec(&s.root, "codex_turn.json", &log), cancelled)
+        .await
+        .unwrap();
+    let mut remote = Vec::new();
+    loop {
+        let item = next_item(&mut items).await;
+        let position = item.position.expect("tracked events carry a position");
+        let exited = matches!(item.event, TurnEvent::Exited(_));
+        remote.push(item.event);
+        s.remote.ack(position);
+        if remote.len() == 10 {
+            s.link.reconnect();
+        }
+        if exited {
+            break;
+        }
+    }
+    // Native ids come from the recording, so both runs report the same events.
+    assert_eq!(remote, local);
+    assert!(matches!(
+        remote.iter().rev().nth(1),
+        Some(TurnEvent::Provider(ProviderEvent::TurnTerminal { .. }))
+    ));
+}
+
+#[tokio::test]
+async fn cancelling_a_remote_provider_turn_interrupts_it() {
+    let s = setup().await;
+    let log = s.root.join("in.jsonl");
+    let (cancel, cancelled) = oneshot::channel();
+    let mut items = s
+        .remote
+        .start_tracked_turn(
+            provider_spec(&s.root, "codex_interrupt.json", &log),
+            cancelled,
+        )
+        .await
+        .unwrap();
+    loop {
+        let item = next_item(&mut items).await;
+        if matches!(
+            item.event,
+            TurnEvent::Provider(ProviderEvent::ProviderTurn { .. })
+        ) {
+            break;
+        }
+    }
+    cancel.send(()).unwrap();
+    let mut terminal = None;
+    let exit = loop {
+        match next_item(&mut items).await.event {
+            TurnEvent::Provider(ProviderEvent::TurnTerminal { status, .. }) => {
+                terminal = Some(status)
+            }
+            TurnEvent::Exited(exit) => break exit,
+            _ => {}
+        }
+    };
+    assert!(exit.cancelled, "{exit:?}");
+    assert_eq!(terminal, Some(TurnStatus::Interrupted));
+    let sent = std::fs::read_to_string(&log).unwrap();
+    assert!(sent.contains("\"turn/interrupt\""), "{sent}");
 }

@@ -371,11 +371,17 @@ impl From<WireGitTools> for crate::workspace::GitTools {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnStart {
+    #[serde(default)]
     pub command: Vec<String>,
     pub prompt: String,
     pub cwd: String,
     #[serde(default)]
     pub env_remove: Vec<String>,
+    /// `[name, value]` pairs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::workspace::ProviderTurn>,
 }
 
 impl From<crate::workspace::TurnSpec> for TurnStart {
@@ -385,6 +391,8 @@ impl From<crate::workspace::TurnSpec> for TurnStart {
             prompt: spec.prompt,
             cwd: spec.cwd,
             env_remove: spec.env_remove,
+            env: spec.env,
+            provider: spec.provider,
         }
     }
 }
@@ -396,6 +404,8 @@ impl From<TurnStart> for crate::workspace::TurnSpec {
             prompt: start.prompt,
             cwd: start.cwd,
             env_remove: start.env_remove,
+            env: start.env,
+            provider: start.provider,
         }
     }
 }
@@ -415,6 +425,10 @@ pub enum WireTurnEvent {
         cancelled: bool,
         status: String,
     },
+    /// A provider turn's event: `{type: "provider", event: {type: ...}}`.
+    Provider {
+        event: crate::workspace::ProviderEvent,
+    },
 }
 
 impl From<TurnEvent> for WireTurnEvent {
@@ -422,6 +436,7 @@ impl From<TurnEvent> for WireTurnEvent {
         match event {
             TurnEvent::Stdout(text) => Self::Stdout { text },
             TurnEvent::Stderr(text) => Self::Stderr { text },
+            TurnEvent::Provider(event) => Self::Provider { event },
             TurnEvent::Exited(exit) => Self::Exited {
                 success: exit.success,
                 cancelled: exit.cancelled,
@@ -436,6 +451,7 @@ impl From<WireTurnEvent> for TurnEvent {
         match event {
             WireTurnEvent::Stdout { text } => Self::Stdout(text),
             WireTurnEvent::Stderr { text } => Self::Stderr(text),
+            WireTurnEvent::Provider { event } => Self::Provider(event),
             WireTurnEvent::Exited {
                 success,
                 cancelled,
@@ -920,6 +936,10 @@ mod tests {
         for event in [
             TurnEvent::Stdout("a\n".into()),
             TurnEvent::Stderr("b\n".into()),
+            TurnEvent::Provider(crate::workspace::ProviderEvent::TurnItemDelta {
+                item_id: "msg_1".into(),
+                delta: "Hel".into(),
+            }),
             TurnEvent::Exited(TurnExit {
                 success: true,
                 cancelled: false,
