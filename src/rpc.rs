@@ -2192,8 +2192,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 manifest.refresh().await;
             });
         }
+        // A refresh checks the providers' CLIs again and answers with what
+        // the checks found.
+        crate::provider_status::refresh(state, params["instanceId"].as_str()).await;
         return match crate::config_rpc::snapshot(state, false, &Value::Null).await {
-            Ok(config) => Reply::Success(json!({"providers":config["providers"]})),
+            Ok(config) => Reply::Success(
+                json!({"providers":crate::provider_status::before_enrichment(&config["providers"])}),
+            ),
             Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
         };
     }

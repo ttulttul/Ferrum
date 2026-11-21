@@ -30,7 +30,9 @@ Steps:
 
 A request the scenario does not expect is answered from SIDE_REPLIES (or the
 scenario's own "replies" by method), so a client that reads its config or
-account first still reaches the scripted steps.
+account first still reaches the scripted steps. A Claude control request is
+answered from CONTROL_REPLIES (or "controlReplies" by subtype). A scenario
+with "silent": true answers nothing, as a CLI that hangs.
 
 After the last step the CLI waits for its input to close, as the real ones do.
 """
@@ -92,6 +94,8 @@ CONTROL_REPLIES = {
 
 def answer(message):
     """Reply to an unscripted request this CLI knows an answer to."""
+    if scenario.get("silent"):
+        return
     method = message.get("method")
     if "id" in message and method in SIDE_REPLIES:
         sys.stdout.write(json.dumps({"id": message["id"], "result": SIDE_REPLIES[method]}) + "\n")

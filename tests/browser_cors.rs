@@ -104,6 +104,8 @@ async fn answers_browser_cors_like_the_reference() {
     let state = AppState::with_config(&paths.state_dir, Vec::new(), AuthService::new(), config)
         .await
         .unwrap();
+    // Tests never run the host's provider CLIs.
+    state.disable_provider_status_checks();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();

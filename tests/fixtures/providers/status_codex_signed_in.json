@@ -1,0 +1,90 @@
+{
+ "_comment": "codex app-server answering the status probe promptly: signed in with an API key, two models and a skill.",
+ "steps": [],
+ "replies": {
+  "initialize": {
+   "codexHome": "/tmp/codex-home",
+   "platformFamily": "unix",
+   "platformOs": "linux",
+   "userAgent": "codex_cli_rs/0.170.0"
+  },
+  "account/read": {
+   "account": {
+    "type": "apiKey"
+   },
+   "requiresOpenaiAuth": true
+  },
+  "model/list": {
+   "data": [
+    {
+     "id": "gpt-6-astra",
+     "model": "gpt-6-astra",
+     "displayName": "gpt-6-astra",
+     "description": "Frontier model",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "high",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "low",
+       "description": ""
+      },
+      {
+       "reasoningEffort": "medium",
+       "description": ""
+      },
+      {
+       "reasoningEffort": "high",
+       "description": ""
+      }
+     ],
+     "serviceTiers": [
+      {
+       "id": "priority",
+       "name": "Fast",
+       "description": "Faster responses"
+      }
+     ]
+    },
+    {
+     "id": "gpt-5.6-terra",
+     "model": "gpt-5.6-terra",
+     "displayName": "gpt-5.6-terra",
+     "description": "Older model",
+     "hidden": false,
+     "isDefault": true,
+     "defaultReasoningEffort": "medium",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "medium",
+       "description": ""
+      }
+     ]
+    }
+   ],
+   "nextCursor": null
+  },
+  "skills/list": {
+   "data": [
+    {
+     "cwd": "/workspace",
+     "errors": [],
+     "skills": [
+      {
+       "name": "release-notes",
+       "path": "/workspace/.codex/skills/release-notes/SKILL.md",
+       "enabled": true,
+       "description": "Write release notes",
+       "scope": "repo",
+       "shortDescription": "Release notes"
+      }
+     ]
+    }
+   ]
+  },
+  "config/read": {
+   "config": {},
+   "origins": {}
+  }
+ }
+}

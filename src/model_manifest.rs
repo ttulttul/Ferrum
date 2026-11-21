@@ -116,7 +116,7 @@ fn decode_capabilities(value: &Value) -> Option<Value> {
 
 /// The reference's `parseSemver`: three numeric segments after normalizing,
 /// with an optional prerelease.
-fn parse_semver(value: &str) -> Option<(u64, u64, u64, Vec<String>)> {
+pub(crate) fn parse_semver(value: &str) -> Option<(u64, u64, u64, Vec<String>)> {
     let without_build = value.trim().split('+').next().unwrap_or("");
     let mut parts = without_build.splitn(2, '-');
     let main = parts.next().unwrap_or("");
@@ -151,7 +151,7 @@ fn parse_semver(value: &str) -> Option<(u64, u64, u64, Vec<String>)> {
     Some((numbers[0], numbers[1], numbers[2], pre))
 }
 
-fn compare_semver(left: &str, right: &str) -> Ordering {
+pub(crate) fn compare_semver(left: &str, right: &str) -> Ordering {
     let (Some(l), Some(r)) = (parse_semver(left), parse_semver(right)) else {
         return left.cmp(right);
     };

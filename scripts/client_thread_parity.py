@@ -668,13 +668,17 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
 
 
 PROVIDER_STATUS_TIMES = {"checkedAt", "updatedAt", "lastCheckedAt"}
+# What the reference reads from the network with update checks on (these scenarios keep the
+# default settings): the CLI's latest release and what follows from it. This server does not
+# look the latest release up (provider_status_parity.py compares the advisory with checks off).
+PROVIDER_STATUS_NETWORK = {"versionAdvisory": {"latestVersion", "status", "message", "updateCommand", "canUpdate"},
+                           "compatibilityAdvisory": {"latestVersionStatus"}}
 
 
-def provider_status(url, cookie, instance, root, wait):
-    """The instance's provider status from server.getConfig, without probe times and with the
-    temporary home masked. With `wait`, once its probe has reported (for up to 20 seconds)."""
-    def settled(entry):
-        return not wait or (entry is not None and "has not been checked" not in str(entry.get("message")))
+def provider_status(url, cookie, instance, root):
+    """The instance's provider status from server.getConfig once its check has reported and the
+    row has settled (for up to 30 seconds), without check times and network-derived fields, and
+    with the temporary home masked."""
     def strip(value):
         if isinstance(value, dict):
             return {key: strip(item) for key, item in value.items() if key not in PROVIDER_STATUS_TIMES}
@@ -685,12 +689,24 @@ def provider_status(url, cookie, instance, root, wait):
                 value = value.replace(f"{root}/{server}", "<home>/<server>")
             return value.replace(str(root), "<home>")
         return value
-    deadline = time.monotonic() + 20
+    def offline(entry):
+        entry = strip(entry)
+        for key, fields in PROVIDER_STATUS_NETWORK.items():
+            if isinstance(entry, dict) and isinstance(entry.get(key), dict):
+                entry[key] = {k: v for k, v in entry[key].items() if k not in fields}
+        return entry
+    deadline = time.monotonic() + 30
+    last, since = None, None
     while True:
         providers = rpc(url, cookie, "server.getConfig", {}).get("providers", [])
         entry = next((p for p in providers if p.get("instanceId") == instance), None)
-        if settled(entry) or time.monotonic() > deadline:
-            return strip(entry)
+        if entry is not None and "has not been checked" not in str(entry.get("message")):
+            if offline(entry) != last:
+                last, since = offline(entry), time.monotonic()
+            elif time.monotonic() - since >= 1.5:
+                return last
+        if time.monotonic() > deadline:
+            return offline(entry)
         time.sleep(0.5)
 
 
@@ -808,8 +824,7 @@ def provider_turns(args, credentials):
                     seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
                     outcomes[name] = run_client(args, url, cookie, seeded)
                     if scenario.get("status"):
-                        outcomes[name]["status"] = provider_status(url, cookie, scenario["instance"], temporary,
-                                                                   wait=name == "original")
+                        outcomes[name]["status"] = provider_status(url, cookie, scenario["instance"], temporary)
                 outcomes[name]["cli"] = cli_approvals(log)
                 outcomes[name]["launch"] = cli_launch(log, temporary)
         if args.dump:

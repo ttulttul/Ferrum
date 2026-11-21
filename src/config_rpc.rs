@@ -192,6 +192,10 @@ pub(crate) struct Subscription {
     timer: tokio::time::Interval,
     provider_event: Option<Value>,
     initial_events: std::collections::VecDeque<Value>,
+    /// Provider status checks that published, and when the debounced
+    /// `providerStatuses` event is due.
+    provider_checks: broadcast::Receiver<()>,
+    providers_due: Option<tokio::time::Instant>,
 }
 
 /// Events the reference server sends right after the snapshot to a client that
@@ -231,6 +235,7 @@ impl Subscription {
         options: &Value,
     ) -> Result<Self, Value> {
         let changes = state.settings.subscribe();
+        let provider_checks = state.provider_status.subscribe();
         let settings_file = revision(&state.paths.settings);
         let bindings_file = revision(&state.paths.keybindings);
         let config = snapshot(state, references, options).await?;
@@ -244,7 +249,47 @@ impl Subscription {
             timer: tokio::time::interval(Duration::from_millis(50)),
             reload_at: None,
             provider_event: None,
+            provider_checks,
+            providers_due: None,
         })
+    }
+
+    /// The `providerStatuses` (or `providerStatusDeltas`) event for the
+    /// provider rows `view` gives now, if they differ from the last sent.
+    fn provider_statuses(
+        &mut self,
+        state: &AppState,
+        view: &Value,
+        options: &Value,
+    ) -> Option<Value> {
+        let providers = providers::list(state, view, options);
+        if providers == self.config["providers"] {
+            return None;
+        }
+        let mut rows = providers.clone();
+        let deltas = options["providerStatusDeltas"] == true;
+        if deltas {
+            let previous = self.config["providers"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for row in rows.as_array_mut().unwrap() {
+                if let Some(old) = previous
+                    .iter()
+                    .find(|v| v["instanceId"] == row["instanceId"])
+                {
+                    for key in ["models", "skills", "slashCommands"] {
+                        if old[key] == row[key] {
+                            row.as_object_mut().unwrap().shift_remove(key);
+                        }
+                    }
+                }
+            }
+        }
+        self.config["providers"] = providers;
+        Some(
+            json!({"version":1,"type":if deltas{"providerStatusDeltas"}else{"providerStatuses"},"payload":{"providers":rows}}),
+        )
     }
 
     pub async fn next(
@@ -267,7 +312,21 @@ impl Subscription {
                     Err(broadcast::error::RecvError::Lagged(_))=>state.settings.client(references)?,
                     Err(broadcast::error::RecvError::Closed)=>return Err(json!({"_tag":"ServerSettingsError","settingsPath":state.paths.settings,"operation":"read-file"})),
                 },
+                received=self.provider_checks.recv()=>{
+                    if !matches!(received, Err(broadcast::error::RecvError::Closed)) {
+                        // `PROVIDER_STATUS_DEBOUNCE_MS`.
+                        self.providers_due = Some(tokio::time::Instant::now() + Duration::from_millis(200));
+                    }
+                    continue;
+                }
                 _=self.timer.tick()=>{
+                    if self.providers_due.is_some_and(|at| tokio::time::Instant::now() >= at) {
+                        self.providers_due = None;
+                        let view = self.config["settings"].clone();
+                        if let Some(event) = self.provider_statuses(state, &view, options) {
+                            return Ok(event);
+                        }
+                    }
                     let keybindings_file=revision(&state.paths.keybindings);
                     if keybindings_file!=self.bindings_file{
                         self.bindings_file=keybindings_file;
@@ -290,30 +349,7 @@ impl Subscription {
                 }
             };
             if view["providerInstances"] != self.config["settings"]["providerInstances"] {
-                let providers = providers::list(state, &view, options);
-                if providers != self.config["providers"] {
-                    let mut rows = providers.clone();
-                    let deltas = options["providerStatusDeltas"] == true;
-                    if deltas {
-                        let previous = self.config["providers"].as_array().unwrap();
-                        for row in rows.as_array_mut().unwrap() {
-                            if let Some(old) = previous
-                                .iter()
-                                .find(|v| v["instanceId"] == row["instanceId"])
-                            {
-                                for key in ["models", "skills", "slashCommands"] {
-                                    if old[key] == row[key] {
-                                        row.as_object_mut().unwrap().shift_remove(key);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    self.config["providers"] = providers;
-                    self.provider_event = Some(
-                        json!({"version":1,"type":if deltas{"providerStatusDeltas"}else{"providerStatuses"},"payload":{"providers":rows}}),
-                    );
-                }
+                self.provider_event = self.provider_statuses(state, &view, options);
             }
             self.config["settings"] = view.clone();
             return Ok(json!({"version":1,"type":"settingsUpdated","payload":{"settings":view}}));
