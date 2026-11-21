@@ -1611,6 +1611,57 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
     }
 
     #[test]
+    fn the_owner_creates_and_revokes_pairing_links() {
+        use tower::ServiceExt;
+        let plane = plane();
+        let (_, owner) = plane.auth.browser_session("secret", None).unwrap();
+        let post = |path: &str, cookie: Option<&str>, body: Value| {
+            let mut request = axum::http::Request::post(path)
+                .header("host", "env.example.test")
+                .header("content-type", "application/json");
+            if let Some(token) = cookie {
+                request = request.header("cookie", format!("t3_session_3773={token}"));
+            }
+            let response = now(plane.router().oneshot(
+                request
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            ))
+            .unwrap();
+            let status = response.status();
+            let bytes = now(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        };
+        let request = json!({"purpose":"peer-link","access":"full-access"});
+        assert_eq!(
+            post("/api/auth/pairing-token", None, request.clone()).0,
+            401
+        );
+        let (status, link) = post("/api/auth/pairing-token", Some(&owner), request);
+        assert_eq!(status, 200, "{link}");
+        assert_eq!(link["purpose"], "peer-link");
+        assert_eq!(link["access"], "full-access");
+        assert_eq!(link["credential"].as_str().map(str::len), Some(12));
+        let (status, revoked) = post(
+            "/api/auth/pairing-links/revoke",
+            Some(&owner),
+            json!({"id":link["id"]}),
+        );
+        assert_eq!((status.as_u16(), revoked), (200, json!({"revoked":true})));
+        assert_eq!(
+            plane.auth.consume_approval_code(
+                link["credential"].as_str().unwrap(),
+                "full-access",
+                true
+            ),
+            Err("unknown_or_used")
+        );
+    }
+
+    #[test]
     fn accepts_a_socket_ticket_with_its_dpop_proof() {
         use tower::ServiceExt;
         let plane = Arc::new(plane());

@@ -956,4 +956,19 @@ impl access_http::AuthHost for AppState {
     fn auth(&self) -> &auth_service::AuthService {
         &self.auth
     }
+    fn pairing_refusal(&self) -> Option<String> {
+        if self.settings.policy.allows_client("remote") {
+            return None;
+        }
+        let org = self
+            .settings
+            .policy
+            .summary()
+            .and_then(|summary| summary["organization"].as_str())
+            .unwrap_or("This organization")
+            .to_owned();
+        Some(format!(
+            "{org}'s policy does not allow remote clients, so this server cannot create pairing links."
+        ))
+    }
 }

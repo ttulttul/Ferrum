@@ -27,14 +27,22 @@ pub(crate) use dpop::{
 /// provide it, so these routes are shared.
 pub trait AuthHost: Send + Sync + 'static {
     fn auth(&self) -> &AuthService;
+    /// Why this server may not create pairing links now, if it may not.
+    fn pairing_refusal(&self) -> Option<String> {
+        None
+    }
 }
 impl<T: AuthHost> AuthHost for Arc<T> {
     fn auth(&self) -> &AuthService {
         (**self).auth()
     }
+    fn pairing_refusal(&self) -> Option<String> {
+        (**self).pairing_refusal()
+    }
 }
 
-/// Sessions, the pairing exchange and WebSocket tickets.
+/// Sessions, the pairing exchange, WebSocket tickets, and the owner's
+/// pairing-link and client administration.
 pub fn auth_routes<S: AuthHost>() -> Router<Arc<S>> {
     Router::new()
         .route("/api/auth/session", get(session::<S>))
@@ -42,6 +50,12 @@ pub fn auth_routes<S: AuthHost>() -> Router<Arc<S>> {
         .route("/oauth/token", post(exchange::<S>))
         .route("/api/auth/websocket-ticket", post(ticket::<S>))
         .route("/api/auth/websocket-ticket/:use", post(ticket_for::<S>))
+        .route("/api/auth/pairing-token", post(admin::<S>))
+        .route("/api/auth/pairing-links/revoke", post(admin::<S>))
+        .route("/api/auth/clients/revoke", post(admin::<S>))
+        .route("/api/auth/clients/revoke-others", post(admin::<S>))
+        .route("/api/auth/connect-devices/approve", post(admin::<S>))
+        .route("/api/auth/connect-devices/revoke", post(admin::<S>))
 }
 
 #[cfg(feature = "native")]
@@ -50,12 +64,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         .merge(guest::routes())
         .merge(connect::routes())
         .merge(auth_routes::<AppState>())
-        .route("/api/auth/pairing-token", post(admin))
-        .route("/api/auth/pairing-links/revoke", post(admin))
-        .route("/api/auth/clients/revoke", post(admin))
-        .route("/api/auth/clients/revoke-others", post(admin))
-        .route("/api/auth/connect-devices/approve", post(admin))
-        .route("/api/auth/connect-devices/revoke", post(admin))
 }
 fn header<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
     h.get(name)?.to_str().ok()
@@ -161,7 +169,6 @@ fn auth_failure(h: &HeaderMap, e: &str) -> Response {
     )
         .into_response()
 }
-#[cfg(feature = "native")]
 fn policy_forbidden(message: &str) -> Response {
     (
         StatusCode::FORBIDDEN,
@@ -307,10 +314,9 @@ async fn issue_ticket(s: &impl AuthHost, h: &HeaderMap, kind: &str) -> Response 
         Err(e) => auth_failure(h, e),
     }
 }
-#[cfg(feature = "native")]
-async fn admin(State(state): State<Arc<AppState>>, req: Request) -> Response {
+async fn admin<S: AuthHost>(State(state): State<Arc<S>>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
-    let p = match principal(&state, &parts.headers) {
+    let p = match principal(&*state, &parts.headers) {
         Ok(p) => p,
         Err(e) => return auth_error(&parts.headers, e),
     };
@@ -338,11 +344,8 @@ async fn admin(State(state): State<Arc<AppState>>, req: Request) -> Response {
             .filter(|v| !v.is_empty())
     };
     let result = match parts.uri.path() {
-        "/api/auth/pairing-token" if !state.settings.policy.allows_client("remote") => {
-            let org = state.settings.policy.summary().unwrap()["organization"]
-                .as_str()
-                .unwrap();
-            return policy_forbidden(&format!("{org}'s policy does not allow remote clients, so this server cannot create pairing links."));
+        "/api/auth/pairing-token" if state.pairing_refusal().is_some() => {
+            return policy_forbidden(&state.pairing_refusal().unwrap_or_default());
         }
         "/api/auth/pairing-token" => state.auth().pair(&p, &json),
         "/api/auth/pairing-links/revoke" => match field("id") {
@@ -354,7 +357,7 @@ async fn admin(State(state): State<Arc<AppState>>, req: Request) -> Response {
         },
         "/api/auth/clients/revoke" => match field("sessionId") {
             Some(id) => state
-                .auth
+                .auth()
                 .revoke_client(&p, id)
                 .map(|v| json!({"revoked":v})),
             None => return StatusCode::BAD_REQUEST.into_response(),
