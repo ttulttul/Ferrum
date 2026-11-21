@@ -70,7 +70,7 @@ impl Subscription {
     /// Opens `method`. With `listen`, also subscribes to the channel its
     /// signals arrive on, before reading the first snapshot, so nothing
     /// committed in between is missed.
-    pub async fn open(
+    pub(crate) async fn open(
         control: &ControlState,
         principal: &Session,
         method: &str,
