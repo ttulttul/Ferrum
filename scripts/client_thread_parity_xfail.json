@@ -17,7 +17,6 @@
     "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events."
   },
   "claude turn": {
-    "items": "The Read tool item has no title (the reference titles it \"Read <path>\").",
     "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
     "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
   },

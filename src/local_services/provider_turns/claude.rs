@@ -532,10 +532,35 @@ fn tool_item(id: &str, name: &str, input: &Value) -> ProviderItem {
             }
             item
         }
-        _ => ProviderItem::new(id, "dynamic_tool", "running")
-            .with("toolName", name)
-            .with("input", input.clone()),
+        _ => {
+            let mut item = ProviderItem::new(id, "dynamic_tool", "running")
+                .with("toolName", name)
+                .with("input", input.clone());
+            item.title = dynamic_tool_title(name, input);
+            item
+        }
     }
+}
+
+/// The title the reference gives a Claude tool item: `Read <path>` for a
+/// read (`formatReadToolLabel`) and `Skill: <name>` for a skill
+/// (`dynamicToolTitle`); none for the others it titles from elsewhere.
+fn dynamic_tool_title(name: &str, input: &Value) -> Option<String> {
+    let text = |key: &str| {
+        input[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    if name == "Skill" {
+        return text("skill").map(|skill| format!("Skill: {skill}"));
+    }
+    matches!(name.to_ascii_lowercase().as_str(), "read" | "read file").then(|| {
+        match text("file_path").or_else(|| text("path")) {
+            Some(path) => format!("Read {path}"),
+            None => "Read file".into(),
+        }
+    })
 }
 
 /// A tool result's content as text.
