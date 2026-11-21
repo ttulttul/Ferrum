@@ -1135,6 +1135,13 @@ impl mcp_oauth::McpHost for AppState {
         let state = self.clone();
         Box::pin(async move { crate::projects::mutate(&state, &command).await })
     }
+    fn create_named_project(
+        self: &Arc<Self>,
+        name: String,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, serde_json::Value>> {
+        let state = self.clone();
+        Box::pin(async move { crate::rpc::create_new_project(&state, &name).await })
+    }
     fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait {
         crate::runtime::Runtime::sleep(&*self.runtime, duration)
     }

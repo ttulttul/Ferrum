@@ -185,6 +185,16 @@ fn unavailable_reply<'a>(method: String) -> WorkspaceFuture<'a, Reply> {
     return futures_util::FutureExt::boxed_local(reply);
 }
 
+/// The folder of a project started from its title.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedProject {
+    pub workspace_root: PathBuf,
+    /// Why the first commit failed, if it did; the folder is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_error: Option<String>,
+}
+
 /// The workspace operations the control plane uses, grouped as the workspace
 /// protocol groups them (`fs.*`, `git.*`, `term.*`, `proc.*`/`turn.*`,
 /// `preview.*`, `device.*`).
@@ -339,4 +349,19 @@ pub trait Workspace: MaybeSendSync {
     fn create_dir_all<'a>(&'a self, path: &'a Path) -> WorkspaceFuture<'a, std::io::Result<()>>;
     fn canonicalize<'a>(&'a self, path: &'a Path) -> WorkspaceFuture<'a, std::io::Result<PathBuf>>;
     fn is_dir<'a>(&'a self, path: &'a Path) -> WorkspaceFuture<'a, bool>;
+    /// `projects.createNew`'s folder: a new folder under `root` named after
+    /// `name`, holding a git repository whose first commit has a README and
+    /// an icon.
+    fn create_named_project<'a>(
+        &'a self,
+        _root: &'a Path,
+        _name: &'a str,
+    ) -> WorkspaceFuture<'a, std::io::Result<NamedProject>> {
+        boxed_future(async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this workspace cannot create projects",
+            ))
+        })
+    }
 }

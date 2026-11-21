@@ -1178,6 +1178,22 @@ impl Workspace for RemoteWorkspace {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not a path"))
         })
     }
+    fn create_named_project<'a>(
+        &'a self,
+        root: &'a Path,
+        name: &'a str,
+    ) -> WorkspaceFuture<'a, io::Result<super::NamedProject>> {
+        boxed(async move {
+            let value = io_result(
+                self.request(
+                    op::FS_CREATE_NAMED_PROJECT,
+                    json!({"rootPath": root, "name": name}),
+                )
+                .await,
+            )?;
+            serde_json::from_value(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        })
+    }
     fn is_dir<'a>(&'a self, path: &'a Path) -> WorkspaceFuture<'a, bool> {
         boxed(async move {
             self.request(op::FS_IS_DIR, json!({"path": path}))

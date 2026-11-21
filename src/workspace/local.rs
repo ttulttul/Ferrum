@@ -217,6 +217,13 @@ impl Workspace for LocalWorkspace {
     fn canonicalize<'a>(&'a self, path: &'a Path) -> WorkspaceFuture<'a, std::io::Result<PathBuf>> {
         tokio::fs::canonicalize(path).boxed()
     }
+    fn create_named_project<'a>(
+        &'a self,
+        root: &'a Path,
+        name: &'a str,
+    ) -> WorkspaceFuture<'a, std::io::Result<super::NamedProject>> {
+        crate::local_services::named_project::create(root, name).boxed()
+    }
     fn is_dir<'a>(&'a self, path: &'a Path) -> WorkspaceFuture<'a, bool> {
         async move { path.is_dir() }.boxed()
     }

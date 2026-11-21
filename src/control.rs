@@ -169,6 +169,13 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
             }
         })
     }
+    fn create_named_project(
+        self: &Arc<Self>,
+        name: String,
+    ) -> crate::mcp_oauth::HostFuture<Result<Value, Value>> {
+        let plane = self.clone();
+        Box::pin(async move { plane.create_new_project(&name).await })
+    }
     fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait {
         self.host.runtime.sleep(duration)
     }
@@ -916,6 +923,18 @@ impl ControlPlane {
                 json!({"providers":self.config_snapshot(&Value::Null)["providers"]}),
             ));
         }
+        if method == "projects.createNew" {
+            let name = params["name"].as_str().unwrap_or_default().trim();
+            if name.is_empty() {
+                return Call::Done(Reply::defect(
+                    "Expected a non-blank string\n  at [\"name\"]".into(),
+                ));
+            }
+            return Call::Done(match self.create_new_project(name).await {
+                Ok(created) => Reply::Success(created),
+                Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+            });
+        }
         if let Some(call) = self.host_call(method, params) {
             return call;
         }
@@ -1071,6 +1090,39 @@ impl ControlPlane {
             Ok(_) => Reply::Success(row),
             Err(_) => error("Failed to mutate project."),
         }
+    }
+
+    /// `projects.createNew`, as the native server runs it: the workspace
+    /// makes a new folder under its `projects` with a repository in it, and
+    /// the project is recorded there.
+    async fn create_new_project(&self, name: &str) -> Result<Value, Value> {
+        let failure =
+            |message: String| json!({"_tag":"OrchestrationDispatchCommandError","message":message});
+        let root = std::path::Path::new(WORKSPACE_ROOT).join("projects");
+        let created = self
+            .host
+            .workspace
+            .create_named_project(&root, name)
+            .await
+            .map_err(|error| failure(error.to_string()))?;
+        let id = crate::platform::uuid_v4().to_string();
+        let project = crate::Project {
+            id: id.clone(),
+            name: name.into(),
+            path: created.workspace_root.to_string_lossy().into_owned(),
+            created_at: crate::now(),
+        };
+        {
+            let _guard = self.mutation_lock.lock().await;
+            if self.commit(Event::ProjectCreated(project)).is_err() {
+                return Err(failure("Failed to create project.".into()));
+            }
+        }
+        let mut result = json!({"projectId": id, "workspaceRoot": created.workspace_root});
+        if let Some(error) = created.commit_error.filter(|e| !e.is_empty()) {
+            result["commitError"] = json!(error);
+        }
+        Ok(result)
     }
 
     /// The `subscribeServerConfig` snapshot. Host facts describe the
@@ -2195,6 +2247,19 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             .unwrap()
             .iter()
             .any(|p| p["providerInstanceId"] == "codex"));
+
+        // With no folder, a project starts from its title in a new repository.
+        let named = tool(None, "t3_project_create", json!({"title":"From title"}));
+        assert_eq!(
+            named["workspaceRoot"], "/workspace/projects/from-title",
+            "{named}"
+        );
+        let refused = tool(
+            None,
+            "t3_project_create",
+            json!({"title":"From title","createWorkspaceRootIfMissing":true}),
+        );
+        assert_eq!(refused["code"], "invalid_request", "{refused}");
 
         // The link was approved for auto, so full access is refused.
         let refused = tool(

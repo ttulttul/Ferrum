@@ -80,6 +80,10 @@ pub mod op {
     pub const FS_CANONICALIZE: &str = "fs.canonicalize";
     /// `{path}`; answers a boolean.
     pub const FS_IS_DIR: &str = "fs.isDir";
+    /// A project started from its title (`rootPath`, `name`): a new folder
+    /// under `rootPath` holding a repository with a first commit. Answers a
+    /// [`crate::workspace::NamedProject`].
+    pub const FS_CREATE_NAMED_PROJECT: &str = "fs.createNamedProject";
 
     // git.*
     /// `{method, input, fetchUpstream}`: a `vcs.*` method.

@@ -789,6 +789,14 @@ async fn call(workspace: &dyn Workspace, op: &str, args: &Value) -> OpResult {
                 .map(Value::from)
                 .map_err(|e| WireError::new(ErrorCode::Internal, e.to_string()))
         }
+        op::FS_CREATE_NAMED_PROJECT => workspace
+            .create_named_project(
+                Path::new(str_arg(args, "rootPath")?),
+                str_arg(args, "name")?,
+            )
+            .await
+            .map(|created| json!(created))
+            .map_err(|e| proto::io_error(&e)),
         op::GIT_VCS => proto::encode_routed(
             workspace
                 .vcs(

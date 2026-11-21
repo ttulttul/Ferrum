@@ -758,106 +758,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         if name.is_empty() {
             return Reply::defect("Expected a non-blank string\n  at [\"name\"]".into());
         }
-        let root = state.paths.base_dir.join("projects");
-        if let Err(error) = tokio::fs::create_dir_all(&root).await {
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
-            );
-        }
-        let slug: String = name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        let slug = slug.trim_matches('-').to_owned();
-        let mut folder = root.join(if slug.is_empty() { "project" } else { &slug });
-        for attempt in 2..=100 {
-            if tokio::fs::metadata(&folder).await.is_err() {
-                break;
-            }
-            folder = root.join(format!(
-                "{}-{attempt}",
-                if slug.is_empty() { "project" } else { &slug }
-            ));
-        }
-        if let Err(error) = tokio::fs::create_dir_all(&folder).await {
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
-            );
-        }
-        let _ = tokio::fs::create_dir_all(folder.join("assets")).await;
-        let _ = tokio::fs::write(folder.join("README.md"), format!("# {name}\n")).await;
-        let _ = tokio::fs::write(
-            folder.join("assets/icon.svg"),
-            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n",
-        )
-        .await;
-        let commit_error = match tokio::process::Command::new("git")
-            .current_dir(&folder)
-            .args(["init", "--initial-branch=main"])
-            .output()
-            .await
-        {
-            Ok(init) if init.status.success() => {
-                let _ = tokio::process::Command::new("git")
-                    .current_dir(&folder)
-                    .args(["add", "--force", "README.md", "assets/icon.svg"])
-                    .output()
-                    .await;
-                match tokio::process::Command::new("git")
-                    .current_dir(&folder)
-                    .args(["commit", "--message", "Initial commit"])
-                    .output()
-                    .await
-                {
-                    Ok(out) if out.status.success() => None,
-                    Ok(out) => Some(
-                        if String::from_utf8_lossy(&out.stderr).contains("Author identity unknown")
-                        {
-                            "Git has no name or email on this machine. Set user.name and user.email, then commit.".into()
-                        } else {
-                            String::from_utf8_lossy(&out.stderr).trim().to_owned()
-                        },
-                    ),
-                    Err(error) => Some(error.to_string()),
-                }
-            }
-            Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_owned()),
-            Err(error) => Some(error.to_string()),
+        return match create_new_project(state, name).await {
+            Ok(created) => Reply::Success(created),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
         };
-        let id = uuid::Uuid::new_v4().to_string();
-        let project = crate::Project {
-            id: id.clone(),
-            name: name.into(),
-            path: folder.to_string_lossy().into_owned(),
-            created_at: crate::now(),
-        };
-        let row = crate::projects::wire(&project);
-        if state
-            .commit(crate::Event::ProjectCommitted {
-                project,
-                row,
-                command_id: format!("named-project:{id}"),
-                command_type: "project.create".into(),
-                removed_threads: vec![],
-            })
-            .await
-            .is_err()
-        {
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":"Failed to create project."}}),
-            );
-        }
-        let mut result = json!({"projectId":id,"workspaceRoot":folder});
-        if let Some(error) = commit_error.filter(|e| !e.is_empty()) {
-            result["commitError"] = json!(error);
-        }
-        return Reply::Success(result);
     }
     if method == "projects.createFromThread" {
         let id = params["threadId"].as_str().unwrap_or_default();
@@ -3908,4 +3812,45 @@ mod source_control_discovery_tests {
         );
         assert_eq!(first_safe_auth_line(" \n"), None);
     }
+}
+
+/// `projects.createNew`: a project started from its title, in a new folder
+/// under the T3 home's `projects` holding a repository with a first commit.
+/// Answers `{projectId, workspaceRoot, commitError?}`, or the failure.
+pub(crate) async fn create_new_project(state: &AppState, name: &str) -> Result<Value, Value> {
+    let failure =
+        |message: String| json!({"_tag":"OrchestrationDispatchCommandError","message":message});
+    let root = state.paths.base_dir.join("projects");
+    let created = state
+        .workspace
+        .create_named_project(&root, name)
+        .await
+        .map_err(|error| failure(error.to_string()))?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let project = crate::Project {
+        id: id.clone(),
+        name: name.into(),
+        path: created.workspace_root.to_string_lossy().into_owned(),
+        created_at: crate::now(),
+    };
+    let row = crate::projects::wire(&project);
+    if state
+        .commit(crate::Event::ProjectCommitted {
+            project,
+            row,
+            command_id: format!("named-project:{id}"),
+            command_type: "project.create".into(),
+            removed_threads: vec![],
+        })
+        .await
+        .is_err()
+    {
+        let _ = tokio::fs::remove_dir_all(&created.workspace_root).await;
+        return Err(failure("Failed to create project.".into()));
+    }
+    let mut result = json!({"projectId": id, "workspaceRoot": created.workspace_root});
+    if let Some(error) = created.commit_error.filter(|e| !e.is_empty()) {
+        result["commitError"] = json!(error);
+    }
+    Ok(result)
 }

@@ -326,10 +326,42 @@ async fn project_create<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -
         }
     }
     if command.get("workspaceRoot").is_none() {
-        return Err(failure(
-            "invalid_request",
-            "Pass workspaceRoot: this server registers an existing folder and cannot create a repository.",
-        ));
+        // Started from its title: a new repository, as the reference makes one.
+        if [
+            "scripts",
+            "createWorkspaceRootIfMissing",
+            "defaultModelSelection",
+        ]
+        .iter()
+        .any(|key| command.get(*key).is_some())
+        {
+            return Err(failure(
+                "invalid_request",
+                "A project started from its title takes only a title; set scripts or defaultModelSelection afterwards with t3_project_update.",
+            ));
+        }
+        let created = host
+            .create_named_project(title.to_owned())
+            .await
+            .map_err(|error| {
+                failure(
+                    "orchestration_error",
+                    error["message"]
+                        .as_str()
+                        .unwrap_or("Failed to create the project.")
+                        .to_owned(),
+                )
+            })?;
+        let store = host.control_state().store.read().await;
+        let mut project = created["projectId"]
+            .as_str()
+            .and_then(|id| store.project_rows.get(id))
+            .map(|row| host.project_row(row))
+            .ok_or_else(|| failure("orchestration_error", "The project was not recorded."))?;
+        if let Some(error) = created.get("commitError").filter(|e| e.is_string()) {
+            project["commitError"] = error.clone();
+        }
+        return Ok(project);
     }
     match host.mutate_project(command).await {
         Ok(row) => Ok(host.project_row(&row)),
