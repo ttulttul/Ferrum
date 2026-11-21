@@ -93,6 +93,20 @@ impl ProviderTurn {
 /// with exactly one [`ProviderEvent::TurnTerminal`], which the turn's
 /// `Exited` event follows.
 /// The reference's failure when Codex's app-server closes during a turn.
+/// The reference's ProviderWorkspaceMissingError: a turn's folder is gone,
+/// so no provider session can open in it.
+pub fn workspace_missing(cwd: &str) -> ProviderFailure {
+    ProviderFailure::new(
+        "provider_error",
+        format!("{WORKSPACE_MISSING}{cwd}. Restore the folder at this path before retrying."),
+    )
+}
+/// Whether `failure` is [`workspace_missing`]'s.
+pub fn is_workspace_missing(failure: &ProviderFailure) -> bool {
+    failure.message.starts_with(WORKSPACE_MISSING)
+}
+const WORKSPACE_MISSING: &str =
+    "This thread's workspace folder no longer exists or is not a directory: ";
 pub const CODEX_STREAM_CLOSED: &str = "The provider event stream closed unexpectedly. Retry the turn; if it keeps failing, check the provider and server logs.";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -397,6 +397,31 @@ async fn missing_clis_fail_with_the_reference_errors() {
 }
 
 #[tokio::test]
+async fn a_turn_in_a_missing_folder_says_the_folder_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("gone").to_string_lossy().into_owned();
+    for driver in [CODEX, CLAUDE_AGENT] {
+        let spec = TurnSpec {
+            prompt: "hi".into(),
+            cwd: cwd.clone(),
+            provider: Some(ProviderTurn {
+                driver: driver.into(),
+                ..ProviderTurn::default()
+            }),
+            ..TurnSpec::default()
+        };
+        let (events, exit) = run(spec).await;
+        assert!(!exit.success);
+        let (status, failure) = terminal(&events);
+        assert_eq!(status, TurnStatus::Failed);
+        assert_eq!(
+            failure.unwrap().message,
+            format!("This thread's workspace folder no longer exists or is not a directory: {cwd}. Restore the folder at this path before retrying.")
+        );
+    }
+}
+
+#[tokio::test]
 async fn claude_turn_streams_text_tool_calls_and_usage() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("in.jsonl");

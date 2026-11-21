@@ -38,6 +38,12 @@ pub(crate) fn start(
     }
     let (events, receiver) = mpsc::unbounded_channel();
     let sink = Sink::new(events, provider.driver.clone(), spec.turn_id.clone());
+    // As the reference opens a session: only in a folder that exists.
+    if !std::path::Path::new(&spec.cwd).is_dir() {
+        let failure = crate::workspace::provider::workspace_missing(&spec.cwd);
+        sink.finish(TurnEnd::failed(failure, ThreadDisposition::Reusable));
+        return Ok(receiver);
+    }
     let responses = requests::register(&spec.turn_id);
     if provider.driver == CODEX {
         tokio::spawn(codex::run(spec, provider, cancel, responses, sink));
