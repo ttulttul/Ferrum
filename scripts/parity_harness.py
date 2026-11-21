@@ -91,6 +91,10 @@ def session_cookie(url, secret):
 
 # The relay client a server would report from PATH (`cloud.getRelayClientStatus`).
 RELAY_TOOLS = {"cloudflared"}
+# Agent CLIs a server may probe or start. managed_server hides them, so a local run sees a host
+# without them, as CI does, and never starts a developer's real codex or claude.
+PROVIDER_CLIS = {"codex", "claude", "cursor-agent", "opencode", "gemini", "grok", "kiro-cli", "droid", "amp",
+                 "copilot", "qwen"}
 
 
 def isolated_git_env(directory):
@@ -126,7 +130,9 @@ def path_without(names, scratch, path=None):
 
 
 def managed_server(stack, prefix, root, secret, signing_key, env=None):
-    """Launches one server in `root`. `env` adds variables (or replaces PATH) for the child."""
+    """Launches one server in `root`. `env` adds variables (or replaces PATH) for the child.
+
+    Without a PATH in `env`, the child's PATH hides the provider CLIs (PROVIDER_CLIS)."""
     secrets_dir = root / "userdata" / "secrets"
     secrets_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     key_file = secrets_dir / "mcp-oauth-signing-key.bin"
@@ -143,6 +149,8 @@ def managed_server(stack, prefix, root, secret, signing_key, env=None):
     # Each child receives its own state directory, home and bootstrap descriptor.
     # Do not pass developer provider credentials into parity processes.
     child_env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "SYSTEMROOT") if k in os.environ}
+    if "PATH" not in (env or {}):
+        child_env["PATH"] = path_without(PROVIDER_CLIS, root / ".parity-path")
     stack.enter_context(launch(prefix + ["--bootstrap-fd", str(bootstrap.fileno())], url,
                                env={**child_env, **(env or {}), "HOME": str(root), "T3CODE_HOME": str(root)},
                                cwd=root, pass_fds=(bootstrap.fileno(),)))

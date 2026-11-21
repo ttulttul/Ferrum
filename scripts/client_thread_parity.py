@@ -41,7 +41,7 @@ import tempfile
 import time
 
 from client_initial_sync_parity import rpc
-from parity_harness import RELAY_TOOLS, encode, http, isolated_git_env, managed_server, path_without
+from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, http, isolated_git_env, managed_server, path_without
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/providers"
@@ -78,10 +78,6 @@ REMOTES = {
     "project:bitbucket": ("Bitbucket checkout", "git@ssh.bitbucket.org:example-org/example-repo.git"),
     "project:github": ("GitHub checkout", "https://github.com/Example-Org/Example.Repo.git"),
 }
-# Agent CLIs a server would start for the dispatched message. Hidden so both servers see a host
-# without them, as on CI, and the turn never reaches a provider.
-PROVIDER_CLIS = {"codex", "claude", "cursor-agent", "opencode", "gemini", "grok", "kiro-cli", "droid", "amp",
-                 "copilot", "qwen"}
 GENERATED = re.compile(r"^(\d{4}-\d\d-\d\dT[\d:.]+Z|[0-9a-f]{40}|[0-9a-f-]{36}|.*:[0-9a-f-]{36}.*)$")
 
 
