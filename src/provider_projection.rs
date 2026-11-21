@@ -55,6 +55,7 @@ pub(crate) struct ProviderRecords {
     pub attempts: Vec<Value>,
     pub nodes: Vec<Value>,
     pub provider_threads: Vec<Value>,
+    pub provider_sessions: Vec<Value>,
     pub provider_turns: Vec<Value>,
     pub messages: Vec<Value>,
     pub plans: Vec<Value>,
@@ -136,12 +137,15 @@ impl Thread {
                 turn_ordinal,
             );
         }
+        let session = self.provider_session(&instance);
+        let session_id = session.as_ref().map(|session| session["id"].clone());
+        out.provider_sessions.extend(session);
         if let (Some(thread), Some(id)) = (&self.provider.thread, self.provider_thread_id()) {
             out.provider_threads.push(json!({
                 "id": id,
                 "driver": thread.driver,
                 "providerInstanceId": instance,
-                "providerSessionId": null,
+                "providerSessionId": session_id,
                 "appThreadId": self.id,
                 "ownerNodeId": null,
                 "nativeThreadRef": thread.native_id.as_deref()
@@ -163,6 +167,57 @@ impl Thread {
         out.messages
             .sort_by(|a, b| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()));
         out
+    }
+
+    /// The provider session the thread's turns ran in, once one opened: the
+    /// shared app-server session of a Codex instance, or the thread's own
+    /// Claude session (which the reference opens even when the CLI is
+    /// missing). A Codex session whose app-server closed mid-turn is `error`.
+    fn provider_session(&self, instance: &str) -> Option<Value> {
+        let thread = self.provider.thread.as_ref()?;
+        let first = self.runs.iter().find(|run| run.id == thread.first_run)?;
+        let claude = thread.driver == provider::CLAUDE_AGENT;
+        if !claude && thread.native_id.is_none() {
+            return None;
+        }
+        let id = if claude {
+            format!(
+                "provider-session:provider-instance:{}:thread:{}:{}",
+                uri_component(instance),
+                uri_component(&self.id),
+                first.id
+            )
+        } else {
+            format!(
+                "provider-session:provider-instance:{}:shared",
+                uri_component(instance)
+            )
+        };
+        let last = self
+            .runs
+            .iter()
+            .rev()
+            .find_map(|run| self.provider.terminals.get(&run.id));
+        let crashed = !claude
+            && last
+                .and_then(|t| t.failure.as_ref())
+                .is_some_and(|failure| failure.message == provider::CODEX_STREAM_CLOSED);
+        let capabilities: Value =
+            serde_json::from_str(include_str!("provider_capabilities.json")).unwrap_or_default();
+        let row = self.stored_row();
+        Some(json!({
+            "capabilities": capabilities[thread.driver.as_str()],
+            "createdAt": iso(thread.created_at),
+            "cwd": self.cwd,
+            "driver": thread.driver,
+            "extensionStatuses": [],
+            "id": id,
+            "lastError": if crashed { json!(provider::CODEX_STREAM_CLOSED) } else { Value::Null },
+            "model": row["modelSelection"]["model"],
+            "providerInstanceId": instance,
+            "status": if crashed { "error" } else { "ready" },
+            "updatedAt": iso(if crashed { thread.updated_at } else { thread.created_at })
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]

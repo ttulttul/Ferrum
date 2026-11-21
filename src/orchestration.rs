@@ -2126,7 +2126,7 @@ async fn apply_command<H: CommandHost>(
                 .get(thread_id)
                 .and_then(|thread| {
                     thread.checkpoints.iter().find(|checkpoint| {
-                        format!("checkpoint:{}:{}", thread_id, checkpoint.turn_count)
+                        crate::thread_projection::checkpoint_id(thread_id, checkpoint.turn_count)
                             == checkpoint_id
                     })
                 })
@@ -2142,7 +2142,7 @@ async fn apply_command<H: CommandHost>(
                     "Checkpoint {checkpoint_id} is missing and cannot be restored."
                 )));
             }
-            let expected_scope = format!("scope:{}", thread_id);
+            let expected_scope = crate::thread_projection::checkpoint_scope_id(thread_id);
             if command["scopeId"].as_str() != Some(expected_scope.as_str()) {
                 return Err(anyhow::anyhow!(format!(
                     "Checkpoint {checkpoint_id} belongs to scope {expected_scope}, not {}.",
