@@ -202,6 +202,29 @@ pub(crate) async fn dispatch_orchestration_command<H: CommandHost>(
             }
         }
     }
+    // A message, or a metadata update that continues the thread, starts
+    // work on a provider instance; the reference refuses a disabled one.
+    let continues = kind == "thread.metadata.update" && !command["continuation"].is_null();
+    if kind == "message.dispatch" || continues {
+        if let Some(thread) = store.threads.get(id) {
+            let row = thread.stored_row();
+            let instance = (!continues)
+                .then(|| command["modelSelection"]["instanceId"].as_str())
+                .flatten()
+                .or(row["modelSelection"]["instanceId"].as_str())
+                .or(row["providerInstanceId"].as_str())
+                .unwrap_or("codex");
+            let settings = state
+                .effective_settings()
+                .map_err(|e| dispatch_error(e.to_string()))?;
+            if !provider_instance_enabled(&settings, &thread.project_id, instance) {
+                return Err(dispatch_error(format!(
+                    "Provider instance \"{instance}\" is disabled for project {}.",
+                    thread.project_id
+                )));
+            }
+        }
+    }
     drop(store);
     let receipt = CommandReceipt {
         command_id: command_id.to_string(),
@@ -210,6 +233,46 @@ pub(crate) async fn dispatch_orchestration_command<H: CommandHost>(
     apply_command(state.clone(), &command, &receipt)
         .await
         .map_err(|e| dispatch_error(e.to_string()))
+}
+
+/// Drivers whose instances are off unless enabled, as the reference decodes
+/// them.
+const DEFAULT_DISABLED_DRIVERS: &[&str] = &[
+    "cursor",
+    "grok",
+    "fx",
+    "kiro",
+    "muse",
+    "pi",
+    "opencode",
+    "antigravity",
+];
+
+/// Whether `instance` may run in `project`: the project's override, else the
+/// instance's own setting, else its driver's default. An instance that is
+/// not configured is enabled only if it is a built-in default (`codex`,
+/// `claudeAgent`). The reference's `resolveProjectProviderInstanceEnabled`.
+pub(crate) fn provider_instance_enabled(settings: &Value, project: &str, instance: &str) -> bool {
+    let overridden =
+        &settings["projectSettingsOverrides"][project]["providerInstances"][instance]["enabled"];
+    if let Some(enabled) = overridden.as_bool() {
+        return enabled;
+    }
+    let Some(config) = settings["providerInstances"]
+        .as_object()
+        .and_then(|instances| instances.get(instance))
+    else {
+        return matches!(instance, "codex" | "claudeAgent");
+    };
+    let own = config["enabled"].as_bool();
+    let nested = config["config"]["enabled"].as_bool();
+    if own == Some(false) || nested == Some(false) {
+        return false;
+    }
+    own.or(nested).unwrap_or_else(|| {
+        let driver = config["driver"].as_str().unwrap_or(instance);
+        !DEFAULT_DISABLED_DRIVERS.contains(&driver)
+    })
 }
 
 async fn start_run<H: CommandHost>(
@@ -2221,4 +2284,39 @@ async fn apply_command<H: CommandHost>(
         )
         .await?
         .id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_instance_enabled;
+    use serde_json::json;
+
+    #[test]
+    fn provider_instances_are_enabled_as_the_reference_resolves_them() {
+        let settings = json!({
+            "providerInstances": {
+                "codex": {"driver": "codex"},
+                "work": {"driver": "codex", "enabled": false},
+                "nested": {"driver": "claudeAgent", "config": {"enabled": false}},
+                "cursor": {"driver": "cursor"},
+                "cursorOn": {"driver": "cursor", "enabled": true}
+            },
+            "projectSettingsOverrides": {
+                "p2": {"providerInstances": {"codex": {"enabled": false}, "work": {"enabled": true}}}
+            }
+        });
+        let enabled =
+            |project: &str, instance: &str| provider_instance_enabled(&settings, project, instance);
+        assert!(enabled("p1", "codex"));
+        assert!(!enabled("p1", "work"));
+        assert!(!enabled("p1", "nested"));
+        assert!(!enabled("p1", "cursor"));
+        assert!(enabled("p1", "cursorOn"));
+        // Unconfigured: only the built-in defaults.
+        assert!(enabled("p1", "claudeAgent"));
+        assert!(!enabled("p1", "parity-absent"));
+        // A project's override wins.
+        assert!(!enabled("p2", "codex"));
+        assert!(enabled("p2", "work"));
+    }
 }

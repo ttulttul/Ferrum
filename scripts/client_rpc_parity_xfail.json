@@ -169,12 +169,6 @@
       "reason": "the projection after a message lacks the reference's provider runtime records and uses other ids",
       "issue": "no attempts, nodes or providerThreads; runs have UUID ids, not run:thread:<id>:ordinal:<n>, and messages carry no nodeId; extra checkpoint and checkpointScope records"
     },
-    "turns.message.missingProvider": {
-      "area": "agent turns",
-      "severity": "high",
-      "reason": "message.dispatch accepts a disabled provider instance",
-      "issue": "the reference rejects the command with OrchestrationV2DispatchCommandError (provider instance disabled for the project); Rust records it and replies with a sequence"
-    },
     "turns.subscribeCommandOutput.missing": {
       "area": "agent turns",
       "severity": "low",
