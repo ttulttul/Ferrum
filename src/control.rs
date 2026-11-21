@@ -85,6 +85,8 @@ pub struct ControlPlane {
 /// [`ControlPlane::commit`], then calls [`ControlPlane::release_run`].
 pub struct StartedRun {
     pub run: crate::Run,
+    /// The provider instance the thread selected (`modelSelection.instanceId`), empty if none.
+    pub instance: String,
     pub cwd: String,
     pub text: String,
     pub cancel: tokio::sync::oneshot::Receiver<()>,
@@ -760,12 +762,24 @@ impl crate::orchestration::CommandHost for PlaneCommands<'_> {
         cancel: tokio::sync::oneshot::Receiver<()>,
     ) {
         if self.plane.host_runs {
+            let instance = self
+                .store_now()
+                .threads
+                .get(&run.thread_id)
+                .and_then(|thread| {
+                    thread.row["modelSelection"]["instanceId"]
+                        .as_str()
+                        .or(thread.row["providerInstanceId"].as_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
             self.plane
                 .started
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(StartedRun {
                     run,
+                    instance,
                     cwd,
                     text,
                     cancel,
