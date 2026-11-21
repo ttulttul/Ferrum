@@ -27,11 +27,11 @@ pub(crate) trait TurnHost:
     fn workspace(&self) -> &dyn Workspace;
     /// Running runs by id; resolving a sender stops its run.
     fn cancellations(&self) -> &Mutex<HashMap<Uuid, oneshot::Sender<()>>>;
-    /// A turn event at `position` is recorded (or deliberately not
-    /// recorded); the run's events up to it need not arrive again. Called
-    /// before the workspace is told, so a host that keeps positions with
-    /// its runs never resumes from before a recorded event.
-    fn turn_recorded(&self, _run: &Run, _position: StreamPosition) {}
+    /// A turn event is recorded (or deliberately not recorded). With a
+    /// `position`, the run's events up to it need not arrive again; this is
+    /// called before the workspace is told, so a host that keeps positions
+    /// with its runs never resumes from before a recorded event.
+    fn turn_recorded(&self, _run: &Run, _position: Option<StreamPosition>) {}
     /// The run has ended and its end is recorded.
     fn turn_finished(&self, _run: &Run) {}
 }
@@ -126,8 +126,8 @@ async fn record<H: TurnHost>(
     mut turn: TurnItems,
 ) -> anyhow::Result<()> {
     let done = |position: Option<StreamPosition>| {
+        host.turn_recorded(run, position);
         if let Some(position) = position {
-            host.turn_recorded(run, position);
             host.workspace().ack(position);
         }
     };

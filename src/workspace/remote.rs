@@ -509,16 +509,17 @@ impl RemoteWorkspace {
     }
 
     fn forward_cancel(&self, stream: u64, cancel: oneshot::Receiver<()>) {
+        // Inside tokio a task forwards it at once; elsewhere `maintain` does.
         #[cfg(feature = "native")]
-        {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let this = self.clone();
-            tokio::spawn(async move {
+            runtime.spawn(async move {
                 if cancel.await.is_ok() {
                     let _ = this.cancel_turn(stream).await;
                 }
             });
+            return;
         }
-        #[cfg(not(feature = "native"))]
         self.lock().cancels.push((stream, cancel));
     }
 

@@ -6,10 +6,11 @@
 //! a WebSocket API that can suspend between messages: each socket's `Connection` (principal and
 //! open streams) lives in the socket's attachment, and every message is one
 //! call to `ControlPlane::on_message`.
+mod runtime;
 mod storage;
 
 use std::sync::Arc;
-use t3code_server::control::{Config, Connection, ControlPlane};
+use t3code_server::control::{Config, Connection, ControlPlane, Host};
 use tower_service::Service;
 use worker::*;
 
@@ -33,7 +34,6 @@ pub struct T3EnvironmentDO {
     state: State,
     sql: SqlStorage,
     plane: Arc<ControlPlane>,
-    workspace: t3code_server::workspace::RemoteWorkspace,
     router: axum::Router,
     started_ms: f64,
     init_ms: f64,
@@ -107,6 +107,9 @@ impl DurableObject for T3EnvironmentDO {
             &std::path::Path::new(t3code_server::control::STATE_DIR).join("environment-auth.json"),
         )
         .expect("migrate auth records");
+        // One thread: the runtime need not be `Send`.
+        #[allow(clippy::arc_with_non_send_sync)]
+        let runtime = Arc::new(runtime::WorkersRuntime::new(state.storage()));
         let plane = Arc::new(
             ControlPlane::open(
                 Config {
@@ -114,9 +117,17 @@ impl DurableObject for T3EnvironmentDO {
                     label,
                     bootstrap_credential,
                     cookie_port: 3773,
+                    provider_command: Vec::new(),
                 },
                 Arc::new(documents),
                 Box::new(storage::SqlLog(sql.clone())),
+                Host {
+                    runtime,
+                    // No transport here: workspace methods answer as
+                    // unavailable and turns end as failed. A host that
+                    // embeds the library connects it (see docs/embedding.md).
+                    workspace: Default::default(),
+                },
             )
             .expect("open control plane"),
         );
@@ -139,7 +150,6 @@ impl DurableObject for T3EnvironmentDO {
             state,
             sql,
             plane,
-            workspace: Default::default(),
             router,
             started_ms: started,
             init_ms,
@@ -181,11 +191,7 @@ impl DurableObject for T3EnvironmentDO {
             ws.close(Some(1011), Some("missing connection state"))?;
             return Ok(());
         };
-        for frame in self
-            .plane
-            .on_message(&self.workspace, &mut connection, &text)
-            .await
-        {
+        for frame in self.plane.on_message(&mut connection, &text).await {
             ws.send_with_str(frame)?;
         }
         ws.serialize_attachment(&connection)?;
@@ -203,6 +209,12 @@ impl DurableObject for T3EnvironmentDO {
             self.plane.disconnect(&connection);
         }
         self.deliver().await
+    }
+
+    async fn alarm(&self) -> Result<Response> {
+        self.plane.on_alarm().await;
+        self.deliver().await?;
+        Response::empty()
     }
 }
 

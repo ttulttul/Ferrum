@@ -21,6 +21,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 mod local;
 #[cfg(feature = "native")]
 pub use local::LocalWorkspace;
+#[cfg(test)]
+pub(crate) mod fake_agentd;
 pub mod provider;
 mod remote;
 pub use provider::{ProviderEvent, ProviderTurn};
