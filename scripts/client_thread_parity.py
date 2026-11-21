@@ -83,6 +83,8 @@ PROVIDER_SCENARIOS = [
      "scenario": "claude_approval.json", "respond": {"decision": "decline"}},
     {"name": "claude approval interrupted", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_approval_interrupt.json", "interrupt": "request"},
+    {"name": "claude question", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_question.json", "respond": {"answers": {"Which color?": "Blue"}}},
     {"name": "claude approval-required", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_approval.json", "runtimeMode": "approval-required", "respond": {"decision": "acceptForSession"}},
     {"name": "claude auto-accept-edits", "instance": "claudeAgent", "model": "claude-opus-5-5",

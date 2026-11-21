@@ -700,6 +700,11 @@ impl<'a> Attempt<'a> {
             return Some(json!({"behavior": "deny", "toolUseID": tool_use_id,
                 "message": "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn."}));
         }
+        // A request for a call not streamed yet starts its tool item, as the
+        // reference's canUseTool does (subagent launches excepted).
+        if tool_name != "Agent" && !self.tools.contains_key(&tool_use_id) {
+            self.tool_use(&json!({"id": tool_use_id, "name": tool_name, "input": input}));
+        }
         let mode = permission_mode(&self.runtime_mode);
         let question = tool_name == "AskUserQuestion";
         // Only Auto mode lets Claude Code's own classifier settle what it
