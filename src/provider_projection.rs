@@ -619,18 +619,29 @@ impl Thread {
         let Some(terminal) = terminal else { return };
         let at = completed.clone().unwrap_or_else(|| started.clone());
         match terminal.status {
-            // A Codex turn whose app-server never opened a session: the
-            // reference reports the session, not the turn, as failed.
+            // A turn whose folder is missing, or a Codex turn whose
+            // app-server never opened a session: the reference reports the
+            // session, not the turn, as failed.
             TurnStatus::Failed
-                if driver == provider::CODEX
-                    && !record.turn_started
-                    && self
-                        .provider
-                        .thread
-                        .as_ref()
-                        .is_some_and(|thread| thread.native_id.is_none()) =>
+                if terminal
+                    .failure
+                    .as_ref()
+                    .is_some_and(provider::is_workspace_missing)
+                    || (driver == provider::CODEX
+                        && !record.turn_started
+                        && self
+                            .provider
+                            .thread
+                            .as_ref()
+                            .is_some_and(|thread| thread.native_id.is_none())) =>
             {
                 let session = join("provider-session:provider-instance", &[instance]) + ":shared";
+                let message = match terminal.failure.as_ref() {
+                    Some(failure) if provider::is_workspace_missing(failure) => {
+                        failure.message.clone()
+                    }
+                    _ => format!("Failed to open {driver} provider session {session}."),
+                };
                 out.items.push((index, json!({
                     "id": join("turn-item:run", &[&ids.run]) + ":signal:provider-session-open-failure",
                     "threadId": self.id,
@@ -649,7 +660,7 @@ impl Thread {
                     "type": "error",
                     "failure": {
                         "class": "provider_error",
-                        "message": format!("Failed to open {driver} provider session {session}."),
+                        "message": message,
                         "code": null,
                         "retryable": null
                     }

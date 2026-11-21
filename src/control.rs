@@ -157,12 +157,14 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
         self: &Arc<Self>,
         command: Value,
     ) -> crate::mcp_oauth::HostFuture<Result<Value, Value>> {
-        let reply = match self.create_project(&command) {
-            Reply::Success(row) => Ok(row),
-            Reply::Failure(mut error) => Err(error["error"].take()),
-            _ => Err(json!({"message":"Failed to mutate project."})),
-        };
-        Box::pin(futures_util::future::ready(reply))
+        let plane = self.clone();
+        Box::pin(async move {
+            match plane.create_project(&command).await {
+                Reply::Success(row) => Ok(row),
+                Reply::Failure(mut error) => Err(error["error"].take()),
+                _ => Err(json!({"message":"Failed to mutate project."})),
+            }
+        })
     }
     fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait {
         self.host.runtime.sleep(duration)
@@ -809,6 +811,9 @@ impl ControlPlane {
                 },
             );
         }
+        if method == "projects.mutate" {
+            return Call::Done(self.create_project(params).await);
+        }
         if let Some(call) = self.host_call(method, params) {
             return call;
         }
@@ -860,7 +865,6 @@ impl ControlPlane {
             "pullRequests.subscribeRefreshes" => Call::Stream(Vec::new()),
             "server.reportClientActivity" => Call::Done(Reply::Success(Value::Null)),
             "preview.reportProfiles" => Call::Done(Reply::Success(Value::Null)),
-            "projects.mutate" => Call::Done(self.create_project(params)),
             "orchestration.getThreadProjection" => {
                 let store = self.store_now();
                 Call::Done(
@@ -901,10 +905,12 @@ impl ControlPlane {
         })
     }
 
-    /// `projects.mutate` with `project.create` only. The native server first
-    /// creates and canonicalizes the workspace root; that check belongs to the
-    /// workspace plane, so the root is recorded as given.
-    fn create_project(&self, input: &Value) -> Reply {
+    /// `projects.mutate` with `project.create` only. As the native server,
+    /// it creates the workspace root when asked, and records it as the
+    /// workspace resolves it; a root that is not a folder there, or that
+    /// another project has, is refused. Without a connected workspace the
+    /// root is recorded as given.
+    async fn create_project(&self, input: &Value) -> Reply {
         let command = input["commandId"].as_str().unwrap_or_default();
         let id = input["projectId"].as_str().unwrap_or_default();
         let error = |msg: &str| {
@@ -927,16 +933,38 @@ impl ControlPlane {
         ) else {
             return error("A title and a workspace root are required.");
         };
+        let _guard = self.mutation_lock.lock().await;
         if command.trim().is_empty()
             || id.trim().is_empty()
             || self.store_now().project_rows.contains_key(id)
         {
             return error("Failed to mutate project.");
         }
+        let workspace = &self.host.workspace;
+        let mut path = PathBuf::from(root);
+        if input["createWorkspaceRootIfMissing"] == true {
+            if let Err(cause) = workspace.create_dir_all(&path).await {
+                tracing::warn!(%cause, root, "could not create a project's workspace root");
+                return error("Failed to mutate project.");
+            }
+        }
+        if workspace.is_ready() {
+            path = match workspace.canonicalize(&path).await {
+                Ok(path) => path,
+                Err(_) => return error("Failed to mutate project."),
+            };
+            if !workspace.is_dir(&path).await {
+                return error("Failed to mutate project.");
+            }
+        }
+        let path = path.to_string_lossy().into_owned();
+        if self.store_now().projects.values().any(|p| p.path == path) {
+            return error("Failed to mutate project.");
+        }
         let project = crate::Project {
             id: id.into(),
             name: title.into(),
-            path: root.into(),
+            path,
             created_at: crate::now(),
         };
         let row = crate::store::wire_project(&project);
@@ -1235,6 +1263,13 @@ mod tests {
         }
     }
 
+    /// An agentd whose workspace has the folder the tests' project uses.
+    fn agentd_with_project_folder() -> Arc<FakeAgentd> {
+        let agentd = Arc::new(FakeAgentd::default());
+        agentd.add_dir("/workspace/one");
+        agentd
+    }
+
     fn config() -> Config {
         Config {
             environment_id: "env-test".into(),
@@ -1290,6 +1325,37 @@ mod tests {
 
     fn send(plane: &Arc<ControlPlane>, connection: &mut Connection, frame: Value) -> Vec<Value> {
         parse(now(plane.on_message(connection, &frame.to_string())))
+    }
+
+    #[test]
+    fn creates_a_projects_folder_in_the_workspace_when_asked() {
+        let plane = plane();
+        let agentd = Arc::new(FakeAgentd::default());
+        now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+        let mut connection = owner(&plane);
+        let mut create = |command: &str, project: &str, root: &str, create: bool| {
+            let reply = send(
+                &plane,
+                &mut connection,
+                json!({"_tag":"Request","id":command,"tag":"projects.mutate","payload":{
+                    "type":"project.create","commandId":command,"projectId":project,
+                    "title":"Sandbox","workspaceRoot":root,"createWorkspaceRootIfMissing":create},"headers":[]}),
+            );
+            reply[0]["exit"].clone()
+        };
+        // A missing folder is refused unless the caller asks for it.
+        let refused = create("c1", "p1", "/workspace/sandbox", false);
+        assert_eq!(refused["_tag"], "Failure", "{refused}");
+        assert!(plane.store_now().project_rows.is_empty());
+        let created = create("c2", "p1", "/workspace/sandbox", true);
+        assert_eq!(created["_tag"], "Success", "{created}");
+        assert_eq!(created["value"]["workspaceRoot"], "/workspace/sandbox");
+        assert!(now(plane
+            .workspace()
+            .is_dir(std::path::Path::new("/workspace/sandbox"))));
+        // Another project cannot take the same folder.
+        let taken = create("c3", "p2", "/workspace/sandbox", true);
+        assert_eq!(taken["_tag"], "Failure", "{taken}");
     }
 
     #[test]
@@ -1904,7 +1970,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             host(&runtime),
         )
         .unwrap();
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
         plane
             .commit(Event::ProjectCreated(crate::Project {
@@ -2395,7 +2461,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             host(&runtime),
         )
         .unwrap();
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
         assert!(
             runtime.take_alarm().is_some(),
@@ -2507,7 +2573,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             host(&runtime),
         )
         .unwrap();
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
         let mut connection = owner(&plane);
         seed(&plane, &mut connection);
@@ -2606,7 +2672,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
 
     #[test]
     fn a_turn_keeps_going_across_a_restart_without_losing_or_repeating_output() {
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         let mut host = Restartable::new(&agentd);
         let mut connection = owner(&host.plane);
         seed(&host.plane, &mut connection);
@@ -2649,7 +2715,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
 
     #[test]
     fn a_restart_ends_runs_whose_turn_is_lost() {
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         let mut host = Restartable::new(&agentd);
         let mut connection = owner(&host.plane);
         seed(&host.plane, &mut connection);
@@ -2704,7 +2770,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
 
     #[test]
     fn workspace_event_streams_resume_after_a_restart_without_repeats() {
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         let mut host = Restartable::new(&agentd);
         let mut connection = owner(&host.plane);
         let device = subscribe(
@@ -2750,7 +2816,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
 
     #[test]
     fn vcs_status_streams_report_only_changes_across_a_restart() {
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         let status = |branch: &str| json!({"isRepo": true, "branch": branch, "hasUpstream": false});
         agentd.set_reading(op::WATCH_VCS_STATUS, status("main"));
         let mut host = Restartable::new(&agentd);
@@ -2789,7 +2855,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
 
     #[test]
     fn terminal_streams_catch_up_after_a_restart() {
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         let snapshot = |sequence: u64, text: &str| json!({"type": "snapshot", "snapshot": {"threadId": "t1", "terminalId": "a", "sequence": sequence, "history": text}});
         let output = |sequence: u64, data: &str| json!({"type": "output", "threadId": "t1", "terminalId": "a", "sequence": sequence, "data": data});
         agentd.set_reading(op::TERM_CALL, snapshot(1, "$ "));
@@ -2842,7 +2908,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             host(&runtime),
         )
         .unwrap();
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
         let mut connection = owner(&plane);
         seed(&plane, &mut connection);
@@ -2924,7 +2990,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             host(&runtime),
         )
         .unwrap();
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
         let mut connection = owner(&plane);
         seed(&plane, &mut connection);
@@ -3051,6 +3117,58 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
     /// provider thread on its run, as a client must decode, and reports the
     /// session as the reference does. Reasoning without text is not shown.
     #[test]
+    fn a_turn_whose_folder_is_missing_says_so() {
+        use crate::workspace::provider::{ProviderEvent, ThreadDisposition, TurnStatus};
+        let runtime = Arc::new(ManualRuntime::default());
+        let plane = ControlPlane::open(
+            config(),
+            Arc::new(MemoryStore::new()),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
+        let agentd = agentd_with_project_folder();
+        now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+        let mut connection = owner(&plane);
+        seed(&plane, &mut connection);
+        dispatch_message(&plane, &mut connection, "hello");
+        runtime.run();
+        let stream = *agentd.turns().keys().next().unwrap();
+        let failure = crate::workspace::provider::workspace_missing("/workspace/one");
+        agentd.emit(
+            stream,
+            WireTurnEvent::Provider {
+                event: ProviderEvent::TurnTerminal {
+                    status: TurnStatus::Failed,
+                    failure: Some(failure.clone()),
+                    thread_disposition: ThreadDisposition::Reusable,
+                    driver: Some("codex".into()),
+                },
+            },
+        );
+        agentd.emit(
+            stream,
+            WireTurnEvent::Exited {
+                success: false,
+                cancelled: false,
+                status: "failed".into(),
+            },
+        );
+        runtime.run();
+        let reply = send(
+            &plane,
+            &mut owner(&plane),
+            json!({"_tag":"Request","id":"g","tag":"orchestration.getThreadProjection","payload":{"threadId":"t1"},"headers":[]}),
+        );
+        let error = &reply[0]["exit"]["value"]["turnItems"][1];
+        assert_eq!(error["title"], "Provider session failed to open", "{error}");
+        assert_eq!(error["failure"]["message"], failure.message);
+        assert!(failure
+            .message
+            .starts_with("This thread's workspace folder no longer exists"));
+    }
+
+    #[test]
     fn a_turn_that_never_opened_a_session_names_its_provider_thread() {
         use crate::workspace::provider::{
             ProviderEvent, ProviderFailure, ProviderItem, ThreadDisposition, TurnStatus,
@@ -3063,7 +3181,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             host(&runtime),
         )
         .unwrap();
-        let agentd = Arc::new(FakeAgentd::default());
+        let agentd = agentd_with_project_folder();
         now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
         let mut connection = owner(&plane);
         seed(&plane, &mut connection);

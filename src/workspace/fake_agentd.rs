@@ -9,7 +9,7 @@ use crate::workspace_protocol::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
@@ -31,6 +31,8 @@ struct State {
     /// Open watches by op, and the reading each op reports.
     watches: Vec<(String, u64)>,
     readings: BTreeMap<String, Value>,
+    /// The folders the workspace has, besides its root.
+    dirs: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -159,6 +161,15 @@ impl FakeAgentd {
         }
     }
 
+    /// Add a folder to the workspace.
+    pub(crate) fn add_dir(&self, path: &str) {
+        self.lock().dirs.insert(path.to_owned());
+    }
+
+    fn has_dir(&self, path: &str) -> bool {
+        path == "/workspace" || self.lock().dirs.contains(path)
+    }
+
     fn open(&self, turn: bool) -> u64 {
         let mut state = self.lock();
         state.next_stream += 1;
@@ -255,6 +266,34 @@ impl FakeAgentd {
                 Ok(json!({ "stream": stream }))
             }
             op::STREAM_CLOSE => Ok(Value::Null),
+            op::FS_CREATE_DIR_ALL => {
+                let path = request.args["path"].as_str().unwrap_or_default();
+                let mut state = self.lock();
+                let mut dir = std::path::Path::new(path);
+                loop {
+                    state.dirs.insert(dir.to_string_lossy().into_owned());
+                    match dir.parent() {
+                        Some(parent) if parent != dir && !parent.as_os_str().is_empty() => {
+                            dir = parent
+                        }
+                        _ => break,
+                    }
+                }
+                Ok(Value::Null)
+            }
+            op::FS_CANONICALIZE => {
+                let path = request.args["path"].as_str().unwrap_or_default();
+                if self.has_dir(path) {
+                    Ok(json!(path))
+                } else {
+                    Err(proto::io_error(&std::io::Error::from(
+                        std::io::ErrorKind::NotFound,
+                    )))
+                }
+            }
+            op::FS_IS_DIR => Ok(json!(
+                self.has_dir(request.args["path"].as_str().unwrap_or_default())
+            )),
             // `terminal.observe`: the snapshot `set_reading` gave for it.
             op::TERM_CALL if request.args["method"] == "observe" => self
                 .lock()
