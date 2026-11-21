@@ -834,6 +834,180 @@ mod tests {
         assert_eq!(interrupted[0]["exit"]["cause"][0]["_tag"], "Interrupt");
     }
 
+    /// An event log that outlives the plane, as durable storage does.
+    #[derive(Clone, Default)]
+    struct SharedLog(Arc<std::sync::Mutex<Vec<ServerEvent>>>);
+    impl EventLog for SharedLog {
+        fn load(&mut self) -> anyhow::Result<Vec<ServerEvent>> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        fn append(&mut self, record: &ServerEvent) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(record.clone());
+            Ok(())
+        }
+    }
+
+    /// A host that can be suspended at any point between messages. Only what
+    /// it stores survives: the documents, the event log and each socket's
+    /// serialized connection. Suspending drops the plane with everything it
+    /// held in memory; the next message rebuilds it from storage.
+    struct SuspendingHost {
+        documents: Arc<crate::persistence::MemoryStore>,
+        log: SharedLog,
+        sockets: BTreeMap<u64, String>,
+        plane: Option<ControlPlane>,
+    }
+
+    impl SuspendingHost {
+        fn new() -> Self {
+            Self {
+                documents: Arc::new(MemoryStore::new()),
+                log: SharedLog::default(),
+                sockets: BTreeMap::new(),
+                plane: None,
+            }
+        }
+
+        fn plane(&mut self) -> &ControlPlane {
+            let (documents, log) = (self.documents.clone(), self.log.clone());
+            self.plane.get_or_insert_with(|| {
+                ControlPlane::open(
+                    Config {
+                        environment_id: "env-test".into(),
+                        label: "test".into(),
+                        bootstrap_credential: "secret".into(),
+                        cookie_port: 3773,
+                    },
+                    documents,
+                    Box::new(log),
+                )
+                .unwrap()
+            })
+        }
+
+        fn suspend(&mut self) {
+            self.plane = None;
+        }
+
+        fn connect(&mut self, socket: u64) -> Vec<(u64, Value)> {
+            let connection = owner(self.plane());
+            self.sockets
+                .insert(socket, serde_json::to_string(&connection).unwrap());
+            self.fan_out()
+        }
+
+        /// One client message, then what pending changes add to every
+        /// socket. Returns the frames sent, by socket.
+        fn message(&mut self, socket: u64, frame: Value) -> Vec<(u64, Value)> {
+            let mut connection: Connection = serde_json::from_str(&self.sockets[&socket]).unwrap();
+            let workspace = crate::workspace::RemoteWorkspace::default();
+            let replies = parse(now(self.plane().on_message(
+                &workspace,
+                &mut connection,
+                &frame.to_string(),
+            )));
+            self.sockets
+                .insert(socket, serde_json::to_string(&connection).unwrap());
+            let mut sent: Vec<_> = replies.into_iter().map(|frame| (socket, frame)).collect();
+            sent.extend(self.fan_out());
+            sent
+        }
+
+        /// A change made outside any client message.
+        fn commit(&mut self, event: Event) -> Vec<(u64, Value)> {
+            self.plane().commit(event).unwrap();
+            self.fan_out()
+        }
+
+        fn fan_out(&mut self) -> Vec<(u64, Value)> {
+            let signals = self.plane().take_signals();
+            let mut sent = Vec::new();
+            for (socket, stored) in self.sockets.clone() {
+                let connection: Connection = serde_json::from_str(&stored).unwrap();
+                for frame in parse(now(self.plane().deliver(&connection, &signals))) {
+                    sent.push((socket, frame));
+                }
+            }
+            sent
+        }
+    }
+
+    fn retitle(title: &str) -> Event {
+        Event::ThreadPatched {
+            thread_id: "t1".into(),
+            patch: json!({ "title": title }),
+        }
+    }
+
+    #[test]
+    fn live_streams_resume_from_their_cursor_after_a_suspension() {
+        let mut host = SuspendingHost::new();
+        host.connect(1);
+        host.connect(2);
+        host.message(1, json!({"_tag":"Request","id":0,"tag":"projects.mutate","payload":{"type":"project.create","commandId":"c1","projectId":"p1","title":"One","workspaceRoot":"/workspace/one"},"headers":[]}));
+        host.commit(Event::ThreadCreated(
+            serde_json::from_value(json!({
+                "id": "t1", "project_id": "p1", "title": "One", "cwd": "/workspace/one",
+                "status": "idle", "messages": [], "runs": [], "created_at": 1,
+                "archived": false, "settled": false, "snoozed_until": null,
+                "pinned": false, "unread": false, "tags": []
+            }))
+            .unwrap(),
+        ));
+        let opened = host.message(1, json!({"_tag":"Request","id":7,"tag":"orchestration.subscribeThread","payload":{"threadId":"t1"},"headers":[]}));
+        assert_eq!(opened.len(), 1);
+        assert_eq!(
+            opened[0].1["values"][0]["projection"]["thread"]["title"],
+            "One"
+        );
+        let access = host.message(2, json!({"_tag":"Request","id":"a","tag":"subscribeAuthAccess","payload":{},"headers":[]}));
+        assert_eq!(access[0].1["values"][0]["revision"], 1);
+
+        host.suspend();
+
+        // A change that leaves the thread as it was sends nothing: the
+        // rebuilt plane compares against the stored cursor, not a fresh one.
+        let unchanged = host.commit(retitle("One"));
+        assert!(
+            unchanged.iter().all(|(socket, _)| *socket != 1),
+            "{unchanged:?}"
+        );
+
+        let changed = host.commit(retitle("Two"));
+        let thread: Vec<_> = changed.iter().filter(|(socket, _)| *socket == 1).collect();
+        assert_eq!(thread.len(), 1, "{changed:?}");
+        assert_eq!(thread[0].1["requestId"], 7);
+        assert_eq!(
+            thread[0].1["values"][0]["projection"]["thread"]["title"],
+            "Two"
+        );
+
+        host.suspend();
+
+        // The cursor delivery moved was stored too.
+        let again = host.commit(retitle("Two"));
+        assert!(again.iter().all(|(socket, _)| *socket != 1), "{again:?}");
+
+        // Auth access numbering continues from the stored revision: a new
+        // socket's session and presence reach socket 2's stream as revision
+        // 2 onwards, not 1 again.
+        let joined = host.connect(3);
+        let revisions: Vec<_> = joined
+            .iter()
+            .filter(|(socket, _)| *socket == 2)
+            .map(|(_, frame)| frame["values"][0]["revision"].as_u64().unwrap())
+            .collect();
+        assert!(!revisions.is_empty(), "{joined:?}");
+        assert_eq!(revisions[0], 2, "{joined:?}");
+        assert!(revisions.windows(2).all(|pair| pair[1] == pair[0] + 1));
+
+        // Interrupting after a suspension still removes the stored stream.
+        host.suspend();
+        let interrupted = host.message(1, json!({"_tag":"Interrupt","requestId":7}));
+        assert_eq!(interrupted[0].1["exit"]["cause"][0]["_tag"], "Interrupt");
+        assert!(host.commit(retitle("Four")).is_empty());
+    }
+
     #[test]
     fn rejects_sockets_without_a_credential() {
         let plane = plane();
