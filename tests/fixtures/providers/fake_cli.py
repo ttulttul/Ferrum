@@ -4,7 +4,8 @@
 It plays the scenario named by FAKE_PROVIDER_SCENARIO: messages recorded from
 a real `codex app-server` or `claude --output-format stream-json` session,
 with steps that wait for what the client sends. Every line it receives is
-appended to FAKE_PROVIDER_LOG, and its arguments to FAKE_PROVIDER_LOG.args.
+appended to FAKE_PROVIDER_LOG, its arguments to FAKE_PROVIDER_LOG.args, and its
+arguments and launch environment as JSON to FAKE_PROVIDER_LOG.launch.
 
 A scenario is {"steps": [...]} or {"variants": [{"argsContain": "...",
 "steps": [...]}, ...]}, where the first variant whose argsContain is in the
@@ -34,6 +35,11 @@ args = sys.argv[1:]
 log_path = os.environ["FAKE_PROVIDER_LOG"]
 with open(log_path + ".args", "a") as out:
     out.write(" ".join(args) + "\n")
+# The launch as JSON: the arguments and the environment a server sets for its CLIs.
+LAUNCH_ENV = ("T3CODE_THREAD_ID", "CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CODEX_INTERNAL_", "ENABLE_CLAUDEAI_")
+with open(log_path + ".launch", "a") as out:
+    out.write(json.dumps({"argv": args, "env": {k: v for k, v in os.environ.items()
+                                                if k.startswith(LAUNCH_ENV)}}) + "\n")
 with open(os.environ["FAKE_PROVIDER_SCENARIO"]) as source:
     scenario = json.load(source)
 

@@ -54,9 +54,32 @@ pub struct ProviderTurn {
     /// `maxTokens` of a Claude turn's token usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// The app thread the turn belongs to, which the CLI's shells see as
+    /// `T3CODE_THREAD_ID`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app_thread_id: String,
+    /// The thread's interaction mode (`default` or `plan`); empty means
+    /// `default`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub interaction_mode: String,
+    /// Directories besides the working directory the CLI may read (the
+    /// attachments directory).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_dirs: Vec<String>,
+    /// Claude Code `--settings` the model selection sets (`fastMode`).
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub claude_settings: Value,
 }
 
 impl ProviderTurn {
+    /// The interaction mode, `default` when unset.
+    pub fn interaction_mode(&self) -> &str {
+        match self.interaction_mode.as_str() {
+            "" => "default",
+            mode => mode,
+        }
+    }
+
     /// The runtime mode, `full-access` when unset.
     pub fn runtime_mode(&self) -> &str {
         match self.runtime_mode.as_str() {

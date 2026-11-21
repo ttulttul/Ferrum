@@ -14,6 +14,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+/// The Claude Agent SDK release the reference runs Claude Code through.
+const CLAUDE_AGENT_SDK_VERSION: &str = "0.3.321";
+
 /// How long an interrupted turn may take to report that it stopped.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 /// What Claude Code prints when `--resume` names a session it does not have.
@@ -133,36 +136,50 @@ impl<'a> Attempt<'a> {
         sink: &'a Sink,
     ) -> Outcome {
         let binary = program(&provider.binary_path, "claude");
-        let mode = permission_mode(provider.runtime_mode());
+        let mode = if provider.interaction_mode() == "plan" {
+            "plan"
+        } else {
+            permission_mode(provider.runtime_mode())
+        };
+        // The flags the reference's Claude Agent SDK query passes, in its
+        // order.
         let mut args: Vec<String> = [
             "--output-format",
             "stream-json",
             "--verbose",
             "--input-format",
             "stream-json",
-            "--include-partial-messages",
-            // Requests the CLI does not settle itself come to us in every
-            // mode, as the reference installs its permission callback.
-            "--permission-prompt-tool",
-            "stdio",
-            "--permission-mode",
-            mode,
+            "--thinking=adaptive",
+            "--thinking-display=summarized",
         ]
         .map(String::from)
         .into();
+        if let Some(effort) = &provider.reasoning_effort {
+            args.push(format!("--effort={effort}"));
+        }
+        if !provider.model.trim().is_empty() {
+            args.push(format!("--model={}", provider.model));
+        }
+        // Requests the CLI does not settle itself come to us in every mode,
+        // as the reference installs its permission callback.
+        args.push("--permission-prompt-tool=stdio".into());
+        args.push("--tools=default".into());
+        args.push(format!("--permission-mode={mode}"));
         if mode == "bypassPermissions" {
             args.push("--allow-dangerously-skip-permissions".into());
         }
-        if !provider.model.trim().is_empty() {
-            args.extend(["--model".into(), provider.model.clone()]);
+        args.push("--include-partial-messages".into());
+        args.push(format!("--add-dir={}", spec.cwd));
+        for dir in &provider.extra_dirs {
+            args.push(format!("--add-dir={dir}"));
         }
         if let Some(resume) = resume {
-            args.extend(["--resume".into(), resume.to_owned()]);
+            args.push(format!("--resume={resume}"));
         } else {
             // The reference picks a new session's id itself, so the thread
             // names its session even if the CLI never starts.
             let session = uuid::Uuid::new_v4().to_string();
-            args.extend(["--session-id".into(), session.clone()]);
+            args.push(format!("--session-id={session}"));
             sink.send(ProviderEvent::ProviderThread {
                 driver: CLAUDE_AGENT.into(),
                 native_thread_id: session,
@@ -170,8 +187,30 @@ impl<'a> Attempt<'a> {
                 model: Some(provider.model.clone()).filter(|model| !model.trim().is_empty()),
             });
         }
+        let mut settings = provider
+            .claude_settings
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        settings.insert("showThinkingSummaries".into(), json!(true));
+        args.extend([
+            "--thinking-display".into(),
+            "summarized".into(),
+            "--settings".into(),
+            Value::Object(settings).to_string(),
+        ]);
         args.extend(provider.launch_args.iter().cloned());
-        let mut extra_env = vec![];
+        let mut extra_env = vec![
+            ("CLAUDE_CODE_ENTRYPOINT".into(), "t3-code".into()),
+            ("CLAUDE_CODE_SDK_READS_SESSION_STATE".into(), "1".into()),
+            (
+                "CLAUDE_AGENT_SDK_VERSION".into(),
+                CLAUDE_AGENT_SDK_VERSION.into(),
+            ),
+        ];
+        if !provider.app_thread_id.is_empty() {
+            extra_env.push(("T3CODE_THREAD_ID".into(), provider.app_thread_id.clone()));
+        }
         if resume.is_some() {
             extra_env.push(("CLAUDE_CODE_RESUME_INTERRUPTED_TURN".into(), "1".into()));
             extra_env.push(("CLAUDE_CODE_RESUME_REASON".into(), "user_resume".into()));

@@ -410,6 +410,11 @@ pub(crate) fn provider_turn(
                 .collect()
         })
         .unwrap_or_default();
+    let claude_launch = if driver == provider::CLAUDE_AGENT {
+        crate::model_manifest::claude_launch(manifest, selection)
+    } else {
+        (None, Value::Null)
+    };
     let turn = ProviderTurn {
         driver: driver.to_owned(),
         binary_path: text("binaryPath"),
@@ -420,9 +425,16 @@ pub(crate) fn provider_turn(
             .filter(|model| !model.is_empty() && *model != "default")
             .unwrap_or_default()
             .to_owned(),
-        reasoning_effort,
+        reasoning_effort: reasoning_effort.or_else(|| claude_launch.0.clone()),
         resume: state.resume_for(driver),
         runtime_mode: row["runtimeMode"].as_str().unwrap_or_default().to_owned(),
+        app_thread_id: row["id"].as_str().unwrap_or_default().to_owned(),
+        interaction_mode: row["interactionMode"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        extra_dirs: Vec::new(),
+        claude_settings: claude_launch.1,
         context_window: (driver == provider::CLAUDE_AGENT)
             .then(|| crate::model_manifest::claude_context_window(manifest, selection))
             .flatten(),

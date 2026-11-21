@@ -460,7 +460,7 @@ async fn claude_turn_streams_text_tool_calls_and_usage() {
         .any(|e| matches!(e, ProviderEvent::ProviderTurn { model: Some(_), .. })));
     let args = std::fs::read_to_string(dir.path().join("in.jsonl.args")).unwrap();
     assert!(
-        args.contains("--permission-mode bypassPermissions"),
+        args.contains("--permission-mode=bypassPermissions"),
         "{args}"
     );
     assert!(!args.contains("--resume"), "{args}");
@@ -471,7 +471,7 @@ async fn claude_turn_streams_text_tool_calls_and_usage() {
         .is_some_and(|t| t.starts_with("Read /"))));
     // A new session's id is chosen before the CLI starts and named first.
     let (first, _) = native_thread(&events);
-    assert!(args.contains(&format!("--session-id {first}")), "{args}");
+    assert!(args.contains(&format!("--session-id={first}")), "{args}");
 }
 
 #[tokio::test]
@@ -488,7 +488,7 @@ async fn claude_turn_resumes_the_native_session() {
     assert!(exit.success, "{exit:?}");
     assert_eq!(native_thread(&events), ("sess-saved".into(), true));
     let args = std::fs::read_to_string(dir.path().join("in.jsonl.args")).unwrap();
-    assert!(args.contains("--resume sess-saved"), "{args}");
+    assert!(args.contains("--resume=sess-saved"), "{args}");
 }
 
 #[tokio::test]

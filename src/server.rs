@@ -250,7 +250,10 @@ impl crate::orchestration::CommandHost for AppState {
                     ..Default::default()
                 };
                 match provider {
-                    Some((provider, env)) => {
+                    Some((mut provider, env)) => {
+                        // Claude may read the thread's attachments, as the
+                        // reference lets it.
+                        provider.extra_dirs = vec![self.paths.attachments.display().to_string()];
                         spec.provider = Some(provider);
                         spec.env = env;
                     }
