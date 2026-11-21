@@ -8,8 +8,10 @@
 //! listens on ([`Source`]). A host that keeps subscriptions in storage feeds
 //! every stored subscription after each change instead.
 //!
-//! Streams over the workspace (terminals, VCS status, previews, devices) and
-//! over host-only services are not here.
+//! Streams over the workspace (terminals, VCS status, previews, devices) are
+//! records too, but only the control plane keeps them that way (see
+//! `crate::control_streams`); the native server serves them as tasks.
+//! Streams over host-only services are not here.
 use crate::{
     auth_service::{access::Change, Session},
     control_state::ControlState,
@@ -56,6 +58,11 @@ pub enum Signal {
     /// A prompt suggestion was generated (`threadId`, `runId`, `text`).
     PromptSuggestion(Value),
     AuthAccess(Change),
+    /// A frame of one of the workspace's event streams.
+    Workspace(Box<crate::workspace::BusFrame>),
+    /// Time to read the workspace's polled state (VCS status and branch,
+    /// local servers) again.
+    Poll,
 }
 
 /// A newly opened stream: the record, its first batches, and (when asked

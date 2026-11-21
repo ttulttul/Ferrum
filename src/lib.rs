@@ -20,6 +20,7 @@ mod config_rpc;
 mod contracts;
 pub mod control;
 pub mod control_state;
+mod control_streams;
 pub mod cors;
 mod dispatch;
 mod dpop_proof;

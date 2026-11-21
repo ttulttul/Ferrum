@@ -106,8 +106,9 @@ returns the same time (`Option<i64>`, wall-clock milliseconds) for hosts
 that would rather compute it after each call:
 
 - now, when a turn recorded something that clients have not been sent;
-- every `MAINTAIN_INTERVAL_MS` (250 ms) while the workspace is connected,
-  which keeps its streams open and forwards turn cancellations;
+- every `MAINTAIN_INTERVAL_MS` (250 ms) while the workspace is connected.
+  This keeps its streams open, forwards turn cancellations, and reads polled
+  state (VCS status and branch, local servers) for clients' streams;
 - otherwise never.
 
 The plane does not use `push` or `connections`; the host delivers frames.
@@ -143,6 +144,14 @@ pub fn ControlPlane::prune_streams<'a>(&self, open: impl IntoIterator<Item = &'a
 - When a socket closes, call `disconnect`. When the plane is rebuilt from
   storage, call `prune_streams` with the connections of every socket still
   open, which deletes the stream records of sockets that closed unseen.
+
+Client streams over the workspace (terminal output and metadata, preview
+and device events, VCS status and branch, local servers) are stored records
+like the plane's other streams. Each one keeps the workspace stream id and
+the seq it last handled, or for polled state the last reading it sent. After
+a restart or a reconnect, the workspace's streams have new ids. A record
+that sees a new id catches up from the workspace's current state and sends
+only what changed.
 
 ## The workspace connection
 
