@@ -175,7 +175,7 @@ impl Server {
         assert_eq!(project["exit"]["_tag"], "Success", "{project}");
         for command in [
             json!({"type":"thread.create","commandId":"c2","threadId":"t1","projectId":"p1","title":"Draft",
-                "modelSelection":{"instanceId":"codex","model":"fixture"},"runtimeMode":"full-access",
+                "modelSelection":{"instanceId":"stub","model":"fixture"},"runtimeMode":"full-access",
                 "interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"}),
             json!({"type":"message.dispatch","commandId":"c3","threadId":"t1","messageId":"message:1","text":text,
                 "attachments":[],"createdBy":"user","creationSource":"web","dispatchMode":{"type":"start_immediately"}}),
@@ -219,7 +219,7 @@ async fn agentd(dir: &std::path::Path, root: &std::path::Path) -> String {
     format!("ws://{addr}/")
 }
 
-/// A stub provider: prints each word of the prompt on its own line,
+/// A stub provider for the `stub` instance, which no CLI driver runs: prints each word of the prompt on its own line,
 /// `delay` seconds apart.
 fn stub_provider(delay: &str) -> Vec<String> {
     vec![

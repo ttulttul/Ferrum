@@ -5,6 +5,7 @@
 //! machine only through [`Workspace::start_tracked_turn`], and its host
 //! starts it with [`crate::runtime::Runtime::spawn`], so it builds for every
 //! target.
+use crate::workspace::provider::TurnStatus;
 use crate::{
     control_state::ControlState,
     workspace::{StreamPosition, TurnEvent, TurnExit, TurnItem, TurnItems, TurnSpec, Workspace},
@@ -147,12 +148,12 @@ fn recorded(run: &Run, event: TurnEvent, position: Option<StreamPosition>) -> Re
             output("stdout", text)
         }
         TurnEvent::Stderr(text) => output("stderr", text),
-        // Provider turns are not started here yet; keep their events as
-        // JSON lines until they are projected.
-        TurnEvent::Provider(event) => output(
-            "provider",
-            serde_json::to_string(&event).expect("provider events serialize") + "\n",
-        ),
+        TurnEvent::Provider(event) => Recorded::Event(Box::new(Event::RunProvider {
+            run_id: run.id,
+            thread_id: run.thread_id.clone(),
+            event,
+            position,
+        })),
         TurnEvent::Exited(exit) => Recorded::End(exit),
     }
 }
@@ -205,23 +206,42 @@ async fn record<H: TurnHost>(
         anyhow::bail!("the provider process could not be waited for");
     };
     let thread_id = run.thread_id.clone();
+    // A provider turn ends as its `turn.terminal` says, which may have been
+    // recorded before a restart; a command turn as its process exited.
+    let terminal = host
+        .store
+        .read()
+        .await
+        .threads
+        .get(&thread_id)
+        .and_then(|thread| thread.provider.terminals.get(&run.id).cloned());
+    let (run_status, error) = match terminal {
+        Some(terminal) => match terminal.status {
+            TurnStatus::Completed => ("completed", None),
+            TurnStatus::Interrupted => ("interrupted", None),
+            TurnStatus::Failed | TurnStatus::Running => (
+                "failed",
+                Some(terminal.failure.map_or_else(
+                    || "The provider turn failed.".to_owned(),
+                    |failure| failure.message,
+                )),
+            ),
+        },
+        None if cancelled => ("cancelled", None),
+        None if ok => ("completed", None),
+        None => ("failed", Some(format!("provider exited with {status}"))),
+    };
+    let ok = run_status == "completed";
     host.commit(Event::RunFinished {
         run_id: run.id,
         thread_id: thread_id.clone(),
-        status: if cancelled {
-            "cancelled"
-        } else if ok {
-            "completed"
-        } else {
-            "failed"
-        }
-        .into(),
-        error: (!ok && !cancelled).then(|| format!("provider exited with {status}")),
+        status: run_status.into(),
+        error,
     })
     .await?;
     host.turn_finished(run);
     done(exit_position);
-    if ok && !cancelled {
+    if ok {
         if let Some(tree) = host.workspace().capture_git_tree(&cwd).await {
             let turn_count = host
                 .store
