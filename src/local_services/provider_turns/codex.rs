@@ -71,6 +71,7 @@ pub(super) async fn run(
         pending: HashMap::new(),
         file_changes: HashMap::new(),
         usage_baseline: None,
+        rate_limits: None,
         turn_usage: TurnUsage::default(),
         thread_id: None,
         turn_id: None,
@@ -96,6 +97,8 @@ struct Session {
     pending: HashMap<String, Pending>,
     /// Each file change item's changes by path, for approval prompts.
     file_changes: HashMap<String, Value>,
+    /// The rate limits Codex last reported (`account/rateLimits/updated`).
+    rate_limits: Option<Value>,
     /// The thread-wide token totals Codex last reported.
     usage_baseline: Option<Breakdown>,
     /// What this turn used so far.
@@ -435,10 +438,10 @@ impl Session {
             };
             self.handle_line(&line).await;
         }
-        Ok(self.end())
+        Ok(self.end().await)
     }
 
-    fn end(&mut self) -> TurnEnd {
+    async fn end(&mut self) -> TurnEnd {
         let turn = self.terminal.take().unwrap_or_default();
         match turn["status"].as_str() {
             Some("completed") => TurnEnd::completed(),
@@ -451,9 +454,34 @@ impl Session {
                     .unwrap_or_else(|| "Codex turn failed.".into());
                 let mut failure = ProviderFailure::new(failure_class(&turn["error"]), message);
                 failure.code = error_code(&turn["error"]["codexErrorInfo"]);
+                if failure.class == "usage_limit" {
+                    failure.reset_at = self.usage_limit_reset().await;
+                }
                 TurnEnd::failed(failure, ThreadDisposition::Reusable)
             }
         }
+    }
+
+    /// When the usage limit a turn hit resets, as the reference finds it:
+    /// from the rate limits Codex reported, else by asking Codex
+    /// (`account/rateLimits/read`, ten seconds at most).
+    async fn usage_limit_reset(&mut self) -> Option<String> {
+        if let Some(reset) = self.rate_limits.as_ref().and_then(usage_limit_reset_at) {
+            return Some(reset);
+        }
+        let read = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.request("account/rateLimits/read", Value::Null),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let limits = if read["rateLimitsByLimitId"]["codex"].is_object() {
+            &read["rateLimitsByLimitId"]["codex"]
+        } else {
+            &read["rateLimits"]
+        };
+        usage_limit_reset_at(limits)
     }
 
     fn turn_started(&mut self, id: &str) {
@@ -656,6 +684,16 @@ impl Session {
                         ..TokenUsage::default()
                     },
                 });
+            }
+            "account/rateLimits/updated" => {
+                // The newest snapshot of each window wins.
+                let mut merged = self.rate_limits.take().unwrap_or_else(|| json!({}));
+                for (key, value) in params["rateLimits"].as_object().into_iter().flatten() {
+                    if !value.is_null() {
+                        merged[key] = value.clone();
+                    }
+                }
+                self.rate_limits = Some(merged);
             }
             "error" if params["willRetry"] != true => {
                 if let Some(message) = params["error"]["message"].as_str() {
@@ -1005,6 +1043,31 @@ fn map_item(item: &Value, completed: bool) -> Option<ProviderItem> {
     Some(mapped)
 }
 
+/// The reference's codexUsageLimitResetAt: the latest reset of the windows
+/// used up, when every one of them names its reset.
+fn usage_limit_reset_at(limits: &Value) -> Option<String> {
+    if limits["limitId"].as_str().is_some_and(|id| id != "codex") {
+        return None;
+    }
+    let exhausted: Vec<&Value> = ["primary", "secondary"]
+        .iter()
+        .map(|key| &limits[*key])
+        .filter(|window| {
+            window["usedPercent"]
+                .as_f64()
+                .is_some_and(|used| used >= 100.0)
+        })
+        .collect();
+    if exhausted.is_empty() {
+        return None;
+    }
+    let resets: Option<Vec<i64>> = exhausted.iter().map(|w| w["resetsAt"].as_i64()).collect();
+    resets?
+        .into_iter()
+        .max()
+        .map(|seconds| crate::auth_service::iso(seconds.saturating_mul(1000)))
+}
+
 fn error_code(info: &Value) -> Option<String> {
     match info {
         Value::String(code) => Some(code.clone()),
@@ -1029,6 +1092,22 @@ fn failure_class(error: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_usage_limit_resets_when_its_last_exhausted_window_does() {
+        let limits = json!({"limitId": "codex",
+            "primary": {"usedPercent": 100, "resetsAt": 1_795_240_000},
+            "secondary": {"usedPercent": 40, "resetsAt": 1_795_800_000}});
+        assert_eq!(
+            usage_limit_reset_at(&limits).as_deref(),
+            Some("2026-11-21T05:46:40.000Z")
+        );
+        assert_eq!(
+            usage_limit_reset_at(&json!({"primary": {"usedPercent": 100}})),
+            None
+        );
+        assert_eq!(usage_limit_reset_at(&json!({"limitId": "other"})), None);
+    }
 
     #[test]
     fn maps_command_and_file_items() {

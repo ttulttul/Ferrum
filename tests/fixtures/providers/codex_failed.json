@@ -145,5 +145,22 @@
     }
    }
   }
- ]
+ ],
+ "replies": {
+  "account/rateLimits/read": {
+   "rateLimits": {
+    "limitId": "codex",
+    "primary": {
+     "usedPercent": 100,
+     "windowDurationMins": 300,
+     "resetsAt": 1795240000
+    },
+    "secondary": {
+     "usedPercent": 40,
+     "windowDurationMins": 10080,
+     "resetsAt": 1795800000
+    }
+   }
+  }
+ }
 }

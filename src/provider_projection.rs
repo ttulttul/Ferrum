@@ -67,6 +67,20 @@ pub(crate) struct ProviderRecords {
 /// The reference's RUNTIME_REQUEST_DELIVERY_FAILED_MESSAGE.
 const DELIVERY_FAILED: &str = "T3 Code could not confirm that your answer reached the agent. If the run stays stuck, stop it and try again.";
 
+/// A failure as the projection carries it.
+fn failure_json(failure: &provider::ProviderFailure) -> Value {
+    let mut out = json!({
+        "class": failure.class,
+        "message": failure.message,
+        "code": failure.code,
+        "retryable": failure.retryable
+    });
+    if let Some(reset) = &failure.reset_at {
+        out["resetAt"] = json!(reset);
+    }
+    out
+}
+
 /// What the server says when a restart cut off the turn a request waited in.
 const RESTART_REASON: &str = "The server restarted before this runtime request was resolved.";
 
@@ -583,12 +597,7 @@ impl Thread {
                     "completedAt": at,
                     "updatedAt": at,
                     "type": "error",
-                    "failure": {
-                        "class": failure.class,
-                        "message": failure.message,
-                        "code": failure.code,
-                        "retryable": failure.retryable
-                    }
+                    "failure": failure_json(&failure)
                 })));
             }
             TurnStatus::Interrupted => {
