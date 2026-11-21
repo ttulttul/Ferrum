@@ -70,7 +70,14 @@ struct Args {
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // The reference logs at Info by default; RUST_LOG still overrides.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
     match serve().await {
         Err(error) if error.is::<t3code_server::ManagedPolicyFileError>() => {
             eprintln!("{error}");

@@ -22,9 +22,19 @@ Scenarios:
 - `register-stored`: a linked environment with a stored, unconfirmed tunnel;
 - `update-restart`: as `register-stored`, stopped with the desktop's update restart marker,
   which keeps the tunnel;
-- `publish-only-link`: a CLI-desired publish-only link, provisioned without a tunnel.
+- `publish-only-link`: a CLI-desired publish-only link, provisioned without a tunnel;
+- `confirmed-restart`: as `register-stored`, but T3 Connect already confirmed the tunnel for
+  this server's port (what a server leaves when it hands the tunnel over), stopped through
+  `./install`'s handoff marker. The connector must start as soon as the server listens, with
+  no first-registration jitter, and the tunnel must survive the stop.
+
+Besides the requests, connectors and secrets, it compares when the first connector starts:
+`immediate` (within a few seconds of the server answering HTTP) or `later`, for the
+scenarios where that does not depend on the reference's random 0-30 s registration jitter.
 """
 import argparse
+import importlib.machinery
+import importlib.util
 import base64
 import contextlib
 import datetime
@@ -73,7 +83,21 @@ PLACEHOLDERS = {
     ROTATED_REFRESH_TOKEN: "<rotated-cli-refresh-token>",
     ENVIRONMENT_CREDENTIAL: "<environment-credential>",
 }
-SCENARIOS = ["provision", "refresh", "register-stored", "update-restart", "publish-only-link"]
+SCENARIOS = ["provision", "refresh", "register-stored", "update-restart", "publish-only-link", "confirmed-restart"]
+# Scenarios whose connector must start without waiting for T3 Connect.
+TIMED_SCENARIOS = {"confirmed-restart"}
+# A connector started this soon after the server answers HTTP did not wait for jitter.
+IMMEDIATE_START = 5.0
+
+
+def load_installer():
+    """`./install`, imported for the handoff marker it writes before stopping a server."""
+    path = Path(__file__).resolve().parent.parent / "install"
+    loader = importlib.machinery.SourceFileLoader("t3code_install", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def b64url(data):
@@ -318,7 +342,7 @@ def seed(root, scenario, fake, key_pair, server_port):
     write_secret(root, "cloud-cli-oauth-token", json.dumps(
         {"accessToken": ACCESS_TOKEN, "refreshToken": REFRESH_TOKEN, "expiresAtEpochMs": expires}, separators=(",", ":")))
     write_secret(root, "cloud-cli-desired-link", "publish_only" if scenario == "publish-only-link" else "managed")
-    if scenario in ("register-stored", "update-restart"):
+    if scenario in ("register-stored", "update-restart", "confirmed-restart"):
         config = {"providerKind": "cloudflare_tunnel", "connectorToken": STORED_TOKEN, "tunnelId": STORED_TUNNEL_ID,
                   "tunnelName": "t3coderelay-managedendpoint-prod-stored"}
         write_secret(root, "cloud-endpoint-runtime-config", json.dumps(config, separators=(",", ":")))
@@ -327,6 +351,10 @@ def seed(root, scenario, fake, key_pair, server_port):
         write_secret(root, "cloud-linked-user-id", CLOUD_USER_ID)
         write_secret(root, "cloud-relay-environment-credential", ENVIRONMENT_CREDENTIAL)
         write_secret(root, "cloud-mint-ed25519-public-key", spki_pem(fake.mint_key.public_key()))
+    if scenario == "confirmed-restart":
+        write_secret(root, "cloud-endpoint-confirmed-origin", json.dumps(
+            {"config": config, "origin": {"localHttpHost": "127.0.0.1", "localHttpPort": server_port}},
+            separators=(",", ":")))
 
 
 def run_scenario(name, prefix, root, credentials, fake, ca_path, key_pair, public_key):
@@ -353,9 +381,24 @@ def run_scenario(name, prefix, root, credentials, fake, ca_path, key_pair, publi
         "register-stored": "/v1/environments/<environment-id>/tunnel/recovery",
         "update-restart": "/v1/environments/<environment-id>/tunnel/recovery",
         "publish-only-link": "/v1/client/environment-links",
+        "confirmed-restart": "/v1/environments/<environment-id>/tunnel/recovery",
     }
     result = {}
     with server(prefix, root, port, *credentials, env) as (process, url):
+        if name in TIMED_SCENARIOS:
+            answered = time.monotonic()
+            started = None
+            while time.monotonic() - answered < 45 and process.poll() is None:
+                with contextlib.suppress(ValueError):
+                    if any(e["event"] == "start" for e in read_jsonl(record)):
+                        started = time.monotonic() - answered
+                if started is not None:
+                    break
+                time.sleep(0.05)
+            result["firstConnectorStart"] = ("never" if started is None else
+                                             "immediate" if started < IMMEDIATE_START else "later")
+            print(f"  {name}: {prefix[0].rsplit('/', 1)[-1]} started its connector "
+                  + ("never" if started is None else f"{started:.2f} s after answering HTTP"))
         # The reference waits up to 30 s (first-registration jitter) before its first call.
         def done():
             paths = [r["path"].replace(ENVIRONMENT_ID, "<environment-id>") for r in fake.requests]
@@ -372,6 +415,7 @@ def run_scenario(name, prefix, root, credentials, fake, ca_path, key_pair, publi
             marker = root / "runtime" / "desktop-update-restart"
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text("")
+        handoff = load_installer().mark_tunnel_handoff(str(root)) if name == "confirmed-restart" else None
         before = len(fake.requests)
         process.send_signal(signal.SIGTERM)
         try:
@@ -380,6 +424,9 @@ def run_scenario(name, prefix, root, credentials, fake, ca_path, key_pair, publi
         except subprocess.TimeoutExpired:
             result["serverExited"] = False
         result["connectorsLeftRunning"] = sum(alive(pid) for pid in running)
+        if handoff is not None:
+            result["handoffMarkerConsumed"] = not handoff.exists()
+            load_installer().clear_tunnel_handoff(handoff)
         requests = list(fake.requests)
     result["startupRequests"] = [normalize_request(r, fake.url, public_key, port) for r in requests[:before]]
     result["shutdownRequests"] = [normalize_request(r, fake.url, public_key, port) for r in requests[before:]]
