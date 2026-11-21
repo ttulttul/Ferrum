@@ -157,12 +157,6 @@
       "reason": "orchestration.subscribeShell sends nothing after its snapshot",
       "issue": "a live shell subscriber never receives project.updated or thread.updated after a mutation, so an open client's sidebar does not change until it reconnects"
     },
-    "threads.threadFollow.sawRename": {
-      "area": "threads",
-      "severity": "medium",
-      "reason": "a live subscribeThread answers a rename with a full snapshot (about 15 s later) instead of a thread.metadata-updated event",
-      "issue": "the reference streams the metadata event within a few seconds of thread.meta.update"
-    },
     "turns.getThreadProjection.afterMessage": {
       "area": "agent turns",
       "severity": "medium",

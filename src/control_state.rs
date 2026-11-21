@@ -126,12 +126,29 @@ impl ControlState {
     ) -> anyhow::Result<ServerEvent> {
         let mut store = self.store.write().await;
         let mut next_event_id = self.next_event_id.lock().await;
-        let record = ServerEvent {
+        let mut record = ServerEvent {
             id: *next_event_id + 1,
             at: crate::now(),
             event,
             receipt,
+            thread_events: None,
         };
+        // Live subscribers get what the commit changed in its thread as
+        // domain events, one sequence number each.
+        if self.events.receiver_count() > 0 {
+            if let Some(mut events) = thread_events(&store, &record) {
+                let count = events.items.as_ref().map_or(0, Vec::len) as u64;
+                record.id = *next_event_id + count.max(1);
+                if let Some(items) = events.items.take() {
+                    events.items = Some(crate::thread_events::sequence(
+                        &events.thread_id,
+                        items,
+                        record.id,
+                    ));
+                }
+                record.thread_events = Some(Arc::new(events));
+            }
+        }
         self.log.lock().await.append(&record)?;
         *next_event_id = record.id;
         store.apply_record(&record);
@@ -145,6 +162,36 @@ impl ControlState {
         let _ = self.events.send(record.clone());
         Ok(record)
     }
+}
+
+/// What `record` changes in its thread's projection, worked out on a copy of
+/// the thread so the store changes only once the record is logged. `None`
+/// when the record touches no thread that exists before and after it.
+fn thread_events(
+    store: &Store,
+    record: &ServerEvent,
+) -> Option<crate::thread_events::ThreadEvents> {
+    let thread_id = record.event.thread_id()?.to_owned();
+    let mut scratch = Store::default();
+    let before = store.threads.get(&thread_id).map(|thread| {
+        scratch.threads.insert(thread_id.clone(), thread.clone());
+        thread.projection()
+    })?;
+    scratch.apply_record(record);
+    let after = scratch.threads.get(&thread_id)?.projection();
+    // An unchanged projection still moves subscribers past the commit.
+    let items = crate::thread_events::diff(
+        &thread_id,
+        &before,
+        &after,
+        &crate::thread_projection::iso(record.at),
+    );
+    Some(crate::thread_events::ThreadEvents {
+        before: crate::thread_events::digest(&before),
+        after: crate::thread_events::digest(&after),
+        thread_id,
+        items,
+    })
 }
 
 /// A JSON array document as a map by each entry's `id`; empty when the
