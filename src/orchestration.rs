@@ -399,6 +399,7 @@ async fn apply_command<H: CommandHost>(
                 unread: false,
                 tags: vec![],
                 checkpoints: vec![],
+                provider: Default::default(),
             };
             return Ok(state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
@@ -1576,6 +1577,7 @@ async fn apply_command<H: CommandHost>(
                 unread: false,
                 tags: source.tags,
                 checkpoints: vec![],
+                provider: Default::default(),
             };
             return Ok(state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
@@ -1734,6 +1736,7 @@ async fn apply_command<H: CommandHost>(
                 unread: false,
                 tags: vec![],
                 checkpoints: vec![],
+                provider: Default::default(),
             };
             let mut subagents = parent.row["subagents"]
                 .as_array()

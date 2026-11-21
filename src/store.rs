@@ -67,6 +67,9 @@ pub struct Thread {
     pub tags: Vec<String>,
     #[serde(default)]
     pub checkpoints: Vec<CheckpointRecord>,
+    /// What provider turns left behind; rebuilt from the log.
+    #[serde(skip)]
+    pub(crate) provider: Box<crate::provider_state::ProviderState>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,6 +112,15 @@ pub enum Event {
         /// Where the output sits in the workspace's stream for the turn,
         /// when the workspace tracks positions. A restarted server resumes
         /// the turn after the last one recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<crate::workspace::StreamPosition>,
+    },
+    /// A provider turn's event, as the workspace reported it.
+    RunProvider {
+        run_id: Uuid,
+        thread_id: String,
+        event: crate::workspace::ProviderEvent,
+        /// As [`Event::RunOutput`]'s.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<crate::workspace::StreamPosition>,
     },
@@ -276,6 +288,19 @@ impl Store {
             } => {
                 if let Some(position) = position {
                     self.turn_positions.insert(*run_id, *position);
+                }
+            }
+            Event::RunProvider {
+                run_id,
+                thread_id,
+                event,
+                position,
+            } => {
+                if let Some(position) = position {
+                    self.turn_positions.insert(*run_id, *position);
+                }
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.provider.apply(*run_id, event);
                 }
             }
             Event::RunFinished {

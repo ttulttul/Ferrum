@@ -369,6 +369,62 @@ impl ControlPlane {
         self.schedule();
     }
 
+    /// The plane's settings: `settings.json` in its documents, normalized,
+    /// or the defaults when there is none or it does not parse.
+    pub fn settings(&self) -> Value {
+        let path = std::path::Path::new(STATE_DIR).join("settings.json");
+        self.documents
+            .read_optional(&path)
+            .ok()
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|stored| {
+                crate::settings::schema::normalize(&stored)
+                    .and_then(|settings| crate::settings::schema::normalize_runtime(&settings))
+                    .ok()
+            })
+            .unwrap_or_else(default_settings)
+    }
+
+    /// How `run` runs: its thread's provider instance's CLI when the
+    /// workspace can run that provider, otherwise the configured command.
+    async fn turn_spec(
+        &self,
+        run: &crate::Run,
+        cwd: String,
+        prompt: String,
+    ) -> crate::workspace::TurnSpec {
+        let provider = {
+            let store = self.store.read().await;
+            store.threads.get(&run.thread_id).and_then(|thread| {
+                crate::provider_state::provider_turn(
+                    &self.settings(),
+                    &thread.stored_row(),
+                    &thread.provider,
+                )
+            })
+        };
+        let mut spec = crate::workspace::TurnSpec {
+            prompt,
+            cwd,
+            ..Default::default()
+        };
+        match provider {
+            Some((provider, env)) => {
+                spec.provider = Some(provider);
+                spec.env = env;
+            }
+            None => {
+                spec.command = if self.config.provider_command.is_empty() {
+                    crate::turn::echo_command()
+                } else {
+                    self.config.provider_command.clone()
+                };
+            }
+        }
+        spec
+    }
+
     /// Ask the runtime for the alarm [`next_alarm`](Self::next_alarm) names.
     fn schedule(&self) {
         if let Some(at) = self.next_alarm() {
@@ -822,10 +878,9 @@ impl ControlPlane {
     }
 
     /// The `subscribeServerConfig` snapshot. Host facts describe the
-    /// workspace process; settings are the defaults until settings move into
-    /// the control plane's storage.
+    /// workspace process; settings are [`settings`](Self::settings).
     fn config_snapshot(&self, options: &Value) -> Value {
-        let settings = default_settings();
+        let settings = self.settings();
         let keybindings_path = std::path::Path::new(STATE_DIR).join("keybindings.json");
         let (keybindings, issues) =
             server_config::keybindings::read(self.documents.as_ref(), &keybindings_path);
@@ -867,7 +922,7 @@ impl ControlPlane {
 }
 
 /// Orchestration commands as this plane runs them: over its control state,
-/// with no managed policy, default settings and no guest shares. Turns run
+/// with no managed policy, its [`ControlPlane::settings`] and no guest shares. Turns run
 /// in its workspace.
 struct PlaneCommands {
     plane: Arc<ControlPlane>,
@@ -894,7 +949,7 @@ impl crate::orchestration::CommandHost for PlaneCommands {
         None
     }
     fn effective_settings(&self) -> anyhow::Result<Value> {
-        Ok(default_settings())
+        Ok(self.plane.settings())
     }
     fn workspace(&self) -> &dyn Workspace {
         &self.plane.host.workspace
@@ -912,20 +967,11 @@ impl crate::orchestration::CommandHost for PlaneCommands {
         cancel: tokio::sync::oneshot::Receiver<()>,
     ) {
         let plane = self.plane.clone();
-        let command = if plane.config.provider_command.is_empty() {
-            crate::turn::echo_command()
-        } else {
-            plane.config.provider_command.clone()
-        };
-        let spec = crate::workspace::TurnSpec {
-            command,
-            prompt: text,
-            cwd,
-            env_remove: Vec::new(),
-            ..Default::default()
-        };
         let runtime = plane.host.runtime.clone();
-        runtime.spawn(Box::pin(crate::turn::launch(plane, run, spec, cancel)));
+        runtime.spawn(Box::pin(async move {
+            let spec = plane.turn_spec(&run, cwd, text).await;
+            crate::turn::launch(plane, run, spec, cancel).await
+        }));
     }
     fn close_guest_thread(&self, _: &str) -> Result<(), String> {
         Err("Guest shares are not available here.".into())
@@ -1716,11 +1762,20 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
     }
 
     fn dispatch_message(plane: &Arc<ControlPlane>, connection: &mut Connection, text: &str) {
+        dispatch_nth_message(plane, connection, 1, text)
+    }
+
+    fn dispatch_nth_message(
+        plane: &Arc<ControlPlane>,
+        connection: &mut Connection,
+        n: u32,
+        text: &str,
+    ) {
         let sent = send(
             plane,
             connection,
-            json!({"_tag":"Request","id":"m","tag":"orchestration.dispatchCommand","payload":{
-                "type":"message.dispatch","commandId":"c3","threadId":"t1","messageId":"message:1","text":text,
+            json!({"_tag":"Request","id":format!("m{n}"),"tag":"orchestration.dispatchCommand","payload":{
+                "type":"message.dispatch","commandId":format!("send-{n}"),"threadId":"t1","messageId":format!("message:{n}"),"text":text,
                 "attachments":[],"createdBy":"user","creationSource":"web","dispatchMode":{"type":"start_immediately"}
             },"headers":[]}),
         );
@@ -1760,7 +1815,11 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             .iter()
             .next()
             .expect("the turn started in the workspace");
-        assert_eq!(start.command, vec!["provider".to_string()]);
+        // The thread's instance is the built-in Codex one.
+        assert!(start.command.is_empty());
+        let provider = start.provider.as_ref().expect("a provider turn");
+        assert_eq!(provider.driver, "codex");
+        assert_eq!(provider.resume, None);
         assert_eq!(start.prompt, "hello");
         assert_eq!(start.cwd, "/workspace/one");
 
@@ -2167,5 +2226,84 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
         agentd.emit_bus(op::TERM_EVENTS, output(5, "pwd\n"));
         let sent = values_for(&alarm(&host.plane, &connection), "t");
         assert_eq!(sent, vec![output(5, "pwd\n")]);
+    }
+
+    #[test]
+    fn the_next_turn_resumes_the_native_thread_the_last_one_reported() {
+        use crate::workspace::provider::{ProviderEvent, ThreadDisposition, TurnStatus};
+        let runtime = Arc::new(ManualRuntime::default());
+        let plane = ControlPlane::open(
+            config(),
+            Arc::new(MemoryStore::new()),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
+        let agentd = Arc::new(FakeAgentd::default());
+        now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+        let mut connection = owner(&plane);
+        seed(&plane, &mut connection);
+        let provider = |event| WireTurnEvent::Provider { event };
+        for (n, terminal) in [(1, TurnStatus::Completed), (2, TurnStatus::Failed)] {
+            dispatch_nth_message(&plane, &mut connection, n, "hello");
+            runtime.run();
+            let turns = agentd.turns();
+            let (&stream, start) = turns.iter().last().unwrap();
+            let resume = start.provider.as_ref().unwrap().resume.clone();
+            assert_eq!(resume, (n == 2).then(|| "thr_1".to_string()));
+            agentd.emit(
+                stream,
+                provider(ProviderEvent::ProviderThread {
+                    driver: "codex".into(),
+                    native_thread_id: "thr_1".into(),
+                    resumed: n == 2,
+                    model: None,
+                }),
+            );
+            agentd.emit(
+                stream,
+                provider(ProviderEvent::TurnTerminal {
+                    status: terminal,
+                    failure: (terminal == TurnStatus::Failed).then(|| {
+                        crate::workspace::provider::ProviderFailure::new("provider_error", "boom")
+                    }),
+                    thread_disposition: if n == 1 {
+                        ThreadDisposition::Reusable
+                    } else {
+                        ThreadDisposition::Broken
+                    },
+                }),
+            );
+            // The CLI's own exit status does not decide the run's.
+            agentd.emit(
+                stream,
+                WireTurnEvent::Exited {
+                    success: true,
+                    cancelled: false,
+                    status: "exit status: 0".into(),
+                },
+            );
+            runtime.run();
+        }
+        let runs = thread_runs(&plane);
+        assert_eq!(runs[0].status, "completed");
+        assert_eq!(runs[1].status, "failed");
+        assert_eq!(runs[1].error.as_deref(), Some("boom"));
+        // The last turn left the native thread broken: the next starts over.
+        dispatch_nth_message(&plane, &mut connection, 3, "again");
+        runtime.run();
+        let turns = agentd.turns();
+        assert_eq!(
+            turns
+                .values()
+                .last()
+                .unwrap()
+                .provider
+                .as_ref()
+                .unwrap()
+                .resume,
+            None
+        );
+        assert!(agentd.turns_acked());
     }
 }

@@ -91,6 +91,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 pub mod event_log;
 pub mod persistence;
 pub mod platform;
+mod provider_state;
 mod store;
 pub use store::*;
 pub(crate) use store::{now, CommandReceipt};

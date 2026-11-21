@@ -85,6 +85,18 @@ recorded turn output carries its stream position, which is what lets a
 restarted plane resume the turn without losing or repeating output.
 `persistence::MemoryStore` and `event_log::MemoryLog` suit tests.
 
+### Settings and provider turns
+
+The plane reads its settings from `settings.json` under `STATE_DIR`, in the
+same format the native server keeps. If there is none, or it does not
+parse, it uses the defaults. A turn runs the CLI of its thread's provider
+instance, found in `settings.providerInstances` or as the built-in
+instance of the same name, when the driver is `codex` or `claudeAgent`.
+The instance's `config.binaryPath`, `config.launchArgs`, `config.homePath`
+and `environment` apply, along with the thread's model and reasoning
+effort. Any other instance runs `Config::provider_command`. The native
+thread or session a turn reports is resumed by the thread's next turn.
+
 ## The runtime
 
 ```rust
