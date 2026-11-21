@@ -611,6 +611,9 @@ async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
     };
     let timeline = visible.iter().filter(shown).collect::<Vec<_>>();
     let position = |entry: &Value| entry["position"].as_i64().unwrap_or(0);
+    // Cursorless reads by a linked environment get the newest items, as its
+    // agents expect; other clients page forward from the start.
+    let newest_first = before.is_some() || (after.is_none() && caller.granted.peer_link);
     let (page, has_more, has_earlier, offset) = if let Some(item_id) = item_id {
         let found = timeline
             .iter()
@@ -624,25 +627,27 @@ async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
             ));
         }
         (found, false, false, text_offset)
-    } else if let Some(before) = before {
-        let earlier = timeline
-            .iter()
-            .copied()
-            .filter(|e| position(e) < before as i64)
-            .collect::<Vec<_>>();
-        let start = earlier.len().saturating_sub(limit);
-        let later = timeline.iter().any(|e| position(e) >= before as i64);
-        (earlier[start..].to_vec(), later, start > 0, 0)
     } else {
         let after = after.unwrap_or(-1);
-        let rest = timeline
+        let before = before.map_or(i64::MAX, |n| n as i64);
+        let matching = timeline
             .iter()
             .copied()
-            .filter(|e| position(e) > after)
+            .filter(|e| position(e) > after && position(e) < before)
             .collect::<Vec<_>>();
-        let earlier = timeline.iter().any(|e| position(e) <= after);
-        let more = rest.len() > limit;
-        (rest.into_iter().take(limit).collect(), more, earlier, 0)
+        let page = if newest_first {
+            matching[matching.len().saturating_sub(limit)..].to_vec()
+        } else {
+            matching.iter().copied().take(limit).collect()
+        };
+        let has_more = if newest_first {
+            timeline.last().is_some_and(|e| position(e) >= before)
+        } else {
+            matching.len() > page.len()
+        };
+        let start = page.first().map_or(after + 1, |e| position(e));
+        let has_earlier = timeline.first().is_some_and(|e| position(e) < start);
+        (page, has_more, has_earlier, 0)
     };
     let items = page
         .iter()
