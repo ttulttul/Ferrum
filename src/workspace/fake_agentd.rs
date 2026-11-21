@@ -291,6 +291,13 @@ impl FakeAgentd {
                     )))
                 }
             }
+            op::FS_CREATE_NAMED_PROJECT => {
+                let root = request.args["rootPath"].as_str().unwrap_or_default();
+                let name = request.args["name"].as_str().unwrap_or_default();
+                let folder = format!("{root}/{}", name.to_lowercase().replace(' ', "-"));
+                self.lock().dirs.insert(folder.clone());
+                Ok(json!({"workspaceRoot": folder}))
+            }
             op::FS_IS_DIR => Ok(json!(
                 self.has_dir(request.args["path"].as_str().unwrap_or_default())
             )),

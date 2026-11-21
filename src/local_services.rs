@@ -7,6 +7,7 @@ pub(crate) mod files;
 pub(crate) mod git_workflow;
 pub(crate) mod local_ssh;
 pub(crate) mod media;
+pub(crate) mod named_project;
 mod previews;
 pub(crate) mod provider_turns;
 pub(crate) mod review;

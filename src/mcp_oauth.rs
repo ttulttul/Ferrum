@@ -74,6 +74,9 @@ pub trait McpHost: AuthHost {
     fn dispatch(self: &Arc<Self>, command: Value) -> HostFuture<Result<u64, Value>>;
     /// `projects.mutate` with a `project.create` command.
     fn mutate_project(self: &Arc<Self>, command: Value) -> HostFuture<Result<Value, Value>>;
+    /// `projects.createNew`: a project started from its title, answering
+    /// `{projectId, workspaceRoot, commitError?}` or the failure.
+    fn create_named_project(self: &Arc<Self>, name: String) -> HostFuture<Result<Value, Value>>;
     fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait;
 }
 
