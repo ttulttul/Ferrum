@@ -466,7 +466,8 @@ async fn a_thread_with_a_turn_decodes_with_the_reference_schemas() {
     assert_eq!(items[0]["text"], "Hello");
     assert!(items[0].get("textOmitted").is_none());
 
-    // A later change arrives on the open subscription as a fresh snapshot.
+    // A later change arrives on the open subscription as the reference's
+    // domain events.
     dispatch(
         &mut socket,
         202,
@@ -475,16 +476,19 @@ async fn a_thread_with_a_turn_decodes_with_the_reference_schemas() {
             "dispatchMode":{"type":"start_immediately"}}),
     )
     .await;
-    loop {
+    let (mut message, mut run) = (false, false);
+    while !(message && run) {
         let update = next_for(&mut socket, 200).await;
         assert_eq!(update["_tag"], "Chunk", "{update}");
-        let snapshot = &update["values"][0];
-        assert_eq!(snapshot["kind"], "snapshot");
-        let messages = snapshot["projection"]["messages"].as_array().unwrap();
-        if messages.len() == 2 {
-            assert_eq!(messages[1]["text"], "Again");
-            assert_eq!(snapshot["projection"]["runs"][1]["ordinal"], 2);
-            break;
+        for item in update["values"].as_array().unwrap() {
+            assert_eq!(item["kind"], "event", "{item}");
+            let event = &item["event"];
+            assert!(item["sequence"].as_u64().is_some(), "{item}");
+            match event["type"].as_str() {
+                Some("message.updated") if event["payload"]["text"] == "Again" => message = true,
+                Some("run.created") if event["payload"]["ordinal"] == 2 => run = true,
+                _ => {}
+            }
         }
     }
 
