@@ -166,7 +166,7 @@ pub(crate) async fn snapshot(
 /// as a repository git refuses for its ownership) or any answer but `true`
 /// means the base directory is not in a work tree.
 fn inside_git_work_tree(dir: &Path) -> bool {
-    std::process::Command::new("git")
+    crate::login_shell::command("git")
         .arg("rev-parse")
         .arg("--is-inside-work-tree")
         .current_dir(dir)

@@ -4,7 +4,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
-    process::Command,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -175,7 +174,7 @@ impl VoiceService {
             .flatten()
             .find(|row| row["id"].as_str() == Some(selected))
             .unwrap_or(&Value::Null);
-        let gpu_devices = Command::new("nvidia-smi")
+        let gpu_devices = crate::login_shell::command("nvidia-smi")
             .args(["--query-gpu=name,pci.bus_id", "--format=csv,noheader"])
             .output()
             .ok()
@@ -693,7 +692,7 @@ pub async fn post_process(input: &Value, command: &[String]) -> Result<Value, Sp
     fs::create_dir(&dir)
         .await
         .map_err(|_| SpeechError::Internal)?;
-    let process = tokio::process::Command::new(exe)
+    let process = crate::login_shell::tokio_command(exe)
         .args(args)
         .arg(prompt)
         .current_dir(&dir)

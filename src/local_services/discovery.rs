@@ -5,14 +5,13 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     time::Duration,
 };
-use tokio::process::Command;
 
 struct Process {
     parent: u32,
     group: u32,
 }
 async fn process_table() -> HashMap<u32, Process> {
-    let Ok(output) = Command::new("ps")
+    let Ok(output) = crate::login_shell::tokio_command("ps")
         .args(["-axo", "pid=,ppid=,pgid="])
         .kill_on_drop(true)
         .output()
@@ -61,7 +60,7 @@ async fn listeners(
         .collect();
     let Ok(Ok(output)) = tokio::time::timeout(
         Duration::from_secs(5),
-        Command::new("lsof")
+        crate::login_shell::tokio_command("lsof")
             .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"])
             .kill_on_drop(true)
             .output(),
@@ -191,7 +190,7 @@ pub(crate) async fn stop(terminals: &TerminalService, input: &Value) -> Reply {
         .map(|(p, _)| *p)
         .collect();
     let signal = |s: &'static str| async move {
-        let status = Command::new("kill")
+        let status = crate::login_shell::tokio_command("kill")
             .args([s, "--", &format!("-{group}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -1,7 +1,7 @@
 use super::{provider_error, resolved, Reply};
 use serde_json::{json, Value};
 use std::{process::Stdio, time::Duration};
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::io::AsyncWriteExt;
 use url::Url;
 
 pub(super) struct Remote {
@@ -68,7 +68,7 @@ impl Remote {
         input: Option<String>,
     ) -> Result<String, Value> {
         let err = || self.error(cwd, op, reference, &format!("{bin} failed to {op}."));
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::login_shell::tokio_command(bin);
         cmd.args(args)
             .current_dir(cwd)
             .kill_on_drop(true)

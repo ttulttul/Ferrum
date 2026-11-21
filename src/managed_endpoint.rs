@@ -30,7 +30,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, BufReader},
-    process::{Child, Command},
+    process::Child,
     sync::{oneshot, Mutex, Notify},
     task::{AbortHandle, JoinHandle},
 };
@@ -1020,7 +1020,9 @@ async fn reconcile_inner(
 
     let fiber = inner.log.fiber();
     let http2 = inner.http2.load(Ordering::SeqCst);
-    let mut command = Command::new(executable["executablePath"].as_str().unwrap_or_default());
+    let mut command = crate::login_shell::tokio_command(
+        executable["executablePath"].as_str().unwrap_or_default(),
+    );
     command.args([
         "tunnel",
         "--no-autoupdate",
@@ -1539,7 +1541,7 @@ mod tests {
             // A test thread that forks while the copy is open holds its write descriptor
             // until it execs, and exec then fails with ETXTBSY; wait until it can run.
             for _ in 0..200 {
-                match std::process::Command::new(&binary).arg("version").output() {
+                match crate::login_shell::command(&binary).arg("version").output() {
                     Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
                         std::thread::sleep(Duration::from_millis(10));
                     }

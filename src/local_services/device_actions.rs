@@ -1,7 +1,7 @@
 use super::{invalid, string, timestamp, Reply};
 use serde_json::{json, Value};
 use std::{path::Path, process::Stdio, time::Duration};
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::io::AsyncWriteExt;
 
 struct Target<'a> {
     platform: &'a str,
@@ -19,7 +19,7 @@ impl Target<'_> {
         stdin: Option<String>,
     ) -> Result<String, Value> {
         let mut c = if self.platform == "ios" {
-            let mut c = Command::new("xcrun");
+            let mut c = crate::login_shell::tokio_command("xcrun");
             c.arg("simctl").arg(args[0]).arg(self.id).args(&args[1..]);
             c
         } else {
@@ -29,7 +29,7 @@ impl Target<'_> {
                         .join(if cfg!(windows) { "adb.exe" } else { "adb" })
                 })
                 .unwrap_or_else(|| "adb".into());
-            let mut c = Command::new(binary);
+            let mut c = crate::login_shell::tokio_command(binary);
             c.arg("-s").arg(self.id);
             if args.first() == Some(&"shell") {
                 c.arg("shell");

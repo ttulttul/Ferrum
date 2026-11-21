@@ -19,7 +19,7 @@ pub(super) fn overlay() -> Result<Option<(String, Value)>> {
     if !Path::new(path).try_exists()? {
         return Ok(None);
     }
-    let output = std::process::Command::new("/usr/bin/plutil")
+    let output = crate::login_shell::command("/usr/bin/plutil")
         .args(["-convert", "json", "-o", "-", path])
         .output()?;
     ensure!(

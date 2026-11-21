@@ -755,7 +755,7 @@ fn valid_op_reference(account: &str, field: &str) -> bool {
 async fn read_op(account: &str, field: &str, cli: &Path) -> Option<String> {
     use std::{process::Stdio, time::Duration};
     tokio::time::timeout(Duration::from_secs(45), async {
-        let result = tokio::process::Command::new(cli)
+        let result = crate::login_shell::tokio_command(cli)
             .args([
                 "--cache=false",
                 "read",

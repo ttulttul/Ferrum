@@ -185,7 +185,7 @@ struct NpmOutput {
 /// Runs npm; any spawn, read, output-limit or timeout failure is a failed lookup, as in the
 /// reference `ProcessRunner`, where those are errors rather than flagged results.
 async fn run_npm(npm: &Path, spec: &str, timeout: Duration) -> Result<NpmOutput, ()> {
-    let mut child = tokio::process::Command::new(npm)
+    let mut child = crate::login_shell::tokio_command(npm)
         // Named fields keep the output small; the full package document grows with every release.
         .args([
             "view",
@@ -289,7 +289,7 @@ impl NpmRelease {
             .inner
             .path
             .clone()
-            .or_else(|| std::env::var_os("PATH"))
+            .or_else(crate::login_shell::path)
             .unwrap_or_default();
         let Some(npm) = resolve_npm(&path) else {
             return self.lookup_public(spec).await;

@@ -317,6 +317,10 @@ impl TerminalService {
                 cmd.env_remove(key);
             }
         }
+        // The login shell's variables as of now, refreshed at runtime too.
+        for (key, value) in crate::login_shell::current().variables() {
+            cmd.env(key, value);
+        }
         cmd.env("TERM", "xterm-256color");
         if let Some(env) = input.get("env") {
             for (k, v) in env

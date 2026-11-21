@@ -15,7 +15,7 @@ use std::{
     io::{self, Read, Write},
     net::IpAddr,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -238,7 +238,7 @@ fn is_process_alive(_pid: i64) -> bool {
 /// `legacyOwnerStartTimeCommand`: the start time of `pid` from `ps`, in
 /// UTC, or `None` when `ps` cannot say within two seconds.
 fn process_start_time(pid: i64) -> Option<String> {
-    let mut child = Command::new("ps")
+    let mut child = crate::login_shell::command("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .env("LC_ALL", "C")
         .env("TZ", "UTC")
@@ -867,7 +867,7 @@ mod tests {
         drop(ServerOwnership::acquire(&path).unwrap());
 
         // A dead pre-lock owner does not block.
-        let mut child = Command::new("true").spawn().unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
         let dead = i64::from(child.id());
         child.wait().unwrap();
         fs::write(&path, legacy_record(dead, &now)).unwrap();

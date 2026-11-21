@@ -15,10 +15,7 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
-use tokio::{
-    process::Command,
-    sync::{watch, Semaphore},
-};
+use tokio::sync::{watch, Semaphore};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -79,7 +76,7 @@ async fn fetch(common_dir: &Path, remote: &str) -> bool {
     } else {
         common_dir
     };
-    let mut command = Command::new("git");
+    let mut command = crate::login_shell::tokio_command("git");
     command
         .current_dir(fetch_cwd)
         .arg("--git-dir")

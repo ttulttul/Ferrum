@@ -5,7 +5,6 @@ use std::{
     process::{Output, Stdio},
     time::Duration,
 };
-use tokio::process::Command;
 
 #[derive(Debug, PartialEq)]
 struct Route {
@@ -151,7 +150,7 @@ fn routes(config: &Value, listen: SocketAddr) -> Result<Vec<Route>> {
 async fn cli(args: &[&str]) -> io::Result<Output> {
     tokio::time::timeout(
         Duration::from_secs(4),
-        Command::new("tailscale")
+        crate::login_shell::tokio_command("tailscale")
             .args(args)
             .stdin(Stdio::null())
             .kill_on_drop(true)

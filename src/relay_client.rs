@@ -92,7 +92,7 @@ impl Options {
             platform: node_platform().to_owned(),
             arch: node_arch().to_owned(),
             override_path: std::env::var(CLOUDFLARED_PATH_ENV_NAME).ok(),
-            path_env: std::env::var("PATH").ok(),
+            path_env: crate::login_shell::path().map(|path| path.to_string_lossy().into_owned()),
         }
     }
     fn managed_root(&self) -> PathBuf {
@@ -130,7 +130,7 @@ async fn probe_version(path: &Path, platform: &str) -> Option<String> {
     if let Some(version) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return Some(version.clone());
     }
-    let child = tokio::process::Command::new(path)
+    let child = crate::login_shell::tokio_command(path)
         .arg("version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -266,7 +266,7 @@ mod tests {
         // A child another test forked while the script was open for writing keeps that descriptor
         // until it execs, and running the script meanwhile fails with ETXTBSY. Wait it out.
         for _ in 0..200 {
-            match std::process::Command::new(&path).arg("version").output() {
+            match crate::login_shell::command(&path).arg("version").output() {
                 Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }

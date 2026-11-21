@@ -4,7 +4,7 @@
 //! reads as `cloud` whatever its chassis), with WSL reported as `linux`;
 //! macOS reads the Apple product name; anything else, or a host the probes
 //! cannot classify, has no machine kind and the field is left out.
-use std::{path::Path, process::Command, sync::OnceLock, time::Duration};
+use std::{path::Path, sync::OnceLock, time::Duration};
 
 const DMI_ROOT: &str = "/sys/class/dmi/id";
 const KERNEL_RELEASE_PATH: &str = "/proc/sys/kernel/osrelease";
@@ -138,7 +138,7 @@ fn read_optional(path: &Path) -> Option<String> {
 
 /// Runs a probe for at most five seconds; its trimmed stdout on exit code 0.
 fn run_probe(command: &str, args: &[&str]) -> Option<String> {
-    let mut child = Command::new(command)
+    let mut child = crate::login_shell::command(command)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

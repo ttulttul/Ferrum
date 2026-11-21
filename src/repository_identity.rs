@@ -447,7 +447,7 @@ pub fn identity_from_remotes(
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Option<(bool, String)> {
-    let mut command = std::process::Command::new("git");
+    let mut command = crate::login_shell::command("git");
     command.arg("-C").arg(cwd).args(args);
     // A repository the server itself runs in must not stand in for the project's.
     for key in [

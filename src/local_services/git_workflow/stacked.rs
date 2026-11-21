@@ -1,7 +1,6 @@
 use super::*;
 use crate::local_services::vcs::run;
 use std::process::Stdio;
-use tokio::process::Command;
 use tokio::sync::mpsc;
 
 struct Progress<'a> {
@@ -133,11 +132,11 @@ async fn generate(tools: &GitTools, cwd: &str, op: &str, context: &str) -> Reply
     let command = &tools.text_generation;
     let fallback = command.is_empty() || command == &["printf", "%s\\n"];
     let mut cmd = if fallback {
-        let mut cmd = Command::new("codex");
+        let mut cmd = crate::login_shell::tokio_command("codex");
         cmd.args(["exec", "--sandbox", "read-only", "--color", "never", "--"]);
         cmd
     } else {
-        let mut cmd = Command::new(&command[0]);
+        let mut cmd = crate::login_shell::tokio_command(&command[0]);
         cmd.args(&command[1..]);
         cmd
     };
@@ -181,7 +180,7 @@ async fn context(cwd: &str, paths: &[String], patch: bool) -> Result<Option<Stri
     let cmd = |args: Vec<String>| {
         let index = index.clone();
         async move {
-            let result = Command::new("git")
+            let result = crate::login_shell::tokio_command("git")
                 .args(["-c", "core.splitIndex=false"])
                 .args(args)
                 .current_dir(cwd)
