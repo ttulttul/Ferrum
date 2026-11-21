@@ -70,6 +70,9 @@ pub struct ControlPlane {
     started_at: String,
     state: ControlState,
     signals: Mutex<Signals>,
+    /// Held while an orchestration command checks and commits.
+    mutation_lock: tokio::sync::Mutex<()>,
+    cancellations: tokio::sync::Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>>,
 }
 impl AuthHost for ControlPlane {
     fn auth(&self) -> &AuthService {
@@ -170,6 +173,8 @@ impl ControlPlane {
             started_at,
             state,
             signals,
+            mutation_lock: Default::default(),
+            cancellations: Default::default(),
         })
     }
 
@@ -441,6 +446,21 @@ impl ControlPlane {
                 Err(reply) => Call::Done(reply),
             };
         }
+        if method == "orchestration.dispatchCommand" {
+            // Command dispatch takes its host by `Arc`. In the single-threaded
+            // WebAssembly build the workspace need not be `Send`.
+            #[allow(clippy::arc_with_non_send_sync)]
+            let host = Arc::new(PlaneCommands {
+                plane: self,
+                workspace,
+            });
+            return Call::Done(
+                match crate::dispatch_orchestration_command(host, params.clone()).await {
+                    Ok(sequence) => Reply::Success(json!({ "sequence": sequence })),
+                    Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+                },
+            );
+        }
         if let Some(call) = self.host_call(method, params) {
             return call;
         }
@@ -488,6 +508,8 @@ impl ControlPlane {
                 ])])
             }
             "subscribeProjectClones" => Call::Stream(vec![json!([[]])]),
+            // As native before any refresh: the stream stays open and silent.
+            "pullRequests.subscribeRefreshes" => Call::Stream(Vec::new()),
             "subscribeDeviceState" => Call::Stream(vec![json!([{
                 "supportsHostRetry": true, "supportsToolUpdate": true, "supportsToolInspection": true,
                 "supportsEasHosts": true, "supportsSimlockHosts": true, "hostStatus": "disabled",
@@ -611,6 +633,71 @@ impl ControlPlane {
         config["newProjectsRoot"] = json!(format!("{WORKSPACE_ROOT}/projects"));
         config["serverTime"] = json!(auth_service::iso(auth_service::now()));
         config
+    }
+}
+
+/// Orchestration commands as this plane runs them: over its control state,
+/// with no managed policy, default settings and no guest shares. Runs need
+/// a process to execute in, which the plane does not start yet, so a run
+/// that would start ends at once as failed.
+struct PlaneCommands<'a> {
+    plane: &'a ControlPlane,
+    workspace: &'a dyn Workspace,
+}
+
+impl std::ops::Deref for PlaneCommands<'_> {
+    type Target = ControlState;
+    fn deref(&self) -> &ControlState {
+        &self.plane.state
+    }
+}
+
+impl crate::orchestration::CommandHost for PlaneCommands<'_> {
+    fn mutation_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.plane.mutation_lock
+    }
+    fn policy_summary(&self) -> Option<&Value> {
+        None
+    }
+    fn runtime_denial(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn provider_denial(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn effective_settings(&self) -> anyhow::Result<Value> {
+        Ok(default_settings())
+    }
+    fn workspace(&self) -> &dyn Workspace {
+        self.workspace
+    }
+    fn cancellations(
+        &self,
+    ) -> &tokio::sync::Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>> {
+        &self.plane.cancellations
+    }
+    fn launch_run(
+        self: Arc<Self>,
+        run: crate::Run,
+        _cwd: String,
+        _text: String,
+        _cancel: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        if let Ok(mut cancellations) = self.plane.cancellations.try_lock() {
+            cancellations.remove(&run.id);
+        }
+        let _ = self.commit_now(Event::RunFinished {
+            run_id: run.id,
+            thread_id: run.thread_id,
+            status: "failed".into(),
+            error: Some("Turns cannot run here yet.".into()),
+        });
+    }
+    fn close_guest_thread(&self, _: &str) -> Result<(), String> {
+        Err("Guest shares are not available here.".into())
+    }
+    fn resolve_guest_message(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+        Err("Guest shares are not available here.".into())
     }
 }
 
@@ -1006,6 +1093,39 @@ mod tests {
         let interrupted = host.message(1, json!({"_tag":"Interrupt","requestId":7}));
         assert_eq!(interrupted[0].1["exit"]["cause"][0]["_tag"], "Interrupt");
         assert!(host.commit(retitle("Four")).is_empty());
+    }
+
+    #[test]
+    fn creates_threads_through_orchestration_commands() {
+        let plane = plane();
+        let mut connection = owner(&plane);
+        send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":0,"tag":"projects.mutate","payload":{"type":"project.create","commandId":"c1","projectId":"p1","title":"One","workspaceRoot":"/workspace/one"},"headers":[]}),
+        );
+        let create = json!({"_tag":"Request","id":1,"tag":"orchestration.dispatchCommand","payload":{
+            "type":"thread.create","commandId":"c2","threadId":"t1","projectId":"p1","title":"Draft",
+            "modelSelection":{"instanceId":"codex","model":"fixture"},"runtimeMode":"full-access",
+            "interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"
+        },"headers":[]});
+        let created = send(&plane, &mut connection, create.clone());
+        assert_eq!(created[0]["exit"]["value"]["sequence"], 2, "{created:?}");
+        // Replaying the command id is idempotent, as natively.
+        let mut replay = create;
+        replay["id"] = json!(2);
+        let replayed = send(&plane, &mut connection, replay);
+        assert_eq!(replayed[0]["exit"]["value"]["sequence"], 2, "{replayed:?}");
+        let thread = send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":3,"tag":"orchestration.subscribeThread","payload":{"threadId":"t1","requestCompletionMarker":true},"headers":[]}),
+        );
+        assert_eq!(
+            thread[0]["values"][0]["projection"]["thread"]["title"],
+            "Draft"
+        );
+        assert_eq!(thread[0]["values"][1], json!({"kind":"synchronized"}));
     }
 
     #[test]

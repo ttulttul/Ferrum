@@ -3,9 +3,10 @@
 the WebAssembly build served locally by `wrangler dev`.
 
 The native server is the reference here ("original" in the step comparison);
-the workers build must answer every step the same way. Only the empty
-environment is compared: the WebAssembly build has no local workspace yet
-(project.create needs a workspace).
+the workers build must answer every step the same way. The empty environment
+is compared first, then one seeded over RPC with a project and a thread, so
+the thread subscription runs too. Steps that read the project's checkout are
+reported but not compared until a workspace is connected.
 
   python3 scripts/workers_initial_sync_parity.py --rust-command target/debug/t3code-server \\
       --reference-root reference --wrangler "npx --yes wrangler@4.166.0"
@@ -26,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from client_initial_sync_parity import compare_steps, run_client  # noqa: E402
+from client_initial_sync_parity import PROJECT, THREAD, compare_steps, rpc, run_client  # noqa: E402
 from parity_harness import free_port, managed_server, session_cookie  # noqa: E402
 
 
@@ -61,6 +62,34 @@ def wrangler_dev(command, port, credential, log):
             process.wait(timeout=15)
 
 
+# Seeded steps that read the project's checkout. The workers build answers
+# them as unavailable until a workspace is connected, so they are reported
+# but not compared.
+WORKSPACE_STEPS = {"subscribeTerminalMetadata", "subscribeVcsBranch", "subscribeVcsStatus"}
+
+
+def seed(url, cookie, root):
+    """A project with one thread, made over RPC on either server."""
+    rpc(url, cookie, "projects.mutate", {
+        "type": "project.create", "commandId": "seed-project", "projectId": PROJECT,
+        "title": "Initial sync", "workspaceRoot": str(root)})
+    rpc(url, cookie, "orchestration.dispatchCommand", {
+        "type": "thread.create", "commandId": "seed-thread", "threadId": THREAD, "projectId": PROJECT,
+        "title": "Draft", "modelSelection": {"instanceId": "codex", "model": "fixture"},
+        "runtimeMode": "full-access", "interactionMode": "default", "branch": None, "worktreePath": None,
+        "createdBy": "user", "creationSource": "web"})
+    return {"cwd": str(root), "threadId": THREAD}
+
+
+def without_workspace_steps(outcomes):
+    for name, result in outcomes.items():
+        for step in result["steps"]:
+            if step["name"] in WORKSPACE_STEPS:
+                print(f"SKIP seeded {step['name']} ({name}): {step['outcome']} {step.get('signature', '')}")
+    return {name: {**result, "steps": [step for step in result["steps"] if step["name"] not in WORKSPACE_STEPS]}
+            for name, result in outcomes.items()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rust-command", required=True, help="native t3code-server command")
@@ -81,16 +110,24 @@ def main():
             url = stack.enter_context(wrangler_dev(args.wrangler, free_port(), credential, log))
             wasm = (url, session_cookie(url, credential))
             outcomes = {"original": run_client(args, *native), "rust": run_client(args, *wasm)}
+            repo = root / "repo"
+            subprocess.run(["git", "init", "-qb", "main", str(repo)], check=True)
+            seeded = without_workspace_steps({
+                "original": run_client(args, *native, seed(*native, repo)),
+                "rust": run_client(args, *wasm, seed(*wasm, repo)),
+            })
         except Exception:
             log.flush()
             print(log_path.read_text(errors="replace")[-6000:], file=sys.stderr)
             raise
         failures, total = compare_steps("workers", outcomes)
-        if failures:
+        seeded_failures, seeded_total = compare_steps("workers seeded", seeded)
+        if failures or seeded_failures:
             log.flush()
             print(log_path.read_text(errors="replace")[-6000:], file=sys.stderr)
     print(f"{total - failures}/{total} initial sync steps matched native")
-    return int(failures != 0)
+    print(f"{seeded_total - seeded_failures}/{seeded_total} seeded steps matched native")
+    return int(failures != 0 or seeded_failures != 0)
 
 
 if __name__ == "__main__":
