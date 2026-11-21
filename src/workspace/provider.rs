@@ -49,6 +49,9 @@ pub struct ProviderTurn {
 /// One translated provider event. Events of a turn arrive in order and end
 /// with exactly one [`ProviderEvent::TurnTerminal`], which the turn's
 /// `Exited` event follows.
+/// The reference's failure when Codex's app-server closes during a turn.
+pub const CODEX_STREAM_CLOSED: &str = "The provider event stream closed unexpectedly. Retry the turn; if it keeps failing, check the provider and server logs.";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ProviderEvent {

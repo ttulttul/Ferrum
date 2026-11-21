@@ -107,6 +107,22 @@ fn dedupe_bodies(projection: &mut Value) {
     }
 }
 
+/// The id of a thread's root checkpoint scope, as the reference names it.
+pub(crate) fn checkpoint_scope_id(thread_id: &str) -> String {
+    format!(
+        "checkpoint-scope:thread:{}:name:root",
+        uri_component(thread_id)
+    )
+}
+
+/// The id of a thread's checkpoint after `turn_count` turns.
+pub(crate) fn checkpoint_id(thread_id: &str, turn_count: u64) -> String {
+    format!(
+        "checkpoint:scope:{}:name:{turn_count}",
+        uri_component(&checkpoint_scope_id(thread_id))
+    )
+}
+
 pub(crate) fn created(command: &Value, at: &str) -> Value {
     json!({"createdBy":command["createdBy"],"creationSource":command["creationSource"],
         "id":command["threadId"],"projectId":command["projectId"],"title":command["title"],
@@ -158,6 +174,10 @@ impl Thread {
                     "checkpointId": null,
                     "contextHandoffId": null
                 });
+                let turn_count = index as u64 + 1;
+                if self.checkpoints.iter().any(|c| c.turn_count == turn_count) {
+                    out["checkpointId"] = json!(checkpoint_id(&self.id, turn_count));
+                }
                 if let Some(ids) = self.provider_run_ids(run) {
                     out["providerThreadId"] = json!(ids.provider_thread);
                     out["rootNodeId"] = json!(ids.root_node);
@@ -352,18 +372,32 @@ impl Thread {
                 .cloned()
                 .unwrap_or_default()
         };
-        let scope_id = format!("scope:{}", self.id);
+        // The root scope and each checkpoint hang off the run they belong to
+        // (the first run for the scope and the baseline), as in the reference.
+        let scope_id = checkpoint_scope_id(&self.id);
+        let run_ids = |turn_count: u64| {
+            let index = turn_count.max(1) as usize - 1;
+            self.runs
+                .get(index)
+                .map(|run| (run.id.to_string(), self.provider_run_ids(run)))
+        };
+        let node_of = |turn_count: u64| {
+            run_ids(turn_count)
+                .and_then(|(_, ids)| ids.map(|ids| ids.root_node))
+                .unwrap_or_else(|| format!("node:{}", self.id))
+        };
         let checkpoint_scopes = self
             .checkpoints
             .first()
             .map(|checkpoint| {
+                let first = run_ids(1);
                 vec![json!({
                     "id":scope_id,
                     "threadId":self.id,
-                    "runId":null,
-                    "nodeId":format!("node:{}",self.id),
+                    "runId":first.as_ref().map(|(id, _)| id.clone()),
+                    "nodeId":node_of(1),
                     "parentScopeId":null,
-                    "providerThreadId":null,
+                    "providerThreadId":first.and_then(|(_, ids)| ids.map(|ids| ids.provider_thread)),
                     "kind":"root_run",
                     "ordinalWithinParent":0,
                     "advancesAppRunCount":true,
@@ -372,13 +406,14 @@ impl Thread {
                 })]
             })
             .unwrap_or_default();
-        let checkpoints = self.checkpoints.iter().map(|checkpoint| json!({
-            "id":format!("checkpoint:{}:{}",self.id,checkpoint.turn_count),
+        let checkpoints = self.checkpoints.iter().enumerate().map(|(position, checkpoint)| json!({
+            "id":checkpoint_id(&self.id, checkpoint.turn_count),
             "threadId":self.id,
             "scopeId":scope_id,
-            "runId":null,
-            "nodeId":format!("node:{}",self.id),
-            "parentCheckpointId":null,
+            "runId":if checkpoint.turn_count == 0 { None } else { run_ids(checkpoint.turn_count).map(|(id, _)| id) },
+            "nodeId":node_of(checkpoint.turn_count),
+            "parentCheckpointId":position.checked_sub(1)
+                .map(|previous| checkpoint_id(&self.id, self.checkpoints[previous].turn_count)),
             "ordinalWithinScope":checkpoint.turn_count,
             "appRunOrdinal":if checkpoint.turn_count == 0 {Value::Null} else {json!(checkpoint.turn_count)},
             "ref":checkpoint.tree,
@@ -386,7 +421,47 @@ impl Thread {
             "files":[],
             "capturedAt":iso(checkpoint.captured_at)
         })).collect::<Vec<_>>();
-        let provider = self.provider_records();
+        let mut provider = self.provider_records();
+        // A provider turn that captured a checkpoint ends with its item.
+        for checkpoint in self.checkpoints.iter().filter(|c| c.turn_count > 0) {
+            let index = checkpoint.turn_count as usize - 1;
+            let Some(ids) = self
+                .runs
+                .get(index)
+                .and_then(|run| self.provider_run_ids(run))
+            else {
+                continue;
+            };
+            let id = checkpoint_id(&self.id, checkpoint.turn_count);
+            let at = iso(checkpoint.captured_at);
+            provider.items.push((
+                index,
+                json!({
+                    "id": format!(
+                        "turn-item:provider:{}:native-item:{}",
+                        uri_component(&ids.driver),
+                        uri_component(&format!("checkpoint:{id}"))
+                    ),
+                    "threadId": self.id,
+                    "runId": ids.run,
+                    "nodeId": ids.root_node,
+                    "providerThreadId": ids.provider_thread,
+                    "providerTurnId": null,
+                    "nativeItemRef": null,
+                    "parentItemId": null,
+                    "ordinal": 0,
+                    "status": "completed",
+                    "title": null,
+                    "startedAt": at,
+                    "completedAt": at,
+                    "updatedAt": at,
+                    "type": "checkpoint",
+                    "checkpointId": id,
+                    "scopeId": scope_id,
+                    "files": []
+                }),
+            ));
+        }
         let turn_items = self.turn_items_with(provider.items);
         let mut app = ordered(APP_FIELDS, &row);
         if let Some(id) = self.provider_thread_id() {
@@ -408,7 +483,7 @@ impl Thread {
             })
             .collect::<Vec<_>>();
         json!({"thread":app,"runs":self.run_rows(&row),"attempts":with("attempts",provider.attempts),"nodes":with("nodes",provider.nodes),"subagents":array("subagents"),
-            "providerSessions":array("providerSessions"),"providerThreads":with("providerThreads",provider.provider_threads),"providerTurns":with("providerTurns",provider.provider_turns),"runtimeRequests":array("runtimeRequests"),
+            "providerSessions":with("providerSessions",provider.provider_sessions),"providerThreads":with("providerThreads",provider.provider_threads),"providerTurns":with("providerTurns",provider.provider_turns),"runtimeRequests":array("runtimeRequests"),
             "messages":messages,"plans":provider.plans,"turnItems":turn_items,"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
             "contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":visible,"updatedAt":row["updatedAt"]})
     }

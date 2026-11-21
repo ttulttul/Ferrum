@@ -300,10 +300,7 @@ async fn log_stderr(
 /// event stream ends, whatever the exit status.
 fn codex_crashed(status: Option<std::process::ExitStatus>) -> ProviderFailure {
     tracing::warn!(?status, "Codex app-server exited during a turn");
-    ProviderFailure::new(
-        "unknown",
-        "The provider event stream closed unexpectedly. Retry the turn; if it keeps failing, check the provider and server logs.",
-    )
+    ProviderFailure::new("unknown", crate::workspace::provider::CODEX_STREAM_CLOSED)
 }
 
 /// The Claude Agent SDK's failure when Claude Code exits mid-turn.
