@@ -64,6 +64,9 @@ pub struct AppState {
     pub(crate) runtime: Arc<crate::runtime::TokioRuntime>,
     /// Set once the server starts to stop; see [`crate::turn::TurnHost::stopping`].
     pub(crate) stopping: std::sync::atomic::AtomicBool,
+    /// Set once the server stops serving its clients: their RPC sockets
+    /// close.
+    pub(crate) closing: tokio::sync::watch::Sender<bool>,
 }
 impl AppState {
     /// The server is stopping: record how its running turns are cut off,
@@ -71,18 +74,36 @@ impl AppState {
     pub(crate) async fn stop_provider_runtime(&self) {
         self.stopping
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // The reference stops serving before it reconciles, so no client
+        // watches the reconciliation; one that reconnects reads its result.
+        self.closing.send_replace(true);
+        tokio::task::yield_now().await;
         {
             let _guard = self.project_mutation_lock.lock().await;
-            reconcile_provider_runtime(&self.control, "shutdown").await;
+            reconcile_provider_runtime(&self.control, &self.settings, "shutdown").await;
         }
         for (_, cancel) in self.cancellations.lock().await.drain() {
             let _ = cancel.send(());
         }
     }
 
-    /// Continue the turns a restart cut off, as the reference's
-    /// `provider-runtime.continue` effects do once the server is up.
+    /// Continue the turns a restart cut off or woke, as the reference's
+    /// `provider-runtime.continue` effects do once the server is up, and
+    /// schedule the retry of a continuation that failed to start.
     pub(crate) async fn continue_restarted_runs(self: Arc<Self>) {
+        self.continue_restarted(None).await
+    }
+
+    /// [`Self::continue_restarted_runs`], for the continuation of `only`
+    /// when given.
+    fn continue_restarted(
+        self: Arc<Self>,
+        only: Option<Uuid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(self.continue_restarted_now(only))
+    }
+
+    async fn continue_restarted_now(self: Arc<Self>, only: Option<Uuid>) {
         let settings = match self.settings.internal() {
             Ok(settings) => settings,
             Err(error) => {
@@ -90,6 +111,19 @@ impl AppState {
                 return;
             }
         };
+        // A scheduled prompt its provider never took is sent again.
+        let resends = if only.is_none() {
+            crate::runtime_recovery::resends(&*self.store.read().await)
+        } else {
+            vec![]
+        };
+        for (thread_id, run_id) in resends {
+            if let Err(error) =
+                crate::orchestration::resend_run(self.clone(), &thread_id, run_id).await
+            {
+                tracing::info!(%thread_id, %run_id, %error, "orchestration-v2.restart-resend.not-sent");
+            }
+        }
         let commands = {
             let store = self.store.read().await;
             crate::runtime_recovery::continuations(
@@ -98,7 +132,25 @@ impl AppState {
                 &auth_service::iso(auth_service::now()),
             )
         };
-        for (source, command) in commands {
+        let now = crate::now();
+        for continuation in commands {
+            let crate::runtime_recovery::Continuation {
+                source,
+                command,
+                due,
+            } = continuation;
+            if only.is_some_and(|only| only != source) {
+                continue;
+            }
+            // A retry waits, then checks again that it is still owed.
+            if due > now && only.is_none() {
+                let state = self.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(due - now)).await;
+                    state.continue_restarted(Some(source)).await;
+                });
+                continue;
+            }
             let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
             if let Err(error) =
                 crate::orchestration::dispatch_restart_continuation(self.clone(), command, source)
@@ -188,7 +240,7 @@ impl AppState {
         let oauth = mcp_oauth::OAuth::open(documents.clone(), &dir)?;
         let control = crate::control_state::ControlState::open(auth, documents, log, &dir)?;
         // Turns run as this process's children, so none survives a restart.
-        reconcile_provider_runtime(&control, "startup").await;
+        reconcile_provider_runtime(&control, &settings, "startup").await;
         let (project_clone_events, _) = broadcast::channel(64);
         let local = Arc::new(crate::workspace::LocalWorkspace::new(
             dir.clone(),
@@ -229,6 +281,7 @@ impl AppState {
             )),
             runtime: Arc::default(),
             stopping: Default::default(),
+            closing: tokio::sync::watch::Sender::new(false),
         }))
     }
 }
@@ -314,7 +367,12 @@ impl crate::orchestration::CommandHost for AppState {
                         };
                     }
                 }
-                crate::turn::launch(self, run, spec, cancel).await
+                // A continuation that failed to start may be owed a retry.
+                let continues = run.restart_continuation_of.is_some().then(|| self.clone());
+                crate::turn::launch(self, run, spec, cancel).await;
+                if let Some(state) = continues {
+                    state.continue_restarted_runs().await;
+                }
             }),
         );
     }
@@ -347,7 +405,15 @@ impl crate::turn::TurnHost for AppState {
 
 /// Record a restart's reconciliation of every thread's provider runtime
 /// ([`crate::runtime_recovery::reconcile`]).
-async fn reconcile_provider_runtime(control: &crate::control_state::ControlState, trigger: &str) {
+async fn reconcile_provider_runtime(
+    control: &crate::control_state::ControlState,
+    settings: &settings::Settings,
+    trigger: &str,
+) {
+    let settings = settings.internal().unwrap_or_else(|error| {
+        tracing::warn!(%error, "could not read settings to reconcile provider turns");
+        serde_json::Value::Null
+    });
     let events = {
         let store = control.store.read().await;
         crate::runtime_recovery::reconcile(
@@ -355,6 +421,7 @@ async fn reconcile_provider_runtime(control: &crate::control_state::ControlState
             trigger,
             crate::now(),
             &auth_service::iso(auth_service::now()),
+            &settings,
         )
     };
     for event in events {

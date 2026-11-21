@@ -1,0 +1,80 @@
+{
+  "steps": [
+    {
+      "expect": "initialize"
+    },
+    {
+      "send": {
+        "id": "$id",
+        "result": {
+          "codexHome": "/tmp/codex-home",
+          "platformFamily": "unix",
+          "platformOs": "linux",
+          "userAgent": "codex_cli_rs/0.170.0"
+        }
+      }
+    },
+    {
+      "expect": "thread/start"
+    },
+    {
+      "send": {
+        "id": "$id",
+        "result": {
+          "thread": {
+            "cliVersion": "0.170.0",
+            "createdAt": 1795225880,
+            "cwd": "/workspace",
+            "ephemeral": false,
+            "modelProvider": "openai",
+            "preview": "",
+            "projectId": null,
+            "sessionId": "01a1fbce-507a-7552-9571-939c5306b04c",
+            "source": "appServer",
+            "status": {
+              "type": "idle"
+            },
+            "turns": [],
+            "updatedAt": 1795225880,
+            "id": "01a1fbce-507a-7552-9571-939c5306b04c"
+          },
+          "model": "gpt-6.1-sol",
+          "cwd": "/workspace",
+          "approvalPolicy": "never",
+          "sandbox": {
+            "type": "dangerFullAccess"
+          },
+          "approvalsReviewer": "user",
+          "modelProvider": "openai"
+        }
+      }
+    },
+    {
+      "send": {
+        "method": "thread/started",
+        "params": {
+          "thread": {
+            "cliVersion": "0.170.0",
+            "createdAt": 1795225880,
+            "cwd": "/workspace",
+            "ephemeral": false,
+            "modelProvider": "openai",
+            "preview": "",
+            "projectId": null,
+            "sessionId": "01a1fbce-507a-7552-9571-939c5306b04c",
+            "source": "appServer",
+            "status": {
+              "type": "idle"
+            },
+            "turns": [],
+            "updatedAt": 1795225880,
+            "id": "01a1fbce-507a-7552-9571-939c5306b04c"
+          }
+        }
+      }
+    },
+    {
+      "expect": "turn/start"
+    }
+  ]
+}

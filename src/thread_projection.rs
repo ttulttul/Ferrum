@@ -38,11 +38,14 @@ fn merge(target: &mut Value, fields: Value) {
     }
 }
 
+/// A queued run, whose message waits to be sent out of the timeline.
+fn queued(run: &crate::Run) -> bool {
+    run.status == "queued"
+}
+
 /// The role of a message the server sent as a notification: the prompt that
 /// continues a run a restart cut off.
 pub(crate) const NOTIFICATION_ROLE: &str = "notification";
-/// The notification's summary, as the reference words it.
-pub(crate) const RESTART_CONTINUATION_SUMMARY: &str = "T3 Code restarted and resumed this turn";
 
 /// The reference's run statuses; older stores can hold others.
 fn run_status(status: &str) -> &'static str {
@@ -193,6 +196,9 @@ impl Thread {
                     out["restartContinuationOfRunId"] = json!(source.to_string());
                     out["workStartedAt"] = json!(iso(self.work_started_at(run)));
                 }
+                if !run.background_work.is_empty() {
+                    out["restartCancelledBackgroundWork"] = json!(run.background_work);
+                }
                 if status == "queued" {
                     queue_position += 1;
                     out["queuePosition"] = json!(queue_position);
@@ -234,9 +240,9 @@ impl Thread {
             .filter(|message| message.role != NOTIFICATION_ROLE)
             .map(|message| {
                 let at = iso(message.created_at);
-                json!({
+                let mut row = json!({
                     "createdBy": if message.role == "user" { "user" } else { "agent" },
-                    "creationSource": if message.role == "user" { "web" } else { "provider" },
+                    "creationSource": if message.role == "user" { message.creation_source.as_deref().unwrap_or("web") } else { "provider" },
                     "id": message.id,
                     "threadId": self.id,
                     "runId": self.run_of(&message.id).map(|(_, run)| run.id.to_string()),
@@ -247,7 +253,14 @@ impl Thread {
                     "streaming": false,
                     "createdAt": at,
                     "updatedAt": at
-                })
+                });
+                if let Some(task) = &message.scheduled_task_id {
+                    row["scheduledTaskId"] = json!(task);
+                }
+                if message.follows_thread_selection {
+                    row["followsThreadSelection"] = json!(true);
+                }
+                row
             })
             .collect()
     }
@@ -305,7 +318,7 @@ impl Thread {
                 "user" => json!({
                     "type": "user_message",
                     "createdBy": "user",
-                    "creationSource": "web",
+                    "creationSource": message.creation_source.as_deref().unwrap_or("web"),
                     "messageId": message.id,
                     "inputIntent": "turn_start",
                     "text": message.content,
@@ -327,13 +340,25 @@ impl Thread {
                         "type": "notification",
                         "source": {"kind": "system"},
                         "outcome": "updated",
-                        "summary": RESTART_CONTINUATION_SUMMARY,
+                        "summary": crate::runtime_recovery::continuation_summary(&message.content),
                         "detail": message.content
                     })
                 }
                 _ => continue,
             };
             merge(&mut item, fields);
+            if let Some(task) = message
+                .scheduled_task_id
+                .as_ref()
+                .filter(|_| message.role == "user")
+            {
+                item["scheduledTaskId"] = json!(task);
+            }
+            // A queued message waits out of the timeline, as the reference's
+            // queued input does.
+            if message.role == "user" && run.is_some_and(|(_, run)| queued(run)) {
+                continue;
+            }
             items.push(item);
             let Some((_, run)) = run else { continue };
             // A provider turn's end adds its own items.
@@ -582,11 +607,19 @@ impl Thread {
         if options["acceptBoundedSnapshot"] != true {
             return json!({"kind":"snapshot","snapshotSequence":sequence,"projection":projection});
         }
+        // A message waiting in the queue keeps its place in the timeline.
+        let queued = self
+            .runs
+            .iter()
+            .enumerate()
+            .filter(|(_, run)| queued(run))
+            .map(|(index, _)| (index as u64 + 1) * 1_000_000 + 1);
         let latest_local_turn_ordinal = projection["turnItems"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|item| item["ordinal"].as_u64())
+            .chain(queued)
             .max();
         if options["acceptDedupedBodies"] == true {
             dedupe_bodies(&mut projection);

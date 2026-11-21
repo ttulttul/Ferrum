@@ -323,6 +323,7 @@ pub async fn session(
     state.auth.socket_presence(&principal.id, true);
     let invalidated = state.auth.invalidated(&principal);
     tokio::pin!(invalidated);
+    let mut closing = state.closing.subscribe();
     let mut calls = FuturesUnordered::<BoxFuture<'static, (String, Value, Reply)>>::new();
     let mut pending = HashMap::<String, PendingCall>::new();
     let (chunks, mut read_chunks) = mpsc::channel::<(Value, Value)>(8);
@@ -330,6 +331,7 @@ pub async fn session(
         let response = tokio::select! {
             biased;
             _ = &mut invalidated => break,
+            () = async { let _ = closing.wait_for(|closing| *closing).await; } => break,
             Some((id, values)) = read_chunks.recv() => Reply::Chunk(values).frame(&id),
             Some((key, id, reply)) = calls.next(), if !calls.is_empty() => {
                 pending.remove(&key);

@@ -79,7 +79,8 @@ impl Sink {
         let _ = self.events.send(TurnEvent::Provider(event));
     }
     /// The turn's terminal event, then its exit. Items still running end
-    /// first: interrupted or failed with the turn, otherwise cancelled.
+    /// first: interrupted or failed with the turn, otherwise cancelled
+    /// (save a completed Codex turn's commands).
     fn finish(&self, end: TurnEnd) {
         if !self.turn_id.is_empty() {
             requests::unregister(&self.turn_id);
@@ -97,7 +98,19 @@ impl Sink {
             _ => "cancelled",
         };
         for mut item in open {
+            // A Codex command can outlive a completed turn, as background
+            // work; the reference ends only an interrupted or failed turn's.
+            if self.driver == CODEX
+                && end.status == TurnStatus::Completed
+                && item.kind == "command_execution"
+            {
+                continue;
+            }
             item.status = closed.into();
+            // The reference rebuilds an interrupted command without it.
+            if end.status == TurnStatus::Interrupted {
+                item.fields.remove("completionWake");
+            }
             if item.fields.contains_key("streaming") {
                 item.fields.insert("streaming".into(), false.into());
             }

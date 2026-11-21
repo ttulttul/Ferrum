@@ -363,7 +363,9 @@ impl<'a> Attempt<'a> {
                     .to_owned();
                 self.sink.send(ProviderEvent::ProviderThread {
                     driver: CLAUDE_AGENT.into(),
-                    resumed: self.resume == Some(session.as_str()),
+                    // The CLI was told to resume a session, so the one it
+                    // reports continues it.
+                    resumed: self.resume.is_some(),
                     native_thread_id: session,
                     model: message["model"].as_str().map(str::to_owned),
                 });
