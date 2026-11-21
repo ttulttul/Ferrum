@@ -32,6 +32,11 @@ LOG_PATH = STATE_ROOT / "rust-server.log"
 # SERVER_EXIT_CODE_STATE_DIR_OWNED: another server holds userdata/server-owner.sqlite.
 EXIT_STATE_DIR_OWNED = 78
 SYSTEMD_UNIT_SUFFIX = ".service"
+# DESKTOP_UPDATE_RESTART_MARKER_FILE: a server that stops within a minute of this file
+# appearing keeps its T3 Connect managed tunnel instead of releasing it, exactly as across
+# a desktop update restart. The next server then starts the stored, confirmed tunnel at
+# once instead of provisioning a new one, which takes tens of seconds to route.
+TUNNEL_HANDOFF_MARKER = Path("runtime") / "desktop-update-restart"
 
 
 class SwitchError(RuntimeError):
@@ -202,7 +207,11 @@ def systemd_control(service: dict[str, object], *arguments: str, action: str) ->
 def systemd_prepare(service: dict[str, object], state: dict[str, object]) -> None:
     """Stop and make the original service unavailable while Rust owns its port."""
     if service.get("activeState") in {"active", "activating", "deactivating", "reloading"}:
-        systemd_control(service, "stop", str(service["unit"]), action="stop")
+        marker = mark_tunnel_handoff(state.get("baseDir"))
+        try:
+            systemd_control(service, "stop", str(service["unit"]), action="stop")
+        finally:
+            clear_tunnel_handoff(marker)
     state["serviceAction"] = "stopped"
     atomic_json(STATE_PATH, state)
     if systemd_enabled(service):
@@ -497,6 +506,26 @@ def wait_for_exit(pid: int, timeout: float = 30.0) -> bool:
     return not process_alive(pid)
 
 
+def mark_tunnel_handoff(base_dir: object) -> Path | None:
+    """Ask the server about to stop to hand its managed tunnel to the next one."""
+    if not isinstance(base_dir, str) or not base_dir:
+        return None
+    marker = Path(base_dir) / TUNNEL_HANDOFF_MARKER
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_bytes(b"")
+    except OSError as error:
+        print(f"t3code-rust install: could not write {marker} ({error}); the stopping server may release its tunnel", file=sys.stderr)
+        return None
+    return marker
+
+
+def clear_tunnel_handoff(marker: Path | None) -> None:
+    """Remove a marker the stopped server did not consume (it had no tunnel to keep)."""
+    if marker is not None:
+        marker.unlink(missing_ok=True)
+
+
 def stop(pid: int, label: str) -> None:
     try:
         os.kill(pid, signal.SIGTERM)
@@ -750,7 +779,11 @@ def rust_switch() -> None:
         if isinstance(service, dict):
             systemd_prepare(service, state)
         if process_alive(int(candidate["pid"])):
-            stop(int(candidate["pid"]), "TypeScript")
+            marker = mark_tunnel_handoff(state.get("baseDir"))
+            try:
+                stop(int(candidate["pid"]), "TypeScript")
+            finally:
+                clear_tunnel_handoff(marker)
         launch_rust(state)
     except SwitchError as error:
         try:
@@ -766,7 +799,11 @@ def restore_original(state: dict[str, object], rollback: bool = False) -> None:
         fail("the saved switch state is not an active Rust installation")
     rust_pid = state.get("rustPid")
     if isinstance(rust_pid, int) and process_alive(rust_pid):
-        stop(rust_pid, "Rust")
+        marker = mark_tunnel_handoff(state.get("baseDir"))
+        try:
+            stop(rust_pid, "Rust")
+        finally:
+            clear_tunnel_handoff(marker)
     runtime_path = Path(str(state["runtimePath"]))
     runtime = read_json(runtime_path)
     if runtime and runtime.get("pid") == rust_pid:
