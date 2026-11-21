@@ -66,5 +66,9 @@
   },
   "codex failed turn": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+  },
+  "claude question": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
+    "items": "The reference holds the turn's streamed frames while it asks, so the question's tool call comes before the command streamed ahead of it, and a question call that never gets a result ends failed; Rust keeps stream order and ends it cancelled."
   }
 }
