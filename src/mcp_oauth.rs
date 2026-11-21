@@ -151,13 +151,20 @@ impl OAuth {
         let secrets = dir.join("secrets");
         let path = secrets.join("mcp-oauth-signing-key.bin");
         if documents.read_optional(&path)?.is_none() {
+            // Written as base64url text, which every document store holds.
+            // A key written as its 32 raw bytes reads as well.
             documents.create_private_dir_all(&secrets)?;
-            documents.write(&path, &random(), WriteMode::Private)?;
+            documents.write(&path, B64.encode(random()).as_bytes(), WriteMode::Private)?;
         }
-        let key = documents
-            .read(&path)?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid MCP OAuth signing key"))?;
+        let stored = documents.read(&path)?;
+        let key = match stored.len() {
+            32 => stored.try_into().ok(),
+            _ => B64
+                .decode(stored.trim_ascii())
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok()),
+        }
+        .ok_or_else(|| anyhow::anyhow!("invalid MCP OAuth signing key"))?;
         Ok(Self {
             key,
             documents,
