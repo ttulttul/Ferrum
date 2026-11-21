@@ -2285,6 +2285,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
                     } else {
                         ThreadDisposition::Broken
                     },
+                    driver: None,
                 }),
             );
             // The CLI's own exit status does not decide the run's.
@@ -2394,6 +2395,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             status: TurnStatus::Failed,
             failure: Some(ProviderFailure::new("provider_error", "boom")),
             thread_disposition: ThreadDisposition::Reusable,
+            driver: None,
         });
         agentd.emit(
             stream,
@@ -2452,6 +2454,117 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
         assert_eq!(ended["providerThreads"][0]["status"], "idle");
         assert_eq!(ended["visibleTurnItems"].as_array().unwrap().len(), 4);
         assert!(agentd.turns_acked());
+    }
+
+    /// A turn whose CLI never started (a missing `codex`) still names a
+    /// provider thread on its run, as a client must decode, and reports the
+    /// session as the reference does. Reasoning without text is not shown.
+    #[test]
+    fn a_turn_that_never_opened_a_session_names_its_provider_thread() {
+        use crate::workspace::provider::{
+            ProviderEvent, ProviderFailure, ProviderItem, ThreadDisposition, TurnStatus,
+        };
+        let runtime = Arc::new(ManualRuntime::default());
+        let plane = ControlPlane::open(
+            config(),
+            Arc::new(MemoryStore::new()),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
+        let agentd = Arc::new(FakeAgentd::default());
+        now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+        let mut connection = owner(&plane);
+        seed(&plane, &mut connection);
+        dispatch_message(&plane, &mut connection, "hello");
+        runtime.run();
+        let stream = *agentd.turns().keys().next().unwrap();
+        let emit = |event| agentd.emit(stream, WireTurnEvent::Provider { event });
+        emit(ProviderEvent::TurnTerminal {
+            status: TurnStatus::Failed,
+            failure: Some(ProviderFailure::new("provider_error", "spawn failed")),
+            thread_disposition: ThreadDisposition::Reusable,
+            driver: Some("codex".into()),
+        });
+        agentd.emit(
+            stream,
+            WireTurnEvent::Exited {
+                success: false,
+                cancelled: false,
+                status: "failed".into(),
+            },
+        );
+        runtime.run();
+        let reply = send(
+            &plane,
+            &mut owner(&plane),
+            json!({"_tag":"Request","id":"g","tag":"orchestration.getThreadProjection","payload":{"threadId":"t1"},"headers":[]}),
+        );
+        let ended = &reply[0]["exit"]["value"];
+        let run = &ended["runs"][0];
+        let thread_id = run["providerThreadId"].as_str().unwrap();
+        assert!(thread_id.starts_with("provider-thread:provider:codex:native-thread:pending"));
+        let thread = &ended["providerThreads"][0];
+        assert_eq!(thread["id"], thread_id);
+        assert_eq!(thread["status"], "not_loaded");
+        assert_eq!(thread["nativeThreadRef"], Value::Null);
+        assert_eq!(ended["providerTurns"], json!([]));
+        let error = &ended["turnItems"][1];
+        assert_eq!(error["title"], "Provider session failed to open");
+        assert_eq!(
+            error["failure"]["message"],
+            "Failed to open codex provider session provider-session:provider-instance:codex:shared."
+        );
+        assert_eq!(
+            error["id"],
+            format!(
+                "turn-item:run:{}:signal:provider-session-open-failure",
+                uri(run["id"].as_str().unwrap())
+            )
+        );
+
+        // The next turn opens its thread, and its empty reasoning is dropped.
+        dispatch_nth_message(&plane, &mut connection, 2, "again");
+        runtime.run();
+        let stream = *agentd.turns().keys().max().unwrap();
+        let emit = |event| agentd.emit(stream, WireTurnEvent::Provider { event });
+        emit(ProviderEvent::ProviderThread {
+            driver: "codex".into(),
+            native_thread_id: "thr_1".into(),
+            resumed: false,
+            model: None,
+        });
+        emit(ProviderEvent::TurnItem {
+            item: ProviderItem::new("rs_1", "reasoning", "completed").with("text", ""),
+        });
+        emit(ProviderEvent::TurnTerminal {
+            status: TurnStatus::Completed,
+            failure: None,
+            thread_disposition: ThreadDisposition::Reusable,
+            driver: Some("codex".into()),
+        });
+        agentd.emit(
+            stream,
+            WireTurnEvent::Exited {
+                success: true,
+                cancelled: false,
+                status: "completed".into(),
+            },
+        );
+        runtime.run();
+        let reply = send(
+            &plane,
+            &mut owner(&plane),
+            json!({"_tag":"Request","id":"g","tag":"orchestration.getThreadProjection","payload":{"threadId":"t1"},"headers":[]}),
+        );
+        let ended = &reply[0]["exit"]["value"];
+        assert_eq!(ended["runs"][1]["status"], "completed");
+        assert_eq!(ended["providerThreads"][0]["status"], "idle");
+        assert!(ended["turnItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"] != "reasoning"));
     }
 
     fn uri(value: &str) -> String {

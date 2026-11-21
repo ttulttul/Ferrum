@@ -67,6 +67,7 @@ jobs:
           reference="node $GITHUB_WORKSPACE/reference/apps/server/src/bin.ts"
           server="$GITHUB_WORKSPACE/target/debug/t3code-server"
           python3 scripts/client_initial_sync_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
+          node scripts/codex_fixture_schemas.mjs "$GITHUB_WORKSPACE/reference"
           python3 scripts/client_thread_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
           python3 scripts/client_rpc_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
           python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$reference" --rust-command "$server"

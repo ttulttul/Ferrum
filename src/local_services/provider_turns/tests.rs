@@ -246,10 +246,10 @@ async fn codex_turn_reports_a_crash() {
     let (status, failure) = terminal(&events);
     assert_eq!(status, TurnStatus::Failed);
     let failure = failure.unwrap();
-    assert_eq!(failure.class, "transport_error");
+    assert_eq!(failure.class, "unknown");
     assert_eq!(
         failure.message,
-        "Codex App Server exited unexpectedly with code 3."
+        "The provider event stream closed unexpectedly. Retry the turn; if it keeps failing, check the provider and server logs."
     );
 }
 
@@ -269,7 +269,7 @@ async fn codex_turn_reports_a_failed_turn() {
 async fn missing_clis_fail_with_the_reference_errors() {
     for (driver, message) in [
         (CODEX, "Failed to spawn Codex App Server process for command: /nonexistent/codex app-server"),
-        (CLAUDE_AGENT, "Claude Code native binary not found at /nonexistent/codex. Please ensure Claude Code is installed via native installer or specify a valid path with options.pathToClaudeCodeExecutable."),
+        (CLAUDE_AGENT, "The provider could not start this turn. Retry the turn; if it keeps failing, check the provider setup and server logs."),
     ] {
         let spec = TurnSpec {
             prompt: "hi".into(),
@@ -398,10 +398,9 @@ async fn claude_turn_reports_a_crash() {
     assert!(!exit.success && !exit.cancelled);
     let (status, failure) = terminal(&events);
     assert_eq!(status, TurnStatus::Failed);
-    assert_eq!(
-        failure.unwrap().message,
-        "Claude Code exited unexpectedly with code 1."
-    );
+    let failure = failure.unwrap();
+    assert_eq!(failure.message, "Claude Code process exited with code 1.");
+    assert_eq!(failure.code.as_deref(), Some("process_exited_nonzero"));
 }
 
 /// Runs a real CLI; set `T3_LIVE_PROVIDER` to `codex` or `claudeAgent` and

@@ -1,6 +1,6 @@
 //! Codex turns over `codex app-server` (JSON-RPC lines on stdio), as the
 //! reference's Codex adapter runs them.
-use super::{cancelled, crashed, program, sleep_until, Cli, Launch, Sink, TurnEnd};
+use super::{cancelled, codex_crashed, program, sleep_until, Cli, Launch, Sink, TurnEnd};
 use crate::workspace::provider::{
     PlanStep, ProviderFailure, ProviderItem, ProviderTurn, ThreadDisposition, TokenUsage,
     TurnStatus, CODEX,
@@ -96,10 +96,7 @@ impl Session {
             Err(Failed::Cancelled) => TurnEnd::interrupted(true),
             Err(Failed::Closed) => {
                 let status = self.cli.exit_status().await;
-                TurnEnd::failed(
-                    crashed("Codex App Server", status),
-                    ThreadDisposition::Reusable,
-                )
+                TurnEnd::failed(codex_crashed(status), ThreadDisposition::Reusable)
             }
             Err(Failed::Rpc(error)) => TurnEnd::failed(
                 ProviderFailure::new(

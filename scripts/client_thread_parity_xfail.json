@@ -1,0 +1,39 @@
+{
+  "codex turn": {
+    "items": "Rust records no checkpoint turn item when a turn captures a checkpoint.",
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events (run.updated, turn-item.updated, ...).",
+    "providerSessions": "Rust keeps no provider session record.",
+    "shape": "Item details differ: the reference omits command output (outputOmitted, completionWake) and file_change diffStr from the projection."
+  },
+  "codex failed turn": {
+    "orchestration.subscribeThread (live turn)": "On a usage-limit error the reference keeps the run waiting for the limit to reset; Rust fails the run."
+  },
+  "codex approval": {
+    "orchestration.subscribeThread (live turn)": "The reference does not answer a Codex approval request itself, even in full-access mode: it records a runtime request and an approval_request item and waits for the client's answer. Rust approves every request in the workspace."
+  },
+  "codex crash": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "providerSessions": "Rust keeps no provider session record (the reference marks the crashed app-server's session as error).",
+    "providerTurns": "The reference leaves the crashed turn's provider turn running; Rust marks it failed."
+  },
+  "codex missing": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events."
+  },
+  "claude turn": {
+    "items": "Rust records no checkpoint turn item, and the Read tool item has no title.",
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "providerSessions": "Rust keeps no provider session record.",
+    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+  },
+  "claude crash": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "providerSessions": "Rust keeps no provider session record.",
+    "shape": "No Claude nativeMetadata on the provider thread, and no tokenUsage or turnTokenUsage on the provider turn."
+  },
+  "claude missing": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "providerSessions": "Rust keeps no provider session record.",
+    "providerThreads": "The reference picks the Claude session id itself (--session-id) before starting the CLI, so its thread names a native session even when the CLI is missing.",
+    "shape": "The reference picks the Claude session id itself (--session-id) before starting the CLI, so its thread names a native session even when the CLI is missing."
+  }
+}

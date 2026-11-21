@@ -16,6 +16,17 @@ records:
 Each step must end the same way on both servers. Decoded values are compared
 by shape (every key path and value type) and, where the value does not depend
 on time or generated ids, exactly.
+
+Then each provider turn scenario (PROVIDER_SCENARIOS) runs on a fresh pair of
+servers with fake `codex` and `claude` executables on PATH. They replay the
+recorded protocol sessions in tests/fixtures/providers, so no model is called.
+The driver subscribes to the thread, dispatches a message, and keeps what
+streams in until the run settles; the turn's projection is then compared the
+same way, along with the turn as the client renders it: items in order with
+their types, statuses and text, the messages, and the run, attempt, provider
+turn, provider thread and provider session states. Known differences are listed
+in client_thread_parity_xfail.json; an entry that starts matching fails the
+suite until it is removed.
 """
 import argparse
 import contextlib
@@ -33,6 +44,35 @@ from client_initial_sync_parity import rpc
 from parity_harness import RELAY_TOOLS, encode, http, isolated_git_env, managed_server, path_without
 
 ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "tests/fixtures/providers"
+# Each scenario: the thread's provider instance and model, and the recorded session its CLI replays.
+PROVIDER_SCENARIOS = [
+    {"name": "codex turn", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"},
+    {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
+    {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json"},
+    {"name": "codex crash", "instance": "codex", "model": "fixture", "scenario": "codex_crash.json"},
+    {"name": "codex missing", "instance": "codex", "model": "fixture", "scenario": None},
+    {"name": "claude turn", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_turn.json"},
+    {"name": "claude crash", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_crash.json"},
+    {"name": "claude missing", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": None},
+]
+# The fake CLIs: version probes answer as a supported release would, and protocol sessions replay
+# the scenario. Anything else exits quietly.
+FAKE_CODEX = """#!/bin/sh
+case "$1 $2" in
+  "--version "*) echo "codex-cli 0.170.0"; exit 0;;
+  "app-server --help") echo "Usage: codex app-server"; exit 0;;
+  "app-server "*) exec python3 "$FAKE_PROVIDER_CLI" "$@";;
+esac
+exit 0
+"""
+FAKE_CLAUDE = """#!/bin/sh
+case "$*" in
+  --version*) echo "2.1.200 (Claude Code)"; exit 0;;
+  *--output-format*stream-json*) exec python3 "$FAKE_PROVIDER_CLI" "$@";;
+esac
+exit 0
+"""
 THREAD = "thread:client-thread"
 REMOTES = {
     "project:bitbucket": ("Bitbucket checkout", "git@ssh.bitbucket.org:example-org/example-repo.git"),
@@ -205,21 +245,153 @@ def compare_thread(original, rust):
     return problems
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--original-command", required=True)
-    parser.add_argument("--rust-command", required=True)
-    parser.add_argument("--reference-root", required=True,
-                        help="checkout of the pinned upstream with dependencies installed")
-    parser.add_argument("--node", default="node")
-    parser.add_argument("--reply-ms", type=int, default=8000)
-    parser.add_argument("--dump", type=Path, help="write each server's decoded results here")
-    args = parser.parse_args()
-    credentials = secrets.token_urlsafe(32), secrets.token_bytes(32)
+def write_fake_clis(directory, drivers):
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE)):
+        if name in drivers:
+            (directory / name).write_text(script)
+            (directory / name).chmod(0o755)
+
+
+def seed_turn(url, cookie, root, scenario):
+    """A project on a git checkout and a thread on the scenario's provider, with the message to send."""
+    checkout = root / "checkout"
+    make_checkout(checkout, REMOTES["project:github"][1])
+    status, _, body = http(url, "POST", "/api/projects/mutate", encode({
+        "type": "project.create", "commandId": "create-project", "projectId": "project:github",
+        "title": "Provider turn", "workspaceRoot": str(checkout)}),
+        {"Cookie": cookie, "Content-Type": "application/json"})
+    if status != 200:
+        raise RuntimeError(f"project.create failed on {url}: HTTP {status} {body[:400]!r}")
+    rpc(url, cookie, "orchestration.dispatchCommand", {
+        "type": "thread.create", "commandId": "seed-thread", "threadId": THREAD, "projectId": "project:github",
+        "title": "Thread", "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"]},
+        "runtimeMode": "full-access", "interactionMode": "default", "branch": None, "worktreePath": None,
+        "createdBy": "user", "creationSource": "web"})
+    return {"threadId": THREAD, "turnMs": 30000, "dispatch": {
+        "type": "message.dispatch", "commandId": "turn-message", "threadId": THREAD,
+        "messageId": "message:turn", "text": "Run echo hi and write notes.txt", "attachments": [],
+        "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}}}
+
+
+def rendered_turn(projection):
+    """The turn as a client renders it, without times and generated ids."""
+    items = sorted(projection.get("turnItems", []), key=lambda item: item.get("ordinal", 0))
+    def item(record):
+        row = [record.get("type"), record.get("status")]
+        for field in ("text", "title", "command", "toolName"):
+            if record.get(field) not in (None, ""):
+                row.append(f"{field}={str(record[field])[:80]}")
+        if record.get("failure"):
+            row.append("failure=" + str(record["failure"].get("message"))[:120])
+        return " ".join(str(part) for part in row)
+    return {
+        "items": [item(record) for record in items],
+        "messages": [f"{m.get('role')} {m.get('createdBy')}/{m.get('creationSource')}: {str(m.get('text'))[:80]}"
+                     for m in projection.get("messages", [])],
+        "runs": [run.get("status") for run in projection.get("runs", [])],
+        "attempts": [attempt.get("status") for attempt in projection.get("attempts", [])],
+        "providerTurns": [turn.get("status") for turn in projection.get("providerTurns", [])],
+        "providerThreads": [thread.get("status") for thread in projection.get("providerThreads", [])],
+        "providerSessions": [session.get("status") for session in projection.get("providerSessions", [])],
+        "plans": [plan.get("kind") for plan in projection.get("plans", [])],
+    }
+
+
+def live_summary(live):
+    """What streamed in after the dispatch: item kinds and event types in order, repeats collapsed."""
+    out = []
+    for item in (live or {}).get("items", []):
+        if not item.get("dispatched"):
+            continue
+        label = item["kind"] if item["kind"] != "event" else f"event {item['event'].get('type')}"
+        if item["kind"] == "event" and item["event"].get("type") == "turn-item.updated":
+            label += f" {item['event'].get('payload', {}).get('type')}"
+        if not out or out[-1] != label:
+            out.append(label)
+    return out
+
+
+def compare_turn(original, rust):
+    """Problems with Rust's provider turn as the reference client sees it, by check name."""
+    problems = {}
+    for step in ("orchestration.subscribeThread (live turn)", "orchestration.subscribeThread",
+                 "orchestration.getThreadProjection"):
+        a, b = original["steps"].get(step), rust["steps"].get(step)
+        if a is None or b is None or a["outcome"] != b["outcome"]:
+            problems[step] = [f"outcome {a and a['outcome']} != {b and b['outcome']}: {(b or {}).get('message', '')[:600]}"]
+    if problems:
+        return problems
+    live = [original["steps"]["orchestration.subscribeThread (live turn)"]["value"],
+            rust["steps"]["orchestration.subscribeThread (live turn)"]["value"]]
+    if live[0] is None or live[1] is None:
+        problems["live"] = [f"run settled: original {live[0] is not None} rust {live[1] is not None}"]
+    else:
+        summaries = [live_summary(side) for side in live]
+        if summaries[0] != summaries[1]:
+            problems["live"] = [f"original {summaries[0]}", f"rust     {summaries[1]}"]
+    shapes = compare_thread(original["steps"]["orchestration.subscribeThread"]["value"],
+                            rust["steps"]["orchestration.subscribeThread"]["value"])
+    if shapes:
+        problems["shape"] = shapes
+    rendered = [rendered_turn(side["steps"]["orchestration.getThreadProjection"]["value"])
+                for side in (original, rust)]
+    for key in rendered[0]:
+        if rendered[0][key] != rendered[1][key]:
+            problems[key] = [f"original {rendered[0][key]}", f"rust     {rendered[1][key]}"]
+    return problems
+
+
+def provider_turns(args, credentials):
+    """Run each provider scenario on both servers; the number of unexpected results."""
+    xfail = json.loads((ROOT / "scripts/client_thread_parity_xfail.json").read_text())
+    failures = 0
+    for scenario in PROVIDER_SCENARIOS:
+        if args.scenario and scenario["name"] not in args.scenario:
+            continue
+        outcomes = {}
+        with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
+            temporary = Path(temporary)
+            drivers = set() if scenario["scenario"] is None else {"codex" if scenario["instance"] == "codex" else "claude"}
+            write_fake_clis(temporary / "fake-bin", drivers)
+            path = os.pathsep.join([str(temporary / "fake-bin"), path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "bin")])
+            env = {**GIT_ISOLATION, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
+                   "FAKE_PROVIDER_LOG": str(temporary / "provider.log"),
+                   "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}
+            for name, command in (("original", shlex.split(args.original_command)),
+                                  ("rust", shlex.split(args.rust_command))):
+                root = temporary / name
+                url, cookie = managed_server(stack, command, root, *credentials, env=env)
+                seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
+                outcomes[name] = run_client(args, url, cookie, seeded)
+        if args.dump:
+            for name, outcome in outcomes.items():
+                slug = scenario["name"].replace(" ", "-")
+                (args.dump / f"turn-{slug}-{name}.json").write_text(json.dumps(outcome, indent=2, sort_keys=True))
+        problems = compare_turn(outcomes["original"], outcomes["rust"])
+        expected = set(xfail.get(scenario["name"], {}))
+        for check in sorted(set(problems) | expected):
+            label = f"{scenario['name']}: {check}"
+            if check in problems and check in expected:
+                print(f"XFAIL {label}: {xfail[scenario['name']][check]}")
+            elif check in problems:
+                failures += 1
+                print(f"FAIL {label}")
+                for problem in problems[check][:40]:
+                    print(f"  {problem}")
+            else:
+                failures += 1
+                print(f"XPASS {label}: remove it from client_thread_parity_xfail.json")
+        if not problems:
+            print(f"PASS {scenario['name']}")
+    return failures
+
+
+def thread_checks(args, credentials, temporary):
+    """The seeded thread's checks; the number that failed."""
     outcomes, roots = {}, {}
-    with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
+    with contextlib.ExitStack() as stack:
         os.environ["PATH"] = path_without(PROVIDER_CLIS | RELAY_TOOLS, Path(temporary) / "bin")
-        GIT_ISOLATION.update(isolated_git_env(Path(temporary) / "git"))
         # Rust runs its provider command for a turn; one that fails ends the turn as the
         # reference's does without a provider CLI.
         commands = {"original": shlex.split(args.original_command),
@@ -268,6 +440,30 @@ def main():
         else:
             print(f"PASS {name}: {rust['outcome']} {rust.get('tag', '')}")
     print(f"{total - failures}/{total} client thread checks matched")
+    return failures
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--original-command", required=True)
+    parser.add_argument("--rust-command", required=True)
+    parser.add_argument("--reference-root", required=True,
+                        help="checkout of the pinned upstream with dependencies installed")
+    parser.add_argument("--node", default="node")
+    parser.add_argument("--reply-ms", type=int, default=8000)
+    parser.add_argument("--dump", type=Path, help="write each server's decoded results here")
+    parser.add_argument("--scenario", action="append", help="run only this provider scenario (repeatable)")
+    parser.add_argument("--skip-thread-checks", action="store_true", help="run only the provider scenarios")
+    args = parser.parse_args()
+    credentials = secrets.token_urlsafe(32), secrets.token_bytes(32)
+    if args.dump:
+        args.dump.mkdir(parents=True, exist_ok=True)
+    failures = 0
+    with tempfile.TemporaryDirectory() as temporary:
+        GIT_ISOLATION.update(isolated_git_env(Path(temporary) / "git"))
+        if not args.skip_thread_checks:
+            failures += thread_checks(args, credentials, Path(temporary) / "thread")
+        failures += provider_turns(args, credentials)
     return int(failures != 0)
 
 

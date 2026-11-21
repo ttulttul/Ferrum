@@ -48,7 +48,7 @@ pub struct ThreadRecord {
     pub created_at: u64,
     pub updated_at: u64,
     pub native_id: Option<String>,
-    /// `active`, `idle` or `error`.
+    /// `not_loaded`, `active`, `idle` or `error`.
     pub status: &'static str,
 }
 
@@ -57,6 +57,9 @@ pub struct ThreadRecord {
 pub struct RunRecord {
     pub driver: String,
     pub started_at: u64,
+    /// The CLI started the turn (`provider_turn.updated`), so the run has a
+    /// provider turn record.
+    pub turn_started: bool,
     pub native_turn_id: Option<String>,
     pub usage: Option<(TokenUsage, u64)>,
     /// Items in the order first seen.
@@ -95,6 +98,7 @@ impl ProviderState {
         let record = self.runs.entry(run).or_insert_with(|| RunRecord {
             driver: driver.clone(),
             started_at: at,
+            turn_started: false,
             native_turn_id: None,
             usage: None,
             items: Vec::new(),
@@ -125,6 +129,7 @@ impl ProviderState {
                 thread.updated_at = at;
             }
             ProviderEvent::ProviderTurn { native_turn_id, .. } => {
+                record.turn_started = true;
                 if native_turn_id.is_some() {
                     record.native_turn_id = native_turn_id.clone();
                 }
@@ -178,8 +183,23 @@ impl ProviderState {
                 status,
                 failure,
                 thread_disposition,
+                driver,
             } => {
                 record.ended_at = Some(at);
+                if let (None, Some(driver)) = (&self.thread, driver) {
+                    record.driver = driver.clone();
+                }
+                // A turn that ended before its CLI opened a thread still has
+                // the provider thread record the reference creates for the
+                // run, not loaded.
+                let thread = self.thread.get_or_insert_with(|| ThreadRecord {
+                    driver: record.driver.clone(),
+                    first_run: run,
+                    created_at: at,
+                    updated_at: at,
+                    native_id: None,
+                    status: "not_loaded",
+                });
                 self.terminals.insert(
                     run,
                     Terminal {
@@ -191,7 +211,7 @@ impl ProviderState {
                 if broken {
                     self.native_thread = None;
                 }
-                if let Some(thread) = self.thread.as_mut() {
+                if thread.native_id.is_some() {
                     thread.status = if broken { "error" } else { "idle" };
                     thread.updated_at = at;
                 }

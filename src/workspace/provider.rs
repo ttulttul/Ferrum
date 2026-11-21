@@ -111,6 +111,10 @@ pub enum ProviderEvent {
         /// `reusable` when the next turn may resume the native thread,
         /// `broken` when it must start a new one.
         thread_disposition: ThreadDisposition,
+        /// The turn's driver, so a turn that ended before its CLI opened a
+        /// thread is still recorded as that driver's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        driver: Option<String>,
     },
 }
 
@@ -256,9 +260,10 @@ mod tests {
                 status: TurnStatus::Failed,
                 failure: Some(ProviderFailure::new("provider_error", "boom")),
                 thread_disposition: ThreadDisposition::Reusable,
+                driver: Some("codex".into()),
             })
             .unwrap(),
-            json!({"type":"turn.terminal","status":"failed","threadDisposition":"reusable",
+            json!({"type":"turn.terminal","status":"failed","threadDisposition":"reusable","driver":"codex",
                 "failure":{"class":"provider_error","message":"boom","code":null,"retryable":null}})
         );
         let thread = json!({"type":"provider_thread.updated","driver":"codex",
