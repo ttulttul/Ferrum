@@ -7,7 +7,8 @@
     "orchestration.subscribeThread (live turn)": "On a usage-limit error the reference keeps the run waiting for the limit to reset; Rust fails the run."
   },
   "codex approval": {
-    "orchestration.subscribeThread (live turn)": "The reference does not answer a Codex approval request itself, even in full-access mode: it records a runtime request and an approval_request item and waits for the client's answer. Rust approves every request in the workspace."
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "The provider turn has no turnTokenUsage record."
   },
   "codex crash": {
     "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
@@ -34,5 +35,50 @@
   "claude interrupt": {
     "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
     "shape": "No Claude attachment budget in nativeMetadata, no turnTokenUsage, model or prompt cache fields on the provider turn, and command output is projected where the reference omits it."
+  },
+  "codex approval for session": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "The provider turn has no turnTokenUsage record."
+  },
+  "codex approval declined": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "The provider turn has no turnTokenUsage record."
+  },
+  "codex approval-required": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "The provider turn has no turnTokenUsage record."
+  },
+  "codex auto-accept-edits": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "The provider turn has no turnTokenUsage record."
+  },
+  "codex user input": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "The provider turn has no turnTokenUsage record."
+  },
+  "codex approval interrupted": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "The provider turn has no turnTokenUsage record.",
+    "items": "The reference captures a checkpoint after a turn interrupted while an approval waits; Rust captures one only after a completed turn."
+  },
+  "claude approval": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+  },
+  "claude approval declined": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+  },
+  "claude approval-required": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+  },
+  "claude auto-accept-edits": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+  },
+  "claude approval interrupted": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "No Claude attachment budget in nativeMetadata, and no turnTokenUsage or model on the provider turn."
   }
 }

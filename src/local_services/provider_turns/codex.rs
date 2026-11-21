@@ -1,14 +1,18 @@
 //! Codex turns over `codex app-server` (JSON-RPC lines on stdio), as the
 //! reference's Codex adapter runs them.
-use super::{cancelled, codex_crashed, program, sleep_until, Cli, Launch, Sink, TurnEnd};
+use super::requests;
+use super::{
+    cancelled, codex_crashed, next_response, program, sleep_until, Cli, Launch, Sink, TurnEnd,
+};
 use crate::workspace::provider::{
-    PlanStep, ProviderFailure, ProviderItem, ProviderTurn, ThreadDisposition, TokenUsage,
-    TurnStatus, CODEX,
+    PlanStep, ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition,
+    TokenUsage, TurnStatus, CODEX,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 /// How long an interrupted turn may take to report that it stopped.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
@@ -17,6 +21,7 @@ pub(super) async fn run(
     spec: TurnSpec,
     provider: ProviderTurn,
     cancel: oneshot::Receiver<()>,
+    responses: mpsc::UnboundedReceiver<RuntimeResponse>,
     sink: Sink,
 ) {
     let binary = program(&provider.binary_path, "codex");
@@ -54,6 +59,10 @@ pub(super) async fn run(
         next_id: 1,
         cancel: Some(cancel),
         cancelled: false,
+        responses,
+        runtime_mode: provider.runtime_mode().to_owned(),
+        pending: HashMap::new(),
+        file_changes: HashMap::new(),
         thread_id: None,
         turn_id: None,
         terminal: None,
@@ -71,12 +80,76 @@ struct Session {
     next_id: u64,
     cancel: Option<oneshot::Receiver<()>>,
     cancelled: bool,
+    /// Answers to the turn's runtime requests.
+    responses: mpsc::UnboundedReceiver<RuntimeResponse>,
+    runtime_mode: String,
+    /// Requests waiting for the user, by request id.
+    pending: HashMap<String, Pending>,
+    /// Each file change item's changes by path, for approval prompts.
+    file_changes: HashMap<String, Value>,
     thread_id: Option<String>,
     turn_id: Option<String>,
     /// `turn/completed` for our turn, once it arrived.
     terminal: Option<Value>,
     /// The last error Codex reported without retrying.
     last_error: Option<String>,
+}
+
+/// A Codex request waiting for the user.
+struct Pending {
+    /// The JSON-RPC id to answer.
+    rpc_id: Value,
+    reply: Reply,
+}
+
+/// How to answer a pending request.
+enum Reply {
+    /// `{decision}`; `allows` is the kind an accept-for-session allows for
+    /// the native thread.
+    Decision {
+        allows: &'static str,
+        thread: String,
+    },
+    /// The legacy `{decision}` review decisions.
+    Legacy {
+        allows: &'static str,
+        thread: String,
+    },
+    Permissions {
+        permissions: Value,
+    },
+    Elicitation {
+        payload: Value,
+    },
+    UserInput {
+        native_ids: HashMap<String, String>,
+    },
+}
+
+/// The reference's codexRuntimeModeTurnDefaults: approval policy, reviewer
+/// and sandbox for a runtime mode.
+fn runtime_mode_policy(mode: &str) -> (Value, &'static str, Value) {
+    match mode {
+        "approval-required" => (json!("untrusted"), "user", json!({"type": "readOnly"})),
+        "auto-accept-edits" => (
+            json!("on-request"),
+            "user",
+            json!({"type": "workspaceWrite"}),
+        ),
+        "auto" => (
+            json!("on-request"),
+            "auto_review",
+            json!({"type": "workspaceWrite"}),
+        ),
+        // `never` also rejects browser and app access prompts before the
+        // client sees them.
+        _ => (
+            json!({"granular": {"mcp_elicitations": true, "request_permissions": false,
+                "rules": false, "sandbox_approval": false, "skill_approval": false}}),
+            "user",
+            json!({"type": "dangerFullAccess"}),
+        ),
+    }
 }
 
 /// Why a request got no reply.
@@ -122,11 +195,8 @@ impl Session {
         self.notify("initialized").await?;
 
         let model = (!provider.model.trim().is_empty()).then(|| provider.model.clone());
-        let mut thread_params = json!({
-            "cwd": spec.cwd,
-            "approvalPolicy": "never",
-            "sandbox": "danger-full-access",
-        });
+        // The turn carries the runtime policy, as the reference sends it.
+        let mut thread_params = json!({"cwd": spec.cwd});
         if let Some(model) = &model {
             thread_params["model"] = json!(model);
         }
@@ -166,12 +236,14 @@ impl Session {
                 .or(model.clone()),
         });
 
+        let (approval_policy, reviewer, sandbox_policy) = runtime_mode_policy(&self.runtime_mode);
         let mut turn_params = json!({
             "threadId": thread_id,
             "input": [{"type": "text", "text": spec.prompt, "text_elements": []}],
             "cwd": spec.cwd,
-            "approvalPolicy": "never",
-            "sandboxPolicy": {"type": "dangerFullAccess"},
+            "approvalsReviewer": reviewer,
+            "approvalPolicy": approval_policy,
+            "sandboxPolicy": sandbox_policy,
             "summary": "auto",
         });
         if let Some(model) = &model {
@@ -198,6 +270,10 @@ impl Session {
                 }
                 _ = sleep_until(interrupt_deadline) => {
                     return Ok(TurnEnd::interrupted(true));
+                }
+                response = next_response(&mut self.responses) => {
+                    self.respond(response).await;
+                    continue;
                 }
             };
             let Some(line) = line else {
@@ -277,6 +353,10 @@ impl Session {
                     self.cancelled = true;
                     return Err(Failed::Cancelled);
                 }
+                response = next_response(&mut self.responses) => {
+                    self.respond(response).await;
+                    continue;
+                }
             };
             let Some(line) = line else {
                 return Err(Failed::Closed);
@@ -306,12 +386,13 @@ impl Session {
         };
         let params = &message["params"];
         if let Some(id) = message.get("id").filter(|id| !id.is_null()) {
-            let reply = self.answer(method, params);
-            let response = match reply {
-                Ok(result) => json!({"id": id, "result": result}),
-                Err(error) => json!({"id": id, "error": error}),
-            };
-            let _ = self.cli.write(&response).await;
+            if let Some(reply) = self.server_request(id, method, params) {
+                let response = match reply {
+                    Ok(result) => json!({"id": id, "result": result}),
+                    Err(error) => json!({"id": id, "error": error}),
+                };
+                let _ = self.cli.write(&response).await;
+            }
             return;
         }
         // Only our turn's notifications; the app-server runs only our thread,
@@ -335,6 +416,25 @@ impl Session {
                 }
             }
             "item/started" | "item/completed" => {
+                let native = &params["item"];
+                if let (Some("fileChange"), Some(id)) =
+                    (native["type"].as_str(), native["id"].as_str())
+                {
+                    if method == "item/started" {
+                        let changes: serde_json::Map<String, Value> = native["changes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|change| {
+                                Some((change["path"].as_str()?.to_owned(), change["kind"].clone()))
+                            })
+                            .collect();
+                        self.file_changes
+                            .insert(id.to_owned(), Value::Object(changes));
+                    } else {
+                        self.file_changes.remove(id);
+                    }
+                }
                 if let Some(item) = map_item(&params["item"], method == "item/completed") {
                     self.sink.send(ProviderEvent::TurnItem { item });
                 }
@@ -404,40 +504,207 @@ impl Session {
         }
     }
 
-    /// The answer to a request from Codex. Approvals are granted for the
-    /// session, as in the reference's full-access mode.
-    fn answer(&mut self, method: &str, params: &Value) -> Result<Value, Value> {
-        let request_id = params["approvalId"]
-            .as_str()
-            .or(params["itemId"].as_str())
-            .or(params["callId"].as_str())
-            .unwrap_or_default()
-            .to_owned();
-        let (kind, result) = match method {
-            "item/commandExecution/requestApproval" => {
-                ("command", json!({"decision": "acceptForSession"}))
-            }
-            "item/fileChange/requestApproval" => {
-                ("file_change", json!({"decision": "acceptForSession"}))
-            }
-            "item/permissions/requestApproval" => (
-                "permissions",
-                json!({"permissions": params["permissions"], "scope": "session"}),
-            ),
-            "execCommandApproval" => ("command", json!({"decision": "approved_for_session"})),
-            "applyPatchApproval" => ("file_change", json!({"decision": "approved_for_session"})),
-            _ => {
-                return Err(
-                    json!({"code": -32601, "message": format!("Method not found: {method}")}),
+    /// A request from Codex: answered now when the reference answers it
+    /// itself, otherwise recorded as a runtime request that waits for the
+    /// user (`None`).
+    fn server_request(
+        &mut self,
+        rpc_id: &Value,
+        method: &str,
+        params: &Value,
+    ) -> Option<Result<Value, Value>> {
+        let text = |key: &str| params[key].as_str().unwrap_or_default().to_owned();
+        let mode = self.runtime_mode.clone();
+        let (request, reply) = match method {
+            "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+                let command = method == "item/commandExecution/requestApproval";
+                let kind = if command { "command" } else { "file-change" };
+                let thread = text("threadId");
+                if requests::session_allows(&thread, &mode, kind) {
+                    return Some(Ok(json!({"decision": "acceptForSession"})));
+                }
+                let item = text("itemId");
+                let native = match params["approvalId"].as_str() {
+                    Some(approval) if command => approval.to_owned(),
+                    _ => item.clone(),
+                };
+                let prompt = if command {
+                    params["reason"]
+                        .as_str()
+                        .or(params["command"].as_str())
+                        .map(str::to_owned)
+                } else {
+                    requests::file_change_prompt(params, self.file_changes.get(&item))
+                };
+                let mut request = requests::open(&native, &item, kind, &mode);
+                if let Some(prompt) = prompt {
+                    request.fields.insert("prompt".into(), json!(prompt));
+                }
+                (
+                    request,
+                    Reply::Decision {
+                        allows: kind,
+                        thread,
+                    },
                 )
             }
+            "item/permissions/requestApproval" => {
+                let item = text("itemId");
+                let kind = requests::permissions_kind(&params["permissions"]);
+                let mut request = requests::open(&item, &item, kind, &mode);
+                if let Some(reason) = params["reason"].as_str() {
+                    request.fields.insert("prompt".into(), json!(reason));
+                }
+                (
+                    request,
+                    Reply::Permissions {
+                        permissions: params["permissions"].clone(),
+                    },
+                )
+            }
+            "mcpServer/elicitation/request" => {
+                let acceptance = requests::elicitation_response(params, "accept");
+                if acceptance["action"] != "accept" || mode == "full-access" {
+                    return Some(Ok(if acceptance["action"] == "accept" {
+                        acceptance
+                    } else {
+                        json!({"action": "cancel"})
+                    }));
+                }
+                let native = if params["mode"] == "url" {
+                    text("elicitationId")
+                } else {
+                    format!("mcp-elicitation:{}", text("serverName"))
+                };
+                let (app_name, options) = requests::describe_elicitation(params);
+                let mut request = requests::open(&native, &native, "mcp-elicitation", &mode);
+                request
+                    .fields
+                    .insert("prompt".into(), json!(text("message")));
+                request.fields.insert("appName".into(), json!(app_name));
+                request.fields.insert("options".into(), options);
+                (
+                    request,
+                    Reply::Elicitation {
+                        payload: params.clone(),
+                    },
+                )
+            }
+            "execCommandApproval" | "applyPatchApproval" => {
+                let command = method == "execCommandApproval";
+                let kind = if command { "command" } else { "file-change" };
+                let thread = text("conversationId");
+                if requests::session_allows(&thread, &mode, kind) {
+                    return Some(Ok(json!({"decision": "approved_for_session"})));
+                }
+                let call = text("callId");
+                let (native, prompt) = if command {
+                    let joined = params["command"]
+                        .as_array()
+                        .map(|words| {
+                            words
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
+                    (
+                        params["approvalId"].as_str().unwrap_or(&call).to_owned(),
+                        Some(params["reason"].as_str().map_or(joined, str::to_owned)),
+                    )
+                } else {
+                    (
+                        call.clone(),
+                        requests::file_change_prompt(params, Some(&params["fileChanges"])),
+                    )
+                };
+                let mut request = requests::open(&native, &call, kind, &mode);
+                if let Some(prompt) = prompt {
+                    request.fields.insert("prompt".into(), json!(prompt));
+                }
+                (
+                    request,
+                    Reply::Legacy {
+                        allows: kind,
+                        thread,
+                    },
+                )
+            }
+            "item/tool/requestUserInput" => {
+                let item = text("itemId");
+                let (questions, native_ids) = requests::codex_questions(&params["questions"]);
+                let mut request = requests::open(&item, &item, "user_input", &mode);
+                request.fields.insert("questions".into(), questions);
+                (request, Reply::UserInput { native_ids })
+            }
+            _ => {
+                return Some(Err(
+                    json!({"code": -32601, "message": format!("Method not found: {method}")}),
+                ))
+            }
         };
-        self.sink.send(ProviderEvent::RuntimeRequest {
-            native_request_id: request_id,
-            kind: kind.into(),
-            decision: "acceptForSession".into(),
-        });
-        Ok(result)
+        self.pending.insert(
+            request.id.clone(),
+            Pending {
+                rpc_id: rpc_id.clone(),
+                reply,
+            },
+        );
+        self.sink
+            .send(ProviderEvent::RuntimeRequestOpened { request });
+        None
+    }
+
+    /// Answer a pending request with the user's response.
+    async fn respond(&mut self, response: RuntimeResponse) {
+        let Some(pending) = self.pending.remove(&response.id) else {
+            return;
+        };
+        let decision = requests::decision(&response);
+        let session = matches!(decision, "acceptForSession" | "acceptAlways");
+        let result = match pending.reply {
+            Reply::Decision { allows, thread } => {
+                if session {
+                    requests::allow_for_session(&thread, &self.runtime_mode, allows);
+                }
+                let decision = if decision == "acceptAlways" {
+                    "acceptForSession"
+                } else {
+                    decision
+                };
+                json!({"decision": decision})
+            }
+            Reply::Legacy { allows, thread } => {
+                if session {
+                    requests::allow_for_session(&thread, &self.runtime_mode, allows);
+                }
+                json!({"decision": requests::legacy_decision(decision)})
+            }
+            Reply::Permissions { permissions } => {
+                requests::permissions_response(decision, &permissions)
+            }
+            Reply::Elicitation { payload } => requests::elicitation_response(&payload, decision),
+            Reply::UserInput { native_ids } => {
+                let Some(answers) = &response.answers else {
+                    // The reference refuses an answer without answers; the
+                    // request keeps waiting.
+                    self.pending.insert(
+                        response.id.clone(),
+                        Pending {
+                            rpc_id: pending.rpc_id,
+                            reply: Reply::UserInput { native_ids },
+                        },
+                    );
+                    return;
+                };
+                json!({"answers": requests::codex_answers(answers, &native_ids)})
+            }
+        };
+        let _ = self
+            .cli
+            .write(&json!({"id": pending.rpc_id, "result": result}))
+            .await;
     }
 }
 

@@ -616,6 +616,23 @@ impl RemoteWorkspace {
         positions
     }
 
+    /// Answer a runtime request of a turn agentd runs.
+    pub async fn respond(
+        &self,
+        turn_id: &str,
+        response: crate::workspace::provider::RuntimeResponse,
+    ) -> bool {
+        self.request(
+            op::TURN_RESPOND,
+            json!(proto::TurnRespond {
+                turn_id: turn_id.to_owned(),
+                response,
+            }),
+        )
+        .await
+        .is_ok_and(|answered| answered == true)
+    }
+
     async fn cancel_turn(&self, stream: u64) -> Result<Value, WireError> {
         self.request(op::TURN_CANCEL, json!(StreamRef { stream }))
             .await
@@ -1027,6 +1044,13 @@ impl Workspace for RemoteWorkspace {
                 .await?;
             Ok(TurnItems::tracked(stream, receiver))
         })
+    }
+    fn respond_turn<'a>(
+        &'a self,
+        turn_id: &'a str,
+        response: crate::workspace::provider::RuntimeResponse,
+    ) -> WorkspaceFuture<'a, bool> {
+        boxed(async move { self.respond(turn_id, response).await })
     }
     fn ack(&self, position: StreamPosition) {
         let (transport, seq) = {

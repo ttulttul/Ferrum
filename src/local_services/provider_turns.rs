@@ -3,10 +3,14 @@
 //!
 //! Each turn starts the CLI, continues the thread's native session when the
 //! spec names one, sends the prompt, and stops the CLI once the turn ends.
-//! Permission and approval requests are approved, as the reference server
-//! does in full-access mode.
+//! The thread's runtime mode decides what the CLI may do without asking;
+//! every approval or question it still asks waits for the user (see
+//! [`requests`]).
 mod claude;
 mod codex;
+mod requests;
+
+pub(crate) use requests::respond;
 
 use crate::workspace::provider::{
     ProviderFailure, ProviderItem, ThreadDisposition, TurnStatus, CLAUDE_AGENT, CODEX,
@@ -29,16 +33,16 @@ pub(crate) fn start(
         .provider
         .clone()
         .ok_or_else(|| anyhow::anyhow!("the turn names no provider"))?;
+    if provider.driver != CODEX && provider.driver != CLAUDE_AGENT {
+        anyhow::bail!("provider driver `{}` cannot run turns", provider.driver);
+    }
     let (events, receiver) = mpsc::unbounded_channel();
-    let sink = Sink::new(events, provider.driver.clone());
-    match provider.driver.as_str() {
-        CODEX => {
-            tokio::spawn(codex::run(spec, provider, cancel, sink));
-        }
-        CLAUDE_AGENT => {
-            tokio::spawn(claude::run(spec, provider, cancel, sink));
-        }
-        other => anyhow::bail!("provider driver `{other}` cannot run turns"),
+    let sink = Sink::new(events, provider.driver.clone(), spec.turn_id.clone());
+    let responses = requests::register(&spec.turn_id);
+    if provider.driver == CODEX {
+        tokio::spawn(codex::run(spec, provider, cancel, responses, sink));
+    } else {
+        tokio::spawn(claude::run(spec, provider, cancel, responses, sink));
     }
     Ok(receiver)
 }
@@ -48,15 +52,18 @@ pub(crate) fn start(
 pub(crate) struct Sink {
     events: mpsc::UnboundedSender<TurnEvent>,
     driver: String,
+    /// The turn's id, under which its answers arrive.
+    turn_id: String,
     /// Items reported as running and not finished since, in order.
     open: std::sync::Arc<std::sync::Mutex<Vec<ProviderItem>>>,
 }
 
 impl Sink {
-    fn new(events: mpsc::UnboundedSender<TurnEvent>, driver: String) -> Self {
+    fn new(events: mpsc::UnboundedSender<TurnEvent>, driver: String, turn_id: String) -> Self {
         Self {
             events,
             driver,
+            turn_id,
             open: std::sync::Arc::default(),
         }
     }
@@ -74,6 +81,9 @@ impl Sink {
     /// The turn's terminal event, then its exit. Items still running end
     /// first: interrupted or failed with the turn, otherwise cancelled.
     fn finish(&self, end: TurnEnd) {
+        if !self.turn_id.is_empty() {
+            requests::unregister(&self.turn_id);
+        }
         let open = self
             .open
             .lock()
@@ -337,6 +347,17 @@ async fn cancelled(cancel: &mut Option<oneshot::Receiver<()>>) {
             *cancel = None;
         }
         None => std::future::pending::<()>().await,
+    }
+}
+
+/// The next answer to one of the turn's runtime requests; never resolves
+/// once the channel closed.
+async fn next_response(
+    responses: &mut mpsc::UnboundedReceiver<crate::workspace::provider::RuntimeResponse>,
+) -> crate::workspace::provider::RuntimeResponse {
+    match responses.recv().await {
+        Some(response) => response,
+        None => std::future::pending().await,
     }
 }
 

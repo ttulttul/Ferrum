@@ -190,20 +190,126 @@ async fn codex_turn_starts_over_when_the_thread_is_gone() {
     assert!(thread != "thr_gone" && !resumed);
 }
 
-#[tokio::test]
-async fn codex_turn_auto_approves_requests() {
+/// Run `scenario` with `turn_id`, answering its first runtime request with
+/// `answer` once it opens; the request and the CLI's log.
+async fn answered_turn(
+    driver: &str,
+    scenario: &str,
+    turn_id: &str,
+    runtime_mode: &str,
+    answer: impl FnOnce(
+        &crate::workspace::provider::RuntimeRequestOpen,
+    ) -> crate::workspace::provider::RuntimeResponse,
+) -> (
+    crate::workspace::provider::RuntimeRequestOpen,
+    Vec<Value>,
+    TurnExit,
+) {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("in.jsonl");
-    let (events, exit) = run(fake_spec(CODEX, "codex_approval.json", &log, None)).await;
+    let mut spec = fake_spec(driver, scenario, &log, None);
+    spec.turn_id = turn_id.into();
+    spec.provider.as_mut().unwrap().runtime_mode = runtime_mode.into();
+    let (_cancel, cancelled) = oneshot::channel();
+    let mut events = start(spec, cancelled).unwrap();
+    let request = loop {
+        match events.recv().await.expect("the turn waits for an answer") {
+            TurnEvent::Provider(ProviderEvent::RuntimeRequestOpened { request }) => break request,
+            TurnEvent::Exited(exit) => panic!("the turn ended without asking: {exit:?}"),
+            _ => {}
+        }
+    };
+    // Nothing answers the CLI until the user does.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !received(&log)
+            .iter()
+            .any(|m| m["id"].is_string() && m.get("method").is_none()
+                || m["type"] == "control_response" && m["response"]["request_id"] == "perm-1"),
+        "the request was answered before the user answered it"
+    );
+    assert!(respond(turn_id, answer(&request)));
+    let (_, exit) = collect(events).await;
+    (request, received(&log), exit)
+}
+
+#[tokio::test]
+async fn codex_turn_waits_for_the_users_approval() {
+    let (request, log, exit) = answered_turn(
+        CODEX,
+        "codex_approval.json",
+        "turn-codex-approval",
+        "full-access",
+        |request| crate::workspace::provider::RuntimeResponse {
+            id: request.id.clone(),
+            decision: Some("decline".into()),
+            ..Default::default()
+        },
+    )
+    .await;
     assert!(exit.success, "{exit:?}");
-    assert!(events
+    assert_eq!(
+        (request.kind.as_str(), request.native_request_id.as_str()),
+        ("command", "call_1")
+    );
+    assert_eq!(request.fields["prompt"], "touch x");
+    let answer = log
         .iter()
-        .any(|e| matches!(e, ProviderEvent::RuntimeRequest { kind, .. } if kind == "command")));
-    let answer = received(&log)
-        .into_iter()
         .find(|m| m["id"] == "approval-1" && m.get("result").is_some())
         .expect("the approval was answered");
-    assert_eq!(answer["result"]["decision"], "acceptForSession");
+    assert_eq!(answer["result"]["decision"], "decline");
+    let turn = log.iter().find(|m| m["method"] == "turn/start").unwrap();
+    assert_eq!(turn["params"]["sandboxPolicy"]["type"], "dangerFullAccess");
+}
+
+#[tokio::test]
+async fn codex_turn_asks_the_users_question() {
+    let (request, log, exit) = answered_turn(
+        CODEX,
+        "codex_user_input.json",
+        "turn-codex-question",
+        "approval-required",
+        |request| crate::workspace::provider::RuntimeResponse {
+            id: request.id.clone(),
+            answers: Some(json!({"color": "Blue"})),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(request.kind, "user_input");
+    let answer = log.iter().find(|m| m["id"] == "input-1").unwrap();
+    assert_eq!(
+        answer["result"],
+        json!({"answers": {"color": {"answers": ["Blue"]}}})
+    );
+    let turn = log.iter().find(|m| m["method"] == "turn/start").unwrap();
+    assert_eq!(turn["params"]["approvalPolicy"], "untrusted");
+}
+
+#[tokio::test]
+async fn claude_turn_waits_for_the_users_approval() {
+    let (request, log, exit) = answered_turn(
+        CLAUDE_AGENT,
+        "claude_approval.json",
+        "turn-claude-approval",
+        "full-access",
+        |request| crate::workspace::provider::RuntimeResponse {
+            id: request.id.clone(),
+            decision: Some("acceptForSession".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(request.fields["fullAccessOverride"], "provider_check");
+    let answer = log
+        .iter()
+        .find(|m| m["type"] == "control_response" && m["response"]["request_id"] == "perm-1")
+        .unwrap();
+    let result = &answer["response"]["response"];
+    assert_eq!(result["behavior"], "allow");
+    assert_eq!(result["updatedPermissions"][0]["destination"], "session");
 }
 
 #[tokio::test]

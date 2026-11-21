@@ -245,6 +245,7 @@ impl crate::orchestration::CommandHost for AppState {
                     prompt: text,
                     cwd,
                     env_remove,
+                    turn_id: run.id.to_string(),
                     ..Default::default()
                 };
                 match provider {

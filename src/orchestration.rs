@@ -1515,6 +1515,11 @@ async fn apply_command<H: CommandHost>(
         "runtime-request.respond" => {
             let request_id = command["requestId"].as_str().unwrap_or_default();
             let thread_id = thread_id.unwrap_or_default();
+            if let Some(sequence) =
+                respond_provider_request(&state, thread_id, request_id, command, receipt).await?
+            {
+                return Ok(sequence);
+            }
             let current = state
                 .store
                 .read()
@@ -2284,6 +2289,127 @@ async fn apply_command<H: CommandHost>(
         )
         .await?
         .id)
+}
+
+/// Answer a runtime request a provider turn waits on, as the reference's
+/// `runtime-request.respond` does: check it can be answered, record the
+/// answer, then hand it to the turn. `None` when the thread's provider turns
+/// made no request `request_id`.
+async fn respond_provider_request<H: CommandHost>(
+    state: &Arc<H>,
+    thread_id: &str,
+    request_id: &str,
+    command: &Value,
+    receipt: &crate::CommandReceipt,
+) -> anyhow::Result<Option<u64>> {
+    let found = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(thread_id) else {
+            return Ok(None);
+        };
+        let Some(record) = thread
+            .provider_records()
+            .runtime_requests
+            .into_iter()
+            .find(|record| record["id"] == request_id)
+        else {
+            return Ok(None);
+        };
+        let uuid = request_id.rsplit(':').next().unwrap_or_default().to_owned();
+        let Some((run_id, _)) = thread.provider.request(&uuid) else {
+            return Ok(None);
+        };
+        (record, uuid, run_id)
+    };
+    let (record, uuid, run_id) = found;
+    let status = record["status"].as_str().unwrap_or("resolved");
+    if status != "pending" {
+        anyhow::bail!("Runtime request {request_id} is {status}.");
+    }
+    let capability = &record["responseCapability"];
+    if capability["type"] == "not_resumable" {
+        anyhow::bail!(
+            "{}",
+            capability["reason"]
+                .as_str()
+                .unwrap_or("This request cannot be answered.")
+        );
+    }
+    let decision = command["decision"].as_str().map(str::to_owned);
+    let feedback = command["feedback"].as_str().map(str::to_owned);
+    if feedback.is_some()
+        && (capability["type"] != "live"
+            || capability["supportsFeedback"] != true
+            || record["kind"] == "user_input"
+            || decision.as_deref() != Some("decline")
+            || feedback.as_deref().is_some_and(|f| f.trim().is_empty()))
+    {
+        anyhow::bail!("Feedback requires a live approval that supports it and a decline decision.");
+    }
+    if capability["type"] == "message" {
+        // The CLI that asked is gone; the reference sends the answers as a
+        // new message, which this server does not do yet.
+        anyhow::bail!("This question can only be answered with a new message.");
+    }
+    // Each answer as its plain value, as the reference decodes them.
+    let answers = command
+        .get("answers")
+        .filter(|a| !a.is_null())
+        .map(|answers| {
+            let flat: serde_json::Map<String, Value> = answers
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(id, answer)| {
+                    let value = answer
+                        .get("answers")
+                        .cloned()
+                        .unwrap_or_else(|| answer.clone());
+                    (id.clone(), value)
+                })
+                .collect();
+            Value::Object(flat)
+        });
+    let sequence = state
+        .commit_receipted(
+            Event::RunProvider {
+                run_id,
+                thread_id: thread_id.to_owned(),
+                event: crate::workspace::ProviderEvent::RuntimeRequestAnswered {
+                    id: uuid.clone(),
+                    decision: decision.clone(),
+                    feedback: feedback.clone(),
+                    answers: answers.clone(),
+                },
+                position: None,
+            },
+            Some(receipt.clone()),
+        )
+        .await?
+        .id;
+    let delivered = state
+        .workspace()
+        .respond_turn(
+            &run_id.to_string(),
+            crate::workspace::provider::RuntimeResponse {
+                id: uuid.clone(),
+                decision,
+                feedback,
+                answers,
+            },
+        )
+        .await;
+    if !delivered {
+        let _ = state
+            .commit(Event::RunProvider {
+                run_id,
+                thread_id: thread_id.to_owned(),
+                event: crate::workspace::ProviderEvent::RuntimeRequestDeliveryFailed { id: uuid },
+                position: None,
+            })
+            .await;
+    }
+    Ok(Some(sequence))
 }
 
 #[cfg(test)]

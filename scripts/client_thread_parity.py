@@ -24,7 +24,11 @@ The driver subscribes to the thread, dispatches a message, and keeps what
 streams in until the run settles; the turn's projection is then compared the
 same way, along with the turn as the client renders it: items in order with
 their types, statuses and text, the messages, and the run, attempt, provider
-turn, provider thread and provider session states. Known differences are listed
+turn, provider thread and provider session states. Scenarios with runtime
+requests set the thread's runtime mode and answer (`respond`) or interrupt the
+first request once its card shows; the `cli approvals` check compares what each
+server told the fake CLI: the runtime policy of its thread and turn, and its
+answer to each request. Known differences are listed
 in client_thread_parity_xfail.json; an entry that starts matching fails the
 suite until it is removed.
 """
@@ -49,7 +53,21 @@ FIXTURES = ROOT / "tests/fixtures/providers"
 PROVIDER_SCENARIOS = [
     {"name": "codex turn", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"},
     {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
-    {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json"},
+    # Runtime requests: what each server asks the user, and what it answers the CLI.
+    {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
+     "respond": {"decision": "accept"}},
+    {"name": "codex approval for session", "instance": "codex", "model": "fixture",
+     "scenario": "codex_approval.json", "respond": {"decision": "acceptForSession"}},
+    {"name": "codex approval declined", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
+     "respond": {"decision": "decline"}},
+    {"name": "codex approval interrupted", "instance": "codex", "model": "fixture",
+     "scenario": "codex_approval_interrupt.json", "interrupt": "request"},
+    {"name": "codex approval-required", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
+    {"name": "codex auto-accept-edits", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
+     "runtimeMode": "auto-accept-edits", "respond": {"decision": "decline"}},
+    {"name": "codex user input", "instance": "codex", "model": "fixture", "scenario": "codex_user_input.json",
+     "respond": {"answers": {"color": "Blue"}}},
     {"name": "codex crash", "instance": "codex", "model": "fixture", "scenario": "codex_crash.json"},
     {"name": "codex missing", "instance": "codex", "model": "fixture", "scenario": None},
     {"name": "codex interrupt", "instance": "codex", "model": "fixture", "scenario": "codex_interrupt.json",
@@ -59,6 +77,16 @@ PROVIDER_SCENARIOS = [
     {"name": "claude missing", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": None},
     {"name": "claude interrupt", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_interrupt.json", "interrupt": True},
+    {"name": "claude approval", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_approval.json", "respond": {"decision": "accept"}},
+    {"name": "claude approval declined", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_approval.json", "respond": {"decision": "decline"}},
+    {"name": "claude approval interrupted", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_approval_interrupt.json", "interrupt": "request"},
+    {"name": "claude approval-required", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_approval.json", "runtimeMode": "approval-required", "respond": {"decision": "acceptForSession"}},
+    {"name": "claude auto-accept-edits", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_approval.json", "runtimeMode": "auto-accept-edits", "respond": {"decision": "cancel"}},
 ]
 # The fake CLIs: version probes answer as a supported release would, and protocol sessions replay
 # the scenario. Anything else exits quietly.
@@ -266,9 +294,10 @@ def seed_turn(url, cookie, root, scenario):
     rpc(url, cookie, "orchestration.dispatchCommand", {
         "type": "thread.create", "commandId": "seed-thread", "threadId": THREAD, "projectId": "project:github",
         "title": "Thread", "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"]},
-        "runtimeMode": "full-access", "interactionMode": "default", "branch": None, "worktreePath": None,
-        "createdBy": "user", "creationSource": "web"})
-    return {"threadId": THREAD, "turnMs": 30000, "interrupt": scenario.get("interrupt", False), "dispatch": {
+        "runtimeMode": scenario.get("runtimeMode", "full-access"), "interactionMode": "default", "branch": None,
+        "worktreePath": None, "createdBy": "user", "creationSource": "web"})
+    return {"threadId": THREAD, "turnMs": 30000, "interrupt": scenario.get("interrupt", False),
+            "respond": scenario.get("respond"), "dispatch": {
         "type": "message.dispatch", "commandId": "turn-message", "threadId": THREAD,
         "messageId": "message:turn", "text": "Run echo hi and write notes.txt", "attachments": [],
         "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}}}
@@ -290,6 +319,8 @@ def rendered_turn(projection):
         "messages": [f"{m.get('role')} {m.get('createdBy')}/{m.get('creationSource')}: {str(m.get('text'))[:80]}"
                      for m in projection.get("messages", [])],
         "runs": [run.get("status") for run in projection.get("runs", [])],
+        "runtimeRequests": [f"{r.get('kind')} {r.get('status')} {r.get('decision')} {r.get('answers')}"
+                            for r in projection.get("runtimeRequests", [])],
         "attempts": [attempt.get("status") for attempt in projection.get("attempts", [])],
         "providerTurns": [turn.get("status") for turn in projection.get("providerTurns", [])],
         "providerThreads": [thread.get("status") for thread in projection.get("providerThreads", [])],
@@ -312,9 +343,53 @@ def live_summary(live):
     return out
 
 
+# Codex request params that carry the thread's runtime mode.
+CODEX_POLICY_KEYS = ("approvalPolicy", "approvalsReviewer", "sandbox", "sandboxPolicy")
+# Claude Code flags that carry it.
+CLAUDE_POLICY_FLAGS = ("--permission-mode", "--permission-prompt-tool", "--allow-dangerously-skip-permissions")
+
+
+def cli_approvals(log):
+    """What a server told the fake CLI about approvals: the runtime policy it started the thread
+    and turn with, and its answer to each request the CLI made (fixture request ids are strings
+    such as "approval-1" or "perm-1")."""
+    out = []
+    args_path = Path(str(log) + ".args")
+    for line in (args_path.read_text().splitlines() if args_path.exists() else []):
+        words = line.split()
+        for index, word in enumerate(words):
+            name = word.split("=", 1)[0]
+            if name in CLAUDE_POLICY_FLAGS:
+                value = word.split("=", 1)[1] if "=" in word else (
+                    words[index + 1] if index + 1 < len(words) and not words[index + 1].startswith("--") else True)
+                out.append(f"arg {name}={value}")
+    for line in (Path(log).read_text().splitlines() if Path(log).exists() else []):
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        method = message.get("method")
+        if method in ("thread/start", "thread/resume", "turn/start"):
+            params = message.get("params") or {}
+            out.append(f"{method} " + json.dumps({k: params[k] for k in CODEX_POLICY_KEYS if k in params},
+                                                 sort_keys=True))
+        elif method is None and isinstance(message.get("id"), str) and ("result" in message or "error" in message):
+            out.append(f"reply {message['id']} " + json.dumps(message.get("result", message.get("error")),
+                                                              sort_keys=True))
+        elif message.get("type") == "control_response":
+            response = message.get("response") or {}
+            if str(response.get("request_id", "")).startswith("perm-"):
+                out.append(f"control_response {response['request_id']} "
+                           + json.dumps(response.get("response", response.get("error")), sort_keys=True))
+    return out
+
+
 def compare_turn(original, rust):
     """Problems with Rust's provider turn as the reference client sees it, by check name."""
     problems = {}
+    cli = [original.get("cli", []), rust.get("cli", [])]
+    if cli[0] != cli[1]:
+        problems["cli approvals"] = [f"original {line}" for line in cli[0]] + [f"rust     {line}" for line in cli[1]]
     for step in ("orchestration.subscribeThread (live turn)", "orchestration.subscribeThread",
                  "orchestration.getThreadProjection"):
         a, b = original["steps"].get(step), rust["steps"].get(step)
@@ -327,6 +402,10 @@ def compare_turn(original, rust):
     if live[0] is None or live[1] is None:
         problems["live"] = [f"run settled: original {live[0] is not None} rust {live[1] is not None}"]
     else:
+        for reply in ("respondReply", "interruptReply"):
+            outcomes = [None if side.get(reply) is None else sorted(side[reply]) for side in live]
+            if outcomes[0] != outcomes[1]:
+                problems[reply] = [f"original {live[0].get(reply)}", f"rust     {live[1].get(reply)}"]
         summaries = [live_summary(side) for side in live]
         if summaries[0] != summaries[1]:
             problems["live"] = [f"original {summaries[0]}", f"rust     {summaries[1]}"]
@@ -355,15 +434,17 @@ def provider_turns(args, credentials):
             drivers = set() if scenario["scenario"] is None else {"codex" if scenario["instance"] == "codex" else "claude"}
             write_fake_clis(temporary / "fake-bin", drivers)
             path = os.pathsep.join([str(temporary / "fake-bin"), path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "bin")])
-            env = {**GIT_ISOLATION, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
-                   "FAKE_PROVIDER_LOG": str(temporary / "provider.log"),
-                   "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}
             for name, command in (("original", shlex.split(args.original_command)),
                                   ("rust", shlex.split(args.rust_command))):
+                log = temporary / f"{name}-provider.log"
+                env = {**GIT_ISOLATION, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
+                       "FAKE_PROVIDER_LOG": str(log),
+                       "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}
                 root = temporary / name
                 url, cookie = managed_server(stack, command, root, *credentials, env=env)
                 seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
                 outcomes[name] = run_client(args, url, cookie, seeded)
+                outcomes[name]["cli"] = cli_approvals(log)
         if args.dump:
             for name, outcome in outcomes.items():
                 slug = scenario["name"].replace(" ", "-")

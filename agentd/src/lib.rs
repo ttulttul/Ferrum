@@ -278,6 +278,14 @@ impl Agentd {
                 Ok(Value::Null)
             }),
             op::TURN_START => self.start_turn(&opener, &args).await,
+            op::TURN_RESPOND => match parse::<proto::TurnRespond>(&args) {
+                Ok(respond) => Ok(json!(
+                    self.workspace
+                        .respond_turn(&respond.turn_id, respond.response)
+                        .await
+                )),
+                Err(error) => Err(error),
+            },
             op::TERM_EVENTS => {
                 let events = self.workspace.terminal_events();
                 self.open_bus(&opener, &op, None, events)

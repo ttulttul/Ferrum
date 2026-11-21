@@ -1,15 +1,18 @@
 //! Claude turns over the Claude Code CLI's stream-json protocol, the one the
 //! Claude Agent SDK speaks and the reference's Claude adapter runs through.
-use super::{cancelled, claude_crashed, program, sleep_until, Cli, Launch, Sink, TurnEnd};
+use super::requests;
+use super::{
+    cancelled, claude_crashed, next_response, program, sleep_until, Cli, Launch, Sink, TurnEnd,
+};
 use crate::workspace::provider::{
-    PlanStep, ProviderFailure, ProviderItem, ProviderTurn, ThreadDisposition, TokenUsage,
-    TurnStatus, CLAUDE_AGENT,
+    PlanStep, ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition,
+    TokenUsage, TurnStatus, CLAUDE_AGENT,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 /// How long an interrupted turn may take to report that it stopped.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
@@ -20,12 +23,21 @@ pub(super) async fn run(
     spec: TurnSpec,
     provider: ProviderTurn,
     cancel: oneshot::Receiver<()>,
+    mut responses: mpsc::UnboundedReceiver<RuntimeResponse>,
     sink: Sink,
 ) {
     let mut cancel = Some(cancel);
     let mut resume = provider.resume.clone().filter(|id| !id.is_empty());
     loop {
-        let attempt = Attempt::run(&spec, &provider, resume.as_deref(), &mut cancel, &sink).await;
+        let attempt = Attempt::run(
+            &spec,
+            &provider,
+            resume.as_deref(),
+            &mut cancel,
+            &mut responses,
+            &sink,
+        )
+        .await;
         match attempt {
             // A session Claude no longer has starts over, as the reference does.
             Outcome::ConversationMissing if resume.is_some() => resume = None,
@@ -44,6 +56,27 @@ enum Outcome {
     Ended(TurnEnd),
     /// The CLI refused `--resume` before it started the turn.
     ConversationMissing,
+}
+
+/// The reference's permissionModeForClaudeRuntimePolicy, without Plan mode.
+fn permission_mode(runtime_mode: &str) -> &'static str {
+    match runtime_mode {
+        "approval-required" => "default",
+        "auto-accept-edits" => "acceptEdits",
+        "auto" => "auto",
+        _ => "bypassPermissions",
+    }
+}
+
+/// A `can_use_tool` request waiting for the user.
+struct PendingPermission {
+    /// The control request to answer.
+    request_id: Value,
+    tool_name: String,
+    input: Value,
+    tool_use_id: String,
+    suggestions: Option<Value>,
+    question: bool,
 }
 
 /// A tool call waiting for its result.
@@ -67,6 +100,10 @@ struct Attempt<'a> {
     tools: HashMap<String, PendingTool>,
     next_control: u64,
     usage: Option<TokenUsage>,
+    runtime_mode: String,
+    responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
+    /// Permission requests waiting for the user, by request id.
+    pending: HashMap<String, PendingPermission>,
 }
 
 impl<'a> Attempt<'a> {
@@ -75,9 +112,11 @@ impl<'a> Attempt<'a> {
         provider: &ProviderTurn,
         resume: Option<&'a str>,
         cancel: &mut Option<oneshot::Receiver<()>>,
+        responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
         sink: &'a Sink,
     ) -> Outcome {
         let binary = program(&provider.binary_path, "claude");
+        let mode = permission_mode(provider.runtime_mode());
         let mut args: Vec<String> = [
             "--output-format",
             "stream-json",
@@ -85,12 +124,18 @@ impl<'a> Attempt<'a> {
             "--input-format",
             "stream-json",
             "--include-partial-messages",
+            // Requests the CLI does not settle itself come to us in every
+            // mode, as the reference installs its permission callback.
+            "--permission-prompt-tool",
+            "stdio",
             "--permission-mode",
-            "bypassPermissions",
-            "--allow-dangerously-skip-permissions",
+            mode,
         ]
         .map(String::from)
         .into();
+        if mode == "bypassPermissions" {
+            args.push("--allow-dangerously-skip-permissions".into());
+        }
         if !provider.model.trim().is_empty() {
             args.extend(["--model".into(), provider.model.clone()]);
         }
@@ -148,6 +193,9 @@ impl<'a> Attempt<'a> {
             tools: HashMap::new(),
             next_control: 1,
             usage: None,
+            runtime_mode: provider.runtime_mode().to_owned(),
+            responses,
+            pending: HashMap::new(),
         };
         let outcome = attempt.drive(spec, cancel).await;
         let Attempt { cli, .. } = attempt;
@@ -175,11 +223,17 @@ impl<'a> Attempt<'a> {
                 line = self.cli.next_line() => line,
                 _ = cancelled(cancel), if !self.interrupted => {
                     self.interrupted = true;
+                    // A waiting request stays pending, as the reference
+                    // leaves it, unless Claude Code withdraws it.
                     self.interrupt().await;
                     deadline = Some(tokio::time::Instant::now() + INTERRUPT_GRACE);
                     continue;
                 }
                 _ = sleep_until(deadline) => return Outcome::Ended(TurnEnd::interrupted(true)),
+                response = next_response(self.responses) => {
+                    self.respond(response).await;
+                    continue;
+                }
             };
             let Some(line) = line else {
                 if self.interrupted {
@@ -249,6 +303,7 @@ impl<'a> Attempt<'a> {
             "assistant" if !nested => self.assistant(&message["message"]),
             "user" if !nested => self.tool_results(&message),
             "control_request" => self.answer(&message).await,
+            "control_cancel_request" => self.withdraw(&message["request_id"]),
             "result" => return Some(self.result(&message)),
             _ => {}
         }
@@ -418,29 +473,18 @@ impl<'a> Attempt<'a> {
         }
     }
 
-    /// Approve whatever Claude Code asks, as bypassPermissions would.
+    /// Answer a control request from Claude Code. A `can_use_tool` request
+    /// is settled now where the reference settles it itself, and otherwise
+    /// waits for the user.
     async fn answer(&mut self, message: &Value) {
         let request = &message["request"];
         let request_id = message["request_id"].clone();
         let response = match request["subtype"].as_str() {
-            Some("can_use_tool") => {
-                self.sink.send(ProviderEvent::RuntimeRequest {
-                    native_request_id: request["tool_use_id"]
-                        .as_str()
-                        .or(request_id.as_str())
-                        .unwrap_or_default()
-                        .into(),
-                    kind: match request["tool_name"].as_str() {
-                        Some("Bash") => "command",
-                        Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit") => "file_change",
-                        _ => "permissions",
-                    }
-                    .into(),
-                    decision: "acceptForSession".into(),
-                });
-                json!({"subtype": "success", "request_id": request_id,
-                    "response": {"behavior": "allow", "updatedInput": request["input"]}})
-            }
+            Some("can_use_tool") => match self.can_use_tool(&request_id, request) {
+                Some(result) => json!({"subtype": "success", "request_id": request_id,
+                    "response": result}),
+                None => return,
+            },
             _ => json!({"subtype": "error", "request_id": request_id,
                 "error": format!("Unsupported control request: {}", request["subtype"])}),
         };
@@ -448,6 +492,143 @@ impl<'a> Attempt<'a> {
             .cli
             .write(&json!({"type": "control_response", "response": response}))
             .await;
+    }
+
+    /// The reference's canUseTool: the permission result to send now, or
+    /// `None` when the request waits for the user.
+    fn can_use_tool(&mut self, request_id: &Value, request: &Value) -> Option<Value> {
+        let tool_name = request["tool_name"].as_str().unwrap_or_default().to_owned();
+        let input = request["input"].clone();
+        let tool_use_id = request["tool_use_id"]
+            .as_str()
+            .or(request_id.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        if tool_name == "ExitPlanMode" {
+            return Some(json!({"behavior": "deny", "toolUseID": tool_use_id,
+                "message": "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn."}));
+        }
+        let mode = permission_mode(&self.runtime_mode);
+        let question = tool_name == "AskUserQuestion";
+        // Only Auto mode lets Claude Code's own classifier settle what it
+        // forwards; every other mode asks the user.
+        if !question && mode == "auto" {
+            return Some(json!({"behavior": "allow", "updatedInput": input,
+                "toolUseID": tool_use_id}));
+        }
+        let reason =
+            strip_terminal_escapes(request["decision_reason"].as_str().unwrap_or_default());
+        if tool_name == "Bash"
+            && mode == "bypassPermissions"
+            && request["matched_ask_rule"].is_null()
+            && (removal_warning(&reason)
+                || reason == "This shell -c script runs rm and could not be checked"
+                || reason == "A permission rule denies a command in this shell -c script")
+        {
+            return Some(
+                json!({"behavior": "deny", "toolUseID": tool_use_id, "message": format!(
+                "Claude Code's removal safety check denied this command; the user did not reject it. The command did not run. Do not bypass the check by splitting the removal, putting it in a script, or using another tool or shell. If the warning below supplies a safe rewrite, use it and let the same check evaluate it. Otherwise continue the rest of the task without the removal and tell the user what you needed to delete and why. Warning: {reason}")}),
+            );
+        }
+        let kind = if question {
+            "user_input"
+        } else {
+            tool_request_kind(&tool_name)
+        };
+        let mut open = requests::open(&tool_use_id, &tool_use_id, kind, &self.runtime_mode);
+        if question {
+            open.fields
+                .insert("questions".into(), user_input_questions(&input));
+        } else {
+            open.supports_feedback = true;
+            let command = input["command"].as_str().filter(|c| !c.trim().is_empty());
+            let prompt = command
+                .map(str::to_owned)
+                .or_else(|| request["title"].as_str().map(str::to_owned))
+                .or_else(|| request["description"].as_str().map(str::to_owned))
+                .or_else(|| request["decision_reason"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| summarize_tool_request(&tool_name, &input));
+            if !reason.is_empty() && reason != prompt {
+                open.fields.insert("reason".into(), json!(reason));
+            }
+            if mode == "bypassPermissions" {
+                let cause = if request["matched_ask_rule"].is_null() {
+                    "provider_check"
+                } else {
+                    "ask_rule"
+                };
+                open.fields
+                    .insert("fullAccessOverride".into(), json!(cause));
+            }
+            if request["suppress_always_allow_rule"] == true {
+                open.fields.insert(
+                    "options".into(),
+                    json!([{"decision": "decline", "label": "Decline"},
+                        {"decision": "accept", "label": "Approve"}]),
+                );
+            }
+            open.fields.insert("prompt".into(), json!(prompt));
+        }
+        self.pending.insert(
+            open.id.clone(),
+            PendingPermission {
+                request_id: request_id.clone(),
+                tool_name,
+                input,
+                tool_use_id,
+                suggestions: request
+                    .get("permission_suggestions")
+                    .filter(|s| !s.is_null())
+                    .cloned(),
+                question,
+            },
+        );
+        self.sink
+            .send(ProviderEvent::RuntimeRequestOpened { request: open });
+        None
+    }
+
+    /// Send the user's answer to a waiting `can_use_tool` request.
+    async fn respond(&mut self, response: RuntimeResponse) {
+        let Some(pending) = self.pending.remove(&response.id) else {
+            return;
+        };
+        let result = if pending.question {
+            let Some(answers) = &response.answers else {
+                self.pending.insert(response.id.clone(), pending);
+                return;
+            };
+            json!({"behavior": "allow", "toolUseID": pending.tool_use_id, "updatedInput": {
+                "questions": pending.input["questions"],
+                "answers": sdk_answers(answers),
+            }})
+        } else {
+            permission_result(
+                &pending,
+                requests::decision(&response),
+                response.feedback.as_deref(),
+            )
+        };
+        let reply = json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": pending.request_id, "response": result}});
+        let _ = self.cli.write(&reply).await;
+    }
+
+    /// Claude Code withdrew the control request `request_id`.
+    fn withdraw(&mut self, request_id: &Value) {
+        let ids: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| &pending.request_id == request_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.pending.remove(&id);
+            self.sink.send(ProviderEvent::RuntimeRequestClosed {
+                id,
+                status: "cancelled".into(),
+            });
+        }
     }
 
     fn result(&mut self, message: &Value) -> Outcome {
@@ -540,6 +721,179 @@ fn tool_item(id: &str, name: &str, input: &Value) -> ProviderItem {
             item
         }
     }
+}
+
+/// The reference's classifyClaudeNativeTool request kind.
+fn tool_request_kind(tool_name: &str) -> &'static str {
+    let normalized: String = tool_name
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '_' && *c != '-')
+        .collect();
+    match normalized.as_str() {
+        "edit" | "multiedit" | "notebookedit" | "write" => "file-change",
+        "glob" | "grep" | "ls" | "read" => "file-read",
+        _ => "command",
+    }
+}
+
+/// The reference's summarizeClaudeToolRequest.
+fn summarize_tool_request(tool_name: &str, input: &Value) -> String {
+    let first = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            input[*key]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+    };
+    let cut = |text: &str, limit: usize| text.chars().take(limit).collect::<String>();
+    if let Some(command) = first(&["command", "cmd", "script"]) {
+        return format!("{tool_name}: {}", cut(command, 400));
+    }
+    if let Some(path) = first(&["file_path", "path", "filename", "fileName"]) {
+        return format!("{tool_name}: {}", cut(path, 400));
+    }
+    let serialized = match input {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    if serialized.chars().count() <= 400 {
+        format!("{tool_name}: {serialized}")
+    } else {
+        format!("{tool_name}: {}...", cut(&serialized, 397))
+    }
+}
+
+/// Text without terminal control sequences, trimmed.
+fn strip_terminal_escapes(text: &str) -> String {
+    static ESCAPES: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]")
+            .expect("valid pattern")
+    });
+    ESCAPES.replace_all(text, "").trim().to_owned()
+}
+
+/// Claude Code's removal safety warnings (`Dangerous rm...`).
+fn removal_warning(reason: &str) -> bool {
+    static RM: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)^Dangerous rm(?:dir)?\b").expect("valid pattern")
+    });
+    RM.is_match(reason)
+}
+
+/// The reference's claudeUserInputQuestions.
+fn user_input_questions(input: &Value) -> Value {
+    let questions = input["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            let question = record["question"].as_str()?.trim();
+            if question.is_empty() {
+                return None;
+            }
+            let header = record["header"]
+                .as_str()
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+                .map_or_else(|| format!("Question {}", index + 1), str::to_owned);
+            let options: Vec<Value> = record["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|option| {
+                    let label = option["label"].as_str()?.trim();
+                    if label.is_empty() {
+                        return None;
+                    }
+                    let description = option["description"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|d| !d.is_empty())
+                        .unwrap_or(label);
+                    let mut row = json!({"label": label, "description": description});
+                    if let Some(preview) = option["preview"].as_str() {
+                        row["preview"] = json!(preview);
+                    }
+                    Some(row)
+                })
+                .collect();
+            Some(
+                json!({"id": question, "header": header, "question": question,
+                "options": options, "multiSelect": record["multiSelect"] == true}),
+            )
+        })
+        .collect();
+    Value::Array(questions)
+}
+
+/// The reference's claudeSdkUserInputAnswers.
+fn sdk_answers(answers: &Value) -> Value {
+    let out: serde_json::Map<String, Value> = answers
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(question, answer)| {
+            let text = match answer {
+                Value::Array(values) => values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                Value::String(text) => text.clone(),
+                Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            (question.clone(), json!(text))
+        })
+        .collect();
+    Value::Object(out)
+}
+
+/// The reference's permissionResultFromDecision, with the tool use id the
+/// SDK adds.
+fn permission_result(pending: &PendingPermission, decision: &str, feedback: Option<&str>) -> Value {
+    if decision == "accept" || decision == "acceptForSession" {
+        let mut result = json!({"behavior": "allow", "updatedInput": pending.input,
+            "toolUseID": pending.tool_use_id,
+            "decisionClassification": if decision == "acceptForSession" { "user_permanent" } else { "user_temporary" }});
+        if decision == "acceptForSession" {
+            let mut updates: Vec<Value> = pending
+                .suggestions
+                .as_ref()
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|suggestion| {
+                    let mut update = suggestion.clone();
+                    update["destination"] = json!("session");
+                    update
+                })
+                .collect();
+            if updates.is_empty() {
+                updates.push(
+                    json!({"type": "addRules", "rules": [{"toolName": pending.tool_name}],
+                    "behavior": "allow", "destination": "session"}),
+                );
+            }
+            result["updatedPermissions"] = json!(updates);
+        }
+        return result;
+    }
+    let feedback = feedback.map(str::trim).filter(|f| !f.is_empty());
+    let message = match feedback {
+        Some(feedback) => format!("The user declined this tool call and said:\n{feedback}"),
+        None if decision == "cancel" => "User cancelled tool execution.".into(),
+        None => "User declined tool execution.".into(),
+    };
+    let mut result = json!({"behavior": "deny", "message": message, "toolUseID": pending.tool_use_id,
+        "decisionClassification": "user_reject"});
+    if decision == "cancel" {
+        result["interrupt"] = json!(true);
+    }
+    result
 }
 
 /// The title the reference gives a Claude tool item: `Read <path>` for a

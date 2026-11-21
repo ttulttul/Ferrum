@@ -159,9 +159,35 @@ const runOf = (item) => {
   return {};
 };
 
+/** Pending runtime requests and the request ids that have a turn item, from a stream item. */
+const requestsOf = (item, pending, withItems) => {
+  const requests =
+    item.kind === "event" && item.event.type === "runtime-request.updated"
+      ? [item.event.payload]
+      : item.kind === "snapshot"
+        ? (item.projection?.runtimeRequests ?? [])
+        : [];
+  for (const request of requests) {
+    if (request?.status === "pending") pending.set(request.id, request);
+    else if (request) pending.delete(request.id);
+  }
+  const turnItems =
+    item.kind === "event" && item.event.type === "turn-item.updated"
+      ? [item.event.payload]
+      : item.kind === "snapshot"
+        ? [
+            ...(item.projection?.turnItems ?? []),
+            ...(item.projection?.visibleTurnItems ?? []).map((row) => row.item),
+          ]
+        : [];
+  for (const turnItem of turnItems) if (turnItem?.requestId) withItems.add(turnItem.requestId);
+};
+
 /**
  * subscribeThread's items from before a message is dispatched until its run settles. With
- * `seed.interrupt`, the run is interrupted once its provider turn is running.
+ * `seed.interrupt`, the run is interrupted once its provider turn is running; with
+ * `seed.interrupt === "request"`, once a runtime request is pending. With `seed.respond`
+ * ({decision} or {answers}), the first pending runtime request is answered with it.
  */
 const liveTurn = (client, seed) =>
   Effect.gen(function* () {
@@ -169,6 +195,9 @@ const liveTurn = (client, seed) =>
     const synchronized = yield* Deferred.make();
     const settled = yield* Deferred.make();
     const turnRunning = yield* Deferred.make();
+    const requestPending = yield* Deferred.make();
+    const pending = new Map();
+    const withItems = new Set();
     let dispatched = false;
     let runId;
     const fiber = yield* client["orchestration.subscribeThread"](threadInput(seed.threadId)).pipe(
@@ -180,6 +209,12 @@ const liveTurn = (client, seed) =>
           const run = runOf(item);
           if (dispatched && run.runId) runId = run.runId;
           if (dispatched && run.turnRunning) yield* Deferred.succeed(turnRunning, undefined);
+          if (dispatched) {
+            requestsOf(item, pending, withItems);
+            // Answer once the request's card is there too, as a user would.
+            const ready = [...pending.values()].find((request) => withItems.has(request.id));
+            if (ready) yield* Deferred.succeed(requestPending, ready);
+          }
         }),
       ),
       Effect.forkScoped,
@@ -188,7 +223,31 @@ const liveTurn = (client, seed) =>
     dispatched = true;
     const reply = yield* client["orchestration.dispatchCommand"](seed.dispatch);
     let interruptReply = null;
-    if (seed.interrupt) {
+    let respondReply = null;
+    if (seed.respond) {
+      const request = yield* Deferred.await(requestPending);
+      respondReply = yield* client["orchestration.dispatchCommand"]({
+        type: "runtime-request.respond",
+        commandId: "turn-respond",
+        threadId: seed.threadId,
+        requestId: request.id,
+        ...seed.respond,
+      }).pipe(
+        Effect.map(plain),
+        Effect.catch((error) => Effect.succeed({ error: String(error?._tag ?? error) })),
+      );
+    }
+    if (seed.interrupt === "request") {
+      yield* Deferred.await(requestPending);
+      interruptReply = plain(
+        yield* client["orchestration.dispatchCommand"]({
+          type: "run.interrupt",
+          commandId: "turn-interrupt",
+          threadId: seed.threadId,
+          runId,
+        }),
+      );
+    } else if (seed.interrupt) {
       yield* Deferred.await(turnRunning);
       interruptReply = plain(
         yield* client["orchestration.dispatchCommand"]({
@@ -203,7 +262,7 @@ const liveTurn = (client, seed) =>
     // Let the run's last events arrive.
     yield* Effect.sleep(1500);
     yield* Fiber.interrupt(fiber);
-    return { dispatchReply: plain(reply), interruptReply, items };
+    return { dispatchReply: plain(reply), interruptReply, respondReply, items };
   });
 
 const program = Effect.gen(function* () {
