@@ -310,7 +310,8 @@ mod tests {
             Some(TurnEvent::Stdout("started\n".into()))
         );
         cancel.send(()).unwrap();
-        let exit = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        // Well inside the two seconds a cancel waits for output.
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
             .await
             .expect("the cancelled turn exited promptly");
         assert!(matches!(exit, Some(TurnEvent::Exited(exit)) if exit.cancelled));
