@@ -278,6 +278,9 @@ pub struct ProviderFailure {
     pub message: String,
     pub code: Option<String>,
     pub retryable: Option<bool>,
+    /// When a usage limit resets, once known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
 }
 
 impl ProviderFailure {
@@ -295,6 +298,7 @@ impl ProviderFailure {
             message,
             code: None,
             retryable: None,
+            reset_at: None,
         }
     }
 }
