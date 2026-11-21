@@ -158,7 +158,10 @@ impl Thread {
                 "forkedFrom": null,
                 "pendingBackgroundTasks": [],
                 "contextUsage": null,
-                "nativeMetadata": null,
+                // A Claude session is titled after its thread.
+                "nativeMetadata": Some(self.title.trim())
+                    .filter(|title| thread.driver == provider::CLAUDE_AGENT && !title.is_empty())
+                    .map_or(Value::Null, |title| json!({"title": title})),
                 "goal": null,
                 "createdAt": iso(thread.created_at),
                 "updatedAt": iso(thread.updated_at)

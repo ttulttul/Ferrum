@@ -143,19 +143,43 @@ const settles = (item) =>
   (item.kind === "event" && item.event.type === "run.updated" && TERMINAL_RUN.has(item.event.payload?.status)) ||
   (item.kind === "snapshot" && (item.projection?.runs ?? []).some((run) => TERMINAL_RUN.has(run.status)));
 
-/** subscribeThread's items from before a message is dispatched until its run settles. */
+/** The run a stream item shows, and whether its provider turn is running. */
+const runOf = (item) => {
+  if (item.kind === "event" && item.event.type.startsWith("run.")) return { runId: item.event.payload?.id };
+  if (item.kind === "event" && item.event.type === "provider-turn.updated") {
+    return { turnRunning: item.event.payload?.status === "running" };
+  }
+  if (item.kind === "snapshot") {
+    const runs = item.projection?.runs ?? [];
+    return {
+      runId: runs.at(-1)?.id,
+      turnRunning: (item.projection?.providerTurns ?? []).some((turn) => turn.status === "running"),
+    };
+  }
+  return {};
+};
+
+/**
+ * subscribeThread's items from before a message is dispatched until its run settles. With
+ * `seed.interrupt`, the run is interrupted once its provider turn is running.
+ */
 const liveTurn = (client, seed) =>
   Effect.gen(function* () {
     const items = [];
     const synchronized = yield* Deferred.make();
     const settled = yield* Deferred.make();
+    const turnRunning = yield* Deferred.make();
     let dispatched = false;
+    let runId;
     const fiber = yield* client["orchestration.subscribeThread"](threadInput(seed.threadId)).pipe(
       Stream.runForEach((item) =>
         Effect.gen(function* () {
           items.push({ ...plain(item), dispatched });
           if (item.kind === "synchronized") yield* Deferred.succeed(synchronized, undefined);
           if (dispatched && settles(item)) yield* Deferred.succeed(settled, undefined);
+          const run = runOf(item);
+          if (dispatched && run.runId) runId = run.runId;
+          if (dispatched && run.turnRunning) yield* Deferred.succeed(turnRunning, undefined);
         }),
       ),
       Effect.forkScoped,
@@ -163,11 +187,23 @@ const liveTurn = (client, seed) =>
     yield* Deferred.await(synchronized);
     dispatched = true;
     const reply = yield* client["orchestration.dispatchCommand"](seed.dispatch);
+    let interruptReply = null;
+    if (seed.interrupt) {
+      yield* Deferred.await(turnRunning);
+      interruptReply = plain(
+        yield* client["orchestration.dispatchCommand"]({
+          type: "run.interrupt",
+          commandId: "turn-interrupt",
+          threadId: seed.threadId,
+          runId,
+        }),
+      );
+    }
     yield* Deferred.await(settled);
     // Let the run's last events arrive.
     yield* Effect.sleep(1500);
     yield* Fiber.interrupt(fiber);
-    return { dispatchReply: plain(reply), items };
+    return { dispatchReply: plain(reply), interruptReply, items };
   });
 
 const program = Effect.gen(function* () {

@@ -19,15 +19,21 @@
   "claude turn": {
     "items": "The Read tool item has no title (the reference titles it \"Read <path>\").",
     "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
-    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
   },
   "claude crash": {
     "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
-    "shape": "No Claude nativeMetadata on the provider thread, and no tokenUsage or turnTokenUsage on the provider turn."
+    "shape": "No Claude attachment budget in the provider thread's nativeMetadata, and no tokenUsage or turnTokenUsage on the provider turn."
   },
   "claude missing": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events."
+  },
+  "codex interrupt": {
     "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
-    "providerThreads": "The reference picks the Claude session id itself (--session-id) before starting the CLI, so its thread names a native session even when the CLI is missing.",
-    "shape": "The reference picks the Claude session id itself (--session-id) before starting the CLI, so its thread names a native session even when the CLI is missing."
+    "shape": "The provider turn has no turnTokenUsage record."
+  },
+  "claude interrupt": {
+    "live": "Rust sends every change to live subscribers as a full snapshot; the reference sends domain events.",
+    "shape": "No Claude attachment budget in nativeMetadata, no turnTokenUsage, model or prompt cache fields on the provider turn, and command output is projected where the reference omits it."
   }
 }

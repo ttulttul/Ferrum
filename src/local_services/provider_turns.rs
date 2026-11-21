@@ -71,18 +71,20 @@ impl Sink {
         }
         let _ = self.events.send(TurnEvent::Provider(event));
     }
-    /// The turn's terminal event, then its exit. Items still running end as
-    /// cancelled (or failed, when the turn failed) first.
+    /// The turn's terminal event, then its exit. Items still running end
+    /// first: interrupted or failed with the turn, otherwise cancelled.
     fn finish(&self, end: TurnEnd) {
         let open = self
             .open
             .lock()
             .map(|mut open| std::mem::take(&mut *open))
             .unwrap_or_default();
-        let closed = if end.status == TurnStatus::Failed {
-            "failed"
-        } else {
-            "cancelled"
+        // An interrupted turn's open items end interrupted, as the
+        // reference closes them.
+        let closed = match end.status {
+            TurnStatus::Failed => "failed",
+            TurnStatus::Interrupted => "interrupted",
+            _ => "cancelled",
         };
         for mut item in open {
             item.status = closed.into();

@@ -52,9 +52,13 @@ PROVIDER_SCENARIOS = [
     {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json"},
     {"name": "codex crash", "instance": "codex", "model": "fixture", "scenario": "codex_crash.json"},
     {"name": "codex missing", "instance": "codex", "model": "fixture", "scenario": None},
+    {"name": "codex interrupt", "instance": "codex", "model": "fixture", "scenario": "codex_interrupt.json",
+     "interrupt": True},
     {"name": "claude turn", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_turn.json"},
     {"name": "claude crash", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_crash.json"},
     {"name": "claude missing", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": None},
+    {"name": "claude interrupt", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_interrupt.json", "interrupt": True},
 ]
 # The fake CLIs: version probes answer as a supported release would, and protocol sessions replay
 # the scenario. Anything else exits quietly.
@@ -264,7 +268,7 @@ def seed_turn(url, cookie, root, scenario):
         "title": "Thread", "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"]},
         "runtimeMode": "full-access", "interactionMode": "default", "branch": None, "worktreePath": None,
         "createdBy": "user", "creationSource": "web"})
-    return {"threadId": THREAD, "turnMs": 30000, "dispatch": {
+    return {"threadId": THREAD, "turnMs": 30000, "interrupt": scenario.get("interrupt", False), "dispatch": {
         "type": "message.dispatch", "commandId": "turn-message", "threadId": THREAD,
         "messageId": "message:turn", "text": "Run echo hi and write notes.txt", "attachments": [],
         "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}}}
