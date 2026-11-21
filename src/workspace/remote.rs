@@ -11,7 +11,10 @@
 //! Natively, [`connect`] does all of this over a WebSocket.
 //!
 //! Until a connection is up, every operation answers as unavailable.
-use super::{GitTools, Reply, TurnEvent, TurnSpec, Workspace, WorkspaceFuture};
+use super::{
+    GitTools, Reply, StreamPosition, TurnEvent, TurnItem, TurnItems, TurnSpec, Workspace,
+    WorkspaceFuture,
+};
 use crate::workspace_protocol::{
     self as proto, op, Ack, EndReason, ErrorCode, Frame, Hello, HelloReply, Inbound, Polled,
     Request, Resume, ResumeReply, StreamBody, StreamRef, TurnStart, WireError, WireGitTools,
@@ -77,6 +80,9 @@ struct State {
     streams: HashMap<u64, Sink>,
     /// The highest sequence number received per stream since the last flush.
     acks: BTreeMap<u64, u64>,
+    /// Tracked streams that ended before their consumer acknowledged every
+    /// event: the end frame's seq, acknowledged with the last event.
+    ending: HashMap<u64, u64>,
     buses: HashMap<&'static str, Bus>,
     /// The terminals as `term.metadata` last described them.
     terminals: Vec<Value>,
@@ -95,19 +101,57 @@ struct Pending {
 }
 
 struct Sink {
+    /// The last frame received; older ones are duplicates.
     last_seq: u64,
+    /// The last frame acknowledged, which a reconnect resumes after.
+    acked: u64,
+    /// Whether the consumer acknowledges frames itself ([`Workspace::ack`])
+    /// rather than on delivery.
+    manual: bool,
     kind: SinkKind,
+}
+
+impl Sink {
+    fn new(kind: SinkKind) -> Self {
+        Self {
+            last_seq: 0,
+            acked: 0,
+            manual: false,
+            kind,
+        }
+    }
 }
 
 enum SinkKind {
     Turn {
-        events: mpsc::UnboundedSender<TurnEvent>,
+        events: TurnSender,
         exited: bool,
     },
     Bus(&'static str),
     Watch(String),
     /// Frames for a caller that awaits them itself.
     Items(mpsc::UnboundedSender<Item>),
+}
+
+/// Where a turn's events go: plain, or with their positions for a consumer
+/// that acknowledges them.
+enum TurnSender {
+    Plain(mpsc::UnboundedSender<TurnEvent>),
+    Tracked(mpsc::UnboundedSender<TurnItem>),
+}
+
+impl TurnSender {
+    fn send(&self, event: TurnEvent, position: Option<StreamPosition>) {
+        match self {
+            Self::Plain(events) => {
+                let _ = events.send(event);
+            }
+            Self::Tracked(items) => {
+                let position = position.filter(|p| p.seq > 0);
+                let _ = items.send(TurnItem { event, position });
+            }
+        }
+    }
 }
 
 /// A stream's event or end, for [`SinkKind::Items`].
@@ -260,7 +304,7 @@ impl RemoteWorkspace {
                 .lock()
                 .streams
                 .iter()
-                .map(|(&id, sink)| (id, sink.last_seq))
+                .map(|(&id, sink)| (id, sink.acked))
                 .collect(),
         };
         let resumed: ResumeReply = serde_json::from_value(
@@ -331,10 +375,20 @@ impl RemoteWorkspace {
                     return;
                 }
                 sink.last_seq = frame.seq;
-                state.acks.insert(frame.stream, frame.seq);
+                let manual = sink.manual;
+                let all_acked = sink.acked + 1 == frame.seq;
+                if !manual {
+                    sink.acked = frame.seq;
+                }
+                let ending = matches!(frame.body, StreamBody::End(_));
+                if !manual || (ending && all_acked) {
+                    state.acks.insert(frame.stream, frame.seq);
+                } else if ending {
+                    state.ending.insert(frame.stream, frame.seq);
+                }
                 match frame.body {
                     StreamBody::Event(event) => {
-                        deliver(&self.inner, &mut state, frame.stream, event)
+                        deliver(&self.inner, &mut state, frame.stream, frame.seq, event)
                     }
                     StreamBody::End(end) => {
                         if let Some(sink) = state.streams.remove(&frame.stream) {
@@ -412,15 +466,7 @@ impl RemoteWorkspace {
         }
         for op in reopen {
             let opened = self
-                .send_request(
-                    op,
-                    Value::Null,
-                    Some(Sink {
-                        last_seq: 0,
-                        kind: SinkKind::Bus(op),
-                    }),
-                    true,
-                )
+                .send_request(op, Value::Null, Some(Sink::new(SinkKind::Bus(op))), true)
                 .await;
             let mut state = self.lock();
             let bus = state.buses.entry(op).or_default();
@@ -431,6 +477,108 @@ impl RemoteWorkspace {
                 };
             }
         }
+    }
+
+    async fn open_turn(
+        &self,
+        spec: TurnSpec,
+        cancel: oneshot::Receiver<()>,
+        events: TurnSender,
+        manual: bool,
+    ) -> anyhow::Result<u64> {
+        let mut sink = Sink::new(SinkKind::Turn {
+            events,
+            exited: false,
+        });
+        sink.manual = manual;
+        let opened = self
+            .send_request(
+                op::TURN_START,
+                json!(TurnStart::from(spec)),
+                Some(sink),
+                true,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(e.message))?;
+        let stream = stream_id(&opened)
+            .ok_or_else(|| anyhow::anyhow!("the workspace did not name the turn's stream"))?;
+        self.forward_cancel(stream, cancel);
+        Ok(stream)
+    }
+
+    fn forward_cancel(&self, stream: u64, cancel: oneshot::Receiver<()>) {
+        #[cfg(feature = "native")]
+        {
+            let this = self.clone();
+            tokio::spawn(async move {
+                let _ = cancel.await;
+                let _ = this.cancel_turn(stream).await;
+            });
+        }
+        #[cfg(not(feature = "native"))]
+        self.lock().cancels.push((stream, cancel));
+    }
+
+    /// Read a tracked turn this server started before it restarted, from
+    /// just after `position`: the last event it recorded (seq 0 for none).
+    /// Events after it arrive again, each once. Call this before
+    /// [`RemoteWorkspace::connected`] so the first `resume` names the
+    /// stream; called later, it resumes the stream itself. A stream agentd
+    /// no longer holds reports an interrupted exit.
+    pub async fn resume_turn(
+        &self,
+        position: StreamPosition,
+        cancel: oneshot::Receiver<()>,
+    ) -> TurnItems {
+        let (items, receiver) = mpsc::unbounded_channel();
+        let ready = {
+            let mut state = self.lock();
+            let mut sink = Sink::new(SinkKind::Turn {
+                events: TurnSender::Tracked(items),
+                exited: false,
+            });
+            sink.manual = true;
+            sink.last_seq = position.seq;
+            sink.acked = position.seq;
+            state.streams.insert(position.stream, sink);
+            state.ready
+        };
+        if ready {
+            let resume = Resume {
+                streams: BTreeMap::from([(position.stream, position.seq)]),
+            };
+            let missing = match self.request(op::RESUME, json!(resume)).await {
+                Ok(reply) => serde_json::from_value::<ResumeReply>(reply)
+                    .map(|r| r.missing.contains(&position.stream))
+                    .unwrap_or(true),
+                // The next connection resumes it.
+                Err(_) => false,
+            };
+            if missing {
+                let mut state = self.lock();
+                if let Some(sink) = state.streams.remove(&position.stream) {
+                    end_sink(&mut state, sink, EndReason::Gap);
+                }
+            }
+        }
+        self.forward_cancel(position.stream, cancel);
+        TurnItems::tracked(receiver)
+    }
+
+    /// The last acknowledged position of every tracked stream still open.
+    pub fn acked_positions(&self) -> Vec<StreamPosition> {
+        let state = self.lock();
+        let mut positions: Vec<_> = state
+            .streams
+            .iter()
+            .filter(|(_, sink)| sink.manual)
+            .map(|(&stream, sink)| StreamPosition {
+                stream,
+                seq: sink.acked,
+            })
+            .collect();
+        positions.sort_by_key(|p| p.stream);
+        positions
     }
 
     async fn cancel_turn(&self, stream: u64) -> Result<Value, WireError> {
@@ -520,10 +668,7 @@ impl RemoteWorkspace {
             (open, latest)
         };
         if open {
-            let sink = Sink {
-                last_seq: 0,
-                kind: SinkKind::Watch(key.clone()),
-            };
+            let sink = Sink::new(SinkKind::Watch(key.clone()));
             let opened = self.send_request(op, args, Some(sink), true).await;
             let mut state = self.lock();
             if let Some(watch) = state.watches.get_mut(&key) {
@@ -550,7 +695,7 @@ impl RemoteWorkspace {
 }
 
 /// Hand a stream event to whoever reads that stream.
-fn deliver(inner: &Inner, state: &mut State, stream: u64, event: Value) {
+fn deliver(inner: &Inner, state: &mut State, stream: u64, seq: u64, event: Value) {
     enum Target {
         Bus(&'static str),
         Watch(String),
@@ -562,7 +707,7 @@ fn deliver(inner: &Inner, state: &mut State, stream: u64, event: Value) {
                 Ok(event) => {
                     let event = TurnEvent::from(event);
                     *exited |= matches!(event, TurnEvent::Exited(_));
-                    let _ = events.send(event);
+                    events.send(event, Some(StreamPosition { stream, seq }));
                 }
                 Err(error) => tracing::warn!(%error, "ignoring a malformed turn event"),
             }
@@ -631,7 +776,7 @@ fn end_sink(state: &mut State, sink: Sink, reason: EndReason) {
         // was interrupted.
         SinkKind::Turn { events, exited } => {
             if !exited {
-                let _ = events.send(proto::interrupted_turn());
+                events.send(proto::interrupted_turn(), None);
             }
         }
         SinkKind::Items(items) => {
@@ -758,10 +903,7 @@ impl Workspace for RemoteWorkspace {
         boxed(async move {
             let method = "git.runStackedAction";
             let (items, mut received) = mpsc::unbounded_channel();
-            let sink = Sink {
-                last_seq: 0,
-                kind: SinkKind::Items(items),
-            };
+            let sink = Sink::new(SinkKind::Items(items));
             let args = json!({"input": input, "tools": WireGitTools::from(tools)});
             if let Err(error) = self
                 .send_request(op::GIT_STACKED_ACTION, args, Some(sink), true)
@@ -821,36 +963,48 @@ impl Workspace for RemoteWorkspace {
     ) -> WorkspaceFuture<'_, anyhow::Result<mpsc::UnboundedReceiver<TurnEvent>>> {
         boxed(async move {
             let (events, receiver) = mpsc::unbounded_channel();
-            let sink = Sink {
-                last_seq: 0,
-                kind: SinkKind::Turn {
-                    events,
-                    exited: false,
-                },
-            };
-            let opened = self
-                .send_request(
-                    op::TURN_START,
-                    json!(TurnStart::from(spec)),
-                    Some(sink),
-                    true,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!(e.message))?;
-            let stream = stream_id(&opened)
-                .ok_or_else(|| anyhow::anyhow!("the workspace did not name the turn's stream"))?;
-            #[cfg(feature = "native")]
-            {
-                let this = self.clone();
-                tokio::spawn(async move {
-                    let _ = cancel.await;
-                    let _ = this.cancel_turn(stream).await;
-                });
-            }
-            #[cfg(not(feature = "native"))]
-            self.lock().cancels.push((stream, cancel));
+            self.open_turn(spec, cancel, TurnSender::Plain(events), false)
+                .await?;
             Ok(receiver)
         })
+    }
+    fn start_tracked_turn(
+        &self,
+        spec: TurnSpec,
+        cancel: oneshot::Receiver<()>,
+    ) -> WorkspaceFuture<'_, anyhow::Result<TurnItems>> {
+        boxed(async move {
+            let (items, receiver) = mpsc::unbounded_channel();
+            self.open_turn(spec, cancel, TurnSender::Tracked(items), true)
+                .await?;
+            Ok(TurnItems::tracked(receiver))
+        })
+    }
+    fn ack(&self, position: StreamPosition) {
+        let (transport, seq) = {
+            let mut state = self.lock();
+            if let Some(sink) = state.streams.get_mut(&position.stream) {
+                sink.acked = sink.acked.max(position.seq.min(sink.last_seq));
+            }
+            let mut seq = position.seq;
+            // The last event of an ended stream: acknowledge its end too.
+            if state.ending.get(&position.stream) == Some(&(seq + 1)) {
+                state.ending.remove(&position.stream);
+                seq += 1;
+            }
+            (state.transport.clone(), seq)
+        };
+        // Without a connection, the next `resume` carries the position.
+        if let Some(transport) = transport {
+            let _ = transport.send(proto::request_frame(&Request {
+                id: None,
+                op: op::ACK.into(),
+                args: json!(Ack {
+                    stream: position.stream,
+                    seq
+                }),
+            }));
+        }
     }
     fn local_servers<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
         boxed(async move {

@@ -57,6 +57,23 @@ Elsewhere, a host implements `Transport::send(frame)` and:
 The token travels in the upgrade's `Authorization: Bearer` header, or in
 `hello` when `RemoteWorkspace::new` is given it.
 
+## Acknowledging what the server has recorded
+
+Turns started with `Workspace::start_tracked_turn` acknowledge nothing on
+their own. Each `TurnItem` carries its `StreamPosition` (`stream`, `seq`);
+call `Workspace::ack(position)` once the event is recorded durably (the
+native server does this right after committing it to its event log). Until
+then agentd keeps the event and sends it again after a reconnect.
+
+After a server restart, pass the last position it recorded to
+`RemoteWorkspace::resume_turn(position, cancel)` before connecting. The
+events after it arrive again, each once; a stream agentd no longer holds
+reports an interrupted exit. `RemoteWorkspace::acked_positions()` lists the
+last acknowledged position of every tracked stream still open.
+
+Other streams (terminal, preview and device events, watches) are
+acknowledged as they are delivered.
+
 ## Protocol
 
 See `src/workspace_protocol.rs` for the frames, op names and error codes.

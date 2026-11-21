@@ -68,6 +68,53 @@ pub enum TurnEvent {
     Exited(TurnExit),
 }
 
+/// Where an event sits in the workspace's stream for it. A workspace that
+/// keeps events until they are acknowledged (see [`RemoteWorkspace`])
+/// attaches one to each event; [`Workspace::ack`] it once the event is
+/// recorded, and pass the last one recorded to
+/// [`RemoteWorkspace::resume_turn`] to pick the stream up after a restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct StreamPosition {
+    pub stream: u64,
+    pub seq: u64,
+}
+
+/// A turn event and, when the workspace redelivers unacknowledged events,
+/// its position.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnItem {
+    pub event: TurnEvent,
+    pub position: Option<StreamPosition>,
+}
+
+/// The events of a turn started with [`Workspace::start_tracked_turn`].
+pub struct TurnItems(TurnItemSource);
+
+enum TurnItemSource {
+    Plain(mpsc::UnboundedReceiver<TurnEvent>),
+    Tracked(mpsc::UnboundedReceiver<TurnItem>),
+}
+
+impl TurnItems {
+    /// Events from a workspace that does not track positions.
+    pub fn untracked(events: mpsc::UnboundedReceiver<TurnEvent>) -> Self {
+        Self(TurnItemSource::Plain(events))
+    }
+    pub(crate) fn tracked(items: mpsc::UnboundedReceiver<TurnItem>) -> Self {
+        Self(TurnItemSource::Tracked(items))
+    }
+    /// The next event, or `None` once the turn's events are done.
+    pub async fn recv(&mut self) -> Option<TurnItem> {
+        match &mut self.0 {
+            TurnItemSource::Plain(events) => events.recv().await.map(|event| TurnItem {
+                event,
+                position: None,
+            }),
+            TurnItemSource::Tracked(items) => items.recv().await,
+        }
+    }
+}
+
 /// The programs git workflows run besides git itself: the GitHub CLI, and
 /// the command that drafts commit messages and pull request descriptions
 /// (empty for the default).
@@ -84,6 +131,19 @@ pub struct TurnExit {
     pub cancelled: bool,
     /// The exit status as the platform describes it ("exit status: 1").
     pub status: String,
+}
+
+#[cfg(feature = "native")]
+fn boxed_future<'a, T: Send + 'a>(
+    future: impl std::future::Future<Output = T> + Send + 'a,
+) -> WorkspaceFuture<'a, T> {
+    Box::pin(future)
+}
+#[cfg(not(feature = "native"))]
+fn boxed_future<'a, T: 'a>(
+    future: impl std::future::Future<Output = T> + 'a,
+) -> WorkspaceFuture<'a, T> {
+    Box::pin(future)
 }
 
 fn unavailable_reply<'a>(method: String) -> WorkspaceFuture<'a, Reply> {
@@ -175,6 +235,20 @@ pub trait Workspace: MaybeSendSync {
         spec: TurnSpec,
         cancel: oneshot::Receiver<()>,
     ) -> WorkspaceFuture<'_, anyhow::Result<mpsc::UnboundedReceiver<TurnEvent>>>;
+    /// Start a provider turn whose events carry their stream position when
+    /// the workspace keeps unacknowledged events. Its caller acknowledges
+    /// each positioned event with [`Workspace::ack`] once it has recorded
+    /// it; until then the workspace redelivers it after a reconnect.
+    fn start_tracked_turn(
+        &self,
+        spec: TurnSpec,
+        cancel: oneshot::Receiver<()>,
+    ) -> WorkspaceFuture<'_, anyhow::Result<TurnItems>> {
+        let started = self.start_turn(spec, cancel);
+        boxed_future(async move { started.await.map(TurnItems::untracked) })
+    }
+    /// Acknowledge a tracked event and those before it in its stream.
+    fn ack(&self, _position: StreamPosition) {}
     /// The local servers a `subscribeDiscoveredLocalServers` stream reports.
     fn local_servers<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply>;
     /// `preview.stopLocalServer`.

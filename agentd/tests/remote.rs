@@ -4,7 +4,8 @@ use serde_json::json;
 use std::{path::Path, process::Command, sync::Arc, time::Duration};
 use t3_agentd::{Agentd, Config};
 use t3code_server::workspace::{
-    connect, GitTools, LocalWorkspace, NativeLink, RemoteWorkspace, TurnEvent, TurnSpec, Workspace,
+    connect, GitTools, LocalWorkspace, NativeLink, RemoteWorkspace, TurnEvent, TurnItem, TurnItems,
+    TurnSpec, Workspace,
 };
 use tokio::sync::oneshot;
 
@@ -14,6 +15,7 @@ struct Setup {
     local: Arc<LocalWorkspace>,
     remote: RemoteWorkspace,
     link: NativeLink,
+    url: String,
     _dir: tempfile::TempDir,
     root: std::path::PathBuf,
 }
@@ -39,12 +41,14 @@ async fn setup() -> Setup {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, agentd.router()).await });
     let remote = RemoteWorkspace::new(1, None);
-    let link = connect(remote.clone(), format!("ws://{addr}/"), TOKEN.into());
+    let url = format!("ws://{addr}/");
+    let link = connect(remote.clone(), url.clone(), TOKEN.into());
     wait_until(|| remote.is_ready()).await;
     Setup {
         local,
         remote,
         link,
+        url,
         _dir: dir,
         root,
     }
@@ -390,4 +394,139 @@ async fn a_turn_survives_a_dropped_socket() {
     assert_eq!(idle.running_turns, 0);
     assert_eq!(idle.unacked_frames, 0);
     assert!(idle.connected);
+}
+
+async fn next_item(items: &mut TurnItems) -> TurnItem {
+    tokio::time::timeout(Duration::from_secs(20), items.recv())
+        .await
+        .expect("the turn kept reporting")
+        .expect("the turn's events kept coming")
+}
+
+#[tokio::test]
+async fn a_restarted_consumer_gets_unacknowledged_events_again_once() {
+    let s = setup().await;
+    let (_cancel, cancelled) = oneshot::channel();
+    let mut items = s
+        .remote
+        .start_tracked_turn(
+            TurnSpec {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "for i in $(seq 1 20); do echo line $i; sleep 0.02; done".into(),
+                ],
+                prompt: String::new(),
+                cwd: s.root.to_string_lossy().into_owned(),
+                env_remove: vec![],
+            },
+            cancelled,
+        )
+        .await
+        .unwrap();
+    // The first consumer records and acknowledges four lines, receives the
+    // fifth, and stops before recording it.
+    let mut recorded = Vec::new();
+    let mut stored = None;
+    let unrecorded = loop {
+        let item = next_item(&mut items).await;
+        let position = item.position.expect("tracked events carry a position");
+        let TurnEvent::Stdout(line) = item.event else {
+            panic!("unexpected {:?}", item.event);
+        };
+        if recorded.len() == 4 {
+            break (line, position);
+        }
+        recorded.push(line);
+        s.remote.ack(position);
+        stored = Some(position);
+    };
+    let stored = stored.unwrap();
+    assert_eq!(unrecorded.1.seq, stored.seq + 1);
+    assert_eq!(s.remote.acked_positions(), vec![stored]);
+    drop(items);
+    drop(s.link);
+    drop(s.remote);
+
+    // A new consumer, as after a server restart, resumes from what it stored.
+    let remote = RemoteWorkspace::new(2, None);
+    let (_cancel, cancelled) = oneshot::channel();
+    let mut items = remote.resume_turn(stored, cancelled).await;
+    let _link = connect(remote.clone(), s.url.clone(), TOKEN.into());
+    let first = next_item(&mut items).await;
+    assert_eq!(first.event, TurnEvent::Stdout(unrecorded.0.clone()));
+    assert_eq!(first.position, Some(unrecorded.1));
+    recorded.push(unrecorded.0);
+    remote.ack(unrecorded.1);
+    let exit = loop {
+        let item = next_item(&mut items).await;
+        let position = item.position.expect("tracked events carry a position");
+        match item.event {
+            TurnEvent::Stdout(line) => recorded.push(line),
+            TurnEvent::Stderr(line) => panic!("unexpected stderr {line}"),
+            TurnEvent::Exited(exit) => {
+                remote.ack(position);
+                break exit;
+            }
+        }
+        remote.ack(position);
+    };
+    assert!(exit.success, "{exit:?}");
+    // Every line recorded exactly once, in order.
+    assert_eq!(
+        recorded,
+        (1..=20).map(|i| format!("line {i}\n")).collect::<Vec<_>>()
+    );
+    // agentd let go of the stream once its end was acknowledged too.
+    let mut idle = remote.idle_state().await.unwrap();
+    for _ in 0..200 {
+        if idle.unacked_frames == 0 && idle.open_streams <= 4 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        idle = remote.idle_state().await.unwrap();
+    }
+    assert_eq!(idle.unacked_frames, 0);
+    assert_eq!(idle.running_turns, 0);
+    assert!(remote.acked_positions().is_empty());
+}
+
+#[tokio::test]
+async fn a_tracked_turn_holds_frames_until_they_are_acknowledged() {
+    let s = setup().await;
+    let (_cancel, cancelled) = oneshot::channel();
+    let mut items = s
+        .remote
+        .start_tracked_turn(
+            TurnSpec {
+                command: vec!["sh".into(), "-c".into(), "echo one; echo two".into()],
+                prompt: String::new(),
+                cwd: s.root.to_string_lossy().into_owned(),
+                env_remove: vec![],
+            },
+            cancelled,
+        )
+        .await
+        .unwrap();
+    let mut positions = Vec::new();
+    loop {
+        let item = next_item(&mut items).await;
+        positions.push(item.position.unwrap());
+        if matches!(item.event, TurnEvent::Exited(_)) {
+            break;
+        }
+    }
+    // Received but not acknowledged: agentd still holds them.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(s.remote.idle_state().await.unwrap().unacked_frames > 0);
+    s.remote.ack(*positions.last().unwrap());
+    let mut idle = s.remote.idle_state().await.unwrap();
+    for _ in 0..200 {
+        if idle.unacked_frames == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        idle = s.remote.idle_state().await.unwrap();
+    }
+    assert_eq!(idle.unacked_frames, 0);
 }
