@@ -118,7 +118,8 @@ async fn codex_turn_streams_text_tool_calls_and_usage() {
         e,
         ProviderEvent::ProviderTurn {
             native_turn_id: Some(_),
-            status: TurnStatus::Running
+            status: TurnStatus::Running,
+            ..
         }
     )));
     assert!(events
@@ -426,7 +427,37 @@ async fn claude_turn_streams_text_tool_calls_and_usage() {
         .into_iter()
         .find(|m| m["type"] == "user")
         .unwrap();
-    assert_eq!(prompt["message"]["content"][0]["text"], "Say hello");
+    // A plain prompt goes as a string, and counts against the attachment budget.
+    assert_eq!(prompt["message"]["content"], "Say hello");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::PromptDelivered {
+            bytes: 11,
+            pages: 0
+        }
+    )));
+    // The last call's usage, with its prompt cache lifetime, and the turn's totals.
+    let last = events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            ProviderEvent::Usage { usage } => Some(usage.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(last.prompt_cache_ttl_ms, Some(3_600_000));
+    assert!(last.prompt_cache_expires_at.is_some());
+    let turn = events
+        .iter()
+        .find_map(|e| match e {
+            ProviderEvent::TurnUsage { usage } => Some(usage.clone()),
+            _ => None,
+        })
+        .expect("the turn's usage");
+    assert_eq!(turn["usageStatus"], "complete");
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ProviderEvent::ProviderTurn { model: Some(_), .. })));
     let args = std::fs::read_to_string(dir.path().join("in.jsonl.args")).unwrap();
     assert!(
         args.contains("--permission-mode bypassPermissions"),

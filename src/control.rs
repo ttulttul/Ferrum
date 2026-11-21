@@ -399,6 +399,7 @@ impl ControlPlane {
             store.threads.get(&run.thread_id).and_then(|thread| {
                 crate::provider_state::provider_turn(
                     &self.settings(),
+                    &crate::model_manifest::BUNDLED,
                     &thread.stored_row(),
                     &thread.provider,
                 )
@@ -2350,6 +2351,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
         emit(ProviderEvent::ProviderTurn {
             native_turn_id: Some("turn_1".into()),
             status: TurnStatus::Running,
+            model: None,
         });
         emit(ProviderEvent::TurnItem {
             item: ProviderItem::new("msg_1", "assistant_message", "running").with("text", ""),

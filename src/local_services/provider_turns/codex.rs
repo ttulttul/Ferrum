@@ -63,6 +63,8 @@ pub(super) async fn run(
         runtime_mode: provider.runtime_mode().to_owned(),
         pending: HashMap::new(),
         file_changes: HashMap::new(),
+        usage_baseline: None,
+        turn_usage: TurnUsage::default(),
         thread_id: None,
         turn_id: None,
         terminal: None,
@@ -87,12 +89,116 @@ struct Session {
     pending: HashMap<String, Pending>,
     /// Each file change item's changes by path, for approval prompts.
     file_changes: HashMap<String, Value>,
+    /// The thread-wide token totals Codex last reported.
+    usage_baseline: Option<Breakdown>,
+    /// What this turn used so far.
+    turn_usage: TurnUsage,
     thread_id: Option<String>,
     turn_id: Option<String>,
     /// `turn/completed` for our turn, once it arrived.
     terminal: Option<Value>,
     /// The last error Codex reported without retrying.
     last_error: Option<String>,
+}
+
+/// Token counts as Codex reports them (`total` or `last`).
+#[derive(Clone, Copy, Default)]
+struct Breakdown {
+    input: u64,
+    cached: u64,
+    cache_creation: Option<u64>,
+    output: u64,
+    reasoning: u64,
+}
+
+impl Breakdown {
+    fn of(usage: &Value) -> Self {
+        let count = |key: &str| usage[key].as_i64().unwrap_or(0).max(0) as u64;
+        Self {
+            input: count("inputTokens"),
+            cached: count("cachedInputTokens"),
+            cache_creation: usage["cacheWriteInputTokens"].as_u64(),
+            output: count("outputTokens"),
+            reasoning: count("reasoningOutputTokens"),
+        }
+    }
+}
+
+/// The reference's CodexTurnTokenUsage accumulator.
+#[derive(Default)]
+struct TurnUsage {
+    input: u64,
+    cached: u64,
+    cache_creation: Option<u64>,
+    output: u64,
+    reasoning: u64,
+    observed: bool,
+}
+
+impl TurnUsage {
+    fn new() -> Self {
+        Self {
+            cache_creation: Some(0),
+            ..Self::default()
+        }
+    }
+
+    /// Add the growth from `previous` to `current` (thread-wide totals),
+    /// or `last` when there is no usable baseline.
+    fn add(&mut self, previous: Option<Breakdown>, current: Breakdown, last: Breakdown) {
+        let delta = match previous {
+            Some(previous)
+                if current.input >= previous.input
+                    && current.cached >= previous.cached
+                    && current.output >= previous.output
+                    && current.reasoning >= previous.reasoning =>
+            {
+                Breakdown {
+                    input: current.input - previous.input,
+                    cached: current.cached - previous.cached,
+                    cache_creation: match (current.cache_creation, previous.cache_creation) {
+                        (Some(now), Some(before)) if now >= before => Some(now - before),
+                        _ => None,
+                    },
+                    output: current.output - previous.output,
+                    reasoning: current.reasoning - previous.reasoning,
+                }
+            }
+            _ => last,
+        };
+        if delta.input > 0 || delta.cached > 0 || delta.output > 0 || delta.reasoning > 0 {
+            self.observed = true;
+        }
+        self.input += delta.input;
+        self.cached += delta.cached;
+        self.output += delta.output;
+        self.reasoning += delta.reasoning;
+        self.cache_creation = match (self.cache_creation, delta.cache_creation) {
+            (Some(sum), Some(more)) => Some(sum + more),
+            _ => None,
+        };
+    }
+
+    /// The reference's completeCodexTurnTokenUsage.
+    fn complete(&self, completed: bool) -> Value {
+        if !self.observed {
+            return json!({"usageStatus": "unavailable", "usageScope": "main_agent",
+                "hasSubagents": false});
+        }
+        let mut usage = json!({
+            "usageStatus": if completed { "complete" } else { "partial" },
+            "usageScope": "main_agent",
+            "inputTokens": self.input,
+            "cachedInputTokens": self.input.min(self.cached),
+            "outputTokens": self.output,
+            "reasoningTokens": self.output.min(self.reasoning),
+            "hasSubagents": false,
+        });
+        if let Some(creation) = self.cache_creation {
+            usage["cacheCreationTokens"] = json!(self.input.min(creation));
+        }
+        usage
+    }
 }
 
 /// A Codex request waiting for the user.
@@ -164,6 +270,22 @@ enum Failed {
 
 impl Session {
     async fn turn(&mut self, spec: &TurnSpec, provider: &ProviderTurn) -> TurnEnd {
+        let end = self.drive_turn(spec, provider).await;
+        // A turn Codex started and ended reports what it used, as the
+        // reference does; one whose app-server closed never ends there.
+        let crashed = end.failure.as_ref().is_some_and(|failure| {
+            failure.message == crate::workspace::provider::CODEX_STREAM_CLOSED
+        });
+        if self.turn_id.is_some() && !crashed {
+            let completed = end.status == TurnStatus::Completed;
+            self.sink.send(ProviderEvent::TurnUsage {
+                usage: self.turn_usage.complete(completed),
+            });
+        }
+        end
+    }
+
+    async fn drive_turn(&mut self, spec: &TurnSpec, provider: &ProviderTurn) -> TurnEnd {
         match self.drive(spec, provider).await {
             Ok(end) => end,
             Err(Failed::Cancelled) => TurnEnd::interrupted(true),
@@ -308,9 +430,11 @@ impl Session {
     fn turn_started(&mut self, id: &str) {
         if self.turn_id.is_none() {
             self.turn_id = Some(id.to_owned());
+            self.turn_usage = TurnUsage::new();
             self.sink.send(ProviderEvent::ProviderTurn {
                 native_turn_id: Some(id.to_owned()),
                 status: TurnStatus::Running,
+                model: None,
             });
         }
     }
@@ -479,9 +603,17 @@ impl Session {
                     explanation: params["explanation"].as_str().map(str::to_owned),
                 });
             }
-            // A resumed thread first repeats its last turn's usage.
-            "thread/tokenUsage/updated" if self.turn_id.is_some() => {
+            // A resumed thread first repeats its last turn's usage, which
+            // only sets the baseline the turn's usage counts from.
+            "thread/tokenUsage/updated" if self.turn_id.is_none() => {
+                self.usage_baseline = Some(Breakdown::of(&params["tokenUsage"]["total"]));
+            }
+            "thread/tokenUsage/updated" => {
                 let usage = &params["tokenUsage"];
+                let total = Breakdown::of(&usage["total"]);
+                self.turn_usage
+                    .add(self.usage_baseline, total, Breakdown::of(&usage["last"]));
+                self.usage_baseline = Some(total);
                 let last = &usage["last"];
                 let count = |key: &str| last[key].as_i64().unwrap_or(0).max(0) as u64;
                 self.sink.send(ProviderEvent::Usage {
@@ -492,6 +624,7 @@ impl Session {
                         cached_input_tokens: count("cachedInputTokens"),
                         output_tokens: count("outputTokens"),
                         reasoning_output_tokens: count("reasoningOutputTokens"),
+                        ..TokenUsage::default()
                     },
                 });
             }

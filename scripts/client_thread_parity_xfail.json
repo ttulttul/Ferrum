@@ -1,14 +1,13 @@
 {
   "codex turn": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Item details differ: the reference omits command output (outputOmitted, completionWake) and file_change diffStr from the projection."
+    "shape": "Command output is projected where the reference omits it (outputOmitted), file_change keeps diffStr, and commands lack completionWake."
   },
   "codex failed turn": {
     "orchestration.subscribeThread (live turn)": "On a usage-limit error the reference keeps the run waiting for the limit to reset; Rust fails the run."
   },
   "codex approval": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "The provider turn has no turnTokenUsage record."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "codex crash": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
@@ -20,67 +19,58 @@
   },
   "claude turn": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
   },
   "claude crash": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "No Claude attachment budget in the provider thread's nativeMetadata, and no tokenUsage or turnTokenUsage on the provider turn."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "claude missing": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "codex interrupt": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "The provider turn has no turnTokenUsage record."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "claude interrupt": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "No Claude attachment budget in nativeMetadata, no turnTokenUsage, model or prompt cache fields on the provider turn, and command output is projected where the reference omits it."
+    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
   },
   "codex approval for session": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "The provider turn has no turnTokenUsage record."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "codex approval declined": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "The provider turn has no turnTokenUsage record."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "codex approval-required": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "The provider turn has no turnTokenUsage record."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "codex auto-accept-edits": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "The provider turn has no turnTokenUsage record."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "codex user input": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "The provider turn has no turnTokenUsage record."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "codex approval interrupted": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "The provider turn has no turnTokenUsage record.",
     "items": "The reference captures a checkpoint after a turn interrupted while an approval waits; Rust captures one only after a completed turn.",
     "live kinds": "The reference captures a checkpoint after a turn interrupted while an approval waits; Rust captures one only after a completed turn."
   },
   "claude approval": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
   },
   "claude approval declined": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
   },
   "claude approval-required": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
   },
   "claude auto-accept-edits": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "Item details differ: no turnTokenUsage or model on the provider turn, no prompt cache fields on tokenUsage, no Claude attachment budget in nativeMetadata, and tool output and file_change details are projected where the reference omits them."
+    "shape": "Tool output (command output, Read results) is projected where the reference omits it and marks outputOmitted, and Claude file_change items carry changes, oldStr and newStr the reference leaves out."
   },
   "claude approval interrupted": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "shape": "No Claude attachment budget in nativeMetadata, and no turnTokenUsage or model on the provider turn."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   }
 }

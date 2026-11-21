@@ -24,6 +24,9 @@ pub struct ProviderState {
     pub runs: HashMap<Uuid, RunRecord>,
     /// How each run's provider turn ended, from its `turn.terminal`.
     pub terminals: HashMap<Uuid, Terminal>,
+    /// What the native session's prompts used of its attachment budget
+    /// (bytes, pages), once a prompt reached it.
+    pub attachment_budget: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +65,12 @@ pub struct RunRecord {
     pub turn_started: bool,
     pub native_turn_id: Option<String>,
     pub usage: Option<(TokenUsage, u64)>,
+    /// The whole turn's usage (`turnTokenUsage`).
+    pub turn_usage: Option<Value>,
+    /// The model the turn ran on.
+    pub model: Option<String>,
+    /// The CLI received the run's prompt.
+    pub prompt_delivered: bool,
     /// Items in the order first seen.
     pub items: Vec<ItemRecord>,
     pub plan: Option<PlanRecord>,
@@ -125,6 +134,9 @@ impl ProviderState {
             turn_started: false,
             native_turn_id: None,
             usage: None,
+            turn_usage: None,
+            model: None,
+            prompt_delivered: false,
             items: Vec::new(),
             plan: None,
             ended_at: None,
@@ -134,9 +146,15 @@ impl ProviderState {
             ProviderEvent::ProviderThread {
                 driver,
                 native_thread_id,
+                resumed,
                 ..
             } => {
                 record.driver = driver.clone();
+                // A run that starts a new native session starts a new
+                // attachment budget.
+                if !resumed && !record.prompt_delivered {
+                    self.attachment_budget = None;
+                }
                 self.native_thread = Some(NativeThread {
                     driver: driver.clone(),
                     id: native_thread_id.clone(),
@@ -153,8 +171,15 @@ impl ProviderState {
                 thread.status = "active";
                 thread.updated_at = at;
             }
-            ProviderEvent::ProviderTurn { native_turn_id, .. } => {
+            ProviderEvent::ProviderTurn {
+                native_turn_id,
+                model,
+                ..
+            } => {
                 record.turn_started = true;
+                if model.is_some() {
+                    record.model = model.clone();
+                }
                 if native_turn_id.is_some() {
                     record.native_turn_id = native_turn_id.clone();
                 }
@@ -204,6 +229,12 @@ impl ProviderState {
                 });
             }
             ProviderEvent::Usage { usage } => record.usage = Some((usage.clone(), at)),
+            ProviderEvent::TurnUsage { usage } => record.turn_usage = Some(usage.clone()),
+            ProviderEvent::PromptDelivered { bytes, pages } => {
+                record.prompt_delivered = true;
+                let (used_bytes, used_pages) = self.attachment_budget.unwrap_or_default();
+                self.attachment_budget = Some((used_bytes + bytes, used_pages + pages));
+            }
             ProviderEvent::TurnTerminal {
                 status,
                 failure,
@@ -342,6 +373,7 @@ impl ProviderState {
 /// workspace does not run.
 pub(crate) fn provider_turn(
     settings: &Value,
+    manifest: &Value,
     row: &Value,
     state: &ProviderState,
 ) -> Option<(ProviderTurn, Vec<(String, String)>)> {
@@ -391,6 +423,9 @@ pub(crate) fn provider_turn(
         reasoning_effort,
         resume: state.resume_for(driver),
         runtime_mode: row["runtimeMode"].as_str().unwrap_or_default().to_owned(),
+        context_window: (driver == provider::CLAUDE_AGENT)
+            .then(|| crate::model_manifest::claude_context_window(manifest, selection))
+            .flatten(),
     };
     Some((turn, env))
 }
@@ -459,7 +494,7 @@ mod tests {
             },
             1,
         );
-        let (turn, env) = provider_turn(&settings, &row, &state).unwrap();
+        let (turn, env) = provider_turn(&settings, &json!({}), &row, &state).unwrap();
         assert_eq!(turn.driver, "codex");
         assert_eq!(turn.binary_path, "/opt/codex");
         assert_eq!(turn.launch_args, ["--profile", "my work", "-c", "x=1"]);
@@ -472,13 +507,13 @@ mod tests {
         // A built-in instance needs no settings; another driver's native
         // thread is not resumed.
         let claude = json!({"modelSelection": {"instanceId": "claudeAgent", "model": "default"}});
-        let (turn, _) = provider_turn(&json!({}), &claude, &state).unwrap();
+        let (turn, _) = provider_turn(&json!({}), &json!({}), &claude, &state).unwrap();
         assert_eq!(
             (turn.driver.as_str(), turn.model.as_str()),
             ("claudeAgent", "")
         );
         assert_eq!(turn.resume, None);
         let other = json!({"modelSelection": {"instanceId": "cursor", "model": "x"}});
-        assert!(provider_turn(&json!({}), &other, &state).is_none());
+        assert!(provider_turn(&json!({}), &json!({}), &other, &state).is_none());
     }
 }

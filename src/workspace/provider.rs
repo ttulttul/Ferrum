@@ -50,6 +50,10 @@ pub struct ProviderTurn {
     /// request the CLI still makes goes to the user, in every mode.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub runtime_mode: String,
+    /// The model's context window from the model catalog, the
+    /// `maxTokens` of a Claude turn's token usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 impl ProviderTurn {
@@ -89,6 +93,9 @@ pub enum ProviderEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         native_turn_id: Option<String>,
         status: TurnStatus,
+        /// The model the turn ran on, once the CLI reports it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// A turn item was created or changed. Later updates of the same
     /// `item.id` replace earlier ones.
@@ -109,9 +116,17 @@ pub enum ProviderEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         explanation: Option<String>,
     },
-    /// Token usage so far, in the reference's `tokenUsage` shape.
+    /// Token usage so far, in the reference's `tokenUsage` shape: the
+    /// context the latest model call used.
     #[serde(rename = "usage.updated")]
     Usage { usage: TokenUsage },
+    /// The whole turn's token usage, the reference's `turnTokenUsage`.
+    #[serde(rename = "turn_usage.updated")]
+    TurnUsage { usage: Value },
+    /// The CLI received the turn's prompt, which counts `bytes` and `pages`
+    /// against the session's attachment budget (Claude).
+    #[serde(rename = "prompt.delivered")]
+    PromptDelivered { bytes: u64, pages: u64 },
     /// Recorded by earlier builds, which approved every request themselves.
     /// Kept so their event logs still load; it changes nothing.
     #[serde(rename = "runtime_request.resolved", rename_all = "camelCase")]
@@ -321,6 +336,12 @@ pub struct TokenUsage {
     pub cached_input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_output_tokens: u64,
+    /// How long the prompt cache the call wrote lasts (Claude).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_ttl_ms: Option<u64>,
+    /// When that cache expires, counted from the call's start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_expires_at: Option<String>,
 }
 
 #[cfg(test)]

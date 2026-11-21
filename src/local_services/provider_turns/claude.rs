@@ -99,11 +99,28 @@ struct Attempt<'a> {
     open_items: Vec<(String, &'static str)>,
     tools: HashMap<String, PendingTool>,
     next_control: u64,
-    usage: Option<TokenUsage>,
     runtime_mode: String,
     responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
     /// Permission requests waiting for the user, by request id.
     pending: HashMap<String, PendingPermission>,
+    /// The model's context window, the usage's `maxTokens`.
+    context_window: Option<u64>,
+    /// The latest root model call's usage, as it streams.
+    stream_usage: Option<StreamUsage>,
+    /// Models of the turn's root assistant messages, in order.
+    root_models: Vec<String>,
+    /// Whether the turn started (Claude Code's `init`).
+    turn_started: bool,
+    /// The turn's `result` message, once it came.
+    result: Option<Value>,
+}
+
+/// One model call's usage as it streams (`message_start`, then deltas).
+struct StreamUsage {
+    message_id: String,
+    usage: Value,
+    /// When the call started (ms), from which its prompt cache lasts.
+    requested_at_ms: Option<i64>,
 }
 
 impl<'a> Attempt<'a> {
@@ -192,12 +209,21 @@ impl<'a> Attempt<'a> {
             open_items: vec![],
             tools: HashMap::new(),
             next_control: 1,
-            usage: None,
             runtime_mode: provider.runtime_mode().to_owned(),
             responses,
             pending: HashMap::new(),
+            context_window: provider.context_window,
+            stream_usage: None,
+            root_models: Vec::new(),
+            turn_started: false,
+            result: None,
         };
         let outcome = attempt.drive(spec, cancel).await;
+        if let (Outcome::Ended(end), true) = (&outcome, attempt.turn_started) {
+            attempt.sink.send(ProviderEvent::TurnUsage {
+                usage: turn_token_usage(attempt.result.as_ref(), end.status, &attempt.root_models),
+            });
+        }
         let Attempt { cli, .. } = attempt;
         cli.close().await;
         outcome
@@ -208,15 +234,23 @@ impl<'a> Attempt<'a> {
         spec: &TurnSpec,
         cancel: &mut Option<oneshot::Receiver<()>>,
     ) -> Outcome {
+        // A plain prompt goes as a string, as the reference's
+        // makeClaudeUserMessage builds it.
+        let content = json!(spec.prompt);
         let prompt = json!({
             "type": "user",
             "session_id": "",
-            "message": {"role": "user", "content": [{"type": "text", "text": spec.prompt}]},
+            "message": {"role": "user", "content": content},
             "parent_tool_use_id": null,
         });
         if self.cli.write(&prompt).await.is_err() {
             return self.closed().await;
         }
+        // What the prompt adds to the session's attachment budget.
+        self.sink.send(ProviderEvent::PromptDelivered {
+            bytes: content.to_string().len() as u64,
+            pages: 0,
+        });
         let mut deadline = None;
         loop {
             let line = tokio::select! {
@@ -294,9 +328,11 @@ impl<'a> Attempt<'a> {
                     native_thread_id: session,
                     model: message["model"].as_str().map(str::to_owned),
                 });
+                self.turn_started = true;
                 self.sink.send(ProviderEvent::ProviderTurn {
                     native_turn_id: None,
                     status: TurnStatus::Running,
+                    model: None,
                 });
             }
             "stream_event" if !nested => self.stream_event(&message["event"]),
@@ -315,6 +351,32 @@ impl<'a> Attempt<'a> {
             Some("message_start") => {
                 self.message_id = event["message"]["id"].as_str().map(str::to_owned);
                 self.blocks.clear();
+                let usage = &event["message"]["usage"];
+                if usage.is_object() {
+                    self.stream_usage = Some(StreamUsage {
+                        message_id: self.message_id.clone().unwrap_or_default(),
+                        usage: usage.clone(),
+                        requested_at_ms: Some(now_ms()),
+                    });
+                    self.emit_usage();
+                }
+            }
+            Some("message_delta") => {
+                let delta = &event["usage"];
+                if let (Some(stream), true) = (self.stream_usage.as_mut(), delta.is_object()) {
+                    // The reference's mergeClaudeStreamUsage.
+                    for key in [
+                        "input_tokens",
+                        "cache_creation_input_tokens",
+                        "cache_read_input_tokens",
+                    ] {
+                        if !delta[key].is_null() {
+                            stream.usage[key] = delta[key].clone();
+                        }
+                    }
+                    stream.usage["output_tokens"] = delta["output_tokens"].clone();
+                    self.emit_usage();
+                }
             }
             Some("content_block_start") => {
                 let index = event["index"].as_u64().unwrap_or_default();
@@ -355,7 +417,76 @@ impl<'a> Attempt<'a> {
 
     /// A complete assistant message: finish its streamed items and start its
     /// tool calls.
+    /// The latest call's usage as the turn's `tokenUsage`, as the
+    /// reference's emitContextUsage reports it; usage without input is a
+    /// placeholder and is skipped.
+    fn emit_usage(&mut self) {
+        let Some(stream) = &self.stream_usage else {
+            return;
+        };
+        let usage = &stream.usage;
+        let count = |key: &str| usage[key].as_u64().unwrap_or(0);
+        let input = count("input_tokens")
+            + count("cache_creation_input_tokens")
+            + count("cache_read_input_tokens");
+        if input == 0 {
+            return;
+        }
+        let output = count("output_tokens");
+        let creation = &usage["cache_creation"];
+        let ttl = if creation["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0) > 0 {
+            Some(60 * 60_000)
+        } else if creation["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0) > 0 {
+            Some(5 * 60_000)
+        } else {
+            None
+        };
+        let expires = ttl
+            .zip(stream.requested_at_ms)
+            .map(|(ttl, started)| crate::auth_service::iso(started + ttl as i64));
+        self.sink.send(ProviderEvent::Usage {
+            usage: TokenUsage {
+                used_tokens: input + output,
+                max_tokens: self.context_window,
+                input_tokens: input,
+                cached_input_tokens: count("cache_read_input_tokens"),
+                output_tokens: output,
+                reasoning_output_tokens: 0,
+                prompt_cache_ttl_ms: ttl,
+                prompt_cache_expires_at: expires,
+            },
+        });
+    }
+
     fn assistant(&mut self, message: &Value) {
+        // The model each root call ran on (not Claude Code's own notices).
+        if let Some(model) = message["model"].as_str().filter(|m| *m != "<synthetic>") {
+            if !self.root_models.iter().any(|known| known == model) {
+                self.root_models.push(model.to_owned());
+            }
+            self.sink.send(ProviderEvent::ProviderTurn {
+                native_turn_id: None,
+                status: TurnStatus::Running,
+                model: Some(model.to_owned()),
+            });
+            // An assistant snapshot of a call that did not stream fills in
+            // its usage, as the reference fills gaps in streamed usage.
+            let snapshot = &message["usage"];
+            let id = message["id"].as_str().unwrap_or_default();
+            if snapshot.is_object()
+                && self
+                    .stream_usage
+                    .as_ref()
+                    .is_none_or(|stream| stream.message_id != id)
+            {
+                self.stream_usage = Some(StreamUsage {
+                    message_id: id.to_owned(),
+                    usage: snapshot.clone(),
+                    requested_at_ms: None,
+                });
+                self.emit_usage();
+            }
+        }
         let message_id = message["id"].as_str().unwrap_or("message").to_owned();
         for (index, block) in message["content"]
             .as_array()
@@ -632,27 +763,7 @@ impl<'a> Attempt<'a> {
     }
 
     fn result(&mut self, message: &Value) -> Outcome {
-        let usage = &message["usage"];
-        if usage.is_object() {
-            let count = |key: &str| usage[key].as_u64().unwrap_or(0);
-            let input = count("input_tokens")
-                + count("cache_creation_input_tokens")
-                + count("cache_read_input_tokens");
-            let output = count("output_tokens");
-            let max_tokens = message["modelUsage"]
-                .as_object()
-                .and_then(|models| models.values().find_map(|m| m["contextWindow"].as_u64()));
-            let usage = TokenUsage {
-                used_tokens: input + output,
-                max_tokens,
-                input_tokens: input,
-                cached_input_tokens: count("cache_read_input_tokens"),
-                output_tokens: output,
-                reasoning_output_tokens: 0,
-            };
-            self.usage = Some(usage.clone());
-            self.sink.send(ProviderEvent::Usage { usage });
-        }
+        self.result = Some(message.clone());
         let errors: Vec<&str> = message["errors"]
             .as_array()
             .into_iter()
@@ -721,6 +832,85 @@ fn tool_item(id: &str, name: &str, input: &Value) -> ProviderItem {
             item
         }
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64)
+}
+
+/// The reference's normalizeClaudeTurnTokenUsage for a turn that ran in one
+/// segment: the `result`'s totals, `complete` only for a turn that completed
+/// with a successful result.
+fn turn_token_usage(result: Option<&Value>, status: TurnStatus, models: &[String]) -> Value {
+    let usage = result.map_or(&Value::Null, |result| &result["usage"]);
+    let count = |key: &str| {
+        usage[key]
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .map(|n| n.round() as u64)
+    };
+    let uncached = count("input_tokens");
+    let cached = count("cache_read_input_tokens");
+    let creation = count("cache_creation_input_tokens");
+    let output = count("output_tokens");
+    let thinking = usage["output_tokens_details"]["thinking_tokens"]
+        .as_f64()
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .map(|n| n.round() as u64);
+    let success = result.is_some_and(|result| result["subtype"] == "success");
+    let known = uncached.is_some() || cached.is_some() || creation.is_some() || output.is_some();
+    let positive =
+        uncached.unwrap_or(0) + cached.unwrap_or(0) + creation.unwrap_or(0) + output.unwrap_or(0)
+            > 0;
+    let mut out = serde_json::Map::new();
+    if !models.is_empty() {
+        out.insert("models".into(), json!(models));
+    }
+    if !known || (!success && !positive) {
+        out.insert("usageStatus".into(), json!("unavailable"));
+        out.insert("usageScope".into(), json!("main_agent"));
+        out.insert("hasSubagents".into(), json!(false));
+        return Value::Object(out);
+    }
+    let input = uncached.map(|uncached| {
+        uncached
+            + if usage["cache_read_input_tokens"].is_null() {
+                0
+            } else {
+                cached.unwrap_or(0)
+            }
+            + if usage["cache_creation_input_tokens"].is_null() {
+                0
+            } else {
+                creation.unwrap_or(0)
+            }
+    });
+    out.insert("usageScope".into(), json!("main_agent"));
+    if let Some(cached) = cached {
+        out.insert("cachedInputTokens".into(), json!(cached));
+    }
+    if let Some(creation) = creation {
+        out.insert("cacheCreationTokens".into(), json!(creation));
+    }
+    if let (Some(thinking), Some(output)) = (thinking, output) {
+        out.insert("reasoningTokens".into(), json!(output.min(thinking)));
+    }
+    out.insert("hasSubagents".into(), json!(false));
+    let complete =
+        status == TurnStatus::Completed && success && input.is_some() && output.is_some();
+    out.insert(
+        "usageStatus".into(),
+        json!(if complete { "complete" } else { "partial" }),
+    );
+    if let Some(input) = input {
+        out.insert("inputTokens".into(), json!(input));
+    }
+    if let Some(output) = output {
+        out.insert("outputTokens".into(), json!(output));
+    }
+    Value::Object(out)
 }
 
 /// The reference's classifyClaudeNativeTool request kind.
