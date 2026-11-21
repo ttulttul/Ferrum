@@ -912,10 +912,14 @@ pub(crate) fn now_iso() -> String {
     crate::auth_service::iso(crate::auth_service::now())
 }
 
-/// The server's environment with the instance's own variables over it
-/// (`mergeProviderInstanceEnvironment`).
+/// The server's environment, with the login shell's `PATH`, `__MISE_DIFF`
+/// and `JAVA_HOME` as of now (a runtime refresh replaces them), and the
+/// instance's own variables over it (`mergeProviderInstanceEnvironment`).
 fn base_env(instance: &[(String, String)]) -> ProcessEnv {
     let mut env: ProcessEnv = std::env::vars().collect();
+    for (name, value) in crate::login_shell::current().variables() {
+        env.insert(name.to_owned(), value.to_string_lossy().into_owned());
+    }
     for (name, value) in instance {
         env.insert(name.clone(), value.clone());
     }
