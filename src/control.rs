@@ -805,6 +805,19 @@ impl ControlPlane {
             "server.reportClientActivity" => Call::Done(Reply::Success(Value::Null)),
             "preview.reportProfiles" => Call::Done(Reply::Success(Value::Null)),
             "projects.mutate" => Call::Done(self.create_project(params)),
+            "orchestration.getThreadProjection" => {
+                let store = self.store_now();
+                Call::Done(
+                    match params["threadId"]
+                        .as_str()
+                        .and_then(|id| store.threads.get(id))
+                    {
+                        Some(thread) => Reply::Success(thread.projection()),
+                        None => Reply::Failure(json!({"_tag":"Fail",
+                        "error":crate::subscription::thread_projection_error(&params["threadId"])})),
+                    },
+                )
+            }
             "orchestration.subscribeShell" => {
                 let sequence = self.sequence_now();
                 let store = self.store_now();
@@ -2305,5 +2318,143 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             None
         );
         assert!(agentd.turns_acked());
+    }
+
+    #[test]
+    fn provider_events_become_the_projection_a_client_renders() {
+        use crate::workspace::provider::{
+            ProviderEvent, ProviderFailure, ProviderItem, ThreadDisposition, TokenUsage, TurnStatus,
+        };
+        let runtime = Arc::new(ManualRuntime::default());
+        let plane = ControlPlane::open(
+            config(),
+            Arc::new(MemoryStore::new()),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
+        let agentd = Arc::new(FakeAgentd::default());
+        now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+        let mut connection = owner(&plane);
+        seed(&plane, &mut connection);
+        dispatch_message(&plane, &mut connection, "hello");
+        runtime.run();
+        let stream = *agentd.turns().keys().next().unwrap();
+        let emit = |event| agentd.emit(stream, WireTurnEvent::Provider { event });
+        emit(ProviderEvent::ProviderThread {
+            driver: "codex".into(),
+            native_thread_id: "thr_1".into(),
+            resumed: false,
+            model: None,
+        });
+        emit(ProviderEvent::ProviderTurn {
+            native_turn_id: Some("turn_1".into()),
+            status: TurnStatus::Running,
+        });
+        emit(ProviderEvent::TurnItem {
+            item: ProviderItem::new("msg_1", "assistant_message", "running").with("text", ""),
+        });
+        emit(ProviderEvent::TurnItemDelta {
+            item_id: "msg_1".into(),
+            delta: "Hel".into(),
+        });
+        emit(ProviderEvent::TurnItemDelta {
+            item_id: "msg_1".into(),
+            delta: "lo".into(),
+        });
+        runtime.run();
+        let projection = || {
+            let reply = send(
+                &plane,
+                &mut owner(&plane),
+                json!({"_tag":"Request","id":"g","tag":"orchestration.getThreadProjection","payload":{"threadId":"t1"},"headers":[]}),
+            );
+            reply[0]["exit"]["value"].clone()
+        };
+        let streaming = projection();
+        let message = &streaming["messages"][1];
+        assert_eq!(message["text"], "Hello", "{streaming:#}");
+        assert_eq!(message["streaming"], true);
+        assert_eq!(message["id"], "message:provider:codex:native-item:msg_1");
+
+        emit(ProviderEvent::TurnItem {
+            item: ProviderItem::new("call_1", "command_execution", "completed")
+                .with("input", "ls")
+                .with("output", "a\n")
+                .with("exitCode", 0),
+        });
+        emit(ProviderEvent::Usage {
+            usage: TokenUsage {
+                used_tokens: 10,
+                output_tokens: 3,
+                ..Default::default()
+            },
+        });
+        emit(ProviderEvent::TurnTerminal {
+            status: TurnStatus::Failed,
+            failure: Some(ProviderFailure::new("provider_error", "boom")),
+            thread_disposition: ThreadDisposition::Reusable,
+        });
+        agentd.emit(
+            stream,
+            WireTurnEvent::Exited {
+                success: false,
+                cancelled: false,
+                status: "exit status: 1".into(),
+            },
+        );
+        runtime.run();
+        let ended = projection();
+        let run = &ended["runs"][0];
+        let run_id = run["id"].as_str().unwrap();
+        assert_eq!(run["status"], "failed");
+        assert_eq!(run["rootNodeId"], format!("node:run:{}:root", uri(run_id)));
+        assert_eq!(
+            ended["thread"]["activeProviderThreadId"],
+            run["providerThreadId"]
+        );
+        let items: Vec<(u64, &str, &str)> = ended["turnItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                (
+                    i["ordinal"].as_u64().unwrap(),
+                    i["type"].as_str().unwrap(),
+                    i["status"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                (1_000_001, "user_message", "completed"),
+                // Still streaming when the turn failed: it ends with it.
+                (1_000_002, "assistant_message", "failed"),
+                (1_000_003, "command_execution", "completed"),
+                (1_000_004, "error", "failed"),
+            ]
+        );
+        let error = &ended["turnItems"][3];
+        assert_eq!(error["failure"]["message"], "boom");
+        assert_eq!(error["title"], "Provider error");
+        assert_eq!(
+            error["id"],
+            "turn-item:provider:codex:native-item:terminal-failure%3Aprovider-turn%3Aprovider%3Acodex%3Anative-turn%3Aturn_1"
+        );
+        let turn = &ended["providerTurns"][0];
+        assert_eq!(turn["status"], "failed");
+        assert_eq!(turn["tokenUsage"]["usedTokens"], 10);
+        assert_eq!(
+            ended["providerThreads"][0]["nativeThreadRef"]["nativeId"],
+            "thr_1"
+        );
+        assert_eq!(ended["providerThreads"][0]["status"], "idle");
+        assert_eq!(ended["visibleTurnItems"].as_array().unwrap().len(), 4);
+        assert!(agentd.turns_acked());
+    }
+
+    fn uri(value: &str) -> String {
+        crate::thread_projection::uri_component(value)
     }
 }
