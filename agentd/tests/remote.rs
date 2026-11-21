@@ -28,6 +28,7 @@ async fn setup() -> Setup {
         Config {
             token: TOKEN.into(),
             root: root.clone(),
+            extra_roots: vec![dir.path().join("state/worktrees")],
             buffer_dir: dir.path().join("streams"),
             buffer_limit: 1 << 20,
             poll_interval: Duration::from_millis(50),
@@ -101,7 +102,6 @@ async fn file_operations_match_the_local_workspace() {
     assert!(matches!(s.remote.write_file(&small).await, Some(Ok(_))));
     for input in [
         json!({"cwd": cwd, "relativePath": "src/big.txt"}),
-        json!({"cwd": cwd, "relativePath": "../escape"}),
         json!({"cwd": cwd, "relativePath": "missing.txt"}),
     ] {
         assert_eq!(
@@ -109,6 +109,10 @@ async fn file_operations_match_the_local_workspace() {
             s.local.read_file(&input).await
         );
     }
+    // agentd refuses paths outside its root before the workspace sees them.
+    let escape = json!({"cwd": cwd, "relativePath": "../escape"});
+    let refused = s.remote.read_file(&escape).await.unwrap().unwrap_err();
+    assert!(refused.to_string().contains("outside"), "{refused}");
     let list = json!({"cwd": cwd});
     assert_eq!(
         s.remote.list_entries(&list).await,
@@ -309,7 +313,7 @@ async fn a_turn_matches_the_local_workspace() {
                     "echo started; exec sleep 30".into(),
                 ],
                 prompt: String::new(),
-                cwd: "/".into(),
+                cwd: s.root.to_string_lossy().into_owned(),
                 env_remove: vec![],
             },
             cancelled,
@@ -341,7 +345,7 @@ async fn a_turn_survives_a_dropped_socket() {
                     "for i in $(seq 1 60); do echo line $i; sleep 0.01; done".into(),
                 ],
                 prompt: String::new(),
-                cwd: "/".into(),
+                cwd: s.root.to_string_lossy().into_owned(),
                 env_remove: vec![],
             },
             cancelled,

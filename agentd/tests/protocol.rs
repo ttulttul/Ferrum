@@ -20,6 +20,7 @@ async fn start(dir: &Path, buffer_limit: u64) -> (SocketAddr, Arc<LocalWorkspace
         Config {
             token: TOKEN.into(),
             root: dir.to_path_buf(),
+            extra_roots: Vec::new(),
             buffer_dir: dir.join("streams"),
             buffer_limit,
             poll_interval: Duration::from_millis(50),
@@ -119,11 +120,12 @@ impl Client {
     }
 }
 
-fn turn(script: &str) -> Value {
+/// A turn that runs `script` in `cwd`, which must be inside agentd's root.
+fn turn(cwd: &Path, script: &str) -> Value {
     json!({
         "command": ["sh", "-c", script, "sh"],
         "prompt": "unused",
-        "cwd": "/",
+        "cwd": cwd,
     })
 }
 
@@ -190,7 +192,10 @@ async fn unary_ops_answer_like_the_local_workspace() {
     assert_eq!(remote, local.read_file(&read).await.unwrap());
     assert!(remote.unwrap().to_string().contains(&big));
 
-    let missing = json!({"cwd": cwd, "relativePath": "../outside"});
+    let outside = json!({"cwd": cwd, "relativePath": "../outside"});
+    let remote = client.request("fs.readFile", outside).await;
+    assert_eq!(remote.unwrap_err()["code"], "outside_root");
+    let missing = json!({"cwd": cwd, "relativePath": "none.txt"});
     let remote = client.request("fs.readFile", missing.clone()).await;
     let local_error = local.read_file(&missing).await.unwrap().unwrap_err();
     assert_eq!(remote.unwrap_err()["detail"], local_error);
@@ -228,7 +233,10 @@ async fn a_turn_survives_a_reconnect_without_loss_or_duplication() {
     let opened = client
         .request(
             "turn.start",
-            turn("for i in $(seq 1 30); do echo line $i; sleep 0.02; done"),
+            turn(
+                dir.path(),
+                "for i in $(seq 1 30); do echo line $i; sleep 0.02; done",
+            ),
         )
         .await
         .unwrap();
@@ -289,7 +297,10 @@ async fn a_full_buffer_ends_the_stream_with_a_gap_and_stops_the_turn() {
     let (addr, _) = start(dir.path(), 4096).await;
     let mut client = Client::adopt(addr, 1).await;
     let opened = client
-        .request("turn.start", turn("while true; do echo flood; done"))
+        .request(
+            "turn.start",
+            turn(dir.path(), "while true; do echo flood; done"),
+        )
         .await
         .unwrap();
     let stream = opened["stream"].as_u64().unwrap();
@@ -312,13 +323,13 @@ async fn unresumed_streams_are_closed_and_cancel_stops_a_turn() {
     let (addr, _) = start(dir.path(), 1 << 20).await;
     let mut client = Client::adopt(addr, 1).await;
     let first = client
-        .request("turn.start", turn("sleep 30"))
+        .request("turn.start", turn(dir.path(), "sleep 30"))
         .await
         .unwrap()["stream"]
         .as_u64()
         .unwrap();
     let second = client
-        .request("turn.start", turn("sleep 30"))
+        .request("turn.start", turn(dir.path(), "sleep 30"))
         .await
         .unwrap()["stream"]
         .as_u64()

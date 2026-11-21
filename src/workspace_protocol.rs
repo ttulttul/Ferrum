@@ -219,6 +219,9 @@ pub enum ErrorCode {
     VersionMismatch,
     /// The connection to agentd is down (reported by the client).
     Unavailable,
+    /// A path the operation names resolves outside the directories agentd
+    /// serves (its root and the worktrees it creates).
+    OutsideRoot,
     Internal,
 }
 

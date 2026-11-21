@@ -35,7 +35,9 @@ use tokio::{
 };
 
 mod buffer;
+mod confine;
 use buffer::DiskBuffer;
+pub use confine::Confinement;
 
 /// The largest frame agentd accepts.
 const MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -44,7 +46,11 @@ pub struct Config {
     /// The bearer token a server must present.
     pub token: String,
     /// The directory agentd serves projects under, reported by `hello`.
+    /// Operations may not name a path outside it or `extra_roots`.
     pub root: PathBuf,
+    /// Other directories operations may use, such as where worktrees are
+    /// created.
+    pub extra_roots: Vec<PathBuf>,
     /// Where stream buffers live. agentd empties it at start-up.
     pub buffer_dir: PathBuf,
     /// The most bytes of unacknowledged frames one stream may hold.
@@ -56,6 +62,7 @@ pub struct Config {
 pub struct Agentd {
     workspace: Arc<dyn Workspace>,
     config: Config,
+    confinement: Confinement,
     state: Mutex<SessionState>,
 }
 
@@ -129,9 +136,13 @@ impl Agentd {
             std::fs::remove_dir_all(&config.buffer_dir)?;
         }
         std::fs::create_dir_all(&config.buffer_dir)?;
+        let confinement = Confinement::new(
+            std::iter::once(config.root.clone()).chain(config.extra_roots.iter().cloned()),
+        )?;
         Ok(Arc::new(Self {
             workspace,
             config,
+            confinement,
             state: Mutex::new(SessionState {
                 max_epoch: 0,
                 current: None,
@@ -231,6 +242,9 @@ impl Agentd {
                 ErrorCode::StaleEpoch,
                 "a server with a newer epoch has adopted this workspace",
             );
+            return Self::reply(&session.tx, id, Err(error));
+        }
+        if let Err(error) = self.confinement.check(&op, &args) {
             return Self::reply(&session.tx, id, Err(error));
         }
         // Stream openers answer with the stream id themselves, before the
