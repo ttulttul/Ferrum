@@ -9,7 +9,7 @@ shard=$1
 checkout=$2
 server=$3
 reference="node $checkout/apps/server/src/bin.ts"
-faketime=/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
+faketime=${FAKETIME_LIB:-/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1}
 both=(--original-command "$reference" --rust-command "$server")
 
 # Run one suite and print how long it took, for balancing the shards.

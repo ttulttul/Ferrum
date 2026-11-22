@@ -1,0 +1,4 @@
+# Python packages the parity suites import (CI caches the environment on this file).
+websockets==16.0
+cryptography==50.0.2
+pillow==12.1.1
