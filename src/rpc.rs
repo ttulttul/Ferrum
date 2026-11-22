@@ -2441,15 +2441,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         };
     }
     if method == "peerLinks.answerRequest" {
-        let thread_id = params["threadId"].as_str().unwrap_or_default();
-        if !state.store.read().await.threads.contains_key(thread_id) {
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"PeerLinkRequestError","reason":"load_failed","cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}}}),
-            );
-        }
-        return Reply::Failure(
-            json!({"_tag":"Fail","error":{"_tag":"PeerLinkError","reason":"not-found","message":"Linked environment request not found."}}),
-        );
+        return match crate::peer_link_requests::answer(state, params).await {
+            Ok(()) => Reply::Success(Value::Null),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.to_json()})),
+        };
     }
     if method == "secrets.answerRequest" {
         let thread_id = params["threadId"].as_str().unwrap_or_default();

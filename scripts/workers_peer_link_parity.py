@@ -77,7 +77,9 @@ def main():
             wasm = (url, session_cookie(url, credential))
             project = root / "project"
             project.mkdir()
-            outcomes = {name: sign_in(args, *server, "auto", project)
+            # Full access: registering the project needs it, as on the reference
+            # (an auto link is refused, which peer_forwarding_parity.py checks).
+            outcomes = {name: sign_in(args, *server, "full-access", project)
                         for name, server in (("native", native), ("wasm", wasm))}
         except Exception:
             log.flush()

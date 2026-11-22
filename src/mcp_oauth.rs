@@ -16,7 +16,7 @@ mod reference_sessions;
 mod thread_credentials;
 mod tools;
 pub use thread_credentials::ThreadScope;
-pub(crate) use tools::answer_matches;
+pub(crate) use tools::{answer_matches, card_command};
 mod transport;
 use axum::{
     extract::{rejection::JsonRejection, OriginalUri, Query, State},
@@ -91,6 +91,14 @@ pub trait McpHost: AuthHost {
     /// Runs `task` in the background, as the reference forks work into its
     /// layer's scope: it ends with the process.
     fn spawn(&self, task: crate::runtime::Task);
+    /// Every link this server keeps, as `peerLinks.list` gives them.
+    fn peer_links_listed(self: &Arc<Self>) -> HostFuture<Result<Vec<Value>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    /// Forgets the link to `environment_id`; whether there was one.
+    fn unlink_peer(&self, _environment_id: &str) -> Result<bool, String> {
+        Ok(false)
+    }
     /// The stored link to `environment_id`, if this server keeps links.
     fn peer_link(&self, _environment_id: &str) -> Option<PeerLinkInfo> {
         None

@@ -1105,6 +1105,7 @@ mod tests {
             unread: false,
             tags: vec![],
             checkpoints: vec![],
+            link_requests: Vec::new(),
             provider: Box::default(),
             stored: None,
         }

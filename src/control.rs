@@ -2449,14 +2449,50 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             .iter()
             .any(|p| p["providerInstanceId"] == "codex"));
 
-        // With no folder, a project starts from its title in a new repository.
-        let named = tool(None, "t3_project_create", json!({"title":"From title"}));
+        // The link was approved for auto; creating a project needs full access.
+        let refused = tool(None, "t3_project_create", json!({"title":"From title"}));
+        assert_eq!(refused["code"], "capability_denied", "{refused}");
+
+        // Over a full-access link, a project with no folder starts from its
+        // title in a new repository.
+        let (_, full) = peer_link_sign_in(&documents, "full-access");
+        let full = format!("Bearer {full}");
+        let full_rpc = |session: Option<&str>, method: &str, params: Value| {
+            let mut headers = vec![
+                ("authorization", full.as_str()),
+                ("content-type", "application/json"),
+            ];
+            if let Some(session) = session {
+                headers.push(("mcp-session-id", session));
+            }
+            let body = json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
+            http(&plane, "POST", "/mcp", &headers, body.to_string())
+        };
+        let (_, headers, _) = full_rpc(
+            None,
+            "initialize",
+            json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t3code-peer","version":"1"}}),
+        );
+        let full_session = headers["mcp-session-id"].to_str().unwrap().to_owned();
+        let full_tool = |name: &str, arguments: Value| -> Value {
+            let (_, _, reply) = full_rpc(
+                Some(&full_session),
+                "tools/call",
+                json!({"name":name,"arguments":arguments}),
+            );
+            let result = &reply["result"];
+            if result["isError"] == true {
+                return serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            }
+            result["structuredContent"].clone()
+        };
+        let named = full_tool("t3_project_create", json!({"title":"From title"}));
         assert_eq!(
             named["workspaceRoot"], "/workspace/projects/from-title",
             "{named}"
         );
-        let refused = tool(
-            None,
+        let refused = full_tool(
             "t3_project_create",
             json!({"title":"From title","createWorkspaceRootIfMissing":true}),
         );

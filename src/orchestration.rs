@@ -311,9 +311,57 @@ async fn dispatch_command<H: CommandHost>(
         thread_id: id.to_string(),
         command_type: kind.to_string(),
     };
-    apply_command(state.clone(), &command, &receipt, continuation_of)
+    let seq = apply_command(state.clone(), &command, &receipt, continuation_of)
         .await
-        .map_err(|e| dispatch_error(e.to_string()))
+        .map_err(|e| dispatch_error(e.to_string()))?;
+    // Stopping, settling or archiving a thread means the user is done with
+    // its link cards; nobody is woken (`closePendingLinkRequests`).
+    if matches!(
+        kind,
+        "thread.archive" | "thread.settle" | "thread.stop" | "run.interrupt"
+    ) {
+        if let Some(last) = close_pending_link_requests(&state, id).await {
+            return Ok(last);
+        }
+    }
+    Ok(seq)
+}
+
+/// Cancels `thread_id`'s link cards still waiting for the user; the sequence
+/// of the last commit, if there was one.
+async fn close_pending_link_requests<H: CommandHost>(
+    state: &Arc<H>,
+    thread_id: &str,
+) -> Option<u64> {
+    let waiting: Vec<Value> = state
+        .store
+        .read()
+        .await
+        .threads
+        .get(thread_id)?
+        .link_requests
+        .iter()
+        .filter(|card| card["linkStatus"] == "pending")
+        .cloned()
+        .collect();
+    let at = crate::thread_projection::iso(now());
+    let mut last = None;
+    for mut card in waiting {
+        card["status"] = json!("cancelled");
+        card["linkStatus"] = json!("cancelled");
+        card["completedAt"] = json!(at);
+        card["updatedAt"] = json!(at);
+        if let Ok(record) = state
+            .commit(Event::LinkRequestRecorded {
+                thread_id: thread_id.to_owned(),
+                card,
+            })
+            .await
+        {
+            last = Some(record.id);
+        }
+    }
+    last
 }
 
 /// Drivers whose instances are off unless enabled, as the reference decodes
@@ -368,6 +416,7 @@ async fn start_run<H: CommandHost>(
     creation_source: Option<String>,
     scheduled_task_id: Option<String>,
     follows_thread_selection: bool,
+    notification: Option<Value>,
 ) -> anyhow::Result<u64> {
     let (cwd, needs_baseline, wire_id) = state
         .store
@@ -410,7 +459,7 @@ async fn start_run<H: CommandHost>(
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),
         // The prompt that continues a run shows as a notification.
-        role: if continues.is_some() {
+        role: if continues.is_some() || notification.is_some() {
             crate::thread_projection::NOTIFICATION_ROLE
         } else {
             "user"
@@ -421,6 +470,7 @@ async fn start_run<H: CommandHost>(
         creation_source: creation_source.filter(|_| continues.is_none()),
         scheduled_task_id: scheduled_task_id.filter(|_| continues.is_none()),
         follows_thread_selection,
+        notification,
     };
     let seq = state
         .commit_receipted(
@@ -572,6 +622,7 @@ async fn apply_command<H: CommandHost>(
         .unwrap_or_default();
     let thread_id = command.get("threadId").and_then(serde_json::Value::as_str);
     match command_type {
+        "link_request.record" => return record_link_request(state, command, receipt).await,
         "thread.create" => {
             let project_id = command
                 .get("projectId")
@@ -615,6 +666,7 @@ async fn apply_command<H: CommandHost>(
                 unread: false,
                 tags: vec![],
                 checkpoints: vec![],
+                link_requests: Vec::new(),
                 provider: Default::default(),
                 stored: None,
             };
@@ -653,6 +705,7 @@ async fn apply_command<H: CommandHost>(
                     .map(str::to_owned),
                 command["scheduledTaskId"].as_str().map(str::to_owned),
                 command["scheduledTaskId"].is_string() && command["modelSelection"].is_null(),
+                None,
             )
             .await;
         }
@@ -1823,6 +1876,7 @@ async fn apply_command<H: CommandHost>(
                 unread: false,
                 tags: source.tags,
                 checkpoints: vec![],
+                link_requests: Vec::new(),
                 provider: Default::default(),
                 stored: None,
             };
@@ -1964,6 +2018,7 @@ async fn apply_command<H: CommandHost>(
                 creation_source: None,
                 scheduled_task_id: None,
                 follows_thread_selection: false,
+                notification: None,
             };
             let thread = Thread {
                 row,
@@ -1986,6 +2041,7 @@ async fn apply_command<H: CommandHost>(
                 unread: false,
                 tags: vec![],
                 checkpoints: vec![],
+                link_requests: Vec::new(),
                 provider: Default::default(),
                 stored: None,
             };
@@ -2220,7 +2276,7 @@ async fn apply_command<H: CommandHost>(
             let id = thread_id.unwrap_or_default();
             return Ok(state.commit_receipted(Event::ThreadPatched {thread_id:id.to_owned(),patch:json!({"row":{"backgroundWorkSettled":true,"backgroundWorkSettleReason":command.get("reason").cloned().unwrap_or(Value::Null)}})},Some(receipt.clone())).await?.id);
         }
-        "secret_request.record" | "link_request.record" => {
+        "secret_request.record" => {
             let id = thread_id.unwrap_or_default();
             let mut row = state
                 .store
@@ -2585,6 +2641,223 @@ async fn respond_provider_request<H: CommandHost>(
             .await;
     }
     Ok(Some(sequence))
+}
+
+/// Whether a newer link to the machine `linked` names answers `card`, an
+/// older card asking for it with the same access (`askedForLinkedMachine`).
+fn asked_for_linked_machine(card: &Value, linked: &Value) -> bool {
+    if card["requestedAccess"] != linked["requestedAccess"] {
+        return false;
+    }
+    if !card["environmentId"].is_null() {
+        return card["environmentId"] == linked["linkedEnvironmentId"];
+    }
+    if let Some(url) = card["url"].as_str() {
+        return linked["url"].as_str() == Some(url);
+    }
+    let normal = |v: &Value| v.as_str().unwrap_or_default().trim().to_lowercase();
+    let hint = normal(&card["hint"]);
+    !hint.is_empty() && hint == normal(&linked["hint"]) && hint == normal(&linked["linkedLabel"])
+}
+
+/// `link_request.record`, internal to the server: records or updates a card
+/// in which an agent asked the user to link another machine, and wakes the
+/// agent with how it ended (`dispatchLinkRequestRecord` in the reference).
+async fn record_link_request<H: CommandHost>(
+    state: Arc<H>,
+    command: &Value,
+    receipt: &CommandReceipt,
+) -> anyhow::Result<u64> {
+    let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
+    let run_id = command["runId"].as_str().unwrap_or_default().to_owned();
+    let card_id = command["turnItemId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let pending = command["linkStatus"] == "pending";
+    let (card, closed, wake_allowed) = {
+        let store = state.store.read().await;
+        let thread = store
+            .threads
+            .get(&thread_id)
+            .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+        let run = thread
+            .runs
+            .iter()
+            .find(|run| run.id.to_string() == run_id)
+            .ok_or_else(|| anyhow::anyhow!("Run {run_id} was not found."))?;
+        let existing = thread
+            .link_requests
+            .iter()
+            .find(|c| c["id"] == card_id.as_str());
+        if existing.is_some_and(|c| c["runId"] != run_id.as_str()) {
+            anyhow::bail!("Link request {card_id} belongs to another run.");
+        }
+        if existing.is_none() && run.status != "running" {
+            anyhow::bail!("Run {run_id} is not active.");
+        }
+        // A request is answered once, and a retry finds its card as it was asked.
+        let unchanged = existing.is_some_and(|c| c["linkStatus"] != "pending" || pending);
+        let at = crate::thread_projection::iso(now());
+        let card = if unchanged {
+            None
+        } else {
+            let mut card = serde_json::Map::new();
+            for key in [
+                "threadId",
+                "runId",
+                "nodeId",
+                "url",
+                "reason",
+                "environmentId",
+                "label",
+                "hint",
+                "requestedAccess",
+                "linkStatus",
+                "linkedEnvironmentId",
+                "linkedLabel",
+                "linkedAccess",
+                "failure",
+            ] {
+                if let Some(value) = command.get(key).filter(|v| !v.is_null()) {
+                    card.insert(key.into(), value.clone());
+                }
+            }
+            let mut card = Value::Object(card);
+            card["id"] = json!(card_id);
+            // An update keeps where the card was asked, even after a restart.
+            match existing {
+                Some(existing) => {
+                    for key in ["nodeId", "providerThreadId", "providerTurnId", "startedAt"] {
+                        card[key] = existing[key].clone();
+                    }
+                }
+                None => {
+                    let ids = thread.provider_run_ids(run);
+                    card["providerThreadId"] =
+                        json!(ids.as_ref().map(|ids| ids.provider_thread.clone()));
+                    card["providerTurnId"] =
+                        json!(ids.as_ref().map(|ids| ids.provider_turn.clone()));
+                    if let Some(ids) = &ids {
+                        card["nodeId"] = json!(ids.root_node);
+                    }
+                    card["startedAt"] = json!(at);
+                }
+            }
+            card["nativeItemRef"] = Value::Null;
+            card["parentItemId"] = Value::Null;
+            card["status"] = json!(match command["linkStatus"].as_str() {
+                Some("pending") => "waiting",
+                Some("linked") => "completed",
+                Some("failed") => "failed",
+                _ => "cancelled",
+            });
+            card["title"] = command["label"]
+                .as_str()
+                .or(command["url"].as_str())
+                .map_or(json!("Link an environment"), |t| json!(t));
+            card["completedAt"] = if pending { Value::Null } else { json!(at) };
+            card["updatedAt"] = json!(at);
+            card["type"] = json!("link_request");
+            Some(card)
+        };
+        // The link answers older cards that asked for the same machine and
+        // access; a card still being answered stays open for its own answer.
+        let answering: Vec<&str> = command["answeringTurnItemIds"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let position = |id: &str| thread.link_requests.iter().position(|c| c["id"] == id);
+        let own = position(&card_id).unwrap_or(thread.link_requests.len());
+        let closed: Vec<Value> = match &card {
+            Some(card) if command["linkStatus"] == "linked" => thread
+                .link_requests
+                .iter()
+                .enumerate()
+                .filter(|(index, older)| {
+                    *index < own
+                        && older["linkStatus"] == "pending"
+                        && !answering.contains(&older["id"].as_str().unwrap_or_default())
+                        && asked_for_linked_machine(older, card)
+                })
+                .map(|(_, older)| {
+                    let mut older = older.clone();
+                    older["status"] = json!("cancelled");
+                    older["linkStatus"] = json!("cancelled");
+                    older["completedAt"] = json!(at);
+                    older["updatedAt"] = json!(at);
+                    older
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let deleted = thread.stored_row()["deletedAt"].is_string();
+        (card, closed, !unchanged && !thread.archived && !deleted)
+    };
+    let mut seq = match card {
+        Some(card) => {
+            state
+                .commit_receipted(
+                    Event::LinkRequestRecorded {
+                        thread_id: thread_id.clone(),
+                        card,
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id
+        }
+        None => {
+            state
+                .commit_receipted(
+                    Event::CommandDispatched {
+                        command_id: receipt.command_id.clone(),
+                        command_type: "link_request.record".into(),
+                        thread_id: Some(thread_id.clone()),
+                        payload: command.clone(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id
+        }
+    };
+    for older in closed {
+        seq = state
+            .commit(Event::LinkRequestRecorded {
+                thread_id: thread_id.clone(),
+                card: older,
+            })
+            .await?
+            .id;
+    }
+    // The agent asked without waiting, so the answer reaches it as a
+    // notification: it starts a turn, or follows the one running.
+    let wake = &command["wake"];
+    if wake.is_object() && wake_allowed {
+        let queued = state
+            .store
+            .read()
+            .await
+            .threads
+            .get(&thread_id)
+            .is_some_and(|thread| thread.runs.iter().any(|run| run.status == "running"));
+        seq = start_run(
+            state.clone(),
+            receipt,
+            &thread_id,
+            wake["text"].as_str().unwrap_or_default().to_owned(),
+            &wake["messageId"],
+            queued,
+            None,
+            Some("server".into()),
+            None,
+            false,
+            Some(wake["notification"].clone()),
+        )
+        .await?;
+    }
+    Ok(seq)
 }
 
 #[cfg(test)]

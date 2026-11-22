@@ -111,6 +111,8 @@ mod store;
 pub use store::*;
 pub(crate) use store::{now, CommandReceipt};
 #[cfg(feature = "native")]
+mod peer_link_requests;
+#[cfg(feature = "native")]
 mod peer_links;
 #[cfg(feature = "native")]
 mod peer_mcp;
