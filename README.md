@@ -46,14 +46,14 @@ The Rust server can already run Codex and Claude Code conversations, manage proj
 
 ### AI providers
 
-- **Missing provider status checks:** OpenCode, Antigravity, and Muse are not checked yet, so they still show as "not checked" in settings. (Claude Code, Codex, fx, Kiro, Grok, Pi, and Cursor are checked.)
+- **Missing provider status checks (in progress):** OpenCode, Antigravity, and Muse are not checked yet, so they still show as "not checked" in settings. (Claude Code, Codex, fx, Kiro, Grok, Pi, and Cursor are checked.)
 - **No update-available checks:** The server does not check online for newer versions of provider command-line tools, so settings always show the latest version as unknown and do not offer an update command.
 - **Claude skills and reset credits:** Installed Claude skills and plugins are not listed yet, and Claude reset credits are not shown.
 - **Background check timing:** Periodic provider checks always run on their timer instead of pausing when nobody is actively using the app.
 
 ### Connecting machines
 
-- **Agent-started machine links:** Agents cannot yet ask you to link another machine from inside a conversation. Linking, listing, unlinking, and forwarding requests to already-linked machines do work.
+- **Agent-started machine links (in progress):** Agents cannot yet ask you to link another machine from inside a conversation. Linking, listing, unlinking, and forwarding requests to already-linked machines do work.
 - **Connected-clients list:** Sessions started on the TypeScript server are not shown in the connected-clients list yet.
 
 ### Other
