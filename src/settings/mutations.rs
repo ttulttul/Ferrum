@@ -1,8 +1,12 @@
 //! Migrations for persistent settings and the entry-specific semantics of a settings patch.
+#[cfg(feature = "native")]
 use anyhow::Context;
+#[cfg(feature = "native")]
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Map, Value};
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
+#[cfg(feature = "native")]
+use std::path::Path;
 
 const LEGACY_PROJECT: [(&str, &str); 3] = [
     (
@@ -101,7 +105,7 @@ fn normalize_global(s: &mut Value) {
     let mode = global_idle(s).to_owned();
     set_idle(s, &mode);
 }
-pub(super) fn normalize(s: &mut Value) {
+pub(crate) fn normalize(s: &mut Value) {
     normalize_global(s);
     derive_legacy(s);
 }
@@ -402,7 +406,7 @@ const ENTRIES: [&str; 5] = [
     "usagePriceOverrides",
     "usageModelAliases",
 ];
-pub(super) fn apply(current: &Value, payload: &Value) -> Result<Value, String> {
+pub(crate) fn apply(current: &Value, payload: &Value) -> Result<Value, String> {
     let mutation = &payload["providerInstanceMutation"];
     let id = mutation["instanceId"].as_str().unwrap_or("");
     if mutation["operation"] == "create" && current["providerInstances"].get(id).is_some() {
@@ -577,6 +581,7 @@ fn apply_patch(current: &Value, patch: &Value) -> Result<Value, String> {
     Ok(next)
 }
 
+#[cfg(feature = "native")]
 fn table_exists(db: &Connection, name: &str) -> rusqlite::Result<bool> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1 AND type IN ('table','view'))",
@@ -584,6 +589,7 @@ fn table_exists(db: &Connection, name: &str) -> rusqlite::Result<bool> {
         |r| r.get(0),
     )
 }
+#[cfg(feature = "native")]
 fn historical_providers(
     db: Option<&Connection>,
 ) -> anyhow::Result<(HashSet<String>, HashSet<String>)> {
@@ -607,6 +613,7 @@ fn historical_providers(
     }
     Ok((drivers, instances))
 }
+#[cfg(feature = "native")]
 fn migrate_providers(s: &mut Value, legacy: &Value, db: Option<&Connection>) -> anyhow::Result<()> {
     let (used_drivers, used_instances) =
         historical_providers(db).context("read-provider-history")?;
@@ -648,15 +655,18 @@ fn migrate_providers(s: &mut Value, legacy: &Value, db: Option<&Connection>) -> 
     s["providerInstances"] = instances.into();
     Ok(())
 }
+#[cfg(feature = "native")]
 fn decode_model(text: Option<String>) -> Option<Value> {
     let model = serde_json::from_str(&text?).ok()?;
     super::schema::persisted_field("defaultModelSelection", &model).filter(|m| !m.is_null())
 }
+#[cfg(feature = "native")]
 fn decode_scripts(text: &str) -> Option<Value> {
     let scripts = serde_json::from_str(text).ok()?;
     super::schema::persisted_field("defaultProjectScripts", &scripts)
         .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
 }
+#[cfg(feature = "native")]
 fn fold_projects(s: &mut Value, raw: &Value, db: Option<&Connection>) -> anyhow::Result<()> {
     if s["projectSettingsFolded"] == true {
         return Ok(());
@@ -719,6 +729,7 @@ fn fold_projects(s: &mut Value, raw: &Value, db: Option<&Connection>) -> anyhow:
     }
     Ok(())
 }
+#[cfg(feature = "native")]
 pub(super) fn migrate(s: &mut Value, raw: &Value, state_dir: &Path) -> anyhow::Result<()> {
     let path = state_dir.join("statev2.sqlite");
     let conn = if path.try_exists()? {
@@ -764,7 +775,7 @@ pub(super) fn migrate(s: &mut Value, raw: &Value, state_dir: &Path) -> anyhow::R
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     #[test]
