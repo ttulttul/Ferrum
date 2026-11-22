@@ -29,6 +29,9 @@ pub struct AppState {
     /// to it.
     pub control: crate::control_state::ControlState,
     pub(crate) config_started_at: String,
+    /// What the startup's provider runtime recovery did, for the
+    /// `server.startup` trace span ([`crate::startup_trace`]).
+    pub(crate) startup_recovery: crate::startup_trace::RecoverySummary,
     pub(crate) environment_id: String,
     pub oauth: mcp_oauth::OAuth,
     pub(crate) connect: access_http::connect::Service,
@@ -248,7 +251,7 @@ impl AppState {
         let oauth = mcp_oauth::OAuth::open(documents.clone(), &dir)?;
         let control = crate::control_state::ControlState::open(auth, documents, log, &dir)?;
         // Turns run as this process's children, so none survives a restart.
-        reconcile_provider_runtime(&control, &settings, "startup").await;
+        let startup_recovery = reconcile_provider_runtime(&control, &settings, "startup").await;
         let (project_clone_events, _) = broadcast::channel(64);
         let local = Arc::new(crate::workspace::LocalWorkspace::new(
             dir.clone(),
@@ -259,6 +262,7 @@ impl AppState {
         Ok(Arc::new(Self {
             control,
             config_started_at: auth_service::iso(auth_service::now()),
+            startup_recovery,
             environment_id: environment_http::identity(&dir)?,
             oauth,
             connect,
@@ -413,31 +417,51 @@ impl crate::turn::TurnHost for AppState {
 }
 
 /// Record a restart's reconciliation of every thread's provider runtime
-/// ([`crate::runtime_recovery::reconcile`]).
+/// ([`crate::runtime_recovery::reconcile`]), and count what it ended as the
+/// reference's recovery summary does.
 async fn reconcile_provider_runtime(
     control: &crate::control_state::ControlState,
     settings: &settings::Settings,
     trigger: &str,
-) {
+) -> crate::startup_trace::RecoverySummary {
     let settings = settings.internal().unwrap_or_else(|error| {
         tracing::warn!(%error, "could not read settings to reconcile provider turns");
         serde_json::Value::Null
     });
+    let mut summary = crate::startup_trace::RecoverySummary::default();
     let events = {
         let store = control.store.read().await;
-        crate::runtime_recovery::reconcile(
+        let events = crate::runtime_recovery::reconcile(
             &store,
             trigger,
             crate::now(),
             &auth_service::iso(auth_service::now()),
             &settings,
-        )
+        );
+        for event in &events {
+            let Event::ProviderRuntimeReconciled { thread_id, cut, .. } = event else {
+                continue;
+            };
+            summary.terminalized_runs += cut.len();
+            let Some(thread) = store.threads.get(thread_id) else {
+                continue;
+            };
+            summary.stopped_sessions += usize::from(thread.provider.session_live());
+            summary.closed_requests += cut
+                .iter()
+                .filter_map(|(run, _)| thread.provider.runs.get(run))
+                .flat_map(|record| &record.requests)
+                .filter(|request| request.pending())
+                .count();
+        }
+        events
     };
     for event in events {
         if let Err(error) = control.commit(event).await {
             tracing::error!(%error, trigger, "could not record a provider runtime reconciliation");
         }
     }
+    summary
 }
 
 impl std::ops::Deref for AppState {
@@ -1043,8 +1067,25 @@ where
             tokio::join!(recoveries, startup);
         })
     });
-    // Continue what the last restart cut off, now that clients can watch it.
-    tokio::spawn(state.clone().continue_restarted_runs());
+    // Continue what the last restart cut off, now that clients can watch it,
+    // then end the startup span as the reference does once its recovery has
+    // queued every continuation.
+    let started = std::time::SystemTime::now();
+    let startup = state.clone();
+    tokio::spawn(async move {
+        startup.clone().continue_restarted_runs().await;
+        let span = crate::startup_trace::startup_span(
+            &startup.runtime_config.mode,
+            &bound.ip().to_string(),
+            bound.port(),
+            started,
+            std::time::SystemTime::now(),
+            startup.startup_recovery,
+        );
+        if let Err(error) = crate::startup_trace::append(&startup.paths.logs, &span) {
+            tracing::warn!(%error, "could not write the startup span to the server trace");
+        }
+    });
     // Check the provider CLIs once clients can load, as the reference does.
     tokio::spawn(crate::provider_status::run(state.clone()));
     let (stopping_tx, stopping_rx) = oneshot::channel::<()>();

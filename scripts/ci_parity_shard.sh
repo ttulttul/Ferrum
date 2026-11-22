@@ -23,7 +23,13 @@ case "$shard" in
   thread-*)
     # thread-I-N: provider scenario shard I of N (shard 1 also runs the seeded thread checks).
     IFS=- read -r _ index count <<<"$shard"
-    run python3 scripts/client_thread_parity.py "${both[@]}" --reference-root "$checkout" --shard "$index/$count"
+    # PARITY_REAL_TIME=1 waits out the restart timers that faketime otherwise skips.
+    real_time=()
+    if [ "${PARITY_REAL_TIME:-0}" = 1 ]; then
+      real_time=(--real-time)
+    fi
+    run python3 scripts/client_thread_parity.py "${both[@]}" --reference-root "$checkout" --shard "$index/$count" \
+      --faketime-lib "$faketime" "${real_time[@]}"
     ;;
   core)
     run python3 scripts/client_initial_sync_parity.py "${both[@]}" --reference-root "$checkout"

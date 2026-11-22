@@ -286,6 +286,8 @@ const program = Effect.gen(function* () {
         "orchestration.subscribeThread (live turn)",
         liveTurn(client, seed).pipe(Effect.timeoutOption(seed.turnMs ?? 30000), Effect.map(Option.getOrNull)),
       );
+      // A watcher of a turn its server stops (`seed.liveOnly`) has nothing more to read.
+      if (seed.liveOnly) return;
     }
     yield* record("orchestration.subscribeThread", untilSynchronized(client["orchestration.subscribeThread"](threadInput(seed.threadId))));
     yield* record("orchestration.getThreadProjection", client["orchestration.getThreadProjection"]({ threadId: seed.threadId }));

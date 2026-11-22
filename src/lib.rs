@@ -107,6 +107,8 @@ pub use store::*;
 pub(crate) use store::{now, CommandReceipt};
 #[cfg(feature = "native")]
 mod server;
+#[cfg(feature = "native")]
+mod startup_trace;
 pub use access_http::{auth_error, trace_id};
 #[cfg(feature = "native")]
 pub use server::*;

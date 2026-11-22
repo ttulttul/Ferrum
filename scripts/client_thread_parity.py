@@ -41,6 +41,17 @@ CLI (`cli launches`: a new session or a resumed one), and how soon after the
 server listened it sent the continuation (`continuation timing`). Known differences are listed
 in client_thread_parity_xfail.json; an entry that starts matching fails the
 suite until it is removed.
+
+A restarted server has settled once it says its recovery has finished: its
+`server.startup` span in userdata/logs/server.trace.ndjson, which both servers
+end once their recovery has decided what to continue, and then nothing left
+to do now: no run active and, for the reference, no effect due or running in
+its outbox. With --faketime-lib, the reference's continuation retry a minute
+after a failed start (`cli restored`) is reached by moving both servers'
+clocks on instead of waiting. --real-time waits the minute instead, and also
+lets every restarted server run for at least 8 seconds before the thread is
+read, so a continuation sent late is still seen; CI runs it nightly and on
+pushes to main.
 """
 import argparse
 import contextlib
@@ -50,6 +61,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -595,6 +607,76 @@ def continuation_delay(projection, listening):
     return None
 
 
+def startup_recorded(root, url):
+    """Whether the server listening at `url` has written its `server.startup` span: the
+    reference ends it, logging "V2 orchestration recovery completed", once its recovery has
+    queued every continuation, and Rust once it has sent them."""
+    port = int(url.rsplit(":", 1)[1])
+    trace = root / "userdata/logs/server.trace.ndjson"
+    with contextlib.suppress(FileNotFoundError), trace.open() as lines:
+        for line in lines:
+            if '"server.startup"' not in line:
+                continue
+            with contextlib.suppress(ValueError):
+                record = json.loads(line)
+                if (record.get("name") == "server.startup"
+                        and record.get("attributes", {}).get("server.port") == port
+                        and any("V2 orchestration recovery completed" in event.get("name", "")
+                                for event in record.get("events", []))):
+                    return True
+    return False
+
+
+def effects_due(root, clock_offset=0):
+    """The thread's effects in the reference's outbox that are running or due within a few
+    seconds (a retry due later is not), by type. Rust has no outbox, so none."""
+    database = root / "userdata/statev2.sqlite"
+    if not database.exists():
+        return []
+    import datetime
+    soon = (datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(seconds=clock_offset + 3)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)) as db:
+            return [row[0] for row in db.execute(
+                "SELECT effect_type FROM orchestration_v2_effect_outbox WHERE thread_id = ? AND"
+                " (status = 'running' OR (status = 'pending' AND available_at <= ?))",
+                (THREAD, soon))]
+    except sqlite3.OperationalError:
+        # Not created yet, or busy: not settled.
+        return ["unknown"]
+
+
+def quiet(root, url, cookie, seconds=30, clock_offset=0, effects=True):
+    """Wait until the thread stops changing: the same projection twice in a row, 0.5 s apart,
+    and (unless `effects` is false, for a server stopped with work in flight) nothing due in the
+    reference's outbox."""
+    previous = None
+    def done(projection):
+        nonlocal previous
+        settled = projection == previous and not (effects and effects_due(root, clock_offset))
+        previous = projection
+        return settled
+    return wait_for(url, cookie, done, seconds)
+
+
+class Clock:
+    """A shifted clock for a server under libfaketime, which reads the offset from a file."""
+
+    def __init__(self, library, directory):
+        self.file = directory / "faketime-offset"
+        self.offset = 0
+        self.file.write_text("+0\n")
+        self.env = {"LD_PRELOAD": str(library.resolve(strict=True)), "FAKETIME_TIMESTAMP_FILE": str(self.file),
+                    "FAKETIME_CACHE_DURATION": "1"}
+
+    def advance(self, seconds):
+        self.offset += seconds
+        self.file.write_text(f"+{self.offset}\n")
+        # Each process rereads the file at most a second later.
+        time.sleep(1.2)
+
+
 def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, scenario):
     """A turn on a server that is stopped and started again: what the client sees afterwards."""
     restart = scenario["restart"]
@@ -605,32 +687,34 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
         if restart.get("live"):
             # A client watches the thread, sends the message, and sees what the stop does.
             watcher = threading.Thread(target=lambda: watched.update(
-                run_client(args, url, cookie, {**seeded, "turnMs": 60000})))
+                run_client(args, url, cookie, {**seeded, "turnMs": 60000, "liveOnly": True})))
             watcher.start()
             wait_for(url, cookie, lambda p: bool(p.get("runs")), 30)
         else:
             rpc(url, cookie, "orchestration.dispatchCommand", seeded["dispatch"])
         for index, text in enumerate(restart.get("queue", [])):
-            # Another message, queued behind the first.
-            time.sleep(1)
+            # Another message, queued behind the first once that one's run is there.
+            wait_for(url, cookie, lambda p: len(p.get("runs", [])) > index, 30)
             rpc(url, cookie, "orchestration.dispatchCommand", {
                 **seeded["dispatch"], "commandId": f"queued-message-{index}",
                 "messageId": f"message:queued-{index}", "text": text,
                 "dispatchMode": {"type": "queue_after_active"}})
-        if restart["after"] == "dispatched":
-            wait_for(url, cookie, lambda p: bool(p.get("runs")), 30)
-        elif restart["after"] == "started":
-            # The run started, but its provider has not taken the prompt.
-            wait_for(url, cookie, lambda p: any(r.get("status") == "running" for r in p.get("runs", [])), 30)
-            time.sleep(2)
+        queued = len(restart.get("queue", []))
+        wait_for(url, cookie, lambda p: len(p.get("runs", [])) > queued, 30)
+        if restart["after"] == "started":
+            # The run started, and its provider got the prompt but has not taken it.
+            log = Path(env["FAKE_PROVIDER_LOG"])
+            wait_for(url, cookie, lambda p: any(r.get("status") == "running" for r in p.get("runs", []))
+                     and log.exists() and '"turn/start"' in log.read_text(), 30)
         elif restart["after"] == "running":
             # The turn has run a command and holds on.
             wait_for(url, cookie, lambda p: any(i.get("type") == "command_execution"
                                                 for i in p.get("turnItems", [])), 30)
-        else:
-            wait_for(url, cookie, lambda p: bool(p.get("runs")) and not any(
-                r.get("status") in ACTIVE_RUN for r in p["runs"]), 30)
-        time.sleep(1)
+        elif restart["after"] == "settled":
+            wait_for(url, cookie, lambda p: not any(r.get("status") in ACTIVE_RUN for r in p["runs"]), 30)
+        # Whatever the server is still recording about it lands before the stop. A turn the
+        # restart cuts off still has its effects running.
+        quiet(root, url, cookie, effects=False)
         if restart.get("settings"):
             rpc(url, cookie, "server.updateSettings", {"patch": restart["settings"]})
     # Stopped as a service manager stops it.
@@ -639,9 +723,14 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
     if restart.get("removeCli"):
         for cli in fake_bin.iterdir():
             cli.unlink()
+    clock = None
+    if restart.get("restoreCli") and args.faketime_lib and not args.real_time:
+        clock = Clock(args.faketime_lib, fake_bin.parent)
+        env = {**env, **clock.env}
     with contextlib.ExitStack() as second:
         url, cookie = managed_server(second, command, root, *credentials, env=env)
         listening = time.time()
+        offset = lambda: clock.offset if clock else 0
         if restart.get("restoreCli"):
             # The continuation fails without its CLI; put the CLI back for its retry, a minute
             # later.
@@ -651,14 +740,19 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
             write_fake_clis(fake_bin, {"codex" if scenario["instance"] == "codex" else "claude"})
             source = next((r["id"] for r in failed.get("runs", [])
                            if r.get("restartContinuationOfRunId") and r.get("status") == "failed"), None)
+            if clock:
+                # Past the minute, but short of the second retry's three.
+                clock.advance(62)
             wait_for(url, cookie, lambda p: any(
                 r.get("restartContinuationOfRunId") == source and r.get("status") not in ACTIVE_RUN
-                for r in p.get("runs", [])), 100)
-        # The reference continues a turn as it starts; let that run settle.
+                for r in p.get("runs", [])), 30 if clock else 100)
+        # The server says its recovery has finished; let what it continued settle.
         started = time.monotonic()
-        wait_for(url, cookie, lambda p: time.monotonic() - started > 8 and not any(
-            r.get("status") in ACTIVE_RUN for r in p.get("runs", [])), 40)
-        time.sleep(1)
+        floor = 8 if args.real_time else 0
+        wait_for(url, cookie, lambda p: time.monotonic() - started >= floor and startup_recorded(root, url)
+                 and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", []))
+                 and not effects_due(root, offset()), 40)
+        quiet(root, url, cookie, clock_offset=offset())
         outcome = run_client(args, url, cookie, {"threadId": THREAD, "inspect": True})
         outcome["continuationDelay"] = continuation_delay(thread_projection(url, cookie), listening)
         if restart.get("live"):
@@ -785,26 +879,29 @@ def compare_turn(original, rust):
 THREAD_CHECKS_COST = 20
 
 
-def scenario_cost(scenario):
+def scenario_cost(scenario, real_time=False):
     """Rough seconds a scenario takes on both servers in CI, for balancing shards."""
     restart = scenario.get("restart")
     if not restart:
-        return 10
+        return 9
     if restart.get("restoreCli"):
-        # The reference retries the continuation after a hard-coded 60 s.
-        return 150
-    # Each queued message and a live subscription add fixed waits to the restart.
-    return 30 + 5 * len(restart.get("queue", [])) + (5 if restart.get("live") else 0)
+        # The reference retries the continuation after a hard-coded 60 s, unless the clock is
+        # moved on.
+        return 150 if real_time else 15
+    # A live subscription waits for the watcher to see the stop; real time adds the 8 s floor on
+    # each server.
+    return (25 if restart.get("live") else 11) + (16 if real_time else 0)
 
 
-def shard_scenarios(index, count):
+def shard_scenarios(index, count, real_time=False):
     """The provider scenarios of shard `index` (from 1) of `count`, balanced by scenario_cost.
 
     Shard 1 also runs the seeded thread checks, so it starts with their cost."""
     loads = [[THREAD_CHECKS_COST if n == 0 else 0, n, []] for n in range(count)]
-    for scenario in sorted(PROVIDER_SCENARIOS, key=scenario_cost, reverse=True):
+    cost = lambda scenario: scenario_cost(scenario, real_time)
+    for scenario in sorted(PROVIDER_SCENARIOS, key=cost, reverse=True):
         lightest = min(loads, key=lambda load: (load[0], load[1]))
-        lightest[0] += scenario_cost(scenario)
+        lightest[0] += cost(scenario)
         lightest[2].append(scenario["name"])
     return set(loads[index - 1][2])
 
@@ -813,7 +910,7 @@ def provider_turns(args, credentials):
     """Run each provider scenario on both servers; the number of unexpected results."""
     xfail = json.loads((ROOT / "scripts/client_thread_parity_xfail.json").read_text())
     failures = 0
-    shard = shard_scenarios(*args.shard) if args.shard else None
+    shard = shard_scenarios(*args.shard, args.real_time) if args.shard else None
     for scenario in PROVIDER_SCENARIOS:
         if args.scenario and scenario["name"] not in args.scenario:
             continue
@@ -897,7 +994,10 @@ def thread_checks(args, credentials, temporary):
             url, cookie = managed_server(stack, command, root, *credentials, env=GIT_ISOLATION)
             seeded = seed(url, cookie, Path(temporary) / f"{name}-checkouts")
             roots[name] = Path(temporary) / f"{name}-checkouts"
-            time.sleep(2)
+            # The seeded turn ends as it starts; read the thread once it has.
+            wait_for(url, cookie, lambda p: bool(p.get("runs")) and not any(
+                r.get("status") in ACTIVE_RUN for r in p["runs"]), 30)
+            quiet(root, url, cookie)
             outcomes[name] = run_client(args, url, cookie, seeded)
     if args.dump:
         args.dump.mkdir(parents=True, exist_ok=True)
@@ -953,13 +1053,18 @@ def main():
     parser.add_argument("--shard", type=lambda text: tuple(int(n) for n in text.split("/")), metavar="I/N",
                         help="run provider scenario shard I of N (from 1); the thread checks run on shard 1 only")
     parser.add_argument("--list-shard", action="store_true", help="print the --shard's scenarios and exit")
+    parser.add_argument("--faketime-lib", type=Path,
+                        help="libfaketime shared object: move restarted servers' clocks on to a retry due later")
+    parser.add_argument("--real-time", action="store_true",
+                        help="wait out the reference's continuation retry, and give each restarted server at "
+                             "least 8 s to continue anything late")
     args = parser.parse_args()
     if args.shard and not 1 <= args.shard[0] <= args.shard[1]:
         parser.error("--shard must be I/N with 1 <= I <= N")
     if args.list_shard:
         if not args.shard:
             parser.error("--list-shard needs --shard")
-        print("\n".join(sorted(shard_scenarios(*args.shard))))
+        print("\n".join(sorted(shard_scenarios(*args.shard, args.real_time))))
         return 0
     credentials = secrets.token_urlsafe(32), secrets.token_bytes(32)
     if args.dump:
