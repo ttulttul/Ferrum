@@ -98,6 +98,22 @@ impl ListingIndexes {
         })
         .await
     }
+
+    pub async fn search_entries(&self, input: &Value) -> Option<Reply> {
+        let indexes = self.clone();
+        list(input, move |workspace, input| {
+            index::search_entries(workspace, &indexes, input)
+        })
+        .await
+    }
+
+    pub async fn search_contents(&self, input: &Value) -> Option<Reply> {
+        let indexes = self.clone();
+        list(input, move |workspace, input| {
+            index::search_contents(workspace, &indexes, input)
+        })
+        .await
+    }
 }
 
 pub async fn list_ignored_files(input: &Value) -> Option<Reply> {

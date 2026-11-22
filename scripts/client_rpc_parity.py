@@ -118,6 +118,7 @@ def seed_fixture(home, isolation):
         "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
         "0000000d4944415478da63f8cfc0f01f0005000201a5f1d6a90000000049454e44ae426082"))
     (repo / "src/lib.rs").write_text("fn alpha() {}\nfn beta() {}\nfn gamma() {}\n")
+    (repo / "unicode.txt").write_text("é parity\n")
     # Exercise the two list modes in isolation from search, branch and diff fixtures.
     listing = home / "listing"
     git("init", "-q", "-b", "main", str(listing), cwd=home)

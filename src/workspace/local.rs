@@ -71,10 +71,10 @@ impl Workspace for LocalWorkspace {
         files::list_ignored_files(input).boxed()
     }
     fn search_entries<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        files::search_entries(input).boxed()
+        self.listings.search_entries(input).boxed()
     }
     fn search_contents<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        files::search_contents(input).boxed()
+        self.listings.search_contents(input).boxed()
     }
     fn read_file<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
         files::read_file(input).boxed()

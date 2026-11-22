@@ -2155,12 +2155,12 @@
       "validationOnly": true,
       "clientHarness": [
         "projects.searchContents",
-        "projects.searchContents.regex"
+        "projects.searchContents.wholeWord",
+        "projects.searchContents.unicode",
+        "projects.searchContents.regex",
+        "projects.searchContents.regexRanges"
       ],
-      "knownGaps": [
-        "projects.searchContents",
-        "projects.searchContents.regex"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc",
@@ -2182,12 +2182,12 @@
       "validationOnly": true,
       "clientHarness": [
         "projects.searchEntries",
+        "projects.searchEntries.fuzzy",
+        "projects.searchEntries.directories",
+        "projects.searchEntries.images",
         "raw.projects.searchEntries#7"
       ],
-      "knownGaps": [
-        "projects.searchEntries",
-        "raw.projects.searchEntries#7"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc",
@@ -4627,8 +4627,11 @@
       "stream": false,
       "auth": "session (source-control:write)",
       "usage": "server-only/unused",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "source_control_clone_parity.py",
+        "source_control_lookup_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -4647,8 +4650,10 @@
       "stream": false,
       "auth": "session (orchestration:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "source_control_lookup_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -5704,6 +5709,7 @@
         "peer_forwarding_parity.py",
         "peer_link_outgoing_parity.py",
         "peer_link_parity.py",
+        "source_control_clone_parity.py",
         "workers_peer_link_parity.py"
       ],
       "validationOnly": false,
@@ -6755,7 +6761,9 @@
         "rpc_edge_parity.py",
         "settings_mutation_parity.py",
         "settings_secrets_parity.py",
+        "source_control_clone_parity.py",
         "source_control_hosts_parity.py",
+        "source_control_lookup_parity.py",
         "storage_cleanup_parity.py"
       ],
       "validationOnly": false,
