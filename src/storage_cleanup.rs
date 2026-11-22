@@ -1,6 +1,7 @@
 //! The latest completed storage cleanup report and the changes seen by settings clients.
 mod checkpoints;
 mod files;
+mod worktrees;
 
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -76,7 +77,7 @@ pub(crate) async fn run(
         if let Err(error) = checkpoints::prune(&state.paths.state_dir) {
             tracing::warn!(%error, "checkpoint ref cleanup failed");
         }
-        let entries = [
+        let mut entries: Vec<Value> = [
             (
                 files::Category::BrowserArtifacts,
                 &state.paths.browser_artifacts,
@@ -86,6 +87,7 @@ pub(crate) async fn run(
         .into_iter()
         .filter_map(|(category, root)| category.clean(root, started, &settings, &state.settings))
         .collect();
+        entries.extend(worktrees::clean(state.clone(), settings.clone(), started));
         let report = report(trigger, started, entries);
         state.storage_cleanup.publish(report.clone());
         Ok(report)

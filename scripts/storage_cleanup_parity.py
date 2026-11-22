@@ -11,6 +11,7 @@ import secrets
 import shlex
 import sqlite3
 import subprocess
+import time
 from tempfile import TemporaryDirectory
 
 from websockets.sync.client import connect
@@ -33,7 +34,7 @@ def seed_checkpoints(state, git, repo):
     scope_key = hashlib.sha256(scope.encode()).hexdigest()[:32]
     scoped = f"refs/t3/orchestration-v2/checkpoints/{b64(scope_key)}/ordinal/"
     with closing(sqlite3.connect(state / "statev2.sqlite")) as db, db:
-        db.execute("""INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,
+        db.execute("""INSERT OR IGNORE INTO projection_projects(project_id,title,workspace_root,scripts_json,
                       created_at,updated_at) VALUES('cleanup','Cleanup',?,'[]',?,?)""", (str(repo), TIME, TIME))
         for owner, archived, deleted, source in [
             ("gone", None, TIME, None), ("ancestor", None, TIME, None),
@@ -94,8 +95,39 @@ def exercise(command, home):
             assert report["trigger"] == "manual"
             return report
 
+        counter = 10
+        def call(tag, payload):
+            nonlocal counter
+            counter += 1
+            ws.send(encode({"_tag": "Request", "id": counter, "tag": tag, "payload": payload, "headers": []}).decode())
+            frame = json.loads(ws.recv(timeout=30))
+            exit = frame["exit"]
+            assert exit["_tag"] == "Success", f"{tag} failed: {exit}"
+            return exit["value"]
+
         request(1)
         response()  # Drain startup before creating eligible files.
+        # A deleted thread with worktreeOnDelete removes its managed linked worktree.
+        worktree = home / "worktrees" / "cleanup-branch"
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        git("branch", "cleanup-branch")
+        subprocess.run(["git", "worktree", "add", "-q", str(worktree), "cleanup-branch"], cwd=repo, env=git_env, check=True)
+        (worktree / "payload.txt").write_text("retained until cleanup\n")
+        subprocess.run(["git", "add", "payload.txt"], cwd=worktree, env=git_env, check=True)
+        subprocess.run(["git", "-c", "user.name=Cleanup", "-c", "user.email=cleanup@example.test", "commit", "-q", "-m", "payload"], cwd=worktree, env=git_env, check=True)
+        call("projects.mutate", {"type":"project.create", "commandId":"cleanup-project", "projectId":"cleanup", "title":"Cleanup", "workspaceRoot":str(repo)})
+        call("server.updateSettings", {"patch":{"storageCleanup":{"worktreeOnDelete":True}}})
+        call("orchestration.dispatchCommand", {"type":"thread.create", "commandId":"cleanup-thread-create", "threadId":"thread:cleanup", "projectId":"cleanup", "title":"Cleanup thread", "modelSelection":{"instanceId":"codex","model":"fixture"}, "runtimeMode":"full-access", "interactionMode":"default", "branch":"cleanup-branch", "worktreePath":str(worktree), "createdBy":"user", "creationSource":"web"})
+        call("server.runStorageCleanup", {})
+        call("orchestration.dispatchCommand", {"type":"thread.delete", "commandId":"cleanup-thread-delete", "threadId":"thread:cleanup"})
+        last_worktree_report = None
+        for _ in range(20):
+            last_worktree_report = call("server.runStorageCleanup", {})
+            if not worktree.exists():
+                break
+            time.sleep(0.1)
+        assert not worktree.exists(), "deleted managed worktree was not removed"
+        call("server.updateSettings", {"patch":{"storageCleanup":{"worktreeOnDelete":False}}})
         kept = seed_checkpoints(state, git, repo)
         logs = state / "logs"
         artifacts = state / "browser-artifacts"
