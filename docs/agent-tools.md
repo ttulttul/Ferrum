@@ -166,7 +166,10 @@ schemas.
 6. **Scheduled tasks**: `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task` and
    `run_scheduled_task_now` share the reference's `scheduled_tasks` table. Thread callers
    default to their project; an outside client can list all projects. Webhook summaries include
-   their signing status. Due-run dispatch remains pending.
+   their signing status. The native scheduler claims due rows from SQLite, launches a fresh thread
+   or sends to a bound thread, advances interval, fixed-time and one-time schedules, records
+   dispatch and provider outcomes, recovers interrupted rows after restart, and rejects relay
+   deliveries older than `maxDeliveryAgeMinutes`.
 7. **Pull requests and issues**: the `pullRequests` and `issues` toolkits.
 8. **Worktrees, previews, devices and HTML**: `t3_worktree_status`, `t3_worktree_handoff`, the
    `previewControls`, `preview`, `device` and `html` toolkits. These drive the desktop's browser

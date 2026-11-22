@@ -88,6 +88,8 @@ pub mod repository_identity;
 #[cfg(feature = "native")]
 mod rpc;
 #[cfg(feature = "native")]
+mod scheduled_tasks;
+#[cfg(feature = "native")]
 pub mod server_runtime;
 #[cfg(feature = "native")]
 mod static_http;

@@ -110,6 +110,101 @@ impl Database {
         Ok(())
     }
 
+    /// Claims one scheduled occurrence. The conditional update is important
+    /// because both the control-plane and a restarted server can observe the
+    /// same due row before either has dispatched it.
+    pub fn claim_due(&mut self, id: &str, now: &str) -> anyhow::Result<Option<Value>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE scheduled_tasks
+             SET last_run_at=?2,last_run_status='running',last_run_error=NULL,updated_at=?2
+             WHERE task_id=?1 AND enabled=1 AND next_run_at IS NOT NULL
+               AND next_run_at <= ?2 AND last_run_status <> 'running'",
+            params![id, now],
+        )?;
+        if changed == 0 {
+            tx.commit()?;
+            return Ok(None);
+        }
+        tx.commit()?;
+        self.get(id)
+    }
+
+    /// Claims an explicit manual run, even when the task is disabled. Webhook
+    /// tasks are rejected by their callers before reaching this method.
+    pub fn claim_manual(&mut self, id: &str, now: &str) -> anyhow::Result<Option<Value>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE scheduled_tasks
+             SET last_run_at=?2,last_run_status='running',last_run_error=NULL,updated_at=?2
+             WHERE task_id=?1 AND last_run_status <> 'running'",
+            params![id, now],
+        )?;
+        if changed == 0 {
+            tx.commit()?;
+            return Ok(None);
+        }
+        tx.commit()?;
+        self.get(id)
+    }
+
+    /// Records the outcome of a claimed dispatch. The timestamp guard prevents
+    /// a late provider failure from overwriting a newer run or a recreated row.
+    pub fn complete(
+        &mut self,
+        id: &str,
+        started_at: &str,
+        completed_at: &str,
+        status: &str,
+        error: Option<&str>,
+        next_run_at: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE scheduled_tasks
+             SET updated_at=?3,next_run_at=?4,last_run_status=?5,last_run_error=?6,
+                 run_count=run_count+1
+             WHERE task_id=?1 AND last_run_status='running' AND last_run_at=?2",
+            params![id, started_at, completed_at, next_run_at, status, error],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn record_failure(
+        &mut self,
+        id: &str,
+        started_at: &str,
+        error: &str,
+    ) -> anyhow::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE scheduled_tasks
+             SET last_run_status='failed',last_run_error=?3
+             WHERE task_id=?1 AND last_run_status='succeeded' AND last_run_at=?2",
+            params![id, started_at, error],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn reschedule_missed(
+        &mut self,
+        id: &str,
+        started_at: &str,
+        updated_at: &str,
+        error: &str,
+        next_run_at: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE scheduled_tasks
+             SET updated_at=?3,next_run_at=?4,last_run_status='failed',last_run_error=?5
+             WHERE task_id=?1 AND last_run_status='running' AND last_run_at=?2",
+            params![id, started_at, updated_at, next_run_at, error],
+        )?;
+        Ok(changed != 0)
+    }
+
     pub fn delete(&mut self, id: &str) -> anyhow::Result<()> {
         let tx = self
             .conn
@@ -200,5 +295,39 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(dir.path().join("scheduled-tasks.imported.json").exists());
+    }
+
+    #[test]
+    fn due_claim_and_completion_are_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = super::super::open(dir.path()).unwrap();
+        let mut db = Database::open(dir.path(), None).unwrap();
+        let mut task = task("due", "2026-01-01T00:00:00.000Z");
+        task["enabled"] = json!(true);
+        task["nextRunAt"] = json!("2026-01-01T00:01:00.000Z");
+        db.save(&task).unwrap();
+        let claimed = db
+            .claim_due("due", "2026-01-01T00:02:00.000Z")
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed["lastRunStatus"], "running");
+        assert!(db
+            .claim_due("due", "2026-01-01T00:02:00.000Z")
+            .unwrap()
+            .is_none());
+        assert!(db
+            .complete(
+                "due",
+                "2026-01-01T00:02:00.000Z",
+                "2026-01-01T00:02:01.000Z",
+                "succeeded",
+                None,
+                Some("2026-01-01T00:03:01.000Z"),
+            )
+            .unwrap());
+        let stored = db.get("due").unwrap().unwrap();
+        assert_eq!(stored["lastRunStatus"], "succeeded");
+        assert_eq!(stored["runCount"], 1);
+        assert_eq!(stored["nextRunAt"], "2026-01-01T00:03:01.000Z");
     }
 }
