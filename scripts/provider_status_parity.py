@@ -279,7 +279,12 @@ SCENARIOS += driver_scenarios("pi", "pi", "0.85.0", [PI_TEXT_GENERATION, pi_rpc(
     "discovery fails": ([pi_rpc(get_available_models=None) | {"piErrors": ["get_available_models"]}], {}),
     "discovery exits then declines project trust": ([PI_TEXT_GENERATION,
         {"prefix": ["--mode", "rpc", "--no-session", "--no-approve"], "pi": pi_rpc()["pi"]},
-        {"prefix": ["--mode", "rpc"], "pi": {"get_state": PI_STATE}, "exitAfter": 1}], {}),
+        # Pi's output closes after its state: both servers see a closed output (not a failed write).
+        {"prefix": ["--mode", "rpc"], "pi": {"get_state": PI_STATE}, "closeOutputAfter": 1}], {}),
+    # Pi stops reading after its state while its output stays open: the next request fails to
+    # write, which neither server retries.
+    "discovery stops reading": ([PI_TEXT_GENERATION,
+        {"prefix": ["--mode", "rpc"], "pi": {"get_state": PI_STATE}, "closeInputAfter": 1}], {}),
     "text generation has no models": ([{**PI_TEXT_GENERATION, "pi": {"get_available_models": {"models": []}}},
                                        pi_rpc()], {}),
     "bad launch arguments": ([pi_rpc()], {"settings": enabled("pi", launchArgs="--mode json")}),

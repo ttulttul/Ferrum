@@ -261,6 +261,9 @@ enum RpcError {
     Spawn,
     /// Pi closed its output or exited (`read`/`exit`).
     Closed,
+    /// A request could not be written while Pi's output was still open
+    /// (`write`), as when Pi has exited but its output is not drained yet.
+    Write,
     /// Pi answered with `success: false`.
     Failed,
     TimedOut,
@@ -319,8 +322,10 @@ impl Rpc {
                     });
                 }
             }
-            reader.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            // Mark the output closed before dropping the waiters, so a request
+            // registered after the drop still sees it.
             let _ = closed_tx.send(true);
+            reader.lock().unwrap_or_else(|e| e.into_inner()).clear();
         });
         Ok(Self {
             _child: child,
@@ -346,7 +351,13 @@ impl Rpc {
         line.push('\n');
         if self.stdin.write_all(line.as_bytes()).await.is_err() || self.stdin.flush().await.is_err()
         {
-            return Err(RpcError::Closed);
+            // The reference reports a failed write as `write` unless it is
+            // already diagnosing a closed output (`read`).
+            return Err(if *self.closed.borrow() {
+                RpcError::Closed
+            } else {
+                RpcError::Write
+            });
         }
         match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(Ok(data))) => Ok(data),

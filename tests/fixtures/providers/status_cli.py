@@ -24,6 +24,10 @@ with "pi" speaks Pi's RPC mode instead: each {"type": ..., "id": ...} record
 is answered with {"type": "response", "id", "command", "success": true,
 "data"} from "pi" by type, or "success": false for a type in "piErrors"; a
 type in neither is left unanswered. "exitAfter": n exits after n records.
+"closeOutputAfter": n closes standard output after n records and exits a
+few seconds later, so a client sees the closed output, not a failed write;
+"closeInputAfter": n closes standard input before the nth reply instead,
+so every later write fails while the output is still open.
 
 Every launch appends its arguments to FAKE_PROVIDER_LOG.args; requests are
 appended to FAKE_PROVIDER_LOG.
@@ -78,10 +82,21 @@ if "pi" in entry:
                      "data": entry["pi"][kind]}
         else:
             continue
-        write(sys.stdout, json.dumps(reply))
         answered += 1
+        if entry.get("closeInputAfter") == answered:
+            # Closed before the reply goes out, so no request written after it can land.
+            os.close(0)
+        write(sys.stdout, json.dumps(reply))
         if entry.get("exitAfter") == answered:
             sys.exit(1)
+        if entry.get("closeOutputAfter") == answered:
+            sys.stdout.flush()
+            os.close(1)
+            time.sleep(3)
+            os._exit(1)
+        if entry.get("closeInputAfter") == answered:
+            time.sleep(3)
+            os._exit(1)
     sys.exit(0)
 
 if "rpc" not in entry:
