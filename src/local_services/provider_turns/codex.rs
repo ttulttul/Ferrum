@@ -600,6 +600,25 @@ impl Session {
         }
     }
 
+    /// `turn/steer`: `text` joins the running turn as the user's input.
+    /// Its reply does not matter; the turn's items report what it did.
+    async fn steer(&mut self, text: &str) {
+        let (Some(thread_id), Some(turn_id)) = (self.thread_id.clone(), self.turn_id.clone())
+        else {
+            return;
+        };
+        let id = self.next_id;
+        self.next_id += 1;
+        let _ = self
+            .cli
+            .write(&json!({"id": id, "method": "turn/steer", "params": {
+                "expectedTurnId": turn_id,
+                "input": [{"type": "text", "text": text, "text_elements": []}],
+                "threadId": thread_id,
+            }}))
+            .await;
+    }
+
     async fn interrupt(&mut self) {
         let (Some(thread_id), Some(turn_id)) = (self.thread_id.clone(), self.turn_id.clone())
         else {
@@ -962,6 +981,9 @@ impl Session {
 
     /// Answer a pending request with the user's response.
     async fn respond(&mut self, response: RuntimeResponse) {
+        if let Some(text) = &response.steer {
+            return self.steer(text).await;
+        }
         let Some(pending) = self.pending.remove(&response.id) else {
             return;
         };

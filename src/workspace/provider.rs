@@ -265,6 +265,10 @@ pub struct RuntimeResponse {
     pub feedback: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers: Option<Value>,
+    /// Not an answer: a message that steers the running turn (its text),
+    /// with `id` the message's id (the reference's `provider-turn.steer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
