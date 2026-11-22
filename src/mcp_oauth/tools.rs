@@ -28,6 +28,7 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("t3_queue", &[]),
     ("t3_pending_request", &[]),
     ("t3_workflow_stop", &[]),
+    ("t3_thread_search", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -55,6 +56,7 @@ const SERVED: &[&str] = &[
     "t3_queue",
     "t3_pending_request",
     "t3_workflow_stop",
+    "t3_thread_search",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -515,6 +517,7 @@ pub(super) async fn call<S: McpHost>(
         "t3_environment_links" => environment_links(host, caller).await,
         "t3_environment_link" => environment_link(host, caller, args).await,
         "t3_environment_unlink" => environment_unlink(&**host, caller, args),
+        "t3_thread_search" => threads::search(host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }

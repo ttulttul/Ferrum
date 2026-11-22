@@ -99,6 +99,17 @@ pub trait McpHost: AuthHost {
     fn unlink_peer(&self, _environment_id: &str) -> Result<bool, String> {
         Ok(false)
     }
+    /// An agent's thread search over the shared store
+    /// (`ThreadSearch.searchThreads`): matches, best first, or `Err` when the
+    /// store cannot be searched.
+    fn search_threads(
+        &self,
+        _query: String,
+        _limit: usize,
+        _project: Option<String>,
+    ) -> HostFuture<Result<Vec<Value>, ()>> {
+        Box::pin(async { Err(()) })
+    }
     /// The stored link to `environment_id`, if this server keeps links.
     fn peer_link(&self, _environment_id: &str) -> Option<PeerLinkInfo> {
         None

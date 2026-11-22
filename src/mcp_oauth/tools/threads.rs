@@ -1069,6 +1069,40 @@ pub(super) async fn update<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value
 }
 
 // ---------------------------------------------------------------------------
+// t3_thread_search
+
+/// Active threads matching `query` by title, branch, pull request or project,
+/// then by message text, in the given project, else the caller's, else all.
+pub(super) async fn search<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> Outcome {
+    let query = required(a, "query")?.to_owned();
+    let limit = arg_count(a, "limit", 1)?.unwrap_or(50) as usize;
+    let project = arg_str(a, "projectId")?
+        .or(caller.thread.as_ref().map(|t| t.project_id.as_str()))
+        .map(str::to_owned);
+    let found = host
+        .search_threads(query, limit, project)
+        .await
+        .map_err(|()| unavailable())?;
+    let matches = found
+        .into_iter()
+        .map(|mut hit| {
+            let link = thread_link(
+                &**host,
+                caller,
+                hit["threadId"].as_str().unwrap_or_default(),
+                hit["title"].as_str().unwrap_or_default(),
+            );
+            hit["link"] = json!(link);
+            hit
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "currentThreadId": caller.thread.as_ref().map(|t| t.id.clone()),
+        "matches": matches,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // t3_workflow_stop
 
 pub(super) async fn workflow_stop<S: McpHost>(

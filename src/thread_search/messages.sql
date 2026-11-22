@@ -5,6 +5,8 @@ WITH eligible AS MATERIALIZED (
     WHERE t.deleted_at IS NULL AND t.archived_at IS NULL AND p.deleted_at IS NULL
       AND json_extract(t.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
       AND json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1
+      AND (:project IS NULL OR t.project_id = :project)
+      AND t.thread_id NOT IN (SELECT value FROM json_each(:excluded))
 )
 SELECT messages.message_id, messages.thread_id, eligible.project_id, messages.role,
        {text}, messages.created_at

@@ -57,6 +57,8 @@ def observations(url, cookie):
         ("t3_thread_organize", dict(action="pin", threadId="thread-missing")),
         ("t3_thread_update", dict(action="rename", title="Renamed")),
         ("t3_workflow_stop", dict(threadId="thread-missing", subagentId="workflow-missing")),
+        ("t3_thread_search", dict(query="anything")),
+        ("t3_thread_search", dict(query="anything", projectId="project-missing")),
     ]:
         call("tools/call", dict(name=name, arguments=arguments))
     call("tools/call",dict(name="missing-tool",arguments={}))

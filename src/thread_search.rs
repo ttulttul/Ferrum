@@ -119,7 +119,23 @@ struct Hit {
     score: f64,
     picked: i64,
 }
-fn messages(conn: &Connection, q: &Query, limit: usize, now: i64) -> anyhow::Result<Vec<Value>> {
+/// Where a message search looks and how it ranks: a client's search looks
+/// everywhere and counts the user's picks; an agent's looks in one project,
+/// leaves out the threads its title matches already list, and ignores picks.
+#[derive(Default)]
+struct Scope<'a> {
+    project: Option<&'a str>,
+    excluded: Vec<String>,
+    no_picks: bool,
+}
+
+fn messages(
+    conn: &Connection,
+    q: &Query,
+    limit: usize,
+    now: i64,
+    scope: &Scope,
+) -> anyhow::Result<Vec<Value>> {
     if q.long.is_empty() {
         return Ok(vec![]);
     }
@@ -172,6 +188,11 @@ fn messages(conn: &Connection, q: &Query, limit: usize, now: i64) -> anyhow::Res
     ] {
         stmt.raw_bind_parameter(stmt.parameter_index(k)?.unwrap(), v)?;
     }
+    stmt.raw_bind_parameter(
+        stmt.parameter_index(":excluded")?.unwrap(),
+        json!(scope.excluded).to_string(),
+    )?;
+    stmt.raw_bind_parameter(stmt.parameter_index(":project")?.unwrap(), scope.project)?;
     if indexed {
         let fts = q
             .long
@@ -234,7 +255,7 @@ fn messages(conn: &Connection, q: &Query, limit: usize, now: i64) -> anyhow::Res
         let (boost, picked, _) = usage(q, &opens, activity.as_deref(), now);
         if let Some(hit) = best.get_mut(&id) {
             hit.score = (1. + (1. + hit.count as f64).log2()) * boost;
-            hit.picked = picked;
+            hit.picked = if scope.no_picks { 0 } else { picked };
         }
     }
     let mut hits = best.into_values().collect::<Vec<_>>();
@@ -264,6 +285,51 @@ const LAST_USER: &str = "(SELECT m.updated_at FROM orchestration_v2_projection_m
       AND coalesce(json_extract(m.payload_json,'$.createdBy'),'user')='user'
     ORDER BY m.updated_at DESC,m.message_id DESC LIMIT 1)";
 
+/// An agent's thread search (`ThreadSearch.searchThreads`): title, branch,
+/// pull request and project matches ranked as the palette ranks them, without
+/// the user's picks, then message matches in the other threads, which keep a
+/// fifth of the `limit` slots.
+pub(crate) fn search_agent_threads(
+    dir: &Path,
+    query: &str,
+    limit: usize,
+    project: Option<&str>,
+) -> anyhow::Result<Vec<Value>> {
+    let mut conn = reader(dir)?;
+    let tx = conn.transaction()?;
+    let q = Query::new(query);
+    let now = crate::platform::now_ms();
+    let (candidates, mut titles) = older::active(&tx, &q, project, now)?;
+    titles.truncate(limit);
+    let scope = Scope {
+        project,
+        excluded: titles
+            .iter()
+            .filter_map(|t| t["threadId"].as_str().map(str::to_owned))
+            .collect(),
+        no_picks: true,
+    };
+    let found = messages(&tx, &q, 50, now, &scope)?
+        .into_iter()
+        .filter_map(|mut hit| {
+            let (_, _, title) = candidates
+                .iter()
+                .find(|(id, _, _)| hit["threadId"] == *id)?;
+            let object = hit.as_object_mut()?;
+            for key in ["quality", "hits", "messageId"] {
+                object.remove(key);
+            }
+            object.insert("title".into(), json!(title));
+            Some(hit)
+        })
+        .collect::<Vec<_>>();
+    let slots = found.len().min(limit / 5);
+    titles.truncate(limit - slots);
+    titles.extend(found);
+    titles.truncate(limit);
+    Ok(titles)
+}
+
 pub(crate) fn search_threads(dir: &Path, input: &Value) -> anyhow::Result<Value> {
     let mut conn = reader(dir)?;
     let tx = conn.transaction()?;
@@ -272,7 +338,13 @@ pub(crate) fn search_threads(dir: &Path, input: &Value) -> anyhow::Result<Value>
     let hits = if input["titlesOnly"] == true {
         vec![]
     } else {
-        messages(&tx, &q, input["limit"].as_u64().unwrap_or(50) as usize, now)?
+        messages(
+            &tx,
+            &q,
+            input["limit"].as_u64().unwrap_or(50) as usize,
+            now,
+            &Scope::default(),
+        )?
     };
     let mut result = json!({});
     if let Some(before) = input["olderSettledBefore"].as_str() {
@@ -286,6 +358,15 @@ pub(crate) fn search_threads(dir: &Path, input: &Value) -> anyhow::Result<Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn messages_everywhere(
+        db: &Connection,
+        q: &Query,
+        limit: usize,
+        now: i64,
+    ) -> anyhow::Result<Vec<Value>> {
+        messages(db, q, limit, now, &Scope::default())
+    }
 
     #[test]
     fn accent_and_short_word_filters_agree_with_and_without_the_index() {
@@ -309,16 +390,16 @@ mod tests {
                 db.execute_batch("DROP TABLE orchestration_v2_message_search")
                     .unwrap();
             }
-            let hits = messages(&db, &Query::new("ecole fermée"), 50, 0).unwrap();
+            let hits = messages_everywhere(&db, &Query::new("ecole fermée"), 50, 0).unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0]["messageId"], "b");
             assert_eq!(hits[0]["quality"], 1.25);
             assert_eq!(hits[0]["hits"], 2);
             assert_eq!(hits[0]["snippet"], "École fermée aussi");
-            assert!(!messages(&db, &Query::new("fermée éc"), 50, 0)
+            assert!(!messages_everywhere(&db, &Query::new("fermée éc"), 50, 0)
                 .unwrap()
                 .is_empty());
-            assert!(messages(&db, &Query::new("fermée ce"), 50, 0)
+            assert!(messages_everywhere(&db, &Query::new("fermée ce"), 50, 0)
                 .unwrap()
                 .is_empty());
         }

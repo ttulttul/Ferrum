@@ -123,6 +123,8 @@ fn branch(s: &str) -> String {
 }
 struct Subject {
     id: String,
+    project: String,
+    title: String,
     fields: Vec<Field>,
     refs: Vec<String>,
     boost: f64,
@@ -238,25 +240,16 @@ impl Subject {
         })
     }
 }
-pub(super) fn threads(
-    db: &Connection,
+/// The palette's subjects for threads read as `(thread_id, payload_json,
+/// project title, latest user message, project_id)` rows. Without `picks`,
+/// as for an agent's search, the user's palette picks do not count.
+fn subjects(
+    rows: &mut rusqlite::Rows,
     q: &Query,
-    input: &Value,
-    before: &str,
-    hits: &[Value],
+    environment_label: Option<&str>,
     now: i64,
-) -> anyhow::Result<Vec<Value>> {
-    let mut stmt=db.prepare(&format!("SELECT t.thread_id,t.payload_json,p.title,{LAST_USER} FROM orchestration_v2_projection_threads t JOIN projection_projects p USING(project_id)
-        WHERE t.archived_at IS NULL AND t.deleted_at IS NULL AND p.deleted_at IS NULL
-        AND json_extract(t.payload_json,'$.lineage.relationshipToParent') IS NOT 'subagent' AND json_extract(t.payload_json,'$.lineage.sideChat') IS NOT 1
-        AND json_extract(t.payload_json,'$.settledOverride')='settled' AND json_extract(t.payload_json,'$.settledAt')<?1
-        AND (?2 IS NULL OR t.project_id IN (SELECT value FROM json_each(?2)))"))?;
-    let mut rows = stmt.query(params![
-        before,
-        input["projectIds"]
-            .as_array()
-            .map(|_| input["projectIds"].to_string())
-    ])?;
+    picks: bool,
+) -> anyhow::Result<Vec<Subject>> {
     let mut subjects = Vec::new();
     while let Some(r) = rows.next()? {
         let id: String = r.get(0)?;
@@ -305,7 +298,7 @@ pub(super) fn threads(
             fields.push(Field::new(&branch(s), 0.6, false));
         }
         fields.push(Field::new(&r.get::<_, String>(2)?, 0.25, true));
-        if let Some(s) = input["environmentLabel"].as_str() {
+        if let Some(s) = environment_label {
             fields.push(Field::new(s, 0.25, true));
         }
         let activity: Option<String> = r.get(3)?;
@@ -317,13 +310,20 @@ pub(super) fn threads(
         );
         subjects.push(Subject {
             id,
+            project: r.get(4)?,
+            title: t["title"].as_str().unwrap_or_default().to_owned(),
             fields,
             refs,
             boost,
-            pick,
-            exact,
+            pick: if picks { pick } else { 0 },
+            exact: picks && exact,
         });
     }
+    Ok(subjects)
+}
+
+/// The subjects that match, best first (`rankSearchItems` with `scoreThreadSearch`).
+fn ranked<'a>(subjects: &'a [Subject], q: &Query) -> Vec<&'a Subject> {
     let field_query = branch(
         PR.replace(&q.normalized, "$1")
             .trim_start_matches('#')
@@ -355,10 +355,37 @@ pub(super) fn threads(
         };
         key(b, y).cmp(&key(a, x)).then(y.score.total_cmp(&x.score))
     });
-    let mut ids = ranked
+    ranked.into_iter().map(|(s, _)| s).collect()
+}
+
+const COLUMNS: &str = "t.thread_id,t.payload_json,p.title,{LAST_USER},t.project_id";
+const VISIBLE: &str = "t.archived_at IS NULL AND t.deleted_at IS NULL AND p.deleted_at IS NULL
+        AND json_extract(t.payload_json,'$.lineage.relationshipToParent') IS NOT 'subagent' AND json_extract(t.payload_json,'$.lineage.sideChat') IS NOT 1";
+
+pub(super) fn threads(
+    db: &Connection,
+    q: &Query,
+    input: &Value,
+    before: &str,
+    hits: &[Value],
+    now: i64,
+) -> anyhow::Result<Vec<Value>> {
+    let columns = COLUMNS.replace("{LAST_USER}", LAST_USER);
+    let mut stmt=db.prepare(&format!("SELECT {columns} FROM orchestration_v2_projection_threads t JOIN projection_projects p USING(project_id)
+        WHERE {VISIBLE}
+        AND json_extract(t.payload_json,'$.settledOverride')='settled' AND json_extract(t.payload_json,'$.settledAt')<?1
+        AND (?2 IS NULL OR t.project_id IN (SELECT value FROM json_each(?2)))"))?;
+    let mut rows = stmt.query(params![
+        before,
+        input["projectIds"]
+            .as_array()
+            .map(|_| input["projectIds"].to_string())
+    ])?;
+    let subjects = subjects(&mut rows, q, input["environmentLabel"].as_str(), now, true)?;
+    let mut ids = ranked(&subjects, q)
         .into_iter()
         .take(15)
-        .map(|(s, _)| s.id.as_str())
+        .map(|s| s.id.as_str())
         .collect::<Vec<_>>();
     let eligible = subjects
         .iter()
@@ -378,4 +405,32 @@ pub(super) fn threads(
         }
     }
     Ok(out)
+}
+
+/// An active thread an agent's search may return: `(id, project id, title)`.
+pub(super) type Candidate = (String, String, String);
+
+/// For an agent's search (`ThreadSearch.searchThreads`): every active thread,
+/// in `project` if given, as `(id, project id, title)`, and those that match
+/// by title, branch, pull request or project, best first. Picks do not count.
+pub(super) fn active(
+    db: &Connection,
+    q: &Query,
+    project: Option<&str>,
+    now: i64,
+) -> anyhow::Result<(Vec<Candidate>, Vec<Value>)> {
+    let columns = COLUMNS.replace("{LAST_USER}", LAST_USER);
+    let mut stmt = db.prepare(&format!("SELECT {columns} FROM orchestration_v2_projection_threads t JOIN projection_projects p USING(project_id)
+        WHERE {VISIBLE} AND (?1 IS NULL OR t.project_id = ?1)"))?;
+    let mut rows = stmt.query(params![project])?;
+    let subjects = subjects(&mut rows, q, None, now, false)?;
+    let matches = ranked(&subjects, q)
+        .into_iter()
+        .map(|s| serde_json::json!({"threadId": s.id, "projectId": s.project, "title": s.title, "source": "title"}))
+        .collect();
+    let all = subjects
+        .into_iter()
+        .map(|s| (s.id, s.project, s.title))
+        .collect();
+    Ok((all, matches))
 }
