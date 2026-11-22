@@ -257,16 +257,18 @@ impl Workspace for LocalWorkspace {
             let previews = self.previews.clone();
             let dir = self.data_dir.clone();
             let input = input.clone();
-            // A disconnected MCP caller must not cancel the timer that stops its renderer script.
-            return async move {
-                let operation = tokio::spawn(async move { previews.automate(&input, &dir).await });
-                Some(operation.await.unwrap_or_else(|_| {
-                    Err(serde_json::json!({"message":"The browser session ended."}))
-                }))
-            }
-            .boxed();
+            return async move { Some(previews.automate(input, dir).await) }.boxed();
         }
-        futures_util::future::ready(self.previews.call(method, input)).boxed()
+        let reply = self.previews.call(method, input);
+        if (method == "resize" || (method == "adjust" && input.get("zoomFactor").is_some()))
+            && reply.as_ref().is_some_and(Result::is_ok)
+        {
+            let previews = self.previews.clone();
+            let input = input.clone();
+            // The manager acknowledges the setting even while Chromium is busy.
+            tokio::spawn(async move { previews.sync_viewport(&input).await });
+        }
+        futures_util::future::ready(reply).boxed()
     }
     fn preview_profile<'a>(
         &'a self,

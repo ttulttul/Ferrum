@@ -40,7 +40,11 @@ fn at(path: &[&str]) -> String {
 /// Fields whose range the reference checks with `isBetween`, which words both
 /// ends as one ("a value between 1 and 50"); other ranges are two checks, and
 /// the advertised schema cannot tell them apart.
-const BETWEEN: &[(&str, &str)] = &[("t3_thread_search", "limit")];
+const BETWEEN: &[(&str, &str)] = &[
+    ("t3_thread_search", "limit"),
+    ("preview_resize", "width"),
+    ("preview_resize", "height"),
+];
 
 /// A union member: its `kind`, and its required fields in order.
 type Member = (&'static str, &'static [&'static str]);
@@ -84,6 +88,14 @@ fn issue(
         });
     }
     if let Some(n) = value.as_f64() {
+        if tool == "preview_resize" && schema["type"] == "integer" {
+            if n.fract() != 0.0 || n.abs() > 9_007_199_254_740_991.0 {
+                return expected("an integer".into());
+            }
+            if schema["exclusiveMinimum"] == 0 && n <= 0.0 {
+                return expected("a value greater than 0".into());
+            }
+        }
         if let (Some(min), Some(max), true) = (
             schema["minimum"].as_f64(),
             schema["maximum"].as_f64(),
@@ -105,7 +117,11 @@ fn issue(
         if tool == "preview_evaluate" && path == ["expression"] && trimmed != text {
             return expected("a string with no leading or trailing whitespace".into());
         }
-        if matches!(tool, "preview_evaluate" | "preview_set_appearance") && path == ["tabId"] {
+        if matches!(
+            tool,
+            "preview_evaluate" | "preview_set_appearance" | "preview_resize"
+        ) && path == ["tabId"]
+        {
             if trimmed.is_empty() {
                 return expected("a non-blank string".into());
             }
@@ -216,7 +232,35 @@ pub(super) fn check(
     }
     match issue(name, &tool["inputSchema"], args, false, &[]) {
         Some(problem) => Err(refusal(name, &problem)),
+        None if name == "preview_resize" => {
+            check_resize(args).map_err(|message| refusal(name, message))
+        }
         None => Ok(()),
+    }
+}
+
+fn check_resize(args: &Value) -> Result<(), &'static str> {
+    let width = args["width"].as_f64();
+    let height = args["height"].as_f64();
+    let preset = args["preset"].is_string();
+    let orientation = args["orientation"].is_string();
+    if width.is_some() != height.is_some() {
+        return Err("Custom dimensions require both width and height.");
+    }
+    match args["mode"].as_str() {
+        Some("fill") if preset || width.is_some() || orientation => {
+            Err("Fill mode does not accept a preset, dimensions, or orientation.")
+        }
+        Some("freeform") if width.is_none() || preset || orientation => Err(
+            "Freeform mode requires width and height and does not accept a preset or orientation.",
+        ),
+        Some("preset") if !preset || width.is_some() => {
+            Err("Preset mode requires a preset and does not accept custom dimensions.")
+        }
+        _ if width.zip(height).is_some_and(|(w, h)| w * h > 8_294_400.0) => {
+            Err("Custom viewport area must not exceed 8294400 pixels.")
+        }
+        _ => Ok(()),
     }
 }
 
