@@ -615,3 +615,381 @@ async fn a_terminal_stream_reports_output_as_it_arrives() {
     }
     panic!("no output on the stream: {sent:?}");
 }
+
+/// Methods that act on the host process or install software even with an
+/// empty payload; the sweep leaves them alone.
+const NOT_SWEPT: &[&str] = &[
+    "server.updateServer",
+    "server.updateServerWithProgress",
+    "server.commitDesktopUpdate",
+    "server.signalProcess",
+    "cloud.installRelayClient",
+    "device.shutdown",
+];
+
+/// Contracts the control plane does not serve yet: they still answer
+/// "registered but unavailable in the control plane". The list may only
+/// shrink. A method that starts answering must come off it, and a method that
+/// stops answering fails the sweep.
+const NOT_YET_IN_THE_CONTROL_PLANE: &[&str] = &[
+    "orchestration.getFullThreadDiff",
+    "orchestration.getTurnDiff",
+    "provider.chatgpt.import-profile",
+    "provider.chatgpt.reconnect-profile",
+    "projects.ensureScratch",
+    "projects.createFromThread",
+    "shell.openInEditor",
+    "agentSessions.scan",
+    "agentSessions.import",
+    "assets.persistChatAttachments",
+    "attachments.createUploadUrl",
+    "attachments.delete",
+    "mcpApps.toolInfo",
+    "mcpApps.readResource",
+    "mcpApps.updateModelContext",
+    "provider.uploadFeedback",
+    "provider.auth.start",
+    "provider.consumeResetCredit",
+    "provider.auth.complete",
+    "provider.chatgpt.handoff.subscribe",
+    "provider.auth.cancel",
+    "provider.auth.removeMethod",
+    "provider.auth.logout",
+    "provider.auth.subscribe",
+    "provider.install.start",
+    "provider.install.cancel",
+    "provider.install.subscribe",
+    "provider.install.remove",
+    "git.runStackedAction",
+    "server.getNpmRelease",
+    "server.updateProvider",
+    "server.upsertKeybinding",
+    "server.removeKeybinding",
+    "server.runStorageCleanup",
+    "server.getStorageCleanupReport",
+    "server.getDatabaseStorage",
+    "server.reclaimDatabaseSpace",
+    "peerLinks.list",
+    "peerLinks.link",
+    "peerLinks.unlink",
+    "peerLinks.answerRequest",
+    "server.discoverSourceControl",
+    "server.searchAcpRegistry",
+    "server.prepareAcpRegistryAgent",
+    "server.uninstallAcpRegistryManagedBinary",
+    "server.acceptAcpRegistryUrlAuth",
+    "server.listAcpRegistrySessions",
+    "server.importAcpRegistrySession",
+    "server.deleteAcpRegistrySession",
+    "server.listAcpRegistryProviders",
+    "server.setAcpRegistryProvider",
+    "server.disableAcpRegistryProvider",
+    "server.logoutAcpRegistry",
+    "server.getTraceDiagnostics",
+    "server.getProcessDiagnostics",
+    "server.getHostResources",
+    "server.getProcessResourceHistory",
+    "server.getResourceTelemetryHistory",
+    "server.retryResourceTelemetry",
+    "server.listTextGeneratorModels",
+    "server.getUsageSummary",
+    "server.refreshUsageRates",
+    "scheduledTasks.upsert",
+    "scheduledTasks.setEnabled",
+    "scheduledTasks.delete",
+    "scheduledTasks.runNow",
+    "scheduledTasks.rotateWebhookToken",
+    "secrets.answerRequest",
+    "guestShare.create",
+    "scheduledTasks.listWebhookDeliveries",
+    "scheduledTasks.getWebhookDelivery",
+    "cloud.getRelayClientStatus",
+    "pullRequests.list",
+    "pullRequests.listStats",
+    "pullRequests.filterOptions",
+    "pullRequests.summary",
+    "pullRequests.routing",
+    "pullRequests.routingIdentity",
+    "pullRequests.stack",
+    "pullRequests.linkedThreads",
+    "pullRequests.detail",
+    "pullRequests.preview",
+    "pullRequests.checks",
+    "pullRequests.activity",
+    "pullRequests.reviewGuide",
+    "pullRequests.generateReviewGuide",
+    "pullRequests.threadComments",
+    "pullRequests.diffFileContents",
+    "pullRequests.filesViewed",
+    "pullRequests.changeBreakdown",
+    "pullRequests.setFilesViewed",
+    "pullRequests.runAction",
+    "pullRequests.update",
+    "pullRequests.comment",
+    "pullRequests.updateComment",
+    "pullRequests.submitReview",
+    "pullRequests.replyToThread",
+    "pullRequests.setThreadResolution",
+    "pullRequests.setReaction",
+    "pullRequests.invalidate",
+    "pullRequests.reportState",
+    "pullRequests.reviewerCandidates",
+    "pullRequests.requestReviewers",
+    "pullRequests.labelCandidates",
+    "pullRequests.setLabels",
+    "issues.list",
+    "issues.detail",
+    "issues.comments",
+    "issues.templates",
+    "issues.candidates",
+    "issues.create",
+    "issues.comment",
+    "issues.update",
+    "issues.setState",
+    "issues.react",
+    "issues.linkedThreads",
+    "issueTrackers.list",
+    "issueTrackers.connect",
+    "issueTrackers.bindProject",
+    "sourceControl.lookupRepository",
+    "sourceControl.cloneRepository",
+    "sourceControl.publishRepository",
+    "sourceControl.signInStart",
+    "sourceControl.signInWait",
+    "sourceControl.signInCancel",
+    "sourceControl.appAccess",
+    "sourceControl.starred",
+    "sourceControl.star",
+    "projectClone.start",
+    "projectClone.cancel",
+    "projectClone.retry",
+    "subscribeWorktreeSetup",
+    "worktreeSetup.cancel",
+    "subscribeResourceTelemetry",
+    "orchestration.searchThreads",
+    "orchestration.searchThread",
+    "orchestration.searchThreadStream",
+    "orchestration.getArchivedShellSnapshot",
+    "orchestration.getThreadFamily",
+    "orchestration.getThreadTitles",
+    "orchestration.getThreadLinkMetadata",
+    "orchestration.getWorktreeThreadIds",
+    "orchestration.getWorkflowScript",
+    "orchestration.getNativeChildWork",
+    "orchestration.stopWorkflow",
+    "orchestration.forceStopThread",
+    "orchestration.getTurnItem",
+    "orchestration.launchThread",
+    "orchestration.subscribeCommandOutput",
+];
+
+/// The payloads the desktop client sends, for methods whose payload the
+/// shared checks decode before routing (so a placeholder never reaches the
+/// method), and for the methods a live desktop trial found unavailable.
+fn desktop_payload(tag: &str) -> Option<Value> {
+    Some(match tag {
+        "assets.createUrl" => {
+            json!({"resource":{"_tag":"workspace-file","path":"/workspace/logo.png"}})
+        }
+        "server.updateSettings" => json!({"patch":{"compactIdleThreads":true}}),
+        "orchestration.getOlderSettledThreads" => {
+            json!({"before":{"settledAt":"2030-01-01T00:00:00.000Z","threadId":"thread-1"},"limit":25})
+        }
+        "projects.mutate" => json!({"type":"project.update","commandId":"c","projectId":"missing"}),
+        "device.action" => json!({"deviceId":"d","action":{"type":"shake"},"type":"shake"}),
+        "orchestration.dispatchCommand" => {
+            json!({"type":"thread.visit","commandId":"c","threadId":"missing","visitedAt":"2030-01-01T00:00:00.000Z"})
+        }
+        "orchestration.getTurnDiff" | "orchestration.getFullThreadDiff" => {
+            json!({"threadId":"missing","fromTurnCount":0,"toTurnCount":1})
+        }
+        "mcpApps.updateModelContext" => {
+            json!({"threadId":"t","itemId":"i","conversationThreadId":"c","content":[]})
+        }
+        "provider.auth.start" => json!({"instanceId":"codex","callbackMode":"server"}),
+        _ => return None,
+    })
+}
+
+/// Every required key, as a placeholder string.
+fn placeholder_payload(tag: &str) -> Value {
+    let contract = t3code_server::RPC_CONTRACTS
+        .iter()
+        .find(|c| c.tag == tag)
+        .unwrap();
+    let mut payload = serde_json::Map::new();
+    for key in contract.required.unwrap_or_default() {
+        payload.insert((*key).into(), json!("placeholder"));
+    }
+    Value::Object(payload)
+}
+
+/// One plane on a connected agentd, for sending single requests.
+async fn connected_plane() -> (tempfile::TempDir, Server) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let url = agentd(dir.path(), &root).await;
+    let documents = Arc::new(MemoryStore::new());
+    write_settings(&documents, &stub_settings());
+    let log = SharedLog::default();
+    let server = Server::start(1, &url, &documents, &log, stub_provider("0")).await;
+    (dir, server)
+}
+
+async fn request(server: &Server, tag: &str, payload: Value) -> Vec<String> {
+    let mut connection = server.connection();
+    let frame = json!({"_tag":"Request","id":"1","tag":tag,"payload":payload,"headers":[]});
+    let replies = tokio::time::timeout(
+        Duration::from_secs(10),
+        server.plane.on_message(&mut connection, &frame.to_string()),
+    )
+    .await
+    .unwrap_or_default();
+    server.plane.disconnect(&connection);
+    replies
+}
+
+/// The sweep that guards every contract: a live desktop got "registered but
+/// unavailable in the control plane" for `assets.createUrl`,
+/// `server.updateSettings` and `orchestration.getOlderSettledThreads`, and no
+/// test sent them to the plane.
+#[tokio::test]
+async fn no_contract_newly_answers_registered_but_unavailable_in_the_control_plane() {
+    let (_dir, server) = connected_plane().await;
+    let mut unavailable = Vec::new();
+    for contract in t3code_server::RPC_CONTRACTS {
+        if NOT_SWEPT.contains(&contract.tag) {
+            continue;
+        }
+        let payload =
+            desktop_payload(contract.tag).unwrap_or_else(|| placeholder_payload(contract.tag));
+        let replies = request(&server, contract.tag, payload).await;
+        if replies
+            .iter()
+            .any(|text| text.contains("registered but unavailable"))
+        {
+            unavailable.push(contract.tag);
+        }
+    }
+    let new: Vec<_> = unavailable
+        .iter()
+        .filter(|tag| !NOT_YET_IN_THE_CONTROL_PLANE.contains(tag))
+        .collect();
+    assert!(
+        new.is_empty(),
+        "these contracts answer \"registered but unavailable in the control plane\": {new:?}"
+    );
+    let served: Vec<_> = NOT_YET_IN_THE_CONTROL_PLANE
+        .iter()
+        .filter(|tag| !unavailable.contains(tag))
+        .collect();
+    assert!(
+        served.is_empty(),
+        "these contracts now answer in the control plane; take them off NOT_YET_IN_THE_CONTROL_PLANE: {served:?}"
+    );
+}
+
+fn exit(replies: &[String]) -> Value {
+    let reply: Value = serde_json::from_str(replies.last().expect("a reply")).unwrap();
+    assert_eq!(reply["_tag"], "Exit", "{reply}");
+    reply["exit"].clone()
+}
+
+#[tokio::test]
+async fn the_control_plane_answers_the_desktops_asset_settings_and_history_calls() {
+    let (_dir, server) = connected_plane().await;
+
+    let asset = exit(
+        &request(
+            &server,
+            "assets.createUrl",
+            desktop_payload("assets.createUrl").unwrap(),
+        )
+        .await,
+    );
+    assert_eq!(asset["_tag"], "Success", "{asset}");
+    let url = asset["value"]["relativeUrl"].as_str().unwrap();
+    assert!(
+        url.starts_with("/api/assets/") && url.ends_with("/logo.png"),
+        "{url}"
+    );
+    assert_eq!(asset["value"]["sourcePath"], "/workspace/logo.png");
+    // `<base64url claims>.<base64url HMAC-SHA256>`, as the native server signs.
+    let token = url.split('/').nth(3).unwrap();
+    let (claims, signature) = token.split_once('.').unwrap();
+    assert_eq!(signature.len(), 43, "{token}");
+    let claims = String::from_utf8(base64_url_decode(claims)).unwrap();
+    let claims: Value = serde_json::from_str(&claims).unwrap();
+    assert_eq!(claims["kind"], "workspace-file");
+    assert_eq!(claims["filePath"], "/workspace/logo.png");
+    let bad = exit(
+        &request(
+            &server,
+            "assets.createUrl",
+            json!({"resource":{"_tag":"workspace-file"}}),
+        )
+        .await,
+    );
+    assert_eq!(bad["_tag"], "Failure");
+    assert!(
+        bad["cause"][0]["defect"]
+            .as_str()
+            .unwrap()
+            .starts_with("Expected {"),
+        "{bad}"
+    );
+
+    let before = exit(&request(&server, "server.getSettings", json!({})).await);
+    assert_eq!(before["_tag"], "Success", "{before}");
+    let updated = exit(
+        &request(
+            &server,
+            "server.updateSettings",
+            json!({"patch":{"defaultRuntimeMode":"approval-required"}}),
+        )
+        .await,
+    );
+    assert_eq!(updated["_tag"], "Success", "{updated}");
+    assert_eq!(updated["value"]["defaultRuntimeMode"], "approval-required");
+    let after = exit(&request(&server, "server.getSettings", json!({})).await);
+    assert_eq!(after["value"]["defaultRuntimeMode"], "approval-required");
+    let invalid = exit(
+        &request(
+            &server,
+            "server.updateSettings",
+            json!({"patch":{"backgroundActivityProfile":"not-a-profile"}}),
+        )
+        .await,
+    );
+    assert_eq!(invalid["_tag"], "Failure", "{invalid}");
+
+    let older = exit(
+        &request(
+            &server,
+            "orchestration.getOlderSettledThreads",
+            desktop_payload("orchestration.getOlderSettledThreads").unwrap(),
+        )
+        .await,
+    );
+    assert_eq!(older["_tag"], "Success", "{older}");
+    assert_eq!(older["value"]["threads"], json!([]));
+    assert_eq!(older["value"]["counts"], json!([]));
+    assert!(older["value"]["snapshotSequence"].is_u64(), "{older}");
+}
+
+fn base64_url_decode(text: &str) -> Vec<u8> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut bits = 0u32;
+    let mut count = 0;
+    let mut out = Vec::new();
+    for byte in text.bytes() {
+        bits = bits << 6 | ALPHABET.iter().position(|&c| c == byte).unwrap() as u32;
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+        }
+    }
+    out
+}

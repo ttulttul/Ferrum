@@ -602,6 +602,56 @@ pub(crate) fn wire_project(p: &Project) -> serde_json::Value {
     serde_json::json!({"id":p.id,"title":p.name,"hasCustomTitle":false,"workspaceRoot":p.path,"repositoryIdentity":null,"faviconPath":null,"projectIcon":null,"defaultModelSelection":null,"defaultThreadEnvMode":null,"autoPull":false,"scripts":[],"pinnedAt":null,"archivedAt":null,"createdAt":at,"updatedAt":at,"deletedAt":null})
 }
 
+/// `orchestration.getOlderSettledThreads`: settled threads older than
+/// `params.before`, newest first, with each project's count, as of `sequence`.
+pub(crate) fn older_settled_threads(
+    store: &Store,
+    sequence: u64,
+    params: &serde_json::Value,
+) -> serde_json::Value {
+    use serde_json::json;
+    let before = params["before"]["settledAt"].as_str().unwrap_or_default();
+    let after_id = params["before"]["threadId"].as_str();
+    let project_ids = params["projectIds"].as_array();
+    let in_projects = |thread: &&crate::Thread| {
+        project_ids.is_none_or(|ids| {
+            ids.iter()
+                .any(|id| id.as_str() == Some(thread.project_id.as_str()))
+        })
+    };
+    let mut older: Vec<&crate::Thread> = store
+        .threads
+        .values()
+        .filter(|thread| {
+            thread.settled
+                && !thread.archived
+                && in_projects(thread)
+                && thread.row["settledAt"].as_str().is_some_and(|at| {
+                    at < before
+                        || (at == before && after_id.is_some_and(|id| thread.id.as_str() > id))
+                })
+        })
+        .collect();
+    older.sort_by(|a, b| {
+        b.row["settledAt"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(a.row["settledAt"].as_str().unwrap_or_default())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for thread in &older {
+        *counts.entry(thread.project_id.clone()).or_default() += 1;
+    }
+    let limit = params["limit"].as_i64().unwrap_or(0).clamp(0, 50) as usize;
+    let threads = if limit == 0 {
+        Vec::new()
+    } else {
+        older.into_iter().take(limit).map(|t| t.shell()).collect()
+    };
+    json!({"snapshotSequence":sequence,"threads":threads,"counts":counts.into_iter().map(|(project_id,count)|json!({"projectId":project_id,"count":count})).collect::<Vec<_>>()})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

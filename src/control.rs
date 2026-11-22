@@ -52,6 +52,10 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc};
 
+/// The defect `assets.createUrl` answers for a resource it cannot decode,
+/// as the reference's schema words it.
+pub(crate) const ASSET_RESOURCE_DEFECT: &str = "Expected { readonly \"_tag\": \"workspace-file\", ... } | { readonly \"_tag\": \"media-file\", readonly \"disposition\"?: \"attachment\", readonly \"hostOnly\"?: true, ... } | { readonly \"_tag\": \"draft-workspace-file\", ... } | { readonly \"_tag\": \"attachment\", readonly \"renderIntent\"?: \"mcp-app\", ... } | { readonly \"_tag\": \"tool-output-image\", ... } | { readonly \"_tag\": \"project-favicon\", ... } | { readonly \"_tag\": \"native-app-icon\", ... } | { readonly \"_tag\": \"environment-theme-background\", ... } | { readonly \"_tag\": \"github-media\", ... }\n  at [\"resource\"]";
+
 /// Where the workspace lives on the `t3-agentd` side.
 pub const WORKSPACE_ROOT: &str = "/workspace";
 /// Where the control plane's state documents live, as the native
@@ -543,6 +547,148 @@ impl ControlPlane {
             .unwrap_or_else(default_settings)
     }
 
+    /// `server.updateSettings` with its decoded `payload`: the patch (and
+    /// provider instance mutation) applied with the native server's
+    /// semantics, written to `settings.json` in the plane's documents. The
+    /// plane has no managed policy or secret store, so it skips those steps.
+    fn update_settings(&self, payload: &Value) -> Result<Value, Value> {
+        let path = std::path::Path::new(STATE_DIR).join("settings.json");
+        let error = |operation: &str| json!({"_tag":"ServerSettingsError","settingsPath":path.to_string_lossy(),"operation":operation});
+        let next =
+            crate::settings::mutations::apply(&self.settings(), payload).map_err(|operation| {
+                let mut e = error(&operation);
+                if operation == "create-provider-instance" {
+                    e["providerInstanceId"] =
+                        payload["providerInstanceMutation"]["instanceId"].clone();
+                }
+                e
+            })?;
+        let mut next = crate::settings::schema::normalize_runtime(&next).map_err(|message| {
+            json!({"_tag":"ServerSettingsError","settingsPath":"<memory>","operation":"normalize",
+                   "cause":{"name":"SchemaError","message":message}})
+        })?;
+        crate::settings::mutations::normalize(&mut next);
+        let mut bytes = serde_json::to_vec_pretty(&next).map_err(|_| error("write-file"))?;
+        bytes.push(b'\n');
+        self.documents
+            .write(&path, &bytes, crate::persistence::WriteMode::ReplaceTarget)
+            .map_err(|_| error("write-file"))?;
+        Ok(self.settings())
+    }
+
+    /// The key that signs asset URLs, made on first use and kept with the
+    /// plane's secrets as the native server keeps its own.
+    fn asset_signing_key(&self) -> std::io::Result<Vec<u8>> {
+        let path = std::path::Path::new(STATE_DIR).join("secrets/asset-access-signing-key.bin");
+        if let Some(key) = self.documents.read_optional(&path)? {
+            if key.len() == 32 {
+                return Ok(key);
+            }
+        }
+        let key = crate::platform::random_bytes::<32>().to_vec();
+        self.documents
+            .write(&path, &key, crate::persistence::WriteMode::ReplaceTarget)?;
+        Ok(key)
+    }
+
+    /// `assets.createUrl`: the same input checks and signed `/api/assets/`
+    /// URL as the native server. Paths are the workspace's, so they are
+    /// signed as given; the plane cannot stat them for a `fileRevision`.
+    fn create_asset_url(&self, params: &Value) -> Reply {
+        use base64::Engine;
+        use hmac::Mac;
+        let Some(resource) = params.get("resource").and_then(Value::as_object) else {
+            return Reply::defect(ASSET_RESOURCE_DEFECT.into());
+        };
+        let tag = resource
+            .get("_tag")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let path = resource
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(
+            tag,
+            "workspace-file"
+                | "media-file"
+                | "draft-workspace-file"
+                | "attachment"
+                | "tool-output-image"
+                | "project-favicon"
+                | "native-app-icon"
+                | "environment-theme-background"
+                | "github-media"
+        ) || matches!(
+            tag,
+            "media-file" | "workspace-file" | "draft-workspace-file"
+        ) && path.is_empty()
+        {
+            return Reply::defect(ASSET_RESOURCE_DEFECT.into());
+        }
+        let file_path = match tag {
+            "draft-workspace-file" => resource
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(|cwd| std::path::Path::new(cwd).join(path)),
+            "media-file" | "workspace-file" => Some(PathBuf::from(path)),
+            _ => None,
+        };
+        let expires = crate::platform::now_ms() as u64 + 60 * 60 * 1000;
+        let claims = if tag == "attachment" {
+            let attachment_id = resource
+                .get("attachmentId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if attachment_id.is_empty() {
+                return Reply::defect("Missing key\n  at [\"resource\"][\"attachmentId\"]".into());
+            }
+            let mut claims = json!({"version":1,"kind":"attachment","attachmentId":attachment_id,"expiresAt":expires});
+            if let Some(file_name) = resource.get("fileName") {
+                claims["fileName"] = file_name.clone();
+            }
+            if let Some(mime_type) = resource.get("mimeType") {
+                claims["mimeType"] = mime_type.clone();
+            }
+            claims
+        } else {
+            json!({"version":1,"kind":tag,"filePath":file_path.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"expiresAt":expires})
+        };
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(crate::wire_json::compact(&claims));
+        let name = if tag == "attachment" {
+            resource
+                .get("fileName")
+                .and_then(Value::as_str)
+                .unwrap_or("asset")
+                .to_owned()
+        } else {
+            std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("asset")
+                .to_owned()
+        };
+        let key = match self.asset_signing_key() {
+            Ok(key) => key,
+            Err(error) => {
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"AssetSigningKeyLoadError","resource":resource,"cause":{"name":"Error","message":error.to_string()}}}),
+                )
+            }
+        };
+        let mut mac =
+            hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).expect("HMAC accepts any key");
+        mac.update(encoded.as_bytes());
+        let signature =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let mut result = json!({"relativeUrl":format!("/api/assets/{encoded}.{signature}/{name}"),"expiresAt":expires});
+        if let Some(path) = file_path {
+            result["sourcePath"] = json!(path);
+        }
+        Reply::Success(result)
+    }
+
     /// How `run` runs: its thread's provider instance's CLI when the
     /// workspace can run that provider, otherwise the configured command.
     async fn turn_spec(
@@ -982,6 +1128,19 @@ impl ControlPlane {
             "subscribeProjectClones" => Call::Stream(vec![json!([[]])]),
             // As native before any refresh: the stream stays open and silent.
             "pullRequests.subscribeRefreshes" => Call::Stream(Vec::new()),
+            "server.getSettings" => Call::Done(Reply::Success(self.settings())),
+            "server.updateSettings" => Call::Done(match self.update_settings(params) {
+                Ok(settings) => Reply::Success(settings),
+                Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+            }),
+            "orchestration.getOlderSettledThreads" => {
+                let sequence = self.sequence_now();
+                let store = self.store_now();
+                Call::Done(Reply::Success(crate::store::older_settled_threads(
+                    &store, sequence, params,
+                )))
+            }
+            "assets.createUrl" => Call::Done(self.create_asset_url(params)),
             "server.reportClientActivity" => Call::Done(Reply::Success(Value::Null)),
             "preview.reportProfiles" => Call::Done(Reply::Success(Value::Null)),
             "orchestration.getThreadProjection" => {

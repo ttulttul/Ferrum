@@ -1798,7 +1798,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     }
     if method == "assets.createUrl" {
         let Some(resource) = params.get("resource").and_then(Value::as_object) else {
-            return Reply::defect("Expected { readonly \"_tag\": \"workspace-file\", ... } | { readonly \"_tag\": \"media-file\", readonly \"disposition\"?: \"attachment\", readonly \"hostOnly\"?: true, ... } | { readonly \"_tag\": \"draft-workspace-file\", ... } | { readonly \"_tag\": \"attachment\", readonly \"renderIntent\"?: \"mcp-app\", ... } | { readonly \"_tag\": \"tool-output-image\", ... } | { readonly \"_tag\": \"project-favicon\", ... } | { readonly \"_tag\": \"native-app-icon\", ... } | { readonly \"_tag\": \"environment-theme-background\", ... } | { readonly \"_tag\": \"github-media\", ... }\n  at [\"resource\"]".into());
+            return Reply::defect(crate::control::ASSET_RESOURCE_DEFECT.into());
         };
         let tag = resource
             .get("_tag")
@@ -1824,7 +1824,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             "media-file" | "workspace-file" | "draft-workspace-file"
         ) && path.is_empty()
         {
-            return Reply::defect("Expected { readonly \"_tag\": \"workspace-file\", ... } | { readonly \"_tag\": \"media-file\", readonly \"disposition\"?: \"attachment\", readonly \"hostOnly\"?: true, ... } | { readonly \"_tag\": \"draft-workspace-file\", ... } | { readonly \"_tag\": \"attachment\", readonly \"renderIntent\"?: \"mcp-app\", ... } | { readonly \"_tag\": \"tool-output-image\", ... } | { readonly \"_tag\": \"project-favicon\", ... } | { readonly \"_tag\": \"native-app-icon\", ... } | { readonly \"_tag\": \"environment-theme-background\", ... } | { readonly \"_tag\": \"github-media\", ... }\n  at [\"resource\"]".into());
+            return Reply::defect(crate::control::ASSET_RESOURCE_DEFECT.into());
         }
         let file_path = match tag {
             "draft-workspace-file" => resource
@@ -2873,47 +2873,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"complete":true,"snapshotSequence":sequence,"totalMatches":total_matches,"activeIndex":active_index,"navigation":navigation,"match":selected})
         }
         "orchestration.getOlderSettledThreads" => {
-            let before = params["before"]["settledAt"].as_str().unwrap_or_default();
-            let after_id = params["before"]["threadId"].as_str();
-            let project_ids = params["projectIds"].as_array();
-            let in_projects = |thread: &&crate::Thread| {
-                project_ids.is_none_or(|ids| {
-                    ids.iter()
-                        .any(|id| id.as_str() == Some(thread.project_id.as_str()))
-                })
-            };
-            let mut older: Vec<&crate::Thread> = store
-                .threads
-                .values()
-                .filter(|thread| {
-                    thread.settled
-                        && !thread.archived
-                        && in_projects(thread)
-                        && thread.row["settledAt"].as_str().is_some_and(|at| {
-                            at < before
-                                || (at == before
-                                    && after_id.is_some_and(|id| thread.id.as_str() > id))
-                        })
-                })
-                .collect();
-            older.sort_by(|a, b| {
-                b.row["settledAt"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(a.row["settledAt"].as_str().unwrap_or_default())
-                    .then_with(|| a.id.cmp(&b.id))
-            });
-            let mut counts = std::collections::BTreeMap::<String, usize>::new();
-            for thread in &older {
-                *counts.entry(thread.project_id.clone()).or_default() += 1;
-            }
-            let limit = params["limit"].as_i64().unwrap_or(0).clamp(0, 50) as usize;
-            let threads = if limit == 0 {
-                Vec::new()
-            } else {
-                older.into_iter().take(limit).map(|t| t.shell()).collect()
-            };
-            json!({"snapshotSequence":sequence,"threads":threads,"counts":counts.into_iter().map(|(project_id,count)|json!({"projectId":project_id,"count":count})).collect::<Vec<_>>()})
+            crate::store::older_settled_threads(&store, sequence, params)
         }
         "orchestration.getThreadProjection" => {
             let Some(thread) = thread(&params["threadId"]) else {

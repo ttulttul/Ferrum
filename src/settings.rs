@@ -2,8 +2,9 @@
 //! Serialize the complete read/modify/write transaction, including sidecar secrets.
 #[cfg(feature = "native")]
 pub(crate) mod failure;
-#[cfg(feature = "native")]
-mod mutations;
+// The patch semantics are shared with the control plane; its migrations are native.
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
+pub(crate) mod mutations;
 #[cfg(feature = "native")]
 pub(crate) mod policy;
 pub(crate) mod schema;
