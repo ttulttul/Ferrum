@@ -21,7 +21,8 @@ Based on `main` and the parity test suites:
 - **T3 Connect relay tunnel:** Provisioning, running, and releasing the T3 Connect managed tunnel, plus handing off an active tunnel cleanly across Rust/TypeScript switches.
 - **Environment links (incoming):** Accepting environment links and pairing tokens issued by the TypeScript server on the same home directory, plus pairing-link administration.
 - **MCP server:** Serving MCP sign-in and thread/project tools over `/mcp`.
-- **Login-shell `PATH` discovery:** Finding provider CLIs on the login shell's `PATH` and listing Codex models from its CLI.
+- **Login-shell `PATH` discovery:** Reading the login shell's `PATH` at startup and again before source-control discovery, so provider CLIs and tools installed later are found; listing Codex models from its CLI.
+- **Provider status checks:** Claude Code and Codex status (installed version, sign-in state, usage and models) checked at startup, on settings changes, every 5 minutes and on refresh, and pushed to clients.
 - **Configuration, auth, and desktop adoption:** Shared `userdata/` layout (`settings.json`, secrets, managed policy, `server-owner.sqlite` exclusive lock, `server-runtime.json`), browser session cookies, WebSocket tickets with DPoP checks, CORS, and desktop SSH launcher adoption.
 - **Git, GitHub, and workspace operations:** File operations, terminals (PTY), git workflows, GitHub/Linear provider RPCs, and Chromium preview support.
 - **Split control/workspace architecture:** Out-of-process workspace execution via `t3-agentd` and an embeddable, `wasm32-unknown-unknown`-compatible control plane (`workers/`).
@@ -31,7 +32,7 @@ Based on `main` and the parity test suites:
 
 - **Separate thread store:** Rust stores its orchestration event log in `events.jsonl` and does **not** read existing threads from the TypeScript server's `statev2.sqlite`.
 - **Live event ordering:** Rust derives live thread domain events from projection commits rather than emitting them in the reference server's exact order and grouping (one per streamed text delta, records grouped by kind).
-- **Provider status checks (in progress):** Provider CLI status probing (installed version, auth state, model catalog) is currently in progress in [PR #85](https://github.com/ttulttul/t3code-rust/pull/85) and only targets Claude Code and Codex.
+- **Provider status checks:** Only Claude Code and Codex are checked (installed version, sign-in state, models). Other providers still show "not checked", Claude skills are always empty, and the latest-release version advisory is reported as unknown.
 - **No outgoing environment links:** The server can accept links issued by the TypeScript server, but cannot initiate outgoing environment links to other machines.
 - **Live shell subscriptions:** `orchestration.subscribeShell` currently sends only the initial snapshot and does not push subsequent `project.updated` / `thread.updated` events until reconnect.
 - **Other client-visible RPC gaps:** Tracked as explicit expected failures in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json), including:
