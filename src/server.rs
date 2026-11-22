@@ -13,7 +13,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hmac::{Hmac, Mac};
 
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::Sha256;
 use std::{
     collections::HashMap,
@@ -411,6 +411,72 @@ impl AppState {
 impl crate::orchestration::CommandHost for AppState {
     fn generate_title(self: Arc<Self>, effect: crate::title_generation::TitleEffect) {
         tokio::spawn(crate::title_generation::execute(self, effect));
+    }
+    fn sync_pull_request_link(self: Arc<Self>, thread_id: String, target: serde_json::Value) {
+        let state = self.clone();
+        crate::runtime::Runtime::spawn(
+            &*self.runtime,
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let mut query = serde_json::json!({
+                    "host": target["host"],
+                    "repository": target["repository"],
+                    "number": target["number"],
+                    "projectId": Value::Null,
+                    "allowStale": false,
+                });
+                {
+                    let store = state.store.read().await;
+                    let Some(thread) = store.threads.get(&thread_id) else {
+                        return;
+                    };
+                    query["projectId"] = serde_json::json!(thread.project_id);
+                }
+                let Some(Ok(summary)) =
+                    crate::provider_rpc::dispatch(&state, "pullRequests.summary", &query).await
+                else {
+                    return;
+                };
+                let mut snapshot = serde_json::Map::new();
+                for key in [
+                    "state",
+                    "title",
+                    "headBranch",
+                    "baseBranch",
+                    "isDraft",
+                    "updatedAt",
+                    "closedAt",
+                    "mergedAt",
+                    "author",
+                    "additions",
+                    "deletions",
+                    "changedFiles",
+                    "reviewDecision",
+                    "checksState",
+                    "mergeability",
+                    "rebaseRequired",
+                ] {
+                    if let Some(value) = summary.get(key) {
+                        snapshot.insert(key.to_owned(), value.clone());
+                    }
+                }
+                snapshot.insert(
+                    "syncedAt".into(),
+                    serde_json::json!(crate::auth_service::iso(crate::auth_service::now())),
+                );
+                let command = serde_json::json!({
+                    "type": "thread.pull-request-link.sync",
+                    "commandId": format!("server:pr-sync:{thread_id}:{}", crate::platform::uuid_v4()),
+                    "threadId": thread_id,
+                    "host": target["host"],
+                    "repository": target["repository"],
+                    "number": target["number"],
+                    "snapshot": snapshot,
+                    "stack": summary.get("stack").cloned().unwrap_or(Value::Null),
+                });
+                let _ = crate::dispatch_orchestration_command(state, command).await;
+            }),
+        );
     }
     fn mutation_lock(&self) -> &Mutex<()> {
         &self.project_mutation_lock
