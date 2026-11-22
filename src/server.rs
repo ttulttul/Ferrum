@@ -949,8 +949,32 @@ pub(crate) async fn webhook_handler(
             );
         }
     }
+    if let (Some(max_age), Some(received)) = (
+        task["schedule"]["maxDeliveryAgeMinutes"].as_i64(),
+        headers
+            .get("x-t3-relay-received-at")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| {
+                time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+                    .ok()
+            }),
+    ) {
+        let age_ms = crate::auth_service::now()
+            .saturating_sub((received.unix_timestamp_nanos() / 1_000_000) as i64);
+        if age_ms > max_age.saturating_mul(60_000) {
+            record_delivery("expired", task["schedule"]["signature"].is_object(), None).await;
+            return outcome(
+                StatusCode::GONE,
+                serde_json::json!({"error":"delivery_too_old"}),
+                "expired",
+            );
+        }
+    }
     record_delivery("accepted", task["schedule"]["signature"].is_object(), None).await;
-    let _ = body;
+    let task_id = hook_id.clone();
+    tokio::spawn(async move {
+        crate::scheduled_tasks::run_webhook(state, &task_id).await;
+    });
     outcome(
         StatusCode::ACCEPTED,
         serde_json::json!({"deliveryId":delivery_id}),
@@ -1226,6 +1250,7 @@ where
         }
     }
     let cleanup = tokio::spawn(crate::storage_cleanup::automatic_runs(state.clone()));
+    let scheduled_tasks = crate::scheduled_tasks::spawn(state.clone());
     // Refresh the model manifest now and then on the provider-check cadence;
     // each refresh is TTL-gated, so most ticks read nothing.
     let manifest = state.model_manifest.clone();
@@ -1328,6 +1353,7 @@ where
         }
     };
     cleanup.abort();
+    scheduled_tasks.abort();
     state.storage_cleanup.shutdown().await;
     manifest_refresh.abort();
     if let Some(startup) = endpoint_startup {
@@ -1468,6 +1494,13 @@ impl mcp_oauth::McpHost for AppState {
         command: serde_json::Value,
     ) -> mcp_oauth::HostFuture<Result<u64, serde_json::Value>> {
         Box::pin(crate::dispatch_orchestration_command(self.clone(), command))
+    }
+    fn run_scheduled_task_now(
+        self: &Arc<Self>,
+        task_id: String,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, serde_json::Value>> {
+        let state = self.clone();
+        Box::pin(async move { crate::scheduled_tasks::run_now(state, &task_id).await })
     }
     fn cancel_delegated_task(
         self: &Arc<Self>,

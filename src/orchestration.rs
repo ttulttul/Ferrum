@@ -149,6 +149,19 @@ async fn dispatch_command<H: CommandHost>(
         })
         .or_else(|| command["parentThreadId"].as_str())
         .unwrap_or_default();
+    // Scheduled fresh-session deliveries detach an idle provider session
+    // before their new run is accepted. A live run remains queued and keeps
+    // its session until it ends.
+    if kind == "message.dispatch"
+        && command["freshContext"] == true
+        && !thread_has_active_run(&state, id).await
+    {
+        detach_session(&state, id, "Fresh scheduled session.")
+            .await
+            .map_err(|error| {
+                json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":command_id,"commandType":kind,"message":error.to_string()})
+            })?;
+    }
     let error = |detail: String, cause: Value| json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":command_id,"commandType":kind,"message":detail,"detail":detail,"cause":cause});
     let dispatch_error = |detail: String| {
         error(

@@ -703,7 +703,7 @@ pub(super) async fn call<S: McpHost>(
         "list_scheduled_tasks" => list_scheduled_tasks(&**host, caller, args).await,
         "schedule_task" => schedule_task(host, caller, args).await,
         "delete_scheduled_task" => delete_scheduled_task(&**host, caller, args).await,
-        "run_scheduled_task_now" => run_scheduled_task_now(&**host, caller, args).await,
+        "run_scheduled_task_now" => run_scheduled_task_now(host, caller, args).await,
 
         "delegate_task" => delegation::delegate_task(host, caller, args).await,
         "task_status" => delegation::task_status(host, caller, args).await,
@@ -778,6 +778,52 @@ fn scheduled_task_summary(task: &Value) -> Value {
     summary
 }
 
+fn scheduled_task_next_run(schedule: &Value, now_ms: i64) -> Option<String> {
+    match schedule["type"].as_str() {
+        Some("interval") => schedule["everyMs"]
+            .as_i64()
+            .map(|every| crate::auth_service::iso(now_ms.saturating_add(every.max(60_000)))),
+        Some("once") => schedule["runAt"].as_str().and_then(|run_at| {
+            time::OffsetDateTime::parse(run_at, &time::format_description::well_known::Rfc3339)
+                .ok()
+                .filter(|at| at.unix_timestamp_nanos() / 1_000_000 > now_ms as i128)
+                .map(|_| run_at.to_owned())
+        }),
+        Some("fixed_time") => {
+            let time = schedule["timeOfDay"].as_str()?.trim();
+            let (hour, minute) = time.split_once(':')?;
+            let hour: u8 = hour.parse().ok()?;
+            let minute: u8 = minute.parse().ok()?;
+            if hour > 23 || minute > 59 {
+                return None;
+            }
+            let now =
+                time::OffsetDateTime::from_unix_timestamp_nanos(now_ms as i128 * 1_000_000).ok()?;
+            let weekdays = schedule["weekdays"].as_array();
+            for offset in 0..=7 {
+                let date = now.date().checked_add(time::Duration::days(offset))?;
+                let candidate =
+                    time::PrimitiveDateTime::new(date, time::Time::from_hms(hour, minute, 0).ok()?)
+                        .assume_utc();
+                if candidate <= now {
+                    continue;
+                }
+                let weekday = candidate.weekday().number_days_from_sunday() as i64;
+                if weekdays
+                    .is_some_and(|days| !days.iter().any(|day| day.as_i64() == Some(weekday)))
+                {
+                    continue;
+                }
+                return Some(crate::auth_service::iso(
+                    candidate.unix_timestamp_nanos() as i64 / 1_000_000,
+                ));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 async fn schedule_task<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
     caller.refuse_read_only()?;
     let project = args["projectId"]
@@ -823,13 +869,7 @@ async fn schedule_task<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value)
         )
         .then(|| caller.thread.as_ref().map(|thread| thread.id.clone()))
         .flatten();
-    let next = match schedule["type"].as_str() {
-        Some("interval") => schedule["everyMs"]
-            .as_i64()
-            .map(|value| crate::auth_service::iso(now.saturating_add(value))),
-        Some("once") => schedule["runAt"].as_str().map(str::to_owned),
-        _ => None,
-    };
+    let next = scheduled_task_next_run(&schedule, now);
     let task = json!({"id":id,"title":title,"prompt":prompt,"enabled":enabled,"schedule":schedule,"projectId":project,"threadId":thread_id,
         "threadMode":if args["freshSession"] == true {"fresh_session"} else if thread_id.is_some() {"continue"} else {"new_thread"},
         "workspaceStrategy":{"type":"root"},"modelSelection":caller.thread.as_ref().map(|thread| json!({"instanceId":thread.provider_instance_id,"model":thread.model})).unwrap_or(json!({"instanceId":"codex","model":""})),
@@ -859,7 +899,11 @@ async fn delete_scheduled_task<S: McpHost>(host: &S, caller: &Caller, args: &Val
     Ok(json!({"scheduledTaskId":id,"deleted":true}))
 }
 
-async fn run_scheduled_task_now<S: McpHost>(host: &S, caller: &Caller, args: &Value) -> Outcome {
+async fn run_scheduled_task_now<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    args: &Value,
+) -> Outcome {
     caller.refuse_read_only()?;
     let id = args["taskId"].as_str().ok_or_else(invalid_arguments)?;
     let task = host
@@ -876,9 +920,28 @@ async fn run_scheduled_task_now<S: McpHost>(host: &S, caller: &Caller, args: &Va
             "Webhook tasks run when their URL receives a request.",
         ));
     }
-    Ok(
-        json!({"taskId":id,"threadId":task["threadId"],"lastRunStatus":task["lastRunStatus"],"lastRunError":task["lastRunError"],"runCount":task["runCount"],"nextRunAt":task["nextRunAt"]}),
-    )
+    let task = host
+        .run_scheduled_task_now(id.to_owned())
+        .await
+        .map_err(|error| failure("orchestration_error", dispatch_message(&error)))?;
+    let mut result = json!({
+        "taskId":id,
+        "threadId":task["threadId"],
+        "lastRunStatus":task["lastRunStatus"],
+        "lastRunError":task["lastRunError"],
+        "runCount":task["runCount"],
+        "nextRunAt":task["nextRunAt"]
+    });
+    if let Some(thread_id) = task["threadId"].as_str() {
+        result["link"] = thread_link(
+            &**host,
+            caller,
+            thread_id,
+            task["title"].as_str().unwrap_or("Scheduled task"),
+        )
+        .into();
+    }
+    Ok(result)
 }
 
 async fn project_list<S: McpHost>(host: &S, a: &Value) -> Outcome {
