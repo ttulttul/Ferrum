@@ -19,7 +19,7 @@ Based on `main` and the parity test suites:
 - **Checkpoints, interrupts, and token usage:** Reference-compatible checkpoint naming, turn interrupts (including stopping spawned child processes), token usage reporting, model reporting, and usage-limit reset times.
 - **Restart recovery:** Resuming and continuing interrupted turns, retries, rewinds, and background work after a server restart.
 - **T3 Connect relay tunnel:** Provisioning, running, and releasing the T3 Connect managed tunnel, plus handing off an active tunnel cleanly across Rust/TypeScript switches.
-- **Environment links (incoming):** Accepting environment links and pairing tokens issued by the TypeScript server on the same home directory, plus pairing-link administration.
+- **Environment links (incoming):** Accepting environment links and pairing tokens issued by the TypeScript server on the same home directory, plus pairing-link administration. Sessions the TypeScript server signed in on the same home are listed under Connections and can be revoked there.
 - **Environment links (outgoing):** Linking to another machine, listing and forgetting links (shared with the TypeScript server on the same home), forwarding MCP tool calls to a linked machine, and agents asking you to link one from inside a conversation (`t3_environment_link`), answered in a card.
 - **MCP server:** Serving MCP sign-in and thread/project tools over `/mcp`.
 - **Login-shell `PATH` discovery:** Reading the login shell's `PATH` at startup and again before source-control discovery, so provider CLIs and tools installed later are found; listing Codex models from its CLI.
@@ -49,10 +49,6 @@ The Rust server can already run Codex and Claude Code conversations, manage proj
 - **No update-available checks:** The server does not check online for newer versions of provider command-line tools, so settings always show the latest version as unknown and do not offer an update command.
 - **Claude skills and reset credits:** Installed Claude skills and plugins are not listed yet, and Claude reset credits are not shown.
 - **Background check timing:** Periodic provider checks always run on their timer instead of pausing when nobody is actively using the app.
-
-### Connecting machines
-
-- **Connected-clients list:** Sessions started on the TypeScript server are not shown in the connected-clients list yet.
 
 ### Other
 
@@ -161,7 +157,7 @@ python3 scripts/github_provider_parity.py --original-command "$original" --rust-
 python3 scripts/relay_parity.py --checkout /tmp/t3code-reference --rust "$rust"
 ```
 
-Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `peer_forwarding_parity.py`, `link_request_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
+Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `peer_forwarding_parity.py`, `link_request_parity.py`, `client_sessions_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
 
 Known gaps in `client_rpc_parity.py` and `client_thread_parity.py` are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json); both suites fail on any unlisted mismatch and on any listed case that starts passing.
 

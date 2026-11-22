@@ -161,35 +161,118 @@ pub(crate) fn consume(
     Ok(Outcome::NotFound)
 }
 
-/// Revokes MCP client sessions (linked environments and outside agents) that the
-/// TypeScript server, or this one on a shared home, keeps in `auth_sessions`, as
-/// `AuthSessions.revoke` does: `revoked_at` is set once and never cleared. `id`
-/// picks one session; `None` revokes them all (revoking every other client).
-/// Returns the session ids it revoked.
-pub(crate) fn revoke_mcp_clients(
-    db: &Path,
-    id: Option<&str>,
-    now: &str,
-) -> rusqlite::Result<Vec<String>> {
+fn open_sessions(db: &Path) -> rusqlite::Result<Option<Connection>> {
     if !db.is_file() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let conn = Connection::open_with_flags(
         db,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(Duration::from_secs(5))?;
-    if !has_table(&conn, "auth_sessions")? {
+    Ok(has_table(&conn, "auth_sessions")?.then_some(conn))
+}
+
+/// The client sessions the TypeScript server keeps in `auth_sessions` (its
+/// browsers and desktop app, outside agents, linked environments) that are
+/// neither revoked nor expired, as its Connections list shows them
+/// (`AuthSessions.listActive`, `toAuthClientSession`): newest first, none of
+/// them connected here.
+pub(crate) fn client_sessions(db: &Path, now: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
+    use serde_json::json;
+    let Some(conn) = open_sessions(db)? else {
         return Ok(Vec::new());
-    }
-    let mut statement = conn.prepare(
+    };
+    let last_connected = if has_column(&conn, "auth_sessions", "last_connected_at")? {
+        "last_connected_at"
+    } else {
+        "NULL"
+    };
+    let mut statement = conn.prepare(&format!(
+        "SELECT session_id, subject, scopes, method, client_label, client_ip_address,
+                client_user_agent, client_device_type, client_os, client_browser,
+                issued_at, expires_at, {last_connected}
+         FROM auth_sessions
+         WHERE revoked_at IS NULL AND expires_at > ?1
+         ORDER BY issued_at DESC, session_id DESC"
+    ))?;
+    let rows = statement.query_map([now], |row| {
+        let text = |i: usize| row.get::<_, Option<String>>(i);
+        let scopes: Vec<String> =
+            serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default();
+        let legacy: Vec<&String> = scopes
+            .iter()
+            .filter(|s| super::LEGACY.contains(&s.as_str()))
+            .collect();
+        // `toClientMetadata`: a field is listed only when it has a value.
+        let mut client = serde_json::Map::new();
+        for (key, index) in [("label", 4), ("ipAddress", 5), ("userAgent", 6)] {
+            if let Some(value) = text(index)?.filter(|v| !v.is_empty()) {
+                client.insert(key.into(), json!(value));
+            }
+        }
+        client.insert(
+            "deviceType".into(),
+            json!(text(7)?.unwrap_or_else(|| "unknown".into())),
+        );
+        for (key, index) in [("os", 8), ("browser", 9)] {
+            if let Some(value) = text(index)?.filter(|v| !v.is_empty()) {
+                client.insert(key.into(), json!(value));
+            }
+        }
+        Ok(json!({
+            "sessionId": row.get::<_, String>(0)?,
+            "subject": row.get::<_, String>(1)?,
+            "scopes": legacy,
+            "permissions": scopes,
+            "method": row.get::<_, String>(3)?,
+            "client": client,
+            "issuedAt": row.get::<_, String>(10)?,
+            "expiresAt": row.get::<_, String>(11)?,
+            "lastConnectedAt": text(12)?,
+            "connected": false,
+            "current": false,
+        }))
+    })?;
+    rows.collect()
+}
+
+/// Revokes client sessions the TypeScript server, or this one on a shared
+/// home, keeps in `auth_sessions`, as `AuthSessions.revoke` does: `revoked_at`
+/// is set once and never cleared. `id` picks one session, and every session of
+/// the same T3 Connect device with it (`revokeConnectDevice`); `None` revokes
+/// them all (revoking every other client, since this server's own session is
+/// not among them). Returns the session ids it revoked.
+pub(crate) fn revoke_clients(
+    db: &Path,
+    id: Option<&str>,
+    now: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let Some(conn) = open_sessions(db)? else {
+        return Ok(Vec::new());
+    };
+    let device: Option<String> = match id {
+        Some(id) if has_column(&conn, "auth_sessions", "proof_key_thumbprint")? => conn
+            .query_row(
+                "SELECT proof_key_thumbprint FROM auth_sessions WHERE session_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten(),
+        _ => None,
+    };
+    let mut statement = conn.prepare(if device.is_some() {
         "UPDATE auth_sessions SET revoked_at = ?1
-         WHERE subject = 'mcp-client' AND revoked_at IS NULL
-           AND (?2 IS NULL OR session_id = ?2)
-         RETURNING session_id",
-    )?;
+         WHERE revoked_at IS NULL AND (session_id = ?2 OR proof_key_thumbprint = ?3)
+         RETURNING session_id"
+    } else {
+        "UPDATE auth_sessions SET revoked_at = ?1
+         WHERE revoked_at IS NULL AND (?2 IS NULL OR session_id = ?2) AND ?3 IS NULL
+         RETURNING session_id"
+    })?;
     let ids = statement
-        .query_map(params![now, id], |row| row.get::<_, String>(0))?
+        .query_map(params![now, id, device], |row| row.get::<_, String>(0))?
         .collect();
     ids
 }
@@ -365,5 +448,144 @@ pub(crate) mod tests {
             consume(&db, "ABCDEFGHJKMN", None, NOW).unwrap(),
             Outcome::NotFound
         );
+    }
+
+    /// The `auth_sessions` shape the TypeScript migrations leave behind.
+    fn sessions_table(dir: &Path) -> Connection {
+        let conn = Connection::open(dir.join("statev2.sqlite")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE auth_sessions (
+               session_id TEXT PRIMARY KEY, subject TEXT NOT NULL, scopes TEXT NOT NULL,
+               method TEXT NOT NULL, client_label TEXT, client_ip_address TEXT,
+               client_user_agent TEXT, client_device_type TEXT NOT NULL DEFAULT 'unknown',
+               client_os TEXT, client_browser TEXT, issued_at TEXT NOT NULL,
+               expires_at TEXT NOT NULL, last_connected_at TEXT, revoked_at TEXT,
+               client_surface TEXT, client_app_version TEXT, proof_key_thumbprint TEXT
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn session(
+        conn: &Connection,
+        id: &str,
+        subject: &str,
+        scopes: &str,
+        issued: &str,
+        device: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO auth_sessions (session_id, subject, scopes, method, client_label, client_user_agent,
+               client_device_type, client_os, issued_at, expires_at, revoked_at, proof_key_thumbprint)
+             VALUES (?1, ?2, ?3, 'browser-session-cookie', ?1, 'Fixture/1.0', 'desktop', 'Linux', ?4,
+               '2027-01-01T00:00:00.000Z', NULL, ?5)",
+            params![id, subject, scopes, issued, device],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn lists_live_sessions_newest_first_in_the_reference_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = sessions_table(dir.path());
+        let db = dir.path().join("statev2.sqlite");
+        session(
+            &conn,
+            "old",
+            "one-time-token",
+            r#"["orchestration:read","files:read"]"#,
+            "2026-01-01T00:00:00.000Z",
+            None,
+        );
+        session(
+            &conn,
+            "new",
+            "desktop-bootstrap",
+            r#"["access:write"]"#,
+            "2026-02-01T00:00:00.000Z",
+            None,
+        );
+        session(
+            &conn,
+            "gone",
+            "mcp-client",
+            "[]",
+            "2026-03-01T00:00:00.000Z",
+            None,
+        );
+        conn.execute("UPDATE auth_sessions SET revoked_at = '2026-03-02T00:00:00.000Z' WHERE session_id = 'gone'", [])
+            .unwrap();
+        let listed = client_sessions(&db, NOW).unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|r| r["sessionId"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["new", "old"]
+        );
+        let old = &listed[1];
+        assert_eq!(old["scopes"], serde_json::json!(["orchestration:read"]));
+        assert_eq!(
+            old["permissions"],
+            serde_json::json!(["orchestration:read", "files:read"])
+        );
+        assert_eq!(
+            old["client"],
+            serde_json::json!({"label":"old","userAgent":"Fixture/1.0","deviceType":"desktop","os":"Linux"})
+        );
+        assert_eq!(old["connected"], false);
+        // Expired sessions are not listed.
+        assert!(client_sessions(&db, "2028-01-01T00:00:00.000Z")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn revoking_a_device_session_revokes_the_device_and_others_revokes_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = sessions_table(dir.path());
+        let db = dir.path().join("statev2.sqlite");
+        session(
+            &conn,
+            "phone-1",
+            "cloud-connect",
+            "[]",
+            "2026-01-01T00:00:00.000Z",
+            Some("key"),
+        );
+        session(
+            &conn,
+            "phone-2",
+            "cloud-connect",
+            "[]",
+            "2026-01-02T00:00:00.000Z",
+            Some("key"),
+        );
+        session(
+            &conn,
+            "laptop",
+            "one-time-token",
+            "[]",
+            "2026-01-03T00:00:00.000Z",
+            None,
+        );
+        let mut revoked = revoke_clients(&db, Some("phone-1"), NOW).unwrap();
+        revoked.sort();
+        assert_eq!(revoked, ["phone-1", "phone-2"]);
+        assert_eq!(
+            revoke_clients(&db, Some("laptop"), NOW).unwrap(),
+            ["laptop"]
+        );
+        assert!(revoke_clients(&db, Some("laptop"), NOW).unwrap().is_empty());
+        session(
+            &conn,
+            "agent",
+            "mcp-client",
+            "[]",
+            "2026-01-04T00:00:00.000Z",
+            None,
+        );
+        assert_eq!(revoke_clients(&db, None, NOW).unwrap(), ["agent"]);
     }
 }
