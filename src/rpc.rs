@@ -557,67 +557,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         };
     }
     if method == "projects.ensureScratch" {
-        let root = state.paths.base_dir.join("scratch");
-        if let Err(error) = state.workspace.create_dir_all(&root).await {
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
-            );
-        }
-        let root = match state.workspace.canonicalize(&root).await {
-            Ok(path) => path,
-            Err(error) => {
-                return Reply::Failure(
-                    json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":error.to_string()}}),
-                );
-            }
+        return match ensure_scratch_project(state).await {
+            Ok(project_id) => Reply::Success(json!({"projectId":project_id})),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
         };
-        let projects: Vec<_> = state
-            .store
-            .read()
-            .await
-            .projects
-            .values()
-            .cloned()
-            .collect();
-        let mut existing = None;
-        for project in projects {
-            let path = std::path::Path::new(&project.path);
-            if state.workspace.canonicalize(path).await.ok().as_deref() == Some(root.as_path()) {
-                existing = Some(project);
-                break;
-            }
-        }
-        let project_id = if let Some(project) = existing {
-            project.id
-        } else {
-            let id = uuid::Uuid::new_v4().to_string();
-            let project = crate::Project {
-                id: id.clone(),
-                name: "No project".into(),
-                path: root.to_string_lossy().into_owned(),
-                created_at: crate::now(),
-            };
-            let mut row = crate::projects::wire(&project);
-            row["projectIcon"] =
-                json!({"kind":"lucide","name":"message-square-dashed","color":"gray"});
-            if state
-                .commit(crate::Event::ProjectCommitted {
-                    project,
-                    row,
-                    command_id: format!("scratch-project:{id}"),
-                    command_type: "project.create".into(),
-                    removed_threads: vec![],
-                })
-                .await
-                .is_err()
-            {
-                return Reply::Failure(
-                    json!({"_tag":"Fail","error":{"_tag":"OrchestrationDispatchCommandError","message":"Failed to create scratch project."}}),
-                );
-            }
-            id
-        };
-        return Reply::Success(json!({"projectId":project_id}));
     }
     if method == "projects.createNew" {
         let name = params["name"].as_str().unwrap_or_default().trim();
@@ -3230,6 +3173,20 @@ mod source_control_discovery_tests {
         );
         assert_eq!(first_safe_auth_line(" \n"), None);
     }
+}
+
+/// `projects.ensureScratch`: ensures the built-in "No project" scratch project
+/// exists under `<base_dir>/scratch` and returns its project id.
+pub(crate) async fn ensure_scratch_project(state: &AppState) -> Result<String, Value> {
+    let root = state.paths.base_dir.join("scratch");
+    crate::scratch::ensure_project(
+        &*state.workspace,
+        &root,
+        state,
+        &state.project_mutation_lock,
+        |event| async move { state.commit(event).await.is_ok() },
+    )
+    .await
 }
 
 /// `projects.createNew`: a project started from its title, in a new folder

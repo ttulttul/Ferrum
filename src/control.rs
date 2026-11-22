@@ -291,6 +291,37 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
         let plane = self.clone();
         Box::pin(async move { plane.create_new_project(&name).await })
     }
+    fn is_scratch_project(
+        self: &Arc<Self>,
+        project_id: &str,
+    ) -> crate::mcp_oauth::HostFuture<bool> {
+        let plane = self.clone();
+        let project_id = project_id.to_owned();
+        Box::pin(async move { plane.scratch_project_matches(&project_id).await })
+    }
+    fn ensure_scratch_project(
+        self: &Arc<Self>,
+    ) -> crate::mcp_oauth::HostFuture<Result<String, String>> {
+        let plane = self.clone();
+        Box::pin(async move {
+            plane.scratch_project_id().await.map_err(|error| {
+                error["message"]
+                    .as_str()
+                    .unwrap_or("Failed to create scratch project.")
+                    .to_owned()
+            })
+        })
+    }
+    fn scratch_thread_folder(
+        self: &Arc<Self>,
+        thread_id: &str,
+        text: &str,
+    ) -> crate::mcp_oauth::HostFuture<Result<Option<String>, String>> {
+        let plane = self.clone();
+        let thread_id = thread_id.to_owned();
+        let text = text.to_owned();
+        Box::pin(async move { plane.new_scratch_thread_folder(&thread_id, &text).await })
+    }
     fn workspace_call(
         self: &Arc<Self>,
         method: String,
@@ -1173,6 +1204,12 @@ impl ControlPlane {
         if method == "projects.mutate" {
             return Call::Done(self.create_project(params).await);
         }
+        if method == "projects.ensureScratch" {
+            return Call::Done(match self.scratch_project_id().await {
+                Ok(project_id) => Reply::Success(json!({"projectId": project_id})),
+                Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+            });
+        }
         if method == "server.refreshProviders" {
             if self.host.workspace.is_ready() {
                 self.list_provider_models().await;
@@ -1438,13 +1475,56 @@ impl ControlPlane {
         }
     }
 
+    fn workspace_root(&self) -> PathBuf {
+        self.host
+            .workspace
+            .root()
+            .unwrap_or_else(|| PathBuf::from(WORKSPACE_ROOT))
+    }
+
+    fn scratch_root(&self) -> PathBuf {
+        self.workspace_root().join("scratch")
+    }
+
+    /// `projects.ensureScratch`, as the native server runs it: ensures the
+    /// scratch folder exists in the workspace and returns the single active
+    /// "No project" project for it.
+    async fn scratch_project_id(&self) -> Result<String, Value> {
+        let root = self.scratch_root();
+        crate::scratch::ensure_project(
+            &self.host.workspace,
+            &root,
+            &self.state,
+            &self.mutation_lock,
+            // The plane's own commit, so subscribers hear of the project.
+            |event| async move { self.commit(event).is_ok() },
+        )
+        .await
+    }
+
+    async fn scratch_project_matches(&self, project_id: &str) -> bool {
+        let root = self.scratch_root();
+        crate::scratch::is_project(&self.host.workspace, &root, &self.state, project_id).await
+    }
+
+    async fn new_scratch_thread_folder(
+        &self,
+        thread_id: &str,
+        text: &str,
+    ) -> Result<Option<String>, String> {
+        let root = self.scratch_root();
+        crate::scratch::folder_for_thread(&self.host.workspace, &root, thread_id, text)
+            .await
+            .map(Some)
+    }
+
     /// `projects.createNew`, as the native server runs it: the workspace
     /// makes a new folder under its `projects` with a repository in it, and
     /// the project is recorded there.
     async fn create_new_project(&self, name: &str) -> Result<Value, Value> {
         let failure =
             |message: String| json!({"_tag":"OrchestrationDispatchCommandError","message":message});
-        let root = std::path::Path::new(WORKSPACE_ROOT).join("projects");
+        let root = self.workspace_root().join("projects");
         let created = self
             .host
             .workspace
@@ -1531,8 +1611,9 @@ impl ControlPlane {
         if let Some(policy) = self.settings.policy.summary() {
             config["managedPolicy"] = policy.clone();
         }
-        config["scratchWorkspaceRoot"] = json!(format!("{WORKSPACE_ROOT}/scratch"));
-        config["newProjectsRoot"] = json!(format!("{WORKSPACE_ROOT}/projects"));
+        let workspace_root = self.workspace_root();
+        config["scratchWorkspaceRoot"] = json!(workspace_root.join("scratch"));
+        config["newProjectsRoot"] = json!(workspace_root.join("projects"));
         config["serverTime"] = json!(auth_service::iso(auth_service::now()));
         Ok(config)
     }
@@ -4085,6 +4166,179 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             .unwrap()
             .iter()
             .all(|item| item["type"] != "reasoning"));
+    }
+
+    #[test]
+    fn scratch_projects_and_mcp_scratch_launches_work_through_the_workspace() {
+        let documents = Arc::new(MemoryStore::new());
+        enable_linked_environments(&documents);
+        let runtime = Arc::new(ManualRuntime::default());
+        let workspace = RemoteWorkspace::new(1, None);
+        let plane = ControlPlane::open(
+            config(),
+            documents.clone(),
+            Box::new(MemoryLog::default()),
+            Host {
+                runtime: runtime.clone(),
+                workspace: workspace.clone(),
+            },
+        )
+        .unwrap();
+        let mut connection = owner(&plane);
+
+        // Before a workspace connects, ensureScratch reports the workspace error.
+        let disconnected = send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":"d1","tag":"projects.ensureScratch","payload":{},"headers":[]}),
+        );
+        assert_eq!(
+            disconnected[0]["exit"]["_tag"], "Failure",
+            "{disconnected:?}"
+        );
+        assert_eq!(
+            disconnected[0]["exit"]["cause"][0]["error"]["_tag"],
+            "OrchestrationDispatchCommandError",
+            "{disconnected:?}"
+        );
+
+        let agentd = Arc::new(FakeAgentd::default());
+        now(plane.workspace_connected(agentd.link(&workspace))).unwrap();
+
+        let first = send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":"s1","tag":"projects.ensureScratch","payload":{},"headers":[]}),
+        );
+        assert_eq!(first[0]["exit"]["_tag"], "Success", "{first:?}");
+        let project_id = first[0]["exit"]["value"]["projectId"]
+            .as_str()
+            .expect("a projectId")
+            .to_owned();
+
+        // Repeated calls return the same project id.
+        let second = send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":"s2","tag":"projects.ensureScratch","payload":{},"headers":[]}),
+        );
+        assert_eq!(
+            second[0]["exit"]["value"]["projectId"], project_id,
+            "{second:?}"
+        );
+
+        let store = plane.store_now();
+        assert_eq!(store.projects.len(), 1);
+        let row = &store.project_rows[&project_id];
+        assert_eq!(row["title"], "No project");
+        assert_eq!(row["workspaceRoot"], "/workspace/scratch");
+        assert_eq!(
+            row["projectIcon"],
+            json!({"kind":"lucide","name":"message-square-dashed","color":"gray"})
+        );
+        drop(store);
+
+        // MCP t3_thread_launch with scratch: true creates a fresh folder under /workspace/scratch.
+        let (_, token) = peer_link_sign_in(&documents, "full-access");
+        let bearer = format!("Bearer {token}");
+        let rpc = |session: Option<&str>, method: &str, params: Value| {
+            let mut headers = vec![
+                ("authorization", bearer.as_str()),
+                ("content-type", "application/json"),
+            ];
+            if let Some(session) = session {
+                headers.push(("mcp-session-id", session));
+            }
+            let body = json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
+            http(&plane, "POST", "/mcp", &headers, body.to_string())
+        };
+        let (_, headers, _) = rpc(
+            None,
+            "initialize",
+            json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t3code-peer","version":"1"}}),
+        );
+        let session = headers["mcp-session-id"].to_str().unwrap().to_owned();
+        let tool = |name: &str, arguments: Value| -> Value {
+            let (status, _, reply) = rpc(
+                Some(&session),
+                "tools/call",
+                json!({"name":name,"arguments":arguments}),
+            );
+            assert_eq!(status, 200, "{reply}");
+            let result = &reply["result"];
+            if result["isError"] == true {
+                return serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            }
+            result["structuredContent"].clone()
+        };
+
+        // scratch: true refuses projectId or workspaceStrategy.
+        let bad_project = tool(
+            "t3_thread_launch",
+            json!({"scratch":true,"projectId":project_id,"title":"Bad"}),
+        );
+        assert_eq!(bad_project["code"], "invalid_request", "{bad_project}");
+        let bad_strategy = tool(
+            "t3_thread_launch",
+            json!({"scratch":true,"workspaceStrategy":{"type":"root"},"title":"Bad"}),
+        );
+        assert_eq!(bad_strategy["code"], "invalid_request", "{bad_strategy}");
+
+        // Launching with scratch: true uses the No project id and a per-thread folder.
+        let launched = tool(
+            "t3_thread_launch",
+            json!({"scratch":true,"title":"Quick note","message":"Convert these PNGs to WebP!",
+                "modelSelection":{"instanceId":"codex","model":"fixture"},"clientRequestId":"scratch-1"}),
+        );
+        assert_eq!(launched["projectId"], project_id, "{launched}");
+        let thread_id = launched["threadId"].as_str().expect("threadId").to_owned();
+        let read = tool("t3_thread_read", json!({"threadId":thread_id}));
+        let folder = read["thread"]["worktreePath"]
+            .as_str()
+            .expect("a scratch folder")
+            .to_owned();
+        assert!(folder.starts_with("/workspace/scratch/"), "{folder}");
+        assert!(folder.contains("convert-these-pngs-to-webp"), "{folder}");
+
+        // Retrying with the same clientRequestId replays without making a second folder or turn.
+        let retried = tool(
+            "t3_thread_launch",
+            json!({"scratch":true,"title":"Quick note","message":"Convert these PNGs to WebP!",
+                "modelSelection":{"instanceId":"codex","model":"fixture"},"clientRequestId":"scratch-1"}),
+        );
+        assert_eq!(retried["threadId"], launched["threadId"], "{retried}");
+        assert_eq!(retried["runId"], launched["runId"], "{retried}");
+
+        runtime.run();
+        let turns = agentd.turns();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns.values().next().unwrap().cwd, folder);
+
+        // A second scratch launch reuses the scratch project with a distinct folder.
+        let second_launch = tool(
+            "t3_thread_launch",
+            json!({"scratch":true,"title":"Another quick note",
+                "modelSelection":{"instanceId":"codex","model":"fixture"}}),
+        );
+        assert_eq!(second_launch["projectId"], project_id, "{second_launch}");
+        let second_read = tool(
+            "t3_thread_read",
+            json!({"threadId":second_launch["threadId"]}),
+        );
+        let second_folder = second_read["thread"]["worktreePath"].as_str().unwrap();
+        assert!(
+            second_folder.starts_with("/workspace/scratch/"),
+            "{second_folder}"
+        );
+        assert_ne!(second_folder, folder);
+
+        // Deleting the built-in scratch project through MCP is refused.
+        let refused_delete = tool("t3_project_delete", json!({"projectId":project_id}));
+        assert_eq!(
+            refused_delete["code"], "invalid_request",
+            "{refused_delete}"
+        );
     }
 
     fn uri(value: &str) -> String {

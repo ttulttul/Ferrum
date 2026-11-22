@@ -89,6 +89,8 @@ struct State {
     transport: Option<Arc<dyn Transport>>,
     /// Whether `hello` and `resume` have finished on this connection.
     ready: bool,
+    /// The workspace root `agentd` reported in `hello`, if connected.
+    root: Option<PathBuf>,
     next_id: u64,
     pending: HashMap<u64, Pending>,
     streams: HashMap<u64, Sink>,
@@ -312,6 +314,11 @@ impl RemoteWorkspace {
         self.lock().ready
     }
 
+    /// The workspace root `agentd` reported in `hello`, if one has connected.
+    pub fn root(&self) -> Option<PathBuf> {
+        self.lock().root.clone()
+    }
+
     /// Adopt a new connection: say hello, resume every stream this side
     /// still reads, then open the event streams.
     pub async fn connected(&self, transport: Arc<dyn Transport>) -> Result<HelloReply, WireError> {
@@ -349,6 +356,9 @@ impl RemoteWorkspace {
                 if let Some(sink) = state.streams.remove(&id) {
                     end_sink(&mut state, sink, EndReason::Gap);
                 }
+            }
+            if !hello.root.is_empty() {
+                state.root = Some(PathBuf::from(&hello.root));
             }
             state.ready = true;
         }

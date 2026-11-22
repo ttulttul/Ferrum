@@ -1515,23 +1515,35 @@ impl mcp_oauth::McpHost for AppState {
         let project_id = project_id.to_owned();
         Box::pin(async move {
             let root = state.paths.base_dir.join("scratch");
-            let Some(path) = state
-                .store
-                .read()
+            crate::scratch::is_project(&*state.workspace, &root, &state, &project_id).await
+        })
+    }
+    fn ensure_scratch_project(self: &Arc<Self>) -> mcp_oauth::HostFuture<Result<String, String>> {
+        let state = self.clone();
+        Box::pin(async move {
+            crate::rpc::ensure_scratch_project(&state)
                 .await
-                .projects
-                .get(&project_id)
-                .map(|p| std::path::PathBuf::from(&p.path))
-            else {
-                return false;
-            };
-            match (
-                state.workspace.canonicalize(&root).await,
-                state.workspace.canonicalize(&path).await,
-            ) {
-                (Ok(root), Ok(path)) => root == path,
-                _ => false,
-            }
+                .map_err(|error| {
+                    error["message"]
+                        .as_str()
+                        .unwrap_or("Failed to create scratch project.")
+                        .to_owned()
+                })
+        })
+    }
+    fn scratch_thread_folder(
+        self: &Arc<Self>,
+        thread_id: &str,
+        text: &str,
+    ) -> mcp_oauth::HostFuture<Result<Option<String>, String>> {
+        let state = self.clone();
+        let thread_id = thread_id.to_owned();
+        let text = text.to_owned();
+        Box::pin(async move {
+            let root = state.paths.base_dir.join("scratch");
+            crate::scratch::folder_for_thread(&*state.workspace, &root, &thread_id, &text)
+                .await
+                .map(Some)
         })
     }
     fn update_settings(

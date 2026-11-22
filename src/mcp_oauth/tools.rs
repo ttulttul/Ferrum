@@ -1280,23 +1280,31 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
             "A new thread accepts only pending attachment uploads.",
         ));
     }
-    if arg_bool(a, "scratch")? == Some(true) {
+    let scratch = arg_bool(a, "scratch")? == Some(true);
+    let explicit_project_id = arg_str(a, "projectId")?;
+    let strategy = a.get("workspaceStrategy").filter(|v| !v.is_null());
+    if scratch && (explicit_project_id.is_some() || strategy.is_some()) {
         return Err(failure(
             "invalid_request",
-            "Pass projectId: this server has no Scratch folder.",
+            "scratch:true picks its own project and folder; omit projectId and workspaceStrategy.",
         ));
     }
     // Inside a thread, its own project, model and modes are the defaults.
     let inherited = caller.thread.clone();
-    let Some(project_id) =
-        arg_str(a, "projectId")?.or(inherited.as_ref().map(|t| t.project_id.as_str()))
-    else {
+    let project_id = if scratch {
+        host.ensure_scratch_project()
+            .await
+            .map_err(|message| failure("orchestration_error", message))?
+    } else if let Some(id) =
+        explicit_project_id.or(inherited.as_ref().map(|t| t.project_id.as_str()))
+    {
+        id.to_owned()
+    } else {
         return Err(failure(
             "target_required",
             "Pass projectId: this MCP client is not running inside a T3 thread.",
         ));
     };
-    let strategy = a.get("workspaceStrategy").filter(|v| !v.is_null());
     if strategy.is_some_and(|s| s["type"] != "root") {
         return Err(failure(
             "invalid_request",
@@ -1310,13 +1318,13 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
         let store = host.control_state().store.read().await;
         let project = store
             .project_rows
-            .get(project_id)
+            .get(&project_id)
             .filter(|r| r["deletedAt"].is_null())
             .cloned()
             .ok_or_else(|| failure("invalid_request", "The project was not found."))?;
         let root = store
             .projects
-            .get(project_id)
+            .get(&project_id)
             .map(|p| p.path.clone())
             .unwrap_or_default();
         (project, root)
@@ -1404,6 +1412,19 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
         }
         Some(_) => {}
         None => {
+            let folder = if scratch || host.is_scratch_project(&project_id).await {
+                let seed = message.as_deref().unwrap_or(&title);
+                host.scratch_thread_folder(&thread_id, seed)
+                    .await
+                    .map_err(|message| failure("orchestration_error", message))?
+            } else {
+                None
+            };
+            let worktree_path = match folder {
+                Some(path) => json!(path),
+                None if root.is_empty() => Value::Null,
+                None => json!(root),
+            };
             let mut create = json!({
                 "type": "thread.create",
                 "commandId": command_id,
@@ -1414,7 +1435,7 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
                 "runtimeMode": runtime_mode,
                 "interactionMode": interaction,
                 "branch": null,
-                "worktreePath": if root.is_empty() { Value::Null } else { json!(root) },
+                "worktreePath": worktree_path,
                 "createdBy": "agent",
                 "creationSource": "mcp",
             });
