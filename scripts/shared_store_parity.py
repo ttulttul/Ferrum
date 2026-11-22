@@ -9,6 +9,8 @@ Checks:
 - projects and threads created on either server are seen identically by the
   other (shell, thread projection), and so is a thread the Rust server
   renamed after reading it from the reference;
+- a Rust home from before the shared store is imported once, keeping its log,
+  and the reference reads its threads as the Rust server does;
 - a database at a migration head the Rust server does not support is refused,
   clearly and without being changed;
 - provider turns across a switch (CROSS_SCENARIOS): a turn one server cut off
@@ -363,7 +365,29 @@ def main():
         same("the reference opens the database the Rust server wrote without migrating",
              reference_schema, schema(database(home)))
 
-        # 4. Migration heads the Rust server does not support.
+        # 4. A Rust home from before the shared store (its own log, no database): the
+        # Rust server imports its threads once, and the reference reads them as it does.
+        legacy = root / "legacy"
+        with running(rust, legacy, credentials) as (url, cookie):
+            seed(url, cookie, root, "project:shared-store-legacy", "thread:shared-store-legacy", "the old Rust server")
+            settle(url, cookie, "thread:shared-store-legacy")
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{database(legacy)}{suffix}").unlink(missing_ok=True)
+        log = legacy / "userdata" / "events.jsonl"
+        logged = log.read_bytes()
+        with running(rust, legacy, credentials) as (url, cookie):
+            rust_legacy = views(url, cookie, "project:shared-store-legacy", "thread:shared-store-legacy")
+        assert log.read_bytes().startswith(logged), "the import keeps the log it imported"
+        with running(reference, legacy, credentials) as (url, cookie):
+            reference_legacy = views(url, cookie, "project:shared-store-legacy", "thread:shared-store-legacy")
+        same("project imported from the Rust server's log", comparable(rust_legacy)["projects"],
+             comparable(reference_legacy)["projects"], ("rust", "reference"))
+        same("thread shell imported from the Rust server's log", rust_legacy["threads"],
+             reference_legacy["threads"], ("rust", "reference"))
+        same("thread projection imported from the Rust server's log", rust_legacy["projection"],
+             reference_legacy["projection"], ("rust", "reference"))
+
+        # 5. Migration heads the Rust server does not support.
         for name, statement, expected in [
             ("newer", "INSERT INTO effect_sql_migrations (migration_id, name) VALUES (99, 'FixtureFuture')", "newer"),
             ("older", "DELETE FROM effect_sql_migrations WHERE migration_id = (SELECT MAX(migration_id) FROM effect_sql_migrations)", "older"),

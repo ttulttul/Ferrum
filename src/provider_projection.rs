@@ -178,6 +178,25 @@ impl Thread {
         ))
     }
 
+    /// The ids a run still waiting in the queue has on the thread's provider
+    /// thread, once the thread has one, before its provider turn runs.
+    pub(crate) fn queued_run_ids(&self, run: &Run) -> Option<RunIds> {
+        if run.status != "queued" || self.provider.runs.contains_key(&run.id) {
+            return None;
+        }
+        let thread = self.provider.thread.as_ref()?;
+        let run_id = run.wire_id();
+        let attempt = join("run-attempt:run", &[&run_id]) + ":attempt:1";
+        Some(RunIds {
+            root_node: join("node:run", &[&run_id]) + ":root",
+            provider_thread: self.provider_thread_id()?,
+            provider_turn: String::new(),
+            driver: thread.driver.clone(),
+            run: run_id,
+            attempt,
+        })
+    }
+
     /// The ids of `run`'s provider records, when it ran a provider turn.
     pub(crate) fn provider_run_ids(&self, run: &Run) -> Option<RunIds> {
         let record = self.provider.runs.get(&run.id)?;
@@ -238,6 +257,52 @@ impl Thread {
                 self.provider_request(&mut out, index, run, &ids, request, &session_id);
             }
         }
+        // A run waiting in the queue already has its pending attempt and
+        // root node on the thread's provider thread, as the reference gives
+        // a queued run them when it queues it.
+        for run in &self.runs {
+            let Some(ids) = self.queued_run_ids(run) else {
+                continue;
+            };
+            out.attempts.push(json!({
+                "id": ids.attempt,
+                "runId": ids.run,
+                "attemptOrdinal": 1,
+                "rootNodeId": ids.root_node,
+                "providerInstanceId": instance,
+                "providerThreadId": ids.provider_thread,
+                "providerTurnId": null,
+                "reason": "initial",
+                "status": "pending",
+                "startedAt": null,
+                "completedAt": null
+            }));
+            out.nodes.push(json!({
+                "id": ids.root_node,
+                "threadId": self.id,
+                "runId": ids.run,
+                "parentNodeId": null,
+                "rootNodeId": ids.root_node,
+                "kind": "root_turn",
+                "status": "pending",
+                "countsForRun": true,
+                "providerThreadId": ids.provider_thread,
+                "providerTurnId": null,
+                "nativeItemRef": null,
+                "runtimeRequestId": null,
+                "checkpointScopeId": null,
+                "startedAt": null,
+                "completedAt": null
+            }));
+        }
+        // Attempts in their runs' order, as the reference reads them.
+        let position = |attempt: &Value| {
+            self.runs
+                .iter()
+                .position(|run| attempt["runId"] == run.wire_id().as_str())
+                .unwrap_or(usize::MAX)
+        };
+        out.attempts.sort_by_key(position);
         out.provider_sessions.extend(session);
         if let (Some(thread), Some(id)) = (&self.provider.thread, self.provider_thread_id()) {
             out.provider_threads.push(json!({

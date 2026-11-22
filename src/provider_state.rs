@@ -88,6 +88,10 @@ pub struct RunRecord {
     pub turn_usage: Option<Value>,
     /// The model the turn ran on.
     pub model: Option<String>,
+    /// For Claude, the model the CLI reported, which the turn's record shows
+    /// from its next usage update or its end on, as the reference's
+    /// provider turn updates carry it (`executedModel`).
+    pub reported_model: Option<String>,
     /// The CLI received the run's prompt.
     pub prompt_delivered: bool,
     /// Items in the order first seen.
@@ -159,6 +163,7 @@ impl ProviderState {
             usage: None,
             turn_usage: None,
             model: None,
+            reported_model: None,
             prompt_delivered: false,
             items: Vec::new(),
             plan: None,
@@ -203,7 +208,11 @@ impl ProviderState {
             } => {
                 record.turn_started = true;
                 if model.is_some() {
-                    record.model = model.clone();
+                    if record.driver == provider::CLAUDE_AGENT {
+                        record.reported_model = model.clone();
+                    } else {
+                        record.model = model.clone();
+                    }
                 }
                 if native_turn_id.is_some() {
                     record.native_turn_id = native_turn_id.clone();
@@ -253,7 +262,12 @@ impl ProviderState {
                     updated_at: at,
                 });
             }
-            ProviderEvent::Usage { usage } => record.usage = Some((usage.clone(), at)),
+            ProviderEvent::Usage { usage } => {
+                record.usage = Some((usage.clone(), at));
+                if record.reported_model.is_some() {
+                    record.model = record.reported_model.clone();
+                }
+            }
             ProviderEvent::TurnUsage { usage } => record.turn_usage = Some(usage.clone()),
             ProviderEvent::PromptDelivered { bytes, pages } => {
                 record.prompt_delivered = true;
@@ -267,6 +281,9 @@ impl ProviderState {
                 driver,
             } => {
                 record.ended_at = Some(at);
+                if record.reported_model.is_some() {
+                    record.model = record.reported_model.clone();
+                }
                 if let (None, Some(driver)) = (&self.thread, driver) {
                     record.driver = driver.clone();
                 }

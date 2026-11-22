@@ -252,8 +252,9 @@ Run ids differ between the servers. The reference allocates
 server gave them:
 - A run Rust reads from the database keeps its id as `Run.wire_id`. Its internal UUID is
   derived from that id (`Run::uuid_for`), so it is the same after every restart.
-- A new run Rust starts on such a thread takes the reference's scheme, with the next
-  ordinal.
+- Every new run Rust starts takes the reference's scheme, with the next ordinal (pull
+  request 4; before that, only runs on threads read from the database did). This way
+  both servers list a thread's runs and attempts in ordinal order.
 - Everything that leaves Rust or arrives from a client names a run by its wire id:
   records, events, commands, and the restart continuation's ids.
 
@@ -278,12 +279,22 @@ applies only what Rust's turns change.
 
 ### 2.3 Existing Rust homes: a one-time import, keeping the old file
 
-On its first start with the write path (pull request 4), Rust writes into the database,
-in one transaction, every thread and project its journal holds that the database lacks.
-It then records the import's sequence in the journal.
+At start-up, before anything else commits, Rust lists the threads and projects its
+journal holds that the database has no row for (`statev2::missing_from_database`):
+- deleted threads are skipped;
+- a deleted project is imported marked deleted, as the reference keeps it.
 
-`events.jsonl` is not deleted or rewritten. It keeps serving as the journal described in
-2.2, so going back to an older Rust build still finds its log.
+Rust then commits one `Event::Imported`. Its shared write puts each listed thread into
+the database whole: every record, with `thread.created` and its record events. Each
+listed project goes in with `project.created`. Logging that event in the journal records
+the import's sequence against those threads and projects, so the next start-up finds the
+journal current (2.2) and imports nothing again. If the one transaction fails, Rust
+imports one thread or project at a time and logs the ones the database refuses. Those
+stay journal-only, and start-up carries on.
+
+`events.jsonl` is not deleted or rewritten; the import only appends its one line. An
+older Rust build skips that line, as it skips any line it cannot read, so going back
+still finds its log.
 
 Every kind of home keeps working:
 
@@ -292,6 +303,7 @@ Every kind of home keeps working:
 | No reference database, no journal | A fresh database (2.1). |
 | Only a journal | The journal is imported. |
 | Only `statev2.sqlite` | Its threads are read. |
+| Both | The threads only the journal has are imported. |
 
 ### 2.4 Effects, queued runs and pending requests
 
@@ -410,4 +422,26 @@ Every kind of home keeps working:
 
      Known differences are listed in `scripts/shared_store_parity_xfail.json`. Every one
      is a difference Rust already has on one server.
-4. **Importing `events.jsonl`:** the one-time import described in 2.3.
+4. **Importing `events.jsonl`:**
+   - The one-time import described in 2.3.
+   - `tests/shared_store_import.rs` checks that an imported thread reaches the database
+     once and that the log keeps its earlier lines.
+   - `scripts/shared_store_parity.py` checks that the reference reads an imported Rust
+     home's project and thread exactly as Rust does.
+   - **Cross-server differences closed:**
+     - A queued run has its pending attempt and root node on the thread's provider
+       thread, as the reference gives a queued run when it queues it.
+     - A queued message is kept as a pending `queued_turn` turn item, which snapshots
+       hide until the run starts.
+     - A Claude provider turn shows its model from its next usage update or its end on,
+       as the reference's provider turn updates carry it.
+
+     - Attempts are listed in their runs' order.
+     - Every new run takes the reference's `run:thread:…:ordinal:…` id. The reference
+       lists attempts by run id, so Rust's random UUIDs had put them in a random order
+       there.
+
+     So a message queued just before a switch from Rust to the reference, a prompt the
+     provider never took, and a Claude turn cut off while it waited for an approval all
+     read as on the reference. `scripts/shared_store_parity_xfail.json` is now empty, and
+     `client_thread_parity_xfail.json` loses the queued-attempt entries.

@@ -425,12 +425,9 @@ async fn start_run<H: CommandHost>(
         .threads
         .get(thread_id)
         .map(|t| {
-            // A run on a thread read from the shared database takes the
-            // reference's id, as its other runs have.
-            let wire_id = t
-                .stored
-                .is_some()
-                .then(|| Run::reference_id(thread_id, t.runs.len() + 1));
+            // The reference's id (`run:thread:<thread>:ordinal:<n>`), so a
+            // run reads the same on both servers and sorts by ordinal there.
+            let wire_id = Some(Run::reference_id(thread_id, t.runs.len() + 1));
             (t.cwd.clone(), t.checkpoints.is_empty(), wire_id)
         })
         .ok_or_else(|| anyhow::anyhow!("thread not found"))?;

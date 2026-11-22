@@ -315,6 +315,17 @@ fn shared_commit(
         }
         _ => None,
     };
+    if let Event::Imported { project_ids, .. } = &record.event {
+        for id in project_ids {
+            if let Some(row) = store.project_rows.get(id) {
+                events.push(project_event(None, row, None, &occurred_at));
+                projects.push(ProjectWrite {
+                    project_id: id.clone(),
+                    row: row.clone(),
+                });
+            }
+        }
+    }
     if let Some((row, project_command)) = project_row {
         let id = row["id"].as_str().unwrap_or_default().to_owned();
         let previous = store.project_rows.get(&id);
