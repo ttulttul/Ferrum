@@ -13,6 +13,7 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from urllib.parse import urlsplit
 
@@ -75,10 +76,31 @@ def launch(command, url, **kwargs):
             os.killpg(process.pid, signal.SIGKILL)
 
 
+_HANDED_OUT = set()
+_HANDED_OUT_LOCK = threading.Lock()
+
+
 def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    """A port nothing listens on, never the same one twice in this process, so servers that
+    suites start side by side (run_concurrently) do not race for one."""
+    while True:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        with _HANDED_OUT_LOCK:
+            if port not in _HANDED_OUT:
+                _HANDED_OUT.add(port)
+                return port
+
+
+def run_concurrently(tasks, jobs):
+    """Call each of `tasks` (functions of no arguments) with up to `jobs` running at once, and
+    return their results in order; the first exception raised is raised here once all are done.
+    Every server and temporary home a task starts must be its own."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        futures = [pool.submit(task) for task in tasks]
+    return [future.result() for future in futures]
 
 
 def session_cookie(url, secret):
@@ -124,7 +146,9 @@ def path_without(names, scratch, path=None):
         shim.mkdir(parents=True, exist_ok=True)
         for entry in folder.iterdir():
             if entry.name not in names and not (shim / entry.name).exists():
-                (shim / entry.name).symlink_to(entry)
+                # Servers started side by side may share `scratch`.
+                with contextlib.suppress(FileExistsError):
+                    (shim / entry.name).symlink_to(entry)
         directories.append(str(shim))
     return os.pathsep.join(directories)
 

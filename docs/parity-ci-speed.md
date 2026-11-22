@@ -209,3 +209,20 @@ public repo), larger runners (Q, the suite waits on timers rather than CPU).
 - **Faketime.** `cli restored` moves both servers' clocks on 62 s with libfaketime (`FAKETIME_TIMESTAMP_FILE`).
 - **Real time.** `--real-time` (`PARITY_REAL_TIME=1`, nightly and on pushes to main) keeps the 8 s floor and the real minute.
 - **Local result.** `client_thread_parity.py` took 7 min 43 s, against 15 min 18 s before. Restart scenarios take 10–15 s each (25 s with a live watcher). Thread shards go from 4 to 3.
+
+**Step 3 (setup caches).** The reference's pnpm store, the Playwright browsers, the libfaketime
+library (no `apt-get update` on a warm shard) and the Python environment are cached (#91).
+
+**Step 4 (concurrency).** `parity_harness.run_concurrently` runs a suite's independent server runs
+side by side (`--jobs`; 1 restores the serial order). Every run already had its own home and port;
+`free_port` now never hands out the same port twice in a process.
+
+| Suite | How | Local, before → after | CI before |
+|---|---|---:|---:|
+| `provider_status_parity.py` | 4 scenarios at once, both servers side by side; the timeout scenarios start first | — → 68 s | 397 s |
+| `relay_provisioning_parity.py` | all 12 runs at once, each with its own fake T3 Connect (sharing the CA and signing keys) | — → 31 s | 156 s |
+| `relay_client_parity.py` | all 12 runs at once (the 4 s negative waits are unchanged) | — → 9 s | 67 s |
+| `client_rpc_parity.py` | both servers side by side | — → 20 s | 46 s |
+
+The timed check in `confirmed-restart` (connector "immediate" after HTTP) still measures 0.05–0.2 s
+with everything running at once.

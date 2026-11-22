@@ -33,7 +33,7 @@ import time
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, free_port, ready, session_cookie
+from parity_harness import encode, free_port, ready, run_concurrently, session_cookie
 
 FAKE = Path(__file__).resolve().parent / "fake_cloudflared.py"
 # Shaped like a connector token, but never valid anywhere.
@@ -282,6 +282,7 @@ def main():
     parser.add_argument("--rust-command", required=True)
     parser.add_argument("--scenario", action="append", choices=SCENARIOS)
     parser.add_argument("--dump", help="write both results as JSON to this path")
+    parser.add_argument("--jobs", type=int, default=12, help="scenario runs at once (1 runs them one by one)")
     args = parser.parse_args()
     if not sys.platform.startswith("linux"):
         print("relay client parity reads /proc and runs on Linux only")
@@ -289,11 +290,17 @@ def main():
     credentials = secrets.token_urlsafe(32), secrets.token_bytes(32)
     failures = 0
     dump = {}
-    for name in args.scenario or SCENARIOS:
-        results = []
-        for label, command in (("original", args.original_command), ("rust", args.rust_command)):
-            with tempfile.TemporaryDirectory(prefix=f"relay-{label}-") as temporary:
-                results.append(run_scenario(name, shlex.split(command), Path(temporary), credentials))
+    def run(name, label, command):
+        with tempfile.TemporaryDirectory(prefix=f"relay-{label}-") as temporary:
+            return run_scenario(name, shlex.split(command), Path(temporary), credentials)
+
+    # Every run has its own home, port and connector, so all of them run side by side.
+    names = args.scenario or SCENARIOS
+    runs = [(name, label, command) for name in names
+            for label, command in (("original", args.original_command), ("rust", args.rust_command))]
+    done = iter(run_concurrently([lambda run_args=run_args: run(*run_args) for run_args in runs], args.jobs))
+    for name in names:
+        results = [next(done), next(done)]
         dump[name] = {"original": results[0], "rust": results[1]}
         differences = diff(*results)
         if differences:

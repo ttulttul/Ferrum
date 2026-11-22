@@ -37,7 +37,7 @@ import tempfile
 import time
 import urllib.request
 
-from parity_harness import RELAY_TOOLS, encode, isolated_git_env, managed_server, path_without, session_cookie
+from parity_harness import RELAY_TOOLS, encode, isolated_git_env, managed_server, path_without, run_concurrently, session_cookie
 
 ROOT = Path(__file__).resolve().parents[1]
 GIT_ENV = {"GIT_AUTHOR_NAME": "Parity", "GIT_AUTHOR_EMAIL": "parity@example.test",
@@ -258,32 +258,38 @@ def main():
     parser.add_argument("--reply-ms", type=int, default=8000, help="wait for each reply or stream value")
     parser.add_argument("--verbose", action="store_true", help="print both sides of expected failures too")
     parser.add_argument("--dump", type=Path, help="write both servers' raw driver results here")
+    parser.add_argument("--jobs", type=int, default=2, help="2 runs both servers at once, 1 one after the other")
     args = parser.parse_args()
     xfail = json.loads(args.xfail.read_text())["cases"]
     modes = plan_modes(args.cases)
     credential, signing_key = secrets.token_urlsafe(32), secrets.token_bytes(32)
     started = time.monotonic()
     results, frames = {}, {}
-    with tempfile.TemporaryDirectory(prefix="t3-client-rpc-") as temporary, contextlib.ExitStack() as stack:
+    with tempfile.TemporaryDirectory(prefix="t3-client-rpc-") as temporary:
         root = Path(temporary)
         # Both servers and the fixture see the same Git configuration, written here, and a PATH
         # without relay tooling, so the host's setup cannot decide a comparison.
         isolation = {**isolated_git_env(root / "git"), "PATH": path_without(RELAY_TOOLS, root / "bin")}
-        for name, command in (("original", args.original_command), ("rust", args.rust_command)):
+        def run(name, command):
+            # Each server has its own home, port and driver, so both run side by side.
             home = root / name
             home.mkdir()
             variables = seed_fixture(home, isolation)
-            url, _ = managed_server(stack, shlex.split(command), home, credential, signing_key, env=isolation)
-            result = run_driver(args, url, credential, variables)
-            with urllib.request.urlopen(url + "/.well-known/t3/environment", timeout=10) as response:
-                environment_id = json.load(response)["environmentId"]
-            # Placeholders are numbered per step, so an extra id in one step does not shift the next.
-            results[name] = {step["name"]: {**step, "value": Normalizer(variables, environment_id)(step.get("value"))}
-                             for step in result["steps"]}
-            # The plan revokes every other client, the launch cookie included, so sign in again.
-            frames[name] = raw_frames(url, session_cookie(url, credential), variables,
-                                      (variables, environment_id))
+            with contextlib.ExitStack() as server:
+                url, _ = managed_server(server, shlex.split(command), home, credential, signing_key, env=isolation)
+                result = run_driver(args, url, credential, variables)
+                with urllib.request.urlopen(url + "/.well-known/t3/environment", timeout=10) as response:
+                    environment_id = json.load(response)["environmentId"]
+                # Placeholders are numbered per step, so an extra id in one step does not shift the next.
+                results[name] = {step["name"]: {**step, "value": Normalizer(variables, environment_id)(step.get("value"))}
+                                 for step in result["steps"]}
+                # The plan revokes every other client, the launch cookie included, so sign in again.
+                frames[name] = raw_frames(url, session_cookie(url, credential), variables,
+                                          (variables, environment_id))
             print(f"{name}: {len(result['steps'])} client steps in {result.get('totalMs')} ms", flush=True)
+
+        run_concurrently([lambda: run("original", args.original_command), lambda: run("rust", args.rust_command)],
+                         args.jobs)
         if args.dump:
             args.dump.write_text(json.dumps(results, indent=1))
 
