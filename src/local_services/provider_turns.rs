@@ -19,7 +19,7 @@ use crate::workspace::{ProviderEvent, TurnEvent, TurnExit, TurnSpec};
 use std::process::Stdio;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, Lines},
-    process::{Child, ChildStdin, ChildStdout, Command},
+    process::{Child, ChildStdin, ChildStdout},
     sync::{mpsc, oneshot},
 };
 
@@ -209,7 +209,7 @@ impl Cli {
     /// The CLI leads its own process group, so stopping it stops the
     /// commands it ran too.
     pub(crate) fn spawn(spec: &TurnSpec, launch: Launch<'_>) -> std::io::Result<Self> {
-        let mut command = Command::new(&launch.program);
+        let mut command = crate::login_shell::tokio_command(&launch.program);
         for (name, _) in std::env::vars_os() {
             let text = name.to_string_lossy();
             if spec

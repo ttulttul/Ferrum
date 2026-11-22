@@ -85,14 +85,12 @@
     "attempts": "The reference gives a queued run a pending attempt and root node on the thread's provider thread; Rust gives a queued run none until it starts."
   },
   "claude in the login shell PATH": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "provider status": "Rust does not probe provider CLIs: every row stays 'has not been checked in this session yet', where the reference reports the CLI it found on the login shell's PATH (installed, version, auth, model catalog) or that it was not found."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "codex in the login shell PATH": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   },
   "claude missing from the login shell": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
-    "provider status": "Rust does not probe provider CLIs: every row stays 'has not been checked in this session yet', where the reference reports the CLI it found on the login shell's PATH (installed, version, auth, model catalog) or that it was not found."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   }
 }

@@ -60,6 +60,8 @@ pub struct AppState {
     /// The provider model manifest, refreshed from upstream.
     pub(crate) model_manifest:
         Arc<crate::model_manifest::ModelManifest<crate::model_manifest::NativeHost>>,
+    /// The provider CLIs' status checks.
+    pub(crate) provider_status: crate::provider_status::ProviderStatus,
     /// Background tasks, timers and the open sockets.
     pub(crate) runtime: Arc<crate::runtime::TokioRuntime>,
     /// Set once the server starts to stop; see [`crate::turn::TurnHost::stopping`].
@@ -69,6 +71,12 @@ pub struct AppState {
     pub(crate) closing: tokio::sync::watch::Sender<bool>,
 }
 impl AppState {
+    /// Do not check the provider CLIs (`claude`, `codex`) on PATH, for a
+    /// server in a test, which must never run the host's real CLIs.
+    pub fn disable_provider_status_checks(&self) {
+        self.provider_status.disable();
+    }
+
     /// The server is stopping: record how its running turns are cut off,
     /// then stop their CLIs, which do not outlive it.
     pub(crate) async fn stop_provider_runtime(&self) {
@@ -279,6 +287,7 @@ impl AppState {
             model_manifest: Arc::new(crate::model_manifest::ModelManifest::new(
                 crate::model_manifest::NativeHost::new(&paths.state_dir, settings.clone()),
             )),
+            provider_status: crate::provider_status::ProviderStatus::new(&paths),
             runtime: Arc::default(),
             stopping: Default::default(),
             closing: tokio::sync::watch::Sender::new(false),
@@ -1036,6 +1045,8 @@ where
     });
     // Continue what the last restart cut off, now that clients can watch it.
     tokio::spawn(state.clone().continue_restarted_runs());
+    // Check the provider CLIs once clients can load, as the reference does.
+    tokio::spawn(crate::provider_status::run(state.clone()));
     let (stopping_tx, stopping_rx) = oneshot::channel::<()>();
     let stopping_endpoint = endpoint.clone();
     let stopping_state = state.clone();

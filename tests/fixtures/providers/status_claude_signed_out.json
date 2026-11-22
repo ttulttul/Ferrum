@@ -1,0 +1,18 @@
+{
+ "_comment": "Claude Code answering the status probe while signed out.",
+ "steps": [],
+ "controlReplies": {
+  "initialize": {
+   "agents": [],
+   "output_style": "default",
+   "available_output_styles": [
+    "default"
+   ],
+   "commands": [],
+   "models": [],
+   "account": {
+    "tokenSource": "none"
+   }
+  }
+ }
+}

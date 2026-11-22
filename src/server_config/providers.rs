@@ -13,12 +13,34 @@ fn continuation(id: &str, driver: &str, config: &Value) -> String {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_default();
-    let path = config["homePath"]
+    // `resolveClaudeHomePath` and `resolveCodexHomeLayout`: a configured home
+    // with `~` expanded, made absolute; Claude then falls back to
+    // CLAUDE_CONFIG_DIR, Codex straight to ~/.codex.
+    let configured = config["homePath"]
         .as_str()
-        .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os(var).map(PathBuf::from))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|path| match path.strip_prefix("~") {
+            Some("") => home.clone(),
+            Some(rest) if rest.starts_with('/') => home.join(&rest[1..]),
+            _ => PathBuf::from(path),
+        });
+    let inherited = || {
+        (driver == "claudeAgent")
+            .then(|| std::env::var(var).ok())
+            .flatten()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let path = configured
+        .or_else(inherited)
         .unwrap_or_else(|| home.join(folder));
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
     format!("{kind}:home:{}", path.display())
 }
 
@@ -51,20 +73,45 @@ fn models(stock: &Value, config: &Value) -> Value {
 
 #[cfg(feature = "native")]
 pub(crate) fn list(state: &crate::AppState, settings: &Value, options: &Value) -> Value {
+    let denial = |driver: &str| state.settings.policy.provider_denial(driver);
+    // Checks key on the effective settings, whose secrets a client's view
+    // redacts.
+    let effective = state.settings.internal().ok();
+    let effective = effective.as_ref().unwrap_or(settings);
     list_with(
         &state.config_started_at,
-        |driver| state.settings.policy.provider_denial(driver),
+        denial,
         |_| None,
         settings,
         options,
         &state.model_manifest.current(),
+        |id, row| {
+            let driver = row["driver"].as_str().unwrap_or("").to_owned();
+            state
+                .provider_status
+                .overlay(id, &fingerprint(effective, id, denial(&driver)), row)
+        },
     )
+}
+
+/// What an instance's status check depends on: its settings entry, the
+/// managed policy's verdict and `enableProviderUpdateChecks`. A check's
+/// result is shown only while these are unchanged, as the reference
+/// rebuilds an instance (and its snapshot) when its settings change.
+pub(crate) fn fingerprint(settings: &Value, id: &str, denial: Option<String>) -> Value {
+    json!({
+        "entry": settings["providerInstances"][id],
+        "denied": denial,
+        "updateChecks": settings["enableProviderUpdateChecks"] != false,
+    })
 }
 
 /// The provider rows of the config snapshot. `denial` is the managed policy's
 /// reason a driver is disallowed, if any. Claude's built-in models come from
 /// the model `manifest`; a Codex instance's from `listed`, the models its CLI
 /// listed (`model/list`), with the manifest's Codex catalog applied.
+/// `overlay` replaces an instance's placeholder row with what its status
+/// check found.
 pub(crate) fn list_with(
     started_at: &str,
     denial: impl Fn(&str) -> Option<String>,
@@ -72,6 +119,7 @@ pub(crate) fn list_with(
     settings: &Value,
     options: &Value,
     manifest: &Value,
+    overlay: impl Fn(&str, Value) -> Value,
 ) -> Value {
     let claude_models: Value =
         crate::model_manifest::claude_models(manifest, crate::platform::now_ms()).into();
@@ -145,6 +193,7 @@ pub(crate) fn list_with(
         row["models"] = models(stock_models, config);
         row["slashCommands"] = catalog["slashCommands"].clone();
         row["skills"] = catalog["skills"].clone();
+        let mut row = overlay(id, row);
         if driver == "antigravity" && options["workspaceSnapshotsOnDemand"] != true {
             row["workspaceSnapshots"] = json!([]);
         }

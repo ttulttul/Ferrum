@@ -11,7 +11,7 @@ permissions:
 jobs:
   parity:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,6 +69,7 @@ jobs:
           python3 scripts/client_initial_sync_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
           node scripts/codex_fixture_schemas.mjs "$GITHUB_WORKSPACE/reference"
           python3 scripts/client_thread_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
+          python3 scripts/provider_status_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/client_rpc_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
           python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$reference" --rust-command "$server"
           python3 scripts/rpc_edge_parity.py --original-command "$reference" --rust-command "$server"
@@ -82,6 +83,7 @@ jobs:
           python3 scripts/github_provider_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
           python3 scripts/linear_provider_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/source_control_hosts_parity.py --original-command "$reference" --rust-command "$server"
+          python3 scripts/login_shell_refresh_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/git_workflow_parity.py --original-command "$reference" --rust-command "$server"
           python3 scripts/preview_provider_parity.py --original-command "$reference" --rust-command "$server" --browser-cache "$HOME/.cache/ms-playwright"
           python3 scripts/relay_parity.py --checkout "$GITHUB_WORKSPACE/reference" --rust "$server"

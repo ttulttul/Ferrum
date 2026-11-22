@@ -191,7 +191,7 @@ async fn launch_project_clone(
         attempt_sequence
     };
     tokio::spawn(async move {
-        let command = tokio::process::Command::new("git")
+        let command = crate::login_shell::tokio_command("git")
             .args(["clone", "--", remote.as_str(), destination.as_str()])
             .stderr(std::process::Stdio::piped())
             .spawn();
@@ -2192,8 +2192,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 manifest.refresh().await;
             });
         }
+        // A refresh checks the providers' CLIs again and answers with what
+        // the checks found.
+        crate::provider_status::refresh(state, params["instanceId"].as_str()).await;
         return match crate::config_rpc::snapshot(state, false, &Value::Null).await {
-            Ok(config) => Reply::Success(json!({"providers":config["providers"]})),
+            Ok(config) => Reply::Success(
+                json!({"providers":crate::provider_status::before_enrichment(&config["providers"])}),
+            ),
             Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
         };
     }
@@ -2232,9 +2237,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(json!({"links":[]}));
     }
     if method == "server.discoverSourceControl" {
+        // As the reference: re-read the login shell first, so a tool installed
+        // since launch resolves here and in every later spawn. One shell
+        // serves every discovery within ten seconds.
+        crate::login_shell::refresh_for_source_control_discovery().await;
         let cwd = std::env::current_dir().unwrap_or_default();
         let probe = |executable: &str| -> Option<String> {
-            std::process::Command::new(executable)
+            crate::login_shell::command(executable)
                 .arg("--version")
                 .current_dir(&cwd)
                 .output()
@@ -3247,7 +3256,7 @@ async fn git_diff_checkpoint(
     to_tree: &str,
     ignore_whitespace: bool,
 ) -> String {
-    let mut command = tokio::process::Command::new("git");
+    let mut command = crate::login_shell::tokio_command("git");
     command.args(["-C", cwd, "diff", "--binary"]);
     if ignore_whitespace {
         command.arg("--ignore-all-space");
@@ -3715,7 +3724,7 @@ mod scheduled_task_tests {
 
 /// Azure DevOps sign-in as the reference reads `az account show --query user.name -o tsv`.
 fn azure_devops_auth(executable: &str, cwd: &Path) -> Value {
-    let output = std::process::Command::new(executable)
+    let output = crate::login_shell::command(executable)
         .args(["account", "show", "--query", "user.name", "-o", "tsv"])
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())

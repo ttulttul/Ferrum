@@ -10,7 +10,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    process::Command,
     sync::{broadcast, mpsc, oneshot},
 };
 
@@ -236,7 +235,7 @@ fn start_turn(
 ) -> anyhow::Result<mpsc::UnboundedReceiver<TurnEvent>> {
     let mut command = spec.command;
     let executable = command.remove(0);
-    let mut child_command = Command::new(executable);
+    let mut child_command = crate::login_shell::tokio_command(executable);
     for (k, _) in std::env::vars_os() {
         let name = k.to_string_lossy();
         if spec
@@ -377,7 +376,7 @@ pub(crate) async fn capture_git_tree(cwd: &str) -> Option<String> {
     if !cwd.is_dir() {
         return None;
     }
-    let probe = Command::new("git")
+    let probe = crate::login_shell::tokio_command("git")
         .args(["-C", cwd.to_str()?, "rev-parse", "--show-toplevel"])
         .output()
         .await
@@ -390,7 +389,7 @@ pub(crate) async fn capture_git_tree(cwd: &str) -> Option<String> {
     drop(index);
     let _ = tokio::fs::remove_file(&index_path).await;
     let index_text = index_path.to_str()?.to_owned();
-    let mut command = Command::new("git");
+    let mut command = crate::login_shell::tokio_command("git");
     command
         .args(["-C", cwd.to_str()?, "read-tree", "HEAD"])
         .env("GIT_INDEX_FILE", &index_text);
@@ -398,7 +397,7 @@ pub(crate) async fn capture_git_tree(cwd: &str) -> Option<String> {
         let _ = tokio::fs::remove_file(&index_path).await;
         return None;
     }
-    let mut add = Command::new("git");
+    let mut add = crate::login_shell::tokio_command("git");
     add.args(["-C", cwd.to_str()?, "add", "-A", "--"])
         .arg(".")
         .env("GIT_INDEX_FILE", &index_text);
@@ -406,7 +405,7 @@ pub(crate) async fn capture_git_tree(cwd: &str) -> Option<String> {
         let _ = tokio::fs::remove_file(&index_path).await;
         return None;
     }
-    let output = Command::new("git")
+    let output = crate::login_shell::tokio_command("git")
         .args(["-C", cwd.to_str()?, "write-tree"])
         .env("GIT_INDEX_FILE", &index_text)
         .output()

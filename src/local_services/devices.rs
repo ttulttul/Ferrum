@@ -11,10 +11,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{
-    process::{Child, Command},
-    sync::broadcast,
-};
+use tokio::{process::Child, sync::broadcast};
 
 const HUB: (&str, &str, &str) = ("expo-device-hub", "0.22.1", "dist/server/cli.mjs");
 const AGENT: (&str, &str, &str) = ("agent-device", "0.21.36", "bin/agent-device.mjs");
@@ -117,7 +114,7 @@ pub(super) fn sdk_root() -> Option<PathBuf> {
         home().join("Android/Sdk"),
         home().join("AppData/Local/Android/Sdk"),
     ]);
-    if let Some(path) = env::var_os("PATH") {
+    if let Some(path) = crate::login_shell::path() {
         for p in env::split_paths(&path) {
             if let Ok(p) = fs::canonicalize(p.join(if cfg!(windows) { "adb.exe" } else { "adb" })) {
                 if let Some(root) = p.parent().and_then(Path::parent) {
@@ -241,7 +238,7 @@ async fn install(dir: &Path, spec: Tool) -> Result<PathBuf, Value> {
         .await
         .map_err(|_| op_err("install", "command_failed"))?;
     let package = format!("{}@{}", spec.0, spec.1);
-    let status = Command::new("npm")
+    let status = crate::login_shell::tokio_command("npm")
         .current_dir(&base)
         .args([
             "install",
@@ -294,7 +291,7 @@ async fn ensure_hub(runtime: &mut Option<(String, Child)>, dir: &Path) -> Result
         .map_err(|_| op_err("start", "command_failed"))?;
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let mut cmd = Command::new("node");
+    let mut cmd = crate::login_shell::tokio_command("node");
     cmd.arg(entry).args([
         "--port",
         &port.to_string(),
@@ -605,7 +602,7 @@ async fn ssh_probe(input: &Value, dir: &Path) -> Reply {
         return Err(invalid("target", "Invalid SSH target"));
     }
     let failed = |reason: &str| json!({"_tag":"DeviceHostUnavailableError","hostId":id,"hostLabel":label,"reason":reason,"cause":null});
-    let mut cmd = Command::new("ssh");
+    let mut cmd = crate::login_shell::tokio_command("ssh");
     cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]);
     if let Some(port) = input.get("port") {
         let p = port

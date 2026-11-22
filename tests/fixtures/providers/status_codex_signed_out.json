@@ -1,0 +1,16 @@
+{
+ "_comment": "codex app-server answering the status probe while signed out.",
+ "steps": [],
+ "replies": {
+  "initialize": {
+   "codexHome": "/tmp/codex-home",
+   "platformFamily": "unix",
+   "platformOs": "linux",
+   "userAgent": "codex_cli_rs/0.170.0"
+  },
+  "account/read": {
+   "account": null,
+   "requiresOpenaiAuth": true
+  }
+ }
+}

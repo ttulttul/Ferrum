@@ -1,4 +1,4 @@
-//! The user's login-shell environment, read once at start-up.
+//! The user's login-shell environment, read at start-up and again at runtime.
 //!
 //! A server started by a service manager or a desktop launcher inherits a
 //! bare `PATH` that misses directories the user's shell profile adds, such as
@@ -8,12 +8,22 @@
 //! and rewrites its own environment with them. Every provider launch, status
 //! probe and tool it starts later inherits that environment. This module
 //! does the same, so it must run before any other thread starts.
+//!
+//! The reference also re-reads the login shell while it runs
+//! (`refreshPathFromLoginShell`): source-control discovery does it, at most
+//! once per ten seconds, so a tool installed since launch resolves there and
+//! in every later spawn. Node can rewrite `process.env` in place; Rust must
+//! not set environment variables once other threads run. So the login-shell
+//! variables live in a process-wide snapshot that a refresh swaps whole, and
+//! every child process takes them from it: build commands with [`command`] or
+//! [`tokio_command`], and search `PATH` with [`path`].
 
 use std::{
+    ffi::{OsStr, OsString},
     io::Read,
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
-    sync::mpsc,
+    process::{Command, ExitStatus, Stdio},
+    sync::{mpsc, Arc, RwLock},
     time::{Duration, Instant},
 };
 
@@ -23,6 +33,170 @@ use std::{
 pub const LOGIN_SHELL_ENV_NAMES: [&str; 3] = ["PATH", "__MISE_DIFF", "JAVA_HOME"];
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 const SLOW_LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long one runtime refresh serves later callers, as the reference's
+/// `Effect.cachedWithTTL(Duration.seconds(10))` in source-control discovery.
+pub const REFRESH_TTL: Duration = Duration::from_secs(10);
+
+/// The variables a login shell contributes to every child process.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoginEnvironment {
+    pub path: Option<OsString>,
+    pub mise_diff: Option<OsString>,
+    pub java_home: Option<OsString>,
+}
+
+impl LoginEnvironment {
+    /// What this process's own environment holds now.
+    pub fn from_process() -> Self {
+        Self {
+            path: std::env::var_os("PATH"),
+            mise_diff: std::env::var_os("__MISE_DIFF"),
+            java_home: std::env::var_os("JAVA_HOME"),
+        }
+    }
+
+    /// The environment after a login shell printed `shell_environment`, as the
+    /// reference's `applyLoginShellEnvironment`: the shell's `PATH` entries
+    /// first, then the current ones; `__MISE_DIFF` with that `PATH`;
+    /// `JAVA_HOME` only where none is set.
+    pub fn merged_with(
+        &self,
+        shell_environment: &[(String, String)],
+        fallback_path: Option<&str>,
+    ) -> Self {
+        let shell_path = value(shell_environment, "PATH");
+        let current_path = self.path.as_deref().map(OsStr::to_string_lossy);
+        let mut next = self.clone();
+        if let Some(merged) =
+            merge_path_entries(shell_path.or(fallback_path), current_path.as_deref())
+        {
+            next.path = Some(merged.into());
+        }
+        if shell_path.is_some() {
+            if let Some(diff) = value(shell_environment, "__MISE_DIFF") {
+                next.mise_diff = Some(diff.into());
+            }
+        }
+        // Android SDK tools are Java programs; a keg-only JDK is only reachable
+        // through the JAVA_HOME the shell profile sets.
+        if next.java_home.is_none() {
+            if let Some(java_home) = value(shell_environment, "JAVA_HOME") {
+                next.java_home = Some(java_home.into());
+            }
+        }
+        next
+    }
+
+    /// The variables that are set, by name.
+    pub fn variables(&self) -> impl Iterator<Item = (&'static str, &OsStr)> {
+        [
+            ("PATH", self.path.as_deref()),
+            ("__MISE_DIFF", self.mise_diff.as_deref()),
+            ("JAVA_HOME", self.java_home.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| (name, value)))
+    }
+}
+
+/// A login-shell environment that can be swapped while other threads read
+/// it. Readers get an `Arc` of one whole snapshot, never a half-written one.
+pub struct SharedEnvironment {
+    slot: RwLock<Option<Arc<LoginEnvironment>>>,
+}
+
+impl SharedEnvironment {
+    pub const fn new() -> Self {
+        Self {
+            slot: RwLock::new(None),
+        }
+    }
+
+    /// The snapshot now; until one is stored, this process's own environment.
+    pub fn current(&self) -> Arc<LoginEnvironment> {
+        if let Some(environment) = self
+            .slot
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            return environment.clone();
+        }
+        self.update(|current| current.clone())
+    }
+
+    /// Replaces the snapshot. Snapshots already handed out are unchanged.
+    pub fn store(&self, environment: LoginEnvironment) {
+        *self
+            .slot
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(environment));
+    }
+
+    /// Replaces the snapshot with `change` of the current one, atomically, so
+    /// concurrent updates are never lost.
+    pub fn update(
+        &self,
+        change: impl FnOnce(&LoginEnvironment) -> LoginEnvironment,
+    ) -> Arc<LoginEnvironment> {
+        let mut slot = self
+            .slot
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let base = slot
+            .take()
+            .unwrap_or_else(|| Arc::new(LoginEnvironment::from_process()));
+        let next = Arc::new(change(&base));
+        *slot = Some(next.clone());
+        next
+    }
+}
+
+impl Default for SharedEnvironment {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static CURRENT: SharedEnvironment = SharedEnvironment::new();
+
+/// The login-shell environment every child process starts with now. Until
+/// start-up or a refresh stores one, it is this process's own environment.
+pub fn current() -> Arc<LoginEnvironment> {
+    CURRENT.current()
+}
+
+/// Replaces the environment later child processes start with. Commands
+/// already built keep the one they were given.
+pub fn store(environment: LoginEnvironment) {
+    CURRENT.store(environment);
+}
+
+/// The `PATH` child processes get, for code that searches it itself.
+pub fn path() -> Option<OsString> {
+    current().path.clone()
+}
+
+/// A command for `program` with the current login-shell environment. With
+/// `PATH` set on the command, a bare `program` is looked up on that `PATH`.
+/// Later `env` and `env_remove` calls on it still win.
+pub fn command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    for (name, value) in current().variables() {
+        command.env(name, value);
+    }
+    command
+}
+
+/// [`command`] for tokio.
+pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    for (name, value) in current().variables() {
+        command.env(name, value);
+    }
+    command
+}
 
 const DEBUG_TRAP_SHELLS: [&str; 5] = ["bash", "zsh", "sh", "ksh", "ksh93"];
 const PRINTENV_LOOKUP_COMMAND: &str = "/bin/sh -c 'command -v printenv || { [ -n \"$1\" ] && PATH=\"$1\" command -v printenv; } || printf %s /usr/bin/printenv' t3";
@@ -37,10 +211,10 @@ pub fn fix_path(shell_environment_prepared: bool) {
         return;
     }
     hydrate_home();
-    if shell_environment_prepared {
-        return;
+    if !shell_environment_prepared {
+        hydrate_path();
     }
-    hydrate_path();
+    store(LoginEnvironment::from_process());
 }
 
 fn hydrate_home() {
@@ -109,21 +283,17 @@ fn apply_login_shell_environment(
     shell_environment: &[(String, String)],
     fallback_path: Option<&str>,
 ) {
-    let shell_path = value(shell_environment, "PATH");
-    let inherited = std::env::var("PATH").ok();
-    if let Some(merged) = merge_path_entries(shell_path.or(fallback_path), inherited.as_deref()) {
-        std::env::set_var("PATH", merged);
-    }
-    if shell_path.is_some() {
-        if let Some(diff) = value(shell_environment, "__MISE_DIFF") {
-            std::env::set_var("__MISE_DIFF", diff);
-        }
-    }
-    // Android SDK tools are Java programs; a keg-only JDK is only reachable
-    // through the JAVA_HOME the shell profile sets.
-    if std::env::var_os("JAVA_HOME").is_none() {
-        if let Some(java_home) = value(shell_environment, "JAVA_HOME") {
-            std::env::set_var("JAVA_HOME", java_home);
+    let current = LoginEnvironment::from_process();
+    let next = current.merged_with(shell_environment, fallback_path);
+    for (name, before, after) in [
+        ("PATH", &current.path, &next.path),
+        ("__MISE_DIFF", &current.mise_diff, &next.mise_diff),
+        ("JAVA_HOME", &current.java_home, &next.java_home),
+    ] {
+        if before != after {
+            if let Some(after) = after {
+                std::env::set_var(name, after);
+            }
         }
     }
 }
@@ -212,8 +382,9 @@ pub fn build_environment_capture_command(shell: &str, names: &[&str]) -> String 
     };
     let supports_fallback = syntax.is_some();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    let inherited_path = std::env::var("PATH")
+    let inherited_path = path()
         .unwrap_or_default()
+        .to_string_lossy()
         .split(':')
         .filter(|entry| !entry.is_empty())
         .map(|entry| posix_resolve(entry, &cwd))
@@ -300,6 +471,8 @@ pub fn extract_environment_values(output: &str, names: &[&str]) -> Vec<(String, 
 
 struct ShellError {
     timed_out: bool,
+    /// Set when the program ran and exited unsuccessfully.
+    exit_status: Option<ExitStatus>,
     message: String,
 }
 
@@ -318,9 +491,11 @@ fn read_environment_from_login_shell(
 fn run_detached(program: &str, args: &[&str], timeout: Duration) -> Result<String, ShellError> {
     let failed = |message: String| ShellError {
         timed_out: false,
+        exit_status: None,
         message,
     };
-    let mut command = Command::new(program);
+    // The shell starts with what every other child process gets now.
+    let mut command = self::command(program);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -353,6 +528,7 @@ fn run_detached(program: &str, args: &[&str], timeout: Duration) -> Result<Strin
         let _ = child.wait();
         ShellError {
             timed_out: true,
+            exit_status: None,
             message: format!("spawnSync {program} ETIMEDOUT"),
         }
     };
@@ -369,12 +545,140 @@ fn run_detached(program: &str, args: &[&str], timeout: Duration) -> Result<Strin
         }
     };
     if !status.success() {
-        return Err(failed(format!(
-            "Command failed: {program} {}",
-            args.join(" ")
-        )));
+        return Err(ShellError {
+            exit_status: Some(status),
+            ..failed(format!("Command failed: {program} {}", args.join(" ")))
+        });
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// What one runtime refresh did, for tests and logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// Not Linux or macOS, or no shell to ask.
+    Skipped,
+    /// The shell printed a `PATH`; it was merged in.
+    Applied,
+    /// The shell failed, printed no `PATH` or timed out; nothing changed.
+    Unchanged,
+}
+
+/// Re-reads the user's login shell and merges what it prints into the
+/// environment later child processes start with, as the reference's
+/// `refreshPathFromLoginShell`. It runs even when the desktop prepared the
+/// environment, since that capture was taken once at launch. Only the user's
+/// own shell counts; a fallback shell's `PATH` is not their environment.
+/// Failure leaves the environment alone. This blocks for up to five seconds.
+pub fn refresh_path_from_login_shell() -> RefreshOutcome {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return RefreshOutcome::Skipped;
+    }
+    let Some(shell) = login_shell_candidates(
+        std::env::var("SHELL").ok().as_deref(),
+        account().and_then(|account| account.shell).as_deref(),
+    )
+    .into_iter()
+    .next() else {
+        return RefreshOutcome::Skipped;
+    };
+    refresh_with_shell(&CURRENT, &shell, LOGIN_SHELL_TIMEOUT)
+}
+
+fn refresh_with_shell(
+    target: &SharedEnvironment,
+    shell: &str,
+    timeout: Duration,
+) -> RefreshOutcome {
+    let script = build_environment_capture_command(shell, &LOGIN_SHELL_ENV_NAMES);
+    let output = match run_detached(shell, &["-ilc", &script], timeout) {
+        Ok(output) => output,
+        Err(error) if error.timed_out => {
+            tracing::warn!(
+                "Timed out reading PATH from login shell {shell} after {}; PATH is unchanged.",
+                format_timeout(timeout)
+            );
+            return RefreshOutcome::Unchanged;
+        }
+        Err(ShellError {
+            exit_status: Some(status),
+            ..
+        }) => {
+            let code = status
+                .code()
+                .map_or_else(|| "null".to_owned(), |code| code.to_string());
+            tracing::warn!("Login shell {shell} exited with code {code} while reading PATH.");
+            String::new()
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Failed to read PATH from login shell {shell}. {}",
+                error.message
+            );
+            String::new()
+        }
+    };
+    let shell_environment = extract_environment_values(&output, &LOGIN_SHELL_ENV_NAMES);
+    if value(&shell_environment, "PATH").is_none() {
+        tracing::warn!("Login shell {shell} printed no PATH; PATH is unchanged.");
+        return RefreshOutcome::Unchanged;
+    }
+    // Merge into whatever is current when the shell answers, not what it was
+    // when it started, so a concurrent store is never lost.
+    target.update(|current| current.merged_with(&shell_environment, None));
+    RefreshOutcome::Applied
+}
+
+fn format_timeout(timeout: Duration) -> String {
+    let seconds = timeout.as_secs();
+    if seconds == 1 {
+        "1 second".to_owned()
+    } else {
+        format!("{seconds} seconds")
+    }
+}
+
+/// Shares one refresh among callers within `ttl` of each other, as the
+/// reference's `Effect.cachedWithTTL`: a caller arriving while a refresh runs
+/// waits for it, and one arriving soon after it finished reuses it.
+pub struct RefreshThrottle {
+    ttl: Duration,
+    last: tokio::sync::Mutex<Option<Instant>>,
+}
+
+impl RefreshThrottle {
+    pub const fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            last: tokio::sync::Mutex::const_new(None),
+        }
+    }
+
+    /// Runs `refresh` on a blocking thread unless a recent run still serves.
+    /// Returns whether it ran.
+    pub async fn run<F>(&self, refresh: F) -> bool
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let mut last = self.last.lock().await;
+        if last.is_some_and(|finished| finished.elapsed() < self.ttl) {
+            return false;
+        }
+        let _ = tokio::task::spawn_blocking(refresh).await;
+        *last = Some(Instant::now());
+        true
+    }
+}
+
+static SOURCE_CONTROL_REFRESH: RefreshThrottle = RefreshThrottle::new(REFRESH_TTL);
+
+/// The refresh source-control discovery runs before it probes for tools.
+pub async fn refresh_for_source_control_discovery() {
+    SOURCE_CONTROL_REFRESH
+        .run(|| {
+            refresh_path_from_login_shell();
+        })
+        .await;
 }
 
 fn read_path_from_launchctl() -> Option<String> {
@@ -498,5 +802,213 @@ mod tests {
             Ok(environment) => assert!(value(&environment, "PATH").is_some()),
             Err(error) => panic!("{}", error.message),
         }
+    }
+
+    fn environment(path: &str) -> LoginEnvironment {
+        LoginEnvironment {
+            path: Some(path.into()),
+            mise_diff: None,
+            java_home: None,
+        }
+    }
+
+    fn pairs(entries: &[(&str, &str)]) -> Vec<(String, String)> {
+        entries
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn a_refresh_puts_the_shell_path_first_and_keeps_an_existing_java_home() {
+        let before = LoginEnvironment {
+            path: Some("/usr/bin:/bin".into()),
+            mise_diff: Some("old".into()),
+            java_home: Some("/jdk/kept".into()),
+        };
+        let after = before.merged_with(
+            &pairs(&[
+                ("PATH", "/home/u/.local/bin:/usr/bin"),
+                ("__MISE_DIFF", "new"),
+                ("JAVA_HOME", "/jdk/shell"),
+            ]),
+            None,
+        );
+        assert_eq!(
+            after,
+            LoginEnvironment {
+                path: Some("/home/u/.local/bin:/usr/bin:/bin".into()),
+                mise_diff: Some("new".into()),
+                java_home: Some("/jdk/kept".into()),
+            }
+        );
+        // JAVA_HOME fills only a gap; __MISE_DIFF travels only with a PATH.
+        let bare = environment("/usr/bin").merged_with(
+            &pairs(&[("__MISE_DIFF", "orphan"), ("JAVA_HOME", "/jdk/shell")]),
+            None,
+        );
+        assert_eq!(bare.path.as_deref(), Some(OsStr::new("/usr/bin")));
+        assert_eq!(bare.mise_diff, None);
+        assert_eq!(bare.java_home.as_deref(), Some(OsStr::new("/jdk/shell")));
+    }
+
+    #[test]
+    fn a_stored_snapshot_reaches_later_readers_and_spares_earlier_ones() {
+        let shared = SharedEnvironment::new();
+        shared.store(environment("/one"));
+        let earlier = shared.current();
+        shared.store(environment("/two"));
+        assert_eq!(earlier.path.as_deref(), Some(OsStr::new("/one")));
+        assert_eq!(shared.current().path.as_deref(), Some(OsStr::new("/two")));
+    }
+
+    #[test]
+    fn an_unset_snapshot_is_the_process_environment() {
+        assert_eq!(
+            *SharedEnvironment::new().current(),
+            LoginEnvironment::from_process()
+        );
+    }
+
+    #[test]
+    fn concurrent_updates_are_never_lost() {
+        let shared = Arc::new(SharedEnvironment::new());
+        shared.store(environment("/base"));
+        let threads: Vec<_> = (0..16)
+            .map(|index| {
+                let shared = shared.clone();
+                std::thread::spawn(move || {
+                    shared.update(|current| {
+                        current.merged_with(&pairs(&[("PATH", &format!("/t{index}"))]), None)
+                    });
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let path = shared.current().path.clone().unwrap();
+        let entries: Vec<_> = path.to_str().unwrap().split(':').collect();
+        assert_eq!(entries.len(), 17);
+        assert!(entries.contains(&"/base"));
+        for index in 0..16 {
+            assert!(entries.contains(&format!("/t{index}").as_str()));
+        }
+    }
+
+    #[test]
+    fn commands_carry_the_snapshot_and_later_env_calls_win() {
+        let command = command("true");
+        let path = command
+            .get_envs()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| value);
+        assert_eq!(path, current().path.as_deref());
+        let mut overridden = self::command("true");
+        overridden.env("PATH", "/explicit");
+        assert_eq!(
+            overridden
+                .get_envs()
+                .find(|(name, _)| *name == "PATH")
+                .and_then(|(_, value)| value),
+            Some(OsStr::new("/explicit"))
+        );
+    }
+
+    #[cfg(unix)]
+    fn fake_shell(dir: &Path, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let shell = dir.join("fake-shell");
+        std::fs::write(&shell, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        shell.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_refresh_merges_only_a_printed_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = SharedEnvironment::new();
+        shared.store(environment("/usr/bin"));
+
+        let printing = fake_shell(
+            dir.path(),
+            "printf '%s\\n' __T3CODE_ENV_PATH_START__ /installed/later:/usr/bin __T3CODE_ENV_PATH_END__",
+        );
+        assert_eq!(
+            refresh_with_shell(&shared, &printing, LOGIN_SHELL_TIMEOUT),
+            RefreshOutcome::Applied
+        );
+        assert_eq!(
+            shared.current().path.as_deref(),
+            Some(OsStr::new("/installed/later:/usr/bin"))
+        );
+
+        for body in [
+            "exit 3",
+            "echo no markers",
+            "printf '%s\\n' __T3CODE_ENV_PATH_START__ /ignored __T3CODE_ENV_PATH_END__; exit 1",
+        ] {
+            let failing = fake_shell(dir.path(), body);
+            assert_eq!(
+                refresh_with_shell(&shared, &failing, LOGIN_SHELL_TIMEOUT),
+                RefreshOutcome::Unchanged,
+                "{body}"
+            );
+        }
+        let slow = fake_shell(dir.path(), "sleep 5");
+        let started = Instant::now();
+        assert_eq!(
+            refresh_with_shell(&shared, &slow, Duration::from_millis(200)),
+            RefreshOutcome::Unchanged
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(
+            refresh_with_shell(&shared, "/nonexistent/shell", LOGIN_SHELL_TIMEOUT),
+            RefreshOutcome::Unchanged
+        );
+        assert_eq!(
+            shared.current().path.as_deref(),
+            Some(OsStr::new("/installed/later:/usr/bin"))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_throttle_shares_one_refresh_within_its_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let throttle = Arc::new(RefreshThrottle::new(Duration::from_secs(60)));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let callers: Vec<_> = (0..8)
+            .map(|_| {
+                let throttle = throttle.clone();
+                let runs = runs.clone();
+                tokio::spawn(async move {
+                    throttle
+                        .run(move || {
+                            std::thread::sleep(Duration::from_millis(50));
+                            runs.fetch_add(1, Ordering::SeqCst);
+                        })
+                        .await
+                })
+            })
+            .collect();
+        let mut ran = 0;
+        for caller in callers {
+            ran += usize::from(caller.await.unwrap());
+        }
+        assert_eq!((ran, runs.load(Ordering::SeqCst)), (1, 1));
+
+        let expiring = RefreshThrottle::new(Duration::ZERO);
+        for _ in 0..2 {
+            let runs = runs.clone();
+            assert!(
+                expiring
+                    .run(move || {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .await
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
     }
 }

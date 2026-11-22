@@ -6,11 +6,10 @@ use std::{
     path::Path,
     process::{Output, Stdio},
 };
-use tokio::process::Command;
 
 pub struct VcsService;
 pub(super) async fn run(cwd: &str, args: &[&str]) -> std::io::Result<Output> {
-    Command::new("git")
+    crate::login_shell::tokio_command("git")
         .current_dir(cwd)
         .args(args)
         .env("LC_ALL", "C")

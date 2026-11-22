@@ -430,6 +430,7 @@ impl ControlPlane {
             &settings,
             &Value::Null,
             &Value::Null,
+            |_, row| row,
         );
         let instances: Vec<String> = providers
             .as_array()
@@ -1140,7 +1141,7 @@ impl ControlPlane {
             "keybindingsConfigPath": keybindings_path,
             "keybindings": keybindings,
             "issues": issues,
-            "providers": server_config::providers::list_with(&self.started_at, |_| None, |id| self.listed_models.lock().ok()?.get(id).cloned(), &settings, options, &crate::model_manifest::BUNDLED),
+            "providers": server_config::providers::list_with(&self.started_at, |_| None, |id| self.listed_models.lock().ok()?.get(id).cloned(), &settings, options, &crate::model_manifest::BUNDLED, |_, row| row),
             "availableEditors": [],
             "remoteOpenTargets": [],
             "directEndpoints": [],

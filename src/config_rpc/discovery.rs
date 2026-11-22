@@ -2,10 +2,10 @@ use super::DEFAULTS;
 use crate::AppState;
 use serde_json::{json, Value};
 use std::{env, net::IpAddr, time::Duration};
-use tokio::{net::TcpStream, process::Command, time::timeout};
+use tokio::{net::TcpStream, time::timeout};
 
 fn executable(name: &str) -> bool {
-    env::var_os("PATH")
+    crate::login_shell::path()
         .into_iter()
         .flat_map(|v| env::split_paths(&v).collect::<Vec<_>>())
         .any(|d| {
@@ -25,7 +25,7 @@ fn executable(name: &str) -> bool {
         })
 }
 async fn output(program: &str, args: &[&str]) -> Option<String> {
-    let mut command = Command::new(program);
+    let mut command = crate::login_shell::tokio_command(program);
     command.args(args).kill_on_drop(true);
     let out = timeout(Duration::from_secs(2), command.output())
         .await

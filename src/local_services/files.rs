@@ -61,7 +61,7 @@ fn is_ignored(root: &Path, path: &Path) -> bool {
     let Some(relative) = path.strip_prefix(root).ok() else {
         return false;
     };
-    std::process::Command::new("git")
+    crate::login_shell::command("git")
         .args([
             "-C",
             root.to_str().unwrap_or_default(),

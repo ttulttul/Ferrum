@@ -2,7 +2,6 @@ use serde_json::{json, Value};
 use std::{
     fmt, io,
     path::{Path, PathBuf},
-    process::Command,
     sync::OnceLock,
 };
 
@@ -143,7 +142,9 @@ fn platform(error: &io::Error, method: &str, syscall: &str, path: &Path) -> Valu
 fn node_directory_error_includes_path() -> bool {
     static INCLUDES_PATH: OnceLock<bool> = OnceLock::new();
     *INCLUDES_PATH.get_or_init(|| {
-        let output = Command::new("node").arg("--version").output();
+        let output = crate::login_shell::command("node")
+            .arg("--version")
+            .output();
         let Ok(output) = output else {
             return false;
         };

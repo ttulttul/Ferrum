@@ -15,12 +15,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{
-    net::TcpStream,
-    process::{Child, Command},
-    sync::watch,
-    time::Instant,
-};
+use tokio::{net::TcpStream, process::Child, sync::watch, time::Instant};
 use tokio_tungstenite::{
     connect_async, tungstenite::Message as Wire, MaybeTlsStream, WebSocketStream,
 };
@@ -165,7 +160,7 @@ fn executable() -> Option<PathBuf> {
             }
         }
     }
-    env::split_paths(&env::var_os("PATH").unwrap_or_default()).find_map(|p| {
+    env::split_paths(&crate::login_shell::path().unwrap_or_default()).find_map(|p| {
         [
             "chromium",
             "chromium-browser",
@@ -208,7 +203,7 @@ impl Browsers {
                 .ok()?
                 .port();
             let origin = format!("http://127.0.0.1:{port}");
-            let mut child = Command::new(executable)
+            let mut child = crate::login_shell::tokio_command(executable)
                 .args([
                     "--headless",
                     "--no-first-run",

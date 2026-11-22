@@ -1,0 +1,7 @@
+{
+ "_comment": "A CLI session that never answers, for the status probe's timeout.",
+ "steps": [],
+ "replies": {},
+ "controlReplies": {},
+ "silent": true
+}

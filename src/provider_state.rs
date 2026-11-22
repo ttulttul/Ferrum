@@ -476,7 +476,7 @@ pub(crate) fn provider_turn(
 
 /// Split launch arguments as a shell would split plain words and quoted
 /// strings (no expansion).
-fn split_args(text: &str) -> Vec<String> {
+pub(crate) fn split_args(text: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut quote = None;

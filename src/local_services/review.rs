@@ -1,7 +1,6 @@
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use tokio::process::Command;
 
 pub async fn call(method: &str, input: &Value) -> Result<Value, Value> {
     match method {
@@ -19,7 +18,7 @@ fn cwd(input: &Value) -> Result<&str, Value> {
         .ok_or_else(|| json!({"_tag":"Die","defect":"Missing key\n  at [\"cwd\"]"}))
 }
 async fn git(cwd: &str, args: &[String]) -> std::io::Result<std::process::Output> {
-    Command::new("git")
+    crate::login_shell::tokio_command("git")
         .current_dir(cwd)
         .args(args)
         .env("LC_ALL", "C")

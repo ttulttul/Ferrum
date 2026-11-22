@@ -58,6 +58,8 @@ impl Server {
         let state = AppState::with_config(&paths.state_dir, Vec::new(), auth, config)
             .await
             .unwrap();
+        // Tests never run the host's provider CLIs.
+        state.disable_provider_status_checks();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();

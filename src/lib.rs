@@ -69,6 +69,8 @@ pub mod provider_http;
 #[cfg(feature = "native")]
 pub mod provider_rpc;
 #[cfg(feature = "native")]
+mod provider_status;
+#[cfg(feature = "native")]
 pub mod pull_requests;
 #[cfg(feature = "native")]
 pub mod relay_client;

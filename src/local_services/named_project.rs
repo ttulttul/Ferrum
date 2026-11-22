@@ -3,7 +3,6 @@
 //! holding a git repository whose first commit has a README and an icon.
 use crate::workspace::NamedProject;
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 
 const MAX_FOLDER_ATTEMPTS: usize = 100;
 
@@ -112,7 +111,7 @@ fn commit_failure(stderr: &str) -> String {
 }
 
 async fn git(cwd: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
-    Command::new("git")
+    crate::login_shell::tokio_command("git")
         .current_dir(cwd)
         .args(args)
         .output()

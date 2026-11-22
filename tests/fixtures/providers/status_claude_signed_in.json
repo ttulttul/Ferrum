@@ -1,0 +1,70 @@
+{
+ "_comment": "Claude Code answering the status probe: signed in with a Max subscription, one extra slash command, a model the catalog lacks, usage windows and an effort cap.",
+ "steps": [],
+ "controlReplies": {
+  "initialize": {
+   "agents": [],
+   "output_style": "default",
+   "available_output_styles": [
+    "default"
+   ],
+   "commands": [
+    {
+     "name": "review",
+     "description": "Review a pull request",
+     "argumentHint": "<number>"
+    },
+    {
+     "name": "compact",
+     "description": "",
+     "argumentHint": ""
+    }
+   ],
+   "models": [
+    {
+     "value": "default",
+     "displayName": "Default",
+     "description": "Recommended"
+    },
+    {
+     "value": "claude-opus-5-5",
+     "displayName": "Opus 5.5",
+     "description": ""
+    },
+    {
+     "value": "claude-lab-9",
+     "displayName": "Claude Lab 9",
+     "description": "Preview",
+     "supportsEffort": true,
+     "supportedEffortLevels": [
+      "low",
+      "high"
+     ]
+    }
+   ],
+   "account": {
+    "email": "dev@example.com",
+    "subscriptionType": "max",
+    "tokenSource": "claude.ai"
+   }
+  },
+  "get_usage": {
+   "rate_limits_available": true,
+   "rate_limits": {
+    "five_hour": {
+     "utilization": 12.5,
+     "resets_at": "2026-11-22T03:00:00Z"
+    },
+    "seven_day": {
+     "utilization": 40,
+     "resets_at": "2026-11-28T00:00:00Z"
+    }
+   }
+  },
+  "get_settings": {
+   "effective": {
+    "maxEffortLevel": "high"
+   }
+  }
+ }
+}

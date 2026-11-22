@@ -1,7 +1,7 @@
 use crate::{issues, AppState, Project};
 use serde_json::{json, Value};
 use std::{path::Path, process::Stdio, time::Duration};
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::io::AsyncWriteExt;
 
 pub(crate) type Reply = Result<Value, Value>;
 
@@ -37,7 +37,7 @@ pub(crate) fn valid_repository(scope: &str) -> bool {
 }
 
 pub(crate) async fn github_remote(project: &Project) -> Option<String> {
-    let git = Command::new("git")
+    let git = crate::login_shell::tokio_command("git")
         .args(["-C", &project.path, "remote", "get-url", "origin"])
         .kill_on_drop(true)
         .output();
@@ -117,7 +117,7 @@ impl<'a> Github<'a> {
         }
     }
     pub async fn pin_credential(&mut self) -> Result<(), Failure> {
-        let cmd = Command::new(self.cli)
+        let cmd = crate::login_shell::tokio_command(self.cli)
             .args(["auth", "token", "--hostname", "github.com"])
             .env("GH_PROMPT_DISABLED", "1")
             .current_dir(self.cwd)
@@ -145,7 +145,7 @@ impl<'a> Github<'a> {
         accept: &str,
         body: Option<Value>,
     ) -> Result<Vec<u8>, Failure> {
-        let mut command = Command::new(self.cli);
+        let mut command = crate::login_shell::tokio_command(self.cli);
         command
             .current_dir(self.cwd)
             .args([
@@ -264,14 +264,14 @@ mod tests {
         let root = std::env::temp_dir().join(format!("t3-provider-{}", Uuid::new_v4()));
         let state = AppState::new(&root, vec![]).await.unwrap();
         let repo = root.join("repo");
-        assert!(Command::new("git")
+        assert!(tokio::process::Command::new("git")
             .args(["init", "--quiet"])
             .arg(&repo)
             .status()
             .await
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(tokio::process::Command::new("git")
             .current_dir(&repo)
             .args(["remote", "add", "origin", "git@github.com:example/proj.git"])
             .status()

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Decodes every message the fake Codex CLI sends in tests/fixtures/providers/codex_*.json
-// with the pinned reference's app-server schemas, so the reference's client accepts what the
-// parity suite replays to it.
+// Decodes every message the fake Codex CLI sends in tests/fixtures/providers/codex_*.json and
+// status_codex_*.json (scripted steps and "replies" by method) with the pinned reference's
+// app-server schemas, so the reference's client accepts what the parity suite replays to it.
 //
 //   node scripts/codex_fixture_schemas.mjs <reference-checkout>
 import { createRequire } from "node:module";
@@ -21,8 +21,22 @@ const meta = await import(pathToFileURL(path.join(pkg, "src/_generated/meta.gen.
 const fixtures = path.join(path.dirname(new URL(import.meta.url).pathname), "../tests/fixtures/providers");
 
 let problems = 0;
-for (const name of fs.readdirSync(fixtures).filter((file) => /^codex_.*\.json$/.test(file)).sort()) {
+for (const name of fs.readdirSync(fixtures).filter((file) => /^(status_)?codex_.*\.json$/.test(file)).sort()) {
   const scenario = JSON.parse(fs.readFileSync(path.join(fixtures, name), "utf8"));
+  for (const [method, result] of Object.entries(scenario.replies ?? {})) {
+    const schema = meta.CLIENT_REQUEST_RESPONSES[method];
+    if (!schema) {
+      problems += 1;
+      console.log(`${name}: no reference schema for reply to ${method}`);
+      continue;
+    }
+    try {
+      Schema.decodeUnknownSync(schema)(result, { errors: "all" });
+    } catch (error) {
+      problems += 1;
+      console.log(`${name}: reply to ${method} does not decode:\n${String(error.message).slice(0, 2000)}`);
+    }
+  }
   for (const steps of scenario.steps ? [scenario.steps] : scenario.variants.map((variant) => variant.steps)) {
     let expected = null;
     for (const step of steps) {

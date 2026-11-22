@@ -7,7 +7,7 @@ use std::{
     process::Stdio,
     time::Duration,
 };
-use tokio::{net::lookup_host, process::Command, time::timeout};
+use tokio::{net::lookup_host, time::timeout};
 
 fn addresses() -> HashSet<IpAddr> {
     if_addrs::get_if_addrs()
@@ -21,7 +21,7 @@ async fn is_local(host: &Value, local: &HashSet<IpAddr>) -> bool {
     let Some(target) = host["target"].as_str() else {
         return false;
     };
-    let mut command = Command::new("ssh");
+    let mut command = crate::login_shell::tokio_command("ssh");
     command.args([
         "-o",
         "BatchMode=yes",
