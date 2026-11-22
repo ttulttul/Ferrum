@@ -1,7 +1,7 @@
 //! Provider status checks, as the reference's managed provider snapshots
 //! (`makeManagedServerProvider`) and provider registry run them.
 //!
-//! Each enabled Codex, Claude, fx and Kiro instance is checked once the
+//! Each enabled Codex, Claude, fx, Kiro, Grok and Pi instance is checked once the
 //! server is listening, again whenever its settings (or
 //! `enableProviderUpdateChecks`) change, when any settings change while it is
 //! signed out, on the background-activity interval (five minutes by default),
@@ -21,6 +21,14 @@
 //! - Kiro: `kiro-cli --version` (10s), `kiro-cli whoami --format json`, and
 //!   once signed in `kiro-cli chat --list-models --format json` alongside an
 //!   ACP agent that reads its agent picker (10s each) ([`kiro`]).
+//! - Grok: `grok --version` (10s), `grok models` (10s), `grok inspect
+//!   --json` (4s) and an ACP agent that only initializes (20s), then the
+//!   account's usage ([`grok`]).
+//! - Pi: `pi --version` (10s), then Pi's RPC mode for its state, models and
+//!   commands (30s) ([`pi`]).
+//!
+//! Grok's and Pi's version advisories come from how their CLI was installed
+//! ([`maintenance`]), as the reference's enrichment pass works it out.
 //!
 //! The result replaces the instance's placeholder row in `server.getConfig`
 //! and `server.refreshProviders`, is pushed to config subscribers as
@@ -31,7 +39,10 @@ mod acp;
 mod claude;
 mod codex;
 mod fx;
+mod grok;
 mod kiro;
+mod maintenance;
+mod pi;
 
 use crate::server::AppState;
 use serde_json::{json, Map, Value};
@@ -41,10 +52,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The drivers this server checks.
-const CHECKED_DRIVERS: [&str; 4] = ["codex", "claudeAgent", "fx", "kiro"];
+const CHECKED_DRIVERS: [&str; 6] = ["codex", "claudeAgent", "fx", "kiro", "grok", "pi"];
 /// The drivers whose snapshot gets its version advisory from an enrichment
 /// pass after the probe, rather than from the probe itself.
-const ENRICHED_DRIVERS: [&str; 2] = ["codex", "claudeAgent"];
+const ENRICHED_DRIVERS: [&str; 4] = ["codex", "claudeAgent", "grok", "pi"];
 /// `AUTH_PROBE_TIMEOUT_MS`.
 const AUTH_PROBE_TIMEOUT_MS: u64 = 10_000;
 /// `FAILED_CHECK_RECHECK_DELAY`: a periodic check that failed over a ready
@@ -76,6 +87,9 @@ pub(crate) struct Draft {
     /// `buildServerProvider` with a driver: the probe's own (manual-only)
     /// version advisory.
     pub version_advisory: bool,
+    /// How the CLI was installed, for the version advisory the enrichment
+    /// pass adds; `None` is manual-only maintenance.
+    pub maintenance: Option<maintenance::Capabilities>,
 }
 
 /// What the scheduler checks an instance for.
@@ -351,6 +365,8 @@ async fn check_instance(
         "codex" => codex::check(&instance.config, &env, &manifest).await,
         "fx" => fx::check(&instance.config, &env).await,
         "kiro" => kiro::check(&instance.config, &env).await,
+        "grok" => grok::check(&instance.config, &env).await,
+        "pi" => pi::check(&instance.config, &env, &service.caches).await,
         _ => return CheckOutcome::Skipped,
     };
     // The row it replaces: the last one shown for these settings, or the
@@ -382,7 +398,11 @@ async fn check_instance(
     let probed = draft_row(&pending, &draft);
     let mut row = merge_snapshot(&previous, probed);
     if ENRICHED_DRIVERS.contains(&instance.driver.as_str()) {
-        row = with_version_advisory(row, settings["enableProviderUpdateChecks"] != false);
+        row = with_version_advisory(
+            row,
+            draft.maintenance.as_ref(),
+            settings["enableProviderUpdateChecks"] != false,
+        );
     }
     row = apply_compatibility(row, &manifest);
     let unauthenticated = row["auth"]["status"] == "unauthenticated";
@@ -733,23 +753,24 @@ fn merge_snapshot(previous: &Value, mut next: Value) -> Value {
     next
 }
 
-/// `enrichProviderSnapshotWithVersionAdvisory` for a CLI the server can only
-/// advise on (manual maintenance), without a latest-version lookup.
-fn with_version_advisory(mut row: Value, _update_checks: bool) -> Value {
+/// `enrichProviderSnapshotWithVersionAdvisory` without a latest-version
+/// lookup: the advisory the CLI's maintenance capabilities give.
+fn with_version_advisory(
+    mut row: Value,
+    capabilities: Option<&maintenance::Capabilities>,
+    _update_checks: bool,
+) -> Value {
     if row["enabled"] != true {
         return row;
     }
-    let current = row["version"].clone();
-    row["versionAdvisory"] = json!({
-        "status": "unknown",
-        "currentVersion": current,
-        "latestVersion": null,
-        "updateCommand": null,
-        "canUpdate": false,
-        "canInstallVersion": false,
-        "checkedAt": row["checkedAt"],
-        "message": null,
-    });
+    let manual = maintenance::manual(None, None);
+    row["versionAdvisory"] = maintenance::version_advisory(
+        capabilities.unwrap_or(&manual),
+        row["version"].as_str(),
+        None,
+        row["checkedAt"].as_str().unwrap_or(""),
+        maintenance::compare_semver,
+    );
     row
 }
 

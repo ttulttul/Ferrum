@@ -101,18 +101,27 @@ impl AcpSession {
     /// The reference's `initialize` with no client capabilities beyond the
     /// runtime's defaults.
     pub(super) async fn initialize(&mut self, client_name: &str) -> Result<Value, AcpError> {
-        self.request(
-            "initialize",
-            json!({
-                "protocolVersion": 2,
-                "clientCapabilities": {
-                    "fs": {"readTextFile": false, "writeTextFile": false},
-                    "terminal": false,
-                    "session": {"notices": {}, "compaction": {}},
-                },
-                "clientInfo": {"name": client_name, "version": "0.0.0"},
-            }),
-        )
-        .await
+        self.initialize_with_meta(client_name, None).await
+    }
+
+    /// `initialize` with the runtime's `initializeMeta`.
+    pub(super) async fn initialize_with_meta(
+        &mut self,
+        client_name: &str,
+        meta: Option<Value>,
+    ) -> Result<Value, AcpError> {
+        let mut params = json!({
+            "protocolVersion": 2,
+            "clientCapabilities": {
+                "fs": {"readTextFile": false, "writeTextFile": false},
+                "terminal": false,
+                "session": {"notices": {}, "compaction": {}},
+            },
+            "clientInfo": {"name": client_name, "version": "0.0.0"},
+        });
+        if let Some(meta) = meta {
+            params["_meta"] = meta;
+        }
+        self.request("initialize", params).await
     }
 }

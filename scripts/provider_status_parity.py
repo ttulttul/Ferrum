@@ -221,6 +221,90 @@ SCENARIOS += driver_scenarios("kiro", "kiro-cli", "kiro-cli 2.32.0", [KIRO_WHOAM
         json.dumps({"models": [{"model_id": "claude-sonnet-5", "model_name": "Sonnet 5"}]}))}, KIRO_ACP], {}),
 })
 
+GROK_MODELS = {"args": ["models"], **ok("You are logged in as dev@example.com.\n\nModels:\n  * grok-build (default)\n  * grok-4-fast\n  - grok_code\n")}
+GROK_SKILLS = {"args": ["inspect", "--json"], **ok(json.dumps({"skills": [
+    {"name": "zeta", "description": "Last", "source": {"type": "user", "path": "/skills/zeta/SKILL.md"}},
+    {"name": "Deploy", "description": " Ship it ", "userInvocable": False,
+     "source": {"type": "project", "path": "/repo/.grok/skills/deploy/SKILL.md"}},
+    {"name": "no-path", "source": {}}]}))}
+GROK_INITIALIZE = {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}, "authMethods": [], "_meta": {
+    "modelState": {"currentModelId": "grok-build", "availableModels": [
+        {"modelId": "grok-build", "name": "Grok Build", "_meta": {"reasoningEffort": "high", "reasoningEfforts": [
+            {"value": "max", "label": "Max"}, {"value": "high", "label": "High", "default": True},
+            {"id": "low", "label": "Low", "description": "Quick"}]}},
+        {"modelId": "grok-4-fast", "name": " ", "_meta": {"supportsReasoningEffort": False}}]},
+    "availableCommands": [{"name": "review", "description": "Review changes", "input": {"hint": " paths "}},
+                          {"name": "compact", "description": "Compact now"},
+                          {"name": "context", "description": "Show context"},
+                          {"name": "always-approve", "description": "Approve all"}, {"name": "bad"}]}}
+GROK_ACP = {"prefix": ["agent", "stdio"], "rpc": {"initialize": GROK_INITIALIZE}}
+SCENARIOS += driver_scenarios("grok", "grok", "grok 1.0.52", [GROK_MODELS, GROK_SKILLS, GROK_ACP], {
+    "signed out": ([{"args": ["models"], **ok("Not authenticated. Run `grok login`.")}, GROK_SKILLS, GROK_ACP], {}),
+    "sign-in unknown": ([{"args": ["models"], **ok("", 1, "boom")}, GROK_SKILLS, GROK_ACP], {}),
+    "acp initialize fails": ([GROK_MODELS, GROK_SKILLS, {"prefix": ["agent", "stdio"], **ok("", 1)}], {}),
+    "no models listed": ([{"args": ["models"], **ok("You are logged in.")}, GROK_SKILLS,
+                          {"prefix": ["agent", "stdio"], "rpc": {"initialize": {
+                              "protocolVersion": 1, "agentCapabilities": {}, "authMethods": []}}}], {}),
+    "api key": ([{"args": ["models"], **ok("Not logged in.")}, GROK_SKILLS, GROK_ACP],
+                {"settings": {"providerInstances": {"grok": {"driver": "grok", "enabled": True, "environment": [
+                    {"name": "XAI_API_KEY", "value": "xai-test-key"}]}}}}),
+    "skills fail": ([GROK_MODELS, {"args": ["inspect", "--json"], **ok("not json")}, GROK_ACP], {}),
+})
+
+PI_STATE = {"model": {"provider": "anthropic", "id": "claude-sonnet-5"}, "thinkingLevel": "minimal"}
+PI_MODELS = {"models": [
+    {"provider": "anthropic", "id": "claude-sonnet-5", "name": "Sonnet 5", "reasoning": True,
+     "thinkingLevelMap": {"minimal": None, "max": "max"}},
+    {"provider": "openai", "id": "gpt-5.6", "reasoning": False,
+     "serviceTiers": [{"id": "flex", "name": "Flex", "description": "Cheaper"}, {"id": "default"}, {"id": " "}]},
+    {"provider": "anthropic", "id": "claude-sonnet-5"}]}
+PI_COMMANDS = {"commands": [
+    {"name": "review", "description": " Review a diff "}, {"name": "compact", "description": "theirs"},
+    {"name": "skill:deploy", "source": "skill", "description": "Ship it",
+     "sourceInfo": {"path": "/skills/deploy/SKILL.md", "scope": "Global", "displayName": "Deploy"}},
+    {"name": "lint", "source": "skill", "location": "workspace", "interface": {"shortDescription": "Lints"}},
+    {"name": " "}]}
+PI_TEXT_GENERATION = {"prefix": ["--mode", "rpc", "--no-session", "--offline", "--no-extensions"],
+                      "pi": {"get_available_models": {"models": [{"provider": "openai", "id": "gpt-5.6"}]}}}
+def pi_rpc(**data):
+    return {"prefix": ["--mode", "rpc"], "pi": {"get_state": PI_STATE, "get_available_models": PI_MODELS,
+                                                  "get_commands": PI_COMMANDS, **data}}
+SCENARIOS += driver_scenarios("pi", "pi", "0.85.0", [PI_TEXT_GENERATION, pi_rpc()], {
+    "too old": ([], {"fakes": {"pi": {"spec": {"commands": [{"args": ["--version"], **ok("pi 0.84.2")}]}}}}),
+    "version unreadable": ([], {"fakes": {"pi": {"spec": {"commands": [{"args": ["--version"], **ok("pi dev")}]}}}}),
+    "no usable models": ([pi_rpc(get_available_models={"models": []})], {}),
+    "default model unavailable": ([PI_TEXT_GENERATION, pi_rpc(get_state={"model": {"provider": "google", "id": "g-1"}}),
+                                   {"args": ["auth", "check", "--provider", "google", "--json", "--no-refresh"],
+                                    **ok('{"reason": "credentials_not_configured"}')}], {}),
+    "discovery fails": ([pi_rpc(get_available_models=None) | {"piErrors": ["get_available_models"]}], {}),
+    "discovery exits then declines project trust": ([PI_TEXT_GENERATION,
+        {"prefix": ["--mode", "rpc", "--no-session", "--no-approve"], "pi": pi_rpc()["pi"]},
+        {"prefix": ["--mode", "rpc"], "pi": {"get_state": PI_STATE}, "exitAfter": 1}], {}),
+    "text generation has no models": ([{**PI_TEXT_GENERATION, "pi": {"get_available_models": {"models": []}}},
+                                       pi_rpc()], {}),
+    "bad launch arguments": ([pi_rpc()], {"settings": enabled("pi", launchArgs="--mode json")}),
+    "absolute binaryPath": ([PI_TEXT_GENERATION, pi_rpc()], {}),
+})
+PI_NPM = "npm-prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+SCENARIOS += [
+    {"name": "pi installed as an npm global", "instance": "pi", "settings": enabled("pi"),
+     "fakes": {"pi": {"spec": {"commands": [{"args": ["--version"], **ok("0.85.0")}, PI_TEXT_GENERATION, pi_rpc()]},
+                      "at": PI_NPM, "link": "fake-bin/pi"}}},
+    {"name": "pi installed as a bun global", "instance": "pi", "settings": enabled("pi", binaryPath="<root>/.bun/bin/pi"),
+     "fakes": {"pi": {"spec": {"commands": [{"args": ["--version"], **ok("0.85.0")}, PI_TEXT_GENERATION, pi_rpc()]},
+                      "at": ".bun/install/global/node_modules/@earendil-works/pi-coding-agent/cli.js",
+                      "link": ".bun/bin/pi"}}},
+    {"name": "grok absolute binaryPath", "instance": "grok", "settings": enabled("grok", binaryPath="<root>/tools/grok"),
+     "fakes": {"grok": {"spec": {"commands": [{"args": ["--version"], **ok("grok 1.0.52")}, GROK_MODELS, GROK_SKILLS,
+                                              GROK_ACP]}, "at": "tools/grok"}}},
+]
+for scenario in SCENARIOS:
+    if scenario["name"] == "pi absolute binaryPath":
+        scenario["settings"] = enabled("pi", binaryPath="<root>/tools/pi-abs")
+        scenario["fakes"]["pi"]["at"] = "tools/pi-abs"
+    if scenario["name"] == "pi discovery fails":
+        scenario["fakes"]["pi"]["spec"]["commands"][1]["pi"].pop("get_available_models")
+
 
 def strip(value, root):
     """`value` without check times and with the temporary home masked."""
@@ -317,7 +401,13 @@ def run_server(args, command, root, scenario, temporary):
                               else codex_script(fake["version"], fake["app"]))
             shutil.copyfile(FIXTURES / fake["fixture"], fixture)
         target.chmod(0o755)
-    settings = {"enableProviderUpdateChecks": False, **scenario.get("settings", {})}
+        if "link" in fake:
+            # The CLI is found through a link elsewhere, as a package manager installs it.
+            link = root / fake["link"]
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target)
+    settings = json.loads(json.dumps({"enableProviderUpdateChecks": False, **scenario.get("settings", {})})
+                          .replace("<root>", str(root)))
     (root / "userdata").mkdir(parents=True, exist_ok=True)
     (root / "userdata/settings.json").write_text(json.dumps(settings))
     env = {"PATH": os.pathsep.join([str(bin_dir), path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "path")]),
