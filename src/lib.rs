@@ -125,6 +125,8 @@ mod server;
 #[cfg(feature = "native")]
 mod source_control_clone;
 #[cfg(feature = "native")]
+mod source_control_lookup;
+#[cfg(feature = "native")]
 mod startup_trace;
 #[cfg(feature = "native")]
 pub mod statev2;

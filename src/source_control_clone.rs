@@ -603,14 +603,22 @@ pub(crate) struct Prepared {
 pub(crate) async fn prepare_clone(
     input: &CloneInput,
     home: &Path,
-    lookup: impl std::future::Future<Output = Result<Value, Value>>,
+    lookup: impl AsyncFnOnce(&str) -> Result<Value, crate::source_control_lookup::LookupFailure>,
 ) -> Result<Prepared, Value> {
     let destination = prepare_destination(&input.destination_path, home).await?;
     let provider = input.provider.clone().unwrap_or_else(|| "unknown".into());
     let mut repository = Value::Null;
     let mut remote = input.remote_url.clone();
     if input.provider.is_some() && input.repository.is_some() {
-        let found = lookup.await?;
+        // Inside a clone the host is asked from the destination's parent.
+        let cwd = destination
+            .parent()
+            .unwrap_or(&destination)
+            .display()
+            .to_string();
+        let found = lookup(&cwd)
+            .await
+            .map_err(|failure| failure.into_error(&provider, "cloneRepository"))?;
         // `selectRemoteUrl`: SSH unless HTTPS is asked for.
         remote = found[if input.protocol.as_deref() == Some("https") {
             "url"
@@ -710,17 +718,17 @@ pub(crate) async fn run_prepared(
     })
 }
 
-/// The clone URLs a host reports for `repository` (`lookupRepository`), or
-/// the `SourceControlRepositoryError` an RPC answers with.
-pub(crate) async fn lookup_repository(provider: &str, _repository: &str) -> Result<Value, Value> {
-    if provider == "github" {
-        return Err(
-            json!({"_tag":"SourceControlRepositoryError","provider":"github","operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":"Source control provider github failed in getRepositoryCloneUrls: No GitHub credential for github.com: run `gh auth login --hostname github.com`.","cause":{"name":"GitHubNotSignedInError","message":"No GitHub credential for github.com: run `gh auth login --hostname github.com`."}}}),
-        );
-    }
-    Err(
-        json!({"_tag":"SourceControlRepositoryError","provider":provider,"operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("Source control provider {provider} failed in getRepositoryCloneUrls: No {provider} source control provider is registered.")}}),
-    )
+/// The clone URLs a host reports for `repository` (`lookupRepository`), looked
+/// up from the server's folder, or the `SourceControlRepositoryError` an RPC
+/// answers with.
+pub(crate) async fn lookup_repository(provider: &str, repository: &str) -> Result<Value, Value> {
+    let cwd = std::env::current_dir()
+        .unwrap_or_default()
+        .display()
+        .to_string();
+    crate::source_control_lookup::lookup(provider, repository, &cwd)
+        .await
+        .map_err(|failure| failure.into_error(provider, "lookupRepository"))
 }
 
 /// Why `clone_json` did not clone.
@@ -741,10 +749,10 @@ pub(crate) async fn clone_json(
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    let lookup = lookup_repository(
-        input.provider.as_deref().unwrap_or_default(),
-        input.repository.as_deref().unwrap_or_default(),
-    );
+    let provider = input.provider.clone().unwrap_or_default();
+    let repository = input.repository.clone().unwrap_or_default();
+    let lookup =
+        async |cwd: &str| crate::source_control_lookup::lookup(&provider, &repository, cwd).await;
     let prepared = prepare_clone(&input, &home, lookup)
         .await
         .map_err(CloneRefusal::Failure)?;
