@@ -566,7 +566,8 @@ pub(crate) fn provider_instance_enabled(settings: &Value, project: &str, instanc
 
 mod delegation;
 pub(crate) use delegation::{
-    after_run, cancel_task, subagent_result, task_node_id, task_thread_id, watch_run_end, RunEnd,
+    after_run, cancel_task, delegated_task_awaits_work, delegated_task_result_run,
+    delegated_task_runs, subagent_result, task_node_id, task_thread_id, watch_run_end, RunEnd,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -995,6 +996,8 @@ async fn apply_command<H: CommandHost>(
                 delegation::record_work_started_at(&*state, thread_id, &command["messageId"], at)
                     .await?;
             }
+            // A message to a delegated child whose task finished starts a follow-up task.
+            delegation::record_followup(&state, thread_id, command).await?;
             // Its effect runs once the message it titles is recorded.
             if let Some(effect) = title_effect {
                 state.clone().generate_title(effect);

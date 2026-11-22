@@ -1687,18 +1687,20 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
             row["modelSelection"].clone(),
         )
     };
-    let key = arg_str(a, "clientRequestId")?;
-    let message_id = match key {
-        Some(key) => format!(
-            "mcp:send:{}",
-            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
-                json!([host.environment_id(), id, key])
-                    .to_string()
-                    .as_bytes()
-            ))
-        ),
-        None => format!("mcp:send:{}", crate::platform::uuid_v4().simple()),
+    // The reference's stable ids (`stableOperationMessageId`, `stableCommandId`).
+    let key = arg_str(a, "clientRequestId")?
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::platform::uuid_v4().to_string());
+    let part = crate::thread_projection::uri_component;
+    let stable = |prefix: &str| {
+        format!(
+            "{prefix}:mcp:{}:thread-send:{}",
+            part(&caller.request_namespace()),
+            part(&key)
+        )
     };
+    let message_id = stable("message");
+    let command_id = stable("command");
     let queued = busy;
     let already = {
         let store = host.control_state().store.read().await;
@@ -1710,7 +1712,7 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
     if !already {
         let mut dispatch = json!({
             "type": "message.dispatch",
-            "commandId": format!("{message_id}:command"),
+            "commandId": command_id,
             "threadId": id,
             "messageId": message_id,
             "text": text,
@@ -1719,6 +1721,10 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
             "createdBy": "agent",
             "creationSource": "mcp",
         });
+        // A thread's agent names itself as the sender.
+        if let Some(sender) = caller.granted.thread.as_ref() {
+            dispatch["senderThreadId"] = json!(sender.thread_id);
+        }
         if selection.is_object() {
             dispatch["modelSelection"] = selection;
         }
@@ -1740,14 +1746,32 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
                 format!("Unable to send to thread {id}."),
             )
         })?;
-    Ok(json!({
+    let mut answer = json!({
         "threadId": id,
         "link": thread_link(&**host, caller, &id, &title),
         "messageId": message_id,
         "runId": run["id"],
-        "status": run["status"],
+        // Rust records a run as running from its start; the reference's run is
+        // starting until its provider turn has an attempt.
+        "status": if run["status"] == "running" && run["activeAttemptId"].is_null() {
+            json!("starting")
+        } else {
+            run["status"].clone()
+        },
         "delivery": if queued { "queued" } else { "started" },
-    }))
+    });
+    // A send that started follow-up work names the task it became.
+    let task_id = thread.full_projection()["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| r["id"] == run["id"])
+        .map(|r| r["delegatedTaskId"].clone())
+        .filter(|t| !t.is_null());
+    if let Some(task_id) = task_id {
+        answer["taskId"] = task_id;
+    }
+    Ok(answer)
 }
 
 async fn thread_wait<S: McpHost>(host: &S, a: &Value) -> Outcome {

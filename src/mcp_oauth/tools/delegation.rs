@@ -995,18 +995,24 @@ async fn read_task<S: McpHost>(
     };
     let runs = records(&child, "runs");
     let transfers = records(&child, "contextTransfers");
-    // `delegatedTaskRun`: the run its spawn started.
-    let child_run = transfers
+    // `delegatedTaskRun`: a follow-up's first run, else the run its spawn started.
+    let child_run = runs
         .iter()
-        .find(|t| {
-            t["type"] == "subagent_spawn"
-                && t["sourceThreadId"] == task["threadId"]
-                && t["targetThreadId"] == task["childThreadId"]
-        })
-        .map_or_else(
-            || runs.first().cloned(),
-            |t| runs.iter().find(|r| r["id"] == t["targetRunId"]).cloned(),
-        );
+        .find(|r| r["delegatedTaskId"] == task["id"])
+        .cloned()
+        .or_else(|| {
+            transfers
+                .iter()
+                .find(|t| {
+                    t["type"] == "subagent_spawn"
+                        && t["sourceThreadId"] == task["threadId"]
+                        && t["targetThreadId"] == task["childThreadId"]
+                })
+                .map_or_else(
+                    || runs.first().cloned(),
+                    |t| runs.iter().find(|r| r["id"] == t["targetRunId"]).cloned(),
+                )
+        });
     let terminal_run = |r: &Value| TERMINAL_RUN.contains(&r["status"].as_str().unwrap_or_default());
     let work_runs: Vec<&Value> = runs
         .iter()
@@ -1032,6 +1038,25 @@ async fn read_task<S: McpHost>(
         "waiting_for_children"
     } else {
         "result_available"
+    };
+    // A follow-up's progress comes from its own runs.
+    let followup_runs = child_run
+        .as_ref()
+        .filter(|run| run["delegatedTaskId"] == task["id"])
+        .map(|_| crate::orchestration::delegated_task_runs(&child, &task["id"]));
+    let (result_run, work_state) = match &followup_runs {
+        None => (result_run, work_state),
+        Some(task_runs) => {
+            let run = crate::orchestration::delegated_task_result_run(task_runs);
+            let state = if !TERMINAL_TASK.contains(&status_for_run(run.as_ref())) {
+                "working"
+            } else if crate::orchestration::delegated_task_awaits_work(task_runs, &child) {
+                "waiting_for_children"
+            } else {
+                "result_available"
+            };
+            (run, state)
+        }
     };
     let work_state = if !task["result"].is_null() {
         "result_available"
@@ -1076,12 +1101,27 @@ async fn read_task<S: McpHost>(
             _ => Value::Null,
         }
     };
+    // `taskResultTransfer`: the result sent from one of the task's own runs.
+    let original_tagged = child_run
+        .as_ref()
+        .is_some_and(|run| !run["delegatedTaskId"].is_null());
+    let result_run_ids: Vec<&Value> = runs
+        .iter()
+        .filter(|run| {
+            run["delegatedTaskId"] == task["id"]
+                || (!original_tagged && run["delegatedTaskId"].is_null())
+        })
+        .map(|run| &run["id"])
+        .chain(child_run.as_ref().map(|run| &run["id"]))
+        .collect();
     let result_transfer = transfers
         .iter()
         .find(|t| {
             t["type"] == "subagent_result"
                 && t["sourceThreadId"] == task["childThreadId"]
                 && t["targetThreadId"] == scope.thread_id.as_str()
+                && (result_run_ids.contains(&&t["sourcePoint"]["runId"])
+                    || (t["sourcePoint"]["runId"].is_null() && !original_tagged))
         })
         .map(|t| t["id"].clone())
         .unwrap_or(Value::Null);
