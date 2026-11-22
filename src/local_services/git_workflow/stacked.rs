@@ -439,27 +439,116 @@ async fn push(cwd: &str, branch: &str, primary: Option<&str>) -> Reply {
     )
     .await
     .or(read(cwd, &["config", "--get", "remote.pushDefault"]).await);
-    let remote=override_remote.as_deref().or(tracking.as_deref().filter(|r|*r!=".")).or(primary).ok_or_else(||json!({"_tag":"GitCommandError","operation":"GitVcsDriver.pushCurrentBranch","command":"git","cwd":cwd,"argumentCount":1,"detail":"Cannot push because no git remote is configured for this repository."}))?;
-    let dest = format!("{remote}/{branch}");
-    let urls = read(cwd, &["remote", "get-url", "--push", "--all", remote]).await;
-    if upstream.as_deref() == Some(&dest)
+    let merge = read(cwd, &["config", "--get", &format!("branch.{branch}.merge")]).await;
+    let tracking_branch = merge
+        .as_deref()
+        .and_then(|name| name.strip_prefix("refs/heads/"));
+    let tracking_ref = tracking
+        .as_ref()
+        .zip(tracking_branch)
+        .map(|(remote, name)| format!("{remote}/{name}"));
+    let same_head = tracking.as_deref() != Some(".")
+        && tracking_branch.is_some_and(|name| {
+            branch == name
+                || (branch.ends_with(&format!("/{name}"))
+                    && tracking_ref
+                        .as_ref()
+                        .is_some_and(|r| r.ends_with(&format!("/{branch}"))))
+        });
+    let remote = override_remote.as_deref().or_else(|| tracking.as_deref().filter(|_| same_head)).or(primary)
+        .or_else(|| tracking.as_deref().filter(|r| *r != "."))
+        .ok_or_else(|| json!({"_tag":"GitCommandError","operation":"GitVcsDriver.pushCurrentBranch","command":"git","cwd":cwd,"argumentCount":1,"detail":"Cannot push because no git remote is configured for this repository."}))?;
+    let remotes = read(cwd, &["remote"]).await.unwrap_or_default();
+    let publish = if same_head {
+        tracking_branch.unwrap_or(branch)
+    } else if tracking.as_deref() == Some(".") {
+        branch
+    } else {
+        remotes
+            .lines()
+            .filter(|r| branch.starts_with(&format!("{r}/")))
+            .max_by_key(|r| r.len())
+            .map_or(branch, |r| &branch[r.len() + 1..])
+    };
+    let dest = format!("{remote}/{publish}");
+    let publishes = !same_head || upstream.is_none();
+    let fork = !publishes && tracking.as_deref() != Some(remote);
+    let fetch_url = read(cwd, &["remote", "get-url", "--", remote]).await;
+    let single_url = fetch_url.is_some()
+        && fetch_url == read(cwd, &["remote", "get-url", "--push", "--all", "--", remote]).await;
+    if upstream.is_some()
+        && single_url
         && read(cwd, &["rev-list", "--count", "HEAD...@{upstream}"])
             .await
             .as_deref()
             == Some("0")
-        && urls == read(cwd, &["remote", "get-url", "--all", remote]).await
     {
-        return Ok(json!({"status":"skipped_up_to_date","branch":branch,"upstreamBranch":dest}));
+        if !fork {
+            return Ok(
+                json!({"status":"skipped_up_to_date","branch":branch,"upstreamBranch":upstream}),
+            );
+        }
+        let full = format!("refs/remotes/{dest}");
+        if read(
+            cwd,
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--",
+                remote,
+                &format!("+refs/heads/{publish}:{full}"),
+            ],
+        )
+        .await
+        .is_some()
+            && read(cwd, &["merge-base", "--is-ancestor", "HEAD", &full])
+                .await
+                .is_some()
+        {
+            return Ok(
+                json!({"status":"skipped_up_to_date","branch":branch,"upstreamBranch":dest,"pushRemote":remote}),
+            );
+        }
     }
-    let publishes = upstream.as_deref() != Some(&dest) && override_remote.is_none();
+    // A differently named upstream is the comparison base, including its remote
+    // when the upstream ref has since been deleted.
+    if publishes && !same_head && read_branch_base(cwd, branch).await.is_none() {
+        if let (Some(remote), Some(name)) = (tracking.as_deref(), tracking_branch) {
+            let full = if remote == "." {
+                format!("refs/heads/{name}")
+            } else {
+                format!("refs/remotes/{remote}/{name}")
+            };
+            checked(
+                cwd,
+                "writeConfigValue",
+                &["config", &format!("branch.{branch}.t3-merge-base"), name],
+                "Could not save branch base.",
+            )
+            .await?;
+            let key = format!("branch.{branch}.t3-merge-base-ref");
+            if read(cwd, &["config", "--get", &key]).await.is_none() {
+                checked(
+                    cwd,
+                    "writeConfigValue",
+                    &["config", &key, &full],
+                    "Could not save branch base.",
+                )
+                .await?;
+            }
+        }
+    }
     checked(
         cwd,
-        if publishes {
+        if publishes && upstream.is_some() {
+            "pushCurrentBranch.pushOwnBranch"
+        } else if publishes {
             "pushCurrentBranch.pushWithUpstream"
         } else {
             "pushCurrentBranch.pushUpstream"
         },
-        &["push", "--", remote, &format!("HEAD:refs/heads/{branch}")],
+        &["push", "--", remote, &format!("HEAD:refs/heads/{publish}")],
         "git push failed",
     )
     .await?;
@@ -470,7 +559,12 @@ async fn push(cwd: &str, branch: &str, primary: Option<&str>) -> Reply {
         )
         .await
         .is_some();
-    Ok(json!({"status":"pushed","branch":branch,"upstreamBranch":dest,"setUpstream":set_upstream}))
+    let mut pushed =
+        json!({"status":"pushed","branch":branch,"upstreamBranch":dest,"setUpstream":set_upstream});
+    if fork {
+        pushed["pushRemote"] = json!(remote);
+    }
+    Ok(pushed)
 }
 async fn action(tools: &GitTools, input: &Value, paths: &[String], g: &mut Progress<'_>) -> Reply {
     let cwd = g.cwd;
@@ -546,6 +640,11 @@ async fn action(tools: &GitTools, input: &Value, paths: &[String], g: &mut Progr
                 if let Some(default) = metadata["default_branch"].as_str() {
                     base = default.into();
                 }
+            }
+        }
+        if let Some(branch) = &branch_name {
+            if let Some(configured) = read_branch_base(cwd, branch).await {
+                base = configured;
             }
         }
         if branch_name.as_deref() == Some(&base) {

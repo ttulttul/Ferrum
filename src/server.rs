@@ -312,6 +312,7 @@ impl AppState {
         let (project_clone_events, _) = broadcast::channel(64);
         let local = Arc::new(crate::workspace::LocalWorkspace::new(
             dir.clone(),
+            settings.clone(),
             local_services::TerminalService::with_logs(dir.join("logs/terminals")),
             local_services::PreviewService::default(),
             local_services::DeviceService::new(settings.clone(), &dir)?,

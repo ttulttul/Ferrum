@@ -16,7 +16,8 @@ use tokio::{
 pub struct LocalWorkspace {
     /// The server's state directory; host services keep their files under it.
     pub(crate) data_dir: PathBuf,
-    pub(crate) vcs: VcsService,
+    vcs: VcsService,
+    settings: std::sync::Arc<crate::settings::Settings>,
     pub(crate) terminals: TerminalService,
     pub(crate) previews: PreviewService,
     pub(crate) devices: DeviceService,
@@ -25,12 +26,14 @@ pub struct LocalWorkspace {
 impl LocalWorkspace {
     pub(crate) fn new(
         data_dir: PathBuf,
+        settings: std::sync::Arc<crate::settings::Settings>,
         terminals: TerminalService,
         previews: PreviewService,
         devices: DeviceService,
     ) -> Self {
         Self {
             data_dir,
+            settings,
             vcs: VcsService,
             terminals,
             previews,
@@ -50,6 +53,7 @@ impl LocalWorkspace {
         let settings = std::sync::Arc::new(crate::settings::Settings::open_in(&paths, documents)?);
         Ok(Self::new(
             state_dir.to_path_buf(),
+            settings.clone(),
             TerminalService::with_logs(state_dir.join("logs/terminals")),
             PreviewService::default(),
             DeviceService::new(settings, state_dir)?,
@@ -89,6 +93,21 @@ impl Workspace for LocalWorkspace {
         input: &'a Value,
         fetch_upstream: bool,
     ) -> WorkspaceFuture<'a, Option<Reply>> {
+        if method == "createWorktree" {
+            let settings = self.settings.internal().unwrap_or_default();
+            return async move {
+                Some(
+                    self.vcs
+                        .create_worktree(
+                            input,
+                            &self.data_dir,
+                            settings["worktreesDirectory"].as_str().unwrap_or_default(),
+                        )
+                        .await,
+                )
+            }
+            .boxed();
+        }
         self.vcs
             .call_with(method, input, &self.data_dir, fetch_upstream)
             .boxed()
@@ -97,7 +116,7 @@ impl Workspace for LocalWorkspace {
         self.vcs.branch_status(input).boxed()
     }
     fn review<'a>(&'a self, method: &'a str, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
-        review::call(method, input).boxed()
+        review::call(method, input, &self.data_dir).boxed()
     }
     fn capture_git_tree<'a>(&'a self, cwd: &'a str) -> WorkspaceFuture<'a, Option<String>> {
         capture_git_tree(cwd).boxed()

@@ -121,12 +121,6 @@
       "reason": "getStorageCleanupReport fails the client's decode",
       "issue": "startedAt must be a string; the storage settings page cannot show the report"
     },
-    "threads.getWorktreeThreadIds": {
-      "area": "threads",
-      "severity": "medium",
-      "reason": "getWorktreeThreadIds matches threads by project root",
-      "issue": "the reference returns only threads whose worktreePath is the given path; Rust also returns local threads of the project at that root"
-    },
     "threads.searchThread": {
       "area": "threads",
       "severity": "medium",
@@ -156,36 +150,6 @@
       "severity": "low",
       "reason": "subscribeCommandOutput for an unknown item streams an empty replace",
       "issue": "the reference fails with OrchestrationV2CommandOutputError"
-    },
-    "vcs.refreshStatus": {
-      "area": "git/VCS",
-      "severity": "medium",
-      "reason": "VCS status has no branchChanges.baseRef",
-      "issue": "the reference compares the branch with its upstream origin/main; Rust reports baseRef null"
-    },
-    "vcs.removeWorktree": {
-      "area": "git/VCS",
-      "severity": "high",
-      "reason": "vcs.removeWorktree fails on a worktree vcs.createWorktree made",
-      "issue": "git worktree remove exits 128 on Rust; the reference removes it"
-    },
-    "vcs.review.getDiffPreview": {
-      "area": "git/VCS",
-      "severity": "medium",
-      "reason": "review.getDiffPreview files lack changeType",
-      "issue": "the review panel's file list needs changeType for each file"
-    },
-    "vcs.subscribeVcsStatus": {
-      "area": "git/VCS",
-      "severity": "medium",
-      "reason": "VCS status has no branchChanges.baseRef",
-      "issue": "the reference compares the branch with its upstream origin/main; Rust reports baseRef null"
-    },
-    "vcs.subscribeVcsStatus.remote": {
-      "area": "git/VCS",
-      "severity": "medium",
-      "reason": "VCS status has no branchChanges.baseRef",
-      "issue": "the reference compares the branch with its upstream origin/main; Rust reports baseRef null"
     }
   }
 }
