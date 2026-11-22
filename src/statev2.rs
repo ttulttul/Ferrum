@@ -14,6 +14,7 @@
 //! - A home that still has only the reference's V1 `state.sqlite` is refused:
 //!   the reference imports that file only when `statev2.sqlite` is absent, so
 //!   creating one here would hide its threads from the reference.
+pub mod outbox;
 pub mod read;
 pub mod write;
 

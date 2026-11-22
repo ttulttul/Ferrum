@@ -635,7 +635,7 @@ pub(crate) fn continuations(store: &Store, settings: &Value, now_iso: &str) -> V
             } else {
                 continue;
             };
-            let message_id = format!("message:restart-continuation:{}", source.id);
+            let message_id = format!("message:restart-continuation:{}", source.wire_id());
             if thread
                 .messages
                 .iter()
@@ -759,7 +759,7 @@ fn command(thread: &Thread, source: &Run, message_id: &str) -> Value {
     };
     let mut command = json!({
         "type": "message.dispatch",
-        "commandId": format!("command:restart-continuation:{}", source.id),
+        "commandId": format!("command:restart-continuation:{}", source.wire_id()),
         "threadId": thread.id,
         "messageId": message_id,
         "text": text,
@@ -773,7 +773,7 @@ fn command(thread: &Thread, source: &Run, message_id: &str) -> Value {
         "dispatchMode": {"type": "start_immediately"},
         "createdBy": "agent",
         "creationSource": "server",
-        "restartContinuationOfRunId": source.id.to_string()
+        "restartContinuationOfRunId": source.wire_id()
     });
     let selection = &thread.stored_row()["modelSelection"];
     if selection.is_object() {
@@ -807,6 +807,7 @@ mod tests {
             continuation: None,
             resend_owed: false,
             resends: 0,
+            wire_id: None,
         }
     }
 

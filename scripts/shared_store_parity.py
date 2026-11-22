@@ -10,7 +10,15 @@ Checks:
   other (shell, thread projection), and so is a thread the Rust server
   renamed after reading it from the reference;
 - a database at a migration head the Rust server does not support is refused,
-  clearly and without being changed.
+  clearly and without being changed;
+- provider turns across a switch (CROSS_SCENARIOS): a turn one server cut off
+  (stopped as a service manager stops it) is continued by the other, a new
+  turn is started on the other server's thread, and queued messages and
+  pending approvals carry over. Each scenario runs reference -> reference,
+  reference -> Rust and Rust -> reference on one home each, with fake provider
+  CLIs, and the switched runs must end as the reference's own restart does
+  (client_thread_parity.py's comparison). Known differences are in
+  shared_store_parity_xfail.json; an entry that starts matching fails.
 
 All data is fake: temporary homes, generated keys and fixture text. No
 provider CLI is installed, so a turn ends as soon as it starts.
@@ -29,8 +37,9 @@ import subprocess
 from tempfile import TemporaryDirectory
 import time
 
+import client_thread_parity as turns
 from client_initial_sync_parity import rpc
-from parity_harness import PROVIDER_CLIS, encode, free_port, http, managed_server, path_without
+from parity_harness import PROVIDER_CLIS, encode, free_port, http, managed_server, path_without, run_concurrently
 
 PROJECT = "project:shared-store"
 THREAD = "thread:shared-store-reference"
@@ -118,6 +127,74 @@ def comparable(view):
     return view
 
 
+# Restart scenarios run with the two halves on different servers. A name is a
+# client_thread_parity.py scenario, or one defined here; `follow_up` sends the
+# restarted server a new turn.
+CROSS_SCENARIOS = [
+    {"name": "codex restart mid-turn"},
+    {"name": "claude restart mid-turn"},
+    {"name": "codex restart queued"},
+    {"name": "codex restart unaccepted"},
+    {"name": "codex restart continuation off", "follow_up": "Now append a line"},
+    {"name": "claude restart continuation off", "follow_up": "Now append a line"},
+    {"name": "codex approval waiting", "scenario": {
+        "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
+        "runtimeMode": "approval-required", "restart": {"after": "waiting"}}},
+    {"name": "claude approval waiting", "scenario": {
+        "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_approval.json",
+        "runtimeMode": "approval-required", "restart": {"after": "waiting"}}},
+]
+ORDERS = {"reference -> reference": ("reference", "reference"), "reference -> rust": ("reference", "rust"),
+          "rust -> reference": ("rust", "reference")}
+
+
+def cross_turn(args, credentials, scenario, first, second, follow_up):
+    """One restart scenario on one home, started on `first` and restarted on `second`."""
+    with TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        root = tmp / "home"
+        env, fake_bin, log = turns.scenario_env(tmp, "cross", root, scenario, turns.scenario_drivers(scenario))
+        outcome = turns.restart_turn(args, shlex.split(first), root, credentials, env, tmp / "checkouts",
+                                     fake_bin, scenario, second=shlex.split(second), follow_up=follow_up)
+        outcome["launches"] = turns.turn_launches(log)
+        outcome["cli"] = turns.cli_approvals(log)
+        outcome["launch"] = turns.cli_launch(log, tmp)
+        return outcome
+
+
+def cross_turns(args, credentials):
+    """Each CROSS_SCENARIOS entry across a switch; the number of unexpected results."""
+    xfail = json.loads((Path(__file__).parent / "shared_store_parity_xfail.json").read_text())
+    commands = {"reference": args.original_command, "rust": args.rust_command}
+    failures = 0
+    for entry in CROSS_SCENARIOS:
+        scenario = ({"name": entry["name"], **entry["scenario"]} if "scenario" in entry else
+                    next(s for s in turns.PROVIDER_SCENARIOS if s["name"] == entry["name"]))
+        outcomes = dict(zip(ORDERS, run_concurrently([
+            (lambda first=first, second=second: cross_turn(args, credentials, scenario, commands[first],
+                                                           commands[second], entry.get("follow_up")))
+            for first, second in ORDERS.values()], len(ORDERS))))
+        label_base = entry["name"] + (" + follow-up" if entry.get("follow_up") else "")
+        for order in ("reference -> rust", "rust -> reference"):
+            label = f"{label_base} ({order})"
+            problems = turns.compare_turn(outcomes["reference -> reference"], outcomes[order])
+            expected = xfail.get(label, {})
+            for check in sorted(set(problems) | set(expected)):
+                if check in problems and check in expected:
+                    print(f"XFAIL {label}: {check}: {expected[check]}")
+                elif check in problems:
+                    failures += 1
+                    print(f"FAIL {label}: {check}")
+                    for line in problems[check][:20]:
+                        print(f"  {line}")
+                else:
+                    failures += 1
+                    print(f"XPASS {label}: {check}: remove it from shared_store_parity_xfail.json")
+            if not problems:
+                print(f"PASS {label}")
+    return failures
+
+
 def differences(left, right, path="$"):
     """Where two JSON values differ, as `path: left != right` lines."""
     if isinstance(left, dict) and isinstance(right, dict):
@@ -148,7 +225,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command", required=True)
     parser.add_argument("--rust-command", required=True)
+    parser.add_argument("--reference-root", required=True, help="the pinned reference checkout (its client runtime)")
+    parser.add_argument("--node", default="node")
+    parser.add_argument("--reply-ms", type=int, default=8000)
+    parser.add_argument("--skip-turns", action="store_true", help="skip the provider turns across a switch")
     args = parser.parse_args()
+    args.faketime_lib, args.real_time, args.dump = None, False, None
     reference, rust = args.original_command, args.rust_command
     credentials = secrets.token_urlsafe(32), secrets.token_bytes(32)
     checks = []
@@ -234,6 +316,13 @@ def main():
             same(f"{name} migration head left unchanged", before, digest(database(copy)))
 
     print(f"{len(checks)}/{len(checks)} shared store checks matched across the reference and the Rust server on one home")
+    if not args.skip_turns:
+        with TemporaryDirectory() as git:
+            turns.GIT_ISOLATION.update(turns.isolated_git_env(Path(git)))
+            failures = cross_turns(args, credentials)
+        if failures:
+            raise SystemExit(f"{failures} unexpected result(s) in provider turns across a switch")
+        print(f"provider turns across a switch: {len(CROSS_SCENARIOS)} scenarios matched the reference's own restart")
 
 
 if __name__ == "__main__":

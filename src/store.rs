@@ -74,6 +74,11 @@ pub struct Run {
     /// How many times a restart sent the run's prompt again.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub resends: u32,
+    /// The run's id on the wire and in the shared database, when it is not
+    /// [`Run::id`]: a run read from `statev2.sqlite`, or a new run on a thread
+    /// read from there, has the reference's `run:thread:…:ordinal:…` id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_id: Option<String>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -81,6 +86,31 @@ fn is_zero(value: &u32) -> bool {
 }
 
 impl Run {
+    /// The run's id as clients and the shared database know it.
+    pub(crate) fn wire_id(&self) -> String {
+        self.wire_id.clone().unwrap_or_else(|| self.id.to_string())
+    }
+
+    /// The internal id for a run known by `wire_id`: stable, so a run read
+    /// from the shared database keeps its id across restarts.
+    pub(crate) fn uuid_for(wire_id: &str) -> Uuid {
+        if let Ok(id) = Uuid::parse_str(wire_id) {
+            return id;
+        }
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(wire_id.as_bytes());
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        uuid::Builder::from_custom_bytes(bytes).into_uuid()
+    }
+
+    /// The reference's id for the `ordinal`th run of `thread_id`.
+    pub(crate) fn reference_id(thread_id: &str, ordinal: usize) -> String {
+        format!(
+            "run:thread:{}:ordinal:{ordinal}",
+            crate::thread_projection::uri_component(thread_id)
+        )
+    }
     /// The continuation a restart owes the run, with its lost processes.
     pub(crate) fn owed_continuation(&self) -> Option<u32> {
         self.continuation

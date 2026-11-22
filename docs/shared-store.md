@@ -249,8 +249,32 @@ add tables to it. So:
 
 Run ids differ between the servers. The reference allocates
 `run:thread:<thread>:ordinal:<n>`; Rust uses UUIDs. Records keep whichever id their
-server gave them. Rust's typed `Run` gains the stored wire id when it rebuilds a
-reference run (pull request 3).
+server gave them:
+- A run Rust reads from the database keeps its id as `Run.wire_id`. Its internal UUID is
+  derived from that id (`Run::uuid_for`), so it is the same after every restart.
+- A new run Rust starts on such a thread takes the reference's scheme, with the next
+  ordinal.
+- Everything that leaves Rust or arrives from a client names a run by its wire id:
+  records, events, commands, and the restart continuation's ids.
+
+**Typed state for a thread read from the database** (`Thread::from_stored`, pull
+request 3). This is what lets Rust queue, start, steer, stop, answer and continue turns
+on it. Rust rebuilds:
+- its runs, with their statuses, messages and continuation links;
+- what was sent to the thread: users' messages, plus the notifications that continue a
+  run. Provider messages stay provider records, as on Rust's own threads;
+- its checkpoints;
+- its provider state:
+  - the provider thread record, still named after the run that first used it;
+  - the native thread the next turn resumes;
+  - the turns that provider thread already ran, so new provider turns continue its
+    numbering;
+  - its session id;
+  - the token usage of its last turn;
+  - Claude's attachment budget.
+
+Rust's computed records then name the same entities as the stored ones, and the overlay
+applies only what Rust's turns change.
 
 ### 2.3 Existing Rust homes: a one-time import, keeping the old file
 
@@ -274,16 +298,37 @@ Every kind of home keeps working:
 - **Queued runs and pending requests** are projection rows, so they carry over in the
   thread's records. Rust applies the same start-up treatment as the reference: queued
   runs are held, and pending requests become message-answerable or expire.
-- **Outbox rows** the reference left unfinished are claimed by Rust when it implements
-  that effect type. Effect types Rust does not implement are left `pending` for the
-  reference, and are never failed or deleted.
-- **Rust's own side effects** (provider turn starts, interrupts, restart continuations)
-  are enqueued with the reference's effect ids and payloads. The reference can then
-  resume them.
+- **The outbox at start-up** (`src/statev2/outbox.rs`). Before anything else, Rust does
+  what the reference's `EffectOutbox.reconcileAfterProcessLoss` does to the previous
+  process's rows:
+  - process-bound effects (turn start, interrupt, steer, restart, request response,
+    model or title change on a session) are cancelled;
+  - replay-safe effects the previous process was running go back to `pending`.
+- **Restart continuations go through the outbox**, as on the reference:
+  - **When Rust's reconcile cuts a run off** that is owed a continuation, the same
+    transaction enqueues `effect:restart-continuation:<run>`
+    (`provider-runtime.continue`) with the reference's payload:
+    - at shutdown, command `command:restart-prepare:<run>` with
+      `processLossCount: 0`;
+    - at start-up, `command:runtime-reconcile:startup:<thread>:<time>` with the
+      processes lost in a row.
+
+    Rows are inserted with `ON CONFLICT DO NOTHING`, so a shutdown's row wins over the
+    next start-up's.
+  - **Taking over a pending continuation** (`ControlState::adopt_continuations`). After
+    its own start-up reconcile, Rust takes over every pending continuation for a thread
+    it holds: it marks the source run owed a continuation, which its continuation pass
+    then sends, and settles the row as `succeeded`, so the other server never sends it
+    too.
+  - **The reference's side:** its worker continues the runs Rust cut off from the rows
+    Rust wrote.
+- **Effect types Rust does not carry out** (title generation, cleanups, checkpoint
+  capture, rollback, detach, stopping delegated tasks) stay `pending` for the reference.
+  Rust never fails or deletes them.
 
 ## 3. Pull requests
 
-1. **Schema and read path** (this change):
+1. **Schema and read path** (merged):
    - `src/statev2.rs`: open, guard, create.
    - The generated schema and its CI check.
    - At start-up, projects and threads that only the database has are read into the
@@ -296,7 +341,7 @@ Every kind of home keeps working:
      - that the reference opens Rust's database without migrating;
      - that a reference project and thread are identical on both servers;
      - that unsupported heads are refused, and the database is left unchanged.
-2. **Write path** (merged after 1):
+2. **Write path** (merged):
    - Every Rust commit is written to the database first, in one `BEGIN IMMEDIATE`
      transaction (`src/shared_store.rs` plans it, `src/statev2/write.rs` writes it):
      - one `orchestration_events` row per domain event, plus `thread.created` for a new
@@ -326,9 +371,34 @@ Every kind of home keeps working:
      projection with the reference's schema, to find contract mismatches. It found that
      `RunAttempt.nativeThreadId` must be absent rather than null.
 3. **Recovery and outbox:**
-   - Restart recovery on the shared records.
-   - Provider resume through `nativeThreadRef`.
-   - Outbox claims and enqueues.
-   - Continuing a turn the other server cut off.
-   - Pending approvals and queued messages, across a switch.
+   - **Turns on threads read from the database:** the typed rebuild and wire run ids
+     (2.2). The refusal of turn commands on those threads is gone.
+   - **The outbox:** start-up treatment, continuation effects written by Rust's
+     reconcile, and pending continuations taken over at start-up (2.4).
+   - **Fixes the cross-server runs turned up:**
+     - A new provider turn continues the stored provider thread's turn numbering. Before,
+       it collided with the reference's turn 1 on a unique index, and the provider events
+       were lost.
+     - Served messages are ordered by their turn items (`sortMessagesByTurnItemOrder`).
+     - Served turn items leave out a rolled-back run's items and undelivered queued
+       input, as the reference's snapshot window does.
+     - A Claude session keeps its stored id. Context usage and the attachment budget
+       carry over.
+   - **A failed database write is logged as an error.** The commit fails as a whole,
+     with nothing logged to the journal or applied.
+   - **Message search text** (`search_text` in `src/statev2/write.rs`) now also turns
+     an assistant quote's `t3-citation://v1/…` link into its quoted words and comment,
+     as the reference's `assistantCitationsToPlainText` does, with the same validation.
+     It was checked against the reference's `readableSearchText` on the same inputs.
+   - **Provider turns across a switch,** in `scripts/shared_store_parity.py`:
+     - `client_thread_parity.py`'s restart scenarios, run with the two halves on
+       different servers, and compared with the reference's own restart;
+     - a run cut off mid-turn and continued by the other server, both ways, for Codex
+       and Claude;
+     - queued messages and a turn whose prompt was never taken;
+     - a new turn sent on the other server's thread;
+     - a turn waiting on an approval.
+
+     Known differences are listed in `scripts/shared_store_parity_xfail.json`. Every one
+     is a difference Rust already has on one server.
 4. **Importing `events.jsonl`:** the one-time import described in 2.3.

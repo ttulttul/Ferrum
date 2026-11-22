@@ -20,6 +20,17 @@ impl Writer {
 }
 
 impl SharedStore for Writer {
+    fn pending_continuations(
+        &mut self,
+    ) -> anyhow::Result<Vec<crate::shared_store::PendingContinuation>> {
+        Ok(super::outbox::pending_continuations(&self.conn)?)
+    }
+
+    fn settle_effect(&mut self, effect_id: &str, status: &str) -> anyhow::Result<()> {
+        super::outbox::settle(&self.conn, effect_id, status)?;
+        Ok(())
+    }
+
     fn write(&mut self, commit: &SharedCommit) -> anyhow::Result<()> {
         // IMMEDIATE, as the reference's writer: take the write lock up front.
         let transaction = self
@@ -33,6 +44,23 @@ impl SharedStore for Writer {
         }
         for project in &commit.projects {
             write_project(&transaction, project)?;
+        }
+        for effect in &commit.effects {
+            transaction.execute(
+                "INSERT INTO orchestration_v2_effect_outbox (
+                   effect_id, command_id, thread_id, effect_type, payload_json, status,
+                   attempt_count, available_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 0, ?6, ?6, ?6)
+                 ON CONFLICT(effect_id) DO NOTHING",
+                params![
+                    effect.effect_id,
+                    effect.command_id,
+                    effect.thread_id,
+                    effect.request["type"].as_str(),
+                    effect.request.to_string(),
+                    super::outbox::now_iso(),
+                ],
+            )?;
         }
         if let Some(receipt) = &commit.receipt {
             transaction.execute(
@@ -376,17 +404,128 @@ const TABLES: &[Table] = &[
     },
 ];
 
-/// `readableSearchText`: a file mention's escaped label as it reads, or
-/// NULL when that is the text. (Quote links are not rewritten.)
+/// `readableSearchText`: the text as it reads, or NULL when that is the
+/// text itself. An assistant quote's link (`assistantCitationsToPlainText`)
+/// becomes its quoted words and comment, and a file mention's escaped label
+/// reads unescaped.
 fn search_text(text: &str) -> Option<String> {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let pattern = PATTERN
         .get_or_init(|| regex::Regex::new(r"(!?\[)([^\]\n]*)(\]\([^)\s]*\))").expect("pattern"));
-    let readable = pattern.replace_all(text, |captures: &regex::Captures| {
+    let quoted = citations_to_plain_text(text);
+    let readable = pattern.replace_all(&quoted, |captures: &regex::Captures| {
         let label = captures[2].replace("\\*", "*").replace("\\_", "_");
         format!("{}{}{}", &captures[1], label, &captures[3])
     });
     (readable != text).then(|| readable.into_owned())
+}
+
+const CITATION_HREF_PREFIX: &str = "t3-citation://v1/";
+const CITATION_MAX_TEXT: usize = 8_000;
+const CITATION_MAX_COMMENT: usize = 8_000;
+const CITATION_CONTEXT: usize = 32;
+const CITATION_MAX_ID: usize = 4_096;
+/// `MAX_CITATION_HREF_LENGTH`.
+const CITATION_MAX_HREF: usize = 9
+    * (CITATION_MAX_TEXT + CITATION_MAX_COMMENT + 3 * CITATION_MAX_ID + 2 * CITATION_CONTEXT)
+    + 1_000;
+
+/// A string's length as JavaScript counts it (UTF-16 code units).
+fn js_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// `assistantCitationsToPlainText`: each `[Assistant quote](t3-citation://…)`
+/// link that parses as a citation becomes its text, then its comment.
+fn citations_to_plain_text(text: &str) -> String {
+    static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let link = LINK.get_or_init(|| {
+        regex::Regex::new(&format!(
+            r"\[Assistant quote\]\(({}[^\s)]+)\)",
+            regex::escape(CITATION_HREF_PREFIX)
+        ))
+        .expect("pattern")
+    });
+    link.replace_all(text, |captures: &regex::Captures| {
+        let href = &captures[1];
+        match parse_citation(href) {
+            Some((quote, None)) => quote,
+            Some((quote, Some(comment))) => format!("{quote}\nComment: {comment}"),
+            None => captures[0].to_owned(),
+        }
+    })
+    .into_owned()
+}
+
+/// `parseAssistantCitationHref` and the `AssistantCitation` schema's checks:
+/// the citation's text and comment, when `href` is a valid citation.
+fn parse_citation(href: &str) -> Option<(String, Option<String>)> {
+    if js_len(href) > CITATION_MAX_HREF {
+        return None;
+    }
+    let url = url::Url::parse(href).ok()?;
+    let parts: Vec<&str> = url.path().trim_start_matches('/').split('/').collect();
+    if url.scheme() != "t3-citation"
+        || url.host_str() != Some("v1")
+        || parts.len() != 3
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let get = |key: &str| -> Vec<&String> {
+        pairs
+            .iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, v)| v)
+            .collect()
+    };
+    let comment = get("comment").first().map(|value| (*value).clone());
+    let required = ["text", "start", "end", "prefix", "suffix"];
+    if pairs.len() != required.len() + usize::from(comment.is_some())
+        || required.iter().any(|key| get(key).len() != 1)
+    {
+        return None;
+    }
+    let value = |key: &str| get(key)[0].clone();
+    let number = |key: &str| -> Option<u64> {
+        let text = value(key);
+        (!text.is_empty() && text.len() <= 16 && text.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| text.parse().ok())
+            .flatten()
+    };
+    let (start, end) = (number("start")?, number("end")?);
+    let ids: Vec<String> = parts
+        .iter()
+        .map(|part| {
+            percent_encoding::percent_decode_str(part)
+                .decode_utf8()
+                .map(|s| s.into_owned())
+        })
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let text = value("text");
+    let valid = ids
+        .iter()
+        .all(|id| !id.trim().is_empty() && js_len(id) <= CITATION_MAX_ID)
+        && !text.is_empty()
+        && js_len(&text) <= CITATION_MAX_TEXT
+        && comment
+            .as_ref()
+            .is_none_or(|c| js_len(c) <= CITATION_MAX_COMMENT)
+        && start <= 9_007_199_254_740_991
+        && end <= 9_007_199_254_740_991
+        && js_len(&value("prefix")) <= CITATION_CONTEXT
+        && js_len(&value("suffix")) <= CITATION_CONTEXT
+        && end > start
+        && !text.trim().is_empty();
+    valid.then_some((text, comment))
 }
 
 /// `isInlineWorkOutput` for a `dynamic_tool` item's stored JSON.
@@ -653,6 +792,7 @@ mod tests {
             sequence: events.last().map_or(0, |e| e.sequence),
             events,
             receipt: None,
+            effects: vec![],
             occurred_at: "2026-01-01T00:00:01.000Z".into(),
         }
     }
@@ -771,6 +911,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(positions, 0);
+    }
+
+    #[test]
+    fn search_text_reads_quotes_and_file_mentions_as_they_read() {
+        let href = "t3-citation://v1/env/thread%3Aa/message%3Ab?text=the+quoted+words&start=3&end=9&prefix=&suffix=";
+        assert_eq!(
+            search_text(&format!("Look: [Assistant quote]({href}) ok")).as_deref(),
+            Some("Look: the quoted words ok")
+        );
+        let commented = format!("{href}&comment=why%3F");
+        assert_eq!(
+            search_text(&format!("[Assistant quote]({commented})")).as_deref(),
+            Some("the quoted words\nComment: why?")
+        );
+        // Not a citation: kept as written, so nothing extra is stored.
+        assert_eq!(
+            search_text("[Assistant quote](t3-citation://v1/a/b?text=x)"),
+            None
+        );
+        let backwards = "t3-citation://v1/e/t/m?text=x&start=9&end=3&prefix=&suffix=";
+        assert_eq!(
+            search_text(&format!("[Assistant quote]({backwards})")),
+            None
+        );
+        assert_eq!(search_text("plain"), None);
+        assert_eq!(
+            search_text("see [a\\_b](file:///a_b)").as_deref(),
+            Some("see [a_b](file:///a_b)")
+        );
     }
 
     #[test]
