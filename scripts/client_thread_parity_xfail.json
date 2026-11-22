@@ -66,8 +66,7 @@
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
   },
   "claude question": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer.",
-    "items": "The reference holds the turn's streamed frames while it asks, so the question's tool call comes before the command streamed ahead of it, and a question call that never gets a result ends failed; Rust keeps stream order and ends it cancelled."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
   },
   "codex background command": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."

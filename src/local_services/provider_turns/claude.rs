@@ -9,6 +9,8 @@ use crate::workspace::provider::{
     TokenUsage, TurnStatus, CLAUDE_AGENT,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
+use futures_util::FutureExt;
+use indexmap::IndexMap;
 use serde_json::{json, Value};
 
 /// A T3 tool such as `request_secret` can wait an hour; Claude's MCP timeout stays above that.
@@ -85,11 +87,6 @@ struct PendingPermission {
     question: bool,
 }
 
-/// A tool call waiting for its result.
-struct PendingTool {
-    item: ProviderItem,
-}
-
 struct Attempt<'a> {
     sink: &'a Sink,
     cli: Cli,
@@ -103,7 +100,8 @@ struct Attempt<'a> {
     blocks: HashMap<u64, (String, &'static str)>,
     /// Streamed items the final assistant message has not completed yet.
     open_items: Vec<(String, &'static str)>,
-    tools: HashMap<String, PendingTool>,
+    /// Tool calls still waiting for a result, in the order they started.
+    tools: IndexMap<String, ProviderItem>,
     next_control: u64,
     runtime_mode: String,
     responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
@@ -253,7 +251,7 @@ impl<'a> Attempt<'a> {
             message_id: None,
             blocks: HashMap::new(),
             open_items: vec![],
-            tools: HashMap::new(),
+            tools: IndexMap::new(),
             next_control: 1,
             runtime_mode: provider.runtime_mode().to_owned(),
             responses,
@@ -347,13 +345,45 @@ impl<'a> Attempt<'a> {
                 }
                 return self.closed().await;
             };
-            let Ok(message) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if let Some(outcome) = self.handle(message).await {
+            if let Some(outcome) = self.handle_available(line).await {
                 return outcome;
             }
         }
+    }
+
+    /// The SDK reads control requests directly from the transport while the adapter
+    /// consumes queued assistant output. Service a ready callback before publishing
+    /// that backlog, without waiting for another frame or passing a turn boundary.
+    async fn handle_available(&mut self, mut line: String) -> Option<Outcome> {
+        let mut queued = Vec::new();
+        let barrier = loop {
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                break None;
+            };
+            match message["type"].as_str() {
+                Some("stream_event" | "assistant") => queued.push(message),
+                Some("control_request" | "control_cancel_request") => {
+                    self.handle(message).await;
+                    break None;
+                }
+                _ => break Some(message),
+            }
+            // Return to the select loop regularly so a busy stream cannot starve
+            // an interrupt or the user's reply.
+            if queued.len() >= 32 {
+                break None;
+            }
+            match self.cli.next_line().now_or_never().flatten() {
+                Some(next) => line = next,
+                None => break None,
+            }
+        };
+        for frame in queued.into_iter().chain(barrier) {
+            if let Some(end) = self.handle(frame).await {
+                return Some(end);
+            }
+        }
+        None
     }
 
     /// The CLI closed its output before the turn ended.
@@ -603,6 +633,10 @@ impl<'a> Attempt<'a> {
         let Some(id) = block["id"].as_str() else {
             return;
         };
+        // A permission callback may already have started this native call.
+        if self.tools.contains_key(id) {
+            return;
+        }
         let name = block["name"].as_str().unwrap_or_default();
         let input = &block["input"];
         if name == "TodoWrite" {
@@ -631,7 +665,7 @@ impl<'a> Attempt<'a> {
         let item = tool_item(id, name, input);
         self.sink
             .send(ProviderEvent::TurnItem { item: item.clone() });
-        self.tools.insert(id.into(), PendingTool { item });
+        self.tools.insert(id.into(), item);
     }
 
     fn tool_results(&mut self, message: &Value) {
@@ -643,15 +677,14 @@ impl<'a> Attempt<'a> {
             if block["type"] != "tool_result" {
                 continue;
             }
-            let Some(pending) = block["tool_use_id"]
+            let Some(mut item) = block["tool_use_id"]
                 .as_str()
-                .and_then(|id| self.tools.remove(id))
+                .and_then(|id| self.tools.shift_remove(id))
             else {
                 continue;
             };
             let failed = block["is_error"] == true;
             let text = result_text(&block["content"]);
-            let mut item = pending.item;
             item.status = if failed { "failed" } else { "completed" }.into();
             match item.kind.as_str() {
                 "command_execution" => {
@@ -737,7 +770,7 @@ impl<'a> Attempt<'a> {
         }
         // A request for a call not streamed yet starts its tool item, as the
         // reference's canUseTool does (subagent launches excepted).
-        if tool_name != "Agent" && !self.tools.contains_key(&tool_use_id) {
+        if tool_name != "Agent" {
             self.tool_use(&json!({"id": tool_use_id, "name": tool_name, "input": input}));
         }
         let mode = permission_mode(&self.runtime_mode);
@@ -878,6 +911,12 @@ impl<'a> Attempt<'a> {
             return Outcome::Ended(TurnEnd::interrupted(true));
         }
         if message["subtype"] == "success" && message["is_error"] != true {
+            // A successful turn cannot supply any more tool results. The SDK
+            // fails its outstanding calls in start order before ending the turn.
+            for (_, mut item) in self.tools.drain(..) {
+                item.status = "failed".into();
+                self.sink.send(ProviderEvent::TurnItem { item });
+            }
             return Outcome::Ended(TurnEnd::completed());
         }
         let text = message["result"]
