@@ -1495,7 +1495,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     }
     if method == "filesystem.browse" {
         let partial = params["partialPath"].as_str().unwrap_or_default();
-        let target = resolve_browse_path(params, partial);
+        let target = normalize_path(resolve_browse_path(params, partial));
         let ends = partial.ends_with('/') || partial.ends_with('\\') || partial == "~";
         let parent = if ends {
             target.clone()
@@ -1578,7 +1578,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 Ok(bytes) => {
                     let truncated = bytes.len() > 1024 * 1024;
                     return Reply::Success(
-                        json!({"relativePath":relative,"contents":String::from_utf8_lossy(&bytes[..bytes.len().min(1024*1024)]),"byteLength":bytes.len(),"truncated":truncated,"exists":true}),
+                        json!({"relativePath":relative,"contents":String::from_utf8_lossy(&bytes[..bytes.len().min(1024*1024)]),"byteLength":bytes.len(),"truncated":truncated}),
                     );
                 }
                 Err(error)
@@ -1594,8 +1594,27 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                         Ok(meta) if meta.is_dir() => "path_not_file",
                         _ => "operation_failed",
                     };
+                    let (operation, operation_path, cause) = if error.kind()
+                        == std::io::ErrorKind::NotFound
+                    {
+                        (
+                            "realpath-target",
+                            target.clone(),
+                            json!({
+                                "name":"WorkspaceFileSystemOperationError",
+                                "message":format!("Workspace file operation 'realpath-target' failed at '{}' for resolved path '{}' (requested as '{}' in '{}').", target.display(), target.display(), relative, cwd),
+                                "cause":{"name":"Error","message":format!("ENOENT: no such file or directory, realpath '{}'", target.display())}
+                            }),
+                        )
+                    } else {
+                        (
+                            "read",
+                            target.clone(),
+                            json!({"name":"Error","message":error.to_string()}),
+                        )
+                    };
                     return Reply::Failure(
-                        json!({"_tag":"Fail","error":{"_tag":"ProjectReadFileError","cwd":cwd,"relativePath":relative,"failure":failure,"resolvedPath":target,"operation":"read","operationPath":target,"message":format!("Failed to read workspace file '{relative}' in '{cwd}'."),"cause":{"name":"Error","message":error.to_string()}}}),
+                        json!({"_tag":"Fail","error":{"_tag":"ProjectReadFileError","cwd":cwd,"relativePath":relative,"failure":failure,"resolvedPath":target,"operation":operation,"operationPath":operation_path,"message":format!("Failed to read workspace file '{relative}' in '{cwd}'."),"cause":cause}}),
                     );
                 }
             }
@@ -2978,6 +2997,10 @@ fn resolve_browse_path(params: &Value, partial: &str) -> PathBuf {
     } else {
         PathBuf::from(partial)
     }
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+    path.components().collect()
 }
 
 #[cfg(test)]

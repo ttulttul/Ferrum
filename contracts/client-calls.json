@@ -443,9 +443,7 @@
       "clientHarness": [
         "projects.filesystem.browse"
       ],
-      "knownGaps": [
-        "projects.filesystem.browse"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc",
@@ -1373,8 +1371,10 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "project_clone_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -1912,8 +1912,10 @@
       "stream": false,
       "auth": "session (source-control:write)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "project_clone_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -1932,8 +1934,10 @@
       "stream": false,
       "auth": "session (source-control:write)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "project_clone_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -1952,8 +1956,10 @@
       "stream": false,
       "auth": "session (source-control:write)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "project_clone_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -2091,6 +2097,7 @@
       "usage": "client",
       "existingCoverage": [
         "parity-fixtures.json",
+        "project_clone_parity.py",
         "workers_initial_sync_parity.py"
       ],
       "validationOnly": false,
@@ -2129,12 +2136,7 @@
         "raw.projects.readFile#5",
         "raw.projects.readFile#6"
       ],
-      "knownGaps": [
-        "projects.readFile",
-        "projects.readFile.afterWrite",
-        "raw.projects.readFile#5",
-        "raw.projects.readFile#6"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc",
@@ -4893,7 +4895,8 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
-        "client_initial_sync_parity.py"
+        "client_initial_sync_parity.py",
+        "project_clone_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -6156,6 +6159,7 @@
         "cors_parity.py",
         "github_provider_parity.py",
         "linear_provider_parity.py",
+        "project_clone_parity.py",
         "provider-parity.json",
         "shared_store_parity.py"
       ],
@@ -6165,9 +6169,7 @@
         "projects.http.snapshot",
         "projects.http.snapshot.afterDelete"
       ],
-      "knownGaps": [
-        "projects.http.snapshot.afterDelete"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "http",
@@ -6755,6 +6757,7 @@
         "parity-fixtures.json",
         "peer_link_outgoing_parity.py",
         "preview_provider_parity.py",
+        "project_clone_parity.py",
         "provider-parity.json",
         "provider_status_parity.py",
         "relay_client_parity.py",
