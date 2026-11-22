@@ -322,6 +322,22 @@ def main():
             pass
         same("reference opens the Rust server's database without migrating", rust_schema, schema(database(rust_home)))
 
+        # Read a disabled task across a server switch, edit it on Rust, then read
+        # that exact row (including timestamps and run history) on the reference.
+        task_input = dict(id="task:shared", title="Read the report", prompt="Read today's report",
+                          projectId=PROJECT, enabled=False, schedule={"type":"interval","everyMs":60000},
+                          workspaceStrategy={"type":"root"}, threadMode="fresh_session",
+                          modelSelection={"instanceId":"codex","model":"fixture"},
+                          runtimeMode="approval-required", interactionMode="default")
+        unchanged = {"id": task_input["id"], "enabled": False}
+        with running(reference, rust_home, credentials) as session:
+            original = rpc(*session, "scheduledTasks.upsert", task_input)["task"]
+        with running(rust, rust_home, credentials) as session:
+            same("reference schedule read by Rust", original, rpc(*session, "scheduledTasks.setEnabled", unchanged)["task"])
+            updated = rpc(*session, "scheduledTasks.upsert", {**task_input, "title":"Updated on Rust"})["task"]
+        with running(reference, rust_home, credentials) as session:
+            same("Rust schedule edit read by the reference", updated, rpc(*session, "scheduledTasks.setEnabled", unchanged)["task"])
+
         # 2. A project and a thread made on the reference, read by both.
         home = root / "shared"
         with running(reference, home, credentials) as (url, cookie):

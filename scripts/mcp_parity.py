@@ -11,6 +11,7 @@ import shlex
 from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from client_initial_sync_parity import rpc
 from parity_harness import encode, http, managed_server
 
 
@@ -46,6 +47,20 @@ def observations(url, cookie, root):
     call("ping",{})
     call("tools/call",dict(name="t3_project_list",arguments={}))
     call("tools/call",dict(name="t3_project_read",arguments=dict(projectId="missing")))
+    # A read-only outside client can list across projects, including disabled tasks.
+    task = dict(title="Read the report", prompt="Read this report", enabled=False,
+                workspaceStrategy={"type":"root"}, modelSelection={"instanceId":"codex","model":"fixture"},
+                runtimeMode="approval-required", interactionMode="default")
+    for project, schedule in [("project:a", {"type":"interval","everyMs":60000}),
+                              ("project:b", {"type":"webhook"})]:
+        rpc(url, cookie, "scheduledTasks.upsert", dict(task, id="task:"+project, projectId=project, schedule=schedule))
+    for filters in [{}, {"projectId":"project:a"}, {"scheduledTaskId":"task:project:b"},
+                    {"projectId":"project:a","scheduledTaskId":"task:project:b"}, {"projectId":17}]:
+        call("tools/call", dict(name="list_scheduled_tasks", arguments=filters))
+    for name, arguments in [("schedule_task", {"projectId":"project:a","prompt":"run","schedule":{"type":"once","runAt":"2027-01-01T00:00:00Z"}}),
+                            ("delete_scheduled_task", {"scheduledTaskId":"task:project:a"}),
+                            ("run_scheduled_task_now", {"taskId":"task:project:a"})]:
+        call("tools/call", dict(name=name, arguments=arguments))
     # The thread tools for a client outside any thread, approved read-only.
     for name, arguments in [
         ("t3_thread_configure", {}),
