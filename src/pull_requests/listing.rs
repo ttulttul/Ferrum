@@ -232,10 +232,59 @@ fn row(p: &Project, repo: &str, raw: &Value, viewer: &str, at: u64) -> Option<Va
     Some(row)
 }
 /// The reference's Bitbucket provider reads change requests with API credentials from settings.
-/// Bitbucket is not read here yet, so a Bitbucket project lists as the reference lists it with
-/// no credential: unauthenticated, each repository unreadable.
+/// Change requests are not listed from Bitbucket here yet; the viewer is asked for (`getViewer`,
+/// `GET /user`), and a failure there is reported as the reference reports it. Otherwise a
+/// Bitbucket project lists as the reference lists it with no credential: unauthenticated, each
+/// repository unreadable.
 const BITBUCKET_UNAUTHENTICATED: &str =
     "Bitbucket rejected the configured credentials. Check them in Settings → Source control & issues.";
+
+/// Why the Bitbucket viewer could not be read (`bitbucketProviderFailure`): `unauthenticated`
+/// for HTTP 401, otherwise an operation failure with the API's detail.
+enum BitbucketViewer {
+    Unauthenticated,
+    Failed { detail: String, not_found: bool },
+}
+
+/// `BitbucketPullRequestApi.getViewer`, against `T3CODE_BITBUCKET_API_BASE_URL` with the
+/// `T3CODE_BITBUCKET_*` credential, if any.
+async fn bitbucket_viewer() -> BitbucketViewer {
+    let base = std::env::var("T3CODE_BITBUCKET_API_BASE_URL")
+        .unwrap_or_else(|_| "https://api.bitbucket.org/2.0".into());
+    let send_failed = || BitbucketViewer::Failed {
+        detail: "Failed to send the Bitbucket request.".into(),
+        not_found: false,
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        return send_failed();
+    };
+    let mut request = client
+        .get(format!("{}/user", base.trim_end_matches('/')))
+        .header("Accept", "application/json");
+    if let Ok(token) = std::env::var("T3CODE_BITBUCKET_ACCESS_TOKEN") {
+        request = request.bearer_auth(token);
+    } else if let (Ok(email), Ok(token)) = (
+        std::env::var("T3CODE_BITBUCKET_EMAIL"),
+        std::env::var("T3CODE_BITBUCKET_API_TOKEN"),
+    ) {
+        request = request.basic_auth(email, Some(token));
+    }
+    match request.send().await {
+        Err(_) => send_failed(),
+        Ok(response) => match response.status().as_u16() {
+            401 => BitbucketViewer::Unauthenticated,
+            200..=299 => BitbucketViewer::Unauthenticated,
+            status => BitbucketViewer::Failed {
+                detail: format!("Bitbucket returned HTTP {status}."),
+                not_found: status == 404,
+            },
+        },
+    }
+}
 
 /// The host and repository a Bitbucket project's identity names.
 fn bitbucket_repository(project: &Project) -> Option<(String, String)> {
@@ -256,6 +305,7 @@ fn bitbucket_repository(project: &Project) -> Option<(String, String)> {
 fn bitbucket_unreadable(
     projects: &[(Project, String, String)],
     input: &Value,
+    detail: &str,
     has_cursor: impl Fn(&str) -> bool,
 ) -> (Vec<Value>, Vec<Value>) {
     let mut providers: Vec<Value> = Vec::new();
@@ -266,7 +316,7 @@ fn bitbucket_unreadable(
                 provider["projectCount"] = json!(provider["projectCount"].as_u64().unwrap_or(0) + 1)
             }
             None => providers.push(json!({"host":host,"kind":"bitbucket","searchesOnHost":true,
-                "actions":["merge","close"],"projectCount":1,"configured":false,"detail":BITBUCKET_UNAUTHENTICATED})),
+                "actions":["merge","close"],"projectCount":1,"projectIds":null,"configured":false,"detail":detail})),
         }
         if input.get("cursors").is_none()
             || has_cursor(&format!("{host} {}", repository.to_lowercase()))
@@ -338,19 +388,39 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
         }
     }
     let mut out = json!({"viewers":{},"providers":[],"entries":[],"errors":[],"truncated":false,"nextCursors":{}});
-    let (bitbucket_providers, bitbucket_errors) = bitbucket_unreadable(&bitbucket, input, |key| {
-        cursors.contains_key(&key.to_owned())
-    });
+    let viewer = if bitbucket.is_empty() {
+        BitbucketViewer::Unauthenticated
+    } else {
+        bitbucket_viewer().await
+    };
+    let detail = match &viewer {
+        BitbucketViewer::Unauthenticated => BITBUCKET_UNAUTHENTICATED,
+        BitbucketViewer::Failed { detail, .. } => detail.as_str(),
+    };
+    let (bitbucket_providers, bitbucket_errors) =
+        bitbucket_unreadable(&bitbucket, input, detail, |key| {
+            cursors.contains_key(&key.to_owned())
+        });
     let Some((first, _)) = repos.first() else {
         out["providers"] = json!(bitbucket_providers);
         out["errors"] = json!(bitbucket_errors);
         if bitbucket_errors.is_empty() {
             return Ok(out);
         }
-        return Err(
-            json!({"_tag":"PullRequestUnavailableError","reason":"cli-unauthenticated",
-            "provider":"bitbucket","requirement":BITBUCKET_UNAUTHENTICATED,"listResult":out}),
-        );
+        return Err(match viewer {
+            BitbucketViewer::Unauthenticated => {
+                json!({"_tag":"PullRequestUnavailableError","reason":"cli-unauthenticated",
+                "provider":"bitbucket","requirement":BITBUCKET_UNAUTHENTICATED,"listResult":out})
+            }
+            BitbucketViewer::Failed { detail, not_found } => {
+                let mut error = json!({"_tag":"PullRequestOperationError","operation":"list",
+                    "detail":detail,"listResult":out});
+                if not_found {
+                    error["reason"] = json!("not-found");
+                }
+                error
+            }
+        });
     };
     let actions = [
         "merge",

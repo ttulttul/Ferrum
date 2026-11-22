@@ -7,6 +7,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import json
 from pathlib import Path
+import platform
+import re
 import secrets
 import shlex
 import sys
@@ -203,12 +205,40 @@ def observe_with_retry(name, server, page_url, page, attempts=2):
             print(f"RETRY {name} preview session {attempt}: {stall}", file=sys.stderr)
 
 
+def playwright_headless_shell(cache):
+    """The headless shell the Rust server launches from the Playwright cache: the newest
+    `chromium*` folder holding `chrome-headless-shell-linux64/chrome-headless-shell`."""
+    for folder in sorted((p for p in Path(cache).iterdir() if p.name.startswith("chromium")), reverse=True):
+        shell = folder / "chrome-headless-shell-linux64"
+        if (shell / "chrome-headless-shell").is_file():
+            return shell
+    raise SystemExit(f"no chrome-headless-shell-linux64 in the Playwright cache {cache}")
+
+
+def seed_reference_browser(root, reference_root, cache):
+    """Install a headless shell where the reference looks for its pinned one, so it never
+    downloads chrome-headless-shell from storage.googleapis.com.
+
+    The reference uses only `<T3 home>/tools/chrome-headless-shell/<platform>/<VERSION>/` and,
+    once something executable is there, does not check its version. Linking the folder the Rust
+    server launches gives both servers the same browser binary."""
+    if sys.platform != "linux" or platform.machine() not in ("x86_64", "AMD64"):
+        raise SystemExit("the preview suite seeds the reference's linux64 headless shell only")
+    source = (Path(reference_root) / "apps/server/src/preview/PreviewBrowser.ts").read_text()
+    version = re.search(r'export const VERSION = "([^"]+)"', source).group(1)
+    target = root / "tools/chrome-headless-shell/linux64" / version
+    target.parent.mkdir(parents=True)
+    target.symlink_to(playwright_headless_shell(cache).resolve(), target_is_directory=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command", required=True)
     parser.add_argument("--rust-command", required=True)
     parser.add_argument("--browser-cache", type=Path, required=True,
                         help="Installed Playwright browser cache shared by both servers")
+    parser.add_argument("--reference-root", type=Path, required=True,
+                        help="The reference checkout, for the headless shell version it pins")
     args = parser.parse_args()
     with TemporaryDirectory() as directory, ExitStack() as stack:
         page = stack.enter_context(ThreadingHTTPServer(("127.0.0.1", 0), PreviewPage))
@@ -225,6 +255,8 @@ def main():
             root = Path(directory, name)
             (root / ".cache").mkdir(parents=True)
             (root / ".cache/ms-playwright").symlink_to(args.browser_cache.resolve(), target_is_directory=True)
+            if name == "original":
+                seed_reference_browser(root, args.reference_root, args.browser_cache)
             servers[name] = managed_server(stack, shlex.split(cmd), root, secret, signing_key)
         try:
             original = observe_with_retry("original", servers["original"], url, page)

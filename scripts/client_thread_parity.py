@@ -268,6 +268,36 @@ GENERATED = re.compile(r"^(\d{4}-\d\d-\d\dT[\d:.]+Z|[0-9a-f]{40}|[0-9a-f-]{36}|.
 
 # Set in main: the Git configuration both servers and the seeded checkouts use.
 GIT_ISOLATION = {}
+# Set in main: the hosts both servers ask instead of real ones (a loopback Bitbucket API).
+HOST_FAKES = {}
+
+
+def fake_bitbucket():
+    """A loopback Bitbucket API that answers every request as Bitbucket answers an anonymous
+    `/user`: HTTP 401. Neither server is given a Bitbucket credential, so both list a Bitbucket
+    project as unauthenticated without leaving the machine."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Unauthorized(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = encode({"type": "error", "error": {"message": "Unauthorized"}})
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_POST = do_PUT = do_DELETE = do_GET
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Unauthorized)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/2.0"
+    assert url.startswith("http://127.0.0.1:")
+    return url
 
 
 def git(*args, cwd=None):
@@ -1190,7 +1220,7 @@ def scenario_env(temporary, name, root, scenario, drivers):
         write_fake_clis(fake_bin, drivers)
         path = os.pathsep.join([str(fake_bin), hidden])
     log = temporary / f"{name}-provider.log"
-    env = {**GIT_ISOLATION, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
+    env = {**GIT_ISOLATION, **HOST_FAKES, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
            "FAKE_PROVIDER_LOG": str(log), **login_shell,
            "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}
     return env, fake_bin, log
@@ -1276,7 +1306,7 @@ def thread_checks(args, credentials, temporary):
                     "rust": shlex.split(args.rust_command) + ["--provider-command", "false"]}
         for name, command in commands.items():
             root = Path(temporary) / name
-            url, cookie = managed_server(stack, command, root, *credentials, env=GIT_ISOLATION)
+            url, cookie = managed_server(stack, command, root, *credentials, env={**GIT_ISOLATION, **HOST_FAKES})
             seeded = seed(url, cookie, Path(temporary) / f"{name}-checkouts")
             roots[name] = Path(temporary) / f"{name}-checkouts"
             # The seeded turn ends as it starts; read the thread once it has.
@@ -1357,6 +1387,7 @@ def main():
     failures = 0
     with tempfile.TemporaryDirectory() as temporary:
         GIT_ISOLATION.update(isolated_git_env(Path(temporary) / "git"))
+        HOST_FAKES["T3CODE_BITBUCKET_API_BASE_URL"] = fake_bitbucket()
         if not args.skip_thread_checks and (not args.shard or args.shard[0] == 1):
             failures += thread_checks(args, credentials, Path(temporary) / "thread")
         failures += provider_turns(args, credentials)

@@ -261,11 +261,15 @@ def report_refused():
 
 def offline_env():
     """Variables that keep a server off the network: no telemetry to ingest.t3.codes (the
-    reference's T3CODE_TELEMETRY_ENABLED; the Rust server sends none), and HTTP(S) through the
-    refusing proxy, honoured by Node (NODE_USE_ENV_PROXY), reqwest, git and the gh CLI."""
+    reference's T3CODE_TELEMETRY_ENABLED; the Rust server sends none), none from the host CLIs a
+    server runs (gh, az), and HTTP(S) through the refusing proxy, honoured by Node
+    (NODE_USE_ENV_PROXY), reqwest, git, npm, Chromium and the gh CLI. Loopback is exempt."""
     proxy = refusing_proxy()
     loopback = "127.0.0.1,localhost,.localhost,::1,[::1]"
-    env = {"T3CODE_TELEMETRY_ENABLED": "false", "NODE_USE_ENV_PROXY": "1"}
+    env = {"T3CODE_TELEMETRY_ENABLED": "false", "NODE_USE_ENV_PROXY": "1",
+           # Host CLIs a server may run (gh, az) have telemetry and update checks of their own.
+           "GH_TELEMETRY": "false", "DO_NOT_TRACK": "1", "GH_NO_UPDATE_NOTIFIER": "1",
+           "AZURE_CORE_COLLECT_TELEMETRY": "false"}
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
         env[name] = env[name.lower()] = proxy
     env["NO_PROXY"] = env["no_proxy"] = loopback
