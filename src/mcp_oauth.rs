@@ -14,6 +14,7 @@ use crate::{
 #[cfg(feature = "native")]
 mod reference_sessions;
 mod tools;
+pub(crate) use tools::answer_matches;
 mod transport;
 use axum::{
     extract::{rejection::JsonRejection, OriginalUri, Query, State},
@@ -51,6 +52,13 @@ const CODE_TTL_MS: i64 = 60_000;
 const TOKEN_TTL_SECS: i64 = 30 * 24 * 3600;
 const SESSION_TTL_MS: i64 = 1_800_000;
 
+/// The stored link to another environment, as forwarding checks it.
+pub struct PeerLinkInfo {
+    pub label: String,
+    pub access: String,
+    pub expired: bool,
+}
+
 /// What the MCP sign-in and transport need from their server.
 pub trait McpHost: AuthHost {
     fn oauth(&self) -> &OAuth;
@@ -78,6 +86,22 @@ pub trait McpHost: AuthHost {
     /// `{projectId, workspaceRoot, commitError?}` or the failure.
     fn create_named_project(self: &Arc<Self>, name: String) -> HostFuture<Result<Value, Value>>;
     fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait;
+    /// The stored link to `environment_id`, if this server keeps links.
+    fn peer_link(&self, _environment_id: &str) -> Option<PeerLinkInfo> {
+        None
+    }
+    /// Calls `tool` in the linked environment `environment_id`, limited to
+    /// `limit` (`<runtime>/<interaction>`). `None` when this server cannot
+    /// reach linked environments.
+    fn forward_tool(
+        self: &Arc<Self>,
+        _environment_id: String,
+        _tool: String,
+        _arguments: Value,
+        _limit: String,
+    ) -> Option<HostFuture<Result<Value, (&'static str, String)>>> {
+        None
+    }
 }
 
 /// A host's future. The WebAssembly build runs on one thread, so its
@@ -186,6 +210,10 @@ struct Session {
 pub struct McpAccess {
     pub access: String,
     pub peer_link: bool,
+    /// The client session, which scopes its retry keys (`client:<id>`).
+    pub session_id: String,
+    /// What the client is called, as Connections lists it.
+    pub label: String,
 }
 enum Invalid {
     Page(&'static str),
@@ -362,6 +390,8 @@ impl OAuth {
             .map(|g| McpAccess {
                 access: g.access,
                 peer_link: g.request.peer_link,
+                session_id: hashed(token)[..32].to_owned(),
+                label: g.request.name,
             })
             .or_else(|| self.reference_access(token))
     }

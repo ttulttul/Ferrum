@@ -1147,3 +1147,326 @@ async fn thread_interrupt<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value)
     })?;
     Ok(json!({"threadId": id, "runId": run["id"], "status": "interrupt_requested"}))
 }
+
+/// What an agent hears when it names another machine while the beta is off here.
+const LINKED_ENVIRONMENTS_OFF: &str = "Linked environments is off on this machine, so no tool can act on another machine. Leave out environmentId to work here; the user can turn it on in Settings → Labs.";
+const FULL_ACCESS_REQUIRED: &str = "Changing projects or environment settings needs a live full-access/default calling thread or a full-access client.";
+const FORWARDED_DEFAULT_WAIT_MS: u64 = 30_000;
+const FORWARDED_MAX_WAIT_MS: u64 = 45_000;
+
+/// What a call names as `environmentId`, when that is another environment.
+/// `Err` when it is not an id at all.
+pub(super) fn linked_target<'a, S: McpHost>(
+    host: &S,
+    name: &str,
+    args: &'a Value,
+) -> Result<Option<&'a str>, Refusal> {
+    match args.get("environmentId") {
+        // The advertised codec takes null for an optional field.
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(id)) if id.is_empty() => Err(invalid_arguments()),
+        Some(Value::String(id)) => Ok((id != host.environment_id()).then_some(id.as_str())),
+        Some(_) => Err(Refusal::Rpc(
+            -32602,
+            format!("Invalid parameters for tool '{name}': Expected string | null\n  at [\"environmentId\"]"),
+        )),
+    }
+}
+
+impl Caller {
+    /// The modes this caller's writes are capped at (`clientModeCeiling`).
+    fn limits(&self) -> (&'static str, &'static str) {
+        let approved = rank(&self.granted.access).unwrap_or(0);
+        let runtime = self
+            .runtime_limit
+            .as_deref()
+            .and_then(rank)
+            .map_or(approved, |asked| asked.min(approved));
+        (RUNTIME_MODES[runtime], self.interaction())
+    }
+    /// `refuseReadOnlyClient`: the check a changing tool makes before it goes to a link.
+    fn refuse_read_only(&self) -> Result<(), Refusal> {
+        if self.granted.access == "read-only" {
+            return Err(failure(
+                "capability_denied",
+                "This tool changes the environment, and this MCP client was approved for read-only access.",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// What a call bound for a linked environment checks here before it goes:
+/// the caller, not the thread or project it names, which are checked there.
+fn remote_check(caller: &Caller, name: &str, args: &Value) -> Result<(), Refusal> {
+    match name {
+        "t3_thread_send" | "t3_thread_interrupt" => caller.refuse_read_only(),
+        "t3_thread_launch" => {
+            caller.refuse_read_only()?;
+            let (runtime, interaction) = caller.limits();
+            match arg_str(args, "runtimeMode")? {
+                None | Some("inherit") => {}
+                Some(mode) => {
+                    let wanted = rank(mode).ok_or_else(invalid_arguments)?;
+                    if wanted > rank(runtime).unwrap_or(0) {
+                        return Err(failure(
+                            "runtime_mode_escalation_denied",
+                            format!(
+                                "Child runtime mode {mode} is broader than parent mode {runtime}."
+                            ),
+                        ));
+                    }
+                }
+            }
+            match arg_str(args, "interactionMode")? {
+                Some("default") if interaction == "plan" => Err(failure(
+                    "interaction_mode_escalation_denied",
+                    "Child interaction mode default is broader than parent mode plan.",
+                )),
+                None | Some("default" | "plan" | "inherit") => Ok(()),
+                Some(_) => Err(invalid_arguments()),
+            }
+        }
+        "t3_project_create" => {
+            caller.refuse_read_only()?;
+            if caller.limits() != ("full-access", "default") {
+                return Err(failure("capability_denied", FULL_ACCESS_REQUIRED));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Runs `name` in the linked environment `target` (`McpToolAccess.routed`
+/// and `PeerForwarding.forward` in the reference). The tool's own checks hold
+/// the caller here; the linked environment then holds the call to the link's
+/// access, narrowed to the caller's modes, which every forwarded call carries.
+pub(super) async fn forward<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    name: &str,
+    args: &Value,
+    target: &str,
+) -> Outcome {
+    if !TOOLS
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|t| t["name"] == name))
+    {
+        return Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found")));
+    }
+    if !host.linked_environments_enabled() {
+        return Err(failure("capability_denied", LINKED_ENVIRONMENTS_OFF));
+    }
+    remote_check(caller, name, args)?;
+    // Every caller here reaches the peer as the one link session, so work a
+    // fenced link started never uses this environment's links.
+    if caller.granted.peer_link && caller.granted.access != "full-access" {
+        return Err(failure(
+            "capability_denied",
+            format!(
+                "This work was started from {} through a linked environment, so it cannot use this environment's links. A link paired with full access is not limited this way.",
+                caller.granted.label
+            ),
+        ));
+    }
+    let mut args = args.as_object().cloned().unwrap_or_default();
+    args.remove("environmentId");
+    // The linked environment refuses a mode above the link's access too, but as
+    // "broader than parent mode", which misleads when the parent here is broader.
+    if let Some(requested) = args
+        .get("runtimeMode")
+        .and_then(Value::as_str)
+        .filter(|m| rank(m).is_some())
+    {
+        if let Some(link) = host.peer_link(target).filter(|l| !l.expired) {
+            if link.access != "read-only" && rank(requested) > rank(&link.access) {
+                return Err(failure(
+                    "runtime_mode_escalation_denied",
+                    format!(
+                        "Linked environment \"{label}\" was linked with {access} access, so work there cannot run in {requested}. Omit runtimeMode to run it at a mode up to {access}, or link it again with broader access.",
+                        label = link.label,
+                        access = link.access
+                    ),
+                ));
+            }
+        }
+    }
+    // A pending upload lives here, so it cannot go with the call.
+    if args
+        .get("attachments")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+    {
+        return Err(failure(
+            "invalid_request",
+            "A launch in a linked environment cannot carry attachments yet.",
+        ));
+    }
+    // Retry keys are scoped to their caller before they leave: two callers
+    // here reusing a key never collide there.
+    if let Some(key) = args.get("clientRequestId").and_then(Value::as_str) {
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(
+            format!("client:{}\n{key}", caller.granted.session_id).as_bytes(),
+        );
+        args.insert(
+            "clientRequestId".into(),
+            json!(format!("fwd:{}", hex::encode(digest))),
+        );
+    }
+    if name == "t3_thread_wait" {
+        let asked = args
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(FORWARDED_DEFAULT_WAIT_MS);
+        args.insert(
+            "timeoutMs".into(),
+            json!(asked.clamp(1, FORWARDED_MAX_WAIT_MS)),
+        );
+    }
+    let (runtime, interaction) = caller.limits();
+    let Some(call) = host.forward_tool(
+        target.to_owned(),
+        name.to_owned(),
+        Value::Object(args),
+        format!("{runtime}/{interaction}"),
+    ) else {
+        return Err(failure(
+            "orchestration_error",
+            "This environment cannot reach linked environments.",
+        ));
+    };
+    call.await
+        .map_err(|(code, message)| Refusal::Failure(code, message))
+}
+
+/// Whether `value` is what `tool` answers, by the `outputSchema` it lists:
+/// the shape the reference decodes a linked environment's answer with.
+/// Extra keys are ignored, as the reference's decoding ignores them.
+pub(crate) fn answer_matches(tool: &str, value: &Value) -> bool {
+    TOOLS
+        .as_array()
+        .and_then(|tools| tools.iter().find(|t| t["name"] == tool))
+        .map(|t| &t["outputSchema"])
+        .is_none_or(|schema| schema.is_null() || matches_schema(schema, value))
+}
+
+fn matches_schema(schema: &Value, value: &Value) -> bool {
+    if let Some(options) = schema["anyOf"].as_array() {
+        if !options.iter().any(|option| matches_schema(option, value)) {
+            return false;
+        }
+    }
+    if let Some(allowed) = schema["enum"].as_array() {
+        if !allowed.contains(value) {
+            return false;
+        }
+    }
+    if let Some(kind) = schema["type"].as_str() {
+        let fits = match kind {
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            "number" => value.is_number(),
+            "integer" => value.as_f64().is_some_and(|n| n.fract() == 0.0),
+            "array" => value.is_array(),
+            "object" => value.is_object(),
+            _ => true,
+        };
+        if !fits {
+            return false;
+        }
+    }
+    if let Some(n) = value.as_f64() {
+        if schema["minimum"].as_f64().is_some_and(|min| n < min)
+            || schema["maximum"].as_f64().is_some_and(|max| n > max)
+        {
+            return false;
+        }
+    }
+    if let (Some(items), Some(values)) = (schema.get("items"), value.as_array()) {
+        if !values.iter().all(|v| matches_schema(items, v)) {
+            return false;
+        }
+    }
+    if let Some(object) = value.as_object() {
+        let required = schema["required"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if !required
+            .iter()
+            .filter_map(Value::as_str)
+            .all(|key| object.contains_key(key))
+        {
+            return false;
+        }
+        if let Some(properties) = schema["properties"].as_object() {
+            for (key, property) in properties {
+                if let Some(v) = object.get(key) {
+                    if !matches_schema(property, v) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Top-level arguments the tool's advertised schema does not list, named as
+/// the reference names them (`advertisedArgumentsOnly`).
+pub(super) fn unknown_arguments(name: &str, args: &Value) -> Result<(), Refusal> {
+    const MAX_NAMED: usize = 5;
+    const MAX_NAME_CHARS: usize = 64;
+    let Some(object) = args.as_object() else {
+        return Ok(());
+    };
+    let Some(tool) = TOOLS
+        .as_array()
+        .and_then(|tools| tools.iter().find(|t| t["name"] == name))
+    else {
+        return Ok(());
+    };
+    let accepted: Vec<&str> = tool["inputSchema"]["properties"]
+        .as_object()
+        .map(|p| p.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let unknown: Vec<&String> = object
+        .keys()
+        .filter(|k| !accepted.contains(&k.as_str()))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let named: Vec<String> = unknown
+        .iter()
+        .take(MAX_NAMED)
+        .map(|key| {
+            let cut: String = if key.chars().count() > MAX_NAME_CHARS {
+                key.chars().take(MAX_NAME_CHARS).chain(['…']).collect()
+            } else {
+                key.to_string()
+            };
+            Value::String(cut).to_string()
+        })
+        .collect();
+    let more = if unknown.len() > named.len() {
+        format!(" and {} more", unknown.len() - named.len())
+    } else {
+        String::new()
+    };
+    let accepted_text = if accepted.is_empty() {
+        "none".to_owned()
+    } else {
+        accepted.join(", ")
+    };
+    Err(Refusal::Rpc(
+        -32602,
+        format!(
+            "Invalid parameters for tool '{name}': Unknown argument{} {}{more}. Accepted arguments: {accepted_text}.",
+            if unknown.len() == 1 { "" } else { "s" },
+            named.join(", ")
+        ),
+    ))
+}
