@@ -146,6 +146,82 @@ SCENARIOS = [
 ]
 
 
+def enabled(instance, driver=None, **config):
+    """Settings that enable `instance` (off by default for every driver but Codex and Claude)."""
+    entry = {"driver": driver or instance, "enabled": True}
+    if config:
+        entry["config"] = config
+    return {"providerInstances": {instance: entry}}
+
+
+def ok(stdout="", exit=0, stderr=""):
+    return {"stdout": stdout, "stderr": stderr, "exit": exit}
+
+
+def driver_scenarios(instance, cli, version, signed_in, variants, wait=30):
+    """The scenarios every driver gets, from its commands when found and signed in (`signed_in`,
+    a list of spec entries after `--version`) and its own `variants` ({name: (commands, extra)}):
+    missing, `--version` failing and hanging, disabled, and a custom binaryPath."""
+    version_entry = {"args": ["--version"], **ok(version)}
+    def spec(commands):
+        return {"commands": commands}
+    scenarios = [
+        {"name": f"{instance} signed in", "instance": instance, "settings": enabled(instance),
+         "fakes": {cli: {"spec": spec([version_entry, *signed_in])}}},
+        {"name": f"{instance} missing", "instance": instance, "settings": enabled(instance), "fakes": {}},
+        {"name": f"{instance} version fails", "instance": instance, "settings": enabled(instance),
+         "fakes": {cli: {"spec": spec([{"args": ["--version"], **ok("", 2, f"{cli}: cannot start")}])}}},
+        {"name": f"{instance} version times out", "instance": instance, "settings": enabled(instance), "wait": wait,
+         "fakes": {cli: {"spec": spec([{"args": ["--version"], "sleep": 60}])}}},
+        {"name": f"{instance} disabled", "instance": instance, "settled": True,
+         "settings": {"providerInstances": {instance: {"driver": instance, "enabled": False}}},
+         "fakes": {cli: {"spec": spec([version_entry, *signed_in])}}},
+        {"name": f"{instance} custom binaryPath", "instance": instance,
+         "settings": enabled(instance, binaryPath=f"~/tools/{cli}-custom"),
+         "fakes": {cli: {"spec": spec([version_entry, *signed_in]), "at": f"tools/{cli}-custom"}}},
+    ]
+    for name, (commands, extra) in variants.items():
+        scenarios.append({"name": f"{instance} {name}", "instance": instance, "settings": enabled(instance),
+                          "fakes": {cli: {"spec": spec([version_entry, *commands])}}, **extra})
+    return scenarios
+
+
+FX_STATUS = {"args": ["status", "--json"], **ok('{"auth": "oauth", "model": "fx-large"}')}
+FX_MODELS = {"args": ["models", "--json"], **ok('{"ids": ["fx-large", "fx-small", "default", "fx-small"]}')}
+SCENARIOS += driver_scenarios("fx", "fx", "fx 0.0.13", [FX_STATUS, FX_MODELS], {
+    "signed out": ([{"args": ["status", "--json"], **ok('{"auth": "missing"}')}, FX_MODELS], {}),
+    "login unknown": ([{"args": ["status", "--json"], **ok("not json")}, FX_MODELS], {}),
+    "model listing fails": ([FX_STATUS, {"args": ["models", "--json"], **ok("", 1, "offline")}], {}),
+    "status times out": ([{"args": ["status", "--json"], "sleep": 60}, FX_MODELS], {"wait": 40}),
+    "sign-in picked up by a refresh": ([{"args": ["status", "--json"], **ok('{"auth": "missing"}')}, FX_MODELS],
+                                       {"refresh": {"fx": {"commands": [{"args": ["--version"], **ok("fx 0.0.13")},
+                                                                        FX_STATUS, FX_MODELS]}}}),
+})
+
+KIRO_TEMPLATE = {"configOptions": [{"id": "mode", "type": "select", "currentValue": "kiro_default", "options": [
+    {"value": "kiro_default", "name": "Default"},
+    {"value": "planner", "name": "Planner", "description": "Plans before it edits"},
+    {"value": " ", "name": "blank"}]}]}
+KIRO_ACP = {"prefix": ["acp"], "rpc": {
+    "initialize": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}, "authMethods": []},
+    "_kiro/config/template": KIRO_TEMPLATE}}
+KIRO_WHOAMI = {"args": ["whoami", "--format", "json"],
+               **ok('{"accountType": "BuilderId", "email": "dev@example.com"}\nProfile: default')}
+KIRO_MODELS = {"args": ["chat", "--list-models", "--format", "json"], **ok(json.dumps({
+    "models": [{"model_id": "auto", "model_name": "Auto"}, {"model_id": "claude-opus-5.5", "model_name": "Opus 5.5"},
+               {"model_id": "mystery-1"}], "default_model": "auto"}))}
+SCENARIOS += driver_scenarios("kiro", "kiro-cli", "kiro-cli 2.32.0", [KIRO_WHOAMI, KIRO_MODELS, KIRO_ACP], {
+    "signed out": ([{"args": ["whoami", "--format", "json"], **ok('{"account":null}', 1)}, KIRO_MODELS, KIRO_ACP], {}),
+    "sign-in unknown": ([{"args": ["whoami", "--format", "json"], **ok("boom", 3)}, KIRO_MODELS, KIRO_ACP], {}),
+    "api key": ([{"args": ["whoami", "--format", "json"], **ok('{"accountType": "ApiKey"}')}, KIRO_MODELS,
+                 KIRO_ACP], {}),
+    "without a model list or agents": ([KIRO_WHOAMI, {"args": ["chat", "--list-models", "--format", "json"],
+                                                      **ok("", 1)}, {"prefix": ["acp"], **ok("", 1)}], {}),
+    "default model not listed": ([KIRO_WHOAMI, {"args": ["chat", "--list-models", "--format", "json"], **ok(
+        json.dumps({"models": [{"model_id": "claude-sonnet-5", "model_name": "Sonnet 5"}]}))}, KIRO_ACP], {}),
+})
+
+
 def strip(value, root):
     """`value` without check times and with the temporary home masked."""
     if isinstance(value, dict):
@@ -163,6 +239,12 @@ def row_of(providers, instance):
     return next((p for p in providers if p.get("instanceId") == instance), None)
 
 
+def pending(row):
+    """Whether `row` is the placeholder an instance shows until its first check reports."""
+    message = str(row.get("message"))
+    return "has not been checked" in message or (message.startswith("Checking ") and message.endswith("..."))
+
+
 def wait_checked(url, cookie, instance, seconds, settled, root):
     """The instance's row once its first check has reported and the row has stopped changing
     (the reference publishes the probe, then the row with its version advisory), or after a few
@@ -174,7 +256,7 @@ def wait_checked(url, cookie, instance, seconds, settled, root):
     last, stable_since = None, None
     while True:
         row = row_of(rpc(url, cookie, "server.getConfig", {})["providers"], instance)
-        checked = row is not None and "has not been checked" not in str(row.get("message"))
+        checked = row is not None and not pending(row)
         if checked:
             if strip(row, root) == last:
                 if time.monotonic() - stable_since >= 1.5:
@@ -226,15 +308,21 @@ def run_server(args, command, root, scenario, temporary):
     for cli, fake in scenario["fakes"].items():
         target = root / fake["at"] if "at" in fake else bin_dir / cli
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(claude_script(fake["version"]) if cli == "claude"
-                          else codex_script(fake["version"], fake["app"]))
+        if "spec" in fake:
+            spec = root / f"{cli}.spec.json"
+            spec.write_text(json.dumps(fake["spec"]))
+            target.write_text(f'#!/bin/sh\nexec python3 "$FAKE_STATUS_CLI" {shlex.quote(str(spec))} "$@"\n')
+        else:
+            target.write_text(claude_script(fake["version"]) if cli == "claude"
+                              else codex_script(fake["version"], fake["app"]))
+            shutil.copyfile(FIXTURES / fake["fixture"], fixture)
         target.chmod(0o755)
-        shutil.copyfile(FIXTURES / fake["fixture"], fixture)
     settings = {"enableProviderUpdateChecks": False, **scenario.get("settings", {})}
     (root / "userdata").mkdir(parents=True, exist_ok=True)
     (root / "userdata/settings.json").write_text(json.dumps(settings))
     env = {"PATH": os.pathsep.join([str(bin_dir), path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "path")]),
-           "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"), "FAKE_PROVIDER_LOG": str(log),
+           "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
+           "FAKE_STATUS_CLI": str(FIXTURES / "status_cli.py"), "FAKE_PROVIDER_LOG": str(log),
            "FAKE_PROVIDER_SCENARIO": str(fixture)}
     outcome = {}
     with contextlib.ExitStack() as stack:
@@ -242,7 +330,11 @@ def run_server(args, command, root, scenario, temporary):
         outcome["row"] = strip(wait_checked(url, cookie, scenario["instance"], scenario.get("wait", 20),
                                             scenario.get("settled", False), temporary), temporary)
         if "refresh" in scenario:
-            shutil.copyfile(FIXTURES / scenario["refresh"], fixture)
+            if isinstance(scenario["refresh"], dict):
+                for cli, spec in scenario["refresh"].items():
+                    (root / f"{cli}.spec.json").write_text(json.dumps(spec))
+            else:
+                shutil.copyfile(FIXTURES / scenario["refresh"], fixture)
             ws = stack.enter_context(contextlib.closing(config_socket(url, cookie)))
             refreshed = rpc(url, cookie, "server.refreshProviders", {})
             outcome["refresh"] = strip(row_of(refreshed["providers"], scenario["instance"]), temporary)

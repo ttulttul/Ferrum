@@ -1,13 +1,14 @@
 //! Provider status checks, as the reference's managed provider snapshots
 //! (`makeManagedServerProvider`) and provider registry run them.
 //!
-//! Each enabled Codex and Claude instance is checked once the server is
-//! listening, again whenever its settings (or `enableProviderUpdateChecks`)
-//! change, when any settings change while it is signed out, on the
-//! background-activity interval (five minutes by default), and when a client
-//! asks (`server.refreshProviders`). A check runs the instance's CLI with the
-//! server's environment, which `login_shell` filled from the user's login
-//! shell, and `MISE_OFFLINE=1`:
+//! Each enabled Codex, Claude, fx and Kiro instance is checked once the
+//! server is listening, again whenever its settings (or
+//! `enableProviderUpdateChecks`) change, when any settings change while it is
+//! signed out, on the background-activity interval (five minutes by default),
+//! and when a client asks (`server.refreshProviders`). A check runs the
+//! instance's CLI from the server's working directory with the server's
+//! environment, which `login_shell` filled from the user's login shell, and
+//! `MISE_OFFLINE=1`:
 //!
 //! - Claude: `claude --version` (20s), then a Claude Code session that only
 //!   initializes, reads its usage and settings and stops (25s), as the
@@ -15,15 +16,22 @@
 //! - Codex: one `codex app-server` session that initializes and reads the
 //!   account, skills, models and config (20s), with `codex --version` after
 //!   a failure ([`codex`]).
+//! - fx: `fx --version` (10s), then `fx status --json` and `fx models --json`
+//!   (10s each) ([`fx`]).
+//! - Kiro: `kiro-cli --version` (10s), `kiro-cli whoami --format json`, and
+//!   once signed in `kiro-cli chat --list-models --format json` alongside an
+//!   ACP agent that reads its agent picker (10s each) ([`kiro`]).
 //!
-//! The result replaces the instance's "has not been checked" row in
-//! `server.getConfig` and `server.refreshProviders`, is pushed to config
-//! subscribers as `providerStatuses`, and is kept in
-//! `<base>/caches/<instanceId>.json`, which the next start shows until its
-//! first check finishes. Other drivers are not checked yet: their rows keep
-//! the pending status.
+//! The result replaces the instance's placeholder row in `server.getConfig`
+//! and `server.refreshProviders`, is pushed to config subscribers as
+//! `providerStatuses`, and is kept in `<base>/caches/<instanceId>.json`,
+//! which the next start shows until its first check finishes. Drivers not
+//! listed here are not checked yet: their rows keep the placeholder.
+mod acp;
 mod claude;
 mod codex;
+mod fx;
+mod kiro;
 
 use crate::server::AppState;
 use serde_json::{json, Map, Value};
@@ -33,7 +41,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The drivers this server checks.
-const CHECKED_DRIVERS: [&str; 2] = ["codex", "claudeAgent"];
+const CHECKED_DRIVERS: [&str; 4] = ["codex", "claudeAgent", "fx", "kiro"];
+/// The drivers whose snapshot gets its version advisory from an enrichment
+/// pass after the probe, rather than from the probe itself.
+const ENRICHED_DRIVERS: [&str; 2] = ["codex", "claudeAgent"];
+/// `AUTH_PROBE_TIMEOUT_MS`.
+const AUTH_PROBE_TIMEOUT_MS: u64 = 10_000;
 /// `FAILED_CHECK_RECHECK_DELAY`: a periodic check that failed over a ready
 /// provider is checked again this soon before it is shown.
 const FAILED_CHECK_RECHECK: Duration = Duration::from_secs(30);
@@ -58,6 +71,11 @@ pub(crate) struct Draft {
     pub slash_commands: Vec<Value>,
     pub skills: Vec<Value>,
     pub usage_limits: Option<Value>,
+    /// Driver-specific fields the snapshot sets over the placeholder's.
+    pub extra: Vec<(&'static str, Value)>,
+    /// `buildServerProvider` with a driver: the probe's own (manual-only)
+    /// version advisory.
+    pub version_advisory: bool,
 }
 
 /// What the scheduler checks an instance for.
@@ -331,6 +349,8 @@ async fn check_instance(
             .await
         }
         "codex" => codex::check(&instance.config, &env, &manifest).await,
+        "fx" => fx::check(&instance.config, &env).await,
+        "kiro" => kiro::check(&instance.config, &env).await,
         _ => return CheckOutcome::Skipped,
     };
     // The row it replaces: the last one shown for these settings, or the
@@ -361,7 +381,9 @@ async fn check_instance(
     }
     let probed = draft_row(&pending, &draft);
     let mut row = merge_snapshot(&previous, probed);
-    row = with_version_advisory(row, settings["enableProviderUpdateChecks"] != false);
+    if ENRICHED_DRIVERS.contains(&instance.driver.as_str()) {
+        row = with_version_advisory(row, settings["enableProviderUpdateChecks"] != false);
+    }
     row = apply_compatibility(row, &manifest);
     let unauthenticated = row["auth"]["status"] == "unauthenticated";
     service.publish(&instance.id, instance.fingerprint.clone(), row);
@@ -426,7 +448,7 @@ pub(crate) async fn refresh(state: &Arc<AppState>, only: Option<&str>) {
 pub(crate) fn before_enrichment(providers: &Value) -> Value {
     let mut providers = providers.clone();
     for row in providers.as_array_mut().into_iter().flatten() {
-        if CHECKED_DRIVERS.contains(&row["driver"].as_str().unwrap_or("")) {
+        if ENRICHED_DRIVERS.contains(&row["driver"].as_str().unwrap_or("")) {
             if let Some(object) = row.as_object_mut() {
                 object.shift_remove("versionAdvisory");
             }
@@ -607,7 +629,31 @@ fn draft_row(pending: &Value, draft: &Draft) -> Value {
     if let Some(usage) = &draft.usage_limits {
         object.insert("usageLimits".into(), usage.clone());
     }
+    for (key, value) in &draft.extra {
+        object.insert((*key).into(), value.clone());
+    }
+    if draft.version_advisory {
+        object.insert(
+            "versionAdvisory".into(),
+            manual_version_advisory(draft.version.as_deref(), &draft.checked_at),
+        );
+    }
     row
+}
+
+/// `createProviderVersionAdvisory` for a CLI with manual-only maintenance and
+/// no latest version.
+fn manual_version_advisory(current: Option<&str>, checked_at: &str) -> Value {
+    json!({
+        "status": "unknown",
+        "currentVersion": current,
+        "latestVersion": null,
+        "updateCommand": null,
+        "canUpdate": false,
+        "canInstallVersion": false,
+        "checkedAt": checked_at,
+        "message": null,
+    })
 }
 
 fn has_capabilities(model: &Value) -> bool {
@@ -616,22 +662,31 @@ fn has_capabilities(model: &Value) -> bool {
         .is_some_and(|d| !d.is_empty())
 }
 
-/// `shouldRetainMissingProviderModels`, for the drivers this server checks.
+/// `shouldRetainMissingProviderModels`.
 fn retain_missing_models(row: &Value) -> bool {
-    match row["driver"].as_str() {
-        Some("claudeAgent") => true,
-        Some("codex") => {
-            if row["enabled"] != true || row["auth"]["status"] == "unauthenticated" {
-                return false;
-            }
-            let pending =
-                row["enabled"] == true && row["installed"] != true && row["status"] == "warning";
-            let incomplete = row["installed"] == true
-                && (row["status"] == "error" || row["status"] == "warning");
-            pending || incomplete
+    let installed = row["installed"] == true;
+    let status = row["status"].as_str().unwrap_or("");
+    let auth = row["auth"]["status"].as_str().unwrap_or("");
+    let driver = row["driver"].as_str().unwrap_or("");
+    match driver {
+        "pi" => return !(installed && matches!(status, "ready" | "warning") && auth != "unknown"),
+        "acpRegistry" => {
+            return !(installed && status == "ready" && row.get("nativeSessions").is_some())
         }
-        _ => !(row["installed"] == true && row["status"] == "ready"),
+        "kiro" | "claudeAgent" => return true,
+        "antigravity" | "codex" | "opencode" => {}
+        _ => return !(installed && status == "ready"),
     }
+    if matches!(driver, "antigravity" | "codex")
+        && (row["enabled"] != true || auth == "unauthenticated")
+    {
+        return false;
+    }
+    let pending_antigravity = driver == "antigravity" && status == "warning" && auth == "unknown";
+    let pending = row["enabled"] == true && !installed && status == "warning";
+    let incomplete = installed
+        && (status == "error" || (matches!(driver, "codex" | "opencode") && status == "warning"));
+    pending_antigravity || pending || incomplete
 }
 
 /// `mergeProviderSnapshot`: the probed row, keeping models the probe no
@@ -1027,6 +1082,65 @@ async fn run_collect(
         Ok(Err(_)) => Err(RunError::Spawn),
         Err(_) => Err(RunError::TimedOut),
     }
+}
+
+/// A provider CLI's binary: `binaryPath` (with `~` expanded) or `default`.
+fn cli_binary(config: &Value, default: &str) -> String {
+    expand_home(
+        config["binaryPath"]
+            .as_str()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .unwrap_or(default),
+    )
+}
+
+/// One run of a provider CLI from the server's working directory, as the
+/// reference's `spawnAndCollect` under `Effect.timeoutOption`.
+async fn run_cli(
+    binary: &str,
+    args: &[&str],
+    env: &ProcessEnv,
+    timeout: Duration,
+) -> Result<CommandResult, RunError> {
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    run_collect(binary, &args, env, &cwd, timeout).await
+}
+
+/// `parseCliVersionResult` with the generic parser: a failed run reports no
+/// version.
+fn cli_version(result: &CommandResult) -> Option<String> {
+    if result.code != 0 {
+        return None;
+    }
+    parse_generic_version(&format!("{}\n{}", result.stdout, result.stderr))
+}
+
+/// `buildSelectOptionDescriptor` from (value, label, description, isDefault).
+fn select_descriptor(
+    id: &str,
+    label: &str,
+    options: &[(String, String, Option<String>, bool)],
+) -> Value {
+    let options: Vec<Value> = options
+        .iter()
+        .map(|(value, label, description, default)| {
+            let mut option = json!({"id": value, "label": label});
+            if let Some(description) = description.as_ref().filter(|d| !d.is_empty()) {
+                option["description"] = json!(description);
+            }
+            if *default {
+                option["isDefault"] = json!(true);
+            }
+            option
+        })
+        .collect();
+    let mut descriptor = json!({"id": id, "label": label, "type": "select", "options": options});
+    if let Some(current) = options.iter().find(|o| o["isDefault"] == true) {
+        descriptor["currentValue"] = current["id"].clone();
+    }
+    descriptor
 }
 
 /// `parseGenericCliVersion`.

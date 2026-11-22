@@ -94,6 +94,17 @@ pub(crate) fn list(state: &crate::AppState, settings: &Value, options: &Value) -
     )
 }
 
+/// The reference's initial snapshot of an enabled instance of `driver`
+/// whose status check has not reported yet: whether it is shown installed,
+/// and its message. Codex and Claude keep the generic placeholder.
+fn initial_status(driver: &str) -> Option<(bool, &'static str)> {
+    match driver {
+        "fx" => Some((true, "Checking fx CLI availability...")),
+        "kiro" => Some((true, "Checking Kiro CLI availability...")),
+        _ => None,
+    }
+}
+
 /// What an instance's status check depends on: its settings entry, the
 /// managed policy's verdict and `enableProviderUpdateChecks`. A check's
 /// result is shown only while these are unchanged, as the reference
@@ -174,7 +185,7 @@ pub(crate) fn list_with(
             _ => json!({"status":"unknown"}),
         };
         row["checkedAt"] = json!(started_at);
-        row["message"] = json!(denied.unwrap_or_else(|| if enabled {
+        row["message"] = json!(denied.clone().unwrap_or_else(|| if enabled {
             format!("{label} provider status has not been checked in this session yet.")
         } else {
             format!("{label} is disabled in T3 Code settings.")
@@ -193,6 +204,15 @@ pub(crate) fn list_with(
         row["models"] = models(stock_models, config);
         row["slashCommands"] = catalog["slashCommands"].clone();
         row["skills"] = catalog["skills"].clone();
+        if let (true, None, Some((installed, message))) = (enabled, &denied, initial_status(driver))
+        {
+            // The driver's own snapshot until its first check reports.
+            row["installed"] = installed.into();
+            row["message"] = json!(message);
+        }
+        if matches!(driver, "fx" | "kiro") {
+            row["versionAdvisory"] = json!({"status":"unknown","currentVersion":null,"latestVersion":null,"updateCommand":null,"canUpdate":false,"canInstallVersion":false,"checkedAt":started_at,"message":null});
+        }
         let mut row = overlay(id, row);
         if driver == "antigravity" && options["workspaceSnapshotsOnDemand"] != true {
             row["workspaceSnapshots"] = json!([]);
@@ -200,9 +220,6 @@ pub(crate) fn list_with(
         if driver == "opencode" {
             row["usageLimits"] =
                 json!({"checkedAt":started_at,"windows":[],"unavailable":{"reason":"unsupported"}});
-        }
-        if matches!(driver, "fx" | "kiro") {
-            row["versionAdvisory"] = json!({"status":"unknown","currentVersion":null,"latestVersion":null,"updateCommand":null,"canUpdate":false,"canInstallVersion":false,"checkedAt":started_at,"message":null});
         }
         if options["workspaceSnapshotsOnDemand"] == true
             && options["providerCatalogsOnDemand"] == true
