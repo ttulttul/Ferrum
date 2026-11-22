@@ -3,12 +3,12 @@
 //! `t3_worktree_list` (`toolkits/worktree/handlers.ts`).
 use super::*;
 
-const NOT_LINKED_WHAT: &str = "change projects or environment settings";
+pub(super) const NOT_LINKED_WHAT: &str = "change projects or environment settings";
 
 /// `McpToolAccess.writesEnvironment`: a writing caller (not read-only, a thread
 /// that still owns a live run) that is full-access/default, and, unless the
 /// tool lets it, not a fenced link's.
-async fn environment_writer<S: McpHost>(
+pub(super) async fn environment_writer<S: McpHost>(
     host: &S,
     caller: &Caller,
     refused: Option<&str>,

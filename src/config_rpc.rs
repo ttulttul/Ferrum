@@ -196,14 +196,17 @@ pub(crate) struct Subscription {
     /// `providerStatuses` event is due.
     provider_checks: broadcast::Receiver<()>,
     providers_due: Option<tokio::time::Instant>,
+    /// The themes directory as last read, and the published themes last sent.
+    themes_dir: Option<(SystemTime, u64)>,
+    themes: Value,
 }
 
 /// Events the reference server sends right after the snapshot to a client that
 /// opted in. Its theme and usage-limit-source services replay their current
-/// value first. This server publishes neither, so it answers only when that
-/// value is known to be empty: no theme files and no configured sources.
+/// value first. This server publishes no usage-limit sources, so it answers
+/// for those only when there are none; the themes are the published ones.
 fn initial_events(
-    state: &AppState,
+    themes: &Value,
     config: &Value,
     options: &Value,
 ) -> std::collections::VecDeque<Value> {
@@ -216,14 +219,9 @@ fn initial_events(
             json!({"version":1,"type":"usageLimitSourcesUpdated","payload":{"sources":[]}}),
         );
     }
-    let no_theme_files = std::fs::read_dir(&state.paths.themes).map_or(true, |entries| {
-        !entries
-            .flatten()
-            .any(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
-    });
-    if options["environmentThemes"] == true && no_theme_files {
+    if options["environmentThemes"] == true {
         events.push_back(
-            json!({"version":1,"type":"environmentThemesUpdated","payload":{"themes":[]}}),
+            json!({"version":1,"type":"environmentThemesUpdated","payload":{"themes":themes}}),
         );
     }
     events
@@ -239,7 +237,9 @@ impl Subscription {
         let settings_file = revision(&state.paths.settings);
         let bindings_file = revision(&state.paths.keybindings);
         let config = snapshot(state, references, options).await?;
-        let initial_events = initial_events(state, &config, options);
+        let themes_dir = revision(&state.paths.themes);
+        let themes = json!(crate::environment_theme::published(&state.paths.themes));
+        let initial_events = initial_events(&themes, &config, options);
         Ok(Self {
             initial_events,
             config,
@@ -251,6 +251,8 @@ impl Subscription {
             provider_event: None,
             provider_checks,
             providers_due: None,
+            themes_dir,
+            themes,
         })
     }
 
@@ -325,6 +327,19 @@ impl Subscription {
                         let view = self.config["settings"].clone();
                         if let Some(event) = self.provider_statuses(state, &view, options) {
                             return Ok(event);
+                        }
+                    }
+                    // A publish renames its file into place, which the directory's
+                    // time records; the reference watches the directory.
+                    if options["environmentThemes"] == true {
+                        let themes_dir = revision(&state.paths.themes);
+                        if themes_dir != self.themes_dir {
+                            self.themes_dir = themes_dir;
+                            let themes = json!(crate::environment_theme::published(&state.paths.themes));
+                            if themes != self.themes {
+                                self.themes = themes.clone();
+                                return Ok(json!({"version":1,"type":"environmentThemesUpdated","payload":{"themes":themes}}));
+                            }
                         }
                     }
                     let keybindings_file=revision(&state.paths.keybindings);

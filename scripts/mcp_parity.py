@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from parity_harness import encode, http, managed_server
 
 
-def observations(url, cookie):
+def observations(url, cookie, root):
     def post(path, data):
         status, _, body = http(url, "POST", path, encode(data), {"Cookie":cookie, "Content-Type":"application/json"})
         assert status in (200,201), (path,status,body)
@@ -37,6 +37,8 @@ def observations(url, cookie):
     def call(method, params):
         status, h, body = http(url, "POST", "/mcp", encode(dict(jsonrpc="2.0",id=1,method=method,params=params)),headers)
         assert status==200, (method,status,body)
+        # Each server has its own home, which a themes directory names.
+        body = body.replace(str(root).encode(), b"<home>")
         results.append((method,status,h.get("content-type"),body))
         return h
     h=call("initialize",dict(protocolVersion="2025-06-18",capabilities={},clientInfo=dict(name="Fixture",version="1")))
@@ -65,6 +67,8 @@ def observations(url, cookie):
         ("t3_environment_preferences_update", dict(newWorktreesStartFromOrigin=False)),
         ("t3_worktree_list", {}),
         ("t3_worktree_list", dict(threadId="thread-missing")),
+        ("t3_theme_read", {}),
+        ("t3_theme_set", dict(appearance="dark")),
     ]:
         call("tools/call", dict(name=name, arguments=arguments))
     call("tools/call",dict(name="missing-tool",arguments={}))
@@ -83,7 +87,7 @@ if __name__=="__main__":
     with TemporaryDirectory() as tmp, ExitStack() as stack:
         key, secret=secrets.token_bytes(32), secrets.token_urlsafe(32)
         servers=[managed_server(stack,shlex.split(cmd),Path(tmp)/str(i),secret,key) for i,cmd in enumerate((args.original_command,args.rust_command))]
-        expected,actual=[observations(*s) for s in servers]
+        expected,actual=[observations(*s, Path(tmp)/str(i)) for i,s in enumerate(servers)]
         for a,b in zip(expected,actual,strict=True):
             assert a==b,(a,b)
         print(f"{len(expected)}/{len(expected)} MCP transport fixtures matched after single-use OAuth approval and PKCE exchange")

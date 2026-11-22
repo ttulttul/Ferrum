@@ -1427,6 +1427,47 @@ impl mcp_oauth::McpHost for AppState {
                 .map_err(|_| ())
         })
     }
+    fn theme_read(
+        self: &Arc<Self>,
+        theme_id: Option<String>,
+    ) -> mcp_oauth::HostFuture<Result<mcp_oauth::ThemesRead, mcp_oauth::ThemeRefusal>> {
+        let dir = self.paths.themes.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let (themes, theme) = crate::environment_theme::read(&dir, theme_id.as_deref())?;
+                Ok((themes, theme, dir.to_string_lossy().into_owned()))
+            })
+            .await
+            .unwrap_or(Err(mcp_oauth::ThemeRefusal::NotSelected))
+        })
+    }
+    fn theme_apply(
+        self: &Arc<Self>,
+        theme_id: Option<String>,
+        theme: Option<serde_json::Value>,
+        appearance: Option<String>,
+    ) -> mcp_oauth::HostFuture<Result<(), mcp_oauth::ThemeRefusal>> {
+        let state = self.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::environment_theme::apply(
+                    &state.paths.themes,
+                    theme_id.as_deref(),
+                    theme.as_ref(),
+                    appearance.as_deref(),
+                    |patch| {
+                        state
+                            .settings
+                            .update(&serde_json::json!({ "patch": patch }), false)
+                            .map(|_| ())
+                            .map_err(|_| ())
+                    },
+                )
+            })
+            .await
+            .unwrap_or(Err(mcp_oauth::ThemeRefusal::NotSelected))
+        })
+    }
     fn list_refs(
         self: &Arc<Self>,
         input: serde_json::Value,

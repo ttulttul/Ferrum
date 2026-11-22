@@ -822,6 +822,193 @@
    }
   },
   {
+   "mcp": {
+    "tool": "t3_theme_read",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_read",
+    "arguments": {
+     "themeId": "missing"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "appearance": "dark"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "themeId": "grove"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "themeId": "nope"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "themeId": "Bad Id"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "themeId": "parity-ocean",
+     "theme": {
+      "name": "Parity Ocean",
+      "appearance": "dark",
+      "canvas": "#001122",
+      "accent": "#33aaff",
+      "css": "a { color: red }",
+      "extra": 1
+     },
+     "appearance": "light"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_read",
+    "arguments": {
+     "themeId": "parity-ocean"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "themeId": "parity-remote",
+     "theme": {
+      "name": "Parity Ocean",
+      "appearance": "dark",
+      "canvas": "#001122",
+      "accent": "#33aaff",
+      "css": "@import 'x.css';",
+      "extra": 1
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "themeId": "parity-plain",
+     "theme": {
+      "name": "Plain",
+      "appearance": "dark"
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "themeId": "t3-code",
+     "theme": {
+      "name": "Parity Ocean",
+      "appearance": "dark",
+      "canvas": "#001122",
+      "accent": "#33aaff",
+      "css": "a { color: red }",
+      "extra": 1
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "themeId": "t3-code"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "themeId": "parity-blank",
+     "theme": {
+      "name": " ",
+      "appearance": "dark"
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "themeId": "parity-version",
+     "theme": {
+      "name": "Parity Ocean",
+      "appearance": "dark",
+      "canvas": "#001122",
+      "accent": "#33aaff",
+      "css": "a { color: red }",
+      "extra": 1,
+      "version": 2
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "theme": {
+      "name": "Parity Ocean",
+      "appearance": "dark",
+      "canvas": "#001122",
+      "accent": "#33aaff",
+      "css": "a { color: red }",
+      "extra": 1
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_set",
+    "arguments": {
+     "appearance": "dim"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_theme_read",
+    "arguments": {}
+   }
+  },
+  {
    "send": {
     "method": "item/started",
     "params": {

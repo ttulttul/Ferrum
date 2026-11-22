@@ -13,6 +13,7 @@ use crate::{
 };
 #[cfg(feature = "native")]
 mod reference_sessions;
+pub(crate) mod themes;
 mod thread_credentials;
 mod tools;
 pub use thread_credentials::ThreadScope;
@@ -75,6 +76,19 @@ pub enum ProjectRefusal {
     Operation,
 }
 
+/// Why a theme was not applied (`EnvironmentThemeRefusedError`,
+/// `EnvironmentThemeNotSelectedError`).
+#[derive(Debug)]
+pub enum ThemeRefusal {
+    /// The theme cannot be published or selected; the reference's sentence.
+    Refused(String),
+    /// The settings that select it could not be saved.
+    NotSelected,
+}
+
+/// The published themes, the one asked for, and the themes directory.
+pub type ThemesRead = (Vec<Value>, Option<Value>, String);
+
 pub trait McpHost: AuthHost {
     fn oauth(&self) -> &OAuth;
     fn environment_id(&self) -> &str;
@@ -127,6 +141,24 @@ pub trait McpHost: AuthHost {
     /// `workspaceRoot`.
     fn list_refs(self: &Arc<Self>, _input: Value) -> HostFuture<Result<Value, ()>> {
         Box::pin(async { Err(()) })
+    }
+    /// The published themes, the one named `theme_id`, and where theme files
+    /// live (`EnvironmentThemeService.read`).
+    fn theme_read(
+        self: &Arc<Self>,
+        _theme_id: Option<String>,
+    ) -> HostFuture<Result<ThemesRead, ThemeRefusal>> {
+        Box::pin(async { Err(ThemeRefusal::NotSelected) })
+    }
+    /// Selects a theme and appearance, first publishing `theme` as `theme_id`
+    /// when given (`EnvironmentThemeService.apply`).
+    fn theme_apply(
+        self: &Arc<Self>,
+        _theme_id: Option<String>,
+        _theme: Option<Value>,
+        _appearance: Option<String>,
+    ) -> HostFuture<Result<(), ThemeRefusal>> {
+        Box::pin(async { Err(ThemeRefusal::NotSelected) })
     }
     /// `sourceControl.cloneRepository`, or the failure's `detail`.
     fn clone_repository(self: &Arc<Self>, _input: Value) -> HostFuture<Result<Value, String>> {

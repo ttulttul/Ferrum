@@ -10,6 +10,7 @@ use std::sync::{Arc, LazyLock};
 
 mod arguments;
 mod projects;
+mod theme;
 mod threads;
 
 /// Tools whose arguments are checked against their advertised schema first,
@@ -35,6 +36,7 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("t3_project_clone", &[]),
     ("t3_environment_preferences_update", &[]),
     ("t3_worktree_list", &[]),
+    ("t3_theme_read", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -68,6 +70,9 @@ const SERVED: &[&str] = &[
     "t3_project_clone",
     "t3_environment_preferences_update",
     "t3_worktree_list",
+    // Themes (batch 3b).
+    "t3_theme_read",
+    "t3_theme_set",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -536,6 +541,8 @@ pub(super) async fn call<S: McpHost>(
             projects::preferences_update(host, caller, args).await
         }
         "t3_worktree_list" => projects::worktree_list(host, caller, args).await,
+        "t3_theme_read" => theme::read(host, args).await,
+        "t3_theme_set" => theme::set(host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }
