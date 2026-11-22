@@ -36,6 +36,8 @@ Steps:
                              request_id), "$params.x" its params.x, and
                              "$session" the Claude session the CLI was
                              started on
+  {"sendTogether": [...]}    write several protocol lines together so a control callback
+                             and stream output are available in the same read
   {"stderr": "text"}         write a line to standard error
   {"sleep": seconds}
   {"exit": code}
@@ -415,8 +417,9 @@ while index < len(steps):
             if message.get("id") == step["expectReply"] and "method" not in message:
                 break
             answer(message)
-    elif "send" in step:
-        sys.stdout.write(json.dumps(fill(step["send"])) + "\n")
+    elif "send" in step or "sendTogether" in step:
+        frames = [step["send"]] if "send" in step else step["sendTogether"]
+        sys.stdout.write("".join(json.dumps(fill(frame)) + "\n" for frame in frames))
         sys.stdout.flush()
     elif "stderr" in step:
         sys.stderr.write(step["stderr"] + "\n")
