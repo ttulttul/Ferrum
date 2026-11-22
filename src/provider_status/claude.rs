@@ -1055,6 +1055,20 @@ async fn capabilities(
     }
 }
 
+/// The config directory holding the claude.ai login and the `.claude.json`
+/// naming its account, as the driver resolves them for reset credits.
+pub(super) fn credit_paths(config: &Value, env: &ProcessEnv) -> (PathBuf, PathBuf) {
+    let resolved = process_env(env);
+    let config_dir = config_dir(config, &resolved);
+    let account = super::claude_skills::account_config_path(config, &resolved, &config_dir);
+    (config_dir, account)
+}
+
+/// Drop the cached capability probe, so the next check probes again.
+pub(super) fn invalidate_capabilities(service: &ProviderStatus, instance_id: &str) {
+    invalidate(service, instance_id);
+}
+
 fn invalidate(service: &ProviderStatus, instance_id: &str) {
     service
         .claude_caps

@@ -1,0 +1,130 @@
+{
+ "_comment": "codex app-server answering the status probe for a ChatGPT login: usage windows and two banked rate-limit reset credits, and a reset when one is redeemed.",
+ "steps": [],
+ "replies": {
+  "initialize": {
+   "codexHome": "/tmp/codex-home",
+   "platformFamily": "unix",
+   "platformOs": "linux",
+   "userAgent": "codex_cli_rs/0.170.0"
+  },
+  "account/read": {
+   "account": {
+    "type": "chatgpt",
+    "email": "dev@example.com",
+    "planType": "plus"
+   },
+   "requiresOpenaiAuth": true
+  },
+  "model/list": {
+   "data": [
+    {
+     "id": "gpt-6-astra",
+     "model": "gpt-6-astra",
+     "displayName": "gpt-6-astra",
+     "description": "Frontier model",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "high",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "low",
+       "description": ""
+      },
+      {
+       "reasoningEffort": "medium",
+       "description": ""
+      },
+      {
+       "reasoningEffort": "high",
+       "description": ""
+      }
+     ],
+     "serviceTiers": [
+      {
+       "id": "priority",
+       "name": "Fast",
+       "description": "Faster responses"
+      }
+     ]
+    },
+    {
+     "id": "gpt-5.6-terra",
+     "model": "gpt-5.6-terra",
+     "displayName": "gpt-5.6-terra",
+     "description": "Older model",
+     "hidden": false,
+     "isDefault": true,
+     "defaultReasoningEffort": "medium",
+     "supportedReasoningEfforts": [
+      {
+       "reasoningEffort": "medium",
+       "description": ""
+      }
+     ]
+    }
+   ],
+   "nextCursor": null
+  },
+  "skills/list": {
+   "data": [
+    {
+     "cwd": "/workspace",
+     "errors": [],
+     "skills": [
+      {
+       "name": "release-notes",
+       "path": "/workspace/.codex/skills/release-notes/SKILL.md",
+       "enabled": true,
+       "description": "Write release notes",
+       "scope": "repo",
+       "shortDescription": "Release notes"
+      }
+     ]
+    }
+   ]
+  },
+  "config/read": {
+   "config": {},
+   "origins": {}
+  },
+  "account/rateLimits/read": {
+   "rateLimits": {
+    "limitId": "codex",
+    "planType": "plus",
+    "primary": {
+     "usedPercent": 92,
+     "windowDurationMins": 300,
+     "resetsAt": 4102444800
+    },
+    "secondary": {
+     "usedPercent": 40,
+     "windowDurationMins": 10080,
+     "resetsAt": 4103049600
+    }
+   },
+   "rateLimitResetCredits": {
+    "availableCount": 2,
+    "credits": [
+     {
+      "id": "credit-1",
+      "grantedAt": 1790000000,
+      "resetType": "codexRateLimits",
+      "status": "available",
+      "expiresAt": 4104000000
+     },
+     {
+      "id": "credit-2",
+      "grantedAt": 1790000000,
+      "resetType": "codexRateLimits",
+      "status": "available",
+      "expiresAt": 4105000000
+     }
+    ]
+   }
+  },
+  "account/rateLimitResetCredit/consume": {
+   "outcome": "reset"
+  }
+ }
+}

@@ -995,9 +995,23 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"consume-reset-credit","detail":"Provider instance not found."}}),
             );
         }
-        return Reply::Failure(
-            json!({"_tag":"Fail","error":{"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"consume-reset-credit","detail":"This provider does not bank reset credits."}}),
-        );
+        let credit_id = params["creditId"].as_str();
+        let (detail, cause) =
+            match crate::provider_status::reset_credits::consume(state, instance_id, credit_id)
+                .await
+            {
+                Some(Ok(result)) => return Reply::Success(result),
+                Some(Err(failure)) => (failure.detail, failure.cause),
+                None => (
+                    "This provider does not bank reset credits.".to_owned(),
+                    None,
+                ),
+            };
+        let mut error = json!({"_tag":"ProviderSetupError","instanceId":instance_id,"operation":"consume-reset-credit","detail":detail});
+        if let Some(cause) = cause {
+            error["cause"] = cause;
+        }
+        return Reply::Failure(json!({"_tag":"Fail","error":error}));
     }
     // Provider authentication and managed-installation controllers are backed by
     // provider-specific runtimes in the TypeScript server.  Preserve their exact
