@@ -621,7 +621,7 @@ impl AuthService {
             Ok(n != r.sessions.len())
         });
         self.invalidations.send_replace(());
-        let external = self.revoke_external_clients(Some(id));
+        let external = self.revoke_external_clients(Some(id), current.proof_key.as_deref());
         match result {
             Ok(revoked) => external.map(|ids| revoked || !ids.is_empty()),
             Err(e) => Err(e),
@@ -629,19 +629,23 @@ impl AuthService {
     }
     /// Revokes client sessions the TypeScript store holds, so a client
     /// revoked here is refused by both servers, and tells subscribers.
-    fn revoke_external_clients(&self, id: Option<&str>) -> Result<Vec<String>, &'static str> {
+    fn revoke_external_clients(
+        &self,
+        id: Option<&str>,
+        current_device: Option<&str>,
+    ) -> Result<Vec<String>, &'static str> {
         let Some(db) = self.external_pairing.as_deref() else {
             return Ok(Vec::new());
         };
         #[cfg(not(feature = "native"))]
         {
-            let _ = (db, id);
+            let _ = (db, id, current_device);
             Ok(Vec::new())
         }
         #[cfg(feature = "native")]
         {
-            let revoked =
-                external_pairing::revoke_clients(db, id, &iso(now())).map_err(|error| {
+            let revoked = external_pairing::revoke_clients(db, id, current_device, &iso(now()))
+                .map_err(|error| {
                     tracing::warn!(%error, "could not revoke client sessions in statev2.sqlite");
                     "internal_error"
                 })?;
@@ -670,7 +674,7 @@ impl AuthService {
             Ok(n.len())
         });
         self.invalidations.send_replace(());
-        let external = self.revoke_external_clients(None);
+        let external = self.revoke_external_clients(None, current.proof_key.as_deref());
         match result {
             Ok(revoked) => external.map(|ids| revoked + ids.len()),
             Err(e) => Err(e),

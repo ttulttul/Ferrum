@@ -46,6 +46,9 @@ fn queued(run: &crate::Run) -> bool {
 /// The role of a message the server sent as a notification: the prompt that
 /// continues a run a restart cut off.
 pub(crate) const NOTIFICATION_ROLE: &str = "notification";
+/// How many of its run's provider items a link card was asked after, kept on
+/// the stored card and left out of the projection.
+pub(crate) const LINK_CARD_POSITION: &str = "afterProviderItems";
 
 /// The reference's run statuses; older stores can hold others.
 fn run_status(status: &str) -> &'static str {
@@ -386,18 +389,6 @@ impl Thread {
             }
             items.push(item);
             let Some((_, run)) = run else { continue };
-            // The run's link cards, in the order they were asked.
-            let run_id = run.id.to_string();
-            for card in self
-                .link_requests
-                .iter()
-                .filter(|card| card["runId"] == run_id.as_str())
-            {
-                ordinal += 1;
-                let mut card = card.clone();
-                card["ordinal"] = json!(ordinal);
-                items.push(card);
-            }
             // A provider turn's end adds its own items.
             if self.provider.terminals.contains_key(&run.id) {
                 continue;
@@ -445,18 +436,59 @@ impl Thread {
             );
             items.push(failure);
         }
-        for (index, mut item) in provider {
+        // A link card takes the next free slot of its run when it is asked, as
+        // the reference's `nextTurnItemOrdinal`: after the provider items its
+        // run had then (`afterProviderItems`), before the ones that came later.
+        let mut cards: Vec<(usize, u64, Value)> = self
+            .link_requests
+            .iter()
+            .filter_map(|card| {
+                let index = self
+                    .runs
+                    .iter()
+                    .position(|run| card["runId"] == run.id.to_string().as_str())?;
+                let after = card[LINK_CARD_POSITION].as_u64().unwrap_or(0);
+                let mut card = card.clone();
+                if let Some(fields) = card.as_object_mut() {
+                    fields.remove(LINK_CARD_POSITION);
+                }
+                Some((index, after, card))
+            })
+            .collect();
+        let next_slot = |items: &[Value], index: usize| {
             let lower = (index as u64 + 1) * 1_000_000;
             let upper = lower + 999_999;
-            let next = items
+            items
                 .iter()
                 .filter_map(|i| i["ordinal"].as_u64())
                 .filter(|o| (lower..=upper).contains(o))
                 .max()
                 .unwrap_or(lower)
-                + 1;
-            item["ordinal"] = json!(next);
+                + 1
+        };
+        let mut seen: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+        let mut place_cards = |items: &mut Vec<Value>, index: usize, upto: u64| {
+            let mut position = 0;
+            while position < cards.len() {
+                if cards[position].0 == index && cards[position].1 <= upto {
+                    let (_, _, mut card) = cards.remove(position);
+                    card["ordinal"] = json!(next_slot(items, index));
+                    items.push(card);
+                } else {
+                    position += 1;
+                }
+            }
+        };
+        for (index, mut item) in provider {
+            let count = *seen.get(&index).unwrap_or(&0);
+            place_cards(&mut items, index, count);
+            item["ordinal"] = json!(next_slot(&items, index));
             items.push(item);
+            seen.insert(index, count + 1);
+        }
+        // Cards asked after the run's last provider item, or in a run with none.
+        for index in 0..self.runs.len() {
+            place_cards(&mut items, index, u64::MAX);
         }
         items.retain(|item| item.get(crate::provider_projection::HIDDEN_ITEM).is_none());
         items.sort_by(|a, b| {

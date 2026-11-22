@@ -2672,7 +2672,7 @@ async fn record_link_request<H: CommandHost>(
         .unwrap_or_default()
         .to_owned();
     let pending = command["linkStatus"] == "pending";
-    let (card, closed, wake_allowed) = {
+    let (card, closed, wake_allowed, unsnooze) = {
         let store = state.store.read().await;
         let thread = store
             .threads
@@ -2741,6 +2741,20 @@ async fn record_link_request<H: CommandHost>(
                     card["startedAt"] = json!(at);
                 }
             }
+            // Where the card sits among its run's items: after those it had
+            // when it was asked, which an answer keeps.
+            card[crate::thread_projection::LINK_CARD_POSITION] = match existing {
+                Some(existing) => existing[crate::thread_projection::LINK_CARD_POSITION].clone(),
+                None => {
+                    let index = thread.runs.iter().position(|r| r.id == run.id).unwrap_or(0);
+                    json!(thread
+                        .provider_records()
+                        .items
+                        .iter()
+                        .filter(|(i, _)| *i == index)
+                        .count())
+                }
+            };
             card["nativeItemRef"] = Value::Null;
             card["parentItemId"] = Value::Null;
             card["status"] = json!(match command["linkStatus"].as_str() {
@@ -2789,8 +2803,29 @@ async fn record_link_request<H: CommandHost>(
             _ => Vec::new(),
         };
         let deleted = thread.stored_row()["deletedAt"].is_string();
-        (card, closed, !unchanged && !thread.archived && !deleted)
+        // A link wakes a snoozed thread, as the reference's `thread.unsnoozed`.
+        let unsnooze = card.is_some()
+            && command["linkStatus"] == "linked"
+            && !thread.stored_row()["snoozedUntil"].is_null();
+        (
+            card,
+            closed,
+            !unchanged && !thread.archived && !deleted,
+            unsnooze,
+        )
     };
+    if unsnooze {
+        let at = json!(crate::auth_service::iso(crate::auth_service::now()));
+        state
+            .commit(Event::ThreadPatched {
+                thread_id: thread_id.clone(),
+                patch: json!({
+                    "snoozed_until": null,
+                    "row": {"updatedAt": at, "snoozedUntil": null, "snoozedAt": null},
+                }),
+            })
+            .await?;
+    }
     let mut seq = match card {
         Some(card) => {
             state

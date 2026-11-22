@@ -6,15 +6,16 @@ A thread's provider CLI (the fake Claude Code in tests/fixtures/providers,
 playing claude_link.json) calls T3's tools on the MCP server its server gave
 it: it lists the links, names a machine already linked (answered `linked` at
 once), forwards a call there (which carries `T3-Sender-Thread`), asks for three
-links the user must make (`pending` cards), retries one with the same key,
+links the user must make (`pending` cards), retries one with the same key, asks for one more mid-turn,
 and makes two calls the server refuses. Then the user answers the cards
 through `peerLinks.answerRequest`: one declined, one linked to the fake peer
-(which wakes the agent with a notification, so a resumed turn runs), a card
+(which wakes the agent with a notification, so a resumed turn runs, and
+wakes the thread from its snooze), a card
 answered twice, requests naming no card or no thread, and a card archiving
 the thread closed.
 
 Compared: every MCP answer, every `answerRequest` reply, the cards and wake
-messages in the thread's projection, the links each server then keeps, and
+messages in the thread's projection, where each card sits in the timeline, the links each server then keeps, and
 what the fake peer received. All data is fake: temporary homes, loopback
 addresses, fixture labels, generated keys and a fake CLI.
 """
@@ -113,6 +114,19 @@ def cards(projection):
             "messages": messages, "runs": [run.get("status") for run in projection.get("runs", [])]}
 
 
+def timeline(projection):
+    """The thread's turn items in order, as a client lays them out: where each card sits among
+    the items its run had when it was asked."""
+    items = sorted(projection.get("turnItems", []), key=lambda item: (item.get("ordinal", 0), item.get("id")))
+    return [f"{item.get('type')} {re.sub(r'.*:', '', item['id']) if item.get('type') == 'link_request' else ''}".strip()
+            for item in items]
+
+
+def snooze_state(projection):
+    thread = projection.get("thread") or {}
+    return {"snoozedUntil": thread.get("snoozedUntil"), "snoozed": thread.get("snoozedAt") is not None}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command", required=True)
@@ -152,6 +166,7 @@ def main():
                     {k: e[k] for k in ("method", "modeLimit", "sender", "params")} for e in peer.take_log()
                     if e["method"] == "tools/call"]
                 record["cards after the turn"] = cards(after_turn)
+                record["timeline after the turn"] = timeline(after_turn)
                 by_key = {re.sub(r".*:", "", item["id"]): item["id"] for item in after_turn.get("turnItems", [])
                           if item.get("type") == "link_request"}
                 answer = lambda key, payload: server.rpc("peerLinks.answerRequest", dict(
@@ -159,8 +174,15 @@ def main():
                 record["decline"] = answer("card-vps", {"type": "decline"})
                 record["answered twice"] = answer("card-vps", {"type": "decline"})
                 wait_runs(server, 2)
+                # A snoozed thread wakes when a card links.
+                snoozed = server.rpc("orchestration.dispatchCommand", {
+                    "type": "thread.snooze", "commandId": "snooze-thread", "threadId": THREAD,
+                    "snoozedUntil": "2099-01-01T00:00:00.000Z"})
+                assert snoozed["_tag"] == "Success", snoozed
+                record["snoozed before the link"] = snooze_state(server.projection())
                 record["link"] = answer("card-url", {"type": "link", "urls": [peer.url], "access": "auto",
                                                      "pairingCode": "fixture-code"})
+                record["snooze after the link"] = snooze_state(server.projection())
                 record["no such card"] = answer("card-none", {"type": "decline"})
                 record["no such thread"] = server.rpc("peerLinks.answerRequest", dict(
                     threadId="thread:missing", turnItemId="turn-item:missing", answer={"type": "decline"}))

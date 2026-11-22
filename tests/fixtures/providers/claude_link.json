@@ -811,6 +811,19 @@
      }
     },
     {
+     "sleep": 1
+    },
+    {
+     "mcp": {
+      "tool": "t3_environment_link",
+      "arguments": {
+       "hint": "desktop",
+       "reason": "Asked mid-turn",
+       "clientRequestId": "card-late"
+      }
+     }
+    },
+    {
      "send": {
       "type": "stream_event",
       "event": {
