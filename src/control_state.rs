@@ -138,6 +138,26 @@ impl ControlState {
         Ok(adopted)
     }
 
+    /// The title effects the outbox still owes, for this server to run.
+    pub async fn pending_title_effects(&self) -> Vec<crate::title_generation::TitleEffect> {
+        match self.shared.lock().await.as_mut() {
+            Some(shared) => shared.pending_title_effects().unwrap_or_else(|error| {
+                tracing::warn!(%error, "could not read title effects from the outbox");
+                Vec::new()
+            }),
+            None => Vec::new(),
+        }
+    }
+
+    /// Settles an outbox effect this server carried out.
+    pub async fn settle_effect(&self, effect_id: &str, status: &str) {
+        if let Some(shared) = self.shared.lock().await.as_mut() {
+            if let Err(error) = shared.settle_effect(effect_id, status) {
+                tracing::warn!(%error, effect_id, "could not settle an outbox effect");
+            }
+        }
+    }
+
     pub(crate) async fn persist_scheduled_tasks(&self) -> anyhow::Result<()> {
         let tasks = self.scheduled_tasks.lock().await;
         let bytes = serde_json::to_vec(&tasks.values().collect::<Vec<_>>())?;
@@ -345,7 +365,8 @@ fn shared_commit(
     for (index, event) in events.iter_mut().enumerate() {
         event.sequence = last + 1 + index as u64;
     }
-    let effects = crate::shared_store::continuation_effects(store, &record.event, &occurred_at);
+    let mut effects = crate::shared_store::continuation_effects(store, &record.event, &occurred_at);
+    effects.extend(crate::shared_store::title_effects(&record.event));
     let commit = crate::shared_store::SharedCommit {
         threads: planned.threads,
         projects,

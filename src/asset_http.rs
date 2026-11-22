@@ -216,3 +216,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/assets/", get(not_found))
         .route("/api/assets/*path", get(asset))
 }
+
+/// The file of the attachment `id` in the attachments directory, if any.
+pub(crate) fn attachment_file(state: &AppState, id: &str) -> Option<std::path::PathBuf> {
+    grants::attachment_path(&state.paths, id)
+}

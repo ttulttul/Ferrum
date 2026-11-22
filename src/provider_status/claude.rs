@@ -25,7 +25,7 @@ const MANAGED_MCP_CONFIG: &str = "/etc/claude-code/managed-mcp.json";
 
 /// Variables a Claude Code session that started this server exports, which
 /// would make a child claude act as part of that session.
-const HOST_SESSION_VARIABLES: [&str; 13] = [
+pub(crate) const HOST_SESSION_VARIABLES: [&str; 13] = [
     "CLAUDECODE",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_HOST_SESSION_ID",

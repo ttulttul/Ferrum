@@ -37,7 +37,11 @@ for (const name of fs.readdirSync(fixtures).filter((file) => /^(status_)?codex_.
       console.log(`${name}: reply to ${method} does not decode:\n${String(error.message).slice(0, 2000)}`);
     }
   }
-  for (const steps of scenario.steps ? [scenario.steps] : scenario.variants.map((variant) => variant.steps)) {
+  // A variant that plays another fixture (`scenario`) is checked with that fixture.
+  const played = scenario.steps
+    ? [scenario.steps]
+    : scenario.variants.filter((variant) => variant.steps).map((variant) => variant.steps);
+  for (const steps of played) {
     let expected = null;
     for (const step of steps) {
       if (step.expect) expected = step.expect;

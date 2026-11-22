@@ -104,6 +104,17 @@ PROVIDER_SCENARIOS = [
     {"name": "codex interrupt", "instance": "codex", "model": "fixture", "scenario": "codex_interrupt.json",
      "interrupt": "command"},
     {"name": "claude turn", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_turn.json"},
+    # A seeded first message titles the thread with the text generation model (Codex), and a
+    # regenerate request titles it again from the whole conversation.
+    {"name": "codex title", "instance": "codex", "model": "fixture", "scenario": "codex_title.json",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate"},
+    # Without Codex installed, the title falls back to Claude's text generation model.
+    {"name": "claude title fallback", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_title.json", "dispatch": {"titleSeed": "Run echo hi and write notes.txt"},
+     "title": "initial"},
+    # A title the provider cannot generate leaves the seed, and a regenerate reports why.
+    {"name": "codex title failed", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate"},
     {"name": "claude crash", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_crash.json"},
     {"name": "claude missing", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": None},
     # Installed where the user's login shell, not the server's own PATH, finds it.
@@ -220,12 +231,17 @@ case "$1 $2" in
   "--version "*) echo "codex-cli 0.170.0"; exit 0;;
   "app-server --help") echo "Usage: codex app-server"; exit 0;;
   "app-server "*) exec python3 "$FAKE_PROVIDER_CLI" "$@";;
+  "exec "*) exec python3 "$FAKE_PROVIDER_CLI" "$@";;
+esac
+case "$*" in
+  *"mcp list --json") exec python3 "$FAKE_PROVIDER_CLI" "$@";;
 esac
 exit 0
 """
 FAKE_CLAUDE = """#!/bin/sh
 case "$*" in
   --version*) echo "2.1.200 (Claude Code)"; exit 0;;
+  "-p "*) exec python3 "$FAKE_PROVIDER_CLI" "$@";;
   *--output-format*stream-json*) exec python3 "$FAKE_PROVIDER_CLI" "$@";;
 esac
 exit 0
@@ -420,7 +436,8 @@ def seed_turn(url, cookie, root, scenario):
         raise RuntimeError(f"project.create failed on {url}: HTTP {status} {body[:400]!r}")
     rpc(url, cookie, "orchestration.dispatchCommand", {
         "type": "thread.create", "commandId": "seed-thread", "threadId": THREAD, "projectId": "project:github",
-        "title": "Thread", "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"]},
+        "title": "New thread" if scenario.get("title") else "Thread",
+        "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"]},
         "runtimeMode": scenario.get("runtimeMode", "full-access"), "interactionMode": "default", "branch": None,
         "worktreePath": None, "createdBy": "user", "creationSource": "web"})
     return {"threadId": THREAD, "turnMs": 60000 if scenario.get("change") else 30000,
@@ -691,6 +708,49 @@ def turn_launches(log):
             method = json.loads(line).get("method")
             if method in ("thread/start", "thread/resume"):
                 out.append("resume" if method == "thread/resume" else "new")
+    return out
+
+
+def title_state(projection):
+    """The thread's title and its last title request, without times or generated ids."""
+    thread = projection.get("thread") or {}
+    last = thread.get("lastTitleRegeneration") or {}
+    return {"title": thread.get("title"), "titleRenamed": thread.get("titleRenamed"),
+            "pending": thread.get("titleRegeneration") is not None,
+            "last": {k: v for k, v in last.items() if k != "completedAt"} or None}
+
+
+def title_runs(log, root):
+    """Each text generation run of the fake CLIs: its arguments, prompt, output schema and
+    environment, with temporary paths masked."""
+    def mask(value):
+        if isinstance(value, str):
+            for server in ("original", "rust"):
+                value = value.replace(f"{root}/{server}", "<home>/<server>")
+            value = re.sub(r"/[^\s\"]*/t3code-(codex-schema|codex-output|claude-title)-[^\s\"]*",
+                           lambda m: f"<tmp>/{m.group(1)}", value)
+            return value.replace(str(root), "<home>")
+        if isinstance(value, list):
+            return [mask(item) for item in value]
+        if isinstance(value, dict):
+            return {key: mask(item) for key, item in value.items()}
+        return value
+    path = Path(str(log) + ".title")
+    return [mask(json.loads(line)) for line in (path.read_text().splitlines() if path.exists() else [])]
+
+
+def title_outcome(url, cookie, scenario, log, root):
+    """The thread's title once its first title request settled, and with "regenerate", once a
+    regenerate request settled too; then the text generation runs that produced them."""
+    settled = lambda p: not (p.get("thread") or {}).get("titleRegeneration")
+    out = {"initial": title_state(wait_for(url, cookie, settled, 60))}
+    if scenario["title"] == "regenerate":
+        rpc(url, cookie, "orchestration.dispatchCommand", {
+            "type": "thread.metadata.update", "commandId": "regenerate-title", "threadId": THREAD,
+            "regenerateTitle": True})
+        out["regenerated"] = title_state(wait_for(url, cookie, lambda p: settled(p) and (
+            (p.get("thread") or {}).get("lastTitleRegeneration") or {}).get("requestId") == "regenerate-title", 60))
+    out["runs"] = title_runs(log, root)
     return out
 
 
@@ -988,6 +1048,13 @@ def compare_turn(original, rust):
     watched = [original.get("reconcileLive"), rust.get("reconcileLive")]
     if watched[0] != watched[1]:
         problems["live reconcile"] = [f"original {watched[0]}", f"rust     {watched[1]}"]
+    titles = [original.get("title"), rust.get("title")]
+    if titles[0] != titles[1]:
+        for key in sorted(set((titles[0] or {}).keys()) | set((titles[1] or {}).keys())):
+            a, b = (titles[0] or {}).get(key), (titles[1] or {}).get(key)
+            if a != b:
+                problems[f"title {key}"] = [f"original {json.dumps(a, sort_keys=True)[:4000]}",
+                                            f"rust     {json.dumps(b, sort_keys=True)[:4000]}"]
     launches = [original.get("launches", []), rust.get("launches", [])]
     if launches[0] != launches[1]:
         problems["cli launches"] = [f"original {launches[0]}", f"rust     {launches[1]}"]
@@ -1125,6 +1192,8 @@ def provider_turns(args, credentials):
                     url, cookie = managed_server(stack, command, root, *credentials, env=env)
                     seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
                     outcomes[name] = run_client(args, url, cookie, seeded)
+                    if scenario.get("title"):
+                        outcomes[name]["title"] = title_outcome(url, cookie, scenario, log, temporary)
                     if scenario.get("status"):
                         outcomes[name]["status"] = provider_status(url, cookie, scenario["instance"], temporary)
                 outcomes[name]["cli"] = cli_approvals(log)

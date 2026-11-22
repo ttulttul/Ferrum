@@ -159,8 +159,18 @@ Gaps the thread tools surface that live in shared code, not in the tools:
   change on the same instance, or a Codex runtime-mode change, lets the turn run on. The
   `* mid-turn` scenarios in `scripts/client_thread_parity.py` send these changes over the
   WebSocket while a turn runs.
-- **Title regeneration.** `t3_thread_update` `regenerate_title` records the request as the
-  reference does, but Rust generates no title, so the request stays pending.
+- **Title regeneration** (fixed). As the reference does, a thread's first user message (seeded
+  by the client, or the first after only `/compact` or `/logout`) and a `regenerate_title`
+  request record `titleRegeneration` and a `thread-title.generate` outbox effect, and Rust runs
+  it (`src/title_generation.rs`): the reference's prompt and thread context, the text
+  generation model with the reference's fallback when its instance cannot run, `codex exec` or
+  `claude -p` with the title schema, then `thread.title.regeneration.complete`. Either server
+  takes over effects the other left pending. Not ported: titles on Cursor, Grok, OpenCode,
+  Antigravity, Pi and Muse, custom text generators, the source control lookup of linked PRs and
+  issues, and the source thread's history in a fork's title. The `codex title`,
+  `claude title fallback` and `codex title failed` scenarios in
+  `scripts/client_thread_parity.py` compare each CLI's arguments, prompt and schema, and the
+  thread's title afterwards.
 - **Claude workflows.** Rust's Claude sessions run no workflow tasks, so `t3_workflow_stop`
   can only answer "not running" or "no live provider task".
 - **Coverage.** The thread scenario works on the caller's own thread: a fork needs a stable

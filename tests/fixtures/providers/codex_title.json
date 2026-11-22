@@ -1,0 +1,4 @@
+{
+  "variants": [{"scenario": "codex_turn.json"}],
+  "title": {"title": "Echo Greeting and Notes File", "needsRefinement": false}
+}

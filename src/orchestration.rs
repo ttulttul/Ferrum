@@ -38,6 +38,9 @@ pub(crate) trait CommandHost:
     /// then ends that process instead of interrupting the turn, as the
     /// reference's detach does. Hosts without local provider turns ignore it.
     fn detach_turn(&self, _run: Uuid) {}
+    /// Run a `thread-title.generate` effect in the background. Hosts that
+    /// run no provider CLIs ignore it.
+    fn generate_title(self: Arc<Self>, _effect: crate::title_generation::TitleEffect) {}
     fn close_guest_thread(&self, thread_id: &str) -> Result<(), String>;
     fn resolve_guest_message(
         &self,
@@ -790,7 +793,38 @@ async fn apply_command<H: CommandHost>(
                     .threads
                     .get(thread_id)
                     .is_some_and(|thread| thread.runs.iter().any(|run| run.status == "running"));
-            return start_run(
+            let title_effect = state
+                .store
+                .read()
+                .await
+                .threads
+                .get(thread_id)
+                .filter(|thread| {
+                    continues.is_none()
+                        && crate::title_generation::initial_title_requested(
+                            &thread.full_projection(),
+                            command,
+                        )
+                })
+                .map(|_| {
+                    crate::title_generation::TitleEffect::new(
+                        &receipt.command_id,
+                        thread_id,
+                        json!({"type": "initial", "messageId": command["messageId"]}),
+                    )
+                });
+            // As the reference's orchestrator, the request is recorded
+            // before the message's run.
+            if let Some(effect) = &title_effect {
+                let at = crate::auth_service::iso(crate::auth_service::now());
+                state
+                    .commit(Event::ThreadPatched {
+                        thread_id: thread_id.to_owned(),
+                        patch: crate::title_generation::initial_title_patch(command, effect, &at),
+                    })
+                    .await?;
+            }
+            let sequence = start_run(
                 state.clone(),
                 receipt,
                 thread_id,
@@ -806,7 +840,12 @@ async fn apply_command<H: CommandHost>(
                 command["scheduledTaskId"].is_string() && command["modelSelection"].is_null(),
                 None,
             )
-            .await;
+            .await?;
+            // Its effect runs once the message it titles is recorded.
+            if let Some(effect) = title_effect {
+                state.clone().generate_title(effect);
+            }
+            return Ok(sequence);
         }
         "thread.stop" | "run.interrupt" | "subagent.stop" => {
             if let Some(thread_id) = thread_id {
@@ -1166,6 +1205,7 @@ async fn apply_command<H: CommandHost>(
                     .map(|thread| thread.stored_row())
                     .unwrap_or_else(|| json!({}));
                 let mut row = json!({"updatedAt":at});
+                let mut title_effect = None;
                 match command_type {
                     "thread.archive" => {
                         patch.insert("archived".into(), true.into());
@@ -1314,11 +1354,11 @@ async fn apply_command<H: CommandHost>(
                                 patch.insert("title".into(), title.clone());
                             }
                             if let Some(outcome) = command.get("outcome") {
-                                row["lastTitleRegeneration"] = json!({
-                                    "requestId": request_id,
-                                    "completedAt": at,
-                                    "outcome": outcome
-                                });
+                                // `{...outcome, requestId, completedAt}`.
+                                let mut last = outcome.as_object().cloned().unwrap_or_default();
+                                last.insert("requestId".into(), json!(request_id));
+                                last.insert("completedAt".into(), at.clone());
+                                row["lastTitleRegeneration"] = Value::Object(last);
                             }
                             row["titleRegeneration"] = Value::Null;
                         }
@@ -1380,6 +1420,13 @@ async fn apply_command<H: CommandHost>(
                                 "requestId": command["commandId"],
                                 "startedAt": at
                             });
+                            let effect = crate::title_generation::TitleEffect::new(
+                                &receipt.command_id,
+                                thread_id,
+                                json!({"type": "regenerate"}),
+                            );
+                            patch.insert("titleGeneration".into(), effect.patch_field());
+                            title_effect = Some(effect);
                         } else if command.get("regenerateTitle") == Some(&Value::Bool(false)) {
                             row["titleRegeneration"] = Value::Null;
                         }
@@ -1452,6 +1499,9 @@ async fn apply_command<H: CommandHost>(
                     .id;
                 if let Some(reason) = reason {
                     detach_session(&state, thread_id, reason).await?;
+                }
+                if let Some(effect) = title_effect {
+                    state.clone().generate_title(effect);
                 }
                 return Ok(sequence);
             }

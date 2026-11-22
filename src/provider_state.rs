@@ -27,6 +27,10 @@ pub struct ProviderState {
     /// What the native session's prompts used of its attachment budget
     /// (bytes, pages), once a prompt reached it.
     pub attachment_budget: Option<(u64, u64)>,
+    /// The title the thread had when its Claude session last started a
+    /// turn: the session's own title, which the reference names it with
+    /// then (and renames only while the session runs).
+    pub session_title: Option<String>,
     /// When a server restart stopped the provider session, until a turn
     /// starts it again.
     pub session_stopped_at: Option<u64>,
