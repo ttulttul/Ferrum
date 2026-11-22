@@ -2,7 +2,6 @@ use serde_json::{json, Value};
 use std::{
     fmt, io,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
 #[derive(Debug)]
@@ -38,6 +37,7 @@ impl fmt::Display for Step {
 }
 impl std::error::Error for Step {}
 
+#[cfg(feature = "native")]
 pub(crate) fn step(
     error: io::Error,
     method: &'static str,
@@ -139,7 +139,14 @@ fn platform(error: &io::Error, method: &str, syscall: &str, path: &Path) -> Valu
            "cause":{"name":"Error","message":node_message}})
 }
 
+#[cfg(not(feature = "native"))]
 fn node_directory_error_includes_path() -> bool {
+    true
+}
+
+#[cfg(feature = "native")]
+fn node_directory_error_includes_path() -> bool {
+    use std::sync::OnceLock;
     static INCLUDES_PATH: OnceLock<bool> = OnceLock::new();
     *INCLUDES_PATH.get_or_init(|| {
         let output = crate::login_shell::command("node")

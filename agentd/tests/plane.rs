@@ -175,6 +175,7 @@ impl Server {
                 bootstrap_credential: "secret".into(),
                 cookie_port: 3773,
                 provider_command: command,
+                managed_policy: None,
                 workspace_mcp_endpoint: address
                     .map(|addr| format!("http://{addr}/mcp").parse().unwrap()),
             },

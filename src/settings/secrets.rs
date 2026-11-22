@@ -653,17 +653,20 @@ pub(super) fn prepare(current: &Value, mut next: Value) -> Prepared {
     }
 }
 
+#[cfg(feature = "native")]
 #[derive(Default)]
 pub(crate) struct Resolver {
     values: std::sync::Mutex<HashMap<(String, String), Cached>>,
     reads: tokio::sync::Mutex<()>,
 }
 
+#[cfg(feature = "native")]
 struct Cached {
     account: String,
     value: Option<String>,
 }
 
+#[cfg(feature = "native")]
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum ReadMode {
     Cached,
@@ -673,6 +676,7 @@ pub(crate) enum ReadMode {
     Invalidate,
 }
 
+#[cfg(feature = "native")]
 pub(crate) fn provider_label<'a>(settings: &'a Value, source: &'a Value) -> &'a str {
     let id = source["provider"].as_str().unwrap_or("");
     settings["secretProviders"][id]["label"]
@@ -682,6 +686,7 @@ pub(crate) fn provider_label<'a>(settings: &'a Value, source: &'a Value) -> &'a 
         .unwrap_or(id)
 }
 
+#[cfg(feature = "native")]
 impl Resolver {
     pub(crate) async fn resolve(
         &self,
@@ -738,6 +743,7 @@ impl Resolver {
     }
 }
 
+#[cfg(feature = "native")]
 fn valid_op_reference(account: &str, field: &str) -> bool {
     use std::sync::LazyLock;
     static ACCOUNT: LazyLock<regex::Regex> =
@@ -752,6 +758,7 @@ fn valid_op_reference(account: &str, field: &str) -> bool {
     ACCOUNT.is_match(account) && FIELD.is_match(field)
 }
 
+#[cfg(feature = "native")]
 async fn read_op(account: &str, field: &str, cli: &Path) -> Option<String> {
     use std::{process::Stdio, time::Duration};
     tokio::time::timeout(Duration::from_secs(45), async {
@@ -777,7 +784,7 @@ async fn read_op(account: &str, field: &str, cli: &Path) -> Option<String> {
     .flatten()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use crate::persistence::FsStore;

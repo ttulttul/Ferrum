@@ -1,20 +1,26 @@
-//! The settings file service (native): reads, writes and watches settings.json.
+//! Reads and writes settings.json and its private sidecars as one transaction.
 use super::*;
+#[cfg(feature = "native")]
 use crate::config::ServerPaths;
 use crate::persistence::{DocumentStore, WriteMode};
 use serde_json::{json, Value};
 use std::{
     io,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
 pub struct Settings {
-    paths: ServerPaths,
+    settings_path: PathBuf,
+    secrets_dir: PathBuf,
+    history_dir: Option<PathBuf>,
     documents: Arc<dyn DocumentStore>,
+    #[cfg(feature = "native")]
     pub(crate) resolver: secrets::Resolver,
     pub(crate) policy: policy::Policy,
     lock: Mutex<Option<LastWrite>>,
     defaults: Value,
+    #[cfg(feature = "native")]
     pub(crate) cleanup_changed: tokio::sync::Notify,
     changes: tokio::sync::broadcast::Sender<(Value, Value)>,
 }
@@ -108,18 +114,57 @@ fn sparse_order(sparse: Value, normalized: &Value) -> Value {
 }
 impl Settings {
     /// The settings service over `documents`, which holds settings.json.
+    #[cfg(feature = "native")]
     pub(crate) fn open_in(
         paths: &ServerPaths,
         documents: Arc<dyn DocumentStore>,
     ) -> anyhow::Result<Self> {
-        secrets::ensure_dir(&*documents, &paths.secrets)?;
         let policy = policy::Policy::load(&*documents)?;
+        Self::open(
+            paths.settings.clone(),
+            paths.secrets.clone(),
+            Some(paths.state_dir.clone()),
+            documents,
+            policy,
+        )
+    }
+
+    pub(crate) fn open_plane(
+        dir: &Path,
+        documents: Arc<dyn DocumentStore>,
+        managed_policy: Option<Value>,
+    ) -> anyhow::Result<Self> {
+        let policy = managed_policy
+            .map(policy::Policy::parse)
+            .transpose()?
+            .unwrap_or_default();
+        Self::open(
+            dir.join("settings.json"),
+            dir.join("secrets"),
+            None,
+            documents,
+            policy,
+        )
+    }
+
+    fn open(
+        settings_path: PathBuf,
+        secrets_dir: PathBuf,
+        history_dir: Option<PathBuf>,
+        documents: Arc<dyn DocumentStore>,
+        policy: policy::Policy,
+    ) -> anyhow::Result<Self> {
+        secrets::ensure_dir(&*documents, &secrets_dir)?;
         let defaults = schema::normalize(&policy.default_settings()).map_err(anyhow::Error::msg)?;
         let service = Self {
+            #[cfg(feature = "native")]
             cleanup_changed: Default::default(),
             changes: tokio::sync::broadcast::channel(64).0,
-            paths: paths.clone(),
+            settings_path,
+            secrets_dir,
+            history_dir,
             documents,
+            #[cfg(feature = "native")]
             resolver: Default::default(),
             policy,
             lock: Mutex::new(None),
@@ -129,11 +174,11 @@ impl Settings {
         Ok(service)
     }
     fn error(&self, operation: &str) -> Value {
-        json!({"_tag":"ServerSettingsError","settingsPath":self.paths.settings,"operation":operation})
+        json!({"_tag":"ServerSettingsError","settingsPath":self.settings_path,"operation":operation})
     }
     fn io_failure(&self, err: &anyhow::Error, fallback: &str) -> Value {
         err.downcast_ref::<io::Error>()
-            .and_then(|e| secrets::rpc_error(&self.paths.settings, e))
+            .and_then(|e| secrets::rpc_error(&self.settings_path, e))
             .unwrap_or_else(|| self.error(fallback))
     }
     fn save(&self, settings: &Value, raw: &Value) -> io::Result<()> {
@@ -150,10 +195,10 @@ impl Settings {
         )?;
         bytes.push(b'\n');
         self.documents
-            .write(&self.paths.settings, &bytes, WriteMode::ReplaceTarget)
+            .write(&self.settings_path, &bytes, WriteMode::ReplaceTarget)
     }
     fn load(&self) -> anyhow::Result<Loaded> {
-        let input = match self.documents.read(&self.paths.settings) {
+        let input = match self.documents.read(&self.settings_path) {
             Ok(bytes) => json_syntax::parse_file(&bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(json!({})),
             Err(e) => {
@@ -167,7 +212,7 @@ impl Settings {
                     "read-file",
                     "readFile",
                     syscall,
-                    &self.paths.settings,
+                    &self.settings_path,
                 )
                 .into());
             }
@@ -189,7 +234,7 @@ impl Settings {
         };
         let was_folded = settings["projectSettingsFolded"].clone();
         let prior_hosts = settings["sourceControlHosts"].clone();
-        mutations::migrate(&mut settings, &raw, &self.paths.state_dir)?;
+        mutations::migrate(&mut settings, &raw, self.history_dir.as_deref())?;
         let otherwise_changed =
             was_folded != settings["projectSettingsFolded"] || raw.get("providers").is_some();
         let settings = secrets::migrate(
@@ -197,7 +242,7 @@ impl Settings {
             prior_hosts,
             &raw,
             &*self.documents,
-            &self.paths.secrets,
+            &self.secrets_dir,
             otherwise_changed,
             |disk| self.save(disk, &raw),
         )?;
@@ -211,7 +256,7 @@ impl Settings {
         let mut value = self.policy.effective(&secrets::materialize(
             &*self.documents,
             disk,
-            &self.paths.secrets,
+            &self.secrets_dir,
         )?);
         mutations::effective_selection(&mut value, |driver| {
             self.policy.provider_denial(driver).is_none()
@@ -223,7 +268,7 @@ impl Settings {
         // The upstream watcher debounces a writer's own filesystem events for 100 ms.
         if let Some(written) = guard.as_ref() {
             if crate::platform::monotonic_ms().saturating_sub(written.at) < 100
-                && written.revision == self.documents.revision(&self.paths.settings)
+                && written.revision == self.documents.revision(&self.settings_path)
             {
                 return self.effective(&written.settings);
             }
@@ -236,6 +281,7 @@ impl Settings {
             .map(|v| secrets::redact(&v, references))
             .map_err(|e| self.io_failure(&e, "read-file"))
     }
+    #[cfg(feature = "native")]
     pub(crate) fn set_speech_key(&self, kind: &str, key: &Value) -> Result<Value, Value> {
         self.update(
             &json!({"patch":{"cloudSpeechCredentials":{kind:key}}}),
@@ -302,20 +348,21 @@ impl Settings {
             })?;
         let prepared = secrets::prepare(current, next);
         prepared
-            .persist(&*self.documents, &self.paths.secrets, |disk| {
+            .persist(&*self.documents, &self.secrets_dir, |disk| {
                 self.save(disk, &loaded.raw)
             })
             .map_err(|e| self.io_failure(&e.into(), "write-file"))?;
         let effective = self
             .effective(&prepared.disk)
             .map_err(|e| self.io_failure(&e, "read-secret"))?;
+        #[cfg(feature = "native")]
         if crate::storage_cleanup::policy_changed(current, &prepared.disk) {
             self.cleanup_changed.notify_one();
         }
         *guard = Some(LastWrite {
             settings: prepared.disk,
             at: crate::platform::monotonic_ms(),
-            revision: self.documents.revision(&self.paths.settings),
+            revision: self.documents.revision(&self.settings_path),
         });
         let view = secrets::redact(&effective, references);
         if self.changes.receiver_count() > 0 {

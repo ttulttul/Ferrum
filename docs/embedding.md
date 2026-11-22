@@ -42,6 +42,7 @@ pub struct Config {
     pub cookie_port: u16,             // the port in `t3_session_<port>`
     pub provider_command: Vec<String>,// a turn's command; the prompt follows
     pub workspace_mcp_endpoint: Option<url::Url>,
+    pub managed_policy: Option<serde_json::Value>,
 }
 
 pub struct Host {
@@ -98,6 +99,17 @@ The instance's `config.binaryPath`, `config.launchArgs`, `config.homePath`
 and `environment` apply, along with the thread's model and reasoning
 effort. Any other instance runs `Config::provider_command`. The native
 thread or session a turn reports is resumed by the thread's next turn.
+
+The embedding host can supply an administrator's `policy.json` through
+`Config::managed_policy`. The plane validates it at startup and returns its
+summary in `server.getConfig`. Managed defaults, locked settings, runtime
+ceilings and provider restrictions apply to effective settings and writes.
+Use `plane.allows_client(kind)` when choosing which listeners to serve.
+
+`server.updateSettings` stores sensitive values in private documents under
+`STATE_DIR/secrets`. Settings RPCs and config subscriptions return the
+redacted view for each connection's `settingsSecretReferences` capability.
+Provider turns receive their materialized environment in the workspace.
 
 Set `Config::workspace_mcp_endpoint` to the URL that reaches this plane's
 `/mcp` route **from agentd**, for example `https://env.example.org/mcp`.
@@ -240,7 +252,9 @@ added later are recorded the same way.
 tasks on the JavaScript event loop and keeps one storage alarm, and its
 alarm handler calls `on_alarm` and then delivers. Its optional `T3_INITIAL_SETTINGS`
 variable is written to `settings.json` when the environment has none, for
-example `{"linkedEnvironmentsEnabled":true}` to let other servers link to it. It holds a
-`RemoteWorkspace` with no transport, so workspace methods answer as
+example `{"linkedEnvironmentsEnabled":true}` to let other servers link to it.
+Set the optional `T3_MANAGED_POLICY` binding to a JSON string containing the
+deployment's managed policy. The Worker requires that policy to allow remote
+clients. It holds a `RemoteWorkspace` with no transport, so workspace methods answer as
 unavailable and a turn ends as failed. A host that embeds the library adds
 the transport as described above.

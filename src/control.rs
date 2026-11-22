@@ -76,6 +76,8 @@ pub struct Config {
     /// This environment's /mcp endpoint as reached from its workspace.
     /// Supplied by the embedding host, independently of incoming requests.
     pub workspace_mcp_endpoint: Option<url::Url>,
+    /// Administrator-supplied managed policy in the reference policy.json format.
+    pub managed_policy: Option<Value>,
 }
 
 /// What the plane runs on: the host's event loop and the workspace it
@@ -110,6 +112,7 @@ pub const MAINTAIN_INTERVAL_MS: i64 = 250;
 
 pub struct ControlPlane {
     config: Config,
+    settings: crate::settings::Settings,
     started_at: String,
     state: ControlState,
     /// The MCP sign-in's grants, kept in the state documents.
@@ -129,6 +132,9 @@ pub struct ControlPlane {
 impl AuthHost for ControlPlane {
     fn auth(&self) -> &AuthService {
         &self.state.auth
+    }
+    fn pairing_refusal(&self) -> Option<String> {
+        self.settings.policy.pairing_refusal()
     }
 }
 impl crate::mcp_oauth::McpHost for ControlPlane {
@@ -151,7 +157,7 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
         ControlPlane::settings(self)
     }
     fn providers(&self) -> Value {
-        self.config_snapshot(&Value::Null)["providers"].take()
+        self.providers_for(&self.settings(), &Value::Null)
     }
     fn dispatch(
         self: &Arc<Self>,
@@ -175,6 +181,19 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
                 Reply::Failure(mut error) => Err(error["error"].take()),
                 _ => Err(json!({"message":"Failed to mutate project."})),
             }
+        })
+    }
+    fn update_settings(
+        self: &Arc<Self>,
+        patch: Value,
+    ) -> crate::mcp_oauth::HostFuture<Result<(), ()>> {
+        let plane = self.clone();
+        Box::pin(async move {
+            plane
+                .settings
+                .update(&json!({"patch": patch}), false)
+                .map(|_| ())
+                .map_err(|_| ())
         })
     }
     fn create_named_project(
@@ -231,13 +250,19 @@ struct Signals {
     workspace: broadcast::Receiver<crate::workspace::BusFrame>,
     /// Whether polled workspace state is due for another reading.
     poll: bool,
+    settings: broadcast::Receiver<(Value, Value)>,
 }
 
 impl Signals {
-    fn new(state: &ControlState, workspace: &RemoteWorkspace) -> Self {
+    fn new(
+        state: &ControlState,
+        workspace: &RemoteWorkspace,
+        settings: &crate::settings::Settings,
+    ) -> Self {
         Self {
             workspace: workspace.bus_frames(),
             poll: false,
+            settings: settings.subscribe(),
             events: state.events.subscribe(),
             shell: state.shell_events.subscribe(),
             suggestions: state.prompt_suggestion_events.subscribe(),
@@ -291,6 +316,13 @@ impl Signals {
                 Err(Empty | broadcast::error::TryRecvError::Closed) => break,
             }
         }
+        loop {
+            match self.settings.try_recv() {
+                Ok(views) => signals.push(Signal::SettingsChanged(Arc::new(views))),
+                Err(Lagged(_)) => continue,
+                Err(Empty | broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
         if std::mem::take(&mut self.poll) {
             signals.push(Signal::Poll);
         }
@@ -311,7 +343,7 @@ impl ControlPlane {
     // One thread in the WebAssembly build: the plane need not be `Send`.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn open(
-        config: Config,
+        mut config: Config,
         documents: Arc<dyn DocumentStore>,
         log: Box<dyn EventLog + Send>,
         host: Host,
@@ -327,9 +359,18 @@ impl ControlPlane {
                 "workspace_mcp_endpoint must be an HTTP(S) URL without credentials, query or fragment"
             );
         }
+        let settings = crate::settings::Settings::open_plane(
+            std::path::Path::new(STATE_DIR),
+            documents.clone(),
+            config.managed_policy.take(),
+        )?;
         let auth = AuthService::with_bootstrap(config.bootstrap_credential.clone())
             .with_port(config.cookie_port)
             .open_in(documents.clone(), std::path::Path::new(STATE_DIR))?;
+        auth.revoke_disallowed(
+            settings.policy.allows_client("remote"),
+            settings.policy.allows_connect(),
+        )?;
         let started_at = auth_service::iso(auth_service::now());
         let mut oauth =
             crate::mcp_oauth::OAuth::open(documents.clone(), std::path::Path::new(STATE_DIR))?;
@@ -337,9 +378,10 @@ impl ControlPlane {
             oauth.restore_thread_credentials()?;
         }
         let state = ControlState::open(auth, documents, log, std::path::Path::new(STATE_DIR))?;
-        let signals = Mutex::new(Signals::new(&state, &host.workspace));
+        let signals = Mutex::new(Signals::new(&state, &host.workspace, &settings));
         let plane = Arc::new(Self {
             config,
+            settings,
             started_at,
             state,
             oauth,
@@ -464,16 +506,10 @@ impl ControlPlane {
     /// Ask each enabled Codex instance's CLI for its models, as the
     /// reference's provider check does, and keep what it lists.
     async fn list_provider_models(&self) {
-        let settings = self.settings();
-        let providers = server_config::providers::list_with(
-            &self.started_at,
-            |_| None,
-            |_| None,
-            &settings,
-            &Value::Null,
-            &Value::Null,
-            |_, row| row,
-        );
+        let Ok(settings) = self.settings.internal() else {
+            return;
+        };
+        let providers = self.providers_for(&settings, &Value::Null);
         let instances: Vec<String> = providers
             .as_array()
             .into_iter()
@@ -494,6 +530,7 @@ impl ControlPlane {
             };
             let spec = crate::workspace::TurnSpec {
                 cwd: WORKSPACE_ROOT.into(),
+                env_remove: self.managed_env_remove(),
                 env,
                 provider: Some(provider),
                 ..Default::default()
@@ -580,50 +617,15 @@ impl ControlPlane {
         self.schedule();
     }
 
-    /// The plane's settings: `settings.json` in its documents, normalized,
-    /// or the defaults when there is none or it does not parse.
-    pub fn settings(&self) -> Value {
-        let path = std::path::Path::new(STATE_DIR).join("settings.json");
-        self.documents
-            .read_optional(&path)
-            .ok()
-            .flatten()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .and_then(|stored| {
-                crate::settings::schema::normalize(&stored)
-                    .and_then(|settings| crate::settings::schema::normalize_runtime(&settings))
-                    .ok()
-            })
-            .unwrap_or_else(default_settings)
+    /// Whether the host may serve this type of client (remote, desktop or
+    /// local-browser). The embedding host knows where its listener is bound.
+    pub fn allows_client(&self, kind: &str) -> bool {
+        self.settings.policy.allows_client(kind)
     }
 
-    /// `server.updateSettings` with its decoded `payload`: the patch (and
-    /// provider instance mutation) applied with the native server's
-    /// semantics, written to `settings.json` in the plane's documents. The
-    /// plane has no managed policy or secret store, so it skips those steps.
-    fn update_settings(&self, payload: &Value) -> Result<Value, Value> {
-        let path = std::path::Path::new(STATE_DIR).join("settings.json");
-        let error = |operation: &str| json!({"_tag":"ServerSettingsError","settingsPath":path.to_string_lossy(),"operation":operation});
-        let next =
-            crate::settings::mutations::apply(&self.settings(), payload).map_err(|operation| {
-                let mut e = error(&operation);
-                if operation == "create-provider-instance" {
-                    e["providerInstanceId"] =
-                        payload["providerInstanceMutation"]["instanceId"].clone();
-                }
-                e
-            })?;
-        let mut next = crate::settings::schema::normalize_runtime(&next).map_err(|message| {
-            json!({"_tag":"ServerSettingsError","settingsPath":"<memory>","operation":"normalize",
-                   "cause":{"name":"SchemaError","message":message}})
-        })?;
-        crate::settings::mutations::normalize(&mut next);
-        let mut bytes = serde_json::to_vec_pretty(&next).map_err(|_| error("write-file"))?;
-        bytes.push(b'\n');
-        self.documents
-            .write(&path, &bytes, crate::persistence::WriteMode::ReplaceTarget)
-            .map_err(|_| error("write-file"))?;
-        Ok(self.settings())
+    /// Effective settings in the legacy client's redacted format.
+    pub fn settings(&self) -> Value {
+        self.settings.client(false).unwrap_or_default()
     }
 
     /// The key that signs asset URLs, made on first use and kept with the
@@ -750,7 +752,7 @@ impl ControlPlane {
         let provider = {
             let store = self.store.read().await;
             crate::provider_state::thread_provider_turn(
-                &self.settings(),
+                &self.settings.internal().map_err(std::io::Error::other)?,
                 &crate::model_manifest::BUNDLED,
                 store.threads.get(&run.thread_id),
                 &self.oauth,
@@ -764,6 +766,7 @@ impl ControlPlane {
             prompt,
             cwd,
             turn_id: run.id.to_string(),
+            env_remove: self.managed_env_remove(),
             ..Default::default()
         };
         match provider {
@@ -903,6 +906,23 @@ impl ControlPlane {
     /// stream's stored cursor past them.
     pub async fn deliver(&self, connection: &Connection, signals: &[Signal]) -> Vec<String> {
         let mut frames = Vec::new();
+        for signal in signals {
+            if let Signal::SettingsChanged(views) = signal {
+                let settings = if connection.references {
+                    &views.1
+                } else {
+                    &views.0
+                };
+                for stream in connection
+                    .open
+                    .values()
+                    .filter(|s| s.method == "subscribeServerConfig")
+                {
+                    let event = json!({"version":1,"type":"settingsUpdated","payload":{"settings":settings}});
+                    frames.push(Reply::Chunk(json!([event])).frame(&stream.id));
+                }
+            }
+        }
         for (key, stream) in connection.open.iter().filter(|(_, s)| s.live) {
             let Some(mut subscription) = self.load(connection, key) else {
                 continue;
@@ -1065,7 +1085,7 @@ impl ControlPlane {
         }
         let method = request["tag"].as_str().unwrap_or("undefined");
         let params = &request["payload"];
-        match self.call(&connection.principal, method, params).await {
+        match self.call(connection, method, params).await {
             Call::Done(reply) => vec![reply.frame(&id)],
             Call::Live(subscription, values) if subscription.cursor["finished"] == true => {
                 let mut frames: Vec<_> = values
@@ -1107,11 +1127,11 @@ impl ControlPlane {
         }
     }
 
-    async fn call(self: &Arc<Self>, principal: &Session, method: &str, params: &Value) -> Call {
+    async fn call(self: &Arc<Self>, connection: &Connection, method: &str, params: &Value) -> Call {
         if !crate::rpc_known(method) {
             return Call::Done(Reply::defect(format!("Unknown request tag: {method}")));
         }
-        let decoded = match dispatch::check(principal, method, params) {
+        let decoded = match dispatch::check(&connection.principal, method, params) {
             Ok(decoded) => decoded,
             Err(reply) => return Call::Done(reply),
         };
@@ -1123,7 +1143,9 @@ impl ControlPlane {
             };
         }
         if crate::subscription::serves(method) {
-            return match Subscription::open(self, principal, method, params, false).await {
+            return match Subscription::open(self, &connection.principal, method, params, false)
+                .await
+            {
                 Ok(opened) => Call::Live(opened.subscription, opened.first),
                 Err(reply) => Call::Done(reply),
             };
@@ -1150,7 +1172,7 @@ impl ControlPlane {
                 self.list_provider_models().await;
             }
             return Call::Done(Reply::Success(
-                json!({"providers":self.config_snapshot(&Value::Null)["providers"]}),
+                json!({"providers":self.providers_for(&self.settings(), &Value::Null)}),
             ));
         }
         if method == "projects.createNew" {
@@ -1165,7 +1187,7 @@ impl ControlPlane {
                 Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
             });
         }
-        if let Some(call) = self.host_call(method, params) {
+        if let Some(call) = self.host_call(method, params, connection.references) {
             return call;
         }
         let settings = WorkspaceSettings {
@@ -1183,13 +1205,15 @@ impl ControlPlane {
     }
 
     /// The methods this host answers itself.
-    fn host_call(&self, method: &str, params: &Value) -> Option<Call> {
+    fn host_call(&self, method: &str, params: &Value, references: bool) -> Option<Call> {
         Some(match method {
             "server.probe" => Call::Done(Reply::Success(json!({}))),
             "subscribeServerConfig" => {
-                let mut batches = vec![
-                    json!([{"version":1,"type":"snapshot","config":self.config_snapshot(params)}]),
-                ];
+                let snapshot = match self.config_snapshot(params, references) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => return Some(Call::result(Err(error))),
+                };
+                let mut batches = vec![json!([{"version":1,"type":"snapshot","config":snapshot}])];
                 // As the native server: report empty theme and usage-limit sources to
                 // clients that opted in.
                 if params["usageLimitSources"] == true {
@@ -1200,7 +1224,7 @@ impl ControlPlane {
                 }
                 Call::Stream(batches)
             }
-            "server.getConfig" => Call::Done(Reply::Success(self.config_snapshot(&Value::Null))),
+            "server.getConfig" => Call::result(self.config_snapshot(&Value::Null, references)),
             "subscribeServerLifecycle" => {
                 let environment = self.descriptor();
                 Call::Stream(vec![json!([
@@ -1211,11 +1235,8 @@ impl ControlPlane {
             "subscribeProjectClones" => Call::Stream(vec![json!([[]])]),
             // As native before any refresh: the stream stays open and silent.
             "pullRequests.subscribeRefreshes" => Call::Stream(Vec::new()),
-            "server.getSettings" => Call::Done(Reply::Success(self.settings())),
-            "server.updateSettings" => Call::Done(match self.update_settings(params) {
-                Ok(settings) => Reply::Success(settings),
-                Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
-            }),
+            "server.getSettings" => Call::result(self.settings.client(references)),
+            "server.updateSettings" => Call::result(self.settings.update(params, references)),
             "orchestration.getOlderSettledThreads" => {
                 let sequence = self.sequence_now();
                 let store = self.store_now();
@@ -1345,10 +1366,30 @@ impl ControlPlane {
         Ok(result)
     }
 
+    fn managed_env_remove(&self) -> Vec<String> {
+        if self.settings.policy.summary().is_some() {
+            vec!["T3CODE_CODEX_LAUNCH_ARGS".into()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn providers_for(&self, settings: &Value, options: &Value) -> Value {
+        server_config::providers::list_with(
+            &self.started_at,
+            |driver| self.settings.policy.provider_denial(driver),
+            |id| self.listed_models.lock().ok()?.get(id).cloned(),
+            settings,
+            options,
+            &crate::model_manifest::BUNDLED,
+            |_, row| row,
+        )
+    }
+
     /// The `subscribeServerConfig` snapshot. Host facts describe the
     /// workspace process; settings are [`settings`](Self::settings).
-    fn config_snapshot(&self, options: &Value) -> Value {
-        let settings = self.settings();
+    fn config_snapshot(&self, options: &Value, references: bool) -> Result<Value, Value> {
+        let settings = self.settings.client(references)?;
         let keybindings_path = std::path::Path::new(STATE_DIR).join("keybindings.json");
         let (keybindings, issues) =
             server_config::keybindings::read(self.documents.as_ref(), &keybindings_path);
@@ -1360,7 +1401,7 @@ impl ControlPlane {
             "keybindingsConfigPath": keybindings_path,
             "keybindings": keybindings,
             "issues": issues,
-            "providers": server_config::providers::list_with(&self.started_at, |_| None, |id| self.listed_models.lock().ok()?.get(id).cloned(), &settings, options, &crate::model_manifest::BUNDLED, |_, row| row),
+            "providers": self.providers_for(&settings, options),
             "availableEditors": [],
             "remoteOpenTargets": [],
             "directEndpoints": [],
@@ -1382,15 +1423,18 @@ impl ControlPlane {
         ] {
             config[key] = true.into();
         }
+        if let Some(policy) = self.settings.policy.summary() {
+            config["managedPolicy"] = policy.clone();
+        }
         config["scratchWorkspaceRoot"] = json!(format!("{WORKSPACE_ROOT}/scratch"));
         config["newProjectsRoot"] = json!(format!("{WORKSPACE_ROOT}/projects"));
         config["serverTime"] = json!(auth_service::iso(auth_service::now()));
-        config
+        Ok(config)
     }
 }
 
 /// Orchestration commands as this plane runs them: over its control state,
-/// with no managed policy, its [`ControlPlane::settings`] and no guest shares. Turns run
+/// with its effective settings and managed policy. Turns run
 /// in its workspace.
 struct PlaneCommands {
     plane: Arc<ControlPlane>,
@@ -1408,16 +1452,16 @@ impl crate::orchestration::CommandHost for PlaneCommands {
         &self.plane.mutation_lock
     }
     fn policy_summary(&self) -> Option<&Value> {
-        None
+        self.plane.settings.policy.summary()
     }
-    fn runtime_denial(&self, _: &str) -> Option<String> {
-        None
+    fn runtime_denial(&self, mode: &str) -> Option<String> {
+        self.plane.settings.policy.runtime_denial(mode)
     }
-    fn provider_denial(&self, _: &str) -> Option<String> {
-        None
+    fn provider_denial(&self, driver: &str) -> Option<String> {
+        self.plane.settings.policy.provider_denial(driver)
     }
     fn effective_settings(&self) -> anyhow::Result<Value> {
-        Ok(self.plane.settings())
+        self.plane.settings.internal()
     }
     fn workspace(&self) -> &dyn Workspace {
         &self.plane.host.workspace
@@ -1512,6 +1556,15 @@ enum Call {
     Stream(Vec<Value>),
 }
 
+impl Call {
+    fn result(result: Result<Value, Value>) -> Self {
+        Self::Done(match result {
+            Ok(value) => Reply::Success(value),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+        })
+    }
+}
+
 /// Frames as text, split into parts for clients that asked for them.
 fn encode(connection: &Connection, frames: &[Value]) -> Vec<String> {
     frames
@@ -1525,13 +1578,6 @@ fn encode(connection: &Connection, frames: &[Value]) -> Vec<String> {
             }
         })
         .collect()
-}
-
-fn default_settings() -> Value {
-    use crate::settings::schema;
-    schema::normalize(&json!({}))
-        .and_then(|settings| schema::normalize_runtime(&settings))
-        .expect("default settings normalize")
 }
 
 async fn descriptor(State(plane): State<Arc<ControlPlane>>) -> Json<Value> {
@@ -1654,6 +1700,7 @@ mod tests {
             cookie_port: 3773,
             provider_command: vec!["provider".into()],
             workspace_mcp_endpoint: None,
+            managed_policy: None,
         }
     }
 
@@ -1675,6 +1722,10 @@ mod tests {
     }
 
     fn owner(plane: &ControlPlane) -> Connection {
+        owner_socket(plane, "/ws?orchestrationProtocol=2")
+    }
+
+    fn owner_socket(plane: &ControlPlane, uri: &str) -> Connection {
         let (_, token) = plane.auth.browser_session("secret", None).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1682,7 +1733,7 @@ mod tests {
             format!("t3_session_3773={token}").parse().unwrap(),
         );
         plane
-            .authorize_socket(&headers, &"/ws?orchestrationProtocol=2".parse().unwrap())
+            .authorize_socket(&headers, &uri.parse().unwrap())
             .map_err(|_| "rejected")
             .unwrap()
     }
@@ -1702,6 +1753,172 @@ mod tests {
 
     fn send(plane: &Arc<ControlPlane>, connection: &mut Connection, frame: Value) -> Vec<Value> {
         parse(now(plane.on_message(connection, &frame.to_string())))
+    }
+
+    #[test]
+    fn settings_rpcs_enforce_policy_and_keep_literals_out_of_client_views() {
+        let documents = Arc::new(MemoryStore::new());
+        let policy = json!({"schemaVersion":1,"organization":"Example",
+            "settings":{"defaultAutoPull":{"locked":true,"value":false}},
+            "limits":{"providers":{"allowedDrivers":["codex"]}}});
+        let open = || {
+            ControlPlane::open(
+                Config {
+                    managed_policy: Some(policy.clone()),
+                    ..config()
+                },
+                documents.clone(),
+                Box::new(MemoryLog::default()),
+                host(&Arc::default()),
+            )
+            .unwrap()
+        };
+        let plane = open();
+        let mut client = owner(&plane);
+        let rpc =
+            |plane: &Arc<ControlPlane>, client: &mut Connection, method: &str, payload: Value| {
+                send(
+                plane,
+                client,
+                json!({"_tag":"Request","id":method,"tag":method,"payload":payload,"headers":[]}),
+            )
+            .remove(0)
+            };
+        assert!(now(crate::mcp_oauth::McpHost::update_settings(
+            &plane,
+            json!({"defaultAutoPull":true})
+        ))
+        .is_err());
+        let literal = "fixture-value-for-private-storage";
+        let reference = json!({"provider":"vault","reference":"op://Example/Item/field"});
+        let subscribed = rpc(&plane, &mut client, "subscribeServerConfig", json!({}));
+        let snapshot = &subscribed["values"][0]["config"];
+        assert_eq!(snapshot["managedPolicy"]["organization"], "Example");
+        assert_eq!(snapshot["settings"]["defaultAutoPull"], false);
+        let denied = rpc(
+            &plane,
+            &mut client,
+            "server.updateSettings",
+            json!({"patch":{
+                "defaultAutoPull":true, "cloudSpeechCredentials":{"xai":literal}
+            }}),
+        );
+        let reason = &denied["exit"]["cause"][0]["error"];
+        assert_eq!(reason["operation"], "write-managed-setting");
+        assert_eq!(reason["managedSetting"], "defaultAutoPull");
+        assert_eq!(reason["managedBy"], "Example");
+        let dir = std::path::Path::new(STATE_DIR);
+        assert!(documents
+            .read_optional(&dir.join("secrets/voice-cloud-xai.bin"))
+            .unwrap()
+            .is_none());
+
+        let saved = rpc(
+            &plane,
+            &mut client,
+            "server.updateSettings",
+            json!({"patch":{
+                "secretProviders":{"vault":{"kind":"one_password","label":"Vault","config":{"account":"example.test"}}},
+                "cloudSpeechCredentials":{"openai":reference,"xai":literal}
+            }}),
+        );
+        assert_eq!(saved["exit"]["_tag"], "Success");
+        let public = &saved["exit"]["value"]["cloudSpeechCredentials"];
+        assert_eq!(public["xai"], "••••••");
+        assert_eq!(public["openai"], "••••••");
+        let signals = plane.take_signals();
+        let updates = parse(now(plane.deliver(&client, &signals)));
+        assert_eq!(
+            updates[0]["values"][0]["payload"]["settings"]["cloudSpeechCredentials"],
+            *public
+        );
+        let disk = documents.read(&dir.join("settings.json")).unwrap();
+        assert!(!String::from_utf8(disk).unwrap().contains(literal));
+        assert!(
+            documents
+                .read(&dir.join("secrets/voice-cloud-xai.bin"))
+                .unwrap()
+                == literal.as_bytes()
+        );
+        drop(plane);
+
+        let reopened = open();
+        let mut client = owner_socket(
+            &reopened,
+            "/ws?orchestrationProtocol=2&clientCapabilities=settingsSecretReferences",
+        );
+        for tag in ["server.getSettings", "server.getConfig"] {
+            let answer = rpc(&reopened, &mut client, tag, json!({}));
+            assert!(!answer.to_string().contains(literal));
+            let value = &answer["exit"]["value"];
+            let settings = if tag == "server.getConfig" {
+                &value["settings"]
+            } else {
+                value
+            };
+            assert_eq!(settings["cloudSpeechCredentials"]["openai"], reference);
+            assert_eq!(settings["cloudSpeechCredentials"]["xai"], "••••••");
+        }
+        assert!(reopened.settings.internal().unwrap()["cloudSpeechCredentials"]["xai"] == literal);
+        let cleared = rpc(
+            &reopened,
+            &mut client,
+            "server.updateSettings",
+            json!({"patch":{
+                "cloudSpeechCredentials":{"xai":""}
+            }}),
+        );
+        assert_eq!(cleared["exit"]["_tag"], "Success");
+        assert!(documents
+            .read_optional(&dir.join("secrets/voice-cloud-xai.bin"))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn agentd_turn_receives_the_saved_sensitive_environment_and_managed_arguments() {
+        let runtime = Arc::new(ManualRuntime::default());
+        let cfg = Config {
+            managed_policy: Some(json!({"schemaVersion":1,"organization":"Example",
+                "limits":{"providers":{"instances":{"codex":{"locked":false,"launchArgs":"--managed"}}}}})),
+            ..config()
+        };
+        let documents = Arc::new(MemoryStore::new());
+        let plane = ControlPlane::open(
+            cfg,
+            documents.clone(),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
+        let agentd = agentd_with_project_folder();
+        now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
+        let mut client = owner(&plane);
+        let value = "fixture-private-environment-value";
+        let reply = send(
+            &plane,
+            &mut client,
+            json!({"_tag":"Request","id":"settings","tag":"server.updateSettings","payload":{
+            "patch":{"providerInstances":{"codex":{"driver":"codex","environment":[{"name":"EXAMPLE_KEY","value":value,"sensitive":true}]}}}
+        },"headers":[]}),
+        );
+        assert_eq!(reply[0]["exit"]["_tag"], "Success");
+        assert!(!reply[0].to_string().contains(value));
+        let stored = documents
+            .read(&std::path::Path::new(STATE_DIR).join("settings.json"))
+            .unwrap();
+        assert!(!String::from_utf8(stored).unwrap().contains(value));
+        seed(&plane, &mut client);
+        dispatch_message(&plane, &mut client, "hello");
+        runtime.run();
+        let turns = agentd.turns();
+        let start = turns.values().next().unwrap();
+        assert!(start
+            .env
+            .iter()
+            .any(|(key, v)| key == "EXAMPLE_KEY" && v == value));
+        assert_eq!(start.env_remove, ["T3CODE_CODEX_LAUNCH_ARGS"]);
+        assert_eq!(start.provider.as_ref().unwrap().launch_args, ["--managed"]);
     }
 
     #[test]
@@ -1749,7 +1966,7 @@ mod tests {
             .unwrap()
         };
         let codex_models = |plane: &ControlPlane| -> Vec<String> {
-            plane.config_snapshot(&Value::Null)["providers"]
+            plane.config_snapshot(&Value::Null, false).unwrap()["providers"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1772,7 +1989,7 @@ mod tests {
         now(plane.workspace_connected(agentd.link(plane.workspace()))).unwrap();
         runtime.run();
         assert_eq!(codex_models(&plane), ["gpt-6-luna"]);
-        let snapshot = plane.config_snapshot(&Value::Null);
+        let snapshot = plane.config_snapshot(&Value::Null, false).unwrap();
         let codex = snapshot["providers"]
             .as_array()
             .unwrap()
