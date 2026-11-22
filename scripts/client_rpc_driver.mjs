@@ -360,12 +360,19 @@ const program = Effect.gen(function* () {
         const response = await rendererFetch(url, {
           method: spec.method,
           headers: { ...(spec.bearer === false ? {} : { Authorization: `Bearer ${accessToken}` }), ...(spec.headers ?? {}) },
-          body: spec.body,
+          body: spec.repeatBytes ? Buffer.alloc(spec.repeatBytes, "x") :
+                spec.bodyBase64 ? Buffer.from(spec.bodyBase64, "base64") : spec.body,
         });
-        const text = await response.text();
         let body;
-        try { body = JSON.parse(text); } catch { body = spec.bodyText ? text : `<${text.length} bytes>`; }
-        return { status: response.status, contentType: response.headers.get("content-type"), body };
+        if (spec.binary) {
+          body = Buffer.from(await response.arrayBuffer()).toString("base64");
+        } else {
+          const text = await response.text();
+          try { body = JSON.parse(text); } catch { body = spec.bodyText ? text : `<${text.length} bytes>`; }
+        }
+        const headers = spec.responseHeaders?.map((key) => [key, response.headers.get(key)]);
+        return { status: response.status, contentType: response.headers.get("content-type"), body,
+                 ...(headers ? { headers: Object.fromEntries(headers) } : {}) };
       }), step.timeoutMs ?? replyMs);
     }
     throw new Error(`unknown step ${JSON.stringify(step)}`);

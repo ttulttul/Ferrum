@@ -51,7 +51,6 @@ The Rust server can already run Codex and Claude Code conversations, manage proj
 
 ### Other
 
-- **Uploaded attachments:** Download links for uploaded attachments return "not found", so attached files and images do not load in the composer or conversation history.
 - **File browsing and search:** Project file lists include `.git` and gitignored files. File and content search do not yet support fuzzy matching, regular expressions, or match highlighting.
 - **Storage cleanup report:** Settings streams automatic and manual cleanup reports. The Rust cleanup command currently reports zero entries and zero bytes freed.
 
