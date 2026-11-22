@@ -1384,9 +1384,7 @@
       "clientHarness": [
         "threads.searchThread"
       ],
-      "knownGaps": [
-        "threads.searchThread"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc-stream",
@@ -1410,9 +1408,7 @@
       "clientHarness": [
         "threads.searchThreadStream"
       ],
-      "knownGaps": [
-        "threads.searchThreadStream"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc",
@@ -1435,9 +1431,7 @@
       "clientHarness": [
         "threads.searchThreads"
       ],
-      "knownGaps": [
-        "threads.searchThreads"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc",

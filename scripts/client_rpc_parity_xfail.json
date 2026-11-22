@@ -121,24 +121,6 @@
       "reason": "getStorageCleanupReport fails the client's decode",
       "issue": "startedAt must be a string; the storage settings page cannot show the report"
     },
-    "threads.searchThread": {
-      "area": "threads",
-      "severity": "medium",
-      "reason": "in-thread search replies have complete instead of navigation",
-      "issue": "searchThread adds a complete field and searchThreadStream omits navigation, which the client uses to step through matches"
-    },
-    "threads.searchThreadStream": {
-      "area": "threads",
-      "severity": "medium",
-      "reason": "in-thread search replies have complete instead of navigation",
-      "issue": "searchThread adds a complete field and searchThreadStream omits navigation, which the client uses to step through matches"
-    },
-    "threads.searchThreads": {
-      "area": "threads",
-      "severity": "high",
-      "reason": "orchestration.searchThreads replies fail the client's decode",
-      "issue": "matches[0].source must be \"user\" | \"assistant\""
-    },
     "turns.getThreadProjection.afterMessage": {
       "area": "agent turns",
       "severity": "medium",

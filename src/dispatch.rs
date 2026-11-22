@@ -135,15 +135,15 @@ pub(crate) fn check(
     {
         return Err(Reply::defect("Expected string\n  at [\"query\"]".into()));
     }
-    if method == "orchestration.searchThreads"
-        && params
-            .get("query")
-            .and_then(Value::as_str)
-            .is_some_and(|query| query.encode_utf16().count() < 2)
-    {
-        return Err(Reply::defect(
-            "Expected a value with a length of at least 2\n  at [\"query\"]".into(),
-        ));
+    if matches!(
+        method,
+        "orchestration.searchThreads"
+            | "orchestration.searchThread"
+            | "orchestration.searchThreadStream"
+    ) {
+        return search_input(method, params)
+            .map(Some)
+            .map_err(Reply::defect);
     }
     if method == "server.searchAcpRegistry"
         && params.get("limit").is_some_and(|value| {
@@ -268,6 +268,127 @@ pub(crate) fn check(
         }
     }
     Ok(decoded)
+}
+
+/// Decode the search contracts before constructing SQL or a timeline cache key.
+fn search_input(method: &str, params: &Value) -> Result<Value, String> {
+    fn string(v: &Value, path: &str, trim: bool, min: usize, max: usize) -> Result<Value, String> {
+        let text = v
+            .as_str()
+            .ok_or_else(|| format!("Expected string\n  at {path}"))?;
+        let text = if trim { text.trim() } else { text };
+        let len = text.encode_utf16().count();
+        if len < min {
+            let expected = if min == 1 {
+                "a non-blank string".into()
+            } else {
+                format!("a value with a length of at least {min}")
+            };
+            return Err(format!("Expected {expected}\n  at {path}"));
+        }
+        if len > max {
+            return Err(format!(
+                "Expected a value with a length of at most {max}\n  at {path}"
+            ));
+        }
+        Ok(json!(text))
+    }
+    fn integer(v: &Value, path: &str, min: i64, max: i64) -> Result<Value, String> {
+        let n = v
+            .as_f64()
+            .ok_or_else(|| format!("Expected number\n  at {path}"))?;
+        if n.fract() != 0. {
+            return Err(format!("Expected an integer\n  at {path}"));
+        }
+        if n < min as f64 || n > max as f64 {
+            let expected = if max == i64::MAX {
+                format!("a value greater than or equal to {min}")
+            } else {
+                format!("a value between {min} and {max}")
+            };
+            return Err(format!("Expected {expected}\n  at {path}"));
+        }
+        Ok(json!(n as i64))
+    }
+    let palette = method == "orchestration.searchThreads";
+    let mut out = params.clone();
+    out["query"] = string(
+        &params["query"],
+        r#"["query"]"#,
+        true,
+        if palette { 2 } else { 1 },
+        200,
+    )?;
+    if palette {
+        if let Some(limit) = params.get("limit") {
+            out["limit"] = integer(limit, r#"["limit"]"#, 1, 50)?;
+        }
+        for key in ["olderSettledBefore", "environmentLabel"] {
+            if let Some(v) = params.get(key) {
+                out[key] = string(v, &format!("[{key:?}]"), false, 0, usize::MAX)?;
+            }
+        }
+        if params.get("titlesOnly").is_some_and(|v| !v.is_boolean()) {
+            return Err("Expected boolean\n  at [\"titlesOnly\"]".into());
+        }
+        if let Some(ids) = params.get("projectIds") {
+            let ids = ids
+                .as_array()
+                .ok_or("Expected array\n  at [\"projectIds\"]")?;
+            for (i, id) in ids.iter().enumerate() {
+                out["projectIds"][i] =
+                    string(id, &format!(r#"["projectIds"][{i}]"#), true, 1, usize::MAX)?;
+            }
+        }
+    } else {
+        out["threadId"] = string(&params["threadId"], r#"["threadId"]"#, true, 1, usize::MAX)?;
+        for (key, min) in [("offset", i64::MIN), ("index", 0)] {
+            if let Some(v) = params.get(key) {
+                out[key] = integer(v, &format!("[{key:?}]"), min, i64::MAX)?;
+            }
+        }
+        if let Some(start) = params.get("start") {
+            for key in ["entryId", "occurrence"] {
+                if start.get(key).is_none() {
+                    return Err(format!("Missing key\n  at [\"start\"][{key:?}]"));
+                }
+            }
+            out["start"]["entryId"] = string(
+                &start["entryId"],
+                r#"["start"]["entryId"]"#,
+                true,
+                1,
+                usize::MAX,
+            )?;
+            out["start"]["occurrence"] = integer(
+                &start["occurrence"],
+                r#"["start"]["occurrence"]"#,
+                0,
+                i64::MAX,
+            )?;
+        }
+        if let Some(skills) = params.get("skills") {
+            let skills = skills
+                .as_array()
+                .ok_or("Expected array\n  at [\"skills\"]")?;
+            if skills.len() > 1000 {
+                return Err(
+                    "Expected a value with a length of at most 1000\n  at [\"skills\"]".into(),
+                );
+            }
+            for (i, skill) in skills.iter().enumerate() {
+                for key in ["name", "displayName"] {
+                    let path = format!(r#"["skills"][{i}][{key:?}]"#);
+                    if let Some(v) = skill.get(key) {
+                        out["skills"][i][key] = string(v, &path, false, 0, 200)?;
+                    } else if key == "name" {
+                        return Err(format!("Missing key\n  at {path}"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The checkpoint diff schemas use non-negative integers and an optional boolean. Most RPC
