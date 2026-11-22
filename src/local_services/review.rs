@@ -1,12 +1,13 @@
+use super::vcs::{branch, checked, read, review_base, run};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-pub async fn call(method: &str, input: &Value) -> Result<Value, Value> {
+pub async fn call(method: &str, input: &Value, state_dir: &Path) -> Result<Value, Value> {
     match method {
         "getBranchCommits" => branch_commits(input).await,
         "getDiffPreview" => diff_preview(input).await,
-        "getDiffFileContents" => diff_file_contents(input).await,
+        "getDiffFileContents" => diff_file_contents(input, state_dir).await,
         _ => Err(json!({"_tag":"Die","defect":format!("Unknown review method: {method}")})),
     }
 }
@@ -16,15 +17,6 @@ fn cwd(input: &Value) -> Result<&str, Value> {
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| json!({"_tag":"Die","defect":"Missing key\n  at [\"cwd\"]"}))
-}
-async fn git(cwd: &str, args: &[String]) -> std::io::Result<std::process::Output> {
-    crate::login_shell::tokio_command("git")
-        .current_dir(cwd)
-        .args(args)
-        .env("LC_ALL", "C")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .await
 }
 fn git_error(operation: &str, cwd: &str, detail: &str) -> Value {
     json!({"_tag":"GitCommandError","operation":operation,"command":"git","cwd":cwd,"detail":detail})
@@ -42,408 +34,446 @@ fn hash_diff(diff: &str, files: &[Value]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 fn parse_numstat(text: &str) -> Vec<Value> {
-    let fields: Vec<&str> = text.split('\0').collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < fields.len() {
-        let f = fields[i];
-        let Some((a, rest)) = f.split_once('\t') else {
-            i += 1;
-            continue;
-        };
-        let Some((d, path0)) = rest.split_once('\t') else {
-            i += 1;
-            continue;
-        };
-        if path0.is_empty() && i + 2 < fields.len() {
-            out.push(json!({"path":fields[i+2],"previousPath":fields[i+1],"additions":a.parse::<u64>().unwrap_or(0),"deletions":d.parse::<u64>().unwrap_or(0)}));
-            i += 3;
+    let mut types = std::collections::HashMap::new();
+    let mut files = Vec::new();
+    let mut fields = text.split_terminator('\0');
+    while let Some(row) = fields.next() {
+        if row.starts_with(':') {
+            let status = row.rsplit(' ').next().unwrap_or("");
+            if status.starts_with(['R', 'C']) {
+                fields.next();
+            }
+            if let Some(path) = fields.next() {
+                let kind = match status {
+                    "A" => "new",
+                    "D" => "deleted",
+                    "R100" => "rename-pure",
+                    s if s.starts_with('R') => "rename-changed",
+                    _ => "change",
+                };
+                types.insert(path, kind);
+            }
         } else {
-            out.push(json!({"path":path0,"previousPath":Value::Null,"additions":a.parse::<u64>().unwrap_or(0),"deletions":d.parse::<u64>().unwrap_or(0)}));
-            i += 1;
+            let mut cols = row.splitn(3, '\t');
+            let (Some(add), Some(del), Some(path)) = (cols.next(), cols.next(), cols.next()) else {
+                continue;
+            };
+            let (previous, path) = if path.is_empty() {
+                (fields.next(), fields.next().unwrap_or(""))
+            } else {
+                (None, path)
+            };
+            files.push(json!({"path":path,"previousPath":previous,"changeType":types.get(path),"additions":add.parse::<u64>().unwrap_or(0),"deletions":del.parse::<u64>().unwrap_or(0)}));
         }
     }
-    out
+    files
 }
+
 async fn branch_commits(input: &Value) -> Result<Value, Value> {
     let cwd = cwd(input)?;
-    let p = git(
-        cwd,
-        &[
-            "rev-parse".into(),
-            "--verify".into(),
-            "--quiet".into(),
-            "HEAD".into(),
-        ],
-    )
-    .await;
-    if p.as_ref().is_err() || !p.as_ref().unwrap().status.success() {
+    if read(cwd, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .await
+        .is_none()
+    {
         return Ok(json!({"commits":[],"truncated":false}));
     }
-    let base = if let Some(b) = input.get("baseRef").and_then(Value::as_str) {
-        b.to_owned()
-    } else {
-        let mut c = None;
-        for b in ["origin/HEAD", "origin/main", "main", "master"] {
-            if let Ok(o) = git(
-                cwd,
-                &[
-                    "rev-parse".into(),
-                    "--verify".into(),
-                    format!("{b}^{{commit}}"),
-                ],
-            )
-            .await
-            {
-                if o.status.success() {
-                    c = Some(b.to_owned());
-                    break;
-                }
-            }
-        }
-        c.unwrap_or_else(|| "HEAD".into())
-    };
-    let o = git(
+    let (_, base) =
+        review_base(cwd, branch(cwd).await.as_deref(), input["baseRef"].as_str()).await?;
+    let log = checked(
         cwd,
+        "getReviewBranchCommits",
         &[
-            "log".into(),
-            "-z".into(),
-            "--no-notes".into(),
-            "--no-show-signature".into(),
-            "--format=%H%x00%s%x00%cI".into(),
-            "--max-count=101".into(),
-            format!("{base}..HEAD"),
+            "log",
+            "-z",
+            "--no-notes",
+            "--no-show-signature",
+            "--format=%H%x00%s%x00%cI",
+            "--max-count=101",
+            &format!("{base}..HEAD"),
         ],
+        "Could not read branch commit metadata.",
+    )
+    .await?;
+    let fields: Vec<_> = log.split_terminator('\0').collect();
+    let commits: Vec<_> = fields.chunks_exact(3).take(100).map(|c| json!({"sha":c[0],"subject":c[1].chars().take(300).collect::<String>(),"committedAt":c[2]})).collect();
+    Ok(json!({"commits":commits,"truncated":fields.len() > 300}))
+}
+
+fn commit_error(cwd: &str, detail: &str) -> Value {
+    json!({"_tag":"GitCommandError","operation":"GitVcsDriver.reviewCommit","command":"git cat-file","cwd":cwd,"detail":detail})
+}
+async fn empty_tree(cwd: &str) -> Result<String, Value> {
+    checked(
+        cwd,
+        "review.emptyTree",
+        &["hash-object", "-t", "tree", "--stdin"],
+        "Could not resolve empty tree.",
     )
     .await
-    .map_err(|_| {
-        git_error(
-            "GitVcsDriver.getReviewBranchCommits",
-            cwd,
-            "Could not read branch commit metadata.",
-        )
-    })?;
-    if !o.status.success() {
-        return Err(git_error(
-            "GitVcsDriver.getReviewBranchCommits",
-            cwd,
-            "Could not read branch commit metadata.",
-        ));
-    }
-    let t = String::from_utf8_lossy(&o.stdout);
-    let f: Vec<&str> = t.split('\0').collect();
-    let mut c = Vec::new();
-    let mut i = 0;
-    while i + 2 < f.len() && c.len() < 100 {
-        if f[i].is_empty() {
-            break;
-        }
-        c.push(json!({"sha":f[i],"subject":f[i+1].chars().take(300).collect::<String>(),"committedAt":f[i+2]}));
-        i += 3
-    }
-    Ok(json!({"commits":c,"truncated":c.len()>=100}))
 }
-async fn diff_preview(input: &Value) -> Result<Value, Value> {
-    let cwd = cwd(input)?;
-    let p = git(cwd, &["rev-parse".into(), "--show-toplevel".into()]).await;
-    if p.as_ref().is_err() || !p.as_ref().unwrap().status.success() {
-        return Ok(json!({"cwd":cwd,"generatedAt":iso_now(),"sources":[]}));
+async fn commit_parent(cwd: &str, sha: &str) -> Result<String, Value> {
+    let invalid = || commit_error(cwd, "Selected commit is invalid or no longer available.");
+    if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err(invalid());
     }
-    let sk = input.get("sourceKind").and_then(Value::as_str);
-    let mut a = vec![
-        "-c".into(),
-        "diff.suppressBlankEmpty=false".into(),
-        "diff".into(),
-        "--find-renames".into(),
-        "--no-color".into(),
-        "--no-ext-diff".into(),
-        "--no-textconv".into(),
-        "--submodule=short".into(),
-        "--src-prefix=a/".into(),
-        "--dst-prefix=b/".into(),
+    let object = read(cwd, &["cat-file", "commit", sha])
+        .await
+        .ok_or_else(invalid)?;
+    if let Some(parent) = object
+        .lines()
+        .nth(1)
+        .and_then(|l| l.strip_prefix("parent "))
+    {
+        if read(cwd, &["cat-file", "-e", &format!("{parent}^{{commit}}")])
+            .await
+            .is_none()
+        {
+            return Err(commit_error(
+                cwd,
+                "Selected commit's parent is not available locally.",
+            ));
+        }
+        Ok(parent.into())
+    } else {
+        empty_tree(cwd).await
+    }
+}
+
+pub(super) mod index;
+pub(crate) mod workspace;
+
+/// Read raw status and numstat together so that rename classifications match the patch.
+async fn review_diff(
+    cwd: &str,
+    refs: &[&str],
+    input: &Value,
+    index: &index::ReviewIndex,
+) -> Result<Value, Value> {
+    let mut args = vec![
+        "-c",
+        "diff.suppressBlankEmpty=false",
+        "diff",
+        "--find-renames",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--submodule=short",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
     ];
     if input["ignoreWhitespace"] == true {
-        a.push("--ignore-all-space".into())
+        args.push("--ignore-all-space");
     }
-    let mut base = None;
-    for b in [
-        input.get("baseRef").and_then(Value::as_str).unwrap_or(""),
-        "origin/HEAD",
-        "origin/main",
-        "main",
-        "master",
-    ] {
-        if b.is_empty() {
-            continue;
+    let paths: Vec<_> = ["path", "previousPath"]
+        .into_iter()
+        .filter_map(|key| input["file"][key].as_str())
+        .map(|p| format!(":(top,literal){p}"))
+        .collect();
+    let diff = |mode: &[&str]| {
+        let mut cmd = crate::login_shell::tokio_command("git");
+        cmd.current_dir(cwd)
+            .args(&args)
+            .args(mode)
+            .args(refs)
+            .arg("--")
+            .args(&paths)
+            .kill_on_drop(true);
+        if let Some(index) = &index.dir {
+            cmd.env("GIT_INDEX_FILE", index.path().join("index"));
         }
-        if let Ok(o) = git(
+        cmd
+    };
+    let stats = diff(&["--raw", "--numstat", "-z"]).output().await;
+    let stats = stats.ok().filter(|o| o.status.success()).ok_or_else(|| {
+        git_error(
+            "GitVcsDriver.getReviewDiffPreview.stat",
+            cwd,
+            "Could not read complete diff statistics.",
+        )
+    })?;
+    let files = parse_numstat(&String::from_utf8_lossy(&stats.stdout));
+    let deferred = input["metadataOnly"] == true && input["file"].is_null() && !index.omitted;
+    let mut patch = String::new();
+    let mut truncated = index.omitted;
+    if !deferred && !files.is_empty() {
+        let limit = if input["file"].is_null() {
+            120_000
+        } else {
+            1024 * 1024
+        };
+        // Drain only the bounded prefix, then drop the child if the patch exceeds the budget.
+        use tokio::io::AsyncReadExt;
+        let fail = || {
+            git_error(
+                "GitVcsDriver.getReviewDiffPreview.patch",
+                cwd,
+                "Could not read diff patch.",
+            )
+        };
+        let mut child = diff(&["--patch"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|_| fail())?;
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| fail())?;
+        if bytes.len() > limit {
+            truncated = true;
+            patch = String::from_utf8_lossy(&bytes[..limit]).into_owned();
+            patch.push_str("\n\n[truncated]");
+        } else {
+            if !child.wait().await.map_err(|_| fail())?.success() {
+                return Err(fail());
+            }
+            patch = String::from_utf8_lossy(&bytes).into_owned();
+        }
+    }
+    let mut result = json!({"diff":patch,"truncated":truncated,"diffHash":hash_diff(&patch, if index.omitted { &[] } else { &files })});
+    if !index.omitted {
+        result["files"] = json!(files);
+    }
+    if deferred {
+        result["patchesDeferred"] = json!(true);
+    }
+    Ok(result)
+}
+
+async fn diff_preview(input: &Value) -> Result<Value, Value> {
+    let requested = cwd(input)?;
+    let mut result = json!({"cwd":requested,"generatedAt":iso_now(),"sources":[]});
+    let Some(root) = read(requested, &["rev-parse", "--show-toplevel"]).await else {
+        return Ok(result);
+    };
+    let cwd = root.as_str();
+    let only = input["sourceKind"].as_str();
+    let kind = input["file"]["sourceKind"].as_str().or(only);
+    let mut sources = Vec::new();
+    if input.get("commitSha").is_some() || kind == Some("commit") {
+        let sha = input["commitSha"]
+            .as_str()
+            .filter(|_| input["file"].is_null() || kind == Some("commit"))
+            .ok_or_else(|| commit_error(cwd, "Selected commit request is invalid."))?
+            .to_ascii_lowercase();
+        let parent = commit_parent(cwd, &sha).await?;
+        let mut source =
+            review_diff(cwd, &[&parent, &sha], input, &index::ReviewIndex::default()).await?;
+        source.as_object_mut().unwrap().extend(json!({"id":sha,"kind":"commit","title":format!("Commit {}", &sha[..7]),"baseRef":parent,"headRef":sha}).as_object().unwrap().clone());
+        if let Some(message) = read(
             cwd,
             &[
-                "rev-parse".into(),
-                "--verify".into(),
-                format!("{b}^{{commit}}"),
+                "show",
+                "-s",
+                "--no-notes",
+                "--no-show-signature",
+                "--format=%B",
+                &sha,
             ],
         )
         .await
         {
-            if o.status.success() {
-                base = Some(b.to_owned());
-                break;
+            let subject: String = message
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(300)
+                .collect();
+            if !subject.trim().is_empty() {
+                source["commitSubject"] = json!(subject.trim());
             }
         }
-    }
-    let branch_name = git(
-        cwd,
-        &[
-            "symbolic-ref".into(),
-            "--quiet".into(),
-            "--short".into(),
-            "HEAD".into(),
-        ],
-    )
-    .await
-    .ok()
-    .filter(|o| o.status.success())
-    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-    .unwrap_or_else(|| "HEAD".into());
-    let metadata_only = input["metadataOnly"] == true;
-    let mut sources = Vec::new();
-    let mut add = |id: &str,
-                   kind: &str,
-                   title: String,
-                   br: Value,
-                   hr: Value,
-                   d: String,
-                   fs: Vec<Value>| {
-        sources.push(json!({"id":id,"kind":kind,"title":title,"baseRef":br,"headRef":hr,"diff":d,"files":fs,"diffHash":hash_diff(&d,&fs),"truncated":false}));
-    };
-    if let Some(sha) = input.get("commitSha").and_then(Value::as_str) {
-        let parents = git(
-            cwd,
-            &[
-                "rev-list".into(),
-                "--parents".into(),
-                "-n1".into(),
-                sha.to_owned(),
-            ],
-        )
-        .await
-        .map_err(|_| {
-            git_error(
-                "GitVcsDriver.getReviewDiffPreview.commit",
-                cwd,
-                "Selected commit is invalid or no longer available.",
-            )
-        })?;
-        if !parents.status.success() {
-            return Err(git_error(
-                "GitVcsDriver.reviewCommit",
-                cwd,
-                "Selected commit is invalid or no longer available.",
-            ));
-        }
-        let parent_text = String::from_utf8_lossy(&parents.stdout).into_owned();
-        let parts: Vec<&str> = parent_text.split_whitespace().collect();
-        let parent = parts.get(1).copied().unwrap_or(sha);
-        let mut st = a.clone();
-        st.extend([
-            "--raw".into(),
-            "--numstat".into(),
-            "-z".into(),
-            parent.to_owned(),
-            sha.to_owned(),
-            "--".into(),
-        ]);
-        let so = git(cwd, &st).await.map_err(|_| {
-            git_error(
-                "GitVcsDriver.getReviewDiffPreview.commitStat",
-                cwd,
-                "Could not read complete diff statistics.",
-            )
-        })?;
-        let fs = parse_numstat(&String::from_utf8_lossy(&so.stdout));
-        let mut pt = a.clone();
-        pt.extend([
-            "--patch".into(),
-            parent.to_owned(),
-            sha.to_owned(),
-            "--".into(),
-        ]);
-        let po = git(cwd, &pt).await.map_err(|_| {
-            git_error(
-                "GitVcsDriver.getReviewDiffPreview.commitPatch",
-                cwd,
-                "Could not read commit patch.",
-            )
-        })?;
-        let d = if metadata_only && input.get("file").is_none() {
-            String::new()
-        } else {
-            String::from_utf8_lossy(&po.stdout).into_owned()
-        };
-        let subject = git(
-            cwd,
-            &[
-                "show".into(),
-                "-s".into(),
-                "--format=%s".into(),
-                sha.to_owned(),
-            ],
-        )
-        .await
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_default();
-        let mut source = json!({"id":sha,"kind":"commit","title":format!("Commit {}", sha.chars().take(7).collect::<String>()),"baseRef":parent,"headRef":sha,"diff":d,"files":fs,"diffHash":hash_diff(&d,&fs),"truncated":false});
-        if !subject.is_empty() {
-            source["commitSubject"] = json!(subject.chars().take(300).collect::<String>());
-        }
-        if metadata_only && input.get("file").is_none() {
-            source["patchesDeferred"] = json!(true);
-        }
         sources.push(source);
-        return Ok(json!({"cwd":cwd,"generatedAt":iso_now(),"sources":sources}));
-    }
-    if sk.is_none() || sk == Some("working-tree") {
-        let mut s = a.clone();
-        s.extend([
-            "--raw".into(),
-            "--numstat".into(),
-            "-z".into(),
-            "HEAD".into(),
-        ]);
-        let so = git(cwd, &s).await.map_err(|_| {
-            git_error(
-                "GitVcsDriver.getReviewDiffPreview.stat",
-                cwd,
-                "Could not read complete diff statistics.",
-            )
-        })?;
-        let fs = parse_numstat(&String::from_utf8_lossy(&so.stdout));
-        let mut q = a.clone();
-        q.extend(["--patch".into(), "HEAD".into()]);
-        let po = git(cwd, &q).await.map_err(|_| {
-            git_error(
-                "GitVcsDriver.getReviewDiffPreview.patch",
-                cwd,
-                "Could not read diff patch.",
-            )
-        })?;
-        let d = if metadata_only {
-            String::new()
+    } else {
+        let index = if input["trackedOnly"] == true {
+            index::ReviewIndex::default()
         } else {
-            String::from_utf8_lossy(&po.stdout).into_owned()
+            index::prepare(cwd, input["file"]["path"].as_str()).await?
         };
-        add(
-            "working-tree",
-            "working-tree",
-            "Uncommitted".into(),
-            json!(input
-                .get("baseRef")
-                .and_then(Value::as_str)
-                .unwrap_or("HEAD")),
-            Value::Null,
-            d,
-            fs,
-        );
-    }
-    if sk.is_none() || sk == Some("branch-range") {
-        let b = base.unwrap_or_else(|| "HEAD".into());
-        let mut s = a.clone();
-        s.extend([
-            "--raw".into(),
-            "--numstat".into(),
-            "-z".into(),
-            format!("{b}..HEAD"),
-        ]);
-        let so = git(cwd, &s).await.map_err(|_| {
-            git_error(
-                "GitVcsDriver.getReviewDiffPreview.stat",
-                cwd,
-                "Could not read complete diff statistics.",
-            )
-        })?;
-        let fs = parse_numstat(&String::from_utf8_lossy(&so.stdout));
-        let mut q = a.clone();
-        q.extend(["--patch".into(), format!("{b}..HEAD")]);
-        let po = git(cwd, &q).await.map_err(|_| {
-            git_error(
-                "GitVcsDriver.getReviewDiffPreview.patch",
-                cwd,
-                "Could not read diff patch.",
-            )
-        })?;
-        let d = if metadata_only {
-            String::new()
+        let head = if read(cwd, &["rev-parse", "--verify", "HEAD"])
+            .await
+            .is_some()
+        {
+            "HEAD".into()
         } else {
-            String::from_utf8_lossy(&po.stdout).into_owned()
+            empty_tree(cwd).await?
         };
-        add(
-            "branch-range",
-            "branch-range",
-            if input.get("baseRef").is_some() {
-                format!("Changes vs {b}")
+        let current = if kind == Some("working-tree") {
+            None
+        } else {
+            branch(cwd).await
+        };
+        let (label, base) = if kind == Some("working-tree") {
+            (input["baseRef"].as_str().map(str::to_owned), "HEAD".into())
+        } else {
+            review_base(cwd, current.as_deref(), input["baseRef"].as_str()).await?
+        };
+        for source_kind in ["working-tree", "branch-range"] {
+            if only.is_some_and(|only| only != source_kind) {
+                continue;
+            }
+            let working = source_kind == "working-tree";
+            let mut source = if kind.is_some_and(|selected| selected != source_kind) {
+                let mut empty =
+                    json!({"diff":"","files":[],"diffHash":hash_diff("",&[]),"truncated":false});
+                if input["metadataOnly"] == true && input["file"].is_null() {
+                    empty["patchesDeferred"] = json!(true);
+                }
+                empty
             } else {
-                "Changes".into()
-            },
-            json!(input.get("baseRef").and_then(Value::as_str)),
-            json!(branch_name),
-            d,
-            fs,
-        );
+                let reference = if working || base == "HEAD" {
+                    &head
+                } else {
+                    &base
+                };
+                review_diff(cwd, &[reference], input, &index).await?
+            };
+            source["id"] = json!(source_kind);
+            source["kind"] = json!(source_kind);
+            source["title"] = json!(if working {
+                "Uncommitted".into()
+            } else {
+                label
+                    .as_ref()
+                    .map_or_else(|| "Changes".into(), |base| format!("Changes vs {base}"))
+            });
+            source["baseRef"] = if working { json!("HEAD") } else { json!(label) };
+            source["headRef"] = if working {
+                Value::Null
+            } else {
+                json!(current.as_deref().unwrap_or("HEAD"))
+            };
+            sources.push(source);
+        }
+        if input["trackedOnly"] == true {
+            result["incomplete"] = json!(true);
+        }
     }
-    let mut result = json!({"cwd":cwd,"generatedAt":iso_now(),"sources":sources});
-    if input["trackedOnly"] == true {
-        result["incomplete"] = json!(true);
-    }
+    result["sources"] = json!(sources);
     Ok(result)
 }
-async fn diff_file_contents(input: &Value) -> Result<Value, Value> {
+
+const FILE_LIMIT: usize = 1024 * 1024;
+
+async fn diff_file_contents(input: &Value, state_dir: &Path) -> Result<Value, Value> {
     let cwd = cwd(input)?;
-    let source = input["sourceKind"].as_str().unwrap_or("working-tree");
-    let change = input["changeType"].as_str().unwrap_or("change");
-    let old = input["oldPath"].as_str().unwrap_or("");
-    let new = input["newPath"].as_str().unwrap_or("");
-    let p = git(cwd, &["rev-parse".into(), "--show-toplevel".into()]).await;
-    if p.as_ref().is_err() || !p.as_ref().unwrap().status.success() {
+    let operation = "GitVcsDriver.getReviewDiffFileContents";
+    let error = |detail: &str| git_error(operation, cwd, detail);
+    let Some(root) = read(cwd, &["rev-parse", "--show-toplevel"]).await else {
         return Err(
             json!({"_tag":"VcsUnsupportedOperationError","operation":"ReviewService.getDiffFileContents","kind":"unknown","detail":"Unchanged diff expansion currently requires a Git repository."}),
         );
-    }
-    let read = |rev: String, path: String| async move {
-        git(cwd, &["show".into(), format!("{rev}:{path}")])
-            .await
-            .ok()
-            .filter(|x| x.status.success())
-            .map(|x| String::from_utf8_lossy(&x.stdout).into_owned())
     };
-    let oc = if change == "new" {
-        String::new()
-    } else {
-        read(
-            input["baseRef"].as_str().unwrap_or("HEAD").into(),
-            old.into(),
+    let source = input["sourceKind"].as_str().unwrap_or("working-tree");
+    let old = input["oldPath"].as_str().unwrap_or("");
+    let new = input["newPath"].as_str().unwrap_or("");
+    let base = input["baseRef"].as_str();
+    let head = input["headRef"].as_str();
+    let revision = if source == "commit" {
+        let parent = commit_parent(
+            cwd,
+            head.ok_or_else(|| error("Selected commit is no longer available."))?,
         )
-        .await
-        .unwrap_or_default()
-    };
-    let nc = if source == "commit" {
-        if change == "deleted" {
-            String::new()
-        } else {
-            read(
-                input["headRef"].as_str().unwrap_or("HEAD").into(),
-                new.into(),
-            )
-            .await
-            .unwrap_or_default()
+        .await?;
+        if base != Some(&parent) {
+            return Err(error("Selected commit changed. Refresh the comparison."));
         }
-    } else if change == "deleted" {
+        parent
+    } else if source == "branch-range" {
+        review_base(cwd, None, base).await?.1
+    } else {
+        base.unwrap_or("HEAD").into()
+    };
+    let at_revision = |revision: String, path: String| async move {
+        let arg = format!("{revision}:{path}");
+        let out = run(cwd, &["show", "--end-of-options", &arg]).await;
+        let out = out
+            .ok()
+            .filter(|o| o.status.success())
+            .ok_or_else(|| error(&format!("Could not read diff file '{path}'.")))?;
+        if out.stdout.contains(&0) {
+            return Err(error(&format!("Cannot expand binary file '{path}'.")));
+        }
+        if out.stdout.len() > FILE_LIMIT {
+            return Err(error(&format!(
+                "Diff file '{path}' exceeds the 1 MB expansion limit."
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let old_contents = if input["changeType"] == "new" {
         String::new()
     } else {
-        tokio::fs::read_to_string(Path::new(cwd).join(new))
-            .await
-            .unwrap_or_default()
+        at_revision(revision, old.into()).await?
     };
-    Ok(json!({"oldContents":oc,"newContents":nc}))
+    let new_contents = if input["changeType"] == "deleted" {
+        String::new()
+    } else if source == "commit" {
+        at_revision(head.unwrap().into(), new.into()).await?
+    } else {
+        let fail = |stage: &str, detail: String| json!({"_tag":"GitCommandError","operation":format!("{operation}.workingTree.{stage}"),"command":stage,"cwd":cwd,"detail":detail});
+        let root = Path::new(&root);
+        let requested = super::vcs::lexical_path(&root.join(new));
+        if !requested.starts_with(root) {
+            return Err(fail(
+                "path.resolve",
+                format!("Diff file '{new}' resolves outside the review workspace."),
+            ));
+        }
+        let path = tokio::fs::canonicalize(requested).await.map_err(|_| {
+            fail(
+                "fs.realPath",
+                format!("Could not resolve diff file '{new}'."),
+            )
+        })?;
+        if !path.starts_with(root) {
+            return Err(fail(
+                "fs.realPath",
+                format!("Diff file '{new}' resolves outside the review workspace."),
+            ));
+        }
+        let state = tokio::fs::canonicalize(state_dir)
+            .await
+            .unwrap_or_else(|_| state_dir.to_owned());
+        if path.starts_with(state.join("secrets"))
+            || path.starts_with("/dev/fd")
+            || (path.parent() == Some(&state)
+                && path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains(".sqlite")))
+        {
+            return Err(fail(
+                "fs.realPath",
+                format!("Diff file '{new}' is not available."),
+            ));
+        }
+        let info = tokio::fs::metadata(&path)
+            .await
+            .map_err(|_| fail("fs.stat", format!("Could not inspect diff file '{new}'.")))?;
+        if !info.is_file() {
+            return Err(fail("fs.stat", format!("Diff path '{new}' is not a file.")));
+        }
+        if info.len() > FILE_LIMIT as u64 {
+            return Err(fail(
+                "fs.stat",
+                format!("Diff file '{new}' exceeds the 1 MB expansion limit."),
+            ));
+        }
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|_| fail("fs.readFile", format!("Could not read diff file '{new}'.")))?;
+        if bytes.contains(&0) {
+            return Err(fail(
+                "fs.readFile",
+                format!("Cannot expand binary file '{new}'."),
+            ));
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    Ok(json!({"oldContents":old_contents,"newContents":new_contents}))
 }

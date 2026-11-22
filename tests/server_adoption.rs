@@ -85,6 +85,7 @@ async fn publishes_bound_port_serves_root_and_clears_record_on_shutdown() {
     let state = AppState::with_config(&paths.state_dir, Vec::new(), AuthService::new(), config)
         .await
         .unwrap();
+    state.disable_provider_status_checks();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     assert_ne!(port, 0);
@@ -151,6 +152,7 @@ async fn publishes_a_requested_host_and_its_origin() {
     let state = AppState::with_config(&paths.state_dir, Vec::new(), AuthService::new(), config)
         .await
         .unwrap();
+    state.disable_provider_status_checks();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();

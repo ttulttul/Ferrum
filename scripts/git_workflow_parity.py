@@ -58,6 +58,7 @@ def observe(server, root):
             if json.loads(frames[-1])["exit"]["_tag"] != expected:
                 raise RuntimeError(f"Unexpected {label} outcome, expected {expected}: {frames[-1]}")
             received[label] = frames
+            return json.loads(frames[-1])["exit"].get("value")
 
         def action(label, name, **params):
             call(label, "git.runStackedAction", dict(action=name, actionId=label, **params))
@@ -75,6 +76,31 @@ def observe(server, root):
         (repo / "unselected").write_text("Keep working\n")
         git(repo, "add", "unselected")
         action("select", "commit", filePaths=["file"], commitMessage="Update file\n\nDetails")
+        # Publishing a child branch must preserve its original comparison base.
+        feature = git(repo, "branch", "--show-current").decode().strip()
+        git(repo, "config", "branch.autoSetupMerge", "false")
+        base = f"origin/{feature}"
+        created = call("stacked worktree", "vcs.createWorktree", dict(
+            refName=base, newRefName="stacked-child", baseRefName=base, path=None))
+        worktree = Path(created["worktree"]["path"])
+        received["stacked worktree"] = (worktree.name, created["worktree"]["refName"])
+        main_checkout, repo = repo, worktree
+        received["stacked tracking before push"] = git(repo, "rev-parse", "--symbolic-full-name", "@{u}")
+        received["worktree base branch"] = git(repo, "config", "--get", "branch.stacked-child.t3-merge-base")
+        received["worktree base ref"] = git(repo, "config", "--get", "branch.stacked-child.t3-merge-base-ref")
+        # Simulate a child created by plain Git: publishing must remember its old upstream too.
+        git(repo, "config", "--unset", "branch.stacked-child.t3-merge-base")
+        git(repo, "config", "--unset", "branch.stacked-child.t3-merge-base-ref")
+        git(repo, "commit", "-qm", "Child", "--allow-empty")
+        action("publish stacked branch", "push")
+        received["publish stacked branch"] = [frame.replace(str(repo), "<worktree>") for frame in
+                                             received["publish stacked branch"]]
+        received["stacked tracking after push"] = git(repo, "rev-parse", "--symbolic-full-name", "@{u}")
+        received["recorded base"] = git(repo, "config", "--get", "branch.stacked-child.t3-merge-base-ref")
+        repo = main_checkout
+        call("remove stacked worktree", "vcs.removeWorktree", dict(path=str(worktree)))
+        if worktree.exists():
+            raise RuntimeError("worktree still present after removal")
         # The published provider URL resolves through a local SSH fixture for Git fetches.
         # The GitHub CLI uses a local Unix socket for all GraphQL reads.
         PR["headRefName"] = "pull-three"
@@ -93,6 +119,14 @@ def observe(server, root):
         git(repo, "restore", "file")
         call("Github local checkout", "git.preparePullRequestThread", dict(reference="3", mode="local"))
         call("Github occupied worktree", "git.preparePullRequestThread", dict(reference="3", mode="worktree"))
+        git(repo, "switch", "-q", "main")
+        for label in ("Github PR worktree", "Github reuse PR worktree"):
+            prepared = call(label, "git.preparePullRequestThread", dict(reference="3", mode="worktree"))
+            path = Path(prepared["worktreePath"])
+            if git(path, "rev-parse", "HEAD").decode().strip() != PR["headRefOid"]:
+                raise RuntimeError("PR worktree did not check out the requested head")
+            received[label] = {**prepared, "worktreePath": path.name}
+        call("remove PR worktree", "vcs.removeWorktree", dict(path=str(path)))
         for label, args in (("commit history", ("log", "--format=raw")),
                             ("working tree", ("status", "--porcelain=v1")),
                             ("tracking refs", ("show-ref",))):

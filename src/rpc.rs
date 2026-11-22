@@ -2579,6 +2579,15 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             method == "issues.linkedThreads",
         ));
     }
+    if method.starts_with("review.") {
+        if let Some(cwd) = params["cwd"].as_str() {
+            if let Err(error) =
+                crate::local_services::review::workspace::check(state, method, cwd).await
+            {
+                return Reply::Failure(json!({"_tag":"Fail","error":error}));
+            }
+        }
+    }
     let result = match crate::dispatch::workspace(
         &*state.workspace,
         &state.workspace_settings(method).await,

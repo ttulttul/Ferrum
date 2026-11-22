@@ -25,6 +25,7 @@ no longer exists.
 """
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -111,7 +112,32 @@ def seed_fixture(home, isolation):
         "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
         "0000000d4944415478da63f8cfc0f01f0005000201a5f1d6a90000000049454e44ae426082"))
     (repo / "src/lib.rs").write_text("fn alpha() {}\nfn beta() {}\nfn gamma() {}\n")
-    return {"HOME": str(home), "REPO": str(repo), "PLAIN": str(plain), "REMOTE": str(remote)}
+    # The published parent advances after its child branches. Review the child's
+    # commit and dirty files against their common ancestor.
+    stack = home / "stack"
+    git("clone", "-q", str(remote), str(stack), cwd=home)
+    git("switch", "-qc", "parent", cwd=stack)
+    for name in ("both", "before", "removed"):
+        (stack / name).write_text(f"base {name}\n")
+    git("add", ".", cwd=stack)
+    git("commit", "-qm", "Parent", cwd=stack)
+    git("push", "-qu", "origin", "parent", cwd=stack)
+    git("switch", "-qc", "topic", cwd=stack)
+    git("mv", "before", "moved", cwd=stack)
+    git("rm", "-q", "removed", cwd=stack)
+    git("commit", "-qm", "Child", cwd=stack)
+    git("switch", "-q", "parent", cwd=stack)
+    (stack / "both").write_text("parent advanced\n")
+    git("commit", "-qam", "Advance parent", cwd=stack)
+    git("push", "-q", "origin", "parent", cwd=stack)
+    git("switch", "-q", "topic", cwd=stack)
+    git("config", "branch.topic.t3-merge-base", "parent", cwd=stack)
+    (stack / "both").write_text("working copy\n")
+    (stack / "new").write_text("untracked\n")
+    # The managed worktree basename includes the repository's absolute common directory.
+    identity = f"{(repo / '.git').resolve()}\0feature/client-rpc"
+    worktree_hash = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    return {"WORKTREE_HASH": worktree_hash, "HOME": str(home), "REPO": str(repo), "PLAIN": str(plain), "REMOTE": str(remote)}
 
 
 def run_driver(args, url, credential, variables):
@@ -130,7 +156,7 @@ class Normalizer:
 
     def __init__(self, variables, environment_id=None):
         self.replacements = sorted(((v, f"${k}") for k, v in variables.items() if k in ("HOME", "REPO", "PLAIN",
-                                                                                         "REMOTE")),
+                                                                                         "REMOTE", "WORKTREE_HASH")),
                                    key=lambda item: -len(item[0]))
         self.replacements += [(os.path.realpath(v), p) for v, p in self.replacements if os.path.realpath(v) != v]
         self.environment_id = environment_id
@@ -157,7 +183,7 @@ class Normalizer:
         if isinstance(value, list):
             return [self(v, key) for v in value]
         if isinstance(value, str):
-            return value if key in ("_tag", "type", "kind") else self.text(value)
+            return value if key in ("_tag", "type", "kind", "diffHash") else self.text(value)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and VOLATILE_KEYS.search(key):
             return "<number>"
         return value

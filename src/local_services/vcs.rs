@@ -36,8 +36,14 @@ pub(super) async fn checked(
     args: &[&str],
     detail: &str,
 ) -> Result<String, Value> {
-    let mut err = failure_context(op, cwd, args);
-    match run(cwd, args).await {
+    checked_output(run(cwd, args).await, failure_context(op, cwd, args), detail)
+}
+fn checked_output(
+    output: std::io::Result<Output>,
+    mut err: Value,
+    detail: &str,
+) -> Result<String, Value> {
+    match output {
         Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout)
             .trim_end_matches('\n')
             .to_string()),
@@ -131,18 +137,27 @@ async fn remote_default_branch(cwd: &str, remote: &str) -> Option<String> {
 pub(super) async fn default_ref(cwd: &str) -> Option<String> {
     remote_default_branch(cwd, "origin").await
 }
+mod base;
+pub(super) use base::{branch_base, read_branch_base, record_worktree_base, review_base};
 fn nonrepo() -> Value {
     json!({"isRepo":false,"hasPrimaryRemote":false,"isDefaultRef":false,"refName":null,"hasWorkingTreeChanges":false,"workingTree":{"files":[],"insertions":0,"deletions":0},"hasUpstream":false,"aheadCount":0,"behindCount":0,"aheadOfDefaultCount":0,"pr":null})
 }
 async fn status(root: &str) -> Reply {
     let head = branch(root).await;
-    let default = default_ref(root).await;
+    let origin = read(root, &["remote"]).await.unwrap_or_default();
+    let primary = origin
+        .lines()
+        .find(|r| *r == "origin")
+        .or_else(|| origin.lines().next());
+    let default = match primary {
+        Some(remote) => remote_default_branch(root, remote).await,
+        None => None,
+    };
     let is_default = head.as_ref().is_some_and(|s| {
         default
             .as_deref()
             .map_or(s == "main" || s == "master", |d| d == s)
     });
-    let origin = read(root, &["remote"]).await.unwrap_or_default();
     let has_remote = !origin.is_empty();
     let mut result = json!({"isRepo":true});
     if let Some(remote) = origin
@@ -204,81 +219,47 @@ async fn status(root: &str) -> Reply {
         "git status failed.",
     )
     .await?;
+    let mut has_untracked = false;
     let mut records = porcelain.split_terminator('\0');
     while let Some(line) = records.next() {
         if line.len() >= 4 {
+            has_untracked |= line.starts_with("?? ");
             files.entry(line[3..].to_string()).or_default();
             if line[..2].contains(['R', 'C']) {
-                records.next();
+                if let Some(original) = records.next() {
+                    files.entry(original.to_owned()).or_default();
+                }
             }
         }
     }
     let (ins, del) = totals(&files);
     result["hasWorkingTreeChanges"] = json!(!porcelain.is_empty());
     result["workingTree"] = json!({"rootPath":root,"files":files.iter().map(|(p,(a,b))|json!({"path":p,"insertions":a,"deletions":b})).collect::<Vec<_>>(),"insertions":ins,"deletions":del});
-    let mut base = None;
-    if !is_default {
-        let candidates = [
-            default.as_ref().map(|d| format!("origin/{d}")),
-            Some("main".into()),
-            Some("master".into()),
-        ];
-        for cand in candidates.into_iter().flatten() {
-            if Some(&cand) != head.as_ref()
-                && read(
-                    root,
-                    &["rev-parse", "--verify", &format!("{cand}^{{commit}}")],
-                )
-                .await
-                .is_some()
-            {
-                base = Some(cand);
-                break;
+    let base = review_base(root, head.as_deref(), None).await;
+    let index = if has_untracked {
+        super::review::index::prepare(root, None).await.ok()
+    } else {
+        Some(Default::default())
+    };
+    if let (Ok((label, merge)), Some(index)) = (base, index.filter(|i| !i.omitted)) {
+        let reference = if merge == "HEAD" { &basis } else { &merge };
+        let mut cmd = crate::login_shell::tokio_command("git");
+        if let Some(dir) = &index.dir {
+            cmd.env("GIT_INDEX_FILE", dir.path().join("index"));
+        }
+        let stats = cmd
+            .current_dir(root)
+            .args(["diff-index", "-M", "--numstat", "-z", reference, "--"])
+            .kill_on_drop(true)
+            .output()
+            .await;
+        if let Ok(out) = stats {
+            if out.status.success() {
+                let (ins, del) = totals(&numstat(&String::from_utf8_lossy(&out.stdout)));
+                result["branchChanges"] = json!({"baseRef":label,"insertions":ins,"deletions":del});
             }
         }
     }
-    let mut left = ins;
-    let mut right = del;
-    let mut divergence = 0;
-    if let Some(base) = &base {
-        if let Some(merge) = read(root, &["merge-base", "HEAD", base]).await {
-            if let Some(stats) =
-                read(root, &["diff-index", "-M", "--numstat", "-z", &merge, "--"]).await
-            {
-                (left, right) = totals(&numstat(&stats));
-            }
-            divergence = read(root, &["rev-list", "--count", &format!("{merge}..HEAD")])
-                .await
-                .and_then(|n| n.parse().ok())
-                .unwrap_or(0);
-        }
-    }
-    let untracked = checked(
-        root,
-        "statusDetails.untracked",
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-        "git ls-files failed.",
-    )
-    .await?;
-    for name in untracked.split_terminator('\0') {
-        let path = Path::new(root).join(name);
-        if let Ok(stat) = tokio::fs::symlink_metadata(&path).await {
-            if stat.is_file() {
-                let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
-                if let Ok(out) = run(
-                    root,
-                    &["diff", "--no-index", "--numstat", "-z", "--", null, name],
-                )
-                .await
-                {
-                    left += totals(&numstat(&String::from_utf8_lossy(&out.stdout))).0;
-                }
-            } else if stat.is_symlink() {
-                left += 1;
-            }
-        }
-    }
-    result["branchChanges"] = json!({"baseRef":base,"insertions":left,"deletions":right});
     let upstream = read(
         root,
         &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
@@ -293,10 +274,30 @@ async fn status(root: &str) -> Reply {
     let mut parts = counts
         .split_whitespace()
         .filter_map(|s| s.parse::<u64>().ok());
+    let divergence = if !is_default || upstream.is_none() {
+        if let Some((_, comparison)) = branch_base(root, head.as_deref(), false).await {
+            read(
+                root,
+                &[
+                    "rev-list",
+                    "--count",
+                    "--end-of-options",
+                    &format!("{comparison}..HEAD"),
+                ],
+            )
+            .await
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
     result["hasUpstream"] = json!(upstream.is_some());
     result["aheadCount"] = json!(parts.next().unwrap_or(divergence));
     result["behindCount"] = json!(parts.next().unwrap_or(0));
-    result["aheadOfDefaultCount"] = json!(divergence);
+    result["aheadOfDefaultCount"] = json!(if is_default { 0 } else { divergence });
     result["pr"] = Value::Null;
     Ok(result)
 }
@@ -329,7 +330,9 @@ async fn refs(root: &str, cwd: &str, input: &Value) -> Reply {
             continue;
         }
         let upstream = cols.next().unwrap_or_default();
-        let worktree = cols.next().filter(|v| !v.is_empty());
+        let worktree = cols
+            .next()
+            .filter(|v| !v.is_empty() && Path::new(v).is_dir());
         let remote = full.starts_with("refs/remotes/");
         let Some(name) = full
             .strip_prefix("refs/heads/")
@@ -449,6 +452,18 @@ async fn checkout(cwd: &str, name: &str) -> Reply {
     Ok(json!({"refName":branch(cwd).await}))
 }
 
+pub(super) fn lexical_path(path: &Path) -> std::path::PathBuf {
+    let mut resolved = std::path::PathBuf::new();
+    for component in path.components() {
+        if component == std::path::Component::ParentDir {
+            resolved.pop();
+        } else {
+            resolved.push(component);
+        }
+    }
+    resolved
+}
+
 impl VcsService {
     pub async fn branch_status(&self, input: &Value) -> Reply {
         let cwd = string(input, "cwd")?;
@@ -484,7 +499,35 @@ impl VcsService {
         ) {
             return None;
         }
-        Some(self.apply(method, input, base_dir, refresh_upstream).await)
+        Some(
+            self.apply(
+                method,
+                input,
+                &super::base_directory(base_dir).join("worktrees"),
+                refresh_upstream,
+            )
+            .await,
+        )
+    }
+    pub(crate) async fn create_worktree(
+        &self,
+        input: &Value,
+        state_dir: &Path,
+        directory: &str,
+    ) -> Reply {
+        let parent = if directory.is_empty() {
+            super::base_directory(state_dir).join("worktrees")
+        } else {
+            let path = std::path::PathBuf::from(crate::provider_status::expand_home(directory));
+            let normalized = lexical_path(&path);
+            if !normalized.is_absolute() || normalized.parent().is_none() {
+                return Err(
+                    json!({"_tag":"GitCommandError","operation":"GitVcsDriver.createWorktree","command":"git worktree add","cwd":input["cwd"],"detail":format!("The worktree location \"{directory}\" must be an absolute folder on this machine, not a drive root. Change it in Settings → Worktrees.")}),
+                );
+            }
+            normalized
+        };
+        self.apply("createWorktree", input, &parent, false).await
     }
     async fn apply(
         &self,
@@ -612,9 +655,11 @@ impl VcsService {
                     }
                     prefix.push(c);
                 }
-                let dir = super::base_directory(base_dir)
-                    .join("worktrees")
-                    .join(Path::new(&root).file_name().unwrap_or_default());
+                let cwd_path = lexical_path(
+                    &std::path::absolute(cwd)
+                        .map_err(|e| json!({"_tag":"Die","defect":e.to_string()}))?,
+                );
+                let dir = base_dir.join(cwd_path.file_name().unwrap_or_default());
                 let file = format!("{prefix}-{}", &hash[..16]);
                 let mut path = dir.join(&file);
                 let mut suffix = 2;
@@ -626,22 +671,76 @@ impl VcsService {
                 let path = std::path::absolute(path)
                     .map_err(|e| json!({"_tag":"Die","defect":e.to_string()}))?;
                 let path = path.to_string_lossy();
-                let args = if let Some(new) = new {
-                    vec!["worktree", "add", "-b", new, "--", &path, name]
-                } else {
-                    vec!["worktree", "add", "--", &path, name]
-                };
+                if let Some(new) = new {
+                    let start = if name == "-" { "@{-1}" } else { name };
+                    checked(
+                        cwd,
+                        "createWorktree.createBranch",
+                        &["branch", "--no-track", "--", new, start],
+                        "git branch failed",
+                    )
+                    .await?;
+                    if let Some(remote) = read(cwd, &["rev-parse", "--symbolic-full-name", start])
+                        .await
+                        .filter(|r| r.starts_with("refs/remotes/"))
+                    {
+                        let _ = read(
+                            cwd,
+                            &["branch", &format!("--set-upstream-to={remote}"), "--", new],
+                        )
+                        .await;
+                    }
+                }
+                let workers = read(cwd, &["config", "--get", "checkout.workers"])
+                    .await
+                    .unwrap_or_else(|| "0".into());
+                let config = format!("checkout.workers={workers}");
+                let args = ["-c", &config, "worktree", "add", "--", &path, target];
                 checked(cwd, "createWorktree", &args, "git worktree add failed").await?;
+                if let (Some(new), Some(base)) = (new, input["baseRefName"].as_str()) {
+                    record_worktree_base(cwd, new, base).await;
+                }
                 Ok(json!({"worktree":{"path":path,"refName":target}}))
             }
             "removeWorktree" => {
                 let path = string(input, "path")?;
-                let mut args = vec!["worktree", "remove"];
+                let target = std::path::absolute(Path::new(cwd).join(path))
+                    .map_err(|e| json!({"_tag":"Die","defect":e.to_string()}))?;
+                let target = lexical_path(&target);
+                let path = target.to_string_lossy();
+                let mut args = vec![
+                    "-c",
+                    "status.showUntrackedFiles=normal",
+                    "worktree",
+                    "remove",
+                ];
                 if input["force"] == true {
                     args.push("--force");
                 }
-                args.extend(["--", path]);
-                checked(cwd, "removeWorktree", &args, "git worktree remove failed").await?;
+                args.extend(["--", &path]);
+                let result = run(cwd, &args).await;
+                if let Ok(out) = &result {
+                    let message = String::from_utf8_lossy(&out.stderr);
+                    if !out.status.success()
+                        && (message.contains("is not a working tree")
+                            || message.contains("cannot remove working tree"))
+                        && matches!(target.try_exists(), Ok(false))
+                    {
+                        checked(
+                            cwd,
+                            "pruneWorktrees",
+                            &["worktree", "prune"],
+                            "git worktree prune failed",
+                        )
+                        .await?;
+                        return Ok(Value::Null);
+                    }
+                }
+                checked_output(
+                    result,
+                    failure_context("removeWorktree", cwd, &args),
+                    "git worktree remove failed",
+                )?;
                 Ok(Value::Null)
             }
             _ => unreachable!(),

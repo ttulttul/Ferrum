@@ -1,8 +1,8 @@
-use super::vcs::{branch, checked, default_ref, read};
+use super::vcs::{branch, checked, default_ref, read, read_branch_base};
 use super::{invalid, string, Reply};
 use crate::{
     provider_rpc::{valid_repository, Failure, Github},
-    workspace::{GitTools, LocalWorkspace},
+    workspace::{GitTools, LocalWorkspace, Workspace},
 };
 use serde_json::{json, Value};
 use std::path::Path;
@@ -408,11 +408,9 @@ pub async fn pull_request(
         .await?;
     } else if path.is_none() {
         let worktree = workspace
-            .vcs
-            .call_with(
+            .vcs(
                 "createWorktree",
                 &json!({"cwd":cwd,"refName":local,"path":null}),
-                &workspace.data_dir,
                 true,
             )
             .await

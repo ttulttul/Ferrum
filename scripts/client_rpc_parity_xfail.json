@@ -156,36 +156,6 @@
       "severity": "low",
       "reason": "subscribeCommandOutput for an unknown item streams an empty replace",
       "issue": "the reference fails with OrchestrationV2CommandOutputError"
-    },
-    "vcs.refreshStatus": {
-      "area": "git/VCS",
-      "severity": "medium",
-      "reason": "VCS status has no branchChanges.baseRef",
-      "issue": "the reference compares the branch with its upstream origin/main; Rust reports baseRef null"
-    },
-    "vcs.removeWorktree": {
-      "area": "git/VCS",
-      "severity": "high",
-      "reason": "vcs.removeWorktree fails on a worktree vcs.createWorktree made",
-      "issue": "git worktree remove exits 128 on Rust; the reference removes it"
-    },
-    "vcs.review.getDiffPreview": {
-      "area": "git/VCS",
-      "severity": "medium",
-      "reason": "review.getDiffPreview files lack changeType",
-      "issue": "the review panel's file list needs changeType for each file"
-    },
-    "vcs.subscribeVcsStatus": {
-      "area": "git/VCS",
-      "severity": "medium",
-      "reason": "VCS status has no branchChanges.baseRef",
-      "issue": "the reference compares the branch with its upstream origin/main; Rust reports baseRef null"
-    },
-    "vcs.subscribeVcsStatus.remote": {
-      "area": "git/VCS",
-      "severity": "medium",
-      "reason": "VCS status has no branchChanges.baseRef",
-      "issue": "the reference compares the branch with its upstream origin/main; Rust reports baseRef null"
     }
   }
 }
