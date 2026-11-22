@@ -118,6 +118,42 @@ def seed_fixture(home, isolation):
         "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
         "0000000d4944415478da63f8cfc0f01f0005000201a5f1d6a90000000049454e44ae426082"))
     (repo / "src/lib.rs").write_text("fn alpha() {}\nfn beta() {}\nfn gamma() {}\n")
+    # Exercise the two list modes in isolation from search, branch and diff fixtures.
+    listing = home / "listing"
+    git("init", "-q", "-b", "main", str(listing), cwd=home)
+    (home / "listing-link").symlink_to(listing, target_is_directory=True)
+    (listing / "tracked.log").touch()
+    (listing / "tracked-private.txt").touch()
+    git("add", "tracked.log", "tracked-private.txt", cwd=listing)
+    (listing / ".gitignore").write_text("*.log\noutput/\n")
+    (listing / ".ignore").write_text("!visible.log\nskip-link\n")
+    (listing / ".git/info/exclude").write_text("private.txt\ntracked-private.txt\n")
+    for name in (".hidden", "alpha", "Alpha", "ä", "Z", "visible.log", "private.txt"):
+        (listing / name).touch()
+    for directory in ("empty", "src", "output"):
+        (listing / directory).mkdir()
+    (listing / "output/build.txt").touch()
+    (listing / "src/nested.txt").touch()
+    (listing / "src/root-link").symlink_to("..", target_is_directory=True)
+    (listing / "alias").symlink_to("src", target_is_directory=True)
+    (listing / "file-link").symlink_to("src/nested.txt")
+    (listing / "skip-link").symlink_to("src/nested.txt")
+    (listing / "broken").symlink_to("absent")
+    for index in range(201):
+        (listing / f"log-{index:03}.log").write_text(str(index))
+    listing_plain = home / "listing-plain"
+    listing_plain.mkdir()
+    for name in ("node_modules", ".settings", "code"):
+        (listing_plain / name).mkdir()
+        (listing_plain / name / "entry.txt").touch()
+    (listing_plain / ".hidden").touch()
+    # One inode keeps this boundary fixture small and gives every entry the same rank.
+    capped = home / "listing-cap"
+    capped.mkdir()
+    seed = capped / "entry-00000"
+    seed.touch()
+    for index in range(1, 25_001):
+        os.link(seed, capped / f"entry-{index:05}")
     # The published parent advances after its child branches. Review the child's
     # commit and dirty files against their common ancestor.
     stack = home / "stack"

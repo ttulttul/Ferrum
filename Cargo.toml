@@ -13,6 +13,9 @@ repository = "https://github.com/ttulttul/t3code-rust"
 default = ["native"]
 # The full server: sockets, processes, PTYs, SQLite and the local filesystem.
 native = [
+    "dep:fff-search",
+    "dep:ignore",
+    "dep:icu_collator",
     "dep:async-compression",
     "dep:httpdate",
     "dep:mime_guess",
@@ -42,6 +45,9 @@ path = "src/main.rs"
 required-features = ["native"]
 
 [dependencies]
+ignore = { version = "0.4", optional = true }
+fff-search = { version = "=0.11.0", optional = true }
+icu_collator = { version = "2", optional = true }
 async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib", "brotli"], optional = true }
 httpdate = { version = "1", optional = true }
 mime_guess = { version = "2", optional = true }
@@ -62,7 +68,7 @@ sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream"] }
 tokio-tungstenite = { version = "0.24", optional = true }
 portable-pty = { version = "0.8.1", optional = true }
-url = "=2.4.1"
+url = "2.4.1"
 percent-encoding = "2"
 axum = { version = "=0.7.9", default-features = false, features = ["json", "query", "form", "matched-path", "original-uri", "multipart"] }
 clap = { version = "=4.5.23", features = ["derive", "env"], optional = true }

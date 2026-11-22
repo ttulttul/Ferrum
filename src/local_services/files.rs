@@ -1,3 +1,6 @@
+mod listing;
+pub use listing::{list_ignored_files, ListingIndexes};
+
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -87,65 +90,6 @@ fn sorted_entries(root: &Path, directory: &Path) -> std::io::Result<Vec<Value>> 
         .collect::<Vec<_>>();
     values.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
     Ok(values)
-}
-
-pub async fn list_entries(input: &Value) -> Option<Reply> {
-    input.get("cwd")?;
-    let result = (|| {
-        let root = root(input)?;
-        let directory = input["directoryPath"].as_str().unwrap_or_default();
-        let directory = root.join(directory);
-        if !directory.is_dir() || !within(&root, &directory) {
-            return Err(error(
-                "ProjectEntriesError",
-                "Directory does not exist.".into(),
-            ));
-        }
-        Ok(
-            json!({"entries": sorted_entries(&root, &directory).map_err(|e| error("ProjectEntriesError", e.to_string()))?, "truncated": false}),
-        )
-    })();
-    Some(result)
-}
-
-pub async fn list_ignored_files(input: &Value) -> Option<Reply> {
-    input.get("cwd")?;
-    let result = (|| {
-        let root = root(input)?;
-        let mut files = Vec::new();
-        fn visit(root: &Path, directory: &Path, files: &mut Vec<Value>) {
-            let Ok(items) = std::fs::read_dir(directory) else {
-                return;
-            };
-            let mut paths = items
-                .filter_map(Result::ok)
-                .map(|e| e.path())
-                .collect::<Vec<_>>();
-            paths.sort();
-            for path in paths {
-                if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
-                    continue;
-                }
-                let directory = path.is_dir();
-                let ignored = is_ignored(root, &path);
-                if directory && ignored {
-                    continue;
-                }
-                if directory {
-                    visit(root, &path, files);
-                } else if ignored {
-                    if let (Some(relative), Ok(metadata)) =
-                        (path.strip_prefix(root).ok(), std::fs::metadata(&path))
-                    {
-                        files.push(json!({"path": relative.to_string_lossy().replace('\\', "/"), "byteLength": metadata.len()}));
-                    }
-                }
-            }
-        }
-        visit(&root, &root, &mut files);
-        Ok(json!({"files": files, "truncated": false}))
-    })();
-    Some(result)
 }
 
 fn walk(root: &Path, directory: &Path, output: &mut Vec<Value>, limit: usize) {
