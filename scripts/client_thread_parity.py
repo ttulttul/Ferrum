@@ -100,6 +100,10 @@ PROVIDER_SCENARIOS = [
     # parent's timeline.
     {"name": "claude create threads", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_create_threads.json", "awaitStatus": True},
+    # A follow-up to a finished child: the parent sends it more work, which becomes a follow-up
+    # task whose result wakes the parent.
+    {"name": "claude delegate followup", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_followup.json", "awaitStatus": True, "settleRuns": 2},
     {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
     # Runtime requests: what each server asks the user, and what it answers the CLI.
     {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",

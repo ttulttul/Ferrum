@@ -981,13 +981,26 @@ async fn finalize_child<H: CommandHost>(
     parent_id: &str,
 ) -> anyhow::Result<()> {
     let _guard = state.mutation_lock().lock().await;
+    // Each of the child's tasks settles from its own runs: the original from
+    // the child's progress, a follow-up from the runs tagged with it.
+    while settle_next(&state, child_id, parent_id).await? {}
+    Ok(())
+}
+
+/// Settles the first of `child_id`'s unsettled tasks whose work has ended
+/// (`finalizeAppOwnedSubagentTask`); whether one was.
+async fn settle_next<H: CommandHost>(
+    state: &Arc<H>,
+    child_id: &str,
+    parent_id: &str,
+) -> anyhow::Result<bool> {
     let (child, parent_row, parent_projection) = {
         let store = state.store.read().await;
         let Some(child) = store.threads.get(child_id) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(parent) = store.threads.get(parent_id) else {
-            return Ok(());
+            return Ok(false);
         };
         (
             child.full_projection(),
@@ -995,26 +1008,31 @@ async fn finalize_child<H: CommandHost>(
             parent.full_projection(),
         )
     };
-    let (work, result_run) = progress(&child);
-    let Some(result_run) = result_run.filter(|_| work == "result_available") else {
-        return Ok(());
-    };
-    let Some(terminal) = terminal_status(result_run["status"].as_str().unwrap_or_default()) else {
-        return Ok(());
-    };
     let task_node = child["thread"]["forkedFrom"]["nodeId"].clone();
+    let (work, progress_run) = progress(&child);
     let mut tasks = records(&parent_row, "subagents");
-    let Some(task) = tasks
+    let picked = tasks
         .iter()
-        .find(|t| {
-            t["id"] == task_node
-                && t["origin"] == "app_owned"
-                && t["childThreadId"] == child_id
-                && t["result"].is_null()
+        .filter(|t| {
+            t["origin"] == "app_owned" && t["childThreadId"] == child_id && t["result"].is_null()
         })
-        .cloned()
-    else {
-        return Ok(());
+        .find_map(|task| {
+            let task_runs = delegated_task_runs(&child, &task["id"]);
+            let run = if task_runs.is_empty() {
+                progress_run
+                    .clone()
+                    .filter(|_| task["id"] == task_node && work == "result_available")
+            } else if delegated_task_awaits_work(&task_runs, &child) {
+                // A follow-up ends with the work it awaits, as the original task does.
+                None
+            } else {
+                delegated_task_result_run(&task_runs)
+            }?;
+            let terminal = terminal_status(run["status"].as_str().unwrap_or_default())?;
+            Some((task.clone(), run, terminal))
+        });
+    let Some((task, result_run, terminal)) = picked else {
+        return Ok(false);
     };
     let mut source_point =
         context_source_point(&child, result_run["id"].as_str().unwrap_or_default());
@@ -1185,7 +1203,7 @@ async fn finalize_child<H: CommandHost>(
             }}),
         })
         .await?;
-    Ok(())
+    Ok(true)
 }
 
 /// Delivers a thread's open delivery once it has no live run, as the
@@ -1355,6 +1373,353 @@ pub(crate) async fn stop_cohorts<H: CommandHost>(
             })
             .await?;
     }
+    Ok(())
+}
+
+/// `delegatedTaskRuns`: a follow-up task's runs, those tagged with it and the
+/// untagged wakes for subagents they started.
+pub(crate) fn delegated_task_runs(child: &Value, task_id: &Value) -> Vec<Value> {
+    let runs = records(child, "runs");
+    let mut owned: std::collections::HashSet<String> = runs
+        .iter()
+        .filter(|run| run["delegatedTaskId"] == *task_id)
+        .filter_map(|run| run["id"].as_str().map(str::to_owned))
+        .collect();
+    let untagged: std::collections::HashSet<String> = runs
+        .iter()
+        .filter(|run| run["delegatedTaskId"].is_null())
+        .filter_map(|run| run["id"].as_str().map(str::to_owned))
+        .collect();
+    let messages = records(child, "messages");
+    let mut grew = !owned.is_empty();
+    while grew {
+        grew = false;
+        for message in &messages {
+            let Some(run_id) = message["runId"].as_str() else {
+                continue;
+            };
+            let parent_run = message["delegatedCompletion"]["parentRunId"].as_str();
+            if untagged.contains(run_id)
+                && !owned.contains(run_id)
+                && parent_run.is_some_and(|parent| owned.contains(parent))
+            {
+                owned.insert(run_id.to_owned());
+                grew = true;
+            }
+        }
+    }
+    runs.into_iter()
+        .filter(|run| run["id"].as_str().is_some_and(|id| owned.contains(id)))
+        .collect()
+}
+
+/// `delegatedTaskAwaitsWork`: a follow-up's runs still owe a subagent they
+/// started its result.
+pub(crate) fn delegated_task_awaits_work(runs: &[Value], child: &Value) -> bool {
+    records(child, "subagents").iter().any(|task| {
+        runs.iter().any(|run| run["id"] == task["runId"])
+            && (work_active(&task["status"])
+                || (task["status"] != "idle"
+                    && matches!(
+                        task["completionDelivery"]["state"].as_str(),
+                        Some("pending" | "claimed")
+                    )))
+    })
+}
+
+/// `delegatedTaskResultRun`: a follow-up's latest run, passing over queued
+/// work it no longer waits on.
+pub(crate) fn delegated_task_result_run(runs: &[Value]) -> Option<Value> {
+    let mut sorted: Vec<&Value> = runs.iter().collect();
+    sorted.sort_by_key(|run| std::cmp::Reverse(run["ordinal"].as_u64().unwrap_or(0)));
+    let awaited: Vec<&Value> = sorted
+        .iter()
+        .copied()
+        .filter(|run| {
+            let cancelled_before_start = run["status"] == "cancelled" && run["startedAt"].is_null();
+            let held = run["status"] == "queued" && run["queueHeld"] == true;
+            !(cancelled_before_start || held)
+        })
+        .collect();
+    awaited
+        .iter()
+        .find(|run| work_active(&run["status"]) || run["status"] == "preparing")
+        .or_else(|| awaited.iter().find(|run| run["status"] == "queued"))
+        .or(awaited.first())
+        .or(sorted.first())
+        .map(|run| (*run).clone())
+}
+
+/// `followUpOwnerRun`: the parent's latest active run, else the last that ran.
+fn follow_up_owner_run(runs: &[Value]) -> Option<Value> {
+    let active = |run: &&Value| {
+        matches!(
+            run["status"].as_str(),
+            Some("preparing" | "starting" | "running" | "waiting")
+        )
+    };
+    runs.iter()
+        .filter(active)
+        .max_by_key(|run| run["ordinal"].as_u64().unwrap_or(0))
+        .or_else(|| {
+            runs.iter()
+                .filter(|run| {
+                    run["status"] != "queued"
+                        && !(run["status"] == "cancelled" && run["startedAt"].is_null())
+                })
+                .max_by_key(|run| run["ordinal"].as_u64().unwrap_or(0))
+        })
+        .cloned()
+}
+
+/// `mayStartSubagentFollowup`: a message that may start follow-up work on a
+/// child. A monitor's progress update only reports.
+fn may_start_followup(command: &Value) -> bool {
+    if command["scheduledTaskId"].is_string() || command["restartContinuationOfRunId"].is_string() {
+        return false;
+    }
+    if command["notification"].is_object() {
+        return command["notification"]["source"]["kind"] != "monitor"
+            || command["notification"]["outcome"] != "updated";
+    }
+    command["createdBy"] == "user"
+        || command["creationSource"] == "mcp"
+        || command["usageLimitContinuationOfRunId"].is_string()
+}
+
+/// `recordSubagentFollowup`: a message that starts a new run on a delegated
+/// child whose task already finished becomes a follow-up task on the parent,
+/// bound to the parent's active run (or the last that ran), its card on the
+/// parent's timeline and its runs tagged with it. A wake continues the open
+/// follow-up instead.
+pub(crate) async fn record_followup<H: CommandHost>(
+    state: &Arc<H>,
+    child_id: &str,
+    command: &Value,
+) -> anyhow::Result<()> {
+    if !may_start_followup(command) {
+        return Ok(());
+    }
+    let command_id = command["commandId"].as_str().unwrap_or_default();
+    let (child, child_row, parent_row, parent_projection, run_index) = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(child_id) else {
+            return Ok(());
+        };
+        let row = thread.stored_row();
+        let Some(parent_id) = row["lineage"]["parentThreadId"].as_str() else {
+            return Ok(());
+        };
+        let Some(parent) = store.threads.get(parent_id) else {
+            return Ok(());
+        };
+        let message_id = command["messageId"].as_str();
+        let Some(run_index) = thread
+            .runs
+            .iter()
+            .position(|run| run.user_message_id.as_deref() == message_id)
+        else {
+            return Ok(());
+        };
+        (
+            thread.full_projection(),
+            row,
+            parent.stored_row(),
+            parent.full_projection(),
+            run_index,
+        )
+    };
+    let parent_id = child_row["lineage"]["parentThreadId"]
+        .as_str()
+        .unwrap_or_default();
+    // A send with no sender thread comes from a client acting for the owner, like a user send.
+    if child_row["lineage"]["relationshipToParent"] != "subagent"
+        || child_row["forkedFrom"]["type"] != "node"
+        || (!command["notification"].is_object()
+            && command["createdBy"] != "user"
+            && !command["usageLimitContinuationOfRunId"].is_string()
+            && command["senderThreadId"]
+                .as_str()
+                .is_some_and(|sender| sender != parent_id))
+    {
+        return Ok(());
+    }
+    let runs = records(&child, "runs");
+    let Some(run) = runs.get(run_index).cloned() else {
+        return Ok(());
+    };
+    if !run["delegatedTaskId"].is_null() {
+        return Ok(());
+    }
+    let run_id = run["id"].as_str().unwrap_or_default().to_owned();
+    let mut child_extras = child_row["runExtras"].clone();
+    if !child_extras.is_object() {
+        child_extras = json!({});
+    }
+    let mut tasks = records(&parent_row, "subagents");
+    let original = tasks
+        .iter()
+        .find(|t| {
+            t["origin"] == "app_owned"
+                && t["childThreadId"] == child_id
+                && t["id"] == child_row["forkedFrom"]["nodeId"]
+        })
+        .cloned();
+    let Some(original) = original.filter(|t| !t["result"].is_null()) else {
+        return Ok(());
+    };
+    // A wake continues the latest follow-up while it is open.
+    if command["notification"].is_object() {
+        let latest = runs
+            .iter()
+            .filter(|r| r["id"] != run["id"] && !r["delegatedTaskId"].is_null())
+            .max_by_key(|r| r["ordinal"].as_u64().unwrap_or(0))
+            .map(|r| r["delegatedTaskId"].clone());
+        if let Some(open) = latest.and_then(|id| {
+            tasks.iter().find(|t| {
+                t["id"] == id
+                    && t["origin"] == "app_owned"
+                    && t["childThreadId"] == child_id
+                    && t["cancelledRunId"].is_null()
+                    && t["result"].is_null()
+            })
+        }) {
+            child_extras[run_id.as_str()]["delegatedTaskId"] = open["id"].clone();
+            state
+                .commit(Event::ThreadPatched {
+                    thread_id: child_id.to_owned(),
+                    patch: json!({"row": {"runExtras": child_extras}}),
+                })
+                .await?;
+            return Ok(());
+        }
+    }
+    let Some(owner) = follow_up_owner_run(&records(&parent_projection, "runs"))
+        .filter(|owner| !owner["rootNodeId"].is_null())
+    else {
+        return Ok(());
+    };
+    let owner_id = owner["id"].as_str().unwrap_or_default().to_owned();
+    let at = crate::auth_service::iso(crate::auth_service::now());
+    let task_id = task_node_id(command_id);
+    let instance = run["providerInstanceId"].as_str().unwrap_or_default();
+    let settings = state.effective_settings().unwrap_or(Value::Null);
+    let status = if run["status"] == "queued" {
+        if run["queueHeld"] == true {
+            "idle"
+        } else {
+            "pending"
+        }
+    } else {
+        "running"
+    };
+    let mut task = original.clone();
+    task["createdBy"] = command["createdBy"].clone();
+    task["driver"] = json!(driver_of(&settings, instance));
+    task["id"] = json!(task_id);
+    task["runId"] = json!(owner_id);
+    task["parentNodeId"] = owner["rootNodeId"].clone();
+    task["providerInstanceId"] = json!(instance);
+    task["providerThreadId"] = run["providerThreadId"].clone();
+    task["model"] = run["modelSelection"]["model"].clone();
+    task["modelSelection"] = run["modelSelection"].clone();
+    task["prompt"] = command["text"].clone();
+    task["title"] = child["thread"]["title"].clone();
+    task["completionWake"] = json!("always");
+    task["completionDelivery"] = json!({"state": "pending", "observedByRunId": null});
+    task["status"] = json!(status);
+    task["result"] = Value::Null;
+    task["startedAt"] = json!(at);
+    task["completedAt"] = Value::Null;
+    task["updatedAt"] = json!(at);
+    if let Some(fields) = task.as_object_mut() {
+        fields.remove("progress");
+        fields.remove("cancelledRunId");
+    }
+    let node = json!({
+        "id": task_id,
+        "threadId": parent_id,
+        "runId": owner_id,
+        "parentNodeId": owner["rootNodeId"],
+        "rootNodeId": owner["rootNodeId"],
+        "kind": "subagent",
+        "status": status,
+        "countsForRun": false,
+        "providerThreadId": run["providerThreadId"],
+        "providerTurnId": null,
+        "nativeItemRef": null,
+        "runtimeRequestId": null,
+        "checkpointScopeId": null,
+        "startedAt": at,
+        "completedAt": null,
+    });
+    // `providerTurnForRun` for the owner, and where the card sits among its items.
+    let provider_turn = records(&parent_projection, "providerTurns")
+        .into_iter()
+        .filter(|turn| {
+            !owner["activeAttemptId"].is_null() && turn["runAttemptId"] == owner["activeAttemptId"]
+        })
+        .max_by_key(|turn| turn["ordinal"].as_u64().unwrap_or(0))
+        .map_or(Value::Null, |turn| turn["id"].clone());
+    let after_items = {
+        let store = state.store.read().await;
+        store.threads.get(parent_id).map_or(0, |parent| {
+            parent
+                .runs
+                .iter()
+                .position(|r| r.wire_id() == owner_id)
+                .map_or(0, |index| {
+                    parent
+                        .provider_records()
+                        .items
+                        .iter()
+                        .filter(|(i, _)| *i == index)
+                        .count()
+                })
+        })
+    };
+    let item = json!({
+        "id": task_turn_item_id(command_id),
+        "threadId": parent_id,
+        "runId": owner_id,
+        "nodeId": task_id,
+        "providerThreadId": owner["providerThreadId"],
+        "providerTurnId": provider_turn,
+        "nativeItemRef": null,
+        "parentItemId": null,
+        "status": status,
+        "title": child["thread"]["title"],
+        "startedAt": at,
+        "completedAt": null,
+        "updatedAt": at,
+        "type": "subagent",
+        "subagentId": task_id,
+        "origin": "app_owned",
+        "driver": task["driver"],
+        "providerInstanceId": instance,
+        "childThreadId": child_id,
+        "prompt": command["text"],
+        "result": null,
+        (crate::thread_projection::LINK_CARD_POSITION): after_items,
+    });
+    child_extras[run_id.as_str()]["delegatedTaskId"] = json!(task_id);
+    state
+        .commit(Event::ThreadPatched {
+            thread_id: child_id.to_owned(),
+            patch: json!({"row": {"runExtras": child_extras}}),
+        })
+        .await?;
+    tasks.push(task);
+    let mut nodes = records(&parent_row, "nodes");
+    nodes.push(node);
+    let mut items = records(&parent_row, "appTurnItems");
+    items.push(item);
+    state
+        .commit(Event::ThreadPatched {
+            thread_id: parent_id.to_owned(),
+            patch: json!({"row": {"subagents": tasks, "nodes": nodes, "appTurnItems": items}}),
+        })
+        .await?;
     Ok(())
 }
 
@@ -1687,6 +2052,51 @@ mod tests {
             context_source_point(&projection, "missing"),
             json!({"threadId": "th", "runId": "missing"})
         );
+    }
+
+    #[test]
+    fn a_followup_settles_from_its_executing_run_else_its_latest() {
+        let run = |id: &str, ordinal: u64, status: &str| json!({"id": id, "ordinal": ordinal, "status": status, "startedAt": "t"});
+        let runs = vec![run("a", 1, "completed"), run("b", 2, "running")];
+        assert_eq!(delegated_task_result_run(&runs).unwrap()["id"], "b");
+        let runs = vec![run("a", 1, "completed"), run("b", 2, "interrupted")];
+        assert_eq!(delegated_task_result_run(&runs).unwrap()["id"], "b");
+        let held = json!({"id": "c", "ordinal": 3, "status": "queued", "queueHeld": true, "startedAt": null});
+        let runs = vec![run("a", 1, "completed"), held];
+        assert_eq!(delegated_task_result_run(&runs).unwrap()["id"], "a");
+    }
+
+    #[test]
+    fn a_followup_binds_to_the_active_run_else_the_last_that_ran() {
+        let runs = vec![
+            json!({"id": "a", "ordinal": 1, "status": "completed", "startedAt": "t"}),
+            json!({"id": "b", "ordinal": 2, "status": "queued", "startedAt": null}),
+        ];
+        assert_eq!(follow_up_owner_run(&runs).unwrap()["id"], "a");
+        let runs = vec![
+            json!({"id": "a", "ordinal": 1, "status": "completed", "startedAt": "t"}),
+            json!({"id": "b", "ordinal": 2, "status": "waiting", "startedAt": "t"}),
+        ];
+        assert_eq!(follow_up_owner_run(&runs).unwrap()["id"], "b");
+    }
+
+    #[test]
+    fn only_user_mcp_and_real_wakes_start_followups() {
+        assert!(may_start_followup(&json!({"createdBy": "user"})));
+        assert!(may_start_followup(
+            &json!({"createdBy": "agent", "creationSource": "mcp"})
+        ));
+        assert!(!may_start_followup(
+            &json!({"createdBy": "agent", "creationSource": "server"})
+        ));
+        assert!(!may_start_followup(
+            &json!({"createdBy": "user", "scheduledTaskId": "s"})
+        ));
+        let monitor =
+            json!({"notification": {"source": {"kind": "monitor"}, "outcome": "updated"}});
+        assert!(!may_start_followup(&monitor));
+        let done = json!({"notification": {"source": {"kind": "monitor"}, "outcome": "completed"}});
+        assert!(may_start_followup(&done));
     }
 
     #[tokio::test]
