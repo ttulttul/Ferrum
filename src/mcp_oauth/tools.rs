@@ -8,6 +8,7 @@ use super::{McpAccess, McpHost};
 use serde_json::{json, Value};
 use std::sync::{Arc, LazyLock};
 
+mod agent_tools;
 mod arguments;
 mod delegation;
 mod projects;
@@ -50,6 +51,10 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     // Delegation (batch 4b).
     ("delegate_task", &[]),
     ("task_status", &[]),
+    // Worktree and preview session controls (agent-tools audit).
+    ("t3_worktree_status", &[]),
+    ("t3_preview_list", &[]),
+    ("t3_preview_close", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -97,6 +102,10 @@ const SERVED: &[&str] = &[
     // Delegation (batch 4b).
     "delegate_task",
     "task_status",
+    // Worktree and preview session controls (agent-tools audit).
+    "t3_worktree_status",
+    "t3_preview_list",
+    "t3_preview_close",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -626,6 +635,9 @@ pub(super) async fn call<S: McpHost>(
 
         "delegate_task" => delegation::delegate_task(host, caller, args).await,
         "task_status" => delegation::task_status(host, caller, args).await,
+        "t3_worktree_status" => agent_tools::worktree_status(host, caller).await,
+        "t3_preview_list" => agent_tools::preview_list(host, caller, args).await,
+        "t3_preview_close" => agent_tools::preview_close(host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }

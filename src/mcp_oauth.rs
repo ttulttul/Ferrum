@@ -142,6 +142,18 @@ pub trait McpHost: AuthHost {
     fn list_refs(self: &Arc<Self>, _input: Value) -> HostFuture<Result<Value, ()>> {
         Box::pin(async { Err(()) })
     }
+    /// Calls a workspace-backed RPC in the caller's workspace. MCP preview and
+    /// device tools use the same operation names as the WebSocket API, which
+    /// keeps local and agentd workspaces behaviorally identical.
+    fn workspace_call(
+        self: &Arc<Self>,
+        _method: String,
+        _input: Value,
+    ) -> HostFuture<Result<Value, Value>> {
+        Box::pin(async {
+            Err(json!({"_tag":"Unavailable","message":"The workspace is unavailable."}))
+        })
+    }
     /// The published themes, the one named `theme_id`, and where theme files
     /// live (`EnvironmentThemeService.read`).
     fn theme_read(

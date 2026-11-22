@@ -1535,6 +1535,23 @@ impl mcp_oauth::McpHost for AppState {
             }
         })
     }
+    fn workspace_call(
+        self: &Arc<Self>,
+        method: String,
+        input: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, serde_json::Value>> {
+        let state = self.clone();
+        Box::pin(async move {
+            let settings = state.workspace_settings(&method).await;
+            match crate::dispatch::workspace(&*state.workspace, &settings, &method, &input).await {
+                Some(result) => result,
+                None => Err(serde_json::json!({
+                    "_tag": "Unavailable",
+                    "message": format!("Workspace operation is unavailable: {method}"),
+                })),
+            }
+        })
+    }
     fn search_threads(
         &self,
         query: String,

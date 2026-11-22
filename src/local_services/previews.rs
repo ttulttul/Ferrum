@@ -121,7 +121,14 @@ impl PreviewService {
     pub fn call(&self, name: &str, input: &Value) -> Option<Reply> {
         if !matches!(
             name,
-            "open" | "close" | "list" | "resize" | "adjust" | "reportStatus"
+            "open"
+                | "close"
+                | "list"
+                | "resize"
+                | "adjust"
+                | "reportStatus"
+                | "navigate"
+                | "setColorScheme"
         ) {
             return None;
         }
@@ -197,6 +204,18 @@ impl PreviewService {
         let mut kind = "resized";
         let mut request = None;
         match name {
+            "navigate" => {
+                let url = normalize_url(string(input, "url")?)?;
+                tab["navStatus"] = json!({"_tag":"Loading","url":url,"title":""});
+                kind = "navigated";
+            }
+            "setColorScheme" => {
+                tab["colorScheme"] = input
+                    .get("colorScheme")
+                    .ok_or_else(|| invalid("colorScheme", "Missing key"))?
+                    .clone();
+                kind = "adjusted";
+            }
             "reportStatus" => {
                 if tab["runtime"] == "server" {
                     return Err(json!({"_tag":"PreviewControlRequiredError","tabId":id}));
