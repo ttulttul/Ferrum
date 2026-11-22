@@ -47,6 +47,9 @@ pub(crate) trait CommandHost:
     /// Run a `thread-title.generate` effect in the background. Hosts that
     /// run no provider CLIs ignore it.
     fn generate_title(self: Arc<Self>, _effect: crate::title_generation::TitleEffect) {}
+    /// Refresh a newly linked pull request after its link command commits.
+    /// Hosts without a provider service leave the link unsynchronized.
+    fn sync_pull_request_link(self: Arc<Self>, _thread_id: String, _target: Value) {}
     fn close_guest_thread(&self, thread_id: &str) -> Result<(), String>;
     fn resolve_guest_message(
         &self,
@@ -328,6 +331,11 @@ async fn dispatch_command<H: CommandHost>(
     let mut seq = apply_command(state.clone(), &command, &receipt, continuation_of)
         .await
         .map_err(|e| dispatch_error(e.to_string()))?;
+    if kind == "thread.pull-request.link" {
+        state
+            .clone()
+            .sync_pull_request_link(id.to_owned(), command.clone());
+    }
     // Stopping, settling or archiving a thread means the user is done with
     // its link cards; nobody is woken (`closePendingLinkRequests`).
     if matches!(

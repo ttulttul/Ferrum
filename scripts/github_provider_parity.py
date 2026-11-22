@@ -26,8 +26,12 @@ LABEL = {"name": "bug", "color": "fff", "description": "Something needs fixing"}
 ISSUE = {"id": "I_12", "__typename": "Issue", "number": 12, "title": "Regression", "body": "Read me",
          "author": AUTHOR, "url": "https://github.com/example/parity/issues/12", "state": "OPEN",
          "stateReason": None, "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
-         "closedAt": None, "comments": {"totalCount": 0}, "assignees": {"nodes": []},
-         "labels": {"nodes": [{"name": "bug", "color": "fff"}]}}
+         "closedAt": None, "comments": {"totalCount": 0,"pageInfo":{"hasPreviousPage":False,"startCursor":None},"nodes":[]},
+         "assignees": {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes":[]},
+         "labels": {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes": [{"name": "bug", "color": "fff"}]},
+         "viewerCanUpdate": True, "viewerCanClose": True, "viewerCanReopen": True,
+         "reactionGroups": [], "closedByPullRequestsReferences": {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes":[]},
+         "timelineItems": {"nodes":[]}}
 PR = {"viewerCanUpdate":True,"viewerDidAuthor":False,"headRepository":{"viewerPermission":"WRITE"},"id": "PR_3", "__typename": "PullRequest", "number": 3, "title": "Work", "url": "https://github.com/example/parity/pull/3",
       "state": "OPEN", "isDraft": False, "author": AUTHOR, "createdAt": "2026-01-02T00:00:00Z"}
 
@@ -210,7 +214,7 @@ class Provider(BaseHTTPRequestHandler):
                                 "comments":{"pageInfo":{"hasNextPage":more,"endCursor":"second" if more else None},
                                             "nodes":[THREAD_COMMENT,{**THREAD_COMMENT,"isMinimized":True}] if more else []}}}
             elif "issue(number:" in query:
-                result = {"repository": {"issue": ISSUE}}
+                result = {"viewer": {"login": "tester"}, "repository": {"viewerPermission": "WRITE", "issue": ISSUE}}
             elif "pullRequests(" in query and hasattr(self.server, "status_rows"):
                 alias = re.search(r"(\w+)\s*:\s*repository\(", query)
                 head_variable = re.search(r"headRefName:\s*\$(\w+)",query)
@@ -238,6 +242,25 @@ def rpc(tag, payload):
     return {"name": tag, "frame": {"_tag": "Request", "tag": tag, "id": tag, "headers": [], "payload": payload}}
 
 
+def github_fixture(stack, directory):
+    config = directory
+    config.mkdir(mode=0o700)
+    endpoint = config / "api.sock"
+    host = stack.enter_context(ThreadingUnixStreamServer(str(endpoint), Provider))
+    host.creates, host.comments, host.pr_writes, host.reviews, host.reviewers = [], [], [], [], []
+    host.repository = deepcopy(REPOSITORY)
+    host.actions = []
+    host.file_writes = []
+    host.deleted = 0
+    host.ref_oid = "a"*40
+    thread = Thread(target=host.serve_forever, daemon=True)
+    thread.start()
+    stack.callback(thread.join)
+    stack.callback(host.shutdown)
+    (config / "config.yml").write_text(f"http_unix_socket: {endpoint}\n")
+    return host, {"GH_CONFIG_DIR": str(config), "GH_TOKEN":"offline-test-fixture", "GH_NO_UPDATE_NOTIFIER":"1"}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command", required=True)
@@ -258,23 +281,9 @@ def main():
         providers = []
         for instance, cmd in [("original", args.original_command), ("rust", args.rust_command)]:
             # Each server can create and mutate its own independent provider state.
-            config = root / f"gh-{instance}"
-            config.mkdir(mode=0o700)
-            endpoint = config / "api.sock"
-            host = stack.enter_context(ThreadingUnixStreamServer(str(endpoint), Provider))
-            host.creates, host.comments, host.pr_writes, host.reviews, host.reviewers = [], [], [], [], []
-            host.repository = deepcopy(REPOSITORY)
-            host.actions = []
-            host.file_writes = []
-            host.deleted = 0
-            host.ref_oid = "a"*40
-            thread = Thread(target=host.serve_forever, daemon=True)
-            thread.start()
-            stack.callback(thread.join)
-            stack.callback(host.shutdown)
+            host, env = github_fixture(stack, root / f"gh-{instance}")
             providers.append(host)
-            (config / "config.yml").write_text(f"http_unix_socket: {endpoint}\n")
-            prefix = ["env", f"GH_CONFIG_DIR={config}", "GH_TOKEN=offline-test-fixture", "GH_NO_UPDATE_NOTIFIER=1"]
+            prefix = ["env", *(f"{k}={v}" for k, v in env.items())]
             if args.faketime_lib:
                 lib = args.faketime_lib.resolve(strict=True)
                 prefix.extend([f"LD_PRELOAD={lib}", "FAKETIME=2026-11-10 12:00:00", "FAKETIME_DONT_FAKE_MONOTONIC=1", "TZ=UTC"])

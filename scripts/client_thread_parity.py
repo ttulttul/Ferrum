@@ -481,7 +481,7 @@ def write_fake_clis(directory, drivers):
 def seed_turn(url, cookie, root, scenario):
     """A project on a git checkout and a thread on the scenario's provider, with the message to send."""
     checkout = root / "checkout"
-    make_checkout(checkout, REMOTES["project:github"][1])
+    make_checkout(checkout, "https://github.com/example/parity.git" if scenario["name"] == "codex thread tools" else REMOTES["project:github"][1])
     status, _, body = http(url, "POST", "/api/projects/mutate", encode({
         "type": "project.create", "commandId": "create-project", "projectId": "project:github",
         "title": "Provider turn", "workspaceRoot": str(checkout)}),
@@ -495,6 +495,13 @@ def seed_turn(url, cookie, root, scenario):
         "runtimeMode": scenario.get("runtimeMode", "full-access"), "interactionMode": "default", "branch": None,
         "worktreePath": None, "createdBy": "user", "creationSource": "web"})
     if scenario["name"] == "codex thread tools":
+        from linear_provider_parity import TOKEN
+        linear = root / "linear"
+        linear.mkdir()
+        rpc(url, cookie, "projects.mutate", {"type":"project.create", "commandId":"add-linear",
+            "projectId":"project:linear", "title":"Linear", "workspaceRoot":str(linear)})
+        rpc(url, cookie, "issueTrackers.connect", {"tracker":"linear", "token":TOKEN})
+        rpc(url, cookie, "issueTrackers.bindProject", {"projectId":"project:linear", "binding":{"tracker":"linear","scope":"ENG"}})
         for project, trigger in [("project:github", {"type": "interval", "everyMs": 60000}),
                                  ("project:other", {"type": "webhook"})]:
             rpc(url, cookie, "scheduledTasks.upsert", {
@@ -1289,6 +1296,13 @@ def provider_turns(args, credentials):
                                   ("rust", shlex.split(args.rust_command))):
                 root = temporary / name
                 env, fake_bin, log = scenario_env(temporary, name, root, scenario, drivers)
+                if scenario["name"] == "codex thread tools":
+                    from github_provider_parity import github_fixture
+                    from linear_provider_parity import linear_fixture
+                    _, github_env = github_fixture(stack, temporary / f"{name}-gh")
+                    linear = linear_fixture(stack)
+                    env.update(github_env, T3CODE_LINEAR_API_URL=f"http://127.0.0.1:{linear.server_port}/graphql",
+                               GIT_ALLOW_PROTOCOL="file")
                 if "restart" in scenario:
                     outcomes[name] = restart_turn(args, command, root, credentials, env,
                                                   temporary / f"{name}-checkouts", fake_bin, scenario)

@@ -286,6 +286,7 @@ enum Phase {
 
 /// The domain events that take `before` to `after`, in `order`. `None`
 /// when a record went away, which no event expresses.
+#[cfg(test)]
 pub fn diff(
     thread_id: &str,
     before: &Value,
@@ -293,7 +294,39 @@ pub fn diff(
     occurred_at: &str,
     order: Order,
 ) -> Option<Vec<Value>> {
-    diff_with(thread_id, before, after, occurred_at, false, None, order)
+    diff_with_command(
+        thread_id,
+        before,
+        after,
+        occurred_at,
+        false,
+        None,
+        order,
+        None,
+    )
+}
+
+/// [`diff`] with the orchestration command that produced the projection.
+/// Pull-request and issue commands have one specialized event in the reference
+/// rather than the generic thread metadata and link events.
+pub fn diff_for_command(
+    thread_id: &str,
+    before: &Value,
+    after: &Value,
+    occurred_at: &str,
+    order: Order,
+    command_type: Option<&str>,
+) -> Option<Vec<Value>> {
+    diff_with_command(
+        thread_id,
+        before,
+        after,
+        occurred_at,
+        false,
+        None,
+        order,
+        command_type,
+    )
 }
 
 /// [`diff`] for a commit that detached the thread's provider session for
@@ -307,7 +340,7 @@ pub fn diff_detaching(
     reason: &str,
     order: Order,
 ) -> Option<Vec<Value>> {
-    diff_with(
+    diff_with_command(
         thread_id,
         before,
         after,
@@ -315,24 +348,35 @@ pub fn diff_detaching(
         false,
         Some(reason),
         order,
+        None,
     )
 }
 
-/// [`diff`]'s events for every record that is new or changed, also when
-/// records went away (which the shared database records by deleting their
-/// rows, not with an event).
-pub fn diff_all(
+/// [`diff_all`] with the orchestration command that produced the projection.
+pub fn diff_all_for_command(
     thread_id: &str,
     before: &Value,
     after: &Value,
     occurred_at: &str,
     detached: Option<&str>,
     order: Order,
+    command_type: Option<&str>,
 ) -> Vec<Value> {
-    diff_with(thread_id, before, after, occurred_at, true, detached, order).unwrap_or_default()
+    diff_with_command(
+        thread_id,
+        before,
+        after,
+        occurred_at,
+        true,
+        detached,
+        order,
+        command_type,
+    )
+    .unwrap_or_default()
 }
 
-fn diff_with(
+#[allow(clippy::too_many_arguments)]
+fn diff_with_command(
     thread_id: &str,
     before: &Value,
     after: &Value,
@@ -340,15 +384,75 @@ fn diff_with(
     allow_removals: bool,
     detached: Option<&str>,
     order: Order,
+    command_type: Option<&str>,
 ) -> Option<Vec<Value>> {
     let mut out = Vec::new();
     if before["thread"] != after["thread"] && after["thread"].is_object() {
-        out.push(event(
-            thread_id,
-            thread_event(&before["thread"], &after["thread"]),
-            &after["thread"],
-            occurred_at,
-        ));
+        let special = command_type.and_then(|kind| match kind {
+            "thread.pull-request.link"
+            | "thread.pull-request.unlink"
+            | "thread.pull-request.watch"
+            | "thread.pull-request.sync"
+            | "thread.pull-request-watch.checks-reopen" => {
+                Some(("thread.pull-request-synced", after["thread"].clone()))
+            }
+            "thread.issue.link" | "thread.issue.unlink" => {
+                Some(("thread.issue-synced", after["thread"].clone()))
+            }
+            "thread.pull-request-link.sync" | "thread.pull-request-watch.sync" => after["thread"]
+                ["pullRequests"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|link| {
+                    before["thread"]["pullRequests"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|old| crate::thread_projection::same_link(old, link, false))
+                })
+                .cloned()
+                .map(|link| ("thread.pull-request-link-updated", link)),
+            _ => None,
+        });
+        let has_special = special.is_some();
+        if let Some((kind, payload)) = special {
+            out.push(event(thread_id, kind, &payload, occurred_at));
+        } else {
+            out.push(event(
+                thread_id,
+                thread_event(&before["thread"], &after["thread"]),
+                &after["thread"],
+                occurred_at,
+            ));
+        }
+        if !has_special && before["thread"]["pullRequests"] != after["thread"]["pullRequests"] {
+            out.push(event(
+                thread_id,
+                "thread.pull-request-synced",
+                &after["thread"],
+                occurred_at,
+            ));
+            let before_links = before["thread"]["pullRequests"].as_array();
+            if let Some(link) = after["thread"]["pullRequests"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|link| {
+                    !before_links
+                        .into_iter()
+                        .flatten()
+                        .any(|old| crate::thread_projection::same_link(old, link, false))
+                })
+            {
+                out.push(event(
+                    thread_id,
+                    "thread.pull-request-link-updated",
+                    link,
+                    occurred_at,
+                ));
+            }
+        }
     }
     // A detached session leaves the thread's records.
     if let Some(reason) = detached {
@@ -639,6 +743,33 @@ mod tests {
         assert_eq!(thread_event(&archived, &base), "thread.unarchived");
         let mode = json!({"archivedAt": null, "runtimeMode": "approval-required"});
         assert_eq!(thread_event(&base, &mode), "thread.runtime-mode-updated");
+    }
+
+    #[test]
+    fn link_commands_emit_the_reference_sync_event_once() {
+        let before = json!({
+            "thread": {"id": "t", "pullRequests": [], "issues": []},
+            "runs": [], "attempts": [], "nodes": [], "messages": [], "turnItems": []
+        });
+        let after = json!({
+            "thread": {"id": "t", "pullRequests": [{
+                "host": "github.com", "repository": "example/repo", "number": 3,
+                "url": "https://github.com/example/repo/pull/3"
+            }], "issues": []},
+            "runs": [], "attempts": [], "nodes": [], "messages": [], "turnItems": []
+        });
+        let events = diff_for_command(
+            "t",
+            &before,
+            &after,
+            "2026-01-02T00:00:00.000Z",
+            Order::Default,
+            Some("thread.pull-request.link"),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "thread.pull-request-synced");
+        assert_eq!(events[0]["payload"], after["thread"]);
     }
 
     fn types(events: &[Value]) -> Vec<String> {
