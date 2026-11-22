@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 mod actions;
+mod bitbucket;
 mod detail;
 mod discussion;
 mod files;
