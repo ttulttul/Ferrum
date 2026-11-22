@@ -470,14 +470,20 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
                 empty_projection(&after["thread"])
             }
         };
-        planned.events.extend(crate::thread_events::diff_all(
-            &thread_id,
-            &diff_from,
-            &after,
-            occurred_at,
-            detach_reason(&record.event),
-            crate::thread_events::Order::of(&record.event),
-        ));
+        planned
+            .events
+            .extend(crate::thread_events::diff_all_for_command(
+                &thread_id,
+                &diff_from,
+                &after,
+                occurred_at,
+                detach_reason(&record.event),
+                crate::thread_events::Order::of(&record.event),
+                record
+                    .receipt
+                    .as_ref()
+                    .map(|receipt| receipt.command_type.as_str()),
+            ));
         planned.threads.push(ThreadWrite {
             thread_id,
             before,

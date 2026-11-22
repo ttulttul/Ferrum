@@ -461,11 +461,22 @@ fn thread_events(
     // An unchanged projection still moves subscribers past the commit.
     let at = crate::thread_projection::iso(record.at);
     let order = crate::thread_events::Order::of(&record.event);
+    let command_type = record
+        .receipt
+        .as_ref()
+        .map(|receipt| receipt.command_type.as_str());
     let items = match crate::shared_store::detach_reason(&record.event) {
         Some(reason) => {
             crate::thread_events::diff_detaching(&thread_id, &before, &after, &at, reason, order)
         }
-        None => crate::thread_events::diff(&thread_id, &before, &after, &at, order),
+        None => crate::thread_events::diff_for_command(
+            &thread_id,
+            &before,
+            &after,
+            &at,
+            order,
+            command_type,
+        ),
     };
     Some(crate::thread_events::ThreadEvents {
         before: crate::thread_events::digest(&before),
