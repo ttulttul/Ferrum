@@ -277,6 +277,26 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
         let plane = self.clone();
         Box::pin(async move { plane.create_new_project(&name).await })
     }
+    fn workspace_call(
+        self: &Arc<Self>,
+        method: String,
+        input: Value,
+    ) -> crate::mcp_oauth::HostFuture<Result<Value, Value>> {
+        let plane = self.clone();
+        Box::pin(async move {
+            let settings = WorkspaceSettings {
+                automatic_git_fetch: true,
+                ..Default::default()
+            };
+            match dispatch::workspace(&plane.host.workspace, &settings, &method, &input).await {
+                Some(result) => result,
+                None => Err(json!({
+                    "_tag": "Unavailable",
+                    "message": format!("Workspace operation is unavailable: {method}"),
+                })),
+            }
+        })
+    }
     fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait {
         self.host.runtime.sleep(duration)
     }
