@@ -145,6 +145,12 @@ PROVIDER_SCENARIOS = [
      "scenario": "codex_restart.json", "restart": {"after": "running", "live": True}},
     {"name": "codex restart mid-turn", "instance": "codex", "model": "fixture",
      "scenario": "codex_restart.json", "restart": {"after": "running"}},
+    # Every app-server answers initialize late, so the restarted server's status probe starts
+    # while the continuation's session is still initializing: the session's
+    # initialize (with the MCP app extension and turn/diff/updated opt-out) and theirs (without)
+    # interleave in the log, and `cli launch` must still tell them apart.
+    {"name": "codex restart probe overlap", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart_slow_initialize.json", "restart": {"after": "running"}},
     {"name": "codex restart idle", "instance": "codex", "model": "fixture",
      "scenario": "codex_restart_idle.json", "restart": {"after": "settled"}},
     # A run whose provider never took its prompt is sent again: a user's message waits in the
@@ -485,10 +491,11 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 
 def cli_launch(log, root):
     """How a server launched the fake CLI for the turn: its arguments, the environment it set,
-    and the Codex initialize, thread and turn parameters, with generated ids and the server's
-    temporary home masked. The reference's own agent MCP server (`mcp__t3-code__*`,
-    `mcp_servers.t3-code*`) and the orchestration context that describes its tools are left out:
-    Rust serves no agent MCP tools, so it does not offer them."""
+    and the Codex initialize, thread and turn parameters, then the initialize parameters of its
+    other app-servers, with generated ids and the server's temporary home masked. The
+    reference's own agent MCP server (`mcp__t3-code__*`, `mcp_servers.t3-code*`) and the
+    orchestration context that describes its tools are left out: Rust serves no agent MCP
+    tools, so it does not offer them."""
     def mask(value):
         if isinstance(value, str):
             for server in ("original", "rust"):
@@ -499,9 +506,13 @@ def cli_launch(log, root):
         if isinstance(value, dict):
             return {key: mask(item) for key, item in value.items()}
         return value
-    out = []
+    # A server runs other Codex app-servers beside the turn's: the provider status probe (which
+    # also lists the models), which may still be starting when the turn's session does, and runs
+    # again after a restart. Their lines interleave with the session's in the log, so each line is
+    # attributed to the process that read it, and the turn's launch and initialize are those of
+    # the process that last started or resumed the thread.
     launch = Path(str(log) + ".launch")
-    launches = []
+    launches, order = {}, []
     for line in (launch.read_text().splitlines() if launch.exists() else []):
         entry = json.loads(line)
         # Claude Code probes at startup, not for a turn.
@@ -509,33 +520,42 @@ def cli_launch(log, root):
             continue
         argv = [arg for arg in entry["argv"] if "mcp__t3-code" not in arg]
         env = {k: v for k, v in entry["env"].items() if k != "T3CODE_HOME"}
-        launches.append(f"launch {json.dumps(mask(argv))} env {json.dumps(mask(env), sort_keys=True)}")
-    # The reference also starts a Codex app-server to read the provider's status; the turn's
-    # session is the last one started.
-    out.extend(launches[-1:])
-    initializes, sessions = [], []
-    for line in (Path(log).read_text().splitlines() if Path(log).exists() else []):
+        launches[entry.get("pid")] = f"launch {json.dumps(mask(argv))} env {json.dumps(mask(env), sort_keys=True)}"
+        order.append(entry.get("pid"))
+    messages = Path(str(log) + ".messages")
+    initializes, sessions, calls = {}, [], []
+    for line in (messages.read_text().splitlines() if messages.exists() else []):
+        entry = json.loads(line)
         try:
-            message = json.loads(line)
+            message = json.loads(entry["line"])
         except ValueError:
             continue
-        if message.get("method") == "initialize":
-            initializes.append(message)
-            continue
-        if message.get("method") in ("thread/start", "thread/resume"):
-            # The session's own initialize, not a later status probe's (a restarted server
-            # probes again).
-            sessions.append(initializes[-1] if initializes else None)
-        if message.get("method") in ("thread/start", "thread/resume", "turn/start"):
+        method = message.get("method")
+        if method == "initialize":
+            initializes[entry["pid"]] = message.get("params")
+        if method in ("thread/start", "thread/resume"):
+            sessions.append(entry["pid"])
+        if method in ("thread/start", "thread/resume", "turn/start"):
             params = dict(message.get("params") or {})
             params.pop("input", None)
             params.pop("additionalContext", None)
             config = params.get("config")
             if isinstance(config, dict):
                 params["config"] = {k: v for k, v in config.items() if not k.startswith("mcp_servers.t3-code")}
-            out.append(f"{message['method']} {json.dumps(mask(params), sort_keys=True)}")
-    for message in ([m for m in sessions if m is not None] or initializes)[-1:]:
-        out.insert(1, f"initialize {json.dumps(mask(message.get('params')), sort_keys=True)}")
+            calls.append(f"{method} {json.dumps(mask(params), sort_keys=True)}")
+    session = sessions[-1] if sessions else None
+    # Claude Code has no thread/start: its turn is the last CLI launched.
+    out = [launches[session if session in launches else order[-1]]] if order else []
+    if session in initializes:
+        out.append(f"initialize {json.dumps(mask(initializes[session]), sort_keys=True)}")
+    out.extend(calls)
+    # The other app-servers' initialize, once each and in no particular order, as how many run
+    # and when is up to each server. The reference asks for the MCP app extension and the
+    # turn/diff/updated opt-out only for a turn's session (CodexAdapterV2), not for the status
+    # probe (buildCodexInitializeParams); neither server acts on turn/diff/updated.
+    others = sorted({json.dumps(mask(params), sort_keys=True)
+                     for pid, params in initializes.items() if pid not in sessions})
+    out.extend(f"other initialize {params}" for params in others)
     return out
 
 
