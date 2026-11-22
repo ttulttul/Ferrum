@@ -457,6 +457,7 @@ async fn start_child_run<H: CommandHost>(
         false,
         None,
         Some(wire),
+        false,
     )
     .await?;
     Ok(seq)

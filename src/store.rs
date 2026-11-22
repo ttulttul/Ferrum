@@ -497,7 +497,12 @@ impl Store {
             Event::RunQueued { message, run } => {
                 if let Some(thread) = self.threads.get_mut(&run.thread_id) {
                     thread.messages.push(message.clone());
-                    thread.status = "running".into();
+                    thread.status = if run.status == "preparing" {
+                        "preparing"
+                    } else {
+                        "running"
+                    }
+                    .into();
                     thread.runs.push(run.clone());
                 }
             }

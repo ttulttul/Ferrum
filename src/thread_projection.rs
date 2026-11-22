@@ -313,13 +313,19 @@ impl Thread {
             .filter(|message| message.role != NOTIFICATION_ROLE)
             .map(|message| {
                 let at = iso(message.created_at);
+                let pending_ids = self
+                    .run_of(&message.id)
+                    .filter(|(_, run)| matches!(run.status.as_str(), "queued" | "preparing"))
+                    .and_then(|(_, run)| self.queued_run_ids(run));
                 let mut row = json!({
                     "createdBy": if message.role == "user" { "user" } else { "agent" },
                     "creationSource": if message.role == "user" { message.creation_source.as_deref().unwrap_or("web") } else { "provider" },
                     "id": message.id,
                     "threadId": self.id,
                     "runId": self.run_of(&message.id).map(|(_, run)| run.wire_id()),
-                    "nodeId": null,
+                    "nodeId": pending_ids
+                        .as_ref()
+                        .map_or(Value::Null, |ids| json!(ids.root_node)),
                     "role": message_role(&message.role),
                     "text": message.content,
                     "attachments": [],
@@ -434,6 +440,14 @@ impl Thread {
                 at.clone().into(),
                 &at,
             );
+            if let Some((_, pending_run)) =
+                run.filter(|(_, run)| matches!(run.status.as_str(), "queued" | "preparing"))
+            {
+                if let Some(ids) = self.queued_run_ids(pending_run) {
+                    item["nodeId"] = json!(ids.root_node);
+                    item["providerThreadId"] = json!(ids.provider_thread);
+                }
+            }
             let fields = match message.role.as_str() {
                 "user" => json!({
                     "type": "user_message",
@@ -691,9 +705,13 @@ impl Thread {
         let scope_id = checkpoint_scope_id(&self.id);
         let run_ids = |turn_count: u64| {
             let index = turn_count.max(1) as usize - 1;
-            self.runs
-                .get(index)
-                .map(|run| (run.wire_id(), self.provider_run_ids(run)))
+            self.runs.get(index).map(|run| {
+                (
+                    run.wire_id(),
+                    self.provider_run_ids(run)
+                        .or_else(|| self.queued_run_ids(run)),
+                )
+            })
         };
         let node_of = |turn_count: u64| {
             run_ids(turn_count)
@@ -744,11 +762,10 @@ impl Thread {
         // A provider turn that captured a checkpoint ends with its item.
         for checkpoint in self.checkpoints.iter().filter(|c| c.turn_count > 0) {
             let index = checkpoint.turn_count as usize - 1;
-            let Some(ids) = self
-                .runs
-                .get(index)
-                .and_then(|run| self.provider_run_ids(run))
-            else {
+            let Some(ids) = self.runs.get(index).and_then(|run| {
+                self.provider_run_ids(run)
+                    .or_else(|| self.queued_run_ids(run))
+            }) else {
                 continue;
             };
             let id = checkpoint_id(&self.id, checkpoint.turn_count);

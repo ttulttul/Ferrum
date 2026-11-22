@@ -530,6 +530,7 @@ async fn start_run<H: CommandHost>(
     follows_thread_selection: bool,
     notification: Option<Value>,
     wire: Option<Value>,
+    deferred: bool,
 ) -> anyhow::Result<u64> {
     let (cwd, needs_baseline, wire_id) = state
         .store
@@ -551,7 +552,14 @@ async fn start_run<H: CommandHost>(
             .map_or_else(crate::platform::uuid_v4, Run::uuid_for),
         thread_id: thread_id.to_owned(),
         provider: "default".into(),
-        status: if queued { "queued" } else { "running" }.into(),
+        status: if queued {
+            "queued"
+        } else if deferred {
+            "preparing"
+        } else {
+            "running"
+        }
+        .into(),
         started_at: now(),
         finished_at: None,
         error: None,
@@ -594,23 +602,25 @@ async fn start_run<H: CommandHost>(
         )
         .await?
         .id;
-    if let Some(baseline_cwd) = baseline {
-        if let Some(tree) = state.workspace().capture_git_tree(&baseline_cwd).await {
-            let _ = state
-                .commit(Event::CheckpointCaptured {
-                    thread_id: thread_id.to_owned(),
-                    checkpoint: crate::CheckpointRecord {
-                        turn_count: 0,
-                        tree,
-                        cwd: baseline_cwd,
-                        captured_at: now(),
-                        ready: true,
-                    },
-                })
-                .await;
+    if !deferred {
+        if let Some(baseline_cwd) = baseline {
+            if let Some(tree) = state.workspace().capture_git_tree(&baseline_cwd).await {
+                let _ = state
+                    .commit(Event::CheckpointCaptured {
+                        thread_id: thread_id.to_owned(),
+                        checkpoint: crate::CheckpointRecord {
+                            turn_count: 0,
+                            tree,
+                            cwd: baseline_cwd,
+                            captured_at: now(),
+                            ready: true,
+                        },
+                    })
+                    .await;
+            }
         }
     }
-    if queued {
+    if queued || deferred {
         return Ok(seq);
     }
     let (tx, rx) = oneshot::channel();
@@ -892,6 +902,7 @@ async fn apply_command<H: CommandHost>(
                         .cloned()
                 }),
                 wire,
+                command["dispatchMode"]["type"] == "defer_start",
             )
             .await?;
             if let Some(at) = wake_started {
@@ -2997,6 +3008,7 @@ async fn record_link_request<H: CommandHost>(
             false,
             Some(wake["notification"].clone()),
             None,
+            false,
         )
         .await?;
     }
