@@ -125,11 +125,7 @@ fn read_api_key(
 }
 
 fn client() -> reqwest::Client {
-    // Like the reference's HTTP client, no proxy from the environment.
-    reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap_or_default()
+    super::http_client()
 }
 
 /// `CursorSdkCatalogError`.

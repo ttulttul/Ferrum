@@ -43,6 +43,14 @@
 //! Grok's and Pi's version advisories come from how their CLI was installed
 //! ([`maintenance`]), as the reference's enrichment pass works it out.
 //!
+//! With `enableProviderUpdateChecks` on, an installed CLI's version advisory
+//! compares it with the latest release its installer would install
+//! ([`maintenance`]): mise, Homebrew or a global npm/pnpm/bun answers for its
+//! own installs, the configured npm (`npm view`) for an npm package, Codex's,
+//! Claude's and Muse's release channels for their own installers, else the
+//! public npm registry. HTTP lookups follow Node's runtime settings, as the
+//! reference's `fetch` does ([`http_builder`]).
+//!
 //! The result replaces the instance's placeholder row in `server.getConfig`
 //! and `server.refreshProviders`, is pushed to config subscribers as
 //! `providerStatuses`, and is kept in `<base>/caches/<instanceId>.json`,
@@ -483,11 +491,18 @@ async fn check_instance(
     let probed = draft_row(&pending, &draft);
     let mut row = merge_snapshot(&previous, probed);
     if ENRICHED_DRIVERS.contains(&instance.driver.as_str()) {
+        let capabilities = match (&draft.maintenance, instance.driver.as_str()) {
+            (Some(capabilities), _) => Some(capabilities.clone()),
+            (None, "codex") => Some(codex_maintenance(&instance.config, &env).await),
+            (None, "claudeAgent") => Some(claude_maintenance(&instance.config, &env).await),
+            (None, _) => None,
+        };
         row = with_version_advisory(
             row,
-            draft.maintenance.as_ref(),
+            capabilities.as_ref(),
             settings["enableProviderUpdateChecks"] != false,
-        );
+        )
+        .await;
     }
     row = apply_compatibility(row, &manifest);
     let unauthenticated = row["auth"]["status"] == "unauthenticated";
@@ -910,10 +925,10 @@ fn merge_snapshot(previous: &Value, mut next: Value) -> Value {
 
 /// `enrichProviderSnapshotWithVersionAdvisory` without a latest-version
 /// lookup: the advisory the CLI's maintenance capabilities give.
-fn with_version_advisory(
+async fn with_version_advisory(
     mut row: Value,
     capabilities: Option<&maintenance::Capabilities>,
-    _update_checks: bool,
+    update_checks: bool,
 ) -> Value {
     if row["enabled"] != true {
         return row;
@@ -924,16 +939,192 @@ fn with_version_advisory(
         Some(installed) => installed.as_str().map(str::to_owned),
         None => row["version"].as_str().map(str::to_owned),
     };
+    // With update checks on, an installed CLI with a version has its latest
+    // release looked up, and the advisory is dated then.
+    let (latest, checked_at) = if update_checks && row["installed"] == true && current.is_some() {
+        let latest = maintenance::resolve_latest(capabilities.unwrap_or(&manual)).await;
+        (latest, now_iso())
+    } else {
+        (None, row["checkedAt"].as_str().unwrap_or("").to_owned())
+    };
     row["versionAdvisory"] = maintenance::version_advisory(
         capabilities.unwrap_or(&manual),
         current.as_deref(),
-        None,
-        row["checkedAt"].as_str().unwrap_or(""),
+        latest.as_deref(),
+        &checked_at,
         capabilities
             .and_then(|c| c.compare_versions)
             .unwrap_or(maintenance::compare_semver),
     );
     row
+}
+
+/// An HTTP client for provider checks that follows Node's own runtime
+/// settings, as the reference's `fetch` does: proxies from the environment
+/// (`HTTPS_PROXY`, `NO_PROXY`) only with `NODE_USE_ENV_PROXY=1`, and the CAs in
+/// `NODE_EXTRA_CA_CERTS` trusted beside the built-in ones.
+pub(crate) fn http_builder() -> reqwest::ClientBuilder {
+    let mut builder = reqwest::Client::builder();
+    let env_proxy = std::env::var("NODE_USE_ENV_PROXY").is_ok_and(|v| v == "1");
+    if !env_proxy {
+        builder = builder.no_proxy();
+    }
+    if let Some(pem) =
+        std::env::var_os("NODE_EXTRA_CA_CERTS").and_then(|path| std::fs::read(path).ok())
+    {
+        for certificate in reqwest::Certificate::from_pem_bundle(&pem).unwrap_or_default() {
+            builder = builder.add_root_certificate(certificate);
+        }
+    }
+    builder
+}
+
+pub(crate) fn http_client() -> reqwest::Client {
+    http_builder().build().unwrap_or_default()
+}
+
+/// The server's own environment (`HostProcess.Environment`).
+fn host_env() -> ProcessEnv {
+    base_env(&[])
+}
+
+/// The reference's Codex resolver: package-managed `@openai/codex`, its
+/// standalone install updated with `codex update`, and that install's own
+/// release channel for the latest version.
+async fn codex_maintenance(config: &Value, env: &ProcessEnv) -> maintenance::Capabilities {
+    fn standalone(path: &str) -> bool {
+        regex::Regex::new(r"(?is)^(.*)/packages/standalone/")
+            .unwrap()
+            .is_match(&path.replace('\\', "/"))
+    }
+    let definition = maintenance::PackageDefinition {
+        provider: "codex",
+        npm_package_name: "@openai/codex",
+        native_update: Some(maintenance::NativeUpdate {
+            args: &["update"],
+            is_command_path: Some(standalone),
+            requires_command_path: true,
+        }),
+        mise: Some(maintenance::MiseTool {
+            tool: "codex",
+            upgrade: true,
+        }),
+    };
+    let binary = cli_binary(config, "codex");
+    let caps = maintenance::with_configured_npm(
+        maintenance::resolve_package_managed(&definition, maintenance::context(&binary, env)).await,
+        &host_env(),
+    );
+    if caps
+        .update
+        .as_ref()
+        .is_some_and(|u| u.lock_key == "codex-native")
+    {
+        return maintenance::Capabilities {
+            latest: Some(None),
+            cache_key: Some("https://releases.openai.com/codex/channels/latest".into()),
+            lookup: Some(std::sync::Arc::new(maintenance::Lookup::CodexNative)),
+            ..caps
+        };
+    }
+    caps
+}
+
+/// The reference's Claude resolver: package-managed
+/// `@anthropic-ai/claude-code`, its native install updated with `claude
+/// update`, and the native release channel its settings choose.
+async fn claude_maintenance(config: &Value, env: &ProcessEnv) -> maintenance::Capabilities {
+    fn native(path: &str) -> bool {
+        let normalized = path.replace('\\', "/").to_lowercase();
+        normalized.ends_with("/.local/bin/claude.exe")
+            || normalized.contains("/.local/share/claude/")
+            || normalized.contains("/claude/versions/")
+    }
+    let definition = maintenance::PackageDefinition {
+        provider: "claudeAgent",
+        npm_package_name: "@anthropic-ai/claude-code",
+        native_update: Some(maintenance::NativeUpdate {
+            args: &["update"],
+            is_command_path: Some(native),
+            requires_command_path: true,
+        }),
+        mise: Some(maintenance::MiseTool {
+            tool: "claude",
+            upgrade: true,
+        }),
+    };
+    let binary = cli_binary(config, "claude");
+    let caps = maintenance::with_configured_npm(
+        maintenance::resolve_package_managed(&definition, maintenance::context(&binary, env)).await,
+        &host_env(),
+    );
+    if caps
+        .update
+        .as_ref()
+        .is_some_and(|u| u.lock_key == "claudeAgent-native")
+    {
+        let url = format!(
+            "https://downloads.claude.ai/claude-code-releases/{}",
+            claude_update_channel()
+        );
+        return maintenance::Capabilities {
+            latest: Some(None),
+            cache_key: Some(url.clone()),
+            lookup: Some(std::sync::Arc::new(maintenance::Lookup::ClaudeNative {
+                url,
+            })),
+            ..caps
+        };
+    }
+    caps
+}
+
+/// `readUpdateChannel`: the last `autoUpdatesChannel` among the user's and
+/// the managed Claude Code settings, `latest` by default.
+fn claude_update_channel() -> String {
+    let managed = match std::env::consts::OS {
+        "macos" => PathBuf::from("/Library/Application Support/ClaudeCode"),
+        "windows" => PathBuf::from(
+            std::env::var("PROGRAMFILES").unwrap_or_else(|_| "C:\\Program Files".into()),
+        )
+        .join("ClaudeCode"),
+        _ => PathBuf::from("/etc/claude-code"),
+    };
+    let config_dir = std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .map(|d| d.trim().to_owned())
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".claude"));
+    let mut paths = vec![
+        config_dir.join("settings.json"),
+        managed.join("managed-settings.json"),
+    ];
+    let mut drop_ins: Vec<String> = std::fs::read_dir(managed.join("managed-settings.d"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".json") && !n.starts_with('.'))
+        .collect();
+    drop_ins.sort();
+    paths.extend(
+        drop_ins
+            .iter()
+            .map(|n| managed.join("managed-settings.d").join(n)),
+    );
+    paths
+        .iter()
+        .filter_map(|path| {
+            let settings: Value =
+                serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+            settings["autoUpdatesChannel"]
+                .as_str()
+                .filter(|c| matches!(*c, "latest" | "stable"))
+                .map(str::to_owned)
+        })
+        .next_back()
+        .unwrap_or_else(|| "latest".into())
 }
 
 /// `satisfiesSemverRange`.

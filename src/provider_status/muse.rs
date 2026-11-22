@@ -340,8 +340,18 @@ async fn discover_models(binary: &str, env: &ProcessEnv, startup: Duration) -> O
 /// `museMaintenance`: mise, else the official launcher (updated by running
 /// it with `MUSE_SYNC_UPDATE=1`), else manual.
 async fn maintenance(binary: &str, env: &ProcessEnv) -> maintenance::Capabilities {
+    // `latestMuseVersion`: an installer without its own lookup is compared
+    // with the release channel Muse's launcher follows.
+    let channel = env
+        .get("MUSE_CHANNEL")
+        .filter(|c| !c.is_empty())
+        .map(String::as_str)
+        .unwrap_or("muse-stable");
+    let muse_channel = matches!(channel, "muse-stable" | "muse-canary")
+        .then(|| format!("https://api.meta.ai/muse-code/channels/{channel}"));
     let manual = maintenance::Capabilities {
         compare_versions: Some(compare_versions),
+        muse_channel: muse_channel.clone(),
         ..maintenance::manual(None, None)
     };
     let Some(context) = maintenance::context(binary, env) else {
@@ -390,10 +400,11 @@ async fn maintenance(binary: &str, env: &ProcessEnv) -> maintenance::Capabilitie
             executable: context.resolved_command_path.clone(),
             args: vec!["--version".into()],
             lock_key: format!("muse:{}", context.real_command_path),
+            env: None,
         }),
-        install_path: None,
-        manual_command: None,
         compare_versions: Some(compare_versions),
+        muse_channel,
+        ..Default::default()
     }
 }
 

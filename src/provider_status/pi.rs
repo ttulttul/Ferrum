@@ -786,7 +786,10 @@ async fn maintenance(binary: &str, env: &ProcessEnv) -> maintenance::Capabilitie
             upgrade: true,
         }),
     };
-    maintenance::resolve_package_managed(&definition, maintenance::context(binary, env)).await
+    maintenance::with_configured_npm(
+        maintenance::resolve_package_managed(&definition, maintenance::context(binary, env)).await,
+        &super::base_env(&[]),
+    )
 }
 
 pub(super) async fn check(config: &Value, env: &ProcessEnv, caches: &Path) -> Draft {

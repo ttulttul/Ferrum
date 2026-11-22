@@ -26,9 +26,11 @@ pub(crate) struct Update {
     pub executable: String,
     pub args: Vec<String>,
     pub lock_key: String,
+    /// The environment the update runs in, when it is not the server's.
+    pub env: Option<ProcessEnv>,
 }
 
-/// `ProviderMaintenanceCapabilities`, without the latest-version lookups.
+/// `ProviderMaintenanceCapabilities`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Capabilities {
     pub package_name: Option<String>,
@@ -37,6 +39,58 @@ pub(crate) struct Capabilities {
     pub manual_command: Option<String>,
     /// `compareVersions`, where the driver orders its versions its own way.
     pub compare_versions: Option<fn(&str, &str) -> std::cmp::Ordering>,
+    /// `latestVersion`: `None` when unset, `Some(None)` for "only the
+    /// installer's own answer counts".
+    pub latest: Option<Option<String>>,
+    /// `lookupLatestVersion`: how the installer says what it would install.
+    pub lookup: Option<std::sync::Arc<Lookup>>,
+    /// `latestVersionCacheKey`.
+    pub cache_key: Option<String>,
+    /// Muse's release channel (`latestMuseVersion`), for an install whose
+    /// installer has no lookup of its own.
+    pub muse_channel: Option<String>,
+}
+
+/// A `lookupLatestVersion` the reference builds for an install method.
+#[derive(Debug)]
+pub(crate) enum Lookup {
+    /// `mise latest <tool>`.
+    Mise {
+        mise: String,
+        tool: String,
+        env: ProcessEnv,
+    },
+    /// `brew info --json=v2 <name>`.
+    Homebrew {
+        brew: String,
+        name: String,
+        cask: bool,
+        env: ProcessEnv,
+    },
+    /// `npm outdated -g --prefix`, then `npm ls -g --prefix`.
+    NpmGlobal {
+        package: String,
+        prefix: String,
+        env: ProcessEnv,
+    },
+    /// `pnpm outdated -g`, then `pnpm ls -g`.
+    PnpmGlobal { package: String, env: ProcessEnv },
+    /// `bun outdated -g`.
+    BunGlobal { package: String, env: ProcessEnv },
+    /// `npm pack --dry-run` beside Vite+'s managed Node.
+    VitePlus { package: String, env: ProcessEnv },
+    /// `npm view --global --json <package>@latest version` with the configured npm.
+    NpmView {
+        npm: String,
+        package: String,
+        env: ProcessEnv,
+    },
+    /// The first lookup, then the second when it has no answer.
+    Then(std::sync::Arc<Lookup>, std::sync::Arc<Lookup>),
+    /// Claude Code's native release channel (`<url>` answers a bare version).
+    ClaudeNative { url: String },
+    /// Codex's standalone release channel (`tag_name` `rust-vX.Y.Z`).
+    CodexNative,
 }
 
 /// `ProviderMaintenanceResolutionContext`.
@@ -103,11 +157,27 @@ fn capabilities(
             executable: executable.to_owned(),
             args: args.to_vec(),
             lock_key: lock_key.to_owned(),
+            env: None,
         }),
-        install_path: None,
-        manual_command: None,
-        compare_versions: None,
+        ..Default::default()
     }
+}
+
+/// The capabilities with the update's environment set.
+fn with_update_env(mut caps: Capabilities, env: &ProcessEnv) -> Capabilities {
+    if let Some(update) = caps.update.as_mut() {
+        update.env = Some(env.clone());
+    }
+    caps
+}
+
+/// `environmentCacheKey`: a digest of the environment, so a cache key never
+/// holds its values.
+fn environment_key(env: &ProcessEnv) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(
+        serde_json::to_string(&env.iter().collect::<Vec<_>>()).unwrap_or_default(),
+    ))
 }
 
 /// `makeManualOnlyProviderMaintenanceCapabilities`.
@@ -581,13 +651,30 @@ pub(crate) async fn resolve_mise(
         .unwrap_or_else(|| mise.tool.to_owned());
     let args = vec!["upgrade".to_owned(), configured_tool];
     let command = format!("mise {}", args.join(" "));
-    Some(capabilities(
-        package_name,
-        &mise_path,
-        &args,
-        "mise",
-        Some(command),
-    ))
+    let caps = with_update_env(
+        capabilities(package_name, &mise_path, &args, "mise", Some(command)),
+        &context.env,
+    );
+    // Settings such as `minimum_release_age` can hold mise behind the
+    // registry, so only mise can say what it installs.
+    Some(Capabilities {
+        latest: Some(None),
+        cache_key: Some(
+            [
+                "mise",
+                &mise_path,
+                mise.tool,
+                &environment_key(&context.env),
+            ]
+            .join("\0"),
+        ),
+        lookup: Some(std::sync::Arc::new(Lookup::Mise {
+            mise: mise_path.clone(),
+            tool: mise.tool.to_owned(),
+            env: context.env.clone(),
+        })),
+        ..caps
+    })
 }
 
 /// `resolveHomebrewProviderMaintenance`.
@@ -617,13 +704,18 @@ pub(crate) async fn resolve_homebrew(
         strings(&["upgrade", &homebrew.name])
     };
     let command = format!("brew {}", args.join(" "));
-    Some(capabilities(
-        package_name,
-        &brew,
-        &args,
-        "homebrew",
-        Some(command),
-    ))
+    let caps = capabilities(package_name, &brew, &args, "homebrew", Some(command));
+    // Brew's release can lag npm; only its own channel says what upgrade installs.
+    Some(Capabilities {
+        latest: Some(None),
+        lookup: Some(std::sync::Arc::new(Lookup::Homebrew {
+            brew: brew.clone(),
+            name: homebrew.name.clone(),
+            cask: homebrew.cask,
+            env: context.env.clone(),
+        })),
+        ..caps
+    })
 }
 
 /// `followVitePlusSystemFirstShim`.
@@ -801,24 +893,42 @@ pub(crate) async fn resolve_package_managed(
     } else {
         native
     };
+    let lookup = |lookup: Lookup| Some(std::sync::Arc::new(lookup));
     if paths.iter().any(|p| is_vite_plus_global(p)) {
-        return capabilities(
+        let caps = capabilities(
             Some(package),
             "vp",
             &strings(&["i", "-g", package]),
             "vite-plus-global",
             None,
         );
+        return Capabilities {
+            lookup: lookup(Lookup::VitePlus {
+                package: package.to_owned(),
+                env: context.env.clone(),
+            }),
+            cache_key: Some(
+                ["vite-plus-global", package, &environment_key(&context.env)].join("\0"),
+            ),
+            ..with_update_env(caps, &context.env)
+        };
     }
     let latest = format!("{package}@latest");
     if paths.iter().any(|p| is_bun_global(p)) {
-        return capabilities(
+        let caps = capabilities(
             Some(package),
             "bun",
             &strings(&["i", "-g", &latest]),
             "bun-global",
             None,
         );
+        return Capabilities {
+            lookup: lookup(Lookup::BunGlobal {
+                package: package.to_owned(),
+                env: context.env.clone(),
+            }),
+            ..with_update_env(caps, &context.env)
+        };
     }
     if paths.iter().any(|p| is_pnpm_global(p)) {
         let version = run_probe("pnpm", &["--version"], &context.env, &[0]).await;
@@ -827,25 +937,34 @@ pub(crate) async fn resolve_package_managed(
             args.push(format!("--allow-build={package}"));
         }
         args.push(latest);
-        return capabilities(Some(package), "pnpm", &args, "pnpm-global", None);
+        let caps = capabilities(Some(package), "pnpm", &args, "pnpm-global", None);
+        return Capabilities {
+            lookup: lookup(Lookup::PnpmGlobal {
+                package: package.to_owned(),
+                env: context.env.clone(),
+            }),
+            ..with_update_env(caps, &context.env)
+        };
     }
     if paths.iter().any(|p| is_yarn_global(p)) {
-        return capabilities(
+        let caps = capabilities(
             Some(package),
             "yarn",
             &strings(&["global", "add", &latest]),
             "yarn-global",
             None,
         );
+        return with_update_env(caps, &context.env);
     }
     if is_volta_package_install(&context, package) {
-        return capabilities(
+        let caps = capabilities(
             Some(package),
             "volta",
             &strings(&["install", &latest]),
             "volta",
             None,
         );
+        return with_update_env(caps, &context.env);
     }
     if let Some(prefix) = npm_global_prefix(&context.real_command_path, package) {
         let args = strings(&[
@@ -856,13 +975,33 @@ pub(crate) async fn resolve_package_managed(
             &format!("--allow-scripts={package}"),
             &latest,
         ]);
-        return capabilities(
+        let caps = capabilities(
             Some(package),
             "npm",
             &args,
             &format!("npm-global:{}", normalize(&prefix)),
             None,
         );
+        // Inside min-release-age `@latest` installs an older release than the
+        // registry's tag, so only npm's own answer counts.
+        return Capabilities {
+            latest: Some(None),
+            cache_key: Some(
+                [
+                    "npm-global",
+                    &normalize(&prefix),
+                    package,
+                    &environment_key(&context.env),
+                ]
+                .join("\0"),
+            ),
+            lookup: lookup(Lookup::NpmGlobal {
+                package: package.to_owned(),
+                prefix: prefix.clone(),
+                env: context.env.clone(),
+            }),
+            ..with_update_env(caps, &context.env)
+        };
     }
     if let Some(homebrew) = homebrew_ownership(&context.real_command_path) {
         return resolve_homebrew(Some(package), &homebrew, &context)
@@ -981,6 +1120,416 @@ pub(crate) fn compare_semver(left: &str, right: &str) -> std::cmp::Ordering {
         }
     }
     Ordering::Equal
+}
+
+// ---------------------------------------------------------------------------
+// Latest versions
+
+/// `withConfiguredNpmVersionLookup`: with an npm package and no latest
+/// version decided, the configured npm (its registry, auth and proxy) answers
+/// after the installer's own lookup.
+pub(crate) fn with_configured_npm(caps: Capabilities, host: &ProcessEnv) -> Capabilities {
+    let Some(package) = caps.package_name.clone() else {
+        return caps;
+    };
+    if caps.latest.is_some() {
+        return caps;
+    }
+    let mut env = host.clone();
+    if let Some(update_env) = caps.update.as_ref().and_then(|u| u.env.as_ref()) {
+        env.extend(update_env.clone());
+    }
+    let Some(npm) = resolve_command_path("npm", &env) else {
+        return caps;
+    };
+    let view = std::sync::Arc::new(Lookup::NpmView {
+        npm: npm.clone(),
+        package: package.clone(),
+        env: env.clone(),
+    });
+    let installer = installer_key(&caps).unwrap_or_default();
+    let lookup = match caps.lookup.clone() {
+        Some(first) => std::sync::Arc::new(Lookup::Then(first, view)),
+        None => view,
+    };
+    Capabilities {
+        latest: Some(None),
+        cache_key: Some(
+            [
+                "configured-npm",
+                &npm,
+                &package,
+                &environment_key(&env),
+                &installer,
+            ]
+            .join("\0"),
+        ),
+        lookup: Some(lookup),
+        ..caps
+    }
+}
+
+/// `installerLatestVersionKey`.
+fn installer_key(caps: &Capabilities) -> Option<String> {
+    caps.lookup.as_ref()?;
+    if let Some(key) = &caps.cache_key {
+        return Some(key.clone());
+    }
+    if let Some(update) = &caps.update {
+        let mut parts = vec![update.lock_key.clone(), update.executable.clone()];
+        parts.extend(update.args.iter().cloned());
+        return Some(parts.join("\0"));
+    }
+    match (&caps.install_path, &caps.package_name) {
+        (Some(path), _) => Some(["manual", path].join("\0")),
+        (None, Some(package)) => Some(format!("npm-registry\0{package}")),
+        _ => None,
+    }
+}
+
+/// `ProviderLatestVersions`: an answer is kept an hour, a missing one a minute.
+type LatestCache = std::collections::HashMap<String, (Option<String>, std::time::Instant)>;
+static LATEST: std::sync::LazyLock<std::sync::Mutex<LatestCache>> =
+    std::sync::LazyLock::new(Default::default);
+
+async fn cached<F: std::future::Future<Output = Option<String>>>(
+    key: &str,
+    lookup: F,
+) -> Option<String> {
+    let now = std::time::Instant::now();
+    if let Some((version, expires)) = LATEST.lock().unwrap_or_else(|e| e.into_inner()).get(key) {
+        if *expires > now {
+            return version.clone();
+        }
+    }
+    let version = lookup.await;
+    let ttl = if version.is_some() {
+        Duration::from_secs(3600)
+    } else {
+        Duration::from_secs(60)
+    };
+    LATEST.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        key.to_owned(),
+        (version.clone(), std::time::Instant::now() + ttl),
+    );
+    version
+}
+
+/// `resolveLatestProviderVersion`.
+pub(crate) async fn resolve_latest(caps: &Capabilities) -> Option<String> {
+    if let (Some(key), Some(lookup)) = (installer_key(caps), caps.lookup.clone()) {
+        if let Some(version) = cached(&key, run_lookup(lookup)).await {
+            return Some(version);
+        }
+    }
+    if let Some(latest) = &caps.latest {
+        return latest.clone();
+    }
+    if let Some(url) = &caps.muse_channel {
+        return cached(&format!("muse:{url}"), fetch_muse_channel(url.clone())).await;
+    }
+    let package = caps.package_name.clone()?;
+    cached(&package.clone(), fetch_npm_latest(package)).await
+}
+
+/// `fetchNpmLatestVersion`: the public registry's `latest` tag.
+async fn fetch_npm_latest(package: String) -> Option<String> {
+    let url = format!(
+        "https://registry.npmjs.org/{}/latest",
+        percent_encoding::utf8_percent_encode(&package, URI_COMPONENT)
+    );
+    let read = async {
+        let response = super::http_client()
+            .get(url)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let body: Value = response.json().await.ok()?;
+        non_empty(body["version"].as_str())
+    };
+    tokio::time::timeout(Duration::from_secs(4), read)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// `latestMuseVersion`: the channel manifest's version.
+async fn fetch_muse_channel(url: String) -> Option<String> {
+    let read = async {
+        let response = super::http_client().get(url).send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let manifest: Value = response.json().await.ok()?;
+        let version = manifest["version"].as_str()?;
+        Regex::new(r"^\d+\.\d+\.\d+-R\d+(?:\.\d+)?$")
+            .unwrap()
+            .is_match(version)
+            .then(|| version.to_owned())
+    };
+    tokio::time::timeout(Duration::from_secs(4), read)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// `encodeURIComponent`'s unreserved set.
+const URI_COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'!')
+    .remove(b'~')
+    .remove(b'*')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')');
+
+/// A JSON record of `{name: {latest?}}`, as `npm/pnpm outdated --json` print it.
+fn outdated_latest(text: &str, package: &str) -> Result<Option<String>, ()> {
+    let value: Value = serde_json::from_str(text).map_err(|_| ())?;
+    let entries = value.as_object().ok_or(())?;
+    if entries
+        .values()
+        .any(|e| !e.is_object() || e.get("latest").is_some_and(|l| !l.is_string()))
+    {
+        return Err(());
+    }
+    Ok(non_empty(
+        entries.get(package).and_then(|e| e["latest"].as_str()),
+    ))
+}
+
+fn listed_version(list: &Value, package: &str) -> Option<String> {
+    non_empty(list["dependencies"][package]["version"].as_str())
+}
+
+fn run_lookup(
+    lookup: std::sync::Arc<Lookup>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> {
+    Box::pin(async move {
+        match &*lookup {
+            Lookup::Mise { mise, tool, env } => {
+                let latest = non_empty(
+                    run_probe(mise, &["latest", tool], env, &[0])
+                        .await
+                        .as_deref(),
+                )?;
+                (!latest.chars().any(char::is_whitespace)).then_some(latest)
+            }
+            Lookup::Homebrew {
+                brew,
+                name,
+                cask,
+                env,
+            } => {
+                let info: Value = serde_json::from_str(
+                    &run_probe(brew, &["info", "--json=v2", name], env, &[0]).await?,
+                )
+                .ok()?;
+                let raw = if *cask {
+                    info["casks"][0]["version"]
+                        .as_str()
+                        .map(|v| v.split(',').next().unwrap_or("").to_owned())
+                } else {
+                    info["formulae"][0]["versions"]["stable"]
+                        .as_str()
+                        .map(str::to_owned)
+                };
+                non_empty(raw.as_deref()).filter(|v| v != "latest")
+            }
+            Lookup::NpmGlobal {
+                package,
+                prefix,
+                env,
+            } => {
+                let mut lookup_env: ProcessEnv = std::env::vars().collect();
+                lookup_env.extend(env.clone());
+                let npm = resolve_command_path("npm", &lookup_env)?;
+                let outdated = run_probe(
+                    &npm,
+                    &["outdated", "-g", "--prefix", prefix, "--json", package],
+                    env,
+                    &[0, 1],
+                )
+                .await?;
+                let value: Value = serde_json::from_str(&outdated).ok()?;
+                if value.get("error").is_some() {
+                    return None;
+                }
+                if let Some(latest) = outdated_latest(&outdated, package).ok()? {
+                    return Some(latest);
+                }
+                let listed = run_probe(
+                    &npm,
+                    &[
+                        "ls", "-g", "--prefix", prefix, "--depth", "0", "--json", package,
+                    ],
+                    env,
+                    &[0, 1],
+                )
+                .await?;
+                listed_version(&serde_json::from_str(&listed).ok()?, package)
+            }
+            Lookup::PnpmGlobal { package, env } => {
+                let mut lookup_env: ProcessEnv = std::env::vars().collect();
+                lookup_env.extend(env.clone());
+                let pnpm = resolve_command_path("pnpm", &lookup_env)?;
+                let outdated = run_probe(
+                    &pnpm,
+                    &[
+                        "outdated",
+                        "-g",
+                        "--reporter=silent",
+                        "--format",
+                        "json",
+                        package,
+                    ],
+                    env,
+                    &[0, 1],
+                )
+                .await?;
+                if let Some(latest) = outdated_latest(&outdated, package).ok()? {
+                    return Some(latest);
+                }
+                let listed = run_probe(
+                    &pnpm,
+                    &[
+                        "ls",
+                        "-g",
+                        "--reporter=silent",
+                        "--depth",
+                        "0",
+                        "--json",
+                        package,
+                    ],
+                    env,
+                    &[0],
+                )
+                .await?;
+                listed_version(
+                    &serde_json::from_str::<Value>(&listed).ok()?.get(0)?.clone(),
+                    package,
+                )
+            }
+            Lookup::BunGlobal { package, env } => {
+                let mut lookup_env: ProcessEnv = std::env::vars().collect();
+                lookup_env.extend(env.clone());
+                let bun = resolve_command_path("bun", &lookup_env)?;
+                let mut env = env.clone();
+                env.insert("FORCE_COLOR".into(), "0".into());
+                let output = run_probe(&bun, &["outdated", "-g", package], &env, &[0]).await?;
+                output.split('\n').find_map(|line| {
+                    let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+                    (cells.len() == 6 && cells[1] == package)
+                        .then(|| non_empty(Some(cells[4].trim_end_matches(" *"))))
+                        .flatten()
+                })
+            }
+            Lookup::VitePlus { package, env } => {
+                let current: Value = serde_json::from_str(
+                    &run_probe("vp", &["env", "current", "--json"], env, &[0]).await?,
+                )
+                .ok()?;
+                let node = &current["node"];
+                let bin = node["bin_path"].as_str()?;
+                if node["installed"] != true
+                    || node["source"] == "system PATH"
+                    || !node["source"].is_string()
+                    || !Path::new(bin).is_absolute()
+                {
+                    return None;
+                }
+                let npm = Path::new(bin).parent()?.join("npm").display().to_string();
+                let packed = run_probe(
+                    &npm,
+                    &[
+                        "pack",
+                        "--dry-run",
+                        "--json=false",
+                        "--global",
+                        &format!("{package}@latest"),
+                    ],
+                    env,
+                    &[0],
+                )
+                .await?;
+                let prefix = format!("{}-", package.trim_start_matches('@').replacen('/', "-", 1));
+                let file = packed.trim();
+                let version = file.strip_prefix(&prefix)?.strip_suffix(".tgz")?;
+                (!version.is_empty() && !version.chars().any(char::is_whitespace))
+                    .then(|| version.to_owned())
+            }
+            Lookup::NpmView { npm, package, env } => {
+                let output = run_probe(
+                    npm,
+                    &[
+                        "view",
+                        "--global",
+                        "--json",
+                        &format!("{package}@latest"),
+                        "version",
+                    ],
+                    env,
+                    &[0],
+                )
+                .await?;
+                match serde_json::from_str::<Value>(output.trim()).ok()? {
+                    Value::String(v) => non_empty(Some(&v)),
+                    Value::Array(items) if items.len() == 1 => non_empty(items[0].as_str()),
+                    _ => None,
+                }
+            }
+            Lookup::Then(first, second) => match run_lookup(first.clone()).await {
+                Some(version) => Some(version),
+                None => run_lookup(second.clone()).await,
+            },
+            Lookup::ClaudeNative { url } => {
+                let read = async {
+                    let response = super::http_client().get(url).send().await.ok()?;
+                    if !response.status().is_success() {
+                        return None;
+                    }
+                    let text = response.text().await.ok()?;
+                    let version = text.trim();
+                    Regex::new(r"^\d+\.\d+\.\d+$")
+                        .unwrap()
+                        .is_match(version)
+                        .then(|| version.to_owned())
+                };
+                tokio::time::timeout(Duration::from_secs(4), read)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            Lookup::CodexNative => {
+                let read = async {
+                    let response = super::http_client()
+                        .get("https://releases.openai.com/codex/channels/latest")
+                        .send()
+                        .await
+                        .ok()?;
+                    if !response.status().is_success() {
+                        return None;
+                    }
+                    let release: Value = response.json().await.ok()?;
+                    let tag = release["tag_name"].as_str()?;
+                    Regex::new(r"^rust-v(\d+\.\d+\.\d+)$")
+                        .unwrap()
+                        .captures(tag)
+                        .map(|c| c[1].to_owned())
+                };
+                tokio::time::timeout(Duration::from_secs(4), read)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+        }
+    })
 }
 
 #[cfg(test)]

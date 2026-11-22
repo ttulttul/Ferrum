@@ -411,10 +411,7 @@ struct Response {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap_or_default()
+    super::http_client()
 }
 
 /// A GET, or `Err` with the reference's transport message.
@@ -1498,7 +1495,10 @@ async fn maintenance_for(
             upgrade: generation == Generation::V2,
         }),
     };
-    maintenance::resolve_package_managed(&definition, maintenance::context(binary, env)).await
+    maintenance::with_configured_npm(
+        maintenance::resolve_package_managed(&definition, maintenance::context(binary, env)).await,
+        &super::base_env(&[]),
+    )
 }
 
 // ---------------------------------------------------------------------------
