@@ -124,7 +124,7 @@ pub async fn read_file(input: &Value) -> Option<Reply> {
             )
         })?;
         Ok(
-            json!({"relativePath": relative_path, "contents":text, "byteLength":bytes.len(), "truncated":false, "exists":true}),
+            json!({"relativePath": relative_path, "contents":text, "byteLength":bytes.len(), "truncated":false}),
         )
     })();
     Some(result)
@@ -219,9 +219,9 @@ pub async fn browse(input: &Value) -> Option<Reply> {
         base.join(partial)
     };
     let directory = if target.is_dir() {
-        target
+        normalize_path(target)
     } else {
-        target.parent().unwrap_or(Path::new("/")).to_path_buf()
+        normalize_path(target.parent().unwrap_or(Path::new("/")).to_path_buf())
     };
     let entries = match sorted_entries(Path::new("/"), &directory) {
         Ok(items) => items
@@ -239,4 +239,8 @@ pub async fn browse(input: &Value) -> Option<Reply> {
     Some(Ok(
         json!({"parentPath":directory.to_string_lossy(),"entries":entries}),
     ))
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+    path.components().collect()
 }

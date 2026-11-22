@@ -12,7 +12,7 @@ use std::{path::PathBuf, sync::Arc};
 pub async fn snapshot(State(s): State<Arc<AppState>>) -> Json<Value> {
     let store = s.store.read().await;
     Json(
-        json!({"projects":store.project_rows.values().map(crate::repository_identity::with_identity).collect::<Vec<_>>(),"updatedAt":iso(time::OffsetDateTime::now_utc())}),
+        json!({"projects":store.project_rows.values().filter(|row| row["deletedAt"].is_null()).map(crate::repository_identity::with_identity).collect::<Vec<_>>(),"updatedAt":iso(time::OffsetDateTime::now_utc())}),
     )
 }
 

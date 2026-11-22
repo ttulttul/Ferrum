@@ -1,42 +1,6 @@
 {
   "about": "Known client-visible Rust gaps found by client_rpc_parity.py against the pinned reference. Each case fails CI if it starts passing; remove it then. severity is for real client use: critical breaks a core flow, high breaks a feature, medium shows wrong data, low differs without visible effect.",
   "cases": {
-    "projects.filesystem.browse": {
-      "area": "projects/files",
-      "severity": "low",
-      "reason": "filesystem.browse keeps the trailing slash in parentPath",
-      "issue": "the reference normalizes parentPath to the directory without a trailing slash"
-    },
-    "projects.http.snapshot.afterDelete": {
-      "area": "projects/files",
-      "severity": "medium",
-      "reason": "GET /api/projects still lists a deleted project",
-      "issue": "the reference omits projects with deletedAt set"
-    },
-    "projects.readFile": {
-      "area": "projects/files",
-      "severity": "low",
-      "reason": "projects.readFile adds an exists field",
-      "issue": "extra key not in ProjectReadFileResult; the client ignores it, but replies differ"
-    },
-    "projects.readFile.afterWrite": {
-      "area": "projects/files",
-      "severity": "low",
-      "reason": "projects.readFile adds an exists field",
-      "issue": "extra key not in ProjectReadFileResult; the client ignores it, but replies differ"
-    },
-    "raw.projects.readFile#5": {
-      "area": "projects/files",
-      "severity": "low",
-      "reason": "projects.readFile adds an exists field",
-      "issue": "extra key not in ProjectReadFileResult; the client ignores it, but replies differ"
-    },
-    "raw.projects.readFile#6": {
-      "area": "projects/files",
-      "severity": "low",
-      "reason": "projects.readFile error for a missing file has a different operation and cause",
-      "issue": "the reference reports operation realpath-target with a WorkspaceFileSystemOperationError cause; Rust reports read and an io error string"
-    },
     "turns.getThreadProjection.afterMessage": {
       "area": "agent turns",
       "severity": "medium",
