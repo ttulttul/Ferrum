@@ -239,27 +239,34 @@ pub(crate) fn client_sessions(db: &Path, now: &str) -> rusqlite::Result<Vec<serd
 
 /// Revokes client sessions the TypeScript server, or this one on a shared
 /// home, keeps in `auth_sessions`, as `AuthSessions.revoke` does: `revoked_at`
-/// is set once and never cleared. `id` picks one session, and every session of
-/// the same T3 Connect device with it (`revokeConnectDevice`); `None` revokes
-/// them all (revoking every other client, since this server's own session is
-/// not among them). Returns the session ids it revoked.
+/// is set once and never cleared. Returns the session ids it revoked.
+///
+/// `id` picks one session. A T3 Connect device's session (one bound to a
+/// proof key other than `current_device`, the caller's own) revokes the
+/// device, as `revokeConnectDevice` does: every session of that key, its
+/// unspent pairing links, and its approval, so it cannot sign in again.
+/// `None` revokes every session (this server's own is not among them) and
+/// every device but `current_device`, as `revokeOtherClientSessions` does.
 pub(crate) fn revoke_clients(
     db: &Path,
     id: Option<&str>,
+    current_device: Option<&str>,
     now: &str,
 ) -> rusqlite::Result<Vec<String>> {
     let Some(conn) = open_sessions(db)? else {
         return Ok(Vec::new());
     };
+    let bound = has_column(&conn, "auth_sessions", "proof_key_thumbprint")?;
     let device: Option<String> = match id {
-        Some(id) if has_column(&conn, "auth_sessions", "proof_key_thumbprint")? => conn
+        Some(id) if bound => conn
             .query_row(
                 "SELECT proof_key_thumbprint FROM auth_sessions WHERE session_id = ?1",
                 [id],
                 |row| row.get(0),
             )
             .optional()?
-            .flatten(),
+            .flatten()
+            .filter(|key: &String| Some(key.as_str()) != current_device),
         _ => None,
     };
     let mut statement = conn.prepare(if device.is_some() {
@@ -273,8 +280,35 @@ pub(crate) fn revoke_clients(
     })?;
     let ids = statement
         .query_map(params![now, id, device], |row| row.get::<_, String>(0))?
-        .collect();
-    ids
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // The devices revoked with them: one, or all but the caller's.
+    let devices = match (id, &device) {
+        (Some(_), Some(key)) => Some((Some(key.as_str()), None)),
+        (None, _) => Some((None, current_device)),
+        (Some(_), None) => None,
+    };
+    if let Some((only, keep)) = devices {
+        // `revokeUnspentByProofKey`: only T3 Connect mints bind a proof key.
+        if has_table(&conn, "auth_pairing_links")?
+            && has_column(&conn, "auth_pairing_links", "proof_key_thumbprint")?
+        {
+            conn.execute(
+                "UPDATE auth_pairing_links SET revoked_at = ?1
+                 WHERE proof_key_thumbprint IS NOT NULL AND revoked_at IS NULL AND consumed_at IS NULL
+                   AND (?2 IS NULL OR proof_key_thumbprint = ?2)
+                   AND proof_key_thumbprint IS NOT ?3",
+                params![now, only, keep],
+            )?;
+        }
+        if has_table(&conn, "auth_connect_devices")? {
+            conn.execute(
+                "DELETE FROM auth_connect_devices
+                 WHERE (?1 IS NULL OR proof_key_thumbprint = ?1) AND proof_key_thumbprint IS NOT ?2",
+                params![only, keep],
+            )?;
+        }
+    }
+    Ok(ids)
 }
 
 #[cfg(test)]
@@ -570,14 +604,16 @@ pub(crate) mod tests {
             "2026-01-03T00:00:00.000Z",
             None,
         );
-        let mut revoked = revoke_clients(&db, Some("phone-1"), NOW).unwrap();
+        let mut revoked = revoke_clients(&db, Some("phone-1"), None, NOW).unwrap();
         revoked.sort();
         assert_eq!(revoked, ["phone-1", "phone-2"]);
         assert_eq!(
-            revoke_clients(&db, Some("laptop"), NOW).unwrap(),
+            revoke_clients(&db, Some("laptop"), None, NOW).unwrap(),
             ["laptop"]
         );
-        assert!(revoke_clients(&db, Some("laptop"), NOW).unwrap().is_empty());
+        assert!(revoke_clients(&db, Some("laptop"), None, NOW)
+            .unwrap()
+            .is_empty());
         session(
             &conn,
             "agent",
@@ -586,6 +622,105 @@ pub(crate) mod tests {
             "2026-01-04T00:00:00.000Z",
             None,
         );
-        assert_eq!(revoke_clients(&db, None, NOW).unwrap(), ["agent"]);
+        assert_eq!(revoke_clients(&db, None, None, NOW).unwrap(), ["agent"]);
+    }
+
+    #[test]
+    fn revoking_a_device_also_revokes_its_unspent_links_and_approval_but_not_the_callers() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = sessions_table(dir.path());
+        let db = dir.path().join("statev2.sqlite");
+        let links = create_ts_store(&db);
+        conn.execute_batch(
+            "CREATE TABLE auth_connect_devices (proof_key_thumbprint TEXT PRIMARY KEY, client_json TEXT, approved_at TEXT NOT NULL);
+             INSERT INTO auth_connect_devices VALUES ('phone', NULL, '2026-01-01T00:00:00.000Z'), ('mine', NULL, '2026-01-01T00:00:00.000Z'), ('tablet', NULL, '2026-01-01T00:00:00.000Z');",
+        )
+        .unwrap();
+        for (id, key) in [
+            ("phone-link", "phone"),
+            ("mine-link", "mine"),
+            ("tablet-link", "tablet"),
+        ] {
+            insert(
+                &links,
+                id,
+                id,
+                &["orchestration:read"],
+                "cloud-connect",
+                LATER,
+            );
+            links
+                .execute(
+                    "UPDATE auth_pairing_links SET proof_key_thumbprint = ?1 WHERE id = ?2",
+                    params![key, id],
+                )
+                .unwrap();
+        }
+        session(
+            &conn,
+            "phone-1",
+            "cloud-connect",
+            "[]",
+            "2026-01-01T00:00:00.000Z",
+            Some("phone"),
+        );
+        session(
+            &conn,
+            "mine-1",
+            "cloud-connect",
+            "[]",
+            "2026-01-02T00:00:00.000Z",
+            Some("mine"),
+        );
+        session(
+            &conn,
+            "tablet-1",
+            "cloud-connect",
+            "[]",
+            "2026-01-03T00:00:00.000Z",
+            Some("tablet"),
+        );
+        let revoked_links = || -> Vec<String> {
+            let mut statement = links
+                .prepare(
+                    "SELECT id FROM auth_pairing_links WHERE revoked_at IS NOT NULL ORDER BY id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let devices = || -> Vec<String> {
+            let mut statement = conn
+                .prepare("SELECT proof_key_thumbprint FROM auth_connect_devices ORDER BY 1")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        // The phone, revoked from the caller's own device: the phone loses everything.
+        assert_eq!(
+            revoke_clients(&db, Some("phone-1"), Some("mine"), NOW).unwrap(),
+            ["phone-1"]
+        );
+        assert_eq!(revoked_links(), ["phone-link"]);
+        assert_eq!(devices(), ["mine", "tablet"]);
+        // A session of the caller's own device: only that session.
+        assert_eq!(
+            revoke_clients(&db, Some("mine-1"), Some("mine"), NOW).unwrap(),
+            ["mine-1"]
+        );
+        assert_eq!(devices(), ["mine", "tablet"]);
+        // Every other client: every device but the caller's.
+        assert_eq!(
+            revoke_clients(&db, None, Some("mine"), NOW).unwrap(),
+            ["tablet-1"]
+        );
+        assert_eq!(revoked_links(), ["phone-link", "tablet-link"]);
+        assert_eq!(devices(), ["mine"]);
     }
 }
