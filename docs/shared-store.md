@@ -260,7 +260,8 @@ server gave them:
 
 **Typed state for a thread read from the database** (`Thread::from_stored`, pull
 request 3). This is what lets Rust queue, start, steer, stop, answer and continue turns
-on it. Rust rebuilds:
+on it (steering is the reference's active steering, for Codex turns only:
+`src/orchestration/steer.rs`). Rust rebuilds:
 - its runs, with their statuses, messages and continuation links;
 - what was sent to the thread: users' messages, plus the notifications that continue a
   run. Provider messages stay provider records, as on Rust's own threads;
@@ -276,6 +277,11 @@ on it. Rust rebuilds:
 
 Rust's computed records then name the same entities as the stored ones, and the overlay
 applies only what Rust's turns change.
+
+The native server also reads and writes the reference's `scheduled_tasks` rows. On first
+open with a legacy `scheduled-tasks.json`, it imports missing ids in one transaction.
+An existing SQLite row wins. After commit, the file moves to `scheduled-tasks.imported.json`
+so deleting a task survives the next restart.
 
 ### 2.3 Existing Rust homes: a one-time import, keeping the old file
 
@@ -413,7 +419,11 @@ Every kind of home keeps working:
        MCP tools (`codex_mcp`, `claude_mcp`). The tool answers must match the reference's
        own run, which shows the thread credential works for a thread the other server
        made;
-     - a turn waiting on an approval.
+     - a turn waiting on an approval;
+     - a thread made on one server whose turn the other runs, steers and stops
+       (`codex steer then stop on the other server`);
+     - a first title still being generated when its server stops, which the other server
+       takes over from the outbox (`codex title request on the other server`).
    - **Thread MCP credentials** (#102) are in memory on both servers, so a switch carries
      nothing over. The server that runs a turn gives the CLI a fresh credential, and that
      includes a continuation it takes over from the outbox, as the reference does.

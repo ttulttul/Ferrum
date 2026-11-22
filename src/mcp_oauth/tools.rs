@@ -41,6 +41,11 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("send_to_user", &[]),
     ("t3_background_wait", &[]),
     ("tool_search", &[]),
+    // Scheduled tasks (batch 6).
+    ("list_scheduled_tasks", &[]),
+    ("schedule_task", &[]),
+    ("delete_scheduled_task", &[]),
+    ("run_scheduled_task_now", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -80,6 +85,11 @@ const SERVED: &[&str] = &[
     // The calling thread's session (batch 4a).
     "send_to_user",
     "t3_background_wait",
+    // Scheduled tasks (batch 6).
+    "list_scheduled_tasks",
+    "schedule_task",
+    "delete_scheduled_task",
+    "run_scheduled_task_now",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -601,8 +611,159 @@ pub(super) async fn call<S: McpHost>(
         "tool_search" => session::tool_search(caller, args),
         "send_to_user" => session::send_to_user(&**host, caller, args).await,
         "t3_background_wait" => session::background_wait(&**host, caller, args).await,
+
+        "list_scheduled_tasks" => list_scheduled_tasks(&**host, caller, args).await,
+        "schedule_task" => schedule_task(host, caller, args).await,
+        "delete_scheduled_task" => delete_scheduled_task(&**host, caller, args).await,
+        "run_scheduled_task_now" => run_scheduled_task_now(&**host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
+}
+
+async fn list_scheduled_tasks<S: McpHost>(host: &S, caller: &Caller, args: &Value) -> Outcome {
+    let project = args["projectId"].as_str().or_else(|| {
+        caller
+            .thread
+            .as_ref()
+            .map(|thread| thread.project_id.as_str())
+    });
+    let id = args.get("scheduledTaskId").and_then(Value::as_str);
+    let tasks = host
+        .control_state()
+        .scheduled_task_list()
+        .await
+        .map_err(|_| {
+            failure(
+                "orchestration_error",
+                "Could not list scheduled tasks: Could not list schedule tasks.",
+            )
+        })?;
+    let summaries: Vec<_> = tasks
+        .iter()
+        .filter(|task| project.is_none_or(|p| task["projectId"] == p))
+        .filter(|task| id.is_none_or(|id| task["id"] == id))
+        .map(scheduled_task_summary)
+        .collect();
+    Ok(json!({"tasks": summaries}))
+}
+
+fn scheduled_task_summary(task: &Value) -> Value {
+    let mut summary = json!({
+        "scheduledTaskId": task["id"], "title": task["title"], "prompt": task["prompt"],
+        "enabled": task["enabled"], "projectId": task["projectId"], "boundThreadId": task["threadId"],
+        "freshSession": task["threadMode"] == "fresh_session", "schedule": task["schedule"],
+        "nextRunAt": task["nextRunAt"], "lastRunStatus": task["lastRunStatus"]
+    });
+    if let Some(has_secret) = task["webhook"]["hasSecret"].as_bool() {
+        summary["webhookSignature"] = json!(if has_secret { "set" } else { "none" });
+    }
+    if let Some(message) = task.get("blockedByPolicy") {
+        summary["blockedByPolicy"] = message.clone();
+    }
+    summary
+}
+
+async fn schedule_task<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
+    caller.refuse_read_only()?;
+    let project = args["projectId"]
+        .as_str()
+        .or_else(|| {
+            caller
+                .thread
+                .as_ref()
+                .map(|thread| thread.project_id.as_str())
+        })
+        .ok_or_else(|| {
+            failure(
+                "invalid_request",
+                "projectId is required outside a project thread.",
+            )
+        })?;
+    let prompt = args["prompt"]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(invalid_arguments)?;
+    let schedule = args
+        .get("schedule")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(invalid_arguments)?;
+    let now = crate::auth_service::now();
+    let id = args["scheduledTaskId"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("scheduled-task:{}", uuid::Uuid::new_v4()));
+    let title = args["title"]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| prompt.lines().next().unwrap_or("Scheduled task"));
+    let enabled = args["enabled"].as_bool().unwrap_or(true);
+    let thread_id = args["bindToCurrentThread"]
+        .as_bool()
+        .unwrap_or(
+            caller
+                .thread
+                .as_ref()
+                .is_some_and(|thread| thread.project_id == project),
+        )
+        .then(|| caller.thread.as_ref().map(|thread| thread.id.clone()))
+        .flatten();
+    let next = match schedule["type"].as_str() {
+        Some("interval") => schedule["everyMs"]
+            .as_i64()
+            .map(|value| crate::auth_service::iso(now.saturating_add(value))),
+        Some("once") => schedule["runAt"].as_str().map(str::to_owned),
+        _ => None,
+    };
+    let task = json!({"id":id,"title":title,"prompt":prompt,"enabled":enabled,"schedule":schedule,"projectId":project,"threadId":thread_id,
+        "threadMode":if args["freshSession"] == true {"fresh_session"} else if thread_id.is_some() {"continue"} else {"new_thread"},
+        "workspaceStrategy":{"type":"root"},"modelSelection":caller.thread.as_ref().map(|thread| json!({"instanceId":thread.provider_instance_id,"model":thread.model})).unwrap_or(json!({"instanceId":"codex","model":""})),
+        "runtimeMode":caller.thread.as_ref().map(|thread| thread.runtime_mode.clone()).unwrap_or_else(|| "approval-required".into()),"interactionMode":"default",
+        "createdBy":"agent","creationSource":"mcp","createdAt":crate::auth_service::iso(now),"updatedAt":crate::auth_service::iso(now),
+        "nextRunAt":if enabled {next} else {None::<String>},"lastRunAt":null,"lastRunStatus":"never","lastRunError":null,"runCount":0});
+    host.control_state()
+        .scheduled_task_upsert(task.clone())
+        .await
+        .map_err(|_| failure("orchestration_error", "Could not schedule task."))?;
+    Ok(scheduled_task_summary(&task))
+}
+
+async fn delete_scheduled_task<S: McpHost>(host: &S, caller: &Caller, args: &Value) -> Outcome {
+    caller.refuse_read_only()?;
+    let id = args["scheduledTaskId"]
+        .as_str()
+        .ok_or_else(invalid_arguments)?;
+    if !host
+        .control_state()
+        .scheduled_task_delete(id)
+        .await
+        .map_err(|_| failure("orchestration_error", "Could not delete scheduled task."))?
+    {
+        return Err(failure("not_found", "Schedule task not found."));
+    }
+    Ok(json!({"scheduledTaskId":id,"deleted":true}))
+}
+
+async fn run_scheduled_task_now<S: McpHost>(host: &S, caller: &Caller, args: &Value) -> Outcome {
+    caller.refuse_read_only()?;
+    let id = args["taskId"].as_str().ok_or_else(invalid_arguments)?;
+    let task = host
+        .control_state()
+        .scheduled_task_list()
+        .await
+        .map_err(|_| failure("orchestration_error", "Could not run scheduled task."))?
+        .into_iter()
+        .find(|task| task["id"] == id)
+        .ok_or_else(|| failure("not_found", "Schedule task not found."))?;
+    if task["schedule"]["type"] == "webhook" {
+        return Err(failure(
+            "invalid_request",
+            "Webhook tasks run when their URL receives a request.",
+        ));
+    }
+    Ok(
+        json!({"taskId":id,"threadId":task["threadId"],"lastRunStatus":task["lastRunStatus"],"lastRunError":task["lastRunError"],"runCount":task["runCount"],"nextRunAt":task["nextRunAt"]}),
+    )
 }
 
 async fn project_list<S: McpHost>(host: &S, a: &Value) -> Outcome {

@@ -68,7 +68,8 @@ def title_generation():
     none). `codex exec ... -` and `claude -p ...` read the prompt from standard
     input, append {argv, prompt, schema, env} to FAKE_PROVIDER_LOG.title, and
     answer the scenario's "title" output ({"title", "needsRefinement"}); a
-    scenario without one fails at once, as a CLI that cannot run.
+    scenario without one fails at once, as a CLI that cannot run. With
+    "titleDelayFirst", the first run answers after that many seconds.
     """
     with open(os.environ["FAKE_PROVIDER_SCENARIO"]) as source:
         scenario = json.load(source)
@@ -83,8 +84,13 @@ def title_generation():
             schema = open(value).read() if flag == "--output-schema" else value
     env = {k: v for k, v in os.environ.items()
            if k.startswith(("CODEX_INTERNAL_", "CODEX_HOME", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CONFIG_DIR"))}
+    # "titleDelayFirst": the first run takes that many seconds, so a server stopped meanwhile
+    # leaves its title request to the next.
+    first = not os.path.exists(log_path + ".title")
     with open(log_path + ".title", "a") as out:
         out.write(json.dumps({"argv": args, "prompt": prompt, "schema": schema, "env": env}) + "\n")
+    if first and scenario.get("titleDelayFirst"):
+        time.sleep(scenario["titleDelayFirst"])
     output = scenario.get("title")
     if output is None:
         sys.stderr.write("fake provider: this scenario generates no title\n")

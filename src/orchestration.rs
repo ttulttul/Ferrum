@@ -9,6 +9,8 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
+mod steer;
+
 /// What command dispatch needs from the server beyond the control state.
 pub(crate) trait CommandHost:
     std::ops::Deref<Target = ControlState> + crate::workspace::MaybeSendSync + Sized
@@ -573,6 +575,7 @@ async fn start_run<H: CommandHost>(
         scheduled_task_id: scheduled_task_id.filter(|_| continues.is_none()),
         follows_thread_selection,
         notification,
+        steer: None,
     };
     let seq = state
         .commit_receipted(
@@ -785,7 +788,18 @@ async fn apply_command<H: CommandHost>(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            let queued = command["dispatchMode"]["type"] == "queue_after_active"
+            let mut queue_steer = false;
+            if command["dispatchMode"]["type"] == "steer_active" {
+                match steer::plan(&state, thread_id, command).await? {
+                    steer::SteerPlan::Start => {}
+                    steer::SteerPlan::Queue => queue_steer = true,
+                    steer::SteerPlan::Steer(target) => {
+                        return steer::steer(state.clone(), receipt, thread_id, command, target)
+                            .await;
+                    }
+                }
+            }
+            let queued = (command["dispatchMode"]["type"] == "queue_after_active" || queue_steer)
                 && state
                     .store
                     .read()
@@ -2181,6 +2195,7 @@ async fn apply_command<H: CommandHost>(
                 scheduled_task_id: None,
                 follows_thread_selection: false,
                 notification: None,
+                steer: None,
             };
             let thread = Thread {
                 row,
@@ -2789,6 +2804,7 @@ async fn respond_provider_request<H: CommandHost>(
                 decision,
                 feedback,
                 answers,
+                steer: None,
             },
         )
         .await;

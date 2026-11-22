@@ -202,6 +202,9 @@ const requestsOf = (item, pending, withItems) => {
  * `seed.interrupt === "request"`, once a runtime request is pending. With `seed.respond`
  * ({decision} or {answers}), the first pending runtime request is answered with it. With
  * `seed.change` (a command without its ids), that command is sent once the provider turn runs.
+ * With `seed.steer` ({text, ack}), a message steers the run once a command it runs is running,
+ * and `seed.interrupt === "steer"` interrupts it once an item carrying `ack` (what the provider
+ * answered the steer with) arrived.
  */
 const liveTurn = (client, seed) =>
   Effect.gen(function* () {
@@ -211,6 +214,7 @@ const liveTurn = (client, seed) =>
     const turnRunning = yield* Deferred.make();
     const commandRunning = yield* Deferred.make();
     const requestPending = yield* Deferred.make();
+    const steerAnswered = yield* Deferred.make();
     const pending = new Map();
     const withItems = new Set();
     let dispatched = false;
@@ -225,6 +229,9 @@ const liveTurn = (client, seed) =>
           if (dispatched && run.runId) runId = run.runId;
           if (dispatched && run.turnRunning) yield* Deferred.succeed(turnRunning, undefined);
           if (dispatched && runsCommand(item)) yield* Deferred.succeed(commandRunning, undefined);
+          if (dispatched && seed.steer && JSON.stringify(plain(item)).includes(seed.steer.ack)) {
+            yield* Deferred.succeed(steerAnswered, undefined);
+          }
           if (dispatched) {
             requestsOf(item, pending, withItems);
             // Answer once the request's card is there too, as a user would.
@@ -241,6 +248,25 @@ const liveTurn = (client, seed) =>
     let interruptReply = null;
     let respondReply = null;
     let changeReply = null;
+    let steerReply = null;
+    if (seed.steer) {
+      yield* Deferred.await(commandRunning);
+      steerReply = yield* client["orchestration.dispatchCommand"]({
+        type: "message.dispatch",
+        commandId: "turn-steer",
+        threadId: seed.threadId,
+        messageId: "message:steer",
+        text: seed.steer.text,
+        attachments: [],
+        createdBy: "user",
+        creationSource: "web",
+        dispatchMode: { type: "steer_active", targetRunId: runId },
+      }).pipe(
+        Effect.map(plain),
+        Effect.catch((error) => Effect.succeed({ error: String(error?._tag ?? error) })),
+      );
+      yield* Effect.raceFirst(Deferred.await(steerAnswered), Effect.sleep(8000));
+    }
     if (seed.change) {
       // A thread change sent while the turn runs (archive, model, runtime mode, ...).
       yield* Deferred.await(turnRunning);
@@ -284,7 +310,9 @@ const liveTurn = (client, seed) =>
         }),
       );
     } else if (seed.interrupt) {
-      yield* Deferred.await(seed.interrupt === "command" ? commandRunning : turnRunning);
+      if (seed.interrupt !== "steer") {
+        yield* Deferred.await(seed.interrupt === "command" ? commandRunning : turnRunning);
+      }
       interruptReply = plain(
         yield* client["orchestration.dispatchCommand"]({
           type: "run.interrupt",
@@ -298,7 +326,7 @@ const liveTurn = (client, seed) =>
     // Let the run's last events arrive.
     yield* Effect.sleep(1500);
     yield* Fiber.interrupt(fiber);
-    return { dispatchReply: plain(reply), interruptReply, respondReply, changeReply, items };
+    return { dispatchReply: plain(reply), interruptReply, respondReply, changeReply, steerReply, items };
   });
 
 const program = Effect.gen(function* () {

@@ -30,8 +30,9 @@ pub struct ControlState {
     pub(crate) pull_request_linked_events: broadcast::Sender<u64>,
     /// Where state documents live.
     pub(crate) documents: Arc<dyn DocumentStore>,
-    pub(crate) scheduled_tasks: Mutex<IndexMap<String, Value>>,
-    pub(crate) scheduled_tasks_path: PathBuf,
+    #[cfg(feature = "native")]
+    pub(crate) scheduled_database: Option<Arc<Mutex<crate::statev2::scheduled_tasks::Database>>>,
+    scheduled_tasks_path: PathBuf,
     pub(crate) scheduled_webhook_deliveries: Mutex<IndexMap<String, Value>>,
     pub(crate) scheduled_webhook_deliveries_path: PathBuf,
     pub(crate) scheduled_task_events: broadcast::Sender<()>,
@@ -54,7 +55,6 @@ impl ControlState {
             store.apply_record(&record);
         }
         let scheduled_tasks_path = dir.join("scheduled-tasks.json");
-        let scheduled_tasks = read_by_id(&*documents, &scheduled_tasks_path);
         let scheduled_webhook_deliveries_path = dir.join("scheduled-webhook-deliveries.json");
         let scheduled_webhook_deliveries =
             read_by_id(&*documents, &scheduled_webhook_deliveries_path);
@@ -71,8 +71,9 @@ impl ControlState {
             pull_request_linked_refresh: Mutex::new(0),
             pull_request_linked_events: broadcast::channel(64).0,
             documents,
-            scheduled_tasks: Mutex::new(scheduled_tasks),
             scheduled_tasks_path,
+            #[cfg(feature = "native")]
+            scheduled_database: None,
             scheduled_webhook_deliveries: Mutex::new(scheduled_webhook_deliveries),
             scheduled_webhook_deliveries_path,
             scheduled_task_events: broadcast::channel(64).0,
@@ -158,13 +159,71 @@ impl ControlState {
         }
     }
 
-    pub(crate) async fn persist_scheduled_tasks(&self) -> anyhow::Result<()> {
-        let tasks = self.scheduled_tasks.lock().await;
-        let bytes = serde_json::to_vec(&tasks.values().collect::<Vec<_>>())?;
-        drop(tasks);
+    pub(crate) async fn scheduled_task_list(&self) -> anyhow::Result<Vec<Value>> {
+        #[cfg(feature = "native")]
+        if let Some(database) = &self.scheduled_database {
+            return database.lock().await.list();
+        }
+        let mut tasks: Vec<Value> = self
+            .documents
+            .read_optional(&self.scheduled_tasks_path)?
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()?
+            .unwrap_or_default();
+        tasks.sort_by(|a, b| {
+            b["createdAt"]
+                .as_str()
+                .cmp(&a["createdAt"].as_str())
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+        Ok(tasks)
+    }
+
+    pub(crate) async fn scheduled_task_upsert(&self, task: Value) -> anyhow::Result<()> {
+        #[cfg(feature = "native")]
+        if let Some(database) = &self.scheduled_database {
+            database.lock().await.save(&task)?;
+            let _ = self.scheduled_task_events.send(());
+            return Ok(());
+        }
+        let mut tasks = self.scheduled_task_list().await?;
+        let id = task["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("scheduled task has no id"))?;
+        tasks.retain(|item| item["id"] != id);
+        tasks.push(task);
+        let bytes = serde_json::to_vec(&tasks)?;
         self.documents
             .write(&self.scheduled_tasks_path, &bytes, WriteMode::Replace)?;
+        let _ = self.scheduled_task_events.send(());
         Ok(())
+    }
+
+    pub(crate) async fn scheduled_task_delete(&self, id: &str) -> anyhow::Result<bool> {
+        #[cfg(feature = "native")]
+        if let Some(database) = &self.scheduled_database {
+            let existed = database.lock().await.get(id)?.is_some();
+            if existed {
+                database.lock().await.delete(id)?;
+            }
+            if existed {
+                let _ = self.scheduled_task_events.send(());
+            }
+            return Ok(existed);
+        }
+        let mut tasks = self.scheduled_task_list().await?;
+        let before = tasks.len();
+        tasks.retain(|item| item["id"] != id);
+        if tasks.len() != before {
+            self.documents.write(
+                &self.scheduled_tasks_path,
+                &serde_json::to_vec(&tasks)?,
+                WriteMode::Replace,
+            )?;
+            let _ = self.scheduled_task_events.send(());
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub(crate) async fn persist_scheduled_webhook_deliveries(&self) -> anyhow::Result<()> {

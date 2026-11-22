@@ -9,8 +9,10 @@
 //! notification that starts or follows a turn.
 use crate::peer_links::LinkInput;
 use crate::server::AppState;
+use crate::{control_state::ControlState, peer_links::PeerLinks};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 /// Why an answer failed before anything was linked (`PeerLinkRequestError`).
@@ -87,7 +89,12 @@ fn notice(card: &Value, outcome: &Value) -> (String, Value) {
 }
 
 /// The outcome of linking the machine the user picked, or of keeping a link.
-async fn outcome(state: &AppState, answer: &Value) -> Value {
+async fn outcome(
+    peer_links: &PeerLinks,
+    enabled: bool,
+    own: &crate::peer_links::SelfDescriptor,
+    answer: &Value,
+) -> Value {
     let failed = |message: String| json!({"linkStatus": "failed", "failure": message});
     let linked = |link: &crate::peer_links::PeerLink| {
         json!({"linkStatus": "linked", "linkedEnvironmentId": link.environment_id,
@@ -96,7 +103,7 @@ async fn outcome(state: &AppState, answer: &Value) -> Value {
     match answer["type"].as_str() {
         Some("use-existing") => {
             let id = answer["environmentId"].as_str().unwrap_or_default();
-            match state.peer_links.get(id) {
+            match peer_links.get(id) {
                 Ok(Some(link)) if !link.expired(crate::platform::now_ms()) => linked(&link),
                 Ok(_) => failed(
                     "That environment is no longer linked here, or its link expired. Link it again.".into(),
@@ -122,13 +129,7 @@ async fn outcome(state: &AppState, answer: &Value) -> Value {
                 expected_environment_id: answer["environmentId"].as_str().map(str::to_owned),
                 expected_label: answer["label"].as_str().map(str::to_owned),
             };
-            let descriptor = crate::environment_http::descriptor_value(state);
-            let own = crate::peer_links::SelfDescriptor {
-                environment_id: state.environment_id.clone(),
-                label: descriptor["label"].as_str().unwrap_or("T3 Code").to_owned(),
-            };
-            let enabled = crate::mcp_oauth::McpHost::linked_environments_enabled(state);
-            match state.peer_links.link(enabled, &own, &input).await {
+            match peer_links.link(enabled, own, &input).await {
                 Ok(link) => linked(&link),
                 Err(error) => failed(error.message),
             }
@@ -138,17 +139,29 @@ async fn outcome(state: &AppState, answer: &Value) -> Value {
 }
 
 /// `peerLinks.answerRequest`: answers a pending card and tells the agent.
-pub(crate) async fn answer(state: &Arc<AppState>, params: &Value) -> Result<(), AnswerError> {
+pub(crate) async fn answer_with<F, Fut>(
+    state: &ControlState,
+    peer_links: &PeerLinks,
+    link_answers: &Answering,
+    enabled: bool,
+    own: &crate::peer_links::SelfDescriptor,
+    params: &Value,
+    dispatch: F,
+) -> Result<(), AnswerError>
+where
+    F: Fn(Value) -> Fut,
+    Fut: Future<Output = Result<u64, Value>>,
+{
     let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
     let card_id = params["turnItemId"].as_str().unwrap_or_default().to_owned();
     let answer = &params["answer"];
     {
-        let mut answering = state.link_answers.0.lock().unwrap();
+        let mut answering = link_answers.0.lock().unwrap();
         if !answering.insert(card_id.clone()) {
             return Err(AnswerError::new("already_answered"));
         }
     }
-    let _held = Held(&state.link_answers, card_id.clone());
+    let _held = Held(link_answers, card_id.clone());
     let card = {
         let store = state.store.read().await;
         let Some(thread) = store.threads.get(&thread_id) else {
@@ -182,7 +195,7 @@ pub(crate) async fn answer(state: &Arc<AppState>, params: &Value) -> Result<(), 
     {
         json!({"linkStatus": "failed", "failure": "This request is from before an update. Ask for the link again."})
     } else {
-        outcome(state, answer).await
+        outcome(peer_links, enabled, own, answer).await
     };
     let status = outcome["linkStatus"]
         .as_str()
@@ -201,22 +214,35 @@ pub(crate) async fn answer(state: &Arc<AppState>, params: &Value) -> Result<(), 
         "text": text,
         "notification": notification,
     });
-    let answering: Vec<String> = state
-        .link_answers
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .cloned()
-        .collect();
+    let answering: Vec<String> = link_answers.0.lock().unwrap().iter().cloned().collect();
     command["answeringTurnItemIds"] = json!(answering);
-    crate::dispatch_orchestration_command(state.clone(), command)
+    dispatch(command)
         .await
         .map(|_| ())
         .map_err(|cause| AnswerError {
             reason: "record_failed",
             cause: Some(cause),
         })
+}
+
+/// Native server adapter for the shared answer implementation.
+pub(crate) async fn answer(state: &Arc<AppState>, params: &Value) -> Result<(), AnswerError> {
+    let descriptor = crate::environment_http::descriptor_value(state);
+    let own = crate::peer_links::SelfDescriptor {
+        environment_id: state.environment_id.clone(),
+        label: descriptor["label"].as_str().unwrap_or("T3 Code").to_owned(),
+    };
+    let enabled = crate::mcp_oauth::McpHost::linked_environments_enabled(&**state);
+    answer_with(
+        &state.control,
+        &state.peer_links,
+        &state.link_answers,
+        enabled,
+        &own,
+        params,
+        |command| crate::dispatch_orchestration_command(state.clone(), command),
+    )
+    .await
 }
 
 #[cfg(test)]

@@ -130,7 +130,7 @@ impl Subscription {
             }
             "scheduledTasks.subscribe" => (
                 listen.then(|| Source::ScheduledTasks(control.scheduled_task_events.subscribe())),
-                vec![json!([scheduled_tasks_snapshot(control).await])],
+                vec![json!([scheduled_tasks_snapshot(control).await?])],
             ),
             "subscribeAuthAccess" => {
                 let (snapshot, changes) = control.auth.subscribe_access();
@@ -233,7 +233,11 @@ impl Subscription {
                 vec![json!([revision])]
             }
             ("scheduledTasks.subscribe", Signal::ScheduledTasks) => {
-                vec![json!([scheduled_tasks_snapshot(control).await])]
+                scheduled_tasks_snapshot(control)
+                    .await
+                    .into_iter()
+                    .map(|snapshot| json!([snapshot]))
+                    .collect()
             }
             ("subscribeAuthAccess", Signal::AuthAccess(change)) => {
                 let revision = self.cursor.as_u64().unwrap_or(0) + 1;
@@ -322,15 +326,15 @@ pub(crate) fn thread_projection_error(thread_id: &Value) -> Value {
     })
 }
 
-pub(crate) async fn scheduled_tasks_snapshot(control: &ControlState) -> Value {
+pub(crate) async fn scheduled_tasks_snapshot(control: &ControlState) -> Result<Value, Reply> {
     let tasks = control
-        .scheduled_tasks
-        .lock()
+        .scheduled_task_list()
         .await
-        .values()
+        .map_err(|_| Reply::Failure(json!({"_tag":"Fail","error":{"_tag":"ScheduledTaskError","message":"Could not list schedule tasks."}})))?
+        .iter()
         .map(scheduled_public_task)
         .collect::<Vec<_>>();
-    json!({"tasks":tasks,"timeZone":scheduled_task_time_zone()})
+    Ok(json!({"tasks":tasks,"timeZone":scheduled_task_time_zone()}))
 }
 
 pub(crate) fn scheduled_task_time_zone() -> String {

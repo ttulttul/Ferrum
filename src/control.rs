@@ -119,6 +119,15 @@ pub struct ControlPlane {
     state: ControlState,
     /// The MCP sign-in's grants, kept in the state documents.
     oauth: crate::mcp_oauth::OAuth,
+    #[cfg(feature = "native")]
+    /// Links from this environment to other environments.
+    peer_links: crate::peer_links::PeerLinks,
+    #[cfg(feature = "native")]
+    /// MCP sessions with linked environments.
+    peer_mcp: crate::peer_mcp::PeerMcpClient,
+    #[cfg(feature = "native")]
+    /// Link cards being answered now.
+    link_answers: crate::peer_link_requests::Answering,
     asset_key: Mutex<Option<[u8; 32]>>,
     signals: Mutex<Signals>,
     /// Held while an orchestration command checks and commits.
@@ -198,6 +207,68 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
                 .map(|_| ())
                 .map_err(|_| ())
         })
+    }
+    #[cfg(feature = "native")]
+    fn peer_links_listed(
+        self: &Arc<Self>,
+    ) -> crate::mcp_oauth::HostFuture<Result<Vec<Value>, String>> {
+        let plane = self.clone();
+        Box::pin(async move {
+            plane
+                .peer_links
+                .list()
+                .await
+                .map(|links| {
+                    links
+                        .into_iter()
+                        .map(|(link, status)| {
+                            let mut row = link.to_json();
+                            row["status"] = json!(status);
+                            row
+                        })
+                        .collect()
+                })
+                .map_err(|error| error.message)
+        })
+    }
+    #[cfg(feature = "native")]
+    fn unlink_peer(&self, environment_id: &str) -> Result<bool, String> {
+        self.peer_links
+            .unlink(environment_id)
+            .map_err(|error| error.message)
+    }
+    #[cfg(feature = "native")]
+    fn peer_link(&self, environment_id: &str) -> Option<crate::mcp_oauth::PeerLinkInfo> {
+        let link = self.peer_links.get(environment_id).ok().flatten()?;
+        Some(crate::mcp_oauth::PeerLinkInfo {
+            expired: link.expired(crate::platform::now_ms()),
+            label: link.label,
+            access: link.access,
+        })
+    }
+    #[cfg(feature = "native")]
+    fn forward_tool(
+        self: &Arc<Self>,
+        environment_id: String,
+        tool: String,
+        arguments: Value,
+        limit: String,
+        sender: Option<String>,
+    ) -> Option<crate::mcp_oauth::HostFuture<Result<Value, (&'static str, String)>>> {
+        let plane = self.clone();
+        Some(Box::pin(async move {
+            plane
+                .peer_mcp
+                .call(
+                    &plane.peer_links,
+                    &environment_id,
+                    &tool,
+                    arguments,
+                    &limit,
+                    sender.as_deref(),
+                )
+                .await
+        }))
     }
     fn create_named_project(
         self: &Arc<Self>,
@@ -388,6 +459,15 @@ impl ControlPlane {
             started_at,
             state,
             oauth,
+            #[cfg(feature = "native")]
+            peer_links: crate::peer_links::PeerLinks::new(
+                std::path::Path::new(STATE_DIR),
+                &std::path::Path::new(STATE_DIR).join("secrets"),
+            ),
+            #[cfg(feature = "native")]
+            peer_mcp: Default::default(),
+            #[cfg(feature = "native")]
+            link_answers: Default::default(),
             signals,
             asset_key: Default::default(),
             mutation_lock: Default::default(),
@@ -1082,6 +1162,22 @@ impl ControlPlane {
         if method == "assets.createUrl" {
             return Call::Done(self.create_asset_url(params).await);
         }
+        #[cfg(feature = "native")]
+        if method == "peerLinks.list" {
+            return Call::Done(self.peer_links_list().await);
+        }
+        #[cfg(feature = "native")]
+        if method == "peerLinks.link" {
+            return Call::Done(self.peer_links_link(params).await);
+        }
+        #[cfg(feature = "native")]
+        if method == "peerLinks.unlink" {
+            return Call::Done(self.peer_links_unlink(params));
+        }
+        #[cfg(feature = "native")]
+        if method == "peerLinks.answerRequest" {
+            return Call::Done(self.peer_links_answer(params).await);
+        }
         if let Some(call) = self.host_call(method, params, connection.references) {
             return call;
         }
@@ -1096,6 +1192,87 @@ impl ControlPlane {
             None => Call::Done(Reply::defect(format!(
                 "RPC contract is registered but unavailable in the control plane: {method}"
             ))),
+        }
+    }
+
+    #[cfg(feature = "native")]
+    async fn peer_links_list(&self) -> Reply {
+        match self.peer_links.list().await {
+            Ok(links) => Reply::Success(json!({
+                "links": links.into_iter().map(|(link, status)| {
+                    let mut row = link.to_json();
+                    row["status"] = json!(status);
+                    row
+                }).collect::<Vec<_>>()
+            })),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.to_json()})),
+        }
+    }
+
+    #[cfg(feature = "native")]
+    async fn peer_links_link(&self, params: &Value) -> Reply {
+        let input = match crate::peer_links::LinkInput::from_json(params) {
+            Ok(input) => input,
+            Err(path) => return Reply::defect(path),
+        };
+        let descriptor = self.descriptor();
+        let own = crate::peer_links::SelfDescriptor {
+            environment_id: self.config.environment_id.clone(),
+            label: descriptor["label"].as_str().unwrap_or("T3 Code").to_owned(),
+        };
+        match self
+            .peer_links
+            .link(
+                crate::mcp_oauth::McpHost::linked_environments_enabled(self),
+                &own,
+                &input,
+            )
+            .await
+        {
+            Ok(link) => Reply::Success(link.to_json()),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.to_json()})),
+        }
+    }
+
+    #[cfg(feature = "native")]
+    fn peer_links_unlink(&self, params: &Value) -> Reply {
+        let Some(environment_id) = params["environmentId"].as_str() else {
+            return Reply::defect("Missing key\n  at [\"environmentId\"]".into());
+        };
+        match self.peer_links.unlink(environment_id) {
+            Ok(removed) => Reply::Success(json!({"removed": removed})),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.to_json()})),
+        }
+    }
+
+    #[cfg(feature = "native")]
+    async fn peer_links_answer(self: &Arc<Self>, params: &Value) -> Reply {
+        let descriptor = self.descriptor();
+        let own = crate::peer_links::SelfDescriptor {
+            environment_id: self.config.environment_id.clone(),
+            label: descriptor["label"].as_str().unwrap_or("T3 Code").to_owned(),
+        };
+        let plane = self.clone();
+        match crate::peer_link_requests::answer_with(
+            &self.state,
+            &self.peer_links,
+            &self.link_answers,
+            crate::mcp_oauth::McpHost::linked_environments_enabled(&**self),
+            &own,
+            params,
+            move |command| {
+                let plane = plane.clone();
+                async move {
+                    #[allow(clippy::arc_with_non_send_sync)]
+                    let host = Arc::new(PlaneCommands { plane });
+                    crate::dispatch_orchestration_command(host, command).await
+                }
+            },
+        )
+        .await
+        {
+            Ok(()) => Reply::Success(Value::Null),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.to_json()})),
         }
     }
 

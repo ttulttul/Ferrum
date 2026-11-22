@@ -267,6 +267,11 @@ impl Thread {
                 if message.follows_thread_selection {
                     row["followsThreadSelection"] = json!(true);
                 }
+                // A steer belongs to the run it joined.
+                if let Some(steer) = &message.steer {
+                    row["runId"] = steer["runId"].clone();
+                    row["nodeId"] = steer["nodeId"].clone();
+                }
                 row
             })
             .collect()
@@ -279,8 +284,47 @@ impl Thread {
     /// each provider item takes the next free slot of its run.
     fn turn_items_with(&self, provider: Vec<(usize, Value)>) -> Vec<Value> {
         let mut items = Vec::new();
+        let mut steers: Vec<(usize, u64, Value)> = Vec::new();
         let mut ordinal: u64 = 0;
         for message in &self.messages {
+            // A steer takes the next free slot of the run it joined, as a
+            // link card does (`nextTurnItemOrdinal`).
+            if let Some(steer) = &message.steer {
+                let Some(index) = self
+                    .runs
+                    .iter()
+                    .position(|run| steer["runId"] == run.wire_id().as_str())
+                else {
+                    continue;
+                };
+                let at = iso(message.created_at);
+                let item = json!({
+                    "id": format!("turn-item:message:{}", uri_component(&message.id)),
+                    "threadId": self.id,
+                    "runId": steer["runId"],
+                    "nodeId": steer["nodeId"],
+                    "providerThreadId": steer["providerThreadId"],
+                    "providerTurnId": steer["providerTurnId"],
+                    "nativeItemRef": null,
+                    "parentItemId": null,
+                    "ordinal": 0,
+                    "status": "completed",
+                    "title": null,
+                    "startedAt": at,
+                    "completedAt": at,
+                    "updatedAt": at,
+                    "type": "user_message",
+                    "createdBy": "user",
+                    "creationSource": message.creation_source.as_deref().unwrap_or("web"),
+                    "messageId": message.id,
+                    "inputIntent": "steer",
+                    "text": message.content,
+                    "attachments": []
+                });
+                let after = steer[LINK_CARD_POSITION].as_u64().unwrap_or(0);
+                steers.push((index, after, item));
+                continue;
+            }
             let run = self.run_of(&message.id);
             ordinal = match run {
                 Some((index, _)) => ((index as u64 + 1) * 1_000_000).max(ordinal) + 1,
@@ -454,6 +498,7 @@ impl Thread {
                 }
                 Some((index, after, card))
             })
+            .chain(steers)
             .collect();
         let next_slot = |items: &[Value], index: usize| {
             let lower = (index as u64 + 1) * 1_000_000;
@@ -683,6 +728,19 @@ impl Thread {
         };
         let mut messages = self.message_rows();
         messages.extend(provider.messages);
+        // Rust's message times are whole seconds, so a steer goes right
+        // after the message that was last when it arrived.
+        for message in self.messages.iter().filter(|m| m.steer.is_some()) {
+            let Some(from) = messages.iter().position(|m| m["id"] == message.id.as_str()) else {
+                continue;
+            };
+            let row = messages.remove(from);
+            let after = message.steer.as_ref().map(|s| &s["afterMessageId"]);
+            let at = after
+                .and_then(|after| messages.iter().position(|m| &m["id"] == after))
+                .map_or(messages.len(), |index| index + 1);
+            messages.insert(at, row);
+        }
         let visible = turn_items
             .iter()
             .enumerate()
@@ -1028,6 +1086,7 @@ impl Thread {
                 scheduled_task_id: message["scheduledTaskId"].as_str().map(str::to_owned),
                 follows_thread_selection: message["followsThreadSelection"] == true,
                 notification: None,
+                steer: None,
             })
             .collect();
         let thread_id = text("id").unwrap_or_default();

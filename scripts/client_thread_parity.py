@@ -104,6 +104,10 @@ PROVIDER_SCENARIOS = [
     {"name": "codex interrupt", "instance": "codex", "model": "fixture", "scenario": "codex_interrupt.json",
      "interrupt": "command"},
     {"name": "claude turn", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_turn.json"},
+    # A message steers the running turn (Codex `turn/steer`), which then answers it, and Stop
+    # interrupts it.
+    {"name": "codex steer then stop", "instance": "codex", "model": "fixture", "scenario": "codex_steer.json",
+     "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}, "interrupt": "steer"},
     # A seeded first message titles the thread with the text generation model (Codex), and a
     # regenerate request titles it again from the whole conversation.
     {"name": "codex title", "instance": "codex", "model": "fixture", "scenario": "codex_title.json",
@@ -440,9 +444,18 @@ def seed_turn(url, cookie, root, scenario):
         "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"]},
         "runtimeMode": scenario.get("runtimeMode", "full-access"), "interactionMode": "default", "branch": None,
         "worktreePath": None, "createdBy": "user", "creationSource": "web"})
+    if scenario["name"] == "codex thread tools":
+        for project, trigger in [("project:github", {"type": "interval", "everyMs": 60000}),
+                                 ("project:other", {"type": "webhook"})]:
+            rpc(url, cookie, "scheduledTasks.upsert", {
+                "id": "task:" + project, "projectId": project, "title": "Read report", "prompt": "Read report",
+                "enabled": False, "schedule": trigger, "threadMode": "fresh_session",
+                "workspaceStrategy": {"type": "root"}, "modelSelection": {"instanceId": "codex", "model": "fixture"},
+                "runtimeMode": "approval-required", "interactionMode": "default"})
     return {"threadId": THREAD, "turnMs": 60000 if scenario.get("change") else 30000,
             "interrupt": scenario.get("interrupt", False),
-            "respond": scenario.get("respond"), "change": scenario.get("change"), "dispatch": {
+            "respond": scenario.get("respond"), "change": scenario.get("change"),
+            "steer": scenario.get("steer"), "dispatch": {
         "type": "message.dispatch", "commandId": "turn-message", "threadId": THREAD,
         "messageId": "message:turn", "text": "Run echo hi and write notes.txt", "attachments": [],
         "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"},
@@ -921,6 +934,11 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
             # The turn asked for an approval or an answer, which nobody gave.
             wait_for(url, cookie, lambda p: any(r.get("status") == "pending"
                                                 for r in p.get("runtimeRequests", [])), 30)
+        elif restart["after"] == "titling":
+            # The turn settled and its title is being generated (a slow first title run).
+            title_log = Path(env["FAKE_PROVIDER_LOG"] + ".title")
+            wait_for(url, cookie, lambda p: not any(r.get("status") in ACTIVE_RUN for r in p["runs"])
+                     and title_log.exists(), 30)
         elif restart["after"] == "settled":
             wait_for(url, cookie, lambda p: not any(r.get("status") in ACTIVE_RUN for r in p["runs"]), 30)
         # Whatever the server is still recording about it lands before the stop. A turn the
@@ -972,8 +990,17 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
             wait_for(url, cookie, lambda p: len(p.get("runs", [])) > runs
                      and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", [])), 40)
         quiet(root, url, cookie, clock_offset=offset())
-        outcome = run_client(args, url, cookie, {"threadId": THREAD, "inspect": True})
+        if scenario.get("title"):
+            title = title_outcome(url, cookie, scenario, Path(env["FAKE_PROVIDER_LOG"]), root.parent)
+        if restart.get("liveTurn"):
+            # The scenario's turn (with its steer and stop) runs on the restarted server, watched
+            # live as on one server.
+            outcome = run_client(args, url, cookie, {**seeded, "turnMs": 60000})
+        else:
+            outcome = run_client(args, url, cookie, {"threadId": THREAD, "inspect": True})
         outcome["continuationDelay"] = continuation_delay(thread_projection(url, cookie), listening)
+        if scenario.get("title"):
+            outcome["title"] = title
         if restart.get("live"):
             outcome["reconcileLive"] = reconcile_events(
                 watched.get("steps", {}).get("orchestration.subscribeThread (live turn)", {}).get("value"))
@@ -1077,7 +1104,7 @@ def compare_turn(original, rust):
     elif live[0] is None or live[1] is None:
         problems["live"] = [f"run settled: original {live[0] is not None} rust {live[1] is not None}"]
     else:
-        for reply in ("respondReply", "interruptReply", "changeReply"):
+        for reply in ("respondReply", "interruptReply", "changeReply", "steerReply"):
             outcomes = [None if side.get(reply) is None else sorted(side[reply]) for side in live]
             if outcomes[0] != outcomes[1]:
                 problems[reply] = [f"original {live[0].get(reply)}", f"rust     {live[1].get(reply)}"]

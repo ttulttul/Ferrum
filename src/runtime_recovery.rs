@@ -1061,6 +1061,7 @@ mod tests {
             scheduled_task_id: None,
             follows_thread_selection: false,
             notification: None,
+            steer: None,
         });
         accepted_thread_only(&mut a, id);
         let mut store = store(a);
@@ -1190,6 +1191,7 @@ mod tests {
             scheduled_task_id: None,
             follows_thread_selection: false,
             notification: None,
+            steer: None,
         });
         let commands = continuations(&store(a.clone()), &json!({}), "2026-01-01T00:00:00Z");
         assert_eq!(commands.len(), 1);
@@ -1223,6 +1225,7 @@ mod tests {
             scheduled_task_id: Some("scheduled-task:a".into()),
             follows_thread_selection: true,
             notification: None,
+            steer: None,
         });
         accepted_thread_only(&mut a, id);
         let mut store = store(a);
