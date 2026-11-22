@@ -20,7 +20,7 @@ use std::{
     path::{Path as FsPath, PathBuf},
     sync::Arc,
 };
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex};
 use tracing::info;
 use uuid::Uuid;
 
@@ -67,10 +67,7 @@ pub struct AppState {
     pub(crate) pull_request_refresh: Mutex<u64>,
     pub(crate) provider_install_states: Mutex<HashMap<String, serde_json::Value>>,
     pub(crate) provider_auth_states: Mutex<HashMap<String, serde_json::Value>>,
-    pub(crate) project_clone_states: Mutex<HashMap<String, serde_json::Value>>,
-    pub(crate) project_clone_events: broadcast::Sender<()>,
-    pub(crate) project_clone_cancellations: Mutex<HashMap<String, (u64, oneshot::Sender<()>)>>,
-    pub(crate) project_clone_sequence: Mutex<u64>,
+    pub(crate) project_clones: Arc<crate::project_clone::Tracker>,
     /// The provider model manifest, refreshed from upstream.
     pub(crate) model_manifest:
         Arc<crate::model_manifest::ModelManifest<crate::model_manifest::NativeHost>>,
@@ -348,7 +345,6 @@ impl AppState {
         if let Err(error) = control.adopt_continuations().await {
             tracing::warn!(%error, "could not take over restart continuations from the outbox");
         }
-        let (project_clone_events, _) = broadcast::channel(64);
         let local = Arc::new(crate::workspace::LocalWorkspace::new(
             dir.clone(),
             settings.clone(),
@@ -387,10 +383,7 @@ impl AppState {
             pull_request_refresh: Mutex::new(0),
             provider_install_states: Mutex::new(HashMap::new()),
             provider_auth_states: Mutex::new(HashMap::new()),
-            project_clone_states: Mutex::new(HashMap::new()),
-            project_clone_events,
-            project_clone_cancellations: Mutex::new(HashMap::new()),
-            project_clone_sequence: Mutex::new(0),
+            project_clones: Arc::default(),
             model_manifest: Arc::new(crate::model_manifest::ModelManifest::new(
                 crate::model_manifest::NativeHost::new(&paths.state_dir, settings.clone()),
             )),
