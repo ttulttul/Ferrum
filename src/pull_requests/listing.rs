@@ -40,13 +40,13 @@ pub(super) async fn stats(state: &AppState, cli: &Path, input: &Value) -> Reply 
     }
     Ok(json!({"stats":result}))
 }
-struct Cursor {
-    before: String,
-    delivered: u64,
-    seen: Vec<u64>,
+pub(super) struct Cursor {
+    pub(super) before: String,
+    pub(super) delivered: u64,
+    pub(super) seen: Vec<u64>,
     after: Option<String>,
 }
-fn cursor(raw: &str) -> Option<Cursor> {
+pub(super) fn cursor(raw: &str) -> Option<Cursor> {
     let mut fields = raw.split('|');
     let before = fields.next()?;
     if before.len() < 20
@@ -231,60 +231,9 @@ fn row(p: &Project, repo: &str, raw: &Value, viewer: &str, at: u64) -> Option<Va
     }
     Some(row)
 }
-/// The reference's Bitbucket provider reads change requests with API credentials from settings.
-/// Change requests are not listed from Bitbucket here yet; the viewer is asked for (`getViewer`,
-/// `GET /user`), and a failure there is reported as the reference reports it. Otherwise a
-/// Bitbucket project lists as the reference lists it with no credential: unauthenticated, each
-/// repository unreadable.
-const BITBUCKET_UNAUTHENTICATED: &str =
-    "Bitbucket rejected the configured credentials. Check them in Settings → Source control & issues.";
-
-/// Why the Bitbucket viewer could not be read (`bitbucketProviderFailure`): `unauthenticated`
-/// for HTTP 401, otherwise an operation failure with the API's detail.
-enum BitbucketViewer {
-    Unauthenticated,
-    Failed { detail: String, not_found: bool },
-}
-
-/// `BitbucketPullRequestApi.getViewer`, against `T3CODE_BITBUCKET_API_BASE_URL` with the
-/// `T3CODE_BITBUCKET_*` credential, if any.
-async fn bitbucket_viewer() -> BitbucketViewer {
-    let base = std::env::var("T3CODE_BITBUCKET_API_BASE_URL")
-        .unwrap_or_else(|_| "https://api.bitbucket.org/2.0".into());
-    let send_failed = || BitbucketViewer::Failed {
-        detail: "Failed to send the Bitbucket request.".into(),
-        not_found: false,
-    };
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    else {
-        return send_failed();
-    };
-    let mut request = client
-        .get(format!("{}/user", base.trim_end_matches('/')))
-        .header("Accept", "application/json");
-    if let Ok(token) = std::env::var("T3CODE_BITBUCKET_ACCESS_TOKEN") {
-        request = request.bearer_auth(token);
-    } else if let (Ok(email), Ok(token)) = (
-        std::env::var("T3CODE_BITBUCKET_EMAIL"),
-        std::env::var("T3CODE_BITBUCKET_API_TOKEN"),
-    ) {
-        request = request.basic_auth(email, Some(token));
-    }
-    match request.send().await {
-        Err(_) => send_failed(),
-        Ok(response) => match response.status().as_u16() {
-            401 => BitbucketViewer::Unauthenticated,
-            200..=299 => BitbucketViewer::Unauthenticated,
-            status => BitbucketViewer::Failed {
-                detail: format!("Bitbucket returned HTTP {status}."),
-                not_found: status == 404,
-            },
-        },
-    }
-}
+use super::bitbucket::{
+    self, Viewer as BitbucketViewer, UNAUTHENTICATED as BITBUCKET_UNAUTHENTICATED,
+};
 
 /// The host and repository a Bitbucket project's identity names.
 fn bitbucket_repository(project: &Project) -> Option<(String, String)> {
@@ -301,11 +250,11 @@ fn bitbucket_repository(project: &Project) -> Option<(String, String)> {
     Some((host, repository))
 }
 
-/// Provider summaries and per-project errors for unreadable Bitbucket projects.
+/// Provider summaries, and per-project errors when the viewer could not be read (`detail`).
 fn bitbucket_unreadable(
     projects: &[(Project, String, String)],
     input: &Value,
-    detail: &str,
+    detail: Option<&str>,
     has_cursor: impl Fn(&str) -> bool,
 ) -> (Vec<Value>, Vec<Value>) {
     let mut providers: Vec<Value> = Vec::new();
@@ -316,10 +265,11 @@ fn bitbucket_unreadable(
                 provider["projectCount"] = json!(provider["projectCount"].as_u64().unwrap_or(0) + 1)
             }
             None => providers.push(json!({"host":host,"kind":"bitbucket","searchesOnHost":true,
-                "actions":["merge","close"],"projectCount":1,"projectIds":null,"configured":false,"detail":detail})),
+                "actions":["merge","close"],"projectCount":1,"projectIds":null,"configured":detail.is_none(),"detail":detail})),
         }
-        if input.get("cursors").is_none()
-            || has_cursor(&format!("{host} {}", repository.to_lowercase()))
+        if detail.is_some()
+            && (input.get("cursors").is_none()
+                || has_cursor(&format!("{host} {}", repository.to_lowercase())))
         {
             errors.push(json!({"projectId":project.id,"projectTitle":project.name,
                 "message":format!("{repository} could not be read.")}));
@@ -391,27 +341,75 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
     let viewer = if bitbucket.is_empty() {
         BitbucketViewer::Unauthenticated
     } else {
-        bitbucket_viewer().await
+        bitbucket::viewer().await
     };
     let detail = match &viewer {
-        BitbucketViewer::Unauthenticated => BITBUCKET_UNAUTHENTICATED,
-        BitbucketViewer::Failed { detail, .. } => detail.as_str(),
+        BitbucketViewer::Known(_) => None,
+        BitbucketViewer::Unauthenticated => Some(BITBUCKET_UNAUTHENTICATED),
+        BitbucketViewer::Failed { detail, .. } => Some(detail.as_str()),
     };
-    let (bitbucket_providers, bitbucket_errors) =
+    let (bitbucket_providers, mut bitbucket_errors) =
         bitbucket_unreadable(&bitbucket, input, detail, |key| {
             cursors.contains_key(&key.to_owned())
         });
+    // With the viewer known, each Bitbucket repository is read (`readRepository`).
+    let mut bitbucket_entries = Vec::new();
+    let mut bitbucket_truncated = false;
+    let mut bitbucket_cursors = serde_json::Map::new();
+    if let BitbucketViewer::Known(name) = &viewer {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let limit = input["limit"].as_u64().unwrap_or(99).clamp(1, 500) as usize;
+        let mut seen = HashSet::new();
+        for (p, host, repo) in &bitbucket {
+            let key = format!("{host} {}", repo.to_lowercase());
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let prev = cursors.get(&key);
+            if input.get("cursors").is_some() && prev.is_none() {
+                continue;
+            }
+            let target = bitbucket::Target {
+                host,
+                repository: repo,
+                project_id: &p.id,
+                project_title: &p.name,
+                input,
+                viewer: name,
+                limit,
+                observed_at: at,
+            };
+            let batch = bitbucket::read_repository(&target, prev).await;
+            if batch.failed {
+                bitbucket_errors.push(json!({"projectId":p.id,"projectTitle":p.name,
+                    "message":format!("{repo} could not be read.")}));
+                continue;
+            }
+            bitbucket_truncated |= batch.truncated;
+            if let Some(next) = batch.next_cursor {
+                bitbucket_cursors.insert(key, json!(next));
+            }
+            bitbucket_entries.extend(batch.entries);
+        }
+        out["viewers"][bitbucket[0].1.as_str()] = json!(name);
+    }
     let Some((first, _)) = repos.first() else {
         out["providers"] = json!(bitbucket_providers);
         out["errors"] = json!(bitbucket_errors);
+        if matches!(viewer, BitbucketViewer::Known(_)) {
+            bitbucket_entries.sort_by(|a, b| b["updatedAt"].as_str().cmp(&a["updatedAt"].as_str()));
+            out["entries"] = json!(bitbucket_entries);
+            out["truncated"] = json!(bitbucket_truncated);
+            out["nextCursors"] = Value::Object(bitbucket_cursors);
+            return Ok(out);
+        }
         if bitbucket_errors.is_empty() {
             return Ok(out);
         }
         return Err(match viewer {
-            BitbucketViewer::Unauthenticated => {
-                json!({"_tag":"PullRequestUnavailableError","reason":"cli-unauthenticated",
-                "provider":"bitbucket","requirement":BITBUCKET_UNAUTHENTICATED,"listResult":out})
-            }
             BitbucketViewer::Failed { detail, not_found } => {
                 let mut error = json!({"_tag":"PullRequestOperationError","operation":"list",
                     "detail":detail,"listResult":out});
@@ -420,6 +418,8 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
                 }
                 error
             }
+            _ => json!({"_tag":"PullRequestUnavailableError","reason":"cli-unauthenticated",
+                "provider":"bitbucket","requirement":BITBUCKET_UNAUTHENTICATED,"listResult":out}),
         });
     };
     let actions = [
@@ -454,6 +454,15 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
             }
             errors.extend(bitbucket_errors.iter().cloned());
             out["errors"] = json!(errors);
+            // Another host's readable repositories still list (`readable` is not empty).
+            if matches!(viewer, BitbucketViewer::Known(_)) {
+                bitbucket_entries
+                    .sort_by(|a, b| b["updatedAt"].as_str().cmp(&a["updatedAt"].as_str()));
+                out["entries"] = json!(bitbucket_entries);
+                out["truncated"] = json!(bitbucket_truncated);
+                out["nextCursors"] = Value::Object(bitbucket_cursors);
+                return Ok(out);
+            }
             if !out["errors"].as_array().unwrap().is_empty() {
                 err["listResult"] = out;
                 return Err(err);
@@ -552,6 +561,13 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
             out["truncated"] = json!(true);
         }
         entries.extend(rows);
+    }
+    entries.extend(bitbucket_entries);
+    if bitbucket_truncated {
+        out["truncated"] = json!(true);
+    }
+    for (key, next) in bitbucket_cursors {
+        out["nextCursors"][&key] = next;
     }
     entries.sort_by(|a, b| b["updatedAt"].as_str().cmp(&a["updatedAt"].as_str()));
     out["entries"] = json!(entries);
