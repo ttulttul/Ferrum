@@ -175,8 +175,15 @@ pub fn ControlPlane::prune_streams<'a>(&self, open: impl IntoIterator<Item = &'a
 - Serve HTTP with `router()`. It answers everything except `/ws`. That includes
   the MCP sign-in (`/oauth/mcp/*`, `/.well-known/oauth-*`) and `/mcp`, whose
   thread and project tools dispatch orchestration commands as
-  `orchestration.dispatchCommand` does. Another server links to this one
-  through them when `linkedEnvironmentsEnabled` is on in its settings.
+  `orchestration.dispatchCommand` does (including `t3_thread_launch` with
+  `scratch: true`, which creates a per-thread folder under the workspace's
+  `scratch` root). Another server links to this one through them when
+  `linkedEnvironmentsEnabled` is on in its settings.
+- On WebSocket RPCs, `projects.ensureScratch` creates `<workspace-root>/scratch`
+  in `t3-agentd` (using the root reported in `hello`, defaulting to
+  `WORKSPACE_ROOT`) and returns the single built-in "No project" scratch
+  project, matching the native server's semantics. Repeated calls return the
+  same `projectId` and recreate the directory if it was removed.
 - On a `/ws` upgrade, call `authorize_socket`. On success, keep the
   `Connection` with the socket. It is small and serializable, so a host that
   suspends between messages can store it with the socket. On failure, send

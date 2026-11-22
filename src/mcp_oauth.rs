@@ -140,6 +140,23 @@ pub trait McpHost: AuthHost {
     fn is_scratch_project(self: &Arc<Self>, _project_id: &str) -> HostFuture<bool> {
         Box::pin(async { false })
     }
+    /// Ensures the built-in "No project" scratch project exists and returns
+    /// its project id.
+    fn ensure_scratch_project(self: &Arc<Self>) -> HostFuture<Result<String, String>> {
+        Box::pin(async {
+            Err("Threads without a project are not available on this environment.".to_owned())
+        })
+    }
+    /// Creates a fresh per-thread folder under the scratch root for
+    /// `thread_id`, named from `text`. Returns `Ok(None)` when the server has
+    /// no scratch root.
+    fn scratch_thread_folder(
+        self: &Arc<Self>,
+        _thread_id: &str,
+        _text: &str,
+    ) -> HostFuture<Result<Option<String>, String>> {
+        Box::pin(async { Ok(None) })
+    }
     /// Applies a settings `patch` (`server.updateSettings`); `Err` when it
     /// cannot be written.
     fn update_settings(self: &Arc<Self>, _patch: Value) -> HostFuture<Result<(), ()>> {

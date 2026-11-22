@@ -56,6 +56,7 @@ mod orchestration;
 mod projects;
 mod rpc_protocol;
 pub mod runtime;
+mod scratch;
 mod server_config;
 mod settings;
 pub mod subscription;

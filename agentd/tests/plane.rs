@@ -860,7 +860,6 @@ const NOT_YET_IN_THE_CONTROL_PLANE: &[&str] = &[
     "orchestration.getTurnDiff",
     "provider.chatgpt.import-profile",
     "provider.chatgpt.reconnect-profile",
-    "projects.ensureScratch",
     "projects.createFromThread",
     "shell.openInEditor",
     "agentSessions.scan",
@@ -1196,6 +1195,287 @@ async fn the_control_plane_answers_the_desktops_asset_settings_and_history_calls
     assert_eq!(older["value"]["threads"], json!([]));
     assert_eq!(older["value"]["counts"], json!([]));
     assert!(older["value"]["snapshotSequence"].is_u64(), "{older}");
+}
+
+async fn http_json(
+    plane: &Arc<ControlPlane>,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: String,
+) -> (StatusCode, HeaderMap, Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let response = plane
+        .router()
+        .oneshot(builder.body(axum::body::Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, headers, json)
+}
+
+async fn mcp_session(plane: &Arc<ControlPlane>) -> (String, String) {
+    let (status, _, client) = http_json(
+        plane,
+        "POST",
+        "/oauth/mcp/register",
+        &[("content-type", "application/json")],
+        json!({"redirect_uris":["http://127.0.0.1/cb"],"client_name":"plane-test","software_id":"t3code-peer-link"}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{client}");
+    let client_id = client["client_id"].as_str().unwrap();
+    // Sign in as a linking client does: the owner mints a pairing code, and
+    // the decision exchanges it for an authorization code.
+    let (_, owner) = plane.auth.browser_session("secret", None).unwrap();
+    let owner = plane.auth.principal(&owner).unwrap();
+    let pairing = plane
+        .auth
+        .pair(
+            &owner,
+            &json!({"purpose":"peer-link","access":"full-access"}),
+        )
+        .unwrap()["credential"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let authorization = json!({
+        "response_type":"code","client_id":client_id,"redirect_uri":"http://127.0.0.1/cb",
+        "code_challenge":challenge,"code_challenge_method":"S256","state":"s1"
+    });
+    let (status, _, decided) = http_json(
+        plane,
+        "POST",
+        "/oauth/mcp/decision",
+        &[("content-type", "application/json")],
+        json!({"authorization":authorization,"decision":{"_tag":"pairing-code","access":"full-access","code":pairing}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{decided}");
+    let code = url::Url::parse(decided["redirectTo"].as_str().unwrap())
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.into_owned())
+        .unwrap();
+    let token_form = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "authorization_code")
+        .append_pair("code", &code)
+        .append_pair("redirect_uri", "http://127.0.0.1/cb")
+        .append_pair("client_id", client_id)
+        .append_pair("code_verifier", verifier)
+        .finish();
+    let (status, _, token) = http_json(
+        plane,
+        "POST",
+        "/oauth/mcp/token",
+        &[("content-type", "application/x-www-form-urlencoded")],
+        token_form,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{token}");
+    let bearer = format!("Bearer {}", token["access_token"].as_str().unwrap());
+    let (status, headers, init) = http_json(
+        plane,
+        "POST",
+        "/mcp",
+        &[
+            ("authorization", &bearer),
+            ("content-type", "application/json"),
+        ],
+        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"plane-test","version":"1"}}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{init}");
+    let session = headers["mcp-session-id"].to_str().unwrap().to_owned();
+    (bearer, session)
+}
+
+async fn mcp_tool(
+    plane: &Arc<ControlPlane>,
+    bearer: &str,
+    session: &str,
+    name: &str,
+    arguments: Value,
+) -> Value {
+    let (status, _, reply) = http_json(
+        plane,
+        "POST",
+        "/mcp",
+        &[
+            ("authorization", bearer),
+            ("content-type", "application/json"),
+            ("mcp-session-id", session),
+        ],
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    let result = &reply["result"];
+    if result["isError"] == true {
+        return serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    }
+    result["structuredContent"].clone()
+}
+
+#[tokio::test]
+async fn projects_ensure_scratch_and_mcp_scratch_launch_run_over_agentd() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("workspace");
+    std::fs::create_dir_all(&root).unwrap();
+    let url = agentd(dir.path(), &root).await;
+    let documents = Arc::new(MemoryStore::new());
+    let mut settings = stub_settings();
+    // Linking clients (MCP sign-in with a pairing code) need linked environments on.
+    settings["linkedEnvironmentsEnabled"] = json!(true);
+    write_settings(&documents, &settings);
+    let log = SharedLog::default();
+    let server = Server::start(1, &url, &documents, &log, stub_provider("0")).await;
+
+    // Config advertises scratchWorkspaceRoot under the connected agentd root.
+    let cfg = exit(&request(&server, "server.getConfig", json!({})).await);
+    assert_eq!(cfg["_tag"], "Success", "{cfg}");
+    let expected_scratch = root.join("scratch");
+    assert_eq!(
+        cfg["value"]["scratchWorkspaceRoot"],
+        expected_scratch.to_string_lossy().as_ref()
+    );
+
+    // Subscribe to the shell stream before creating the scratch project so we
+    // verify the client receives the new "No project" row.
+    let mut sub_conn = server.connection();
+    let sub_frame = json!({"_tag":"Request","id":"shell","tag":"orchestration.subscribeShell","payload":{},"headers":[]});
+    let _ = server
+        .plane
+        .on_message(&mut sub_conn, &sub_frame.to_string())
+        .await;
+    let _ = server.plane.take_signals();
+
+    // Concurrent first calls create a single scratch project and directory.
+    let (first, second) = tokio::join!(
+        request(&server, "projects.ensureScratch", json!({})),
+        request(&server, "projects.ensureScratch", json!({})),
+    );
+    let first = exit(&first);
+    let second = exit(&second);
+    assert_eq!(first["_tag"], "Success", "{first}");
+    assert_eq!(second["_tag"], "Success", "{second}");
+    let project_id = first["value"]["projectId"]
+        .as_str()
+        .expect("projectId")
+        .to_owned();
+    assert_eq!(second["value"]["projectId"], project_id);
+    let canonical_scratch = expected_scratch.canonicalize().unwrap();
+    assert!(canonical_scratch.is_dir());
+
+    // As a host's alarm loop delivers them.
+    let delivered = deliveries(&server, &sub_conn, 3).await;
+    assert!(
+        delivered
+            .iter()
+            .any(|frame| frame.contains(&project_id) && frame.contains("No project")),
+        "subscribeShell should receive the scratch project: {delivered:?}"
+    );
+    server.plane.disconnect(&sub_conn);
+
+    // Deleting the scratch directory and calling ensureScratch recreates it
+    // and keeps the same projectId.
+    std::fs::remove_dir_all(&canonical_scratch).unwrap();
+    let recreated = exit(&request(&server, "projects.ensureScratch", json!({})).await);
+    assert_eq!(recreated["_tag"], "Success", "{recreated}");
+    assert_eq!(recreated["value"]["projectId"], project_id);
+    assert!(canonical_scratch.is_dir());
+
+    // MCP t3_thread_launch with scratch: true creates a per-thread folder in
+    // agentd and runs the turn inside it.
+    let (bearer, session) = mcp_session(&server.plane).await;
+    let refused = mcp_tool(
+        &server.plane,
+        &bearer,
+        &session,
+        "t3_thread_launch",
+        json!({"scratch":true,"projectId":project_id,"title":"Invalid"}),
+    )
+    .await;
+    assert_eq!(refused["code"], "invalid_request", "{refused}");
+
+    let launched = mcp_tool(
+        &server.plane,
+        &bearer,
+        &session,
+        "t3_thread_launch",
+        json!({
+            "scratch": true,
+            "title": "Scratch task",
+            "message": "hello scratch",
+            "modelSelection": {"instanceId": "stub", "model": "fixture"},
+            "clientRequestId": "agentd-scratch-1"
+        }),
+    )
+    .await;
+    assert_eq!(launched["projectId"], project_id, "{launched}");
+    let thread_id = launched["threadId"].as_str().expect("threadId").to_owned();
+
+    wait_until(|| log.run_status().is_some()).await;
+    assert_eq!(log.run_status().as_deref(), Some("completed"));
+    assert_eq!(log.output(), vec!["hello\n", "scratch\n"]);
+
+    let read = mcp_tool(
+        &server.plane,
+        &bearer,
+        &session,
+        "t3_thread_read",
+        json!({"threadId": thread_id}),
+    )
+    .await;
+    let folder = std::path::PathBuf::from(read["thread"]["worktreePath"].as_str().unwrap());
+    assert!(
+        folder.is_dir(),
+        "scratch thread folder must exist: {folder:?}"
+    );
+    assert_eq!(folder.parent(), Some(canonical_scratch.as_path()));
+    let name = folder.file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.contains("-hello-scratch-"),
+        "unexpected scratch folder name: {name}"
+    );
+
+    // Retry with the same clientRequestId replays without creating another folder.
+    let retried = mcp_tool(
+        &server.plane,
+        &bearer,
+        &session,
+        "t3_thread_launch",
+        json!({
+            "scratch": true,
+            "title": "Scratch task",
+            "message": "hello scratch",
+            "modelSelection": {"instanceId": "stub", "model": "fixture"},
+            "clientRequestId": "agentd-scratch-1"
+        }),
+    )
+    .await;
+    assert_eq!(retried["threadId"], launched["threadId"], "{retried}");
+    assert_eq!(retried["runId"], launched["runId"], "{retried}");
+
+    // Refuses deleting the built-in scratch project through MCP.
+    let delete = mcp_tool(
+        &server.plane,
+        &bearer,
+        &session,
+        "t3_project_delete",
+        json!({"projectId": project_id}),
+    )
+    .await;
+    assert_eq!(delete["code"], "invalid_request", "{delete}");
 }
 
 fn base64_url_decode(text: &str) -> Vec<u8> {
