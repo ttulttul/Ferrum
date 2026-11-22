@@ -17,9 +17,6 @@
   "codex user input": {
     "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
   },
-  "codex approval interrupted": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
   "claude approval": {
     "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
   },
@@ -42,16 +39,16 @@
     "nativeMetadata": "The reference hands the failed continuation's items to its retry as a context handoff (delta_since_target_last_seen), which Rust does not build, and counts the handoff in the session's attachment budget."
   },
   "claude model change mid-turn": {
-    "live": "The change sent mid-turn lands among the turn's items wherever each server has got to when it arrives, which differs by a step between the servers."
+    "live": "Racy: the change sent mid-turn lands among the turn's items wherever each server has got to when it arrives, which differs by a step on some runs."
   },
   "claude runtime mode change mid-turn": {
-    "live": "The change sent mid-turn lands among the turn's items wherever each server has got to when it arrives, which differs by a step between the servers."
+    "live": "Racy: the change sent mid-turn lands among the turn's items wherever each server has got to when it arrives, which differs by a step on some runs."
   },
   "codex title": {
-    "live": "Rust records the generated title later in the turn than the reference, which records it as the turn starts."
+    "live": "Racy: Rust usually records the generated title later in the turn than the reference, which records it as the turn starts; when its title generation finishes first, both match."
   },
   "claude title fallback": {
-    "live": "Rust records the generated title later in the turn than the reference, which records it as the turn starts."
+    "live": "Racy: Rust usually records the generated title later in the turn than the reference, which records it as the turn starts; when its title generation finishes first, both match."
   },
   "claude delegate": {
     "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
@@ -60,16 +57,13 @@
     "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
   },
   "claude delegate cancel": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
+    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
   },
   "claude delegate stop": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
-  },
-  "claude create threads": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
+    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
   },
   "claude delegate followup": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer.",
+    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference.",
     "agent mcp": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories.",
     "cli approvals": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories.",
     "cli launch": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories."
@@ -88,5 +82,14 @@
   },
   "grok title": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
+  },
+  "claude archive mid-turn": {
+    "live": "Racy: the archive sent mid-turn lands among the turn's items wherever each server has got to when it arrives, which differs by a step on some runs."
+  },
+  "codex crash": {
+    "live": "Racy: the turn's last usage report and the Codex app-server's exit race; on some runs one server records the usage before the session's failure, on others after."
+  },
+  "codex thread tools": {
+    "live": "Racy: the pull-request and issue link events the thread tools cause arrive in a different order or number on some runs, as their syncs race."
   }
 }
