@@ -397,7 +397,16 @@ Every kind of home keeps working:
        and Claude;
      - queued messages and a turn whose prompt was never taken;
      - a new turn sent on the other server's thread;
+     - a thread made on one server whose first turn runs on the other and calls T3's
+       MCP tools (`codex_mcp`, `claude_mcp`). The tool answers must match the reference's
+       own run, which shows the thread credential works for a thread the other server
+       made;
      - a turn waiting on an approval.
+   - **Thread MCP credentials** (#102) are in memory on both servers, so a switch carries
+     nothing over. The server that runs a turn gives the CLI a fresh credential, and that
+     includes a continuation it takes over from the outbox, as the reference does.
+     `cli launch` compares the MCP config of every launch, with the port and token
+     masked.
 
      Known differences are listed in `scripts/shared_store_parity_xfail.json`. Every one
      is a difference Rust already has on one server.

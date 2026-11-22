@@ -783,7 +783,10 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
     with contextlib.ExitStack() as first:
         url, cookie = managed_server(first, command, root, *credentials, env=env)
         seeded = seed_turn(url, cookie, checkouts, scenario)
-        if restart.get("live"):
+        if restart["after"] == "created":
+            # Only the thread: its first turn runs on the restarted server (follow_up).
+            pass
+        elif restart.get("live"):
             # A client watches the thread, sends the message, and sees what the stop does.
             watcher = threading.Thread(target=lambda: watched.update(
                 run_client(args, url, cookie, {**seeded, "turnMs": 60000, "liveOnly": True})))
@@ -799,8 +802,11 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
                 "messageId": f"message:queued-{index}", "text": text,
                 "dispatchMode": {"type": "queue_after_active"}})
         queued = len(restart.get("queue", []))
-        wait_for(url, cookie, lambda p: len(p.get("runs", [])) > queued, 30)
-        if restart["after"] == "started":
+        if restart["after"] != "created":
+            wait_for(url, cookie, lambda p: len(p.get("runs", [])) > queued, 30)
+        if restart["after"] == "created":
+            pass
+        elif restart["after"] == "started":
             # The run started, and its provider got the prompt but has not taken it.
             log = Path(env["FAKE_PROVIDER_LOG"])
             wait_for(url, cookie, lambda p: any(r.get("status") == "running" for r in p.get("runs", []))

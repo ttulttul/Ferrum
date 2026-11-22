@@ -137,6 +137,14 @@ CROSS_SCENARIOS = [
     {"name": "codex restart unaccepted"},
     {"name": "codex restart continuation off", "follow_up": "Now append a line"},
     {"name": "claude restart continuation off", "follow_up": "Now append a line"},
+    # A thread made on one server whose first turn runs on the other, calling T3's MCP
+    # tools with the thread credential that server gives the CLI.
+    {"name": "codex agent mcp on the other server", "follow_up": "Run echo hi and write notes.txt",
+     "scenario": {"instance": "codex", "model": "fixture", "scenario": "codex_mcp.json",
+                  "restart": {"after": "created"}}},
+    {"name": "claude agent mcp on the other server", "follow_up": "Run echo hi and write notes.txt",
+     "scenario": {"instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_mcp.json",
+                  "restart": {"after": "created"}}},
     {"name": "codex approval waiting", "scenario": {
         "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
         "runtimeMode": "approval-required", "restart": {"after": "waiting"}}},
@@ -159,6 +167,7 @@ def cross_turn(args, credentials, scenario, first, second, follow_up):
         outcome["launches"] = turns.turn_launches(log)
         outcome["cli"] = turns.cli_approvals(log)
         outcome["launch"] = turns.cli_launch(log, tmp)
+        outcome["mcp"] = turns.agent_mcp(log, tmp)
         return outcome
 
 
@@ -174,7 +183,10 @@ def cross_turns(args, credentials):
             (lambda first=first, second=second: cross_turn(args, credentials, scenario, commands[first],
                                                            commands[second], entry.get("follow_up")))
             for first, second in ORDERS.values()], len(ORDERS))))
-        label_base = entry["name"] + (" + follow-up" if entry.get("follow_up") else "")
+        if "agent mcp" in entry["name"]:
+            # The comparison means something only if the CLI called the T3 MCP server.
+            assert outcomes["reference -> reference"].get("mcp"), f"{entry['name']}: the CLI made no MCP call"
+        label_base = entry["name"] + (" + follow-up" if entry.get("follow_up") and "scenario" not in entry else "")
         for order in ("reference -> rust", "rust -> reference"):
             label = f"{label_base} ({order})"
             problems = turns.compare_turn(outcomes["reference -> reference"], outcomes[order])
