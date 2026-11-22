@@ -19,6 +19,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "src/mcp_oauth/tools.json"
 SOURCE = ROOT / "src/mcp_oauth/tools.rs"
 DOC = ROOT / "docs/agent-tools.md"
+# The reference's theme constants the t3_theme_* tools use (scripts/reference_theme_constants.mjs).
+THEMES = ROOT / "src/mcp_oauth/themes.json"
 START, END = "<!-- tools:start -->", "<!-- tools:end -->"
 
 LISTED_TO = {
@@ -110,13 +112,17 @@ def main() -> int:
         return 1
     table = checklist(listing, caller_checks(checkout, names), rust)
     doc_text = doc[:doc.index(START)] + table + doc[doc.index(END) + len(END):]
-    stale = [path for path, text in ((TOOLS, tools_text), (DOC, doc_text)) if path.read_text() != text]
+    themes_text = subprocess.run(
+        ["node", str(ROOT / "scripts/reference_theme_constants.mjs"), str(checkout)],
+        check=True, capture_output=True, text=True).stdout
+    outputs = ((TOOLS, tools_text), (DOC, doc_text), (THEMES, themes_text))
+    stale = [path for path, text in outputs if not path.exists() or path.read_text() != text]
     if check:
         for path in stale:
             print(f"{path.relative_to(ROOT)} is out of date; run {sys.argv[0]} {sys.argv[1]}")
         return 1 if stale else 0
-    TOOLS.write_text(tools_text)
-    DOC.write_text(doc_text)
+    for path, text in outputs:
+        path.write_text(text)
     return 0
 
 

@@ -63,10 +63,8 @@ fn issue(
     let expected = |what: String| Some(format!("Expected {what}\n  at {}", at(path)));
     if let Some(allowed) = schema["enum"].as_array() {
         if !allowed.contains(value) {
-            let mut options: Vec<String> = allowed.iter().map(Value::to_string).collect();
-            if optional {
-                options.push("null".into());
-            }
+            // An optional literal union reads without `| null`, unlike other types.
+            let options: Vec<String> = allowed.iter().map(Value::to_string).collect();
             return expected(options.join(" | "));
         }
         return None;
