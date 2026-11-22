@@ -50,19 +50,92 @@ impl Confinement {
         Ok(Self { roots })
     }
 
-    /// Whether `path` (absolute, or relative to `base`) resolves inside a root.
-    pub fn allows(&self, path: &Path, base: Option<&Path>) -> bool {
+    /// The primary root (`--root`), canonicalized.
+    pub fn root(&self) -> Option<&Path> {
+        self.roots.first().map(PathBuf::as_path)
+    }
+
+    /// Resolve `path` (absolute, or relative to `base`) the way the filesystem
+    /// would, without requiring it to exist.
+    pub fn resolve_path(&self, path: &Path, base: Option<&Path>) -> Option<PathBuf> {
         let joined = match (path.is_absolute(), base) {
             (true, _) => path.to_path_buf(),
             (false, Some(base)) => base.join(path),
-            (false, None) => match std::env::current_dir() {
-                Ok(cwd) => cwd.join(path),
-                Err(_) => return false,
-            },
+            (false, None) => std::env::current_dir().ok()?.join(path),
         };
-        match resolve(&joined) {
-            Ok(resolved) => self.roots.iter().any(|root| resolved.starts_with(root)),
-            Err(_) => false,
+        resolve(&joined).ok()
+    }
+
+    /// Whether `path` (absolute, or relative to `base`) resolves inside a root.
+    pub fn allows(&self, path: &Path, base: Option<&Path>) -> bool {
+        match self.resolve_path(path, base) {
+            Some(resolved) => self.roots.iter().any(|root| resolved.starts_with(root)),
+            None => false,
+        }
+    }
+
+    /// Resolved working directories (`cwd` values) in `args` that lie under
+    /// the primary root (`--root`), in encounter order with duplicates removed.
+    pub fn cwds_under_root(&self, op_name: &str, args: &Value) -> Vec<PathBuf> {
+        if matches!(
+            op_name,
+            op::HELLO
+                | op::PING
+                | op::ACK
+                | op::RESUME
+                | op::IDLE_STATE
+                | op::STREAM_CLOSE
+                | op::TURN_CANCEL
+                | op::TURN_RESPOND
+                | op::ASSET_READ
+                | op::ASSET_CLOSE
+        ) {
+            return Vec::new();
+        }
+        let Some(root) = self.root() else {
+            return Vec::new();
+        };
+        let mut dirs = Vec::new();
+        self.collect_cwds(args, None, root, &mut dirs);
+        dirs
+    }
+
+    fn collect_cwds(
+        &self,
+        value: &Value,
+        base: Option<&Path>,
+        root: &Path,
+        out: &mut Vec<PathBuf>,
+    ) {
+        match value {
+            Value::Object(map) => {
+                let own = match map.get("cwd").and_then(Value::as_str) {
+                    Some(cwd) if !cwd.is_empty() => {
+                        if let Some(resolved) = self.resolve_path(Path::new(cwd), base) {
+                            if resolved.starts_with(root) && !out.contains(&resolved) {
+                                out.push(resolved);
+                            }
+                        }
+                        Some(match base {
+                            Some(base) => base.join(cwd),
+                            None => PathBuf::from(cwd),
+                        })
+                    }
+                    _ => None,
+                };
+                let base = own.as_deref().or(base);
+                for (key, item) in map {
+                    if key != "cwd" {
+                        self.collect_cwds(item, base, root, out);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    self.collect_cwds(item, base, root, out);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -374,5 +447,42 @@ mod tests {
             code(c.check(op::FS_BROWSE, &json!({"partialPath": "etc"}))),
             Some(ErrorCode::OutsideRoot)
         );
+    }
+
+    #[test]
+    fn cwds_under_root_resolves_only_primary_root_cwds() {
+        let (dir, root, outside, _) = setup();
+        let extra = dir.path().join("extra");
+        std::fs::create_dir_all(&extra).unwrap();
+        let c = Confinement::new([root.clone(), extra.clone()]).unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+
+        let missing = root.join("not-yet");
+        assert_eq!(
+            c.cwds_under_root(
+                op::FS_READ_FILE,
+                &json!({"cwd": missing, "relativePath": "a.txt"})
+            ),
+            vec![canonical_root.join("not-yet")]
+        );
+        assert_eq!(
+            c.cwds_under_root(
+                op::GIT_VCS,
+                &json!({"method": "refreshStatus", "input": {"cwd": format!("{}/not-yet/", root.display())}})
+            ),
+            vec![canonical_root.join("not-yet")]
+        );
+        assert!(c
+            .cwds_under_root(
+                op::TERM_CALL,
+                &json!({"method": "open", "input": {"cwd": extra.join("wt")}})
+            )
+            .is_empty());
+        assert!(c
+            .cwds_under_root(op::FS_LIST_ENTRIES, &json!({"cwd": outside}))
+            .is_empty());
+        assert!(c
+            .cwds_under_root(op::FS_IS_DIR, &json!({"path": root.join("project")}))
+            .is_empty());
     }
 }
