@@ -251,34 +251,52 @@ async fn guides<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value, write:
         };
         let own = matching(&known, &target);
         let missing=format!("No project in this environment is a checkout of {}, so its pull requests cannot be read here. Add one with t3_project_create.",target["repository"].as_str().unwrap_or(""));
-        let result = if let Some(project) = own.or(preferred.filter(|_| !write)) {
-            let mut params = fields(&target, &["host", "repository", "number"]);
-            params["projectId"] = project["id"].clone();
-            let op = if write {
-                "generateReviewGuide"
-            } else {
-                "reviewGuide"
-            };
-            match host
-                .provider_dispatch(format!("pullRequests.{op}"), params)
-                .await
-            {
-                Some(Ok(v)) => Ok(v),
-                Some(Err(e))
-                    if own.is_none()
-                        && matches!(
-                            e["reason"].as_str(),
-                            Some("provider-unsupported" | "repository-without-project")
-                        ) =>
+        let result =
+            if let Some(project) = own.or(preferred.filter(|_| !write)) {
+                let mut params = fields(&target, &["host", "repository", "number"]);
+                params["projectId"] = project["id"].clone();
+                if write
+                    && !host.settings()["reviewGuidesEnabled"]
+                        .as_bool()
+                        .unwrap_or(false)
                 {
-                    Err(missing)
+                    Err("Review guides are off. Turn them on in Settings → Source control & issues."
+                    .to_owned())
+                } else if write {
+                    match host
+                        .provider_dispatch("pullRequests.generateReviewGuide".into(), params)
+                        .await
+                    {
+                        Some(Ok(v)) => Ok(v),
+                        Some(Err(e))
+                            if own.is_none()
+                                && matches!(
+                                    e["reason"].as_str(),
+                                    Some("provider-unsupported" | "repository-without-project")
+                                ) =>
+                        {
+                            Err(missing)
+                        }
+                        Some(Err(e)) => Err(provider_message(&e)),
+                        None => Err(provider_message(&Value::Null)),
+                    }
+                } else {
+                    match host
+                        .provider_dispatch("pullRequests.detail".into(), params)
+                        .await
+                    {
+                        Some(Ok(detail)) => Ok(json!({
+                            "guide": null,
+                            "run": null,
+                            "currentHeadSha": detail["headSha"],
+                        })),
+                        Some(Err(e)) => Err(provider_message(&e)),
+                        None => Err(provider_message(&Value::Null)),
+                    }
                 }
-                Some(Err(e)) => Err(provider_message(&e)),
-                None => Err(provider_message(&Value::Null)),
-            }
-        } else {
-            Err(missing)
-        };
+            } else {
+                Err(missing)
+            };
         if !write {
             let data = result.map_err(message)?;
             for k in ["guide", "run", "currentHeadSha"] {

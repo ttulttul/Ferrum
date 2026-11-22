@@ -108,6 +108,8 @@ fn thread_event(before: &Value, after: &Value) -> &'static str {
         } else {
             "thread.unpinned"
         }
+    } else if changed("issues") {
+        "thread.issue-synced"
     } else if changed("tags") {
         "thread.tags-updated"
     } else if changed("runtimeMode") {

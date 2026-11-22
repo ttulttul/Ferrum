@@ -703,14 +703,10 @@ pub(super) async fn call<S: McpHost>(
         | "unwatch_pull_request"
         | "write_pull_request_guides"
         | "read_pull_request_guide" => pull_requests::call(host, caller, name, args).await,
-        "list_issues"
-        | "read_issue"
-        | "create_issue"
-        | "comment_on_issue"
-        | "set_issue_state"
-        | "link_issue"
-        | "unlink_issue"
-        | "list_thread_issues" => issues::call(host, caller, name, args).await,
+        "list_issues" | "read_issue" | "create_issue" | "comment_on_issue" | "set_issue_state"
+        | "link_issue" | "unlink_issue" | "list_thread_issues" => {
+            issues::call(host, caller, name, args).await
+        }
         "t3_worktree_status" => agent_tools::worktree_status(host, caller).await,
         "t3_preview_list" => agent_tools::preview_list(host, caller, args).await,
         "t3_preview_close" => agent_tools::preview_close(host, caller, args).await,
@@ -2420,7 +2416,12 @@ mod sender_tests {
             assert!(
                 matches!(
                     reference["listedTo"][name].as_str(),
-                    Some("everyone" | LINKS_ONLY | "hiddenFromOutsideClients")
+                    Some(
+                        "everyone"
+                            | LINKS_ONLY
+                            | "hiddenFromOutsideClients"
+                            | "hiddenFromSubagents",
+                    )
                 ),
                 "{name} needs listing by caller"
             );
