@@ -20,13 +20,13 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 
 | Kind | Calls | Used by the client | Mobile only | Server-only / unused | Existing parity | Client harness | Either |
 |---|---|---|---|---|---|---|---|
-| rpc | 205 | 202 | 0 | 3 | 122 | 78 | 146 |
+| rpc | 205 | 202 | 0 | 3 | 124 | 78 | 148 |
 | rpc-stream | 30 | 30 | 0 | 0 | 17 | 23 | 25 |
 | http | 52 | 40 | 0 | 12 | 39 | 14 | 40 |
 | http-raw | 7 | 7 | 0 | 0 | 6 | 3 | 7 |
-| **all** | 294 | 279 | 0 | 15 | 184 | 118 | 218 |
+| **all** | 294 | 279 | 0 | 15 | 186 | 118 | 220 |
 
-Newly covered by the client harness (no earlier parity script): 35. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 7.
+Newly covered by the client harness (no earlier parity script): 34. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 5.
 
 Calls the harness does not make need credentials or hardware it cannot have in CI (GitHub, Linear,
 model providers, T3 Connect relay, voice models, simulators, a browser), are destructive to the host
@@ -117,8 +117,8 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `projects.listIgnoredFiles` | open project/thread | `packages/client-runtime/src/state/projectCommands.ts:170` | ProjectListIgnoredFilesInput | ProjectListIgnoredFilesResult | session (filesystem:read) | client | validation only | 3 case(s) |
 | `projects.mutate` | user action | `packages/client-runtime/src/operations/commands.ts:417` | ProjectMutation | Project | session (orchestration:operate) | client | parity-fixtures.json, workers_initial_sync_parity.py | 5 case(s) |
 | `projects.readFile` | user action | `packages/client-runtime/src/state/projectCommands.ts:105`<br>`packages/client-runtime/src/state/projectCommands.ts:119` | ProjectReadFileInput | ProjectReadFileResult | session (filesystem:read) | client | validation only | 6 case(s), 4 xfail |
-| `projects.searchContents` | user action | `apps/web/src/state/projects.ts:24` | ProjectSearchContentsInput | ProjectSearchContentsResult | session (filesystem:read) | client | validation only | 2 case(s), 2 xfail |
-| `projects.searchEntries` | user action | `packages/client-runtime/src/state/projectCommands.ts:149`<br>`packages/client-runtime/src/state/projectCommands.ts:153` | ProjectSearchEntriesInput | ProjectSearchEntriesResult | session (filesystem:read) | client | validation only | 2 case(s), 2 xfail |
+| `projects.searchContents` | user action | `apps/web/src/state/projects.ts:24` | ProjectSearchContentsInput | ProjectSearchContentsResult | session (filesystem:read) | client | validation only | 5 case(s) |
+| `projects.searchEntries` | user action | `packages/client-runtime/src/state/projectCommands.ts:149`<br>`packages/client-runtime/src/state/projectCommands.ts:153` | ProjectSearchEntriesInput | ProjectSearchEntriesResult | session (filesystem:read) | client | validation only | 5 case(s) |
 | `projects.writeFile` | user action | `packages/client-runtime/src/state/projectCommands.ts:236`<br>`packages/client-runtime/src/state/projectCommands.ts:244` | ProjectWriteFileInput | ProjectWriteFileResult | session (filesystem:write) | client | validation only | 1 case(s) |
 | `provider.auth.cancel` | user action | `packages/client-runtime/src/state/server.ts:1510` | ProviderAuthCancelInput | ProviderAuthState | session (providers:manage) | client | rpc_edge_parity.py | — |
 | `provider.auth.complete` | user action | `packages/client-runtime/src/state/server.ts:1490` | ProviderAuthCompleteInput | ProviderAuthState | session (providers:manage) | client | validation only | — |
@@ -218,8 +218,8 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `server.upsertKeybinding` | user action | `packages/client-runtime/src/state/server.ts:1740` | ServerUpsertKeybindingInput | ServerUpsertKeybindingResult | session (settings:write) | client | validation only | 1 case(s) |
 | `shell.openInEditor` | user action | `packages/client-runtime/src/state/shellCommands.ts:13` | LaunchEditorInput | void | session (orchestration:operate) | client | validation only | — |
 | `sourceControl.appAccess` | user action | `packages/client-runtime/src/state/sourceControl.ts:26`<br>`packages/client-runtime/src/state/sourceControl.ts:31` | SourceControlAppAccessInput | SourceControlAppAccess | session (orchestration:read) | client | validation only | — |
-| `sourceControl.cloneRepository` | - | — | SourceControlCloneRepositoryInput | SourceControlCloneRepositoryResult | session (source-control:write) | server-only/unused | validation only | — |
-| `sourceControl.lookupRepository` | user action | `packages/client-runtime/src/state/sourceControl.ts:43` | SourceControlRepositoryLookupInput | SourceControlRepositoryInfo | session (orchestration:read) | client | validation only | — |
+| `sourceControl.cloneRepository` | - | — | SourceControlCloneRepositoryInput | SourceControlCloneRepositoryResult | session (source-control:write) | server-only/unused | source_control_clone_parity.py, source_control_lookup_parity.py | — |
+| `sourceControl.lookupRepository` | user action | `packages/client-runtime/src/state/sourceControl.ts:43` | SourceControlRepositoryLookupInput | SourceControlRepositoryInfo | session (orchestration:read) | client | source_control_lookup_parity.py | — |
 | `sourceControl.publishRepository` | user action | `packages/client-runtime/src/state/sourceControl.ts:95` | SourceControlPublishRepositoryInput | SourceControlPublishRepositoryResult | session (source-control:write) | client | validation only | — |
 | `sourceControl.signInCancel` | user action | `packages/client-runtime/src/state/sourceControl.ts:87` | SourceControlSignInInput | Schema.Void | session (settings:write) | client | validation only | — |
 | `sourceControl.signInStart` | user action | `packages/client-runtime/src/state/sourceControl.ts:79` | SourceControlSignInInput | SourceControlSignInPrompt | session (settings:write) | client | validation only | — |
@@ -287,7 +287,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `POST /oauth/token` | connect | `packages/client-runtime/src/authorization/remote.ts:130`<br>`packages/client-runtime/src/authorization/remote.ts:132`<br>(+5) | auth.token | auth.token | none | client | auth_parity.py, cors_parity.py, relay_provisioning_parity.py | 1 case(s) |
 | `POST /api/auth/websocket-ticket` | connect | `packages/client-runtime/src/authorization/remote.ts:194`<br>`packages/client-runtime/src/authorization/remote.ts:232`<br>(+1) | auth.webSocketTicket | auth.webSocketTicket | session (cookie/bearer/DPoP) | client | auth_parity.py, cors_parity.py | — |
 | `POST /api/auth/websocket-ticket/:use` | connect | `packages/client-runtime/src/authorization/remote.ts:194`<br>`packages/client-runtime/src/authorization/remote.ts:233`<br>(+3) | auth.webSocketTicketFor | auth.webSocketTicketFor | session (cookie/bearer/DPoP) | client | auth_parity.py, cors_parity.py | 1 case(s) |
-| `POST /api/auth/pairing-token` | connect | `packages/client-runtime/src/state/auth.ts:101`<br>`packages/client-runtime/src/state/peerPairingCode.ts:62` | auth.pairingCredential | auth.pairingCredential | session (cookie/bearer/DPoP) | client | auth_parity.py, client_sessions_parity.py, managed_policy_parity.py, mcp_parity.py, peer_forwarding_parity.py, peer_link_outgoing_parity.py, peer_link_parity.py, workers_peer_link_parity.py | 1 case(s) |
+| `POST /api/auth/pairing-token` | connect | `packages/client-runtime/src/state/auth.ts:101`<br>`packages/client-runtime/src/state/peerPairingCode.ts:62` | auth.pairingCredential | auth.pairingCredential | session (cookie/bearer/DPoP) | client | auth_parity.py, client_sessions_parity.py, managed_policy_parity.py, mcp_parity.py, peer_forwarding_parity.py, peer_link_outgoing_parity.py, peer_link_parity.py, source_control_clone_parity.py, workers_peer_link_parity.py | 1 case(s) |
 | `POST /api/auth/pairing-links/revoke` | connect | `packages/client-runtime/src/state/auth.ts:112` | auth.revokePairingLink | auth.revokePairingLink | session (cookie/bearer/DPoP) | client | auth_parity.py | 2 case(s) |
 | `POST /api/auth/clients/revoke` | connect | `packages/client-runtime/src/state/auth.ts:123` | auth.revokeClient | auth.revokeClient | session (cookie/bearer/DPoP) | client | auth_parity.py, client_sessions_parity.py, peer_forwarding_parity.py, peer_link_parity.py | — |
 | `POST /api/auth/connect-devices/approve` | connect | `packages/client-runtime/src/state/auth.ts:146` | auth.approveConnectDevice | auth.approveConnectDevice | session (cookie/bearer/DPoP) | client | auth_parity.py | — |
@@ -338,7 +338,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 
 | Call | Trigger | Callers | Request | Response | Auth | Usage | Existing | Client harness |
 |---|---|---|---|---|---|---|---|---|
-| `GET /ws` | connect | `packages/client-runtime/src/rpc/session.ts:251`<br>`packages/client-runtime/src/rpc/session.ts:252` | websocket upgrade: orchestrationProtocol=2, frameParts=1, clientCapabilities; cookie, or wsTicket from a bearer/DPoP ticket |  | session | client | auth_parity.py, client_initial_sync_parity.py, client_sessions_parity.py, config_parity.py, cors_parity.py, git_workflow_parity.py, github_provider_parity.py, linear_provider_parity.py, link_request_parity.py, login_shell_refresh_parity.py, managed_policy_parity.py, orchestration_parity.py, parity-fixtures.json, peer_link_outgoing_parity.py, preview_provider_parity.py, provider-parity.json, provider_status_parity.py, relay_client_parity.py, rpc_edge_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, source_control_hosts_parity.py, storage_cleanup_parity.py | 1 case(s) |
+| `GET /ws` | connect | `packages/client-runtime/src/rpc/session.ts:251`<br>`packages/client-runtime/src/rpc/session.ts:252` | websocket upgrade: orchestrationProtocol=2, frameParts=1, clientCapabilities; cookie, or wsTicket from a bearer/DPoP ticket |  | session | client | auth_parity.py, client_initial_sync_parity.py, client_sessions_parity.py, config_parity.py, cors_parity.py, git_workflow_parity.py, github_provider_parity.py, linear_provider_parity.py, link_request_parity.py, login_shell_refresh_parity.py, managed_policy_parity.py, orchestration_parity.py, parity-fixtures.json, peer_link_outgoing_parity.py, preview_provider_parity.py, provider-parity.json, provider_status_parity.py, relay_client_parity.py, rpc_edge_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, source_control_clone_parity.py, source_control_hosts_parity.py, source_control_lookup_parity.py, storage_cleanup_parity.py | 1 case(s) |
 | `GET /api/attachments/:id` | user action | `packages/client-runtime/src/pullRequestMarkdown.ts:361` | attachment bytes shown in the transcript |  | session | client | cors_parity.py | — |
 | `POST /api/attachments/upload/:token` | user action | `apps/web/src/lib/attachmentUploadQueue.ts:154` | unauthenticated XHR upload to the signed URL attachments.createUploadUrl returns |  | signed URL | client | cors_parity.py | 9 case(s) |
 | `GET /api/assets/:token` | user action | `packages/shared/src/preview.ts:16` | asset URLs from assets.createUrl |  | signed URL | client | — | 17 case(s) |

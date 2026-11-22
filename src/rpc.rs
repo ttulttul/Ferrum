@@ -1564,13 +1564,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         }
         return Reply::Success(json!({"entries":entries}));
     }
-    if matches!(
-        method,
-        "projects.searchEntries"
-            | "projects.searchContents"
-            | "projects.readFile"
-            | "projects.writeFile"
-    ) {
+    if matches!(method, "projects.readFile" | "projects.writeFile") {
         let cwd = params["cwd"].as_str().unwrap_or_default();
         let root = expand_user_path(cwd);
         if method == "projects.readFile" {
