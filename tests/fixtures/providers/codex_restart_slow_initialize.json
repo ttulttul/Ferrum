@@ -1,0 +1,27 @@
+{
+  "steps": [
+    {
+      "expect": "initialize"
+    },
+    {
+      "sleep": 2
+    },
+    {
+      "send": {
+        "id": "$id",
+        "result": {
+          "codexHome": "/tmp/codex-home",
+          "platformFamily": "unix",
+          "platformOs": "linux",
+          "userAgent": "codex_cli_rs/0.170.0"
+        }
+      }
+    },
+    {
+      "branch": {
+        "thread/start": "codex_interrupt.json",
+        "thread/resume": "codex_resume.json"
+      }
+    }
+  ]
+}
