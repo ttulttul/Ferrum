@@ -11,6 +11,7 @@ import secrets
 import shlex
 import signal
 import socket
+import sys
 import subprocess
 import tempfile
 import threading
@@ -257,20 +258,36 @@ def managed_server(stack, prefix, root, secret, signing_key, env=None):
     if not key_file.exists():
         key_file.write_bytes(signing_key)
         key_file.chmod(0o600)
-    port = free_port()
-    url = f"http://127.0.0.1:{port}"
-    envelope = dict(mode="desktop", noBrowser=True, host="127.0.0.1", port=port, t3Home=str(root),
-                    desktopBootstrapToken=secret, tailscaleServeEnabled=False, tailscaleServePort=443)
-    bootstrap = stack.enter_context(tempfile.TemporaryFile())
-    bootstrap.write(encode(envelope) + b"\n")
-    bootstrap.seek(0)
-    # Each child receives its own state directory, home and bootstrap descriptor.
     prefix, variables = split_env_prefix(prefix)
-    stack.enter_context(launch(prefix + ["--bootstrap-fd", str(bootstrap.fileno())], url,
-                               env=server_env(root, {**variables, **(env or {}), "HOME": str(root),
-                                                     "T3CODE_HOME": str(root)}),
-                               cwd=root, pass_fds=(bootstrap.fileno(),)))
-    return url, session_cookie(url, secret)
+    # The port is free when picked, but a slow-starting server leaves a window in which another
+    # process (another suite on the same machine, or a server a suite started) can take it and
+    # answer: then the bootstrap is refused, or our server exits for want of the port. Each such
+    # attempt is stopped and the server relaunched on a fresh port.
+    for attempt in range(3):
+        port = free_port()
+        url = f"http://127.0.0.1:{port}"
+        envelope = dict(mode="desktop", noBrowser=True, host="127.0.0.1", port=port, t3Home=str(root),
+                        desktopBootstrapToken=secret, tailscaleServeEnabled=False, tailscaleServePort=443)
+        attempt_stack = contextlib.ExitStack()
+        try:
+            bootstrap = attempt_stack.enter_context(tempfile.TemporaryFile())
+            bootstrap.write(encode(envelope) + b"\n")
+            bootstrap.seek(0)
+            # Each child receives its own state directory, home and bootstrap descriptor.
+            attempt_stack.enter_context(launch(prefix + ["--bootstrap-fd", str(bootstrap.fileno())], url,
+                                               env=server_env(root, {**variables, **(env or {}), "HOME": str(root),
+                                                                     "T3CODE_HOME": str(root)}),
+                                               cwd=root, pass_fds=(bootstrap.fileno(),)))
+            cookie = session_cookie(url, secret)
+        except RuntimeError as error:
+            attempt_stack.close()
+            lost_port = "browser bootstrap failed" in str(error) or "exited before readiness" in str(error)
+            if attempt == 2 or not lost_port:
+                raise
+            print(f"relaunching a server on a new port after: {error}", file=sys.stderr)
+            continue
+        stack.enter_context(attempt_stack)
+        return url, cookie
 
 
 def check(fixture, servers, sockets):

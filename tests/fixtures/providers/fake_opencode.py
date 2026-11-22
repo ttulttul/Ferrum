@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""A stand-in for the `opencode` CLI in provider status tests; never the real binary.
+
+Usage: fake_opencode.py <spec.json> <arguments...>
+
+  {"version": {"stdout": "1.15.0", "stderr": "", "exit": 0, "sleep": 0},
+   "serve": {"routes": {"GET /global/health": {"status": 200, "body": {...},
+                                                "contentType": "application/json", "sleep": 0}},
+             "exit": {"code": 1, "stderr": "..."},   # exit before listening
+             "silent": true}}                          # never report the URL
+
+`opencode --version` answers from "version". `opencode serve --hostname=H
+--port=P` listens on H:P, prints OpenCode's "opencode server listening on
+http://H:P" line and answers each `METHOD /path` from "serve.routes" (404
+otherwise) until it is stopped. A route with "sequence": [route, ...] answers
+its successive requests with each entry in turn, the last one repeating. Every launch appends its arguments to
+FAKE_PROVIDER_LOG.args (with the port replaced by PORT), and every request
+`METHOD /path` to one of OpenCode's routes (plus " basic" when it carries
+Basic credentials) to FAKE_PROVIDER_LOG.http.
+"""
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+import re
+import sys
+import time
+
+spec_path, args = sys.argv[1], sys.argv[2:]
+log = os.environ.get("FAKE_PROVIDER_LOG")
+if log:
+    with open(log + ".args", "a") as out:
+        out.write(re.sub(r"--port=\d+", "--port=PORT", " ".join(args)) + "\n")
+with open(spec_path) as source:
+    spec = json.load(source)
+
+
+def emit(stream, text):
+    if text:
+        stream.write(text if text.endswith("\n") else text + "\n")
+        stream.flush()
+
+
+if args[:1] == ["--version"]:
+    version = spec.get("version", {})
+    emit(sys.stdout, version.get("stdout", ""))
+    emit(sys.stderr, version.get("stderr", ""))
+    time.sleep(version.get("sleep", 0))
+    sys.exit(version.get("exit", 0))
+
+if args[:1] != ["serve"]:
+    sys.exit(0)
+
+serve = spec.get("serve", {})
+if "exit" in serve:
+    emit(sys.stderr, serve["exit"].get("stderr", ""))
+    sys.exit(serve["exit"].get("code", 1))
+options = dict(arg[2:].split("=", 1) for arg in args[1:] if arg.startswith("--") and "=" in arg)
+host, port = options.get("hostname", "127.0.0.1"), int(options.get("port", "0"))
+routes = serve.get("routes", {})
+served = {}
+OPENCODE_PATH = re.compile(r"^/(?:api/|global/|provider$|agent$|skill$|command$)")
+
+
+class Handler(BaseHTTPRequestHandler):
+    def answer(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        path = self.path.split("?", 1)[0]
+        basic = (self.headers.get("Authorization") or "").startswith("Basic ")
+        # Only OpenCode's own routes are recorded: both servers pick the port by binding port 0,
+        # so a T3 client of another scenario can briefly reach this one (`GET /ws`).
+        if log and OPENCODE_PATH.match(path):
+            with open(log + ".http", "a") as out:
+                out.write(f"{self.command} {path}{' basic' if basic else ''}\n")
+        key = f"{self.command} {path}"
+        route = routes.get(key, {"status": 404, "body": {"error": "not found"}})
+        if "sequence" in route:
+            count = served.get(key, 0)
+            served[key] = count + 1
+            route = route["sequence"][min(count, len(route["sequence"]) - 1)]
+        time.sleep(route.get("sleep", 0))
+        body = json.dumps(route.get("body", {})).encode()
+        try:
+            self.send_response(route.get("status", 200))
+            self.send_header("Content-Type", route.get("contentType", "application/json"))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    do_GET = do_POST = answer
+
+    def log_message(self, *_):
+        pass
+
+
+server = ThreadingHTTPServer((host, port), Handler)
+server.daemon_threads = True
+if not serve.get("silent"):
+    emit(sys.stdout, f"opencode server listening on http://{host}:{server.server_address[1]}")
+try:
+    server.serve_forever()
+except KeyboardInterrupt:
+    pass

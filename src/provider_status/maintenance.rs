@@ -911,7 +911,7 @@ fn normalize_semver(version: &str) -> String {
 }
 
 /// `parseSemver`: (major, minor, patch, prerelease identifiers).
-fn parse_semver(value: &str) -> Option<(u64, u64, u64, Vec<String>)> {
+pub(crate) fn parse_semver(value: &str) -> Option<(u64, u64, u64, Vec<String>)> {
     let normalized = normalize_semver(value);
     let normalized = normalized.strip_prefix('v').unwrap_or(&normalized);
     let mut parts = normalized.split('-');

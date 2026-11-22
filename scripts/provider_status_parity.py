@@ -363,6 +363,142 @@ SCENARIOS += [
 ]
 
 
+OC_V1_PROVIDERS = {"all": [
+    {"id": "anthropic", "name": "Anthropic", "models": {
+        "claude-opus-5-5": {"id": "claude-opus-5-5", "name": "Claude Opus 5.5", "family": "claude-opus",
+                            "release_date": "2026-09-01", "status": "active",
+                            "variants": {"low": {}, "high": {}, "max": {}}},
+        "claude-opus-5": {"id": "claude-opus-5", "name": "Claude Opus 5", "family": "claude-opus",
+                          "release_date": "2026-03-01", "variants": {"high": {}}},
+        "claude-old": {"id": "claude-old", "name": "Claude Old", "release_date": "2024-01-01", "status": "deprecated"},
+        "nameless": {"id": "nameless", "name": " ", "release_date": "2026-01-01"}}},
+    {"id": "openai", "name": "OpenAI", "models": {
+        "gpt-5.6": {"id": "gpt-5.6", "name": "GPT-5.6", "release_date": "not a date",
+                    "variants": {"minimal": {}, "medium": {}, "high": {}}}}},
+    {"id": "unconnected", "name": "Unconnected", "models": {
+        "x": {"id": "x", "name": "X", "release_date": "2026-01-01"}}}],
+    "connected": ["anthropic", "openai"], "default": {}}
+OC_V1_ROUTES = {
+    "GET /global/health": {"body": {"healthy": True, "version": "1.15.0"}},
+    "GET /provider": {"body": OC_V1_PROVIDERS},
+    "GET /agent": {"body": [{"name": "plan", "mode": "primary"}, {"name": "build", "mode": "all"},
+                            {"name": "general", "mode": "subagent"}, {"name": "secret", "mode": "primary", "hidden": True}]},
+    "GET /skill": {"body": [{"name": "zeta", "description": " Last ", "location": "/skills/zeta/SKILL.md"},
+                            {"name": "alpha", "location": "/skills/alpha/SKILL.md"}, {"name": "no-location"}]},
+    "GET /command": {"body": [{"name": "review", "description": "Review", "source": "command", "hints": ["$1", "files"]},
+                              {"name": "compact", "hints": []}, {"name": "alpha", "source": "skill", "hints": []},
+                              {"name": " ", "hints": []}]},
+}
+def oc_model(provider, id, name, variants=(), released=1767225600000, family=None, status="active"):
+    model = {"id": id, "modelID": id, "providerID": provider, "name": name,
+             "capabilities": {"tools": True, "input": ["text"], "output": ["text"]},
+             "variants": [{"id": v} for v in variants], "time": {"released": released}, "cost": [],
+             "status": status, "enabled": True, "limit": {"context": 200000, "output": 32000}}
+    if family:
+        model["family"] = family
+    return model
+OC_V2_MODELS = [oc_model("anthropic", "claude-opus-5-5", "Claude Opus 5.5", ["low", "high"], family="claude-opus"),
+                oc_model("anthropic", "claude-opus-5", "Claude Opus 5", ["high"], 1750000000000, "claude-opus"),
+                oc_model("opencode", "big-pickle", "Big Pickle", ["low", "medium"]),
+                oc_model("openai", "gpt-5.6", "GPT-5.6", ["medium"], status="deprecated")]
+OC_V2_ROUTES = {
+    "GET /api/info": {"body": {"version": "2.2.5", "pid": 4242, "urls": [], "paths": {"tmp": "/tmp"}}},
+    "GET /api/model": {"body": {"location": {"directory": "/"}, "data": OC_V2_MODELS}},
+    "GET /api/provider": {"body": {"location": {"directory": "/"}, "data": [
+        {"id": "anthropic", "name": "Anthropic", "activation": "auto", "package": ""},
+        {"id": "opencode", "name": "OpenCode", "activation": "auto", "package": ""}]}},
+}
+def opencode(name, version="1.15.0", routes=None, settings=None, serve=None, **extra):
+    spec = {"version": {"stdout": version}, "serve": serve or {"routes": routes or OC_V1_ROUTES}}
+    return {"name": f"opencode {name}", "instance": "opencode", "settings": settings or enabled("opencode"),
+            "fakes": {"opencode": {"opencode": spec}}, **extra}
+def oc_routes(base, **changes):
+    """`base` with routes replaced (None removes one)."""
+    routes = {**base, **changes}
+    return {k: v for k, v in routes.items() if v is not None}
+
+
+def oc_external(name, routes, binary=None, password="secret-pw", **extra):
+    """A configured OpenCode server (the harness's fake API), with a local CLI or none."""
+    settings = enabled("opencode", serverUrl="<api>", serverPassword=password)
+    fakes = {"opencode": {"opencode": binary}} if binary else {}
+    return {"name": f"opencode {name}", "instance": "opencode", "settings": settings, "api": routes,
+            "fakes": fakes, **extra}
+
+
+OC_ACTIVATING = {"_tag": "ServiceUnavailableError", "message": "Plugins are activating", "service": "plugin"}
+OC_USAGE = {"location": {"directory": "/"}, "data": {
+    "workspace": {"id": "ws_1", "name": "Team", "usageURL": "https://opencode.ai/workspace/ws_1/usage"},
+    "go": {"rolling": {"percent": 12.5, "limited": False, "resetsAt": 1767225600000},
+           "weekly": {"percent": 40, "limited": True, "resetsAt": 1767830400000},
+           "monthly": {"percent": 150, "limited": False, "resetsAt": 1769904000000}},
+    "budgets": []}}
+SCENARIOS += [
+    opencode("1.x signed in"),
+    opencode("2.x signed in", "2.2.5", OC_V2_ROUTES),
+    {"name": "opencode missing", "instance": "opencode", "settings": enabled("opencode"), "fakes": {}},
+    opencode("version unreadable", "", serve={"routes": OC_V1_ROUTES}),
+    {**opencode("version times out"),
+     "fakes": {"opencode": {"opencode": {"version": {"sleep": 60}}}}},
+    opencode("disabled", settings={"providerInstances": {"opencode": {"driver": "opencode", "enabled": False}}},
+             settled=True),
+    opencode("disabled with a server URL", settled=True, settings={"providerInstances": {"opencode": {
+        "driver": "opencode", "enabled": False, "config": {"serverUrl": "http://example.invalid:4096"}}}}),
+    {**opencode("custom binaryPath", settings=enabled("opencode", binaryPath="~/tools/opencode-custom")),
+     "fakes": {"opencode": {"opencode": {"version": {"stdout": "1.15.0"}, "serve": {"routes": OC_V1_ROUTES}},
+                            "at": "tools/opencode-custom"}}},
+    opencode("custom models", settings=enabled("opencode", customModels=["mine/one", {"slug": "mine/two", "name": "Two"}])),
+    opencode("1.x too old", "1.10.0"),
+    opencode("1.x server exits on start", serve={"exit": {"code": 3, "stderr": "Error: invalid config"}}),
+    {**opencode("1.x server never starts", serve={"silent": True, "routes": OC_V1_ROUTES}), "wait": 50},
+    opencode("1.x server unhealthy", routes=oc_routes(OC_V1_ROUTES, **{
+        "GET /global/health": {"body": {"healthy": False, "version": "1.15.0"}}})),
+    opencode("1.x provider list fails", routes=oc_routes(OC_V1_ROUTES, **{
+        "GET /provider": {"status": 500, "body": {"message": "provider boom"}}})),
+    opencode("1.x optional lists fail", routes=oc_routes(OC_V1_ROUTES, **{
+        "GET /agent": {"status": 500, "body": {}}, "GET /skill": None, "GET /command": {"status": 500}})),
+    opencode("1.x no connected providers", routes=oc_routes(OC_V1_ROUTES, **{
+        "GET /provider": {"body": {**OC_V1_PROVIDERS, "connected": []}}})),
+    opencode("1.x connected without models", routes=oc_routes(OC_V1_ROUTES, **{
+        "GET /provider": {"body": {"all": [{"id": "anthropic", "name": "Anthropic", "models": {}}],
+                                   "connected": ["anthropic"], "default": {}}}})),
+    opencode("2.x no models", "2.2.5", oc_routes(OC_V2_ROUTES, **{
+        "GET /api/model": {"body": {"location": {"directory": "/"}, "data": []}}})),
+    opencode("2.x model list fails", "2.2.5", oc_routes(OC_V2_ROUTES, **{
+        "GET /api/model": {"status": 500, "body": {}}})),
+    opencode("2.x plugins activating", "2.2.5", oc_routes(OC_V2_ROUTES, **{
+        "GET /api/model": {"sequence": [{"status": 503, "body": OC_ACTIVATING}, {"status": 503, "body": OC_ACTIVATING},
+                                        OC_V2_ROUTES["GET /api/model"]]}})),
+    # Without a message the 503 is not OpenCode's ServiceUnavailableError, so it is not waited out.
+    opencode("2.x unreadable 503", "2.2.5", oc_routes(OC_V2_ROUTES, **{
+        "GET /api/model": {"status": 503, "body": {"_tag": "ServiceUnavailableError", "service": "plugin"}}})),
+    opencode("2.x partial catalog settles", "2.2.5", oc_routes(OC_V2_ROUTES, **{
+        "GET /api/model": {"sequence": [{"body": {"location": {"directory": "/"}, "data": OC_V2_MODELS[:1]}},
+                                        OC_V2_ROUTES["GET /api/model"]]}})),
+    opencode("2.x without provider names", "2.2.5", oc_routes(OC_V2_ROUTES, **{"GET /api/provider": None})),
+    opencode("2.x workspace usage", "2.2.5", oc_routes(OC_V2_ROUTES, **{
+        "GET /api/experimental/usage/limits": {"body": OC_USAGE}})),
+    opencode("2.x no console workspace", "2.2.5", oc_routes(OC_V2_ROUTES, **{
+        "GET /api/experimental/usage/limits": {"body": {"location": {"directory": "/"}, "data": None}}})),
+    opencode("2.x usage unreadable", "2.2.5", oc_routes(OC_V2_ROUTES, **{
+        "GET /api/experimental/usage/limits": {"status": 500, "body": {}}})),
+    {**opencode("1.x installed as an npm global"), "fakes": {"opencode": {
+        "opencode": {"version": {"stdout": "1.15.0"}, "serve": {"routes": OC_V1_ROUTES}},
+        "at": "npm-prefix/lib/node_modules/opencode-ai/bin/opencode", "link": "fake-bin/opencode"}}},
+    {**opencode("installed by the curl installer", settings=enabled("opencode", binaryPath="<root>/.opencode/bin/opencode")),
+     "fakes": {"opencode": {"opencode": {"version": {"stdout": "1.15.0"}, "serve": {"routes": OC_V1_ROUTES}},
+                            "at": ".opencode/bin/opencode"}}},
+    oc_external("1.x configured server", OC_V1_ROUTES),
+    oc_external("1.x configured server with a local CLI", OC_V1_ROUTES, {"version": {"stdout": "1.16.0"}}),
+    oc_external("2.x configured server", oc_routes(OC_V2_ROUTES, **{
+        "GET /api/experimental/usage/limits": {"body": OC_USAGE}})),
+    oc_external("configured server rejects the password", {"GET /api/info": {"status": 401, "body": {}}}),
+    oc_external("configured server is not OpenCode", {"GET /api/info": {"body": "<html>", "contentType": "text/html"}}),
+    {"name": "opencode configured server unreachable", "instance": "opencode", "fakes": {},
+     "settings": enabled("opencode", serverUrl="http://127.0.0.1:9")},
+]
+
+
 PI_NPM = "npm-prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 SCENARIOS += [
     {"name": "pi installed as an npm global", "instance": "pi", "settings": enabled("pi"),
@@ -407,7 +543,7 @@ class FakeApi:
                 body = json.dumps(route.get("body", {})).encode()
                 try:
                     self.send_response(route.get("status", 200))
-                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Type", route.get("contentType", "application/json"))
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
@@ -452,26 +588,44 @@ def pending(row):
     return "has not been checked" in message or (message.startswith("Checking ") and message.endswith("..."))
 
 
-def wait_checked(url, cookie, instance, seconds, settled, root):
-    """The instance's row once its first check has reported and the row has stopped changing
-    (the reference publishes the probe, then the row with its version advisory), or after a few
-    seconds for a scenario whose row is final from the start."""
+# Drivers whose version advisory is added by an enrichment pass after the probe's row is
+# published: their row is final only once it carries the advisory.
+ENRICHED_DRIVERS = {"codex", "claudeAgent", "grok", "pi", "opencode"}
+# How long a server may take to finish an instance's first check on a loaded machine.
+CHECK_DEADLINE = 180
+
+
+def final(row):
+    """Whether `row` is a completed check in its final shape: past the placeholder, and with the
+    version advisory an enriched driver adds once its probe is published."""
+    if row is None or pending(row):
+        return False
+    return row.get("driver") not in ENRICHED_DRIVERS or row.get("enabled") is not True \
+        or "versionAdvisory" in row
+
+
+def wait_checked(url, cookie, instance, seconds, settled, root, stable=1.5):
+    """The instance's row once its first check has completed (`final`) and the row has stopped
+    changing for `stable` seconds, or after a few seconds for a scenario whose row is final from
+    the start. A server that has not finished the check within CHECK_DEADLINE (or the scenario's
+    longer `wait`) gives a timeout marker, so a pending row is never compared."""
     if settled:
         time.sleep(4)
         return row_of(rpc(url, cookie, "server.getConfig", {})["providers"], instance)
-    deadline = time.monotonic() + seconds
+    deadline = time.monotonic() + max(seconds, CHECK_DEADLINE)
     last, stable_since = None, None
     while True:
         row = row_of(rpc(url, cookie, "server.getConfig", {})["providers"], instance)
-        checked = row is not None and not pending(row)
-        if checked:
+        if final(row):
             if strip(row, root) == last:
-                if time.monotonic() - stable_since >= 1.5:
+                if time.monotonic() - stable_since >= stable:
                     return row
             else:
                 last, stable_since = strip(row, root), time.monotonic()
+        else:
+            last, stable_since = None, None
         if time.monotonic() > deadline:
-            return row
+            return {"timedOut": f"no completed check within {max(seconds, CHECK_DEADLINE)}s", "row": row}
         time.sleep(0.25)
 
 
@@ -515,7 +669,11 @@ def run_server(args, command, root, scenario, temporary):
     for cli, fake in scenario["fakes"].items():
         target = root / fake["at"] if "at" in fake else bin_dir / cli
         target.parent.mkdir(parents=True, exist_ok=True)
-        if "spec" in fake:
+        if "opencode" in fake:
+            spec = root / f"{cli}.spec.json"
+            spec.write_text(json.dumps(fake["opencode"]))
+            target.write_text(f'#!/bin/sh\nexec python3 "$FAKE_OPENCODE" {shlex.quote(str(spec))} "$@"\n')
+        elif "spec" in fake:
             spec = root / f"{cli}.spec.json"
             spec.write_text(json.dumps(fake["spec"]))
             target.write_text(f'#!/bin/sh\nexec python3 "$FAKE_STATUS_CLI" {shlex.quote(str(spec))} "$@"\n')
@@ -542,6 +700,7 @@ def run_server(args, command, root, scenario, temporary):
     env = {"PATH": os.pathsep.join([str(bin_dir), path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "path")]),
            "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
            "FAKE_STATUS_CLI": str(FIXTURES / "status_cli.py"),
+           "FAKE_OPENCODE": str(FIXTURES / "fake_opencode.py"),
            "CURSOR_BACKEND_URL": api.url, "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1", "FAKE_PROVIDER_LOG": str(log),
            "FAKE_PROVIDER_SCENARIO": str(fixture)}
     outcome = {}
@@ -549,7 +708,8 @@ def run_server(args, command, root, scenario, temporary):
         stack.callback(api.close)
         url, cookie = managed_server(stack, command, root, secrets.token_hex(16), secrets.token_bytes(32), env=env)
         outcome["row"] = strip(wait_checked(url, cookie, scenario["instance"], scenario.get("wait", 20),
-                                            scenario.get("settled", False), temporary), temporary)
+                                            scenario.get("settled", False), temporary,
+                                            scenario.get("stable", 1.5)), temporary)
         if "refresh" in scenario:
             if isinstance(scenario["refresh"], dict):
                 for cli, spec in scenario["refresh"].items():
@@ -565,7 +725,8 @@ def run_server(args, command, root, scenario, temporary):
     # local codex can stand in for the one it downloads, not a status check; this server does
     # not manage a Codex runtime.
     # The provider API requests each server made (distinct, as reads can repeat).
-    outcome["requests"] = sorted(set(api.requests))
+    served = Path(str(log) + ".http")
+    outcome["requests"] = sorted(set(api.requests) | (set(served.read_text().splitlines()) if served.exists() else set()))
     outcome["launches"] = sorted({line for line in launches.read_text().splitlines()
                                   if line != "app-server --help"}) if launches.exists() else []
     return outcome
