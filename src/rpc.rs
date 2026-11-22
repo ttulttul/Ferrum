@@ -2180,7 +2180,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         };
     }
     if method == "server.runStorageCleanup" {
-        return Reply::Success(state.storage_cleanup.run("manual"));
+        return match crate::storage_cleanup::run(state.clone(), "manual").await {
+            Ok(report) => Reply::Success(report),
+            Err(reply) => reply,
+        };
     }
     if method == "server.getDatabaseStorage" {
         let database_bytes = [

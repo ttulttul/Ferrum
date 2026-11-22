@@ -2488,6 +2488,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "rustix",
  "ryu-js",
  "scraper",
  "serde",

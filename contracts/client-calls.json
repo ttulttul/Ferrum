@@ -4357,8 +4357,10 @@
       "stream": false,
       "auth": "session (settings:write)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "storage_cleanup_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [
         "settings.storageCleanup.run"
       ],
@@ -6751,7 +6753,8 @@
         "rpc_edge_parity.py",
         "settings_mutation_parity.py",
         "settings_secrets_parity.py",
-        "source_control_hosts_parity.py"
+        "source_control_hosts_parity.py",
+        "storage_cleanup_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
