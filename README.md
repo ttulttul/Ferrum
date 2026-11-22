@@ -155,7 +155,20 @@ python3 scripts/github_provider_parity.py --original-command "$original" --rust-
 python3 scripts/relay_parity.py --checkout /tmp/t3code-reference --rust "$rust"
 ```
 
-Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `peer_forwarding_parity.py`, `link_request_parity.py`, `client_sessions_parity.py`, `source_control_clone_parity.py`, `source_control_lookup_parity.py`, `project_clone_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
+Parity runs stay off the network. `server_env()` in `scripts/parity_harness.py` turns the reference's telemetry off (`T3CODE_TELEMETRY_ENABLED=false`; the Rust server sends none), and turns off telemetry for the host's `gh` and `az` CLIs. It also sends every server's HTTP(S) through a loopback proxy that forwards nothing; `NO_PROXY` exempts loopback, for Node, reqwest, git, npm and Chromium alike. Each suite's output names any targets the proxy refused. Suites give both servers local stand-ins for what they would fetch:
+
+- Bitbucket: a loopback API through `T3CODE_BITBUCKET_API_BASE_URL`.
+- npm releases: a loopback registry through `npm_config_registry`, read by the npm CLI.
+- The ACP Registry: a seeded `caches/acp-registry/registry.json`. Both servers fall back to it when the registry's fixed HTTPS URL is refused.
+- The preview browser: the reference's pinned `chrome-headless-shell` folder, linked to the Playwright headless shell the Rust server runs, so nothing is downloaded.
+
+Some targets are still refused. Each has no setting that points it elsewhere, and both servers handle the failure the same way:
+
+- The model-manifest refresh from raw.githubusercontent.com. Both servers then keep the bundled copy, which is the same file.
+- The reference's Codex, maintenance and Muse Code update checks: registry.npmjs.org and api.meta.ai.
+- Anything the host's `gh` and `az` CLIs try.
+
+Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `peer_forwarding_parity.py`, `link_request_parity.py`, `client_sessions_parity.py`, `source_control_clone_parity.py`, `source_control_lookup_parity.py`, `project_clone_parity.py`, `bitbucket_pull_requests_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
 
 Known gaps in `client_rpc_parity.py` and `client_thread_parity.py` are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json); both suites fail on any unlisted mismatch and on any listed case that starts passing.
 

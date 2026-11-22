@@ -775,39 +775,17 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         };
     }
     if method == "server.searchAcpRegistry" {
-        let query = params["query"].as_str().unwrap_or_default().to_lowercase();
-        let limit = params["limit"].as_u64().unwrap_or(512).min(512) as usize;
-        let agents: Vec<Value> =
-            serde_json::from_str::<Vec<Value>>(include_str!("../contracts/acp-registry.json"))
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|agent| {
-                    query.is_empty()
-                        || agent["id"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&query)
-                        || agent["name"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&query)
-                        || agent["description"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&query)
-                })
-                .take(limit)
-                .collect();
-        return Reply::Success(json!({"agents":agents}));
+        return match crate::acp_registry::search(&state.paths.caches, params).await {
+            Ok(result) => Reply::Success(result),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.operation_error()})),
+        };
     }
     if method == "server.prepareAcpRegistryAgent" {
         let agent = params["agentId"].as_str().unwrap_or_default();
-        return Reply::Failure(
-            json!({"_tag":"Fail","error":{"_tag":"AcpRegistryOperationError","reason":"agent_not_found","message":format!("ACP Registry does not contain agent '{}'.",agent),"cause":{"name":"AcpRegistryError","message":format!("ACP Registry does not contain agent '{}'.",agent)}}}),
-        );
+        return match crate::acp_registry::prepare(&state.paths.caches, agent).await {
+            Ok(result) => Reply::Success(result),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.operation_error()})),
+        };
     }
     if method == "server.uninstallAcpRegistryManagedBinary" {
         let agent = params["agentId"].as_str().unwrap_or_default();

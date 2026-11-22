@@ -211,6 +211,71 @@ def login_shell():
         return str(_LOGIN_SHELL_DIR / "bash")
 
 
+# Every server a suite starts sends its HTTP(S) through this loopback proxy, which forwards
+# nothing: it records each target and refuses it, so no parity run reaches a real host. Loopback
+# fakes are exempt (NO_PROXY). Both servers otherwise fetch the upstream model manifest from
+# raw.githubusercontent.com at start-up and have no switch for it; refused, both keep the bundled
+# copy, which is the same file (contracts/model-manifest.json is the reference's), so what the
+# suites compare does not change.
+REFUSED = []
+_REFUSING_PROXY = None
+_REFUSING_PROXY_LOCK = threading.Lock()
+
+
+def refusing_proxy():
+    """The URL of this process's refusing proxy (see REFUSED), started on first use."""
+    global _REFUSING_PROXY
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Refuse(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def refuse(self):
+            REFUSED.append(f"{self.command} {self.path}")
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+        do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = do_CONNECT = refuse
+
+    with _REFUSING_PROXY_LOCK:
+        if _REFUSING_PROXY is None:
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Refuse)
+            server.daemon_threads = True
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            _REFUSING_PROXY = f"http://127.0.0.1:{server.server_port}"
+            import atexit
+            atexit.register(report_refused)
+        return _REFUSING_PROXY
+
+
+def report_refused():
+    """Names, once a suite ends, the off-loopback targets its servers tried and were refused."""
+    targets = sorted({entry.split(" ", 1)[1] for entry in REFUSED})
+    if targets:
+        print(f"refused {len(REFUSED)} off-loopback request(s) from the servers: {', '.join(targets)}",
+              file=sys.stderr)
+
+
+def offline_env():
+    """Variables that keep a server off the network: no telemetry to ingest.t3.codes (the
+    reference's T3CODE_TELEMETRY_ENABLED; the Rust server sends none), none from the host CLIs a
+    server runs (gh, az), and HTTP(S) through the refusing proxy, honoured by Node
+    (NODE_USE_ENV_PROXY), reqwest, git, npm, Chromium and the gh CLI. Loopback is exempt."""
+    proxy = refusing_proxy()
+    loopback = "127.0.0.1,localhost,.localhost,::1,[::1]"
+    env = {"T3CODE_TELEMETRY_ENABLED": "false", "NODE_USE_ENV_PROXY": "1",
+           # Host CLIs a server may run (gh, az) have telemetry and update checks of their own.
+           "GH_TELEMETRY": "false", "DO_NOT_TRACK": "1", "GH_NO_UPDATE_NOTIFIER": "1",
+           "AZURE_CORE_COLLECT_TELEMETRY": "false"}
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        env[name] = env[name.lower()] = proxy
+    env["NO_PROXY"] = env["no_proxy"] = loopback
+    return env
+
+
 def split_env_prefix(command):
     """`command` without a leading `env NAME=value ...`, and those variables, so server_env sees them."""
     command = list(command)
@@ -227,9 +292,10 @@ def server_env(home, env=None):
     """The whole environment for a T3 server (or one of its CLI commands) a suite starts in `home`.
 
     Every suite builds a server's environment here, so both servers get the same one and neither
-    can find a real provider CLI: not on PATH (PROVIDER_CLIS are hidden unless a suite wrote them), not through the login shell (LOGIN_SHELL), and not under the developer's
-    home. `env` adds variables or replaces PATH; nothing else reaches the child, so no developer
-    provider credential does either. scripts/check_parity_shards.py fails a suite that starts a
+    can find a real provider CLI: not on PATH (PROVIDER_CLIS are hidden unless a suite wrote them),
+    not through the login shell (LOGIN_SHELL), and not under the developer's home. Neither sends
+    telemetry or reaches a real host either (offline_env). `env` adds variables or replaces PATH;
+    nothing else reaches the child, so no developer provider credential does either. scripts/check_parity_shards.py fails a suite that starts a
     server without it.
     """
     env = dict(env or {})
@@ -237,6 +303,9 @@ def server_env(home, env=None):
         raise ValueError("server_env sets SHELL to the parity login shell; write a .profile in the home instead")
     child = {k: os.environ[k] for k in ("LANG", "LC_ALL", "SYSTEMROOT") if k in os.environ}
     path = env.pop("PATH", os.environ.get("PATH", ""))
+    # A suite may set its own proxy (a recorder of its own) or telemetry; otherwise neither server
+    # reaches the network.
+    child.update(offline_env())
     child.update(env)
     child["PATH"] = path_without(PROVIDER_CLIS, Path(home) / ".parity-path", path)
     child.setdefault("HOME", str(home))
