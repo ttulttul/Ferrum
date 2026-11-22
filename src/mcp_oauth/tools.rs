@@ -8,6 +8,28 @@ use super::{McpAccess, McpHost};
 use serde_json::{json, Value};
 use std::sync::{Arc, LazyLock};
 
+mod arguments;
+mod threads;
+
+/// Tools whose arguments are checked against their advertised schema first,
+/// with the reference's wording, and the fields the reference declares as
+/// tagged unions.
+const CHECKED: &[(&str, &[(&str, &str)])] = &[
+    ("t3_thread_update", &[]),
+    ("t3_thread_organize", &[]),
+    ("t3_thread_configure", &[]),
+    (
+        "t3_thread_transfer",
+        &[(
+            "sourcePoint",
+            r#"{ readonly "type": "latest_stable", ... } | { readonly "type": "run", ... } | { readonly "type": "checkpoint", ... }"#,
+        )],
+    ),
+    ("t3_queue", &[]),
+    ("t3_pending_request", &[]),
+    ("t3_workflow_stop", &[]),
+];
+
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
 /// the pinned reference advertises; `scripts/update_agent_tools.py` regenerates
 /// it and the checklist in docs/agent-tools.md, which reads this list.
@@ -23,6 +45,13 @@ const SERVED: &[&str] = &[
     "t3_project_read",
     "t3_project_create",
     "t3_environment_read",
+    "t3_thread_update",
+    "t3_thread_organize",
+    "t3_thread_configure",
+    "t3_thread_transfer",
+    "t3_queue",
+    "t3_pending_request",
+    "t3_workflow_stop",
 ];
 
 /// The reference's definitions of the tools served here, as `tools/list`
@@ -39,6 +68,36 @@ pub(super) static TOOLS: LazyLock<Value> = LazyLock::new(|| {
         .collect::<Vec<_>>();
     assert_eq!(tools.len(), SERVED.len(), "SERVED names an unknown tool");
     Value::Array(tools)
+});
+
+/// The served tools as `tools/list` sends them: the MCP protocol layer the
+/// reference uses (effect's `isToolOutputSchema`) leaves out an output schema
+/// whose root is not a plain object, such as a union of answers.
+pub(super) static LISTED: LazyLock<Value> = LazyLock::new(|| {
+    let listed = TOOLS
+        .as_array()
+        .expect("MCP tool definitions")
+        .iter()
+        .map(|tool| {
+            let mut tool = tool.clone();
+            let output = &tool["outputSchema"];
+            let sendable = output["type"] == "object"
+                && output.get("properties").is_none_or(|p| {
+                    p.as_object()
+                        .is_some_and(|p| p.values().all(Value::is_object))
+                })
+                && output
+                    .get("required")
+                    .is_none_or(|r| r.as_array().is_some_and(|r| r.iter().all(Value::is_string)));
+            if !sendable {
+                if let Some(object) = tool.as_object_mut() {
+                    object.remove("outputSchema");
+                }
+            }
+            tool
+        })
+        .collect();
+    Value::Array(listed)
 });
 
 const RUNTIME_MODES: [&str; 4] = [
@@ -391,6 +450,9 @@ pub(super) async fn call<S: McpHost>(
     if !args.is_object() && !args.is_null() {
         return Err(invalid_arguments());
     }
+    if let Some((_, unions)) = CHECKED.iter().find(|(tool, _)| *tool == name) {
+        arguments::check(name, args, unions)?;
+    }
     match name {
         "t3_project_list" => project_list(&**host, args).await,
         "t3_project_read" => project_read(&**host, args).await,
@@ -403,6 +465,13 @@ pub(super) async fn call<S: McpHost>(
         "t3_thread_send" => thread_send(host, caller, args).await,
         "t3_thread_wait" => thread_wait(&**host, args).await,
         "t3_thread_interrupt" => thread_interrupt(host, caller, args).await,
+        "t3_thread_update" => threads::update(host, caller, args).await,
+        "t3_thread_organize" => threads::organize(host, caller, args).await,
+        "t3_thread_configure" => threads::configure(host, caller, args).await,
+        "t3_thread_transfer" => threads::transfer(host, caller, args).await,
+        "t3_queue" => threads::queue(host, caller, args).await,
+        "t3_pending_request" => threads::pending_request(host, caller, args).await,
+        "t3_workflow_stop" => threads::workflow_stop(host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }
@@ -1374,7 +1443,18 @@ impl Caller {
 /// the caller, not the thread or project it names, which are checked there.
 fn remote_check(caller: &Caller, name: &str, args: &Value) -> Result<(), Refusal> {
     match name {
-        "t3_thread_send" | "t3_thread_interrupt" => caller.refuse_read_only(),
+        "t3_thread_send"
+        | "t3_thread_interrupt"
+        | "t3_thread_organize"
+        | "t3_thread_update"
+        | "t3_workflow_stop" => caller.refuse_read_only(),
+        // One tool, two rules: its reads go as they are, its changes as changes.
+        "t3_thread_configure" if args.get("modelSelection").is_some() => caller.refuse_read_only(),
+        "t3_thread_transfer" if args["action"] != "status" => caller.refuse_read_only(),
+        "t3_pending_request" if args["action"] == "respond" => caller.refuse_read_only(),
+        "t3_queue" if !matches!(args["action"].as_str(), Some("list" | "read")) => {
+            caller.refuse_read_only()
+        }
         "t3_thread_launch" => {
             caller.refuse_read_only()?;
             let (runtime, interaction) = caller.limits();

@@ -78,6 +78,8 @@ PROVIDER_SCENARIOS = [
     # The turn calls T3's tools on the MCP server the server gave its CLI.
     {"name": "codex agent mcp", "instance": "codex", "model": "fixture", "scenario": "codex_mcp.json"},
     {"name": "claude agent mcp", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_mcp.json"},
+    # The thread toolkit, called by the thread on itself and on a thread it forks.
+    {"name": "codex thread tools", "instance": "codex", "model": "fixture", "scenario": "codex_thread_tools.json"},
     {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
     # Runtime requests: what each server asks the user, and what it answers the CLI.
     {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
@@ -522,6 +524,8 @@ def comparable_mcp(original, rust):
                     and isinstance(answer.get("content"), dict) and not answer.get("isError"):
                 answer["content"] = {k: answer["content"].get(k) for k in CALLER_CAPABILITIES}
             text = re.sub(r'"latestRunId": "[^"]*"', '"latestRunId": "<run>"', json.dumps(record, sort_keys=True))
+            # Each server numbers its own orchestration events.
+            text = re.sub(r'"sequence": \d+', '"sequence": "<sequence>"', text)
             out.append(text)
         return out
     listed = None

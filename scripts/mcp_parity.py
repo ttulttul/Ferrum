@@ -44,6 +44,21 @@ def observations(url, cookie):
     call("ping",{})
     call("tools/call",dict(name="t3_project_list",arguments={}))
     call("tools/call",dict(name="t3_project_read",arguments=dict(projectId="missing")))
+    # The thread tools for a client outside any thread, approved read-only.
+    for name, arguments in [
+        ("t3_thread_configure", {}),
+        ("t3_thread_configure", dict(threadId="thread-missing")),
+        ("t3_queue", dict(action="list", threadId="thread-missing")),
+        ("t3_queue", dict(action="bogus")),
+        ("t3_pending_request", dict(action="list")),
+        ("t3_pending_request", dict(action="respond", requestId="request-missing", answers={})),
+        ("t3_thread_transfer", dict(action="status")),
+        ("t3_thread_transfer", dict(action="fork")),
+        ("t3_thread_organize", dict(action="pin", threadId="thread-missing")),
+        ("t3_thread_update", dict(action="rename", title="Renamed")),
+        ("t3_workflow_stop", dict(threadId="thread-missing", subagentId="workflow-missing")),
+    ]:
+        call("tools/call", dict(name=name, arguments=arguments))
     call("tools/call",dict(name="missing-tool",arguments={}))
     status, _, body = http(url, "DELETE", "/mcp", headers=headers)
     results.append(("close",status,body))

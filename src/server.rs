@@ -1320,6 +1320,9 @@ impl mcp_oauth::McpHost for AppState {
     fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait {
         crate::runtime::Runtime::sleep(&*self.runtime, duration)
     }
+    fn spawn(&self, task: crate::runtime::Task) {
+        crate::runtime::Runtime::spawn(&*self.runtime, task)
+    }
 }
 
 impl access_http::AuthHost for AppState {

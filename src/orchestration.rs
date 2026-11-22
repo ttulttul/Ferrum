@@ -59,6 +59,63 @@ pub(crate) async fn dispatch_restart_continuation<H: CommandHost>(
     dispatch_command(state, command, Some(source)).await
 }
 
+/// Why `thread.settle` may not settle `thread` now, as the reference's
+/// orchestrator refuses it: another run arrived since the caller looked
+/// (`expectedLatestRunId`), or the thread still waits on a question, runs, or
+/// holds a message the user queued.
+fn settle_blocker(thread: &crate::Thread, command: &Value) -> Option<String> {
+    let projection = thread.full_projection();
+    let runs = projection["runs"].as_array().cloned().unwrap_or_default();
+    let id = &thread.id;
+    if let Some(expected) = command.get("expectedLatestRunId").and_then(Value::as_str) {
+        let latest = runs.iter().max_by_key(|run| run["ordinal"].as_u64());
+        if latest.and_then(|run| run["id"].as_str()) != Some(expected) {
+            return Some("The thread received another run before settlement.".into());
+        }
+    }
+    let messages = projection["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let automatic = |message_id: &Value| {
+        messages.iter().any(|message| {
+            message["id"] == *message_id
+                && message["role"] == "user"
+                && (message["createdBy"].as_str().is_some_and(|by| by != "user")
+                    || !message["scheduledTaskId"].is_null()
+                    || !message["notification"].is_null()
+                    || !message["delegatedCompletion"].is_null())
+        })
+    };
+    let running = runs.iter().any(|run| {
+        matches!(
+            run["status"].as_str(),
+            Some("preparing" | "starting" | "running" | "waiting")
+        )
+    });
+    let queued = runs
+        .iter()
+        .any(|run| run["status"] == "queued" && !automatic(&run["userMessageId"]));
+    let blocking = projection["runtimeRequests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|request| request["status"] == "pending")
+        .any(|request| {
+            request["kind"] != "user_input" || request["responseCapability"]["type"] != "message"
+        });
+    let blocker = if blocking {
+        "is waiting on an approval or question. Answer it before settling."
+    } else if running {
+        "is still running. Stop it before settling."
+    } else if queued {
+        "has a queued message. Send it or remove it from the queue before settling."
+    } else {
+        return None;
+    };
+    Some(format!("Thread {id} {blocker}"))
+}
+
 async fn dispatch_command<H: CommandHost>(
     state: Arc<H>,
     command: Value,
@@ -162,6 +219,11 @@ async fn dispatch_command<H: CommandHost>(
             )
         {
             return Err(dispatch_error(format!("Thread {id} is archived.")));
+        }
+        if kind == "thread.settle" {
+            if let Some(refusal) = settle_blocker(thread, &command) {
+                return Err(dispatch_error(refusal));
+            }
         }
         if kind == "message.dispatch" && !store.projects.contains_key(&thread.project_id) {
             let runtime = json!({
@@ -1018,6 +1080,10 @@ async fn apply_command<H: CommandHost>(
                     }
                     "thread.pin" => {
                         patch.insert("pinned".into(), true.into());
+                        // Pinning wakes a snoozed thread, as unsnoozing does.
+                        if !existing_row["snoozedUntil"].is_null() {
+                            row["lastSnoozeWakeAt"] = at.clone();
+                        }
                         row["pinnedAt"] = at;
                         row["settledOverride"] = if existing_row["settledOverride"] == "settled" {
                             Value::String("active".into())
@@ -1063,9 +1129,21 @@ async fn apply_command<H: CommandHost>(
                         patch.insert("snoozed_until".into(), snoozed_until.clone());
                         row["snoozedUntil"] = snoozed_until;
                         row["snoozedAt"] = at.clone();
+                        // A snooze the user chose ends any snooze a usage limit asked for.
+                        row["limitRecovery"] = match &existing_row["limitRecovery"] {
+                            Value::Object(recovery) => {
+                                let mut recovery = recovery.clone();
+                                recovery.insert("snooze".into(), false.into());
+                                Value::Object(recovery)
+                            }
+                            _ => Value::Null,
+                        };
                     }
                     "thread.unsnooze" => {
                         patch.insert("snoozed_until".into(), serde_json::Value::Null);
+                        if !existing_row["snoozedUntil"].is_null() {
+                            row["lastSnoozeWakeAt"] = at.clone();
+                        }
                         row["snoozedUntil"] = Value::Null;
                         row["snoozedAt"] = Value::Null;
                     }
