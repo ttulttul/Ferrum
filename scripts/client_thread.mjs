@@ -159,6 +159,17 @@ const runOf = (item) => {
   return {};
 };
 
+/** Whether a stream item shows a running command's turn item. */
+const runsCommand = (item) =>
+  item.kind === "event"
+    ? item.event.type === "turn-item.updated" &&
+      item.event.payload?.type === "command_execution" &&
+      item.event.payload?.status === "running"
+    : item.kind === "snapshot" &&
+      (item.projection?.turnItems ?? []).some(
+        (turnItem) => turnItem.type === "command_execution" && turnItem.status === "running",
+      );
+
 /** Pending runtime requests and the request ids that have a turn item, from a stream item. */
 const requestsOf = (item, pending, withItems) => {
   const requests =
@@ -186,6 +197,8 @@ const requestsOf = (item, pending, withItems) => {
 /**
  * subscribeThread's items from before a message is dispatched until its run settles. With
  * `seed.interrupt`, the run is interrupted once its provider turn is running; with
+ * `seed.interrupt === "command"`, once a command it runs is (so the command's item comes before
+ * the interrupt's on both servers, however fast each takes the CLI's frames); with
  * `seed.interrupt === "request"`, once a runtime request is pending. With `seed.respond`
  * ({decision} or {answers}), the first pending runtime request is answered with it.
  */
@@ -195,6 +208,7 @@ const liveTurn = (client, seed) =>
     const synchronized = yield* Deferred.make();
     const settled = yield* Deferred.make();
     const turnRunning = yield* Deferred.make();
+    const commandRunning = yield* Deferred.make();
     const requestPending = yield* Deferred.make();
     const pending = new Map();
     const withItems = new Set();
@@ -209,6 +223,7 @@ const liveTurn = (client, seed) =>
           const run = runOf(item);
           if (dispatched && run.runId) runId = run.runId;
           if (dispatched && run.turnRunning) yield* Deferred.succeed(turnRunning, undefined);
+          if (dispatched && runsCommand(item)) yield* Deferred.succeed(commandRunning, undefined);
           if (dispatched) {
             requestsOf(item, pending, withItems);
             // Answer once the request's card is there too, as a user would.
@@ -248,7 +263,7 @@ const liveTurn = (client, seed) =>
         }),
       );
     } else if (seed.interrupt) {
-      yield* Deferred.await(turnRunning);
+      yield* Deferred.await(seed.interrupt === "command" ? commandRunning : turnRunning);
       interruptReply = plain(
         yield* client["orchestration.dispatchCommand"]({
           type: "run.interrupt",

@@ -531,6 +531,9 @@ impl crate::turn::TurnHost for AppState {
     fn workspace(&self) -> &dyn crate::workspace::Workspace {
         &*self.workspace
     }
+    fn turn_wait(&self, duration: std::time::Duration) -> crate::runtime::Wait {
+        crate::runtime::Runtime::sleep(&*self.runtime, duration)
+    }
     fn cancellations(&self) -> &Mutex<HashMap<Uuid, oneshot::Sender<()>>> {
         &self.cancellations
     }

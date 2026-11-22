@@ -1434,6 +1434,9 @@ impl crate::turn::TurnHost for ControlPlane {
     fn workspace(&self) -> &dyn Workspace {
         &self.host.workspace
     }
+    fn turn_wait(&self, duration: std::time::Duration) -> crate::runtime::Wait {
+        self.host.runtime.sleep(duration)
+    }
     fn cancellations(
         &self,
     ) -> &tokio::sync::Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>> {
