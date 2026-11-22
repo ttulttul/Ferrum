@@ -66,7 +66,8 @@ impl SharedLog {
     }
 
     /// The stream positions of the recorded provider events. Only streamed
-    /// text, recorded as held updates, has none.
+    /// text may have none: held text is recorded as one update per item, and
+    /// only the last update of a flush carries the newest delta's position.
     fn provider_seqs(&self) -> Vec<u64> {
         self.0
             .lock()
@@ -755,7 +756,7 @@ async fn a_provider_turn_keeps_going_across_a_server_restart() {
     assert_rendered_turn(&got, "completed");
     // Every event of the turn is recorded once, in order: the recorded
     // stream positions only rise. The ones skipped are streamed text, which
-    // is held and recorded as updates without a position.
+    // is held and recorded as one update per window.
     let seqs = log.provider_seqs();
     assert!(seqs.len() > 10, "{seqs:?}");
     assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]), "{seqs:?}");
@@ -774,6 +775,129 @@ async fn a_provider_turn_keeps_going_across_a_server_restart() {
             .count(),
         1
     );
+}
+
+/// The Codex turn fixture with its final answer streamed slowly, one line
+/// per delta, `ticks` lines and then a last one that the item's end follows
+/// at once. Returns the scenario's path and the answer's item id and text.
+fn ticking(dir: &std::path::Path, ticks: usize) -> (std::path::PathBuf, String, String) {
+    let mut value: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture("codex_turn.json")).unwrap())
+            .unwrap();
+    let steps = value["steps"].as_array().unwrap().clone();
+    let is = |step: &Value, method: &str, kind: &str| {
+        step["send"]["method"] == method && step["send"]["params"]["item"]["type"] == kind
+    };
+    let last_message = |method: &str| {
+        steps
+            .iter()
+            .rposition(|step| is(step, method, "agentMessage"))
+            .unwrap()
+    };
+    let (started, completed) = (last_message("item/started"), last_message("item/completed"));
+    let item_id = steps[started]["send"]["params"]["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let delta = &steps[started + 1];
+    assert_eq!(delta["send"]["method"], "item/agentMessage/delta");
+    let mut lines: Vec<String> = (1..=ticks)
+        .map(|tick| format!("tick {tick} of {ticks}\n"))
+        .collect();
+    lines.push("provider done\n".into());
+    let mut paced = steps[..=started].to_vec();
+    for (index, line) in lines.iter().enumerate() {
+        let mut step = delta.clone();
+        step["send"]["params"]["delta"] = json!(line);
+        paced.push(step);
+        if index + 1 < lines.len() {
+            paced.push(json!({"sleep": 0.1}));
+        }
+    }
+    let text = lines.concat();
+    let mut end = steps[completed].clone();
+    end["send"]["params"]["item"]["text"] = json!(text);
+    paced.push(end);
+    paced.extend_from_slice(&steps[completed + 1..]);
+    value["steps"] = Value::Array(paced);
+    let path = dir.join("codex_ticking.json");
+    std::fs::write(&path, value.to_string()).unwrap();
+    (path, item_id, text)
+}
+
+/// Every piece of text the answer streamed is recorded once, in order, as
+/// deltas before its item ends, with a restart in the middle or without.
+async fn streamed_text_is_recorded_before_its_item_ends(restart: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let url = agentd(dir.path(), &root).await;
+    let documents = Arc::new(MemoryStore::new());
+    let (scenario, item_id, text) = ticking(dir.path(), 12);
+    write_settings(
+        &documents,
+        &fake_cli_settings(&scenario, &dir.path().join("cli.jsonl")),
+    );
+    let log = SharedLog::default();
+    let mut server = Server::start(1, &url, &documents, &log, Vec::new()).await;
+    server
+        .start_thread(root.to_str().unwrap(), "codex", "Say hello")
+        .await;
+    let streamed = |log: &SharedLog| {
+        log.provider_event_values()
+            .iter()
+            .filter(|e| e["type"] == "turn_item.delta" && e["itemId"] == item_id.as_str())
+            .count()
+    };
+    if restart {
+        wait_until(|| streamed(&log) >= 4).await;
+        drop(server);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        server = Server::start(2, &url, &documents, &log, Vec::new()).await;
+    }
+    wait_until(|| log.run_status().is_some()).await;
+    assert_eq!(log.run_status().as_deref(), Some("completed"));
+    let recorded = log.provider_event_values();
+    let ended = recorded
+        .iter()
+        .position(|e| {
+            e["type"] == "turn_item.updated"
+                && e["item"]["id"] == item_id.as_str()
+                && e["item"]["status"] != "running"
+        })
+        .expect("the answer ends");
+    let deltas: Vec<&str> = recorded
+        .iter()
+        .filter(|e| e["type"] == "turn_item.delta" && e["itemId"] == item_id.as_str())
+        .map(|e| e["delta"].as_str().unwrap())
+        .collect();
+    assert_eq!(deltas.concat(), text, "{deltas:?}");
+    assert!(
+        !recorded[ended..]
+            .iter()
+            .any(|e| e["type"] == "turn_item.delta" && e["itemId"] == item_id.as_str()),
+        "text recorded after its item ended"
+    );
+    // Positions still only rise.
+    let seqs = log.provider_seqs();
+    assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]), "{seqs:?}");
+    let (got, _) = server.projections().await;
+    let answer = got["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "assistant" && m["text"] == text.as_str());
+    assert!(answer.is_some(), "{got:#}");
+}
+
+#[tokio::test]
+async fn streamed_text_is_recorded_before_its_item_ends_without_a_restart() {
+    streamed_text_is_recorded_before_its_item_ends(false).await;
+}
+
+#[tokio::test]
+async fn streamed_text_is_recorded_before_its_item_ends_across_a_restart() {
+    streamed_text_is_recorded_before_its_item_ends(true).await;
 }
 
 /// The frames the plane delivers to `connection` over `rounds` alarms, as a
