@@ -933,7 +933,7 @@ fn field<'a>(row: &'a Value, key: &str) -> &'a str {
     row[key].as_str().unwrap_or_default().trim()
 }
 
-fn same_link(a: &Value, b: &Value, issue: bool) -> bool {
+pub(crate) fn same_link(a: &Value, b: &Value, issue: bool) -> bool {
     field(a, "host").eq_ignore_ascii_case(field(b, "host"))
         && if issue {
             a["tracker"] == b["tracker"]
