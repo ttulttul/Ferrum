@@ -184,6 +184,9 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
     fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait {
         self.host.runtime.sleep(duration)
     }
+    fn spawn(&self, task: crate::runtime::Task) {
+        self.host.runtime.spawn(task)
+    }
 }
 impl std::ops::Deref for ControlPlane {
     type Target = ControlState;

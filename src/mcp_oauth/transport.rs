@@ -108,7 +108,7 @@ pub(super) async fn handle<S: McpHost>(
     }
     let result = match operation {
         "ping" => json!({}),
-        "tools/list" => json!({"tools":*super::tools::TOOLS}),
+        "tools/list" => json!({"tools":*super::tools::LISTED}),
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or("");
             let a = &req["params"]["arguments"];

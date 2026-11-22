@@ -98,5 +98,8 @@
   },
   "claude agent mcp": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+  },
+  "codex thread tools": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
   }
 }

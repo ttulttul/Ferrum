@@ -34,7 +34,10 @@ Steps:
                              thread/start; Claude: `mcp_set_servers`), as the
                              real CLI would; {"mcp": {"method": "tools/list"}}
                              lists its tools. The request and the answer are
-                             appended to FAKE_PROVIDER_LOG.mcp as JSON.
+                             appended to FAKE_PROVIDER_LOG.mcp as JSON. With
+                             "as": "name", the tool's answer is kept, and a
+                             later argument "$mcp.name.a.b" is its field a.b;
+                             "$env.NAME" is an environment variable.
 
 A request the scenario does not expect is answered from SIDE_REPLIES (or the
 scenario's own "replies" by method), so a client that reads its config or
@@ -191,11 +194,43 @@ def mcp_call(step):
                 mcp_server["session"] = headers.get("mcp-session-id")
                 mcp_post({"jsonrpc": "2.0", "method": "notifications/initialized"})
         method = step.get("method", "tools/call")
-        params = {"name": step["tool"], "arguments": step.get("arguments", {})} if method == "tools/call" else {}
+        arguments = fill_mcp(step.get("arguments", {}))
+        params = {"name": step["tool"], "arguments": arguments} if method == "tools/call" else {}
         status, _, answer = mcp_post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
         record.update(status=status, answer=answer)
+        if "as" in step:
+            result = (answer or {}).get("result") if isinstance(answer, dict) else None
+            text = "".join(part.get("text", "") for part in (result or {}).get("content", []))
+            try:
+                mcp_answers[step["as"]] = json.loads(text)
+            except ValueError:
+                mcp_answers[step["as"]] = None
     with open(log_path + ".mcp", "a") as out:
         out.write(json.dumps(record) + "\n")
+
+
+mcp_answers = {}
+
+
+def fill_mcp(value):
+    """Arguments with "$mcp.name.path" and "$env.NAME" filled in."""
+    if isinstance(value, str):
+        if value.startswith("$env."):
+            return os.environ.get(value[len("$env."):])
+        if value.startswith("$mcp."):
+            # Left as written when the answer lacks it, so a failed step cannot
+            # turn a later call into one on the caller's own thread.
+            name, *path = value[len("$mcp."):].split(".")
+            found = mcp_answers.get(name)
+            for key in path:
+                found = found.get(key) if isinstance(found, dict) else None
+            return value if found is None else found
+        return value
+    if isinstance(value, list):
+        return [fill_mcp(v) for v in value]
+    if isinstance(value, dict):
+        return {k: fill_mcp(v) for k, v in value.items()}
+    return value
 
 
 def fill(value):

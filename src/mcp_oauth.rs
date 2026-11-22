@@ -88,6 +88,9 @@ pub trait McpHost: AuthHost {
     /// `{projectId, workspaceRoot, commitError?}` or the failure.
     fn create_named_project(self: &Arc<Self>, name: String) -> HostFuture<Result<Value, Value>>;
     fn sleep(&self, duration: std::time::Duration) -> crate::runtime::Wait;
+    /// Runs `task` in the background, as the reference forks work into its
+    /// layer's scope: it ends with the process.
+    fn spawn(&self, task: crate::runtime::Task);
     /// The stored link to `environment_id`, if this server keeps links.
     fn peer_link(&self, _environment_id: &str) -> Option<PeerLinkInfo> {
         None
