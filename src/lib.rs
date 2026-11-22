@@ -106,6 +106,8 @@ mod store;
 pub use store::*;
 pub(crate) use store::{now, CommandReceipt};
 #[cfg(feature = "native")]
+mod peer_links;
+#[cfg(feature = "native")]
 mod server;
 #[cfg(feature = "native")]
 mod startup_trace;

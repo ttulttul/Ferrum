@@ -33,7 +33,7 @@ Based on `main` and the parity test suites:
 - **Separate thread store:** Rust stores its orchestration event log in `events.jsonl` and does **not** read existing threads from the TypeScript server's `statev2.sqlite`.
 - **Live event ordering:** Rust derives live thread domain events from projection commits rather than emitting them in the reference server's exact order and grouping (one per streamed text delta, records grouped by kind).
 - **Provider status checks:** Claude Code, Codex, fx and Kiro are checked (installed version, sign-in state, models). Other providers still show "not checked", Claude skills are always empty, and the latest-release version advisory is reported as unknown.
-- **No outgoing environment links:** The server can accept links issued by the TypeScript server, but cannot initiate outgoing environment links to other machines.
+- **Outgoing environment links are partial:** The server can link to another machine, list and forget its links, and shares them with the TypeScript server on the same home, but it cannot yet forward tool calls over a link.
 - **Live shell subscriptions:** `orchestration.subscribeShell` currently sends only the initial snapshot and does not push subsequent `project.updated` / `thread.updated` events until reconnect.
 - **Other client-visible RPC gaps:** Tracked as explicit expected failures in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json), including:
   - uploaded attachment asset URLs returning 404;
@@ -136,7 +136,7 @@ python3 scripts/github_provider_parity.py --original-command "$original" --rust-
 python3 scripts/relay_parity.py --checkout /tmp/t3code-reference --rust "$rust"
 ```
 
-Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
+Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
 
 Known gaps in `client_rpc_parity.py` and `client_thread_parity.py` are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json); both suites fail on any unlisted mismatch and on any listed case that starts passing.
 
