@@ -145,7 +145,7 @@ fn resolve_npm(path: &OsStr) -> Option<PathBuf> {
         })
 }
 
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
     };

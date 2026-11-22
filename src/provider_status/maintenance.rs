@@ -215,16 +215,11 @@ fn normalize(path: &str) -> String {
     path.replace('\\', "/").to_lowercase()
 }
 
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
 /// `resolveCommandPath`: a command with a slash as given, otherwise the
 /// first executable of that name on the environment's `PATH`.
 pub(crate) fn resolve_command_path(command: &str, env: &ProcessEnv) -> Option<String> {
     if command.contains('/') || command.contains('\\') {
-        return is_executable_file(Path::new(command)).then(|| command.to_owned());
+        return crate::npm_release::is_executable(Path::new(command)).then(|| command.to_owned());
     }
     let path = env.get("PATH")?;
     let mut seen = Vec::new();
@@ -235,7 +230,7 @@ pub(crate) fn resolve_command_path(command: &str, env: &ProcessEnv) -> Option<St
         }
         seen.push(entry);
         let candidate = Path::new(entry).join(command);
-        if is_executable_file(&candidate) {
+        if crate::npm_release::is_executable(&candidate) {
             return Some(normalize_join(&candidate));
         }
     }

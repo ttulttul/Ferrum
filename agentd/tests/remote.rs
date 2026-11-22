@@ -21,7 +21,11 @@ struct Setup {
     root: std::path::PathBuf,
 }
 
+#[path = "../../tests/support/mod.rs"]
+mod support;
+
 async fn setup() -> Setup {
+    support::isolate_host();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project");
     std::fs::create_dir_all(&root).unwrap();
@@ -168,7 +172,7 @@ async fn vcs_status_matches_the_local_workspace() {
     assert!(matches!(local, Some(Ok(_))));
     assert_eq!(s.remote.vcs("refreshStatus", &input, false).await, local);
     // The polled reading comes from agentd's watch.
-    assert_eq!(s.remote.vcs_status(&input, false).await, local);
+    assert_eq!(s.remote.vcs_status(&input, false, false).await, local);
     assert_eq!(
         s.remote.vcs_branch(&input).await,
         s.local.vcs_branch(&input).await
@@ -181,12 +185,12 @@ async fn vcs_status_matches_the_local_workspace() {
     std::fs::write(s.root.join("c.txt"), "c\n").unwrap();
     let changed = s.local.vcs("refreshStatus", &input, false).await;
     for _ in 0..200 {
-        if s.remote.vcs_status(&input, false).await == changed {
+        if s.remote.vcs_status(&input, false, false).await == changed {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert_eq!(s.remote.vcs_status(&input, false).await, changed);
+    assert_eq!(s.remote.vcs_status(&input, false, false).await, changed);
     assert_eq!(
         s.remote.capture_git_tree(&s.root.to_string_lossy()).await,
         s.local.capture_git_tree(&s.root.to_string_lossy()).await
@@ -228,6 +232,22 @@ async fn git_workflows_answer_like_the_local_workspace() {
 #[tokio::test]
 async fn a_terminal_runs_through_agentd() {
     let s = setup().await;
+    // The isolated host has no login shell. Supply an interactive-only shell
+    // for this PTY; a PATH hydration request passes arguments and exits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let shell = std::env::var_os("SHELL").unwrap();
+        std::fs::write(
+            &shell,
+            r#"#!/bin/sh
+[ "$#" -eq 0 ] || exit 1
+PS1= ENV= exec /bin/sh
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let mut output = s.remote.terminal_events();
     let open =
         json!({"threadId": "t1", "terminalId": "term-1", "cwd": s.root, "cols": 80, "rows": 24});

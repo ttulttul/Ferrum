@@ -176,7 +176,7 @@ pub fn repository_key_from_remote(remote_url: &str) -> String {
 }
 
 /// The host a remote is on: with its port as written, and as a bare host name.
-fn parse_git_remote_host(remote_url: &str) -> Option<(String, String)> {
+pub(crate) fn parse_git_remote_host(remote_url: &str) -> Option<(String, String)> {
     let trimmed = remote_url.trim();
     if trimmed.is_empty() {
         return None;

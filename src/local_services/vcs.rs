@@ -7,7 +7,10 @@ use std::{
     process::{Output, Stdio},
 };
 
-pub struct VcsService;
+#[derive(Default)]
+pub struct VcsService {
+    hosted: super::git_workflow::status::Cache,
+}
 pub(super) async fn run(cwd: &str, args: &[&str]) -> std::io::Result<Output> {
     crate::login_shell::tokio_command("git")
         .current_dir(cwd)
@@ -138,11 +141,18 @@ pub(super) async fn default_ref(cwd: &str) -> Option<String> {
     remote_default_branch(cwd, "origin").await
 }
 mod base;
+mod removal;
+mod worktree;
 pub(super) use base::{branch_base, read_branch_base, record_worktree_base, review_base};
 fn nonrepo() -> Value {
     json!({"isRepo":false,"hasPrimaryRemote":false,"isDefaultRef":false,"refName":null,"hasWorkingTreeChanges":false,"workingTree":{"files":[],"insertions":0,"deletions":0},"hasUpstream":false,"aheadCount":0,"behindCount":0,"aheadOfDefaultCount":0,"pr":null})
 }
-async fn status(root: &str) -> Reply {
+async fn status(
+    root: &str,
+    hosted: &super::git_workflow::status::Cache,
+    local_only: bool,
+    subscription: bool,
+) -> Reply {
     let head = branch(root).await;
     let origin = read(root, &["remote"]).await.unwrap_or_default();
     let primary = origin
@@ -160,33 +170,27 @@ async fn status(root: &str) -> Reply {
     });
     let has_remote = !origin.is_empty();
     let mut result = json!({"isRepo":true});
-    if let Some(remote) = origin
-        .lines()
-        .find(|r| *r == "origin")
-        .or_else(|| origin.lines().next())
+    let preferred = match head.as_ref() {
+        Some(name) => read(root, &["config", "--get", &format!("branch.{name}.remote")]).await,
+        None => None,
+    };
+    let mut url = read(
+        root,
+        &[
+            "remote",
+            "get-url",
+            preferred.as_deref().unwrap_or("origin"),
+        ],
+    )
+    .await;
+    if url.is_none() && preferred.is_some() {
+        url = read(root, &["remote", "get-url", "origin"]).await;
+    }
+    if let Some(provider) = url
+        .as_deref()
+        .and_then(super::git_workflow::status::provider)
     {
-        if let Some(url) = read(root, &["remote", "get-url", remote]).await {
-            let host = url::Url::parse(&url)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_owned))
-                .or_else(|| {
-                    url.split_once('@')?
-                        .1
-                        .split_once(':')
-                        .map(|(h, _)| h.to_owned())
-                });
-            if let Some(h) = host.as_deref() {
-                if let Some((kind, name)) = match h {
-                    "github.com" => Some(("github", "GitHub")),
-                    "gitlab.com" => Some(("gitlab", "GitLab")),
-                    "bitbucket.org" => Some(("bitbucket", "Bitbucket")),
-                    _ => None,
-                } {
-                    result["sourceControlProvider"] =
-                        json!({"kind":kind,"name":name,"baseUrl":format!("https://{h}")});
-                }
-            }
-        }
+        result["sourceControlProvider"] = provider;
     }
     result["hasPrimaryRemote"] = json!(has_remote);
     result["isDefaultRef"] = json!(is_default);
@@ -260,6 +264,13 @@ async fn status(root: &str) -> Reply {
             }
         }
     }
+    if local_only {
+        let cached = hosted.snapshot(root, head.as_deref());
+        if let Some(remote) = cached.or_else(|| (!subscription).then(||json!({"hasUpstream":false,"aheadCount":0,"behindCount":0,"aheadOfDefaultCount":0,"pr":null}))) {
+            result.as_object_mut().unwrap().extend(remote.as_object().unwrap().clone());
+        }
+        return Ok(result);
+    }
     let upstream = read(
         root,
         &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
@@ -294,11 +305,41 @@ async fn status(root: &str) -> Reply {
     } else {
         0
     };
-    result["hasUpstream"] = json!(upstream.is_some());
-    result["aheadCount"] = json!(parts.next().unwrap_or(divergence));
-    result["behindCount"] = json!(parts.next().unwrap_or(0));
-    result["aheadOfDefaultCount"] = json!(if is_default { 0 } else { divergence });
-    result["pr"] = Value::Null;
+    let mut pr = match head.as_deref() {
+        Some(branch) => {
+            hosted
+                .pull_request(
+                    root,
+                    branch,
+                    upstream.as_deref(),
+                    default.as_deref(),
+                    &origin,
+                    !subscription,
+                )
+                .await
+        }
+        None => None,
+    }
+    .filter(|pr| !is_default || pr["state"] == "open");
+    let mut shipped = false;
+    if let Some(pr) = &mut pr {
+        let sha = pr.as_object_mut().unwrap().remove("headSha");
+        shipped = pr["state"] == "merged"
+            && sha.as_ref().and_then(Value::as_str) == Some(&basis)
+            && default.as_ref().map_or(
+                matches!(pr["baseRef"].as_str(), Some("main" | "master")),
+                |d| pr["baseRef"] == *d,
+            );
+    }
+    let remote = json!({"hasUpstream":upstream.is_some(),
+        "aheadCount":if shipped && upstream.is_none() {0} else {parts.next().unwrap_or(divergence)},
+        "behindCount":parts.next().unwrap_or(0),
+        "aheadOfDefaultCount": if is_default || shipped {0} else {divergence},"pr":pr});
+    result
+        .as_object_mut()
+        .unwrap()
+        .extend(remote.as_object().unwrap().clone());
+    hosted.remember(root, head, remote);
     Ok(result)
 }
 
@@ -465,6 +506,18 @@ pub(super) fn lexical_path(path: &Path) -> std::path::PathBuf {
 }
 
 impl VcsService {
+    pub(crate) async fn subscription(&self, input: &Value, fetch: bool, initial: bool) -> Reply {
+        let cwd = string(input, "cwd")?;
+        let Some(root) = read(cwd, &["rev-parse", "--show-toplevel"]).await else {
+            return Ok(nonrepo());
+        };
+        let cached_only = initial || input["includeRemote"] == false;
+        if fetch && !cached_only {
+            super::vcs_upstream::refresh_if_stale(cwd).await;
+        }
+        status(&root, &self.hosted, cached_only, true).await
+    }
+
     pub async fn branch_status(&self, input: &Value) -> Reply {
         let cwd = string(input, "cwd")?;
         let is_repo = read(cwd, &["rev-parse", "--git-dir"]).await.is_some();
@@ -505,6 +558,7 @@ impl VcsService {
                 input,
                 &super::base_directory(base_dir).join("worktrees"),
                 refresh_upstream,
+                None,
             )
             .await,
         )
@@ -514,6 +568,7 @@ impl VcsService {
         input: &Value,
         state_dir: &Path,
         directory: &str,
+        submodules: Option<&str>,
     ) -> Reply {
         let parent = if directory.is_empty() {
             super::base_directory(state_dir).join("worktrees")
@@ -527,7 +582,8 @@ impl VcsService {
             }
             normalized
         };
-        self.apply("createWorktree", input, &parent, false).await
+        self.apply("createWorktree", input, &parent, false, submodules)
+            .await
     }
     async fn apply(
         &self,
@@ -535,6 +591,7 @@ impl VcsService {
         input: &Value,
         base_dir: &Path,
         refresh_upstream: bool,
+        submodules: Option<&str>,
     ) -> Reply {
         let cwd = string(input, "cwd")?;
         if method == "init" {
@@ -571,10 +628,11 @@ impl VcsService {
         };
         match method {
             "refreshStatus" => {
-                if refresh_upstream {
+                let local_only = input["localOnly"] == true;
+                if refresh_upstream && !local_only {
                     super::vcs_upstream::refresh_if_stale(cwd).await;
                 }
-                status(&root).await
+                status(&root, &self.hosted, local_only, false).await
             }
             "listRefs" => refs(&root, cwd, input).await,
             "pull" => {
@@ -671,77 +729,14 @@ impl VcsService {
                 let path = std::path::absolute(path)
                     .map_err(|e| json!({"_tag":"Die","defect":e.to_string()}))?;
                 let path = path.to_string_lossy();
-                if let Some(new) = new {
-                    let start = if name == "-" { "@{-1}" } else { name };
-                    checked(
-                        cwd,
-                        "createWorktree.createBranch",
-                        &["branch", "--no-track", "--", new, start],
-                        "git branch failed",
-                    )
-                    .await?;
-                    if let Some(remote) = read(cwd, &["rev-parse", "--symbolic-full-name", start])
-                        .await
-                        .filter(|r| r.starts_with("refs/remotes/"))
-                    {
-                        let _ = read(
-                            cwd,
-                            &["branch", &format!("--set-upstream-to={remote}"), "--", new],
-                        )
-                        .await;
-                    }
-                }
-                let workers = read(cwd, &["config", "--get", "checkout.workers"])
-                    .await
-                    .unwrap_or_else(|| "0".into());
-                let config = format!("checkout.workers={workers}");
-                let args = ["-c", &config, "worktree", "add", "--", &path, target];
-                checked(cwd, "createWorktree", &args, "git worktree add failed").await?;
+                worktree::create(cwd, name, new, &path, &common, submodules).await?;
                 if let (Some(new), Some(base)) = (new, input["baseRefName"].as_str()) {
                     record_worktree_base(cwd, new, base).await;
                 }
                 Ok(json!({"worktree":{"path":path,"refName":target}}))
             }
             "removeWorktree" => {
-                let path = string(input, "path")?;
-                let target = std::path::absolute(Path::new(cwd).join(path))
-                    .map_err(|e| json!({"_tag":"Die","defect":e.to_string()}))?;
-                let target = lexical_path(&target);
-                let path = target.to_string_lossy();
-                let mut args = vec![
-                    "-c",
-                    "status.showUntrackedFiles=normal",
-                    "worktree",
-                    "remove",
-                ];
-                if input["force"] == true {
-                    args.push("--force");
-                }
-                args.extend(["--", &path]);
-                let result = run(cwd, &args).await;
-                if let Ok(out) = &result {
-                    let message = String::from_utf8_lossy(&out.stderr);
-                    if !out.status.success()
-                        && (message.contains("is not a working tree")
-                            || message.contains("cannot remove working tree"))
-                        && matches!(target.try_exists(), Ok(false))
-                    {
-                        checked(
-                            cwd,
-                            "pruneWorktrees",
-                            &["worktree", "prune"],
-                            "git worktree prune failed",
-                        )
-                        .await?;
-                        return Ok(Value::Null);
-                    }
-                }
-                checked_output(
-                    result,
-                    failure_context("removeWorktree", cwd, &args),
-                    "git worktree remove failed",
-                )?;
-                Ok(Value::Null)
+                removal::remove(cwd, string(input, "path")?, input["force"] == true).await
             }
             _ => unreachable!(),
         }

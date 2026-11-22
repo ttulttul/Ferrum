@@ -7,7 +7,7 @@ use url::Url;
 pub(super) struct Remote {
     pub kind: &'static str,
     host: String,
-    repo: String,
+    pub(super) repo: String,
 }
 fn safe_path(s: &str) -> bool {
     s.split('/').all(|p| {
@@ -191,7 +191,13 @@ impl Remote {
         row.and_then(|v|Some((v["name"].as_str()?.into(),v["url"].as_str()?.trim_end_matches('/').into())))
             .ok_or_else(||self.error(cwd,"getChangeRequest",reference,"No matching Forgejo login. Use `fj auth login`, `fj auth add-token`, or `tea login add` for this server. For a server under a URL subpath, use `tea login add`. Choose a default when multiple tea accounts match."))
     }
-    async fn http(&self, cwd: &str, reference: &str, repo: &str, n: u64) -> Result<Value, Value> {
+    async fn http(
+        &self,
+        cwd: &str,
+        reference: &str,
+        repo: &str,
+        suffix: &str,
+    ) -> Result<Value, Value> {
         let fail = |s: &str| self.error(cwd, "getChangeRequest", reference, s);
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -203,7 +209,7 @@ impl Remote {
                 let base = std::env::var("T3CODE_BITBUCKET_API_BASE_URL")
                     .unwrap_or_else(|_| "https://api.bitbucket.org/2.0".into());
                 let req = client.get(format!(
-                    "{}/repositories/{repo}/pullrequests/{n}",
+                    "{}/repositories/{repo}/pullrequests{suffix}",
                     base.trim_end_matches('/')
                 ));
                 if let Ok(token) = std::env::var("T3CODE_BITBUCKET_ACCESS_TOKEN") {
@@ -230,7 +236,7 @@ impl Remote {
                     .await?;
                 client
                     .get(format!(
-                        "https://api.cursor.com/v1/origin/repos/{repo}/pulls/{n}"
+                        "https://api.cursor.com/v1/origin/repos/{repo}/pulls{suffix}"
                     ))
                     .bearer_auth(token.trim())
             }
@@ -275,7 +281,10 @@ impl Remote {
                     }
                 };
                 client
-                    .get(format!("https://{}/api/repos/{repo}/pulls/{n}", self.host))
+                    .get(format!(
+                        "https://{}/api/repos/{repo}/pulls{suffix}",
+                        self.host
+                    ))
                     .bearer_auth(token.trim())
             }
             _ => unreachable!(),
@@ -401,7 +410,7 @@ impl Remote {
                         },
                     )
                 })?;
-                let raw = self.http(cwd, reference, &repo, n).await?;
+                let raw = self.http(cwd, reference, &repo, &format!("/{n}")).await?;
                 return self.normalize(&raw, &repo).ok_or_else(|| {
                     self.error(
                         cwd,
@@ -423,6 +432,199 @@ impl Remote {
                     "The provider returned an unreadable response.",
                 )
             })
+    }
+    pub(super) async fn list(
+        &self,
+        cwd: &str,
+        head: &str,
+        open_only: bool,
+    ) -> Result<Vec<Value>, Value> {
+        let state = if open_only { "open" } else { "all" };
+        let op = "listChangeRequests";
+        let invalid = || self.error(cwd, op, head, "The provider returned an unreadable list.");
+        let branch: String = url::form_urlencoded::byte_serialize(head.as_bytes()).collect();
+        let rows = match self.kind {
+            "gitlab" | "azure-devops" => {
+                let (bin, mut args) = if self.kind == "gitlab" {
+                    let mut args = vec!["mr", "list", "--source-branch", head];
+                    if !open_only {
+                        args.push("--all");
+                    }
+                    args.extend(["--per-page", "100", "--output", "json"]);
+                    ("glab", args)
+                } else {
+                    (
+                        "az",
+                        vec![
+                            "repos",
+                            "pr",
+                            "list",
+                            "--detect",
+                            "true",
+                            "--source-branch",
+                            &branch,
+                            "--status",
+                            if open_only { "active" } else { "all" },
+                            "--top",
+                            "100",
+                            "--only-show-errors",
+                            "--output",
+                            "json",
+                        ],
+                    )
+                };
+                let scoped;
+                if self.kind == "azure-devops" {
+                    let parts: Vec<_> = self.repo.split('/').collect();
+                    let scope = match parts.as_slice() {
+                        ["v3", org, project, repo] => Some((*org, *project, *repo)),
+                        [org, project, "_git", repo] if self.host == "dev.azure.com" => {
+                            Some((*org, *project, *repo))
+                        }
+                        [project, "_git", repo] | ["DefaultCollection", project, "_git", repo] => {
+                            self.host
+                                .strip_suffix(".visualstudio.com")
+                                .map(|org| (org, *project, *repo))
+                        }
+                        _ => None,
+                    };
+                    if let Some((org, project, repo)) = scope {
+                        args[4] = "false";
+                        let organization = if self.host.ends_with(".visualstudio.com") {
+                            format!("https://{org}.visualstudio.com")
+                        } else {
+                            format!("https://dev.azure.com/{org}")
+                        };
+                        scoped = [
+                            organization,
+                            format!("--project={project}"),
+                            format!("--repository={repo}"),
+                        ];
+                        args.push("--organization");
+                        args.extend(scoped.iter().map(String::as_str));
+                    }
+                }
+                let raw = self.command(cwd, op, head, bin, &args, None).await?;
+                if raw.trim().is_empty() {
+                    return Ok(vec![]);
+                }
+                serde_json::from_str::<Vec<Value>>(&raw).map_err(|_| invalid())?
+            }
+            "forgejo" => {
+                let (login, base) = self.tea_login(cwd, head).await?;
+                let mut found = vec![];
+                for page in 1.. {
+                    let endpoint = format!("{base}/api/v1/repos/{}/pulls?state={state}&head={branch}&sort=recentupdate&limit=50&page={page}",self.repo);
+                    let raw = self
+                        .command(
+                            cwd,
+                            op,
+                            head,
+                            "tea",
+                            &[
+                                "api",
+                                "--include",
+                                "--login",
+                                &login,
+                                "--repo",
+                                &self.repo,
+                                "--method",
+                                "GET",
+                                &endpoint,
+                            ],
+                            None,
+                        )
+                        .await?;
+                    let rows: Vec<Value> = serde_json::from_str(&raw).map_err(|_| invalid())?;
+                    let last = rows.len() < 50;
+                    found.extend(
+                        rows.into_iter()
+                            .filter(|r| r["head"]["ref"] == head || r["head"]["label"] == head),
+                    );
+                    if last || found.len() >= 20 {
+                        break;
+                    }
+                }
+                found
+            }
+            "gitcafe" => {
+                let mut after = None;
+                let mut found = vec![];
+                loop {
+                    let mut pairs = vec![
+                        ("sourceBranches", json!([head]).to_string()),
+                        ("sort", "newest".into()),
+                        ("limit", "20".into()),
+                    ];
+                    if open_only {
+                        pairs.push(("state", "open".into()));
+                    }
+                    if let Some(cursor) = &after {
+                        pairs.push(("after", String::clone(cursor)));
+                    }
+                    let query = url::form_urlencoded::Serializer::new(String::new())
+                        .extend_pairs(pairs)
+                        .finish();
+                    let page = self
+                        .http(cwd, head, &self.repo, &format!("?{query}"))
+                        .await?;
+                    let rows = page["items"].as_array().ok_or_else(invalid)?;
+                    for row in rows {
+                        if row["sourceBranch"] == head {
+                            let n = row["number"].as_u64().ok_or_else(invalid)?;
+                            found.push(self.read(cwd, &n.to_string()).await?);
+                            if found.len() == 20 {
+                                return Ok(found);
+                            }
+                        }
+                    }
+                    let next = page["next"].as_str().map(str::to_owned);
+                    if rows.is_empty() || next.is_none() || next == after {
+                        return Ok(found);
+                    }
+                    after = next;
+                }
+            }
+            "cursor-origin" => {
+                let page = self
+                    .http(
+                        cwd,
+                        head,
+                        &self.repo,
+                        &format!("?head={branch}&state={state}&pageSize=20&sortBy=updated"),
+                    )
+                    .await?;
+                page["pullRequests"].as_array().cloned().unwrap_or_default()
+            }
+            "bitbucket" => {
+                let states: &[&str] = if open_only {
+                    &["OPEN"]
+                } else {
+                    &["OPEN", "MERGED", "DECLINED", "SUPERSEDED"]
+                };
+                let filters = states
+                    .iter()
+                    .map(|s| format!("state = \"{s}\""))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                let filter = format!("source.branch.name = {} AND ({filters})", json!(head));
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("pagelen", "20")
+                    .append_pair("sort", "-updated_on")
+                    .append_pair("q", &filter)
+                    .extend_pairs(states.iter().map(|s| ("state", s)))
+                    .finish();
+                let page = self
+                    .http(cwd, head, &self.repo, &format!("?{query}"))
+                    .await?;
+                page["values"].as_array().cloned().ok_or_else(invalid)?
+            }
+            _ => return Ok(vec![]),
+        };
+        Ok(rows
+            .iter()
+            .filter_map(|r| self.normalize(r, &self.repo))
+            .collect())
     }
     fn normalize(&self, v: &Value, target: &str) -> Option<Value> {
         let head_repo = match self.kind {
@@ -542,7 +744,24 @@ impl Remote {
                 _ => "open",
             }
         };
-        let row = json!({"number":n,"title":v["title"],"url":url,"baseRefName":base,"headRefName":head,"headRefOid":sha,"state":state,"isCrossRepository":cross,"headRepository":{"nameWithOwner":source},"headRepositoryOwner":{"login":source.as_deref().and_then(|s|s.split('/').next())}});
+        let draft = match self.kind {
+            "forgejo" => v["draft"].as_bool().unwrap_or_else(|| {
+                v["title"].as_str().is_some_and(|t| {
+                    t.to_ascii_uppercase().starts_with("WIP:")
+                        || t.to_ascii_uppercase().starts_with("[WIP]")
+                })
+            }),
+            "gitlab" => v["draft"] == true || v["work_in_progress"] == true,
+            "azure-devops" => v["isDraft"] == true,
+            _ => v["draft"] == true,
+        };
+        let updated = match self.kind {
+            "azure-devops" => get("/closedDate").or_else(|| get("/creationDate")),
+            "bitbucket" => get("/updated_on"),
+            "gitlab" | "forgejo" => get("/updated_at"),
+            _ => get("/updatedAt"),
+        };
+        let row = json!({"updatedAt":updated,"isDraft":draft,"number":n,"title":v["title"],"url":url,"baseRefName":base,"headRefName":head,"headRefOid":sha,"state":state,"isCrossRepository":cross,"headRepository":{"nameWithOwner":source},"headRepositoryOwner":{"login":source.as_deref().and_then(|s|s.split('/').next())}});
         resolved(&row).map(|_| row)
     }
     pub async fn local_checkout(

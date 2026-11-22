@@ -223,6 +223,7 @@ pub trait Workspace: MaybeSendSync {
         &'a self,
         input: &'a Value,
         fetch_upstream: bool,
+        _initial: bool,
     ) -> WorkspaceFuture<'a, Option<Reply>> {
         self.vcs("refreshStatus", input, fetch_upstream)
     }

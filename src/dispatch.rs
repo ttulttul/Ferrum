@@ -638,6 +638,7 @@ pub(crate) async fn polled_stream(
     host: &WorkspaceSettings,
     method: &str,
     input: &Value,
+    initial: bool,
 ) -> Option<Result<Value, Value>> {
     if method == "subscribeDiscoveredLocalServers" {
         return Some(workspace.local_servers(input).await);
@@ -649,14 +650,14 @@ pub(crate) async fn polled_stream(
         return Some(workspace.vcs_branch(input).await);
     }
     let status = match workspace
-        .vcs_status(input, host.automatic_git_fetch)
+        .vcs_status(input, host.automatic_git_fetch, initial)
         .await?
     {
         Ok(status) => status,
         Err(e) => return Some(Err(e)),
     };
     let mut local = serde_json::json!({});
-    let mut remote = serde_json::json!({});
+    let mut remote = Value::Null;
     for (key, value) in status.as_object()? {
         if matches!(
             key.as_str(),
@@ -668,6 +669,9 @@ pub(crate) async fn polled_stream(
                 local[key] = value.clone();
             }
         }
+    }
+    if status["isRepo"] != true {
+        remote = Value::Null;
     }
     Some(Ok(
         serde_json::json!({"_tag":"snapshot","local":local,"remote":remote}),

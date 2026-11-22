@@ -638,6 +638,7 @@ async fn run_call(
                 &state.workspace_settings(method).await,
                 method,
                 params,
+                previous.is_none(),
             )
             .await
             {
@@ -647,19 +648,11 @@ async fn run_call(
                 None => return Reply::defect(format!("Unknown stream: {method}")),
             };
             match (method, previous.as_ref()) {
-                ("subscribeVcsStatus", None) => {
-                    let mut initial = snapshot.clone();
-                    initial["remote"] = Value::Null;
-                    send(json!([initial])).await;
-                    if params["includeRemote"] != false && snapshot["local"]["isRepo"] == true {
-                        send(json!([{"_tag":"remoteUpdated","remote":snapshot["remote"]}])).await;
-                    }
-                }
                 ("subscribeVcsStatus", Some(old)) => {
                     if old["local"] != snapshot["local"] {
                         send(json!([{"_tag":"localUpdated","local":snapshot["local"]}])).await;
                     }
-                    if params["includeRemote"] != false && old["remote"] != snapshot["remote"] {
+                    if old["remote"] != snapshot["remote"] {
                         send(json!([{"_tag":"remoteUpdated","remote":snapshot["remote"]}])).await;
                     }
                 }
@@ -668,7 +661,14 @@ async fn run_call(
                 (_, Some(old)) if old == &snapshot => {}
                 _ => send(json!([snapshot])).await,
             }
+            let start_remote = previous.is_none()
+                && method == "subscribeVcsStatus"
+                && params["includeRemote"] != false
+                && snapshot["local"]["isRepo"] == true;
             previous = Some(snapshot);
+            if start_remote {
+                continue;
+            }
             state.runtime.sleep(std::time::Duration::from_secs(2)).await;
         }
     }

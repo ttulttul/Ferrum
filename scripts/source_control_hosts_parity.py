@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 from threading import Thread
+from urllib.parse import parse_qs, urlsplit
 
 from websockets.sync.client import connect
 from parity_harness import encode, managed_server
@@ -29,6 +30,11 @@ if cmd=="glab" and args==["mr","checkout","--","3"] or cmd=="tea" and args==["pu
     subprocess.run(["git","switch","--quiet","--","topic"],check=True)
 elif cmd=="glab" and args==["mr","view","--output","json","--","3"] or cmd=="az" and args==["repos","pr","show","--detect","false","--id","3","--only-show-errors","--output","json","--organization","https://dev.azure.com/org"]:
     print(json.dumps(data))
+elif cmd=="glab" and args==["mr","list","--source-branch","topic","--all","--per-page","100","--output","json"] or cmd=="az" and args==["repos","pr","list","--detect","false","--source-branch","topic","--status","all","--top","100","--only-show-errors","--output","json","--organization","https://dev.azure.com/org","--project=project","--repository=repo"]:
+    print(json.dumps([data]))
+elif cmd=="tea" and args[:7]==["api","--include","--login","forge","--repo","org/repo","--method"] and "/pulls?state=all&head=topic" in args[-1]:
+    print("HTTP/1.1 200 OK",file=sys.stderr)
+    print(json.dumps([data] if args[-1].endswith("page=1") else []))
 elif cmd=="tea" and args==["api","--include","--login","forge","--repo","org/repo","--method","GET","https://codeberg.org/api/v1/repos/org/repo/pulls/3"]:
     print("HTTP/1.1 200 OK",file=sys.stderr)
     print(json.dumps(data))
@@ -38,13 +44,22 @@ else:
 
 class Bitbucket(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != "/2.0/repositories/org/repo/pullrequests/3" or self.headers.get("Authorization") != "Bearer local-fixture":
+        url = urlsplit(self.path)
+        query = parse_qs(url.query)
+        if self.headers.get("Authorization") != "Bearer local-fixture":
+            self.send_error(403)
+            return
+        if url.path == "/2.0/repositories/org/repo/pullrequests/3":
+            result = self.server.pull
+        elif url.path == "/2.0/repositories/org/repo/pullrequests" and 'source.branch.name = "topic"' in query.get("q", [""])[0]:
+            result = {"values":[self.server.pull]}
+        else:
             self.send_error(404)
             return
         self.send_response(200)
         self.send_header("Content-Type","application/json")
         self.end_headers()
-        self.wfile.write(encode(self.server.pull))
+        self.wfile.write(encode(result))
 
     def log_message(self, *args):
         pass
@@ -57,9 +72,14 @@ def observe(server, root, api):
                  additional_headers={"Cookie":cookie}, compression=None, proxy=None) as socket:
         def call(host, label, op, payload, success):
             request_id = str(len(results))
-            socket.send(encode(dict(_tag="Request", id=request_id, tag="git."+op, payload=payload, headers=[])).decode())
+            socket.send(encode(dict(_tag="Request", id=request_id, tag=op if "." in op else "git."+op, payload=payload, headers=[])).decode())
             frame = socket.recv(timeout=20)
             exit = json.loads(frame)["exit"]
+            if op=="vcs.refreshStatus":
+                status=exit.get("value", {})
+                pr=status.get("pr") or {}
+                assert pr.get("number")==3 and pr.get("isDraft") and pr["updatedAt"]=="2026-01-02T03:04:05.000Z", (host,status)
+                frame=status
             results[host + " " + label] = (frame, (exit["_tag"] == "Success") == success)
 
         for host, address in (("GitLab","git@gitlab.com:org/repo"), ("Azure","git@ssh.dev.azure.com:v3/org/project/repo"),
@@ -97,6 +117,9 @@ def observe(server, root, api):
                           merged=False,base=ref("main"),head=ref("topic"))
             api.pull = dict(id=3,title="Example",state="OPEN",links={"html":{"href":"https://bitbucket.org/org/repo/pull-requests/3"}},
                             source=branch("topic"),destination=branch("main"))
+            stamp="2026-01-02T03:04:05Z"
+            pull.update(draft=True, isDraft=True, updated_at=stamp, creationDate=stamp)
+            api.pull.update(draft=True, updated_on=stamp)
             (repo / ".git/provider-fixture").write_text(json.dumps(pull))
             args=dict(cwd=str(repo),reference="#3")
             call(host,"resolve","resolvePullRequest",args,True)
@@ -105,6 +128,7 @@ def observe(server, root, api):
             git(repo,"restore","tracked")
             call(host,"local checkout","preparePullRequestThread",dict(**args,mode="local"),True)
             call(host,"occupied worktree","preparePullRequestThread",dict(**args,mode="worktree"),False)
+            call(host,"hosted status","vcs.refreshStatus",dict(cwd=str(repo)),True)
             results[host+" branch"] = (git(repo,"branch","--show-current"),git(repo,"rev-parse","HEAD").decode().strip()==sha)
             shutil.rmtree(bare)
             shutil.rmtree(repo)

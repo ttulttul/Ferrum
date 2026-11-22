@@ -106,6 +106,7 @@ pub(crate) struct Github<'a> {
     pub cli: &'a Path,
     pub cwd: &'a str,
     token: Option<String>,
+    host: &'a str,
 }
 
 impl<'a> Github<'a> {
@@ -114,11 +115,18 @@ impl<'a> Github<'a> {
             cli,
             cwd,
             token: None,
+            host: "github.com",
+        }
+    }
+    pub(crate) fn at_host(cli: &'a Path, cwd: &'a str, host: &'a str) -> Self {
+        Self {
+            host,
+            ..Self::new(cli, cwd)
         }
     }
     pub async fn pin_credential(&mut self) -> Result<(), Failure> {
         let cmd = crate::login_shell::tokio_command(self.cli)
-            .args(["auth", "token", "--hostname", "github.com"])
+            .args(["auth", "token", "--hostname", self.host])
             .env("GH_PROMPT_DISABLED", "1")
             .current_dir(self.cwd)
             .kill_on_drop(true)
@@ -151,7 +159,7 @@ impl<'a> Github<'a> {
             .args([
                 "api",
                 "--hostname",
-                "github.com",
+                self.host,
                 "--method",
                 method,
                 "-H",

@@ -110,7 +110,7 @@ pub(crate) async fn open(
         }
         _ => {
             let reading = poll(workspace, method, params).await?;
-            let first = changes(method, params, None, &reading);
+            let first = changes(method, None, &reading);
             subscription.cursor = json!({ "previous": reading });
             first
         }
@@ -119,7 +119,7 @@ pub(crate) async fn open(
 }
 
 async fn poll(workspace: &RemoteWorkspace, method: &str, params: &Value) -> Result<Value, Reply> {
-    match dispatch::polled_stream(workspace, &settings(), method, params).await {
+    match dispatch::polled_stream(workspace, &settings(), method, params, false).await {
         Some(Ok(reading)) => Ok(reading),
         Some(Err(error)) => Err(failure(error)),
         None => Err(Reply::defect(format!("Unknown stream: {method}"))),
@@ -128,22 +128,14 @@ async fn poll(workspace: &RemoteWorkspace, method: &str, params: &Value) -> Resu
 
 /// The batches a polled stream sends for `reading`, after `previous`, as the
 /// native server's polling loop sends them.
-fn changes(method: &str, params: &Value, previous: Option<&Value>, reading: &Value) -> Vec<Value> {
+fn changes(method: &str, previous: Option<&Value>, reading: &Value) -> Vec<Value> {
     let mut batches = Vec::new();
     match (method, previous) {
-        ("subscribeVcsStatus", None) => {
-            let mut initial = reading.clone();
-            initial["remote"] = Value::Null;
-            batches.push(json!([initial]));
-            if params["includeRemote"] != false && reading["local"]["isRepo"] == true {
-                batches.push(json!([{"_tag":"remoteUpdated","remote":reading["remote"]}]));
-            }
-        }
         ("subscribeVcsStatus", Some(old)) => {
             if old["local"] != reading["local"] {
                 batches.push(json!([{"_tag":"localUpdated","local":reading["local"]}]));
             }
-            if params["includeRemote"] != false && old["remote"] != reading["remote"] {
+            if old["remote"] != reading["remote"] {
                 batches.push(json!([{"_tag":"remoteUpdated","remote":reading["remote"]}]));
             }
         }
@@ -169,7 +161,7 @@ pub(crate) async fn advance(
                 return Vec::new();
             };
             let previous = subscription.cursor.get("previous").cloned();
-            let batches = changes(&method, &subscription.params, previous.as_ref(), &reading);
+            let batches = changes(&method, previous.as_ref(), &reading);
             subscription.cursor = json!({ "previous": reading });
             batches
         }

@@ -13,7 +13,7 @@ from socketserver import ThreadingUnixStreamServer
 import subprocess
 import tempfile
 from threading import Thread
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from websockets.sync.client import connect
 import parity_harness as harness
@@ -79,7 +79,22 @@ class Provider(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path == f"/repos/{REPO}/stacks":
+        if path == f"/repos/{REPO}/pulls" and hasattr(self.server, "status_rows"):
+            head = parse_qs(urlsplit(self.path).query).get("head", [""])[0]
+            pulls = []
+            for row in self.server.status_rows:
+                owner = row["headRepositoryOwner"]["login"]
+                if head != owner + ":" + row["headRefName"]:
+                    continue
+                repo = dict(name="parity", full_name=row["headRepository"]["nameWithOwner"],
+                            owner=dict(login=owner, type="User"))
+                pulls.append(dict(number=row["number"], title=row["title"], html_url=row["url"],
+                                  state="open" if row["state"]=="OPEN" else "closed", draft=row["isDraft"],
+                                  updated_at=row["updatedAt"], closed_at=row["closedAt"], merged_at=row["mergedAt"],
+                                  head=dict(ref=row["headRefName"],sha=row["headRefOid"],repo=repo),
+                                  base=dict(ref=row["baseRefName"],repo={"full_name":REPO})))
+            self.reply(200,pulls)
+        elif path == f"/repos/{REPO}/stacks":
             self.reply(200, [STACK] if self.path.endswith("pull_request=3") else [])
         elif path == f"/repos/{REPO}/stacks/6":
             self.reply(200, STACK)
@@ -196,6 +211,13 @@ class Provider(BaseHTTPRequestHandler):
                                             "nodes":[THREAD_COMMENT,{**THREAD_COMMENT,"isMinimized":True}] if more else []}}}
             elif "issue(number:" in query:
                 result = {"repository": {"issue": ISSUE}}
+            elif "pullRequests(" in query and hasattr(self.server, "status_rows"):
+                alias = re.search(r"(\w+)\s*:\s*repository\(", query)
+                head_variable = re.search(r"headRefName:\s*\$(\w+)",query)
+                head = data["variables"][head_variable.group(1)]
+                rows = [row for row in self.server.status_rows if row["headRefName"] == head]
+                self.server.status_reads.append(head)
+                result = {(alias.group(1) if alias else "repository"): {"pullRequests": {"nodes": rows}}}
             elif "pullRequest(number:" in query:
                 alias = re.search(r"(\w+)\s*:\s*repository\(", query)
                 result = {(alias.group(1) if alias else "repository"): self.server.repository}

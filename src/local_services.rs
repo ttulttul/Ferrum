@@ -75,7 +75,7 @@ mod tests {
         let data = Fixture::new();
         let cwd = repo.0.to_str().unwrap();
         let input = json!({"cwd":cwd});
-        let svc = VcsService;
+        let svc = VcsService::default();
         let call = |name: &'static str, input: Value| {
             let dir = &data.0;
             let svc = &svc;
@@ -173,7 +173,7 @@ mod tests {
         );
         git(&repo, &["push", "-q", "-u", "origin", "main"]);
         git(&repo, &["branch", "side"]);
-        let svc = VcsService;
+        let svc = VcsService::default();
         let input = json!({"cwd":repo.to_str().unwrap()});
         let refs = || async {
             let refs = svc
