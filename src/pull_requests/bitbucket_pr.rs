@@ -175,6 +175,46 @@ async fn request(method: &str, url: &str, body: Option<Value>) -> Result<String,
     response.text().await.map_err(|_| ApiError::send())
 }
 
+/// The most of a patch that is kept (`DIFF_MAX_BYTES`); the rest is cut and reported truncated.
+const DIFF_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Redirects a diff may follow. Bitbucket answers a diff with a redirect to where it is
+/// rendered; the reference's `fetch` follows redirects itself (up to 20, dropping the
+/// credential when one leaves the origin), so its own same-origin check never runs.
+const MAX_REDIRECTS: usize = 20;
+
+/// A GET whose body may be large (a patch), following redirects, keeping at most `max_bytes`.
+async fn get_capped(path: &str, max_bytes: usize) -> Result<(String, bool), ApiError> {
+    let url = format!("{}{path}", base_url().trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+        .build()
+        .map_err(|_| ApiError::send())?;
+    let mut builder = client.get(&url).header("Accept", "application/json");
+    match crate::bitbucket_credential::current().await {
+        Ok(Some(credential)) => builder = credential.apply(builder),
+        Ok(None) => {}
+        Err(message) => return Err(ApiError::unresolved(message)),
+    }
+    let mut response = builder.send().await.map_err(|_| ApiError::send())?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) || status == 204 {
+        let at = response.url().to_string();
+        return Err(ApiError::status(status, "GET", &at));
+    }
+    let (mut body, mut truncated) = (Vec::new(), false);
+    while let Some(chunk) = response.chunk().await.map_err(|_| ApiError::send())? {
+        let room = max_bytes.saturating_sub(body.len());
+        if chunk.len() > room {
+            body.extend_from_slice(&chunk[..room]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((String::from_utf8_lossy(&body).into_owned(), truncated))
+}
+
 fn get_json(body: &str, operation: &str) -> Result<Value, ApiError> {
     serde_json::from_str(body).map_err(|_| ApiError::unreadable(operation))
 }
@@ -972,6 +1012,42 @@ pub(super) async fn run(
             .map_err(failed)?;
             Ok(Value::Null)
         }
+        "diff" => {
+            if input.get("path").is_some() {
+                return Err(refusal(
+                    "diff",
+                    "This host cannot read one file of a change request's diff.",
+                ));
+            }
+            let failed = |e: ApiError| e.to_error("diff", "getDiff");
+            let commit = input["commit"].as_str();
+            // `isCommitSha`: 7 to 64 hexadecimal digits.
+            if commit.is_some_and(|c| {
+                !(7..=64).contains(&c.len()) || !c.bytes().all(|b| b.is_ascii_hexdigit())
+            }) {
+                let detail = "The named commit was not a commit sha.";
+                return Err(failed(ApiError {
+                    detail: detail.into(),
+                    reason: "failed",
+                    cause: json!({"name": "BitbucketDiffCommitError", "message": format!("Bitbucket failed in getPullRequestDiff: {detail}")}),
+                }));
+            }
+            let (path, _) = repo.path().map_err(failed)?;
+            let target = match commit {
+                Some(sha) => format!("{path}/diff/{sha}"),
+                None => format!("{path}/pullrequests/{number}/diff"),
+            };
+            // `/diff` answers the whole patch, without pages.
+            let (patch, truncated) = get_capped(&target, DIFF_MAX_BYTES).await.map_err(failed)?;
+            Ok(json!({"patch": patch, "truncated": truncated, "nextCursor": null}))
+        }
+        // Bitbucket cannot read a file at both sides of a diff (`getDiffFileContents`).
+        "diffFileContents" => Err(refusal(
+            "diffFileContents",
+            "This host cannot expand unchanged pull request lines.",
+        )),
+        // Bitbucket reports no per-file statistics (`getFileStats`).
+        "changeBreakdown" => Ok(Value::Null),
         "setReaction" => Err(refusal("setReaction", "This host has no reactions.")),
         "runAction" => run_action(&repo, input, number).await,
         _ => Err(json!({"_tag": "PullRequestUnavailableError", "reason": "provider-unsupported"})),
