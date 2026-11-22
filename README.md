@@ -51,7 +51,7 @@ The [client RPC parity suite](scripts/client_rpc_parity_xfail.json) has no expec
 - **Steering.** You can redirect a running Codex turn with a text message. Claude queues the message for later. Changing the model or including an attachment in a steering message still behaves differently.
 - **Titles and workflows.** Codex and Claude can generate thread titles. Custom title generators and titles that draw on the source thread’s history after a fork are still missing. Claude workflow tasks are also unsupported.
 - **ACP Registry agents.** Rust searches the ACP Registry, installs its agents (downloaded binaries, and npm or uv packages) and removes managed binaries. It cannot run turns with ACP agents yet.
-- **Provider settings.** Rust checks all built-in providers. Online checks for newer CLI versions, Claude skill and plugin listings, and Claude reset credits are still missing. Periodic checks can continue when nobody is using the app.
+- **Provider settings.** Rust checks all built-in providers, including whether a newer CLI release is out. Claude skill and plugin listings and Claude reset credits are still missing. Periodic checks can continue when nobody is using the app.
 
 ## Install and switching
 
@@ -153,6 +153,7 @@ Parity runs stay off the network. `server_env()` in `scripts/parity_harness.py` 
 - Bitbucket: a loopback API through `T3CODE_BITBUCKET_API_BASE_URL`.
 - npm releases: a loopback registry through `npm_config_registry`, read by the npm CLI.
 - The ACP Registry: a seeded `caches/acp-registry/registry.json`. Both servers fall back to it when the registry's fixed HTTPS URL is refused.
+- Provider release lookups in `provider_status_parity.py`: fake `npm`, `mise` and the like on `PATH`, and a loopback HTTPS proxy (`scripts/fake_https_proxy.py`) with a test CA both servers trust through `NODE_EXTRA_CA_CERTS`. It answers registry.npmjs.org and the Codex, Claude and Muse Code release channels, and forwards nothing.
 - The preview browser: the reference's pinned `chrome-headless-shell` folder, linked to the Playwright headless shell the Rust server runs, so nothing is downloaded.
 
 Some targets are still refused. Each has no setting that points it elsewhere, and both servers handle the failure the same way:

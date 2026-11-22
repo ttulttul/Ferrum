@@ -558,7 +558,7 @@ async fn read_account(env: &ProcessEnv) -> (Option<String>, Value) {
         return (email, unavailable_usage(&checked_at, "unsupported", None));
     };
     let fetch = async {
-        let response = reqwest::Client::new()
+        let response = super::http_client()
             .get(USAGE_URL)
             .bearer_auth(token)
             .send()
@@ -597,6 +597,13 @@ async fn read_account(env: &ProcessEnv) -> (Option<String>, Value) {
 /// cask stay with their manager, anything else updates with `grok update`
 /// (in its own `$GROK_HOME` for a script install).
 async fn maintenance(binary: &str, env: &ProcessEnv) -> maintenance::Capabilities {
+    maintenance::with_configured_npm(
+        resolve_maintenance(binary, env).await,
+        &super::base_env(&[]),
+    )
+}
+
+async fn resolve_maintenance(binary: &str, env: &ProcessEnv) -> maintenance::Capabilities {
     let package = Some(NPM_PACKAGE);
     let Some(context) = maintenance::context(binary, env) else {
         return maintenance::manual(package, None);
@@ -632,10 +639,9 @@ async fn maintenance(binary: &str, env: &ProcessEnv) -> maintenance::Capabilitie
             executable: context.resolved_command_path.clone(),
             args,
             lock_key: "grok".into(),
+            env: Some(context.env.clone()),
         }),
-        install_path: None,
-        manual_command: None,
-        compare_versions: None,
+        ..Default::default()
     }
 }
 

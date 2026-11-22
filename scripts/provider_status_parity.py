@@ -42,12 +42,16 @@ import time
 from websockets.sync.client import connect
 
 from client_initial_sync_parity import rpc
+from fake_https_proxy import FakeHttpsProxy
 from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, managed_server, path_without, run_concurrently
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/providers"
 XFAIL = Path(__file__).with_name("provider_status_parity_xfail.json")
 TIMES = {"checkedAt", "updatedAt", "lastCheckedAt"}
+# Package managers and installers a server may ask for a provider's latest version. They are hidden
+# from both servers, so only a scenario's fakes answer and no lookup reaches a real registry.
+INSTALLERS = {"npm", "pnpm", "bun", "mise", "brew", "vp", "yarn", "volta", "port"}
 
 # How each fake answers `--version`.
 VERSION = {
@@ -595,6 +599,79 @@ for scenario in SCENARIOS:
         scenario["fakes"]["muse"]["comment"] = "muse-code/launcher-v3 (refreshes with MUSE_SYNC_UPDATE=1)"
 
 
+def npm_view(package, version):
+    """A fake `npm` whose configured registry has `version` as `package`'s latest."""
+    return {"spec": {"commands": [{"args": ["view", "--global", "--json", f"{package}@latest", "version"],
+                                   **ok(json.dumps(version))}]}}
+
+
+def checks_on(settings):
+    return {**settings, "enableProviderUpdateChecks": True}
+
+
+GROK_FAKE = {"spec": {"commands": [{"args": ["--version"], **ok("grok 1.0.52")}, GROK_MODELS, GROK_SKILLS, GROK_ACP]}}
+SCENARIOS += [
+    {"name": "advisory grok update available", "instance": "grok", "settings": checks_on(enabled("grok")),
+     "fakes": {"grok": GROK_FAKE, "npm": npm_view("@xai-official/grok", "1.2.0")}},
+    {"name": "advisory grok up to date", "instance": "grok", "settings": checks_on(enabled("grok")),
+     "fakes": {"grok": GROK_FAKE, "npm": npm_view("@xai-official/grok", "1.0.52")}},
+    {"name": "advisory grok from the public registry", "instance": "grok", "settings": checks_on(enabled("grok")),
+     "fakes": {"grok": GROK_FAKE},
+     "proxy": {"GET registry.npmjs.org/%40xai-official%2Fgrok/latest": {"body": {"version": "1.3.0"}}}},
+    {"name": "advisory grok registry unreachable", "instance": "grok", "settings": checks_on(enabled("grok")),
+     "fakes": {"grok": GROK_FAKE}, "proxy": {"GET registry.npmjs.org/%40xai-official%2Fgrok/latest": {"status": 503}}},
+    {"name": "advisory codex installed elsewhere", "instance": "codex", "settings": checks_on({}),
+     "fakes": {"codex": {"version": "ok", "app": "ok", "fixture": "status_codex_signed_in.json"},
+               "npm": npm_view("@openai/codex", "0.200.0")}},
+    {"name": "advisory codex standalone release", "instance": "codex",
+     "settings": checks_on({"providerInstances": {"codex": {"driver": "codex", "config": {
+         "binaryPath": "<root>/codex-home/packages/standalone/bin/codex"}}}}),
+     "fakes": {"codex": {"version": "ok", "app": "ok", "fixture": "status_codex_signed_in.json",
+                         "at": "codex-home/packages/standalone/bin/codex"}},
+     "proxy": {"GET releases.openai.com/codex/channels/latest": {"body": {"tag_name": "rust-v0.180.0"}}}},
+    {"name": "advisory claude native release", "instance": "claudeAgent",
+     "settings": checks_on({"providerInstances": {"claudeAgent": {"driver": "claudeAgent", "config": {
+         "binaryPath": "<root>/.local/bin/claude"}}}}),
+     "fakes": {"claude": {"version": "ok", "fixture": "status_claude_signed_in.json",
+                          "at": ".local/share/claude/versions/2.1.300", "link": ".local/bin/claude"}},
+     "proxy": {"GET downloads.claude.ai/claude-code-releases/latest": {"body": "2.1.310\n"}}},
+    {"name": "advisory pi npm global update available", "instance": "pi", "settings": checks_on(enabled("pi")),
+     "fakes": {"pi": {"spec": {"commands": [{"args": ["--version"], **ok("0.85.0")}, PI_TEXT_GENERATION, pi_rpc()]},
+                      "at": "npm-prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js", "link": "fake-bin/pi"},
+               "npm": {"spec": {"commands": [{"prefix": ["outdated"], **ok(json.dumps(
+                   {"@earendil-works/pi-coding-agent": {"current": "0.85.0", "latest": "0.90.0"}}), 1)}]}}}},
+    {"name": "advisory pi npm global up to date", "instance": "pi", "settings": checks_on(enabled("pi")),
+     "fakes": {"pi": {"spec": {"commands": [{"args": ["--version"], **ok("0.85.0")}, PI_TEXT_GENERATION, pi_rpc()]},
+                      "at": "npm-prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js", "link": "fake-bin/pi"},
+               "npm": {"spec": {"commands": [{"prefix": ["outdated"], **ok("{}")}, {"prefix": ["ls"], **ok(json.dumps(
+                   {"dependencies": {"@earendil-works/pi-coding-agent": {"version": "0.85.0"}}}))}]}}}},
+    # mise owns codex (an active `latest` install, launched through mise's `latest` directory), so
+    # only `mise latest` says what an upgrade installs.
+    {"name": "advisory codex installed by mise", "instance": "codex",
+     "settings": checks_on({"providerInstances": {"codex": {"driver": "codex", "config": {
+         "binaryPath": "<root>/mise/installs/codex/latest/bin/codex"}}}}),
+     "fakes": {"codex": {"version": "ok", "app": "ok", "fixture": "status_codex_signed_in.json",
+                         "at": "mise/installs/codex/0.170.0/bin/codex", "link": "mise/installs/codex/latest/bin/codex"},
+               "mise": {"spec": {"commands": [
+                   {"args": ["which", "codex"], **ok("<root>/mise/installs/codex/0.170.0/bin/codex")},
+                   {"args": ["ls", "--json", "--installed", "codex"], **ok(json.dumps([
+                       {"install_path": "<root>/mise/installs/codex/0.170.0", "requested_version": "latest",
+                        "active": True}]))},
+                   {"args": ["ls", "--json", "--installed"], **ok(json.dumps({"codex": [
+                       {"install_path": "<root>/mise/installs/codex/0.170.0", "requested_version": "latest",
+                        "active": True}]}))},
+                   {"args": ["latest", "codex"], **ok("0.190.0")}]}}}},
+    {"name": "advisory muse channel", "instance": "muse", "settings": checks_on(enabled("muse")),
+     "fakes": {"muse": {"spec": {"commands": [{"args": ["--version"], **ok("muse 2.1.0-R4")}, muse_serve()]}}},
+     "proxy": {"GET api.meta.ai/muse-code/channels/muse-stable": {"body": {"version": "2.1.0-R9"}}}},
+    {"name": "advisory opencode npm global", "instance": "opencode", "settings": checks_on(enabled("opencode")),
+     "fakes": {"opencode": {"opencode": {"version": {"stdout": "1.15.0"}, "serve": {"routes": OC_V1_ROUTES}},
+                            "at": "npm-prefix/lib/node_modules/opencode-ai/bin/opencode", "link": "fake-bin/opencode"},
+               "npm": {"spec": {"commands": [{"prefix": ["outdated"], **ok(json.dumps(
+                   {"opencode-ai": {"latest": "1.16.2"}}), 1)}]}}}},
+]
+
+
 PI_NPM = "npm-prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 SCENARIOS += [
     {"name": "pi installed as an npm global", "instance": "pi", "settings": enabled("pi"),
@@ -784,7 +861,7 @@ def run_server(args, command, root, scenario, temporary):
             target.write_text(f'#!/bin/sh\nexec python3 "$FAKE_OPENCODE" {shlex.quote(str(spec))} "$@"\n')
         elif "spec" in fake:
             spec = root / f"{cli}.spec.json"
-            spec.write_text(json.dumps(fake["spec"]))
+            spec.write_text(json.dumps(fake["spec"]).replace("<root>", str(root)))
             # A "comment" is written into the wrapper, as an installer's marker would be.
             comment = "".join(f"# {line}\n" for line in fake.get("comment", "").splitlines())
             target.write_text(f'#!/bin/sh\n{comment}exec python3 "$FAKE_STATUS_CLI" {shlex.quote(str(spec))} "$@"\n')
@@ -799,6 +876,7 @@ def run_server(args, command, root, scenario, temporary):
             link.parent.mkdir(parents=True, exist_ok=True)
             link.symlink_to(target)
     api = FakeApi(scenario.get("api", {}))
+    proxy = FakeHttpsProxy(scenario["proxy"], root / "proxy") if "proxy" in scenario else None
     settings = json.loads(json.dumps({"enableProviderUpdateChecks": False, **scenario.get("settings", {})})
                           .replace("<root>", str(root)).replace("<api>", api.url))
     for name, text in scenario.get("files", {}).items():
@@ -810,15 +888,20 @@ def run_server(args, command, root, scenario, temporary):
             target.chmod(0o755)
     (root / "userdata").mkdir(parents=True, exist_ok=True)
     (root / "userdata/settings.json").write_text(json.dumps(settings))
-    env = {"PATH": os.pathsep.join([str(bin_dir), path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "path")]),
+    env = {"PATH": os.pathsep.join([str(bin_dir), path_without(PROVIDER_CLIS | RELAY_TOOLS | INSTALLERS,
+                                                               temporary / "path")]),
            "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
            "FAKE_STATUS_CLI": str(FIXTURES / "status_cli.py"),
            "FAKE_OPENCODE": str(FIXTURES / "fake_opencode.py"),
            "CURSOR_BACKEND_URL": api.url, "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1", "FAKE_PROVIDER_LOG": str(log),
            "FAKE_PROVIDER_SCENARIO": str(fixture)}
+    if proxy:
+        env.update(proxy.env())
     outcome = {}
     with contextlib.ExitStack() as stack:
         stack.callback(api.close)
+        if proxy:
+            stack.callback(proxy.close)
         url, cookie = managed_server(stack, command, root, secrets.token_hex(16), secrets.token_bytes(32), env=env)
         outcome["row"] = strip(wait_checked(url, cookie, scenario["instance"], scenario.get("wait", 20),
                                             scenario.get("settled", False), temporary,
@@ -840,7 +923,12 @@ def run_server(args, command, root, scenario, temporary):
     # The provider API requests each server made (distinct, as reads can repeat).
     served = Path(str(log) + ".http")
     outcome["requests"] = sorted(set(api.requests) | (set(served.read_text().splitlines()) if served.exists() else set()))
-    outcome["launches"] = sorted({line for line in launches.read_text().splitlines()
+    if proxy:
+        # Only requests to the scenario's own hosts: other startup fetches (the model manifest)
+        # also pass through the proxy, and a client without its CA never sends them.
+        hosts = {route.split()[1].split("/", 1)[0] for route in scenario["proxy"]}
+        outcome["requests"] += sorted({r for r in proxy.requests if r.split("/")[2] in hosts})
+    outcome["launches"] = sorted({strip(line, temporary) for line in launches.read_text().splitlines()
                                   if line != "app-server --help"}) if launches.exists() else []
     return outcome
 

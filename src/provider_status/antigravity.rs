@@ -549,8 +549,7 @@ async fn read_usage(profile: &Path, method: &str) -> Value {
             field("refresh_token")?,
         );
         let project = token["project_id"].as_str().map(str::to_owned);
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        let client = super::http_builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))
             .build()
