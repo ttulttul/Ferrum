@@ -84,6 +84,7 @@ def observe(server, root, api):
             sha = git(repo,"rev-parse","HEAD").decode().strip()
             git(repo, "switch", "-q", "main")
             bare = root / "remote.git"
+            # parity-env: git, not a T3 server
             subprocess.run(["git","clone","-q","--bare",repo,bare],check=True)
             branch = lambda name: dict(repository={"full_name":"org/repo"},branch={"name":name},commit={"hash":sha})
             pull = dict(number=3, title="Example", iid=3, web_url="https://gitlab.com/org/repo/-/merge_requests/3",

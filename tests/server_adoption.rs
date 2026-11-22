@@ -4,6 +4,8 @@
 //!
 //! Everything runs in a temporary T3 home on an ephemeral port.
 
+mod support;
+
 use std::time::Duration;
 
 use serde_json::Value;
@@ -82,6 +84,7 @@ async fn publishes_bound_port_serves_root_and_clears_record_on_shutdown() {
         mode: "web".into(),
         ..RuntimeConfig::default()
     };
+    support::isolate_host();
     let state = AppState::with_config(&paths.state_dir, Vec::new(), AuthService::new(), config)
         .await
         .unwrap();
@@ -148,6 +151,7 @@ async fn publishes_a_requested_host_and_its_origin() {
         requested_host: Some("127.0.0.1".parse().unwrap()),
         ..RuntimeConfig::default()
     };
+    support::isolate_host();
     let state = AppState::with_config(&paths.state_dir, Vec::new(), AuthService::new(), config)
         .await
         .unwrap();

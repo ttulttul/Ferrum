@@ -180,5 +180,6 @@ async fn serve(args: Args, bootstrap: Option<Bootstrap>) -> anyhow::Result<()> {
         config,
     )
     .await?;
+    state.enable_provider_status_checks();
     run_server_owned(state, listen, Some(ownership)).await
 }

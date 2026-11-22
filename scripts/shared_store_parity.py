@@ -39,7 +39,7 @@ import time
 
 import client_thread_parity as turns
 from client_initial_sync_parity import rpc
-from parity_harness import PROVIDER_CLIS, encode, free_port, http, managed_server, path_without, run_concurrently
+from parity_harness import PROVIDER_CLIS, encode, free_port, http, managed_server, path_without, run_concurrently, server_env
 
 PROJECT = "project:shared-store"
 THREAD = "thread:shared-store-reference"
@@ -226,8 +226,7 @@ def refused(command, home, credentials, root):
     server = shlex.split(command)
     scratch = root / "refusal"
     scratch.mkdir(exist_ok=True)
-    env = {k: os.environ[k] for k in ("LANG", "LC_ALL") if k in os.environ}
-    env.update(PATH=path_without(PROVIDER_CLIS, scratch / ".parity-path"), HOME=str(home), T3CODE_HOME=str(home))
+    env = server_env(home, {"PATH": path_without(PROVIDER_CLIS, scratch / ".parity-path")})
     result = subprocess.run(server + ["--host", "127.0.0.1", "--port", str(free_port())],
                             capture_output=True, text=True, env=env, cwd=home, timeout=60)
     return result.returncode, result.stdout + result.stderr

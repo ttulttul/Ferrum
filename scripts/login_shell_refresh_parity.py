@@ -119,7 +119,7 @@ def main():
             (root / ".profile").write_text(PROFILE)
             repos[name] = gitlab_repo(root)
             server = managed_server(stack, shlex.split(command), root, seed, key,
-                                    env={"PATH": str(bin), "SHELL": shutil.which("bash")})
+                                    env={"PATH": str(bin)})
             sessions[name] = Session(stack, server, root)
 
         observed = {name: {} for name in sessions}

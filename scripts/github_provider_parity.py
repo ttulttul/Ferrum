@@ -225,7 +225,9 @@ def main():
     with ExitStack() as stack:
         root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="t3-gh-parity-")))
         checkout = root / "repo"
+        # parity-env: git, not a T3 server
         subprocess.run(["git", "init", "--quiet", checkout], check=True)
+        # parity-env: git, not a T3 server
         subprocess.run(["git", "-C", checkout, "remote", "add", "origin", f"https://github.com/{REPO}.git"], check=True)
         projects = []
         sockets = []
@@ -255,6 +257,7 @@ def main():
                 lib = args.faketime_lib.resolve(strict=True)
                 prefix.extend([f"LD_PRELOAD={lib}", "FAKETIME=2026-11-10 12:00:00", "FAKETIME_DONT_FAKE_MONOTONIC=1", "TZ=UTC"])
             # Assert this gh version is actually using the fixture before starting either server.
+            # parity-env: gh against the local fixture, not a T3 server
             probe = subprocess.run(prefix + ["gh", "api", "--hostname", "github.com", "user"],
                                    capture_output=True, check=True, timeout=8)
             if json.loads(probe.stdout)["id"] != 1234:

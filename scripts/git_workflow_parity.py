@@ -24,6 +24,7 @@ DATE = "2026-01-01T00:00:00+00:00"
 def git(repo, *args):
     env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
                GIT_COMMITTER_DATE=DATE, GIT_AUTHOR_DATE=DATE)
+    # parity-env: git, not a T3 server
     return subprocess.check_output(["git", "-C", repo, *args], env=env)
 
 

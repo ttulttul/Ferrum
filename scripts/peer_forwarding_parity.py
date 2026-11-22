@@ -442,6 +442,7 @@ def reference_client_steps(args, servers):
             assert status == 200, (status, body)
             env = {**os.environ, "T3_PEER_LINK_CODE": json.loads(body)["credential"], "T3_PEER_LINK_ACCESS": "full-access",
                    "T3_PEER_LINK_ROOT": str(project)}
+            # parity-env: the Node sign-in driver, a client of the server, not a T3 server
             done = subprocess.run([args.node, str(Path(__file__).with_name("peer_link_sign_in.mjs")),
                                    str(args.reference_root), server.url],
                                   env=env, capture_output=True, text=True, timeout=180)

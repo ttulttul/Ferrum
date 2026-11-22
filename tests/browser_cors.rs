@@ -7,6 +7,8 @@
 //! Requests go over a raw socket so header order and absence are checked
 //! exactly as the wire carries them.
 
+mod support;
+
 use std::time::Duration;
 
 use t3code_server::{
@@ -101,6 +103,7 @@ async fn answers_browser_cors_like_the_reference() {
         mode: "web".into(),
         ..RuntimeConfig::default()
     };
+    support::isolate_host();
     let state = AppState::with_config(&paths.state_dir, Vec::new(), AuthService::new(), config)
         .await
         .unwrap();

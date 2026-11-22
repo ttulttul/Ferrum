@@ -5,6 +5,8 @@
 //!
 //! Everything runs in a temporary T3 home on an ephemeral port.
 
+mod support;
+
 use std::time::Duration;
 
 use rusqlite::{params, Connection};
@@ -111,6 +113,7 @@ async fn exchanges_a_pairing_token_issued_out_of_process_by_the_cli() {
         mode: "web".into(),
         ..RuntimeConfig::default()
     };
+    support::isolate_host();
     let state = AppState::with_config(&paths.state_dir, Vec::new(), AuthService::new(), config)
         .await
         .unwrap();

@@ -10,6 +10,8 @@
 //! Everything runs in a temporary T3 home on an ephemeral port, with an empty
 //! `PATH` so no CLI on the host can run, and with provider status checks off.
 
+mod support;
+
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -202,6 +204,7 @@ async fn start() -> Server {
         ..RuntimeConfig::default()
     };
     let auth = AuthService::with_bootstrap(CREDENTIAL);
+    support::isolate_host();
     let state = AppState::with_config(&paths.state_dir, Vec::new(), auth, config)
         .await
         .unwrap();

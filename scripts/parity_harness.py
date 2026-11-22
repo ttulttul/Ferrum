@@ -58,6 +58,7 @@ def launch(command, url, **kwargs):
         ready(url)
         yield
         return
+    # parity-env: callers pass the server_env their server needs
     process = subprocess.Popen(command, start_new_session=True, stdout=subprocess.DEVNULL, **kwargs)
     try:
         ready(url, process)
@@ -113,10 +114,11 @@ def session_cookie(url, secret):
 
 # The relay client a server would report from PATH (`cloud.getRelayClientStatus`).
 RELAY_TOOLS = {"cloudflared"}
-# Agent CLIs a server may probe or start. managed_server hides them, so a local run sees a host
-# without them, as CI does, and never starts a developer's real codex or claude.
-PROVIDER_CLIS = {"codex", "claude", "cursor-agent", "opencode", "gemini", "grok", "kiro-cli", "droid", "amp",
-                 "copilot", "qwen", "fx", "muse", "pi", "agy"}
+# Agent CLIs a server may probe or start, under every name either server looks one up by. server_env
+# hides them, so a local run sees a host without them, as CI does, and never starts a developer's
+# real codex or claude. Fakes a suite writes into its temporary directories stay visible.
+PROVIDER_CLIS = {"codex", "claude", "cursor-agent", "cursor", "opencode", "gemini", "grok", "kiro-cli", "droid",
+                 "amp", "copilot", "qwen", "fx", "muse", "pi", "agy", "antigravity", "agy_acp_server.par"}
 
 
 def isolated_git_env(directory):
@@ -133,19 +135,24 @@ def isolated_git_env(directory):
 
 
 def path_without(names, scratch, path=None):
-    """PATH with every directory that holds one of `names` replaced by links to its other entries."""
+    """PATH with every directory that holds one of `names` replaced by links to its other entries.
+
+    A program the suites wrote themselves (one whose real file is in the system temporary directory
+    or the repository's fixtures, such as a fake CLI) stays visible; a link to a host program does
+    not, even from a directory in the temporary directory."""
     directories = []
     for index, directory in enumerate((os.environ.get("PATH", "") if path is None else path).split(os.pathsep)):
         folder = Path(directory)
         if not folder.is_dir():
             continue
-        if not any((folder / name).exists() for name in names):
+        hidden = host_programs(folder, names)
+        if not hidden:
             directories.append(directory)
             continue
         shim = Path(scratch) / f"path-{index}"
         shim.mkdir(parents=True, exist_ok=True)
         for entry in folder.iterdir():
-            if entry.name not in names and not (shim / entry.name).exists():
+            if entry.name not in hidden and not (shim / entry.name).exists():
                 # Servers started side by side may share `scratch`.
                 with contextlib.suppress(FileExistsError):
                     (shim / entry.name).symlink_to(entry)
@@ -153,10 +160,97 @@ def path_without(names, scratch, path=None):
     return os.pathsep.join(directories)
 
 
-def managed_server(stack, prefix, root, secret, signing_key, env=None):
-    """Launches one server in `root`. `env` adds variables (or replaces PATH) for the child.
+def host_programs(folder, names):
+    """Those of `names` in `folder` that are the host's own programs rather than the suites'."""
+    return {name for name in names if (Path(folder) / name).exists() and not harness_owned(Path(folder) / name)}
 
-    Without a PATH in `env`, the child's PATH hides the provider CLIs (PROVIDER_CLIS)."""
+
+def harness_owned(path):
+    """Whether the real file of `path` is the suites' own: in the system temporary directory, where
+    suites write their homes and fakes, or in the repository's test fixtures."""
+    resolved = os.path.realpath(path)
+    for owned in (os.path.realpath(tempfile.gettempdir()), str(ROOT / "tests" / "fixtures")):
+        if resolved == owned or resolved.startswith(owned + os.sep):
+            return True
+    return False
+
+
+# The login shell both servers read PATH from at start-up and on refresh (`$SHELL -ilc`). It never
+# reads /etc/profile or the developer's own profile, which can put ~/.local/bin, nvm or Homebrew
+# (and their real codex and claude) back on PATH: only a `.profile` a suite wrote into the server's
+# temporary home. Named `bash` because the servers pick the capture syntax by the shell's name.
+LOGIN_SHELL = """#!/bin/sh
+# Written by the parity harness (scripts/parity_harness.py).
+case "$1" in
+  -[!-]*c*)
+    exec {bash} --noprofile --norc -c '[ -r "$HOME/.profile" ] && . "$HOME/.profile"; eval "$1"' bash "$2" ;;
+esac
+exec {bash} --noprofile --norc "$@"
+"""
+_LOGIN_SHELL_DIR = None
+_LOGIN_SHELL_LOCK = threading.Lock()
+
+
+def login_shell():
+    """The path of this process's parity login shell (LOGIN_SHELL), written on first use."""
+    global _LOGIN_SHELL_DIR
+    with _LOGIN_SHELL_LOCK:
+        if _LOGIN_SHELL_DIR is None:
+            import atexit
+            import shutil
+            bash = shutil.which("bash", path=os.defpath + os.pathsep + "/bin:/usr/bin")
+            if not bash:
+                raise RuntimeError("the parity login shell needs bash")
+            directory = Path(tempfile.mkdtemp(prefix="t3-parity-shell-"))
+            shell = directory / "bash"
+            shell.write_text(LOGIN_SHELL.format(bash=shlex.quote(bash)))
+            shell.chmod(0o755)
+            atexit.register(shutil.rmtree, directory, ignore_errors=True)
+            _LOGIN_SHELL_DIR = directory
+        return str(_LOGIN_SHELL_DIR / "bash")
+
+
+def split_env_prefix(command):
+    """`command` without a leading `env NAME=value ...`, and those variables, so server_env sees them."""
+    command = list(command)
+    variables = {}
+    if command and command[0] == "env":
+        command.pop(0)
+        while command and "=" in command[0] and not command[0].startswith("-"):
+            name, value = command.pop(0).split("=", 1)
+            variables[name] = value
+    return command, variables
+
+
+def server_env(home, env=None):
+    """The whole environment for a T3 server (or one of its CLI commands) a suite starts in `home`.
+
+    Every suite builds a server's environment here, so both servers get the same one and neither
+    can find a real provider CLI: not on PATH (PROVIDER_CLIS are hidden unless a suite wrote them), not through the login shell (LOGIN_SHELL), and not under the developer's
+    home. `env` adds variables or replaces PATH; nothing else reaches the child, so no developer
+    provider credential does either. scripts/check_parity_shards.py fails a suite that starts a
+    server without it.
+    """
+    env = dict(env or {})
+    if "SHELL" in env:
+        raise ValueError("server_env sets SHELL to the parity login shell; write a .profile in the home instead")
+    child = {k: os.environ[k] for k in ("LANG", "LC_ALL", "SYSTEMROOT") if k in os.environ}
+    path = env.pop("PATH", os.environ.get("PATH", ""))
+    child.update(env)
+    child["PATH"] = path_without(PROVIDER_CLIS, Path(home) / ".parity-path", path)
+    child.setdefault("HOME", str(home))
+    child.setdefault("T3CODE_HOME", str(home))
+    child["SHELL"] = login_shell()
+    for directory in child["PATH"].split(os.pathsep):
+        found = directory and host_programs(directory, PROVIDER_CLIS)
+        if found:
+            raise RuntimeError(f"a real provider CLI is still on the server PATH: {directory} has {sorted(found)}")
+    return child
+
+
+def managed_server(stack, prefix, root, secret, signing_key, env=None):
+    """Launches one server in `root`. `env` adds variables (or replaces PATH) for the child; see
+    server_env, which also takes the variables of a leading `env NAME=value` in `prefix`."""
     secrets_dir = root / "userdata" / "secrets"
     secrets_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     key_file = secrets_dir / "mcp-oauth-signing-key.bin"
@@ -171,12 +265,10 @@ def managed_server(stack, prefix, root, secret, signing_key, env=None):
     bootstrap.write(encode(envelope) + b"\n")
     bootstrap.seek(0)
     # Each child receives its own state directory, home and bootstrap descriptor.
-    # Do not pass developer provider credentials into parity processes.
-    child_env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "SYSTEMROOT") if k in os.environ}
-    if "PATH" not in (env or {}):
-        child_env["PATH"] = path_without(PROVIDER_CLIS, root / ".parity-path")
+    prefix, variables = split_env_prefix(prefix)
     stack.enter_context(launch(prefix + ["--bootstrap-fd", str(bootstrap.fileno())], url,
-                               env={**child_env, **(env or {}), "HOME": str(root), "T3CODE_HOME": str(root)},
+                               env=server_env(root, {**variables, **(env or {}), "HOME": str(root),
+                                                     "T3CODE_HOME": str(root)}),
                                cwd=root, pass_fds=(bootstrap.fileno(),)))
     return url, session_cookie(url, secret)
 
@@ -244,8 +336,10 @@ def main():
             secret = secrets.token_urlsafe(32)
             signing_key = secrets.token_bytes(32)
             git_repo = root / "repo"
+            # parity-env: git, not a T3 server
             subprocess.run(["git", "init", "-qb", "main", git_repo], check=True)
             git = ["git", "-C", str(git_repo), "-c", "user.email=test@example.test", "-c", "user.name=Parity"]
+            # parity-env: git, not a T3 server
             subprocess.run(git + ["commit", "--allow-empty", "-qm", "Fixture"], check=True)
             (git_repo / "untracked.txt").write_text("test data")
             for fixture in fixtures:
@@ -257,7 +351,9 @@ def main():
             servers = []
             for url, cmd, credential_var in [(args.original_url, args.original_command, "T3_PARITY_ORIGINAL_BOOTSTRAP"),
                                              (args.rust_url, args.rust_command, "T3_PARITY_RUST_BOOTSTRAP")]:
-                stack.enter_context(launch(shlex.split(cmd) if cmd else None, url))
+                # A launched server still gets a temporary home and never the host's provider CLIs.
+                home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+                stack.enter_context(launch(shlex.split(cmd) if cmd else None, url, env=server_env(home)))
                 secret = os.environ.get(credential_var)
                 servers.append((url, session_cookie(url, secret) if secret else None))
         sockets = []

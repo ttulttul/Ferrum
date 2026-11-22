@@ -39,6 +39,7 @@ def wrangler_dev(command, port, credential, log, variables=()):
                                    "--var", f"T3_BOOTSTRAP_CREDENTIAL:{credential}"]
     for variable in variables:
         argv += ["--var", variable]
+    # parity-env: wrangler running the Workers build, not a T3 server
     process = subprocess.Popen(argv, cwd=ROOT / "workers", stdout=log, stderr=subprocess.STDOUT,
                                stdin=subprocess.DEVNULL, start_new_session=True)
     url = f"http://127.0.0.1:{port}"
@@ -113,6 +114,7 @@ def main():
             wasm = (url, session_cookie(url, credential))
             outcomes = {"original": run_client(args, *native), "rust": run_client(args, *wasm)}
             repo = root / "repo"
+            # parity-env: git, not a T3 server
             subprocess.run(["git", "init", "-qb", "main", str(repo)], check=True)
             seeded = without_workspace_steps({
                 "original": run_client(args, *native, seed(*native, repo)),
