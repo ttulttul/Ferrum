@@ -165,6 +165,21 @@ impl AppState {
             )
         };
         let now = crate::now();
+        // A child whose cut run still awaits its continuation is not settled yet.
+        let awaiting: std::collections::HashSet<String> = {
+            let store = self.store.read().await;
+            commands
+                .iter()
+                .filter_map(|c| {
+                    store
+                        .threads
+                        .values()
+                        .flat_map(|t| t.runs.iter())
+                        .find(|run| run.id == c.source)
+                        .map(|run| run.wire_id())
+                })
+                .collect()
+        };
         for continuation in commands {
             let crate::runtime_recovery::Continuation {
                 source,
@@ -195,6 +210,9 @@ impl AppState {
                     "orchestration-v2.restart-continuation.not-sent"
                 );
             }
+        }
+        if only.is_none() {
+            crate::orchestration::recover_delegated_tasks(self.clone(), &awaiting).await;
         }
     }
 

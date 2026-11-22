@@ -104,6 +104,10 @@ PROVIDER_SCENARIOS = [
     # task whose result wakes the parent.
     {"name": "claude delegate followup", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate_followup.json", "awaitStatus": True, "settleRuns": 2},
+    # A restart while a delegated task's child runs: the child's work continues after the
+    # restart, and its result reaches the parent.
+    {"name": "claude delegate restart", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_restart.json", "awaitStatus": True, "restart": {"after": "settled"}},
     {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
     # Runtime requests: what each server asks the user, and what it answers the CLI.
     {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
@@ -992,6 +996,9 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
     watched = {}
     with contextlib.ExitStack() as first:
         url, cookie = managed_server(first, command, root, *credentials, env=env)
+        if scenario.get("awaitStatus"):
+            # A delegated task's target must be a checked, installed provider.
+            provider_status(url, cookie, scenario["instance"], root)
         seeded = seed_turn(url, cookie, checkouts, scenario)
         if restart["after"] == "created":
             # Only the thread: its first turn runs on the restarted server (follow_up).

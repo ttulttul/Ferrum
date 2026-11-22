@@ -572,7 +572,8 @@ pub(crate) fn provider_instance_enabled(settings: &Value, project: &str, instanc
 mod delegation;
 pub(crate) use delegation::{
     after_run, cancel_task, delegated_task_awaits_work, delegated_task_result_run,
-    delegated_task_runs, subagent_result, task_node_id, task_thread_id, watch_run_end, RunEnd,
+    delegated_task_runs, recover as recover_delegated_tasks, subagent_result, task_node_id,
+    task_thread_id, watch_run_end, RunEnd,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -915,6 +916,8 @@ async fn apply_command<H: CommandHost>(
                     .cloned()
                     .unwrap_or_default();
                 text = delegation::wake_detail(&ids, &tasks);
+                // The delivery is accepted with its message (`acceptDelegatedCompletionDelivery`).
+                delegation::accept_delivery(&state, thread_id, completion).await?;
                 wake_started = delegation::wake_work_started_at(&*state, thread_id).await;
                 wire = Some(json!({
                     "createdBy": command["createdBy"],
