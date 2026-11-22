@@ -20,13 +20,13 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 
 | Kind | Calls | Used by the client | Mobile only | Server-only / unused | Existing parity | Client harness | Either |
 |---|---|---|---|---|---|---|---|
-| rpc | 205 | 202 | 0 | 3 | 120 | 77 | 144 |
+| rpc | 205 | 202 | 0 | 3 | 120 | 78 | 145 |
 | rpc-stream | 30 | 30 | 0 | 0 | 17 | 23 | 25 |
 | http | 52 | 40 | 0 | 12 | 39 | 14 | 40 |
 | http-raw | 7 | 7 | 0 | 0 | 6 | 3 | 7 |
-| **all** | 294 | 279 | 0 | 15 | 182 | 117 | 216 |
+| **all** | 294 | 279 | 0 | 15 | 182 | 118 | 217 |
 
-Newly covered by the client harness (no earlier parity script): 34. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 13.
+Newly covered by the client harness (no earlier parity script): 35. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 12.
 
 Calls the harness does not make need credentials or hardware it cannot have in CI (GitHub, Linear,
 model providers, T3 Connect relay, voice models, simulators, a browser), are destructive to the host
@@ -207,14 +207,14 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `server.removeKeybinding` | user action | `packages/client-runtime/src/state/server.ts:1746` | ServerRemoveKeybindingInput | ServerRemoveKeybindingResult | session (settings:write) | client | validation only | 2 case(s) |
 | `server.reportClientActivity` | background | `apps/web/src/lib/backgroundActivityReporter.ts:206`<br>`apps/web/src/rpc/requestLatencyState.ts:34` | ClientActivityReportInput | void | session (orchestration:read) | client | client_initial_sync_parity.py | 1 case(s) |
 | `server.retryResourceTelemetry` | user action | `packages/client-runtime/src/state/server.ts:1911` | Struct{} | ResourceTelemetryRetryResult | session (diagnostics:read) | client | validation only | — |
-| `server.runStorageCleanup` | user action | `packages/client-runtime/src/state/server.ts:1446` | Struct{} | StorageCleanupReport | session (settings:write) | client | validation only | — |
+| `server.runStorageCleanup` | user action | `packages/client-runtime/src/state/server.ts:1446` | Struct{} | StorageCleanupReport | session (settings:write) | client | validation only | 1 case(s) |
 | `server.searchAcpRegistry` | user action | `packages/client-runtime/src/state/server.ts:1633` | AcpRegistrySearchInput | AcpRegistrySearchResult | session (orchestration:read) | client | rpc_edge_parity.py | — |
 | `server.setAcpRegistryProvider` | user action | `packages/client-runtime/src/state/server.ts:1815` | AcpRegistrySetProviderInput | AcpRegistrySetProviderResult | session (providers:manage) | client | validation only | — |
 | `server.signalProcess` | user action | `packages/client-runtime/src/state/server.ts:1841` | ServerSignalProcessInput | ServerSignalProcessResult | session (environment:maintain) | client | validation only | — |
 | `server.uninstallAcpRegistryManagedBinary` | user action | `packages/client-runtime/src/state/server.ts:1762` | AcpRegistryManagedBinaryUninstallInput | AcpRegistryManagedBinaryUninstallResult | session (providers:manage) | client | validation only | — |
 | `server.updateProvider` | background | `apps/web/src/rpc/requestLatencyState.ts:38`<br>`packages/client-runtime/src/state/server.ts:1731` | ServerProviderUpdateInput | ServerProviderUpdatedPayload | session (providers:manage) | client | validation only | — |
 | `server.updateServer` | background | `apps/web/src/rpc/requestLatencyState.ts:40`<br>`packages/client-runtime/src/connection/outdatedHostUpdate.ts:178`<br>(+2) | ServerSelfUpdateInput | ServerSelfUpdateResult | session (environment:maintain) | client | validation only | — |
-| `server.updateSettings` | user action | `packages/client-runtime/src/state/server.ts:1437` | Struct{patch,providerInstanceMutation} | ServerSettings | session (settings:write) | client | client_thread_parity.py, config_parity.py, config_snapshot_parity.py, managed_policy_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, settings_syntax_parity.py, workers_peer_link_parity.py | 4 case(s) |
+| `server.updateSettings` | user action | `packages/client-runtime/src/state/server.ts:1437` | Struct{patch,providerInstanceMutation} | ServerSettings | session (settings:write) | client | client_thread_parity.py, config_parity.py, config_snapshot_parity.py, managed_policy_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, settings_syntax_parity.py, workers_peer_link_parity.py | 6 case(s) |
 | `server.upsertKeybinding` | user action | `packages/client-runtime/src/state/server.ts:1740` | ServerUpsertKeybindingInput | ServerUpsertKeybindingResult | session (settings:write) | client | validation only | 1 case(s) |
 | `shell.openInEditor` | user action | `packages/client-runtime/src/state/shellCommands.ts:13` | LaunchEditorInput | void | session (orchestration:operate) | client | validation only | — |
 | `sourceControl.appAccess` | user action | `packages/client-runtime/src/state/sourceControl.ts:26`<br>`packages/client-runtime/src/state/sourceControl.ts:31` | SourceControlAppAccessInput | SourceControlAppAccess | session (orchestration:read) | client | validation only | — |
@@ -260,7 +260,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `pullRequests.subscribeRefreshes` | open project/thread | `packages/client-runtime/src/state/pullRequests.ts:696` | Struct{} | NonNegativeInt | session (orchestration:read) | client | client_initial_sync_parity.py | 1 case(s) |
 | `scheduledTasks.subscribe` | user action | `packages/client-runtime/src/state/server.ts:1579` | ScheduledTaskListInput | ScheduledTaskListResult | session (orchestration:read) | client | validation only | 1 case(s) |
 | `server.getDatabaseStorage` | user action | `packages/client-runtime/src/state/server.ts:1405` | Struct{} | Schema.NullOr(DatabaseStorageStatus) | session (orchestration:read) | client | validation only | 1 case(s) |
-| `server.getStorageCleanupReport` | user action | `packages/client-runtime/src/state/server.ts:1463` | Struct{} | Schema.NullOr(StorageCleanupReport) | session (orchestration:read) | client | validation only | 1 case(s), 1 xfail |
+| `server.getStorageCleanupReport` | user action | `packages/client-runtime/src/state/server.ts:1463` | Struct{} | Schema.NullOr(StorageCleanupReport) | session (orchestration:read) | client | validation only | 6 case(s) |
 | `server.updateServerWithProgress` | connect | `packages/client-runtime/src/connection/outdatedHostUpdate.ts:152`<br>`packages/client-runtime/src/state/server.ts:1124` | ServerSelfUpdateInput | ServerSelfUpdateProgressEvent | session (environment:maintain) | client | validation only | — |
 | `subscribeAuthAccess` | connect | `packages/client-runtime/src/state/auth.ts:163` | Struct{} | AuthAccessStreamEvent | session (access:read) | client | auth_parity.py, client_initial_sync_parity.py | 2 case(s) |
 | `subscribeDeviceState` | connect | `packages/client-runtime/src/state/device.ts:43` | Struct{} | DeviceServiceState | session (orchestration:read) | client | client_initial_sync_parity.py | 1 case(s) |

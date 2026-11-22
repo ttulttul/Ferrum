@@ -541,6 +541,13 @@ async fn run_call(
         }
         return Reply::Success(result);
     }
+    if method == "server.getStorageCleanupReport" {
+        let mut reports = state.storage_cleanup.subscribe();
+        while let Some(report) = reports.recv().await {
+            send(json!([*report])).await;
+        }
+        return Reply::Success(Value::Null);
+    }
     if crate::subscription::serves(method) {
         let opened =
             match crate::subscription::Subscription::open(state, principal, method, params, true)
@@ -2260,18 +2267,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         };
     }
     if method == "server.runStorageCleanup" {
-        let now = time::OffsetDateTime::now_utc()
-            .format(time::macros::format_description!(
-                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
-            ))
-            .unwrap_or_default();
-        let report = json!({"trigger":"manual","startedAt":now,"finishedAt":now,"entries":[],"counts":{"removed":0,"kept":0,"failed":0},"omittedCount":0,"bytesFreed":0});
-        *state.storage_cleanup_report.lock().await = Some(report.clone());
-        return Reply::Success(report);
-    }
-    if method == "server.getStorageCleanupReport" {
-        let report = state.storage_cleanup_report.lock().await.clone().unwrap_or_else(|| json!({"trigger":"manual","startedAt":null,"finishedAt":null,"entries":[],"counts":{"removed":0,"kept":0,"failed":0},"omittedCount":0,"bytesFreed":0}));
-        return Reply::Chunk(json!([report]));
+        return Reply::Success(state.storage_cleanup.run("manual"));
     }
     if method == "server.getDatabaseStorage" {
         let database_bytes = [

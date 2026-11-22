@@ -196,7 +196,16 @@
     {"name": "settings.server.getResourceTelemetryHistory", "rpc": "server.getResourceTelemetryHistory", "input": {"windowMs": 60000, "bucketMs": 10000}, "compare": "signature"},
     {"name": "settings.server.getDatabaseStorage", "rpc": "server.getDatabaseStorage", "input": {}, "stream": {"take": 1}, "compare": "kinds"},
     {"name": "settings.server.discoverSourceControl", "rpc": "server.discoverSourceControl", "input": {}, "timeoutMs": 30000},
-    {"name": "settings.server.getStorageCleanupReport", "rpc": "server.getStorageCleanupReport", "input": {}, "stream": {"take": 1}, "compare": "kinds"},
+    {"name": "settings.server.getStorageCleanupReport", "rpc": "server.getStorageCleanupReport", "input": {}, "stream": {"take": 1}, "compare": "value"},
+    {"name": "settings.storageCleanup.follow", "rpc": "server.getStorageCleanupReport", "input": {}, "stream": {"background": true}},
+    {"name": "settings.storageCleanup.run", "rpc": "server.runStorageCleanup", "input": {}, "compare": "value"},
+    {"name": "settings.storageCleanup.sawRun", "await": "settings.storageCleanup.follow", "until": {"trigger": "manual"}, "lastOnly": true, "compare": "value"},
+    {"name": "settings.storageCleanup.reopen", "rpc": "server.getStorageCleanupReport", "input": {}, "stream": {"take": 1}, "compare": "value"},
+
+    {"name": "settings.storageCleanup.followAutomatic", "rpc": "server.getStorageCleanupReport", "input": {}, "stream": {"background": true}},
+    {"name": "settings.storageCleanup.changePolicy", "rpc": "server.updateSettings", "input": {"patch": {"storageCleanup": {"worktreeKeepWhen": "tracked-changes"}}}, "compare": "signature"},
+    {"name": "settings.storageCleanup.sawAutomatic", "await": "settings.storageCleanup.followAutomatic", "until": {"trigger": "automatic"}, "compare": "value"},
+    {"name": "settings.storageCleanup.restorePolicy", "rpc": "server.updateSettings", "input": {"patch": {"storageCleanup": {"worktreeKeepWhen": "uncommitted-changes"}}}, "compare": "signature"},
 
     {"name": "auth.http.createPairingCredential", "http": true, "group": "auth", "endpoint": "pairingCredential", "method": "POST", "path": "/api/auth/pairing-token", "args": {"payload": {"label": "Client RPC parity"}}, "compare": "shape"},
     {"name": "auth.http.revokePairingLink", "http": true, "group": "auth", "endpoint": "revokePairingLink", "method": "POST", "path": "/api/auth/pairing-links/revoke", "args": {"payload": {"id": "$step:auth.http.createPairingCredential.id"}}, "compare": "signature"},

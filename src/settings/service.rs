@@ -15,6 +15,7 @@ pub struct Settings {
     pub(crate) policy: policy::Policy,
     lock: Mutex<Option<LastWrite>>,
     defaults: Value,
+    pub(crate) cleanup_changed: tokio::sync::Notify,
     changes: tokio::sync::broadcast::Sender<(Value, Value)>,
 }
 
@@ -115,6 +116,7 @@ impl Settings {
         let policy = policy::Policy::load(&*documents)?;
         let defaults = schema::normalize(&policy.default_settings()).map_err(anyhow::Error::msg)?;
         let service = Self {
+            cleanup_changed: Default::default(),
             changes: tokio::sync::broadcast::channel(64).0,
             paths: paths.clone(),
             documents,
@@ -307,6 +309,9 @@ impl Settings {
         let effective = self
             .effective(&prepared.disk)
             .map_err(|e| self.io_failure(&e, "read-secret"))?;
+        if crate::storage_cleanup::policy_changed(current, &prepared.disk) {
+            self.cleanup_changed.notify_one();
+        }
         *guard = Some(LastWrite {
             settings: prepared.disk,
             at: crate::platform::monotonic_ms(),
