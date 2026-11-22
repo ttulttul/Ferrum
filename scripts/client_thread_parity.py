@@ -1213,6 +1213,32 @@ def compare_turn(original, rust):
     return problems
 
 
+def print_mcp_length_diagnostics(outcomes, fake_hosts, stderr_paths):
+    """Print enough local state to explain a CI-only missing agent MCP transcript."""
+    original = outcomes["original"].get("mcp", [])
+    rust = outcomes["rust"].get("mcp", [])
+    if len(original) == len(rust):
+        return
+    print(f"agent mcp answer-list length mismatch: original {len(original)} rust {len(rust)}")
+    print(f"rust agent mcp full list ({len(rust)} answers):")
+    for line in rust:
+        print(f"  {line}")
+    for name in ("original", "rust"):
+        hosts = fake_hosts.get(name, {})
+        for provider in ("github", "linear"):
+            requests = hosts.get(provider)
+            requests = [] if requests is None else requests
+            print(f"{name} fake {provider} request log ({len(requests)} requests):")
+            for request in requests:
+                print(f"  {request}")
+        path = stderr_paths.get(name)
+        tail = "<missing>"
+        if path is not None and Path(path).exists():
+            tail = Path(path).read_text(errors="replace")[-4000:] or "<empty>"
+        print(f"{name} server stderr tail:")
+        print(tail)
+
+
 # Rough seconds the seeded thread checks take on shard 1, for balancing shards.
 THREAD_CHECKS_COST = 20
 
@@ -1292,6 +1318,7 @@ def provider_turns(args, credentials):
             if keep:
                 print(f"keeping {scenario['name']} in {temporary}", flush=True)
             drivers = set() if scenario["scenario"] is None else {"codex" if scenario["instance"] == "codex" else "claude"}
+            fake_hosts, stderr_paths = {}, {}
             for name, command in (("original", shlex.split(args.original_command)),
                                   ("rust", shlex.split(args.rust_command))):
                 root = temporary / name
@@ -1299,16 +1326,20 @@ def provider_turns(args, credentials):
                 if scenario["name"] == "codex thread tools":
                     from github_provider_parity import github_fixture
                     from linear_provider_parity import linear_fixture
-                    _, github_env = github_fixture(stack, temporary / f"{name}-gh")
+                    github, github_env = github_fixture(stack, temporary / f"{name}-gh")
                     linear = linear_fixture(stack)
+                    fake_hosts[name] = {"github": github.requests, "linear": linear.requests}
                     env.update(github_env, T3CODE_LINEAR_API_URL=f"http://127.0.0.1:{linear.server_port}/graphql",
                                GIT_ALLOW_PROTOCOL="file")
+                stderr_path = temporary / f"{name}-server.stderr"
+                stderr_paths[name] = stderr_path
                 if "restart" in scenario:
                     outcomes[name] = restart_turn(args, command, root, credentials, env,
                                                   temporary / f"{name}-checkouts", fake_bin, scenario)
                     outcomes[name]["launches"] = turn_launches(log)
                 else:
-                    url, cookie = managed_server(stack, command, root, *credentials, env=env)
+                    url, cookie = managed_server(stack, command, root, *credentials, env=env,
+                                                 stderr_path=stderr_path)
                     if scenario.get("awaitStatus"):
                         # A delegated task's target must be a checked, installed provider.
                         provider_status(url, cookie, scenario["instance"], temporary)
@@ -1332,6 +1363,8 @@ def provider_turns(args, credentials):
                 slug = scenario["name"].replace(" ", "-")
                 (args.dump / f"turn-{slug}-{name}.json").write_text(json.dumps(outcome, indent=2, sort_keys=True))
         problems = compare_turn(outcomes["original"], outcomes["rust"])
+        if "agent mcp" in problems:
+            print_mcp_length_diagnostics(outcomes, fake_hosts, stderr_paths)
         expected = set(xfail.get(scenario["name"], {}))
         for check in sorted(set(problems) | expected):
             label = f"{scenario['name']}: {check}"

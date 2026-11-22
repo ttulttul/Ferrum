@@ -40,6 +40,7 @@ class Provider(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self):
+        self.server.requests.append(f"POST {self.path}")
         if self.path != "/graphql" or self.headers.get("authorization")!=TOKEN:
             self.answer({"errors":[{"message":"Invalid token"}]},401)
             return
@@ -137,7 +138,7 @@ def linear_fixture(stack):
     host.team={"id":"T1","key":"ENG","name":"Engineering","states":page([DONE,OPEN]),"members":page([USER]),
                "labels":page([LABEL]),"templates":page([{"id":"TEMPLATE","name":"Bug","description":"File a bug",
                "content":"How to reproduce","type":"issue","hasFormFields":False,"templateData":{"title":"Bug", "labelIds":["L1"]}}])}
-    host.issue,host.writes,host.filters={},[],[]
+    host.issue,host.writes,host.filters,host.requests={},[],[],[]
     thread=Thread(target=host.serve_forever,daemon=True)
     thread.start()
     stack.callback(thread.join)
