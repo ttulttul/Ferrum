@@ -132,6 +132,19 @@ class Provider(BaseHTTPRequestHandler):
         self.answer({"data":data})
 
 
+def linear_fixture(stack):
+    host=stack.enter_context(ThreadingHTTPServer(("127.0.0.1",0),Provider))
+    host.team={"id":"T1","key":"ENG","name":"Engineering","states":page([DONE,OPEN]),"members":page([USER]),
+               "labels":page([LABEL]),"templates":page([{"id":"TEMPLATE","name":"Bug","description":"File a bug",
+               "content":"How to reproduce","type":"issue","hasFormFields":False,"templateData":{"title":"Bug", "labelIds":["L1"]}}])}
+    host.issue,host.writes,host.filters={},[],[]
+    thread=Thread(target=host.serve_forever,daemon=True)
+    thread.start()
+    stack.callback(thread.join)
+    stack.callback(host.shutdown)
+    return host
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command",required=True)
@@ -146,15 +159,7 @@ def main():
         secret=secrets.token_urlsafe(32)
         signing=secrets.token_bytes(32)
         for who,command in (("original",args.original_command),("rust",args.rust_command)):
-            host=stack.enter_context(ThreadingHTTPServer(("127.0.0.1",0),Provider))
-            host.team={"id":"T1","key":"ENG","name":"Engineering","states":page([DONE,OPEN]),"members":page([USER]),
-                       "labels":page([LABEL]),"templates":page([{"id":"TEMPLATE","name":"Bug","description":"File a bug",
-                       "content":"How to reproduce","type":"issue","hasFormFields":False,"templateData":{"title":"Bug", "labelIds":["L1"]}}])}
-            host.issue,host.writes,host.filters={},[],[]
-            thread=Thread(target=host.serve_forever,daemon=True)
-            thread.start()
-            stack.callback(thread.join)
-            stack.callback(host.shutdown)
+            host=linear_fixture(stack)
             providers.append(host)
             prefix=["env",f"T3CODE_LINEAR_API_URL=http://127.0.0.1:{host.server_port}/graphql"]
             url,cookie=harness.managed_server(stack,prefix+shlex.split(command),root/who,secret,signing)
