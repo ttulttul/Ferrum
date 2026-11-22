@@ -128,6 +128,7 @@ impl DurableObject for T3EnvironmentDO {
                 bootstrap_credential,
                 cookie_port: 3773,
                 provider_command: Vec::new(),
+                workspace_mcp_endpoint: None,
             },
             Arc::new(documents),
             Box::new(storage::SqlLog(sql.clone())),

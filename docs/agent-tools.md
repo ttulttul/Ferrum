@@ -6,6 +6,9 @@ through OAuth, and a linked environment calling through a peer link. This page i
 for serving the same tools from Rust, with the same names, schemas, descriptions, caller checks,
 errors and side effects.
 
+Providers running in agentd receive the same thread scope through the embedding host's
+[workspace MCP endpoint](embedding.md#settings-and-provider-turns).
+
 ## Where the list comes from
 
 `scripts/reference_agent_tools.mjs <reference>` builds the reference's tool registrations the way

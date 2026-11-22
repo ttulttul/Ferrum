@@ -444,18 +444,17 @@ impl crate::orchestration::CommandHost for AppState {
                 let provider = match self.settings.internal() {
                     Ok(settings) => {
                         let store = self.store.read().await;
-                        store.threads.get(&run.thread_id).and_then(|thread| {
-                            crate::provider_state::provider_turn(
-                                &settings,
-                                &self.model_manifest.current(),
-                                &thread.stored_row(),
-                                &thread.provider,
-                            )
-                        })
+                        crate::provider_state::thread_provider_turn(
+                            &settings,
+                            &self.model_manifest.current(),
+                            store.threads.get(&run.thread_id),
+                            &self.oauth,
+                            self.mcp_endpoint.get().map(String::as_str),
+                        )
                     }
                     Err(error) => {
                         tracing::warn!(%error, "could not read settings for a turn");
-                        None
+                        Ok(None)
                     }
                 };
                 let mut spec = crate::workspace::TurnSpec {
@@ -466,36 +465,18 @@ impl crate::orchestration::CommandHost for AppState {
                     ..Default::default()
                 };
                 match provider {
-                    Some((mut provider, env)) => {
+                    Ok(Some((mut provider, env))) => {
                         // Claude may read the thread's attachments, as the
                         // reference lets it.
                         provider.extra_dirs = vec![self.paths.attachments.display().to_string()];
-                        // T3's tools, acting as this thread.
-                        if let Some(endpoint) = self.mcp_endpoint.get() {
-                            let instance = self
-                                .store
-                                .read()
-                                .await
-                                .threads
-                                .get(&run.thread_id)
-                                .and_then(|thread| {
-                                    let row = thread.stored_row();
-                                    row["modelSelection"]["instanceId"]
-                                        .as_str()
-                                        .or(row["providerInstanceId"].as_str())
-                                        .map(str::to_owned)
-                                })
-                                .unwrap_or_else(|| provider.driver.clone());
-                            let token = self.oauth.thread_credential(&run.thread_id, &instance);
-                            provider.mcp = Some(crate::workspace::provider::McpServer {
-                                url: endpoint.clone(),
-                                authorization: format!("Bearer {token}"),
-                            });
-                        }
                         spec.provider = Some(provider);
                         spec.env = env;
                     }
-                    None => {
+                    Err(error) => {
+                        crate::turn::fail(&*self, &run, error.into()).await;
+                        return;
+                    }
+                    Ok(None) => {
                         spec.command = if self.provider_command.is_empty() {
                             crate::turn::echo_command()
                         } else {

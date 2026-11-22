@@ -21,7 +21,6 @@ struct Setup {
     root: std::path::PathBuf,
 }
 
-#[path = "../../tests/support/mod.rs"]
 mod support;
 
 async fn setup() -> Setup {
@@ -232,22 +231,7 @@ async fn git_workflows_answer_like_the_local_workspace() {
 #[tokio::test]
 async fn a_terminal_runs_through_agentd() {
     let s = setup().await;
-    // The isolated host has no login shell. Supply an interactive-only shell
-    // for this PTY; a PATH hydration request passes arguments and exits.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let shell = std::env::var_os("SHELL").unwrap();
-        std::fs::write(
-            &shell,
-            r#"#!/bin/sh
-[ "$#" -eq 0 ] || exit 1
-PS1= ENV= exec /bin/sh
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    support::enable_test_terminal();
     let mut output = s.remote.terminal_events();
     let open =
         json!({"threadId": "t1", "terminalId": "term-1", "cwd": s.root, "cols": 80, "rows": 24});

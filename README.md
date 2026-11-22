@@ -26,7 +26,7 @@ Based on `main` and the parity test suites:
 - **Provider status checks:** Claude Code, Codex, fx, Kiro, Grok, Pi, Cursor and OpenCode status (installed version, sign-in state, usage and models) checked at startup, on settings changes, every 5 minutes and on refresh, and pushed to clients.
 - **Configuration, auth, and desktop adoption:** Shared `userdata/` layout (`settings.json`, secrets, managed policy, `server-owner.sqlite` exclusive lock, `server-runtime.json`), browser session cookies, WebSocket tickets with DPoP checks, CORS, and desktop SSH launcher adoption.
 - **Git, GitHub, and workspace operations:** File operations, terminals (PTY), git workflows, GitHub/Linear provider RPCs, and Chromium preview support.
-- **Split control/workspace architecture:** Out-of-process workspace execution via `t3-agentd` and an embeddable, `wasm32-unknown-unknown`-compatible control plane (`workers/`).
+- **Split control/workspace architecture:** Out-of-process workspace execution via `t3-agentd` and an embeddable, `wasm32-unknown-unknown`-compatible control plane (`workers/`). Remote Codex and Claude turns can call the host's MCP endpoint as their thread. See [host configuration](docs/embedding.md#settings-and-provider-turns).
 - **Parity test suites:** Automated suites comparing HTTP, WebSocket RPC, client initial sync, live provider turns, settings, auth, MCP, git/GitHub, previews, and relay behavior directly against the pinned TypeScript reference.
 
 ## What's still missing compared with the original
@@ -41,7 +41,6 @@ The Rust server can already run Codex and Claude Code conversations, manage proj
 ### Agents and tools
 
 - **Few built-in T3 tools for agents:** An agent running on the Rust server can use only a small set of T3's built-in tools (for threads, projects, and basic environment info) and does not receive the instructions that describe the rest. Most built-in T3 actions—such as browser previews, scheduled tasks, and pull request helpers—are not available to agents yet.
-- **Remote workspace credentials:** When workspaces run in a separate remote process (`t3-agentd`), agents are not yet given credentials to call back into T3's built-in tools.
 
 ### AI providers
 
