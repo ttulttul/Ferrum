@@ -576,6 +576,24 @@ pub(crate) use delegation::{
     task_thread_id, watch_run_end, RunEnd,
 };
 
+/// The CLI driver a thread's provider instance runs (`codex` or
+/// `claudeAgent`), when it runs one this server drives.
+fn cli_driver<H: CommandHost>(state: &H, row: &Value) -> Option<String> {
+    let instance = row["modelSelection"]["instanceId"]
+        .as_str()
+        .or(row["providerInstanceId"].as_str())?;
+    let settings = state.effective_settings().ok()?;
+    let driver = settings["providerInstances"][instance]["driver"]
+        .as_str()
+        .unwrap_or(instance);
+    [
+        crate::workspace::provider::CODEX,
+        crate::workspace::provider::CLAUDE_AGENT,
+    ]
+    .contains(&driver)
+    .then(|| driver.to_owned())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn start_run<H: CommandHost>(
     state: Arc<H>,
@@ -592,7 +610,7 @@ async fn start_run<H: CommandHost>(
     wire: Option<Value>,
     deferred: bool,
 ) -> anyhow::Result<u64> {
-    let (cwd, needs_baseline, wire_id) = state
+    let (cwd, needs_baseline, wire_id, row) = state
         .store
         .read()
         .await
@@ -602,9 +620,15 @@ async fn start_run<H: CommandHost>(
             // The reference's id (`run:thread:<thread>:ordinal:<n>`), so a
             // run reads the same on both servers and sorts by ordinal there.
             let wire_id = Some(Run::reference_id(thread_id, t.runs.len() + 1));
-            (t.cwd.clone(), t.checkpoints.is_empty(), wire_id)
+            (
+                t.cwd.clone(),
+                t.checkpoints.is_empty(),
+                wire_id,
+                t.stored_row(),
+            )
         })
         .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+    let driver = cli_driver(&*state, &row);
     let baseline = needs_baseline.then(|| cwd.clone());
     let run = Run {
         id: wire_id
@@ -633,6 +657,10 @@ async fn start_run<H: CommandHost>(
         resend_owed: false,
         resends: 0,
         wire_id,
+        driver,
+        model_selection: row["modelSelection"]
+            .is_object()
+            .then(|| Box::new(row["modelSelection"].clone())),
     };
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),

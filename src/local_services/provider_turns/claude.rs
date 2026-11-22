@@ -131,6 +131,9 @@ struct Attempt<'a> {
     steers: HashMap<String, String>,
     /// A message steered the turn.
     steered: bool,
+    /// What the prompt added to the session's attachment budget, reported
+    /// once the turn starts.
+    delivered: Option<(u64, u64)>,
 }
 
 /// One model call's usage as it streams (`message_start`, then deltas).
@@ -310,8 +313,11 @@ impl<'a> Attempt<'a> {
             result: None,
             steers: HashMap::new(),
             steered: false,
+            delivered: None,
         };
         let outcome = attempt.drive(spec, cancel).await;
+        // A prompt the CLI took without starting a turn still counts.
+        attempt.report_delivery();
         if let Outcome::Ended(end) = &outcome {
             attempt.settle_steers(end.status);
         }
@@ -372,11 +378,9 @@ impl<'a> Attempt<'a> {
         if self.cli.write(&prompt).await.is_err() {
             return self.closed().await;
         }
-        // What the prompt adds to the session's attachment budget.
-        self.sink.send(ProviderEvent::PromptDelivered {
-            bytes: content.to_string().len() as u64,
-            pages: 0,
-        });
+        // What the prompt adds to the session's attachment budget, which
+        // the reference reports once the turn starts.
+        self.delivered = Some((content.to_string().len() as u64, 0));
         let mut deadline = None;
         loop {
             let line = tokio::select! {
@@ -477,6 +481,14 @@ impl<'a> Attempt<'a> {
             .await;
     }
 
+    /// Report what the prompt added to the attachment budget, once.
+    fn report_delivery(&mut self) {
+        if let Some((bytes, pages)) = self.delivered.take() {
+            self.sink
+                .send(ProviderEvent::PromptDelivered { bytes, pages });
+        }
+    }
+
     async fn handle(&mut self, message: Value) -> Option<Outcome> {
         let kind = message["type"].as_str().unwrap_or_default();
         if kind != "control_response" {
@@ -491,20 +503,29 @@ impl<'a> Attempt<'a> {
                     .as_str()
                     .unwrap_or_default()
                     .to_owned();
-                self.sink.send(ProviderEvent::ProviderThread {
+                let thread = ProviderEvent::ProviderThread {
                     driver: CLAUDE_AGENT.into(),
                     // The CLI was told to resume a session, so the one it
                     // reports continues it.
                     resumed: self.resume.is_some(),
                     native_thread_id: session,
                     model: message["model"].as_str().map(str::to_owned),
-                });
+                };
+                // A new session keeps the id it was given until the turn
+                // ends, as the reference's thread does; then it names the
+                // session the CLI reported.
+                if self.resume.is_some() {
+                    self.sink.send(thread);
+                } else {
+                    self.sink.report_thread_at_end(thread);
+                }
                 self.turn_started = true;
                 self.sink.send(ProviderEvent::ProviderTurn {
                     native_turn_id: None,
                     status: TurnStatus::Running,
                     model: None,
                 });
+                self.report_delivery();
             }
             "stream_event" if !nested => self.stream_event(&message["event"]),
             "assistant" if !nested => self.assistant(&message["message"]),

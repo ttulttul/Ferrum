@@ -93,6 +93,17 @@ pub struct Run {
     /// read from there, has the reference's `run:thread:…:ordinal:…` id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire_id: Option<String>,
+    /// The CLI driver (`codex`, `claudeAgent`) the run's provider instance
+    /// ran when it was sent, when it runs one: such a run has the
+    /// reference's pending attempt, root node and provider thread from its
+    /// dispatch, before the CLI reports its thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// The thread's model selection when the run was sent: the reference's
+    /// run, and the provider session it opens, keep it when the thread's
+    /// selection changes during the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<Box<serde_json::Value>>,
 }
 
 fn is_zero(value: &u32) -> bool {

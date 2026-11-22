@@ -121,6 +121,9 @@ pub(crate) struct Sink {
     open: std::sync::Arc<std::sync::Mutex<Vec<ProviderItem>>>,
     /// A Codex turn's token usage, held to go with its end.
     usage: std::sync::Arc<std::sync::Mutex<Option<ProviderEvent>>>,
+    /// The native thread the turn's end reports (a new Claude session's
+    /// own id), held to go with the end.
+    thread_report: std::sync::Arc<std::sync::Mutex<Option<ProviderEvent>>>,
 }
 
 impl Sink {
@@ -131,6 +134,13 @@ impl Sink {
             turn_id,
             open: std::sync::Arc::default(),
             usage: std::sync::Arc::default(),
+            thread_report: std::sync::Arc::default(),
+        }
+    }
+    /// Report `event` (a `provider_thread.updated`) with the turn's end.
+    fn report_thread_at_end(&self, event: ProviderEvent) {
+        if let Ok(mut report) = self.thread_report.lock() {
+            *report = Some(event);
         }
     }
     fn send(&self, event: ProviderEvent) {
@@ -173,12 +183,9 @@ impl Sink {
         };
         // A Codex turn's end goes with what it closes: its usage and its
         // open items, as the reference writes them together.
-        let mut closing: Vec<ProviderEvent> = self
-            .usage
-            .lock()
-            .ok()
-            .and_then(|mut usage| usage.take())
+        let mut closing: Vec<ProviderEvent> = [&self.thread_report, &self.usage]
             .into_iter()
+            .filter_map(|held| held.lock().ok().and_then(|mut held| held.take()))
             .collect();
         for mut item in open {
             // A Codex command can outlive a completed turn, as background

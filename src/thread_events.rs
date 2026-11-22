@@ -183,9 +183,35 @@ pub enum Order {
     /// A checkpoint capture (`CheckpointCaptureService`): the checkpoints,
     /// the checkpoint item, then the run and its root node.
     Checkpoint,
+    /// A run sent (`ThreadMessageIntake`): the thread, the provider thread
+    /// the run opens, the run, its pending attempt and root node, the
+    /// checkpoint scope, then the user's message and its item.
+    Dispatch,
+    /// A turn's start, once the CLI reports its thread: the provider
+    /// session, the provider thread, then the run, its attempt and root
+    /// node, running.
+    Start,
 }
 
 impl Order {
+    const SESSION_OPEN_FAILURE: &'static [Step] = &[
+        Step::Items(Phase::All),
+        Step::Collection("runs"),
+        Step::Collection("attempts"),
+        Step::LooseNodes,
+        Step::Collection("providerSessions"),
+        Step::Collection("providerThreads"),
+        Step::Collection("providerTurns"),
+        Step::Collection("checkpointScopes"),
+        Step::LooseMessages,
+        Step::Collection("runtimeRequests"),
+        Step::Collection("subagents"),
+        Step::Collection("plans"),
+        Step::Collection("checkpoints"),
+        Step::Collection("contextHandoffs"),
+        Step::Collection("contextTransfers"),
+    ];
+
     /// The order of the events of a commit of `event`.
     pub fn of(event: &crate::Event) -> Self {
         use crate::workspace::provider::ProviderEvent;
@@ -196,6 +222,11 @@ impl Order {
             }
             | crate::Event::RunFinished { .. } => Order::End,
             crate::Event::CheckpointCaptured { .. } => Order::Checkpoint,
+            crate::Event::RunStarted(_) | crate::Event::RunQueued { .. } => Order::Dispatch,
+            crate::Event::RunProvider {
+                event: ProviderEvent::ProviderThread { .. },
+                ..
+            } => Order::Start,
             _ => Order::Default,
         }
     }
@@ -232,6 +263,40 @@ impl Order {
                 Collection("checkpointScopes"),
                 LooseMessages,
                 Collection("providerThreads"),
+                Collection("runtimeRequests"),
+                Collection("subagents"),
+                Collection("plans"),
+                Collection("checkpoints"),
+                Collection("contextHandoffs"),
+                Collection("contextTransfers"),
+            ],
+            Order::Dispatch => &[
+                Collection("providerThreads"),
+                Collection("runs"),
+                Collection("attempts"),
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Items(Phase::All),
+                Collection("providerSessions"),
+                Collection("providerTurns"),
+                Collection("runtimeRequests"),
+                Collection("subagents"),
+                Collection("plans"),
+                Collection("checkpoints"),
+                Collection("contextHandoffs"),
+                Collection("contextTransfers"),
+            ],
+            Order::Start => &[
+                Collection("providerSessions"),
+                Collection("providerThreads"),
+                Collection("runs"),
+                Collection("attempts"),
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Items(Phase::All),
+                Collection("providerTurns"),
                 Collection("runtimeRequests"),
                 Collection("subagents"),
                 Collection("plans"),
@@ -563,7 +628,20 @@ fn diff_with_command(
                     || item["failure"]["message"]
                         == crate::workspace::provider::CODEX_STREAM_CLOSED))
     };
-    for step in order.steps() {
+    // A session that failed to open (`ProviderSessionManager`) writes its
+    // error, then the run, its attempt and root node.
+    let session_failed = order == Order::End
+        && items.iter().any(|item| {
+            item["id"]
+                .as_str()
+                .is_some_and(|id| id.ends_with(":signal:provider-session-open-failure"))
+        });
+    let steps = if session_failed {
+        Order::SESSION_OPEN_FAILURE
+    } else {
+        order.steps()
+    };
+    for step in steps {
         match *step {
             Step::Collection(name) => push_collection(&mut out, name),
             Step::ReportedProviderThread => {
@@ -872,6 +950,80 @@ mod tests {
                 "checkpoint.captured",
                 "turn-item.updated checkpoint",
                 "run.created"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_starts_as_the_reference_writes_it() {
+        let empty = json!({
+            "thread": {"id": "t", "activeProviderThreadId": null}, "runs": [], "attempts": [],
+            "nodes": [], "messages": [], "turnItems": [], "providerThreads": [],
+            "providerSessions": [], "checkpointScopes": []
+        });
+        let mut sent = empty.clone();
+        sent["thread"]["activeProviderThreadId"] = json!("pth");
+        sent["providerThreads"] = json!([{"id": "pth", "status": "not_loaded"}]);
+        sent["runs"] = json!([{"id": "r", "status": "starting"}]);
+        sent["attempts"] = json!([{"id": "a", "status": "pending"}]);
+        sent["nodes"] = json!([{"id": "n:root", "kind": "root_turn", "status": "pending"}]);
+        sent["checkpointScopes"] = json!([{"id": "s"}]);
+        sent["messages"] = json!([{"id": "m", "role": "user"}]);
+        sent["turnItems"] =
+            json!([{"id": "i", "type": "user_message", "messageId": "m", "ordinal": 1}]);
+        // The dispatch: thread, provider thread, run, attempt, root node,
+        // scope, then the user's message and its item.
+        let events = diff("t", &empty, &sent, "x", Order::Dispatch).unwrap();
+        assert_eq!(
+            types(&events),
+            [
+                "thread.metadata-updated",
+                "provider-thread.updated",
+                "run.created",
+                "run-attempt.created",
+                "node.updated",
+                "checkpoint-scope.created",
+                "message.updated",
+                "turn-item.updated user_message"
+            ]
+        );
+        // The CLI reports its thread: the session, the provider thread, then
+        // the run, attempt and root node, running.
+        let mut started = sent.clone();
+        started["providerSessions"] = json!([{"id": "ps", "status": "ready"}]);
+        started["providerThreads"][0]["status"] = json!("active");
+        started["runs"][0]["status"] = json!("running");
+        started["attempts"][0]["status"] = json!("running");
+        started["nodes"][0]["status"] = json!("running");
+        let events = diff("t", &sent, &started, "x", Order::Start).unwrap();
+        assert_eq!(
+            types(&events),
+            [
+                "provider-session.attached",
+                "provider-session.updated",
+                "provider-thread.updated",
+                "run.updated",
+                "run-attempt.updated",
+                "node.updated"
+            ]
+        );
+        // A session that failed to open: its error, the run, its attempt and
+        // root node.
+        let mut failed = sent.clone();
+        failed["runs"][0]["status"] = json!("failed");
+        failed["attempts"][0]["status"] = json!("failed");
+        failed["nodes"][0]["status"] = json!("failed");
+        failed["turnItems"].as_array_mut().unwrap().push(json!({
+            "id": "turn-item:run:r:signal:provider-session-open-failure", "type": "error",
+            "nodeId": "n:root", "ordinal": 2}));
+        let events = diff("t", &sent, &failed, "x", Order::End).unwrap();
+        assert_eq!(
+            types(&events),
+            [
+                "turn-item.updated error",
+                "run.updated",
+                "run-attempt.updated",
+                "node.updated"
             ]
         );
     }

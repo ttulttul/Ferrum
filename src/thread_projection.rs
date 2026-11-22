@@ -187,7 +187,7 @@ impl Thread {
             .enumerate()
             .map(|(index, run)| {
                 let (status, ended_at) = self.projected_run_status(run);
-                let waiting = matches!(status, "queued" | "preparing");
+                let waiting = matches!(status, "queued" | "preparing" | "starting");
                 let requested_at = self
                     .messages
                     .iter()
@@ -198,7 +198,7 @@ impl Thread {
                     "threadId": self.id,
                     "ordinal": index + 1,
                     "providerInstanceId": instance,
-                    "modelSelection": selection,
+                    "modelSelection": run.model_selection.as_deref().unwrap_or(&selection),
                     "providerThreadId": null,
                     "userMessageId": run.user_message_id.clone().filter(|id| !id.trim().is_empty()).unwrap_or_else(|| run.wire_id()),
                     "rootNodeId": null,
@@ -223,7 +223,10 @@ impl Thread {
                     out["providerThreadId"] = json!(ids.provider_thread);
                     out["rootNodeId"] = json!(ids.root_node);
                     out["activeAttemptId"] = json!(ids.attempt);
-                } else if let Some(ids) = self.queued_run_ids(run) {
+                } else if let Some(ids) = self
+                    .queued_run_ids(run)
+                    .or_else(|| self.starting_run_ids(run))
+                {
                     out["providerThreadId"] = json!(ids.provider_thread);
                     out["rootNodeId"] = json!(ids.root_node);
                     out["activeAttemptId"] = json!(ids.attempt);
@@ -274,6 +277,7 @@ impl Thread {
                 .map(|record| record.ended_at.unwrap_or(record.started_at))
         };
         match (status, turn) {
+            ("running", None) if self.starting(run) => ("starting", None),
             ("running", Some(TurnStatus::Completed)) => ("waiting", None),
             ("running", Some(TurnStatus::Interrupted)) => ("interrupted", turn_end()),
             ("running", Some(TurnStatus::Failed)) => ("failed", turn_end()),
@@ -719,11 +723,11 @@ impl Thread {
         let run_ids = |turn_count: u64| {
             let index = turn_count.max(1) as usize - 1;
             self.runs.get(index).map(|run| {
-                (
-                    run.wire_id(),
-                    self.provider_run_ids(run)
-                        .or_else(|| self.queued_run_ids(run)),
-                )
+                let ids = self
+                    .provider_run_ids(run)
+                    .or_else(|| self.queued_run_ids(run))
+                    .or_else(|| self.starting_run_ids(run));
+                (run.wire_id(), ids)
             })
         };
         let node_of = |turn_count: u64| {
@@ -731,10 +735,18 @@ impl Thread {
                 .and_then(|(_, ids)| ids.map(|ids| ids.root_node))
                 .unwrap_or_else(|| format!("node:{}", self.id))
         };
-        let checkpoint_scopes = self
+        // The scope exists from the thread's first provider run, as the
+        // reference creates it when it sends that run; else from the
+        // baseline checkpoint.
+        let first_run = self.runs.first().filter(|run| run.driver.is_some());
+        let scope_from = self
             .checkpoints
             .first()
-            .map(|checkpoint| {
+            .map(|checkpoint| (checkpoint.cwd.clone(), checkpoint.captured_at))
+            .or_else(|| first_run.map(|_| (self.cwd.clone(), 0)))
+            .map(|(cwd, at)| (cwd, first_run.map_or(at, |run| run.started_at)));
+        let checkpoint_scopes = scope_from
+            .map(|(cwd, created_at)| {
                 let first = run_ids(1);
                 vec![json!({
                     "id":scope_id,
@@ -746,8 +758,8 @@ impl Thread {
                     "kind":"root_run",
                     "ordinalWithinParent":0,
                     "advancesAppRunCount":true,
-                    "cwd":checkpoint.cwd,
-                    "createdAt":iso(checkpoint.captured_at)
+                    "cwd":cwd,
+                    "createdAt":iso(created_at)
                 })]
             })
             .unwrap_or_default();
@@ -1290,6 +1302,8 @@ fn stored_runs(thread_id: &str, projection: &Value) -> Vec<crate::Run> {
                 resends: 0,
                 // A run this server made keeps its own (UUID) id.
                 wire_id: uuid::Uuid::parse_str(&wire).is_err().then_some(wire),
+                driver: None,
+                model_selection: None,
             })
         })
         .collect()
