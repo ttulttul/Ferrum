@@ -93,4 +93,21 @@ const listing = await Effect.runPromise(
 );
 const tools = listing.map(({ tool }) => tool);
 const listedTo = Object.fromEntries(listing.map(({ tool, listedTo }) => [tool.name, listedTo]));
-process.stdout.write(`${JSON.stringify({ tools, listedTo }, null, 1)}\n`);
+// `tool_search` sits outside `layerTools`: only a provider session that defers its tools lists it.
+const toolSearch = await Effect.runPromise(
+  Effect.scoped(
+    Effect.gen(function* () {
+      const mcp = yield* McpServer.McpServer;
+      const found = mcp.tools.find(({ tool }) => tool.name === "tool_search");
+      return JSON.parse(JSON.stringify(found.tool));
+    }).pipe(
+      Effect.provide(
+        McpHttpServer.layerToolSearch.pipe(
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+          Layer.provide(services),
+        ),
+      ),
+    ),
+  ),
+);
+process.stdout.write(`${JSON.stringify({ tools, listedTo, toolSearch }, null, 1)}\n`);

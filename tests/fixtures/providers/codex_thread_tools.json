@@ -1009,6 +1009,107 @@
    }
   },
   {
+   "mcp": {
+    "method": "tools/list",
+    "headers": {
+     "t3-tool-exposure": "deferred"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "tool_search",
+    "arguments": {
+     "query": "t3_theme_read"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "tool_search",
+    "arguments": {
+     "query": "queue"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "tool_search",
+    "arguments": {
+     "query": "zzzz"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "tool_search",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "method": "tools/list",
+    "headers": {
+     "t3-tool-exposure": "deferred"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "send_to_user",
+    "arguments": {
+     "message": "Hello from the agent."
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "send_to_user",
+    "arguments": {
+     "message": ""
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_background_wait",
+    "arguments": {
+     "taskIds": [
+      "bg-1"
+     ]
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_background_wait",
+    "arguments": {
+     "taskIds": [
+      "bg-1"
+     ],
+     "waiting": false
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_background_wait",
+    "arguments": {
+     "taskIds": []
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_background_wait",
+    "arguments": {
+     "taskIds": [
+      1
+     ]
+    }
+   }
+  },
+  {
    "send": {
     "method": "item/started",
     "params": {

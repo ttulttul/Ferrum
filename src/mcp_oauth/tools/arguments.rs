@@ -27,8 +27,14 @@ fn fits(schema: &Value, value: &Value) -> bool {
     }
 }
 
+/// A path as effect prints it: keys quoted, array indexes (`#<n>` here) bare.
 fn at(path: &[&str]) -> String {
-    path.iter().map(|key| format!("[{}]", json!(key))).collect()
+    path.iter()
+        .map(|key| match key.strip_prefix('#') {
+            Some(index) if index.parse::<usize>().is_ok() => format!("[{index}]"),
+            _ => format!("[{}]", json!(key)),
+        })
+        .collect()
 }
 
 /// Fields whose range the reference checks with `isBetween`, which words both
@@ -103,6 +109,25 @@ fn issue(
             return expected(format!("a value with a length of at least {min}"));
         }
     }
+    if let Some(items) = value.as_array() {
+        let count = items.len() as f64;
+        if let Some(min) = schema["minItems"].as_f64().filter(|min| count < *min) {
+            return expected(format!("a value with a length of at least {min}"));
+        }
+        if let Some(max) = schema["maxItems"].as_f64().filter(|max| count > *max) {
+            return expected(format!("a value with a length of at most {max}"));
+        }
+        if let Some(item) = schema.get("items").filter(|i| i.is_object()) {
+            for (index, value) in items.iter().enumerate() {
+                let segment = format!("#{index}");
+                let mut inner = path.to_vec();
+                inner.push(&segment);
+                if let Some(problem) = issue(tool, item, value, false, &inner) {
+                    return Some(problem);
+                }
+            }
+        }
+    }
     if let (Some(object), Some(properties)) = (value.as_object(), schema["properties"].as_object())
     {
         let required: Vec<&str> = schema["required"]
@@ -139,10 +164,7 @@ pub(super) fn check(
     args: &Value,
     union_fields: &[(&str, &str)],
 ) -> Result<(), Refusal> {
-    let Some(tool) = TOOLS
-        .as_array()
-        .and_then(|tools| tools.iter().find(|t| t["name"] == name))
-    else {
+    let Some(tool) = tool_definition(name) else {
         return Ok(());
     };
     let empty = json!({});

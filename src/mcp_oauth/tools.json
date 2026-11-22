@@ -16587,5 +16587,55 @@
   "send_to_user": "hiddenFromOutsideClients",
   "html_render": "hiddenFromOutsideClients",
   "html_preview": "hiddenFromOutsideClients"
+ },
+ "toolSearch": {
+  "name": "tool_search",
+  "description": "Load T3 Code tools you do not have yet, then call them by name. Search by name or purpose: threads (t3_thread_*), projects (t3_project_*), worktrees, preview_* browser, device_*, html_preview/html_render, schedule_task, pull requests and guides, attachments, request_secret, environment links. Exact names work too.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "query": {
+     "type": "string",
+     "maxLength": 500
+    }
+   },
+   "required": [
+    "query"
+   ]
+  },
+  "outputSchema": {
+   "type": "object",
+   "properties": {
+    "tools": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "properties": {
+       "name": {
+        "type": "string"
+       },
+       "description": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "name",
+       "description"
+      ],
+      "additionalProperties": true
+     }
+    }
+   },
+   "required": [
+    "tools"
+   ],
+   "additionalProperties": true
+  },
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": false,
+   "openWorldHint": true
+  }
  }
 }
