@@ -31,34 +31,26 @@ Based on `main` and the parity test suites:
 
 ## What's still missing compared with the original
 
-The Rust server can already run Codex and Claude Code conversations, manage projects, and share a data folder with the TypeScript original. That said, several features are still missing or behave differently.
+The [client RPC parity suite](scripts/client_rpc_parity_xfail.json) has no expected failures. Differences still show up during live conversations and in the tools agents can use.
 
 ### Threads and history
 
-- **Switching between the Rust and TypeScript servers:** Threads and projects created on either server show up on the other, and you can keep working in them: rename, archive or delete them, start new turns, and a turn cut off by a server switch is picked up by the other server. Threads from an earlier Rust-only setup are copied into the shared database once, the first time the Rust server starts with it, and its old event log is kept.
-- **Live update order:** As an agent streams a reply, live updates arrive in a different order and grouping than on the TypeScript server. Most conversations still read normally, though some edge cases (like interrupting a turn while waiting for approval) can look slightly different.
+- **Live updates.** Rust can show the start of a turn or the answer to an approval request in a different order. Interrupting Codex while it waits for approval can leave the turn without a checkpoint. A Claude question can appear after a command that the original shows after the question.
+- **Restarts and server switches.** A queued Codex message can appear earlier in the history after a restart. If a resumed Claude turn fails, its retry can be missing context from the failed attempt. Steering and then stopping a Codex turn after switching servers can also change the order of live updates. See the [live-turn cases](scripts/client_thread_parity_xfail.json) and [server-switch cases](scripts/shared_store_parity_xfail.json).
+- **Older databases.** Both servers can use the same current database. If a home has only the older TypeScript database, start the matching TypeScript server once to upgrade it. See the [shared database notes](docs/shared-store.md).
 
 ### Agents and tools
 
-- **Few built-in T3 tools for agents:** An agent running on the Rust server can use only a small set of T3's built-in tools (for threads, projects, and basic environment info) and does not receive the instructions that describe the rest. Most built-in T3 actions—such as browser previews, scheduled tasks, and pull request helpers—are not available to agents yet.
+- **Delegated tasks.** An agent can start a child, check its progress and receive its result. Cancelling the task, sending a follow-up to a finished child, and running a child in a separate worktree or on a linked machine are still missing.
+- **Other agent tools.** Agents still lack tools for requesting secrets, sending attachments, working with pull requests and issues, and controlling browser previews and devices. They also lack the instructions the original gives agents about when to use T3 tools. The [agent tool checklist](docs/agent-tools.md#checklist) tracks each tool.
+- **Scheduled runs.** Agents can manage schedules and run a task on demand. Rust does not yet start a task automatically when it comes due.
 
 ### AI providers
 
-- **No update-available checks:** The server does not check online for newer versions of provider command-line tools, so settings always show the latest version as unknown and do not offer an update command.
-- **Claude skills and reset credits:** Installed Claude skills and plugins are not listed yet, and Claude reset credits are not shown.
-- **Background check timing:** Periodic provider checks always run on their timer instead of pausing when nobody is actively using the app.
-
-### Other
-
-- **Cloning into a new project:** Clone from a URL, a path, or a repository name on GitHub, GitLab, Bitbucket, Azure DevOps, Forgejo/Gitea, GitCafe or Cursor Origin. A new project's clone shows git's progress, says when the transfer has stalled, and can be cancelled or retried; threads wait until it finishes.
-- **File browsing and search:** Project file lists include `.git` and gitignored files. File and content search do not yet support fuzzy matching, regular expressions, or match highlighting.
-- **Storage cleanup report:** Settings streams automatic and manual cleanup reports. File retention and checkpoint pruning run automatically and on request. Worktree retention is still pending.
-
-### Details for developers
-
-- **Shared database:** See [`docs/shared-store.md`](docs/shared-store.md) for the `statev2.sqlite` design and remaining migration/outbox work.
-- **Expected-failure lists:** Client-visible RPC and live-turn mismatches are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json).
-- **Agent tools:** Rust currently exposes 11 of the reference's 79 MCP tools and does not inject the orchestration prompt context.
+- **Follow-up messages.** Rust starts a new Claude process and resumes the conversation for each turn. It also starts a Codex process per turn, while the original shares one across threads using the same provider instance.
+- **Steering.** You can redirect a running Codex turn with a text message. Claude queues the message for later. Changing the model or including an attachment in a steering message still behaves differently.
+- **Titles and workflows.** Codex and Claude can generate thread titles. Custom title generators and titles that draw on the source thread’s history after a fork are still missing. Claude workflow tasks are also unsupported.
+- **Provider settings.** Rust checks all built-in providers. Online checks for newer CLI versions, Claude skill and plugin listings, and Claude reset credits are still missing. Periodic checks can continue when nobody is using the app.
 
 ## Install and switching
 
