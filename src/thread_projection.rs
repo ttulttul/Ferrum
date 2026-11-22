@@ -336,13 +336,20 @@ impl Thread {
                         item["nodeId"] = json!(ids.root_node);
                         item["providerThreadId"] = json!(ids.provider_thread);
                     }
-                    json!({
-                        "type": "notification",
-                        "source": {"kind": "system"},
-                        "outcome": "updated",
-                        "summary": crate::runtime_recovery::continuation_summary(&message.content),
-                        "detail": message.content
-                    })
+                    // A notification the server sent, such as the answer to a link card.
+                    if let Some(notification) = &message.notification {
+                        let mut fields = json!({"type": "notification"});
+                        merge(&mut fields, notification.clone());
+                        fields
+                    } else {
+                        json!({
+                            "type": "notification",
+                            "source": {"kind": "system"},
+                            "outcome": "updated",
+                            "summary": crate::runtime_recovery::continuation_summary(&message.content),
+                            "detail": message.content
+                        })
+                    }
                 }
                 _ => continue,
             };
@@ -361,6 +368,18 @@ impl Thread {
             }
             items.push(item);
             let Some((_, run)) = run else { continue };
+            // The run's link cards, in the order they were asked.
+            let run_id = run.id.to_string();
+            for card in self
+                .link_requests
+                .iter()
+                .filter(|card| card["runId"] == run_id.as_str())
+            {
+                ordinal += 1;
+                let mut card = card.clone();
+                card["ordinal"] = json!(ordinal);
+                items.push(card);
+            }
             // A provider turn's end adds its own items.
             if self.provider.terminals.contains_key(&run.id) {
                 continue;
@@ -952,6 +971,7 @@ impl Thread {
                 creation_source: message["creationSource"].as_str().map(str::to_owned),
                 scheduled_task_id: message["scheduledTaskId"].as_str().map(str::to_owned),
                 follows_thread_selection: message["followsThreadSelection"] == true,
+                notification: None,
             })
             .collect();
         let thread_id = text("id").unwrap_or_default();
@@ -981,6 +1001,7 @@ impl Thread {
                 .filter_map(|tag| tag.as_str().map(str::to_owned))
                 .collect(),
             checkpoints,
+            link_requests: Vec::new(),
             provider,
             stored: Some(Box::new(projection)),
             row,

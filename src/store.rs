@@ -33,6 +33,10 @@ pub struct ConversationMessage {
     /// selection when it starts (`followsThreadSelection`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub follows_thread_selection: bool,
+    /// What a server-sent notification says (`notification`: source,
+    /// outcome, summary), for a message in the notification role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<serde_json::Value>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Run {
@@ -163,6 +167,11 @@ pub struct Thread {
     pub tags: Vec<String>,
     #[serde(default)]
     pub checkpoints: Vec<CheckpointRecord>,
+    /// The cards in which the thread's agent asked the user to link another
+    /// machine (`link_request` turn items), as last recorded, in the order
+    /// they were first asked. Each holds every field but its ordinal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_requests: Vec<serde_json::Value>,
     /// What provider turns left behind; rebuilt from the log.
     #[serde(skip)]
     pub(crate) provider: Box<crate::provider_state::ProviderState>,
@@ -185,6 +194,12 @@ pub enum Event {
         removed_threads: Vec<String>,
     },
     ThreadCreated(Thread),
+    /// A link card asked or answered (`link_request.record`): it replaces
+    /// the card with its id, or is added after the others.
+    LinkRequestRecorded {
+        thread_id: String,
+        card: serde_json::Value,
+    },
     MessageAdded {
         thread_id: String,
         message: ConversationMessage,
@@ -301,6 +316,7 @@ impl Event {
             | Event::RunFinished { thread_id, .. }
             | Event::CheckpointCaptured { thread_id, .. }
             | Event::ThreadPatched { thread_id, .. }
+            | Event::LinkRequestRecorded { thread_id, .. }
             | Event::ProviderRuntimeReconciled { thread_id, .. } => Some(thread_id),
             Event::RunStarted(run) | Event::RunUpdated(run) | Event::RunQueued { run, .. } => {
                 Some(&run.thread_id)
@@ -420,6 +436,14 @@ impl Store {
             Event::MessageAdded { thread_id, message } => {
                 if let Some(t) = self.threads.get_mut(thread_id) {
                     t.messages.push(message.clone());
+                }
+            }
+            Event::LinkRequestRecorded { thread_id, card } => {
+                if let Some(t) = self.threads.get_mut(thread_id) {
+                    match t.link_requests.iter_mut().find(|c| c["id"] == card["id"]) {
+                        Some(existing) => *existing = card.clone(),
+                        None => t.link_requests.push(card.clone()),
+                    }
                 }
             }
             Event::MessageEdited {
@@ -773,6 +797,7 @@ mod tests {
                 unread: false,
                 tags: vec![],
                 checkpoints: vec![],
+                link_requests: Vec::new(),
                 provider: Box::default(),
                 stored: None,
             },

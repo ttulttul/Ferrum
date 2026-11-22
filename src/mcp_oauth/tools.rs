@@ -40,6 +40,9 @@ const SERVED: &[&str] = &[
     "t3_thread_send",
     "t3_thread_wait",
     "t3_thread_interrupt",
+    "t3_environment_links",
+    "t3_environment_link",
+    "t3_environment_unlink",
     "t3_thread_launch",
     "t3_project_list",
     "t3_project_read",
@@ -54,51 +57,88 @@ const SERVED: &[&str] = &[
     "t3_workflow_stop",
 ];
 
+/// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
+/// Their `environmentId` names a machine; it is never a target to act in.
+const LINKS_ONLY: &str = "hiddenWhileLinksOff";
+
 /// The reference's definitions of the tools served here, as `tools/list`
-/// returns them, in the reference's order.
-pub(super) static TOOLS: LazyLock<Value> = LazyLock::new(|| {
+/// returns them, in the reference's order, each with whom it is listed to.
+static SERVED_TOOLS: LazyLock<Vec<(Value, String)>> = LazyLock::new(|| {
     let reference: Value =
         serde_json::from_str(include_str!("tools.json")).expect("MCP tool definitions");
     let tools = reference["tools"]
         .as_array()
         .expect("MCP tool definitions")
         .iter()
-        .filter(|tool| tool["name"].as_str().is_some_and(|n| SERVED.contains(&n)))
-        .cloned()
+        .filter_map(|tool| {
+            let name = tool["name"].as_str().filter(|n| SERVED.contains(n))?;
+            let listed = reference["listedTo"][name].as_str().unwrap_or("everyone");
+            Some((tool.clone(), listed.to_owned()))
+        })
         .collect::<Vec<_>>();
     assert_eq!(tools.len(), SERVED.len(), "SERVED names an unknown tool");
-    Value::Array(tools)
+    tools
 });
 
-/// The served tools as `tools/list` sends them: the MCP protocol layer the
+/// The served tools every caller is listed.
+pub(super) static TOOLS: LazyLock<Value> = LazyLock::new(|| {
+    Value::Array(
+        SERVED_TOOLS
+            .iter()
+            .filter(|(_, listed)| listed == "everyone")
+            .map(|(tool, _)| tool.clone())
+            .collect(),
+    )
+});
+
+/// The tools `tools/list` offers: the links-only ones too while Linked
+/// environments is on, as the reference lists them.
+pub(super) fn listed<S: McpHost>(host: &S) -> Value {
+    let links = host.linked_environments_enabled();
+    Value::Array(
+        SERVED_TOOLS
+            .iter()
+            .filter(|(_, listed)| listed == "everyone" || (links && listed == LINKS_ONLY))
+            .map(|(tool, _)| sendable(tool))
+            .collect(),
+    )
+}
+
+fn tool_definition(name: &str) -> Option<&'static Value> {
+    SERVED_TOOLS
+        .iter()
+        .map(|(tool, _)| tool)
+        .find(|t| t["name"] == name)
+}
+
+/// A served tool as `tools/list` sends it: the MCP protocol layer the
 /// reference uses (effect's `isToolOutputSchema`) leaves out an output schema
 /// whose root is not a plain object, such as a union of answers.
-pub(super) static LISTED: LazyLock<Value> = LazyLock::new(|| {
-    let listed = TOOLS
-        .as_array()
-        .expect("MCP tool definitions")
-        .iter()
-        .map(|tool| {
-            let mut tool = tool.clone();
-            let output = &tool["outputSchema"];
-            let sendable = output["type"] == "object"
-                && output.get("properties").is_none_or(|p| {
-                    p.as_object()
-                        .is_some_and(|p| p.values().all(Value::is_object))
-                })
-                && output
-                    .get("required")
-                    .is_none_or(|r| r.as_array().is_some_and(|r| r.iter().all(Value::is_string)));
-            if !sendable {
-                if let Some(object) = tool.as_object_mut() {
-                    object.remove("outputSchema");
-                }
-            }
-            tool
+/// `update_agent_tools.py` already leaves such schemas out of `tools.json`.
+fn sendable(tool: &Value) -> Value {
+    let mut tool = tool.clone();
+    let output = &tool["outputSchema"];
+    let keeps = output["type"] == "object"
+        && output.get("properties").is_none_or(|p| {
+            p.as_object()
+                .is_some_and(|p| p.values().all(Value::is_object))
         })
-        .collect();
-    Value::Array(listed)
-});
+        && output
+            .get("required")
+            .is_none_or(|r| r.as_array().is_some_and(|r| r.iter().all(Value::is_string)));
+    if !keeps {
+        if let Some(object) = tool.as_object_mut() {
+            object.remove("outputSchema");
+        }
+    }
+    tool
+}
+
+fn links_only(name: &str) -> bool {
+    SERVED_TOOLS
+        .iter()
+        .any(|(tool, listed)| tool["name"] == name && listed == LINKS_ONLY)
+}
 
 const RUNTIME_MODES: [&str; 4] = [
     "approval-required",
@@ -472,6 +512,9 @@ pub(super) async fn call<S: McpHost>(
         "t3_queue" => threads::queue(host, caller, args).await,
         "t3_pending_request" => threads::pending_request(host, caller, args).await,
         "t3_workflow_stop" => threads::workflow_stop(host, caller, args).await,
+        "t3_environment_links" => environment_links(host, caller).await,
+        "t3_environment_link" => environment_link(host, caller, args).await,
+        "t3_environment_unlink" => environment_unlink(&**host, caller, args),
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }
@@ -509,7 +552,8 @@ async fn project_read<S: McpHost>(host: &S, a: &Value) -> Outcome {
 }
 
 async fn project_create<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> Outcome {
-    caller.writable()?;
+    // Linked work may bring the repository it works in.
+    writes_environment(caller, None)?;
     let title = required(a, "title")?.trim();
     if title.is_empty() {
         return Err(invalid_arguments());
@@ -999,8 +1043,8 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
         arg_str(a, "projectId")?.or(inherited.as_ref().map(|t| t.project_id.as_str()))
     else {
         return Err(failure(
-            "invalid_request",
-            "Pass projectId or scratch: this MCP client is not running inside a T3 thread.",
+            "target_required",
+            "Pass projectId: this MCP client is not running inside a T3 thread.",
         ));
     };
     let strategy = a.get("workspaceStrategy").filter(|v| !v.is_null());
@@ -1390,6 +1434,11 @@ pub(super) fn linked_target<'a, S: McpHost>(
     name: &str,
     args: &'a Value,
 ) -> Result<Option<&'a str>, Refusal> {
+    // Only a tool whose `environmentId` is the environment to act in runs
+    // there; the link tools name a machine for their own reasons.
+    if links_only(name) {
+        return Ok(None);
+    }
     match args.get("environmentId") {
         // The advertised codec takes null for an optional field.
         None | Some(Value::Null) => Ok(None),
@@ -1515,15 +1564,7 @@ pub(super) async fn forward<S: McpHost>(
     remote_check(caller, name, args)?;
     // Every caller here reaches the peer as the one link session, so work a
     // fenced link started never uses this environment's links.
-    if caller.granted.peer_link && caller.granted.access != "full-access" {
-        return Err(failure(
-            "capability_denied",
-            format!(
-                "This work was started from {} through a linked environment, so it cannot use this environment's links. A link paired with full access is not limited this way.",
-                caller.granted.label
-            ),
-        ));
-    }
+    assert_not_linked(caller, "use this environment's links")?;
     let mut args = args.as_object().cloned().unwrap_or_default();
     args.remove("environmentId");
     // The linked environment refuses a mode above the link's access too, but as
@@ -1681,10 +1722,7 @@ pub(super) fn unknown_arguments(name: &str, args: &Value) -> Result<(), Refusal>
     let Some(object) = args.as_object() else {
         return Ok(());
     };
-    let Some(tool) = TOOLS
-        .as_array()
-        .and_then(|tools| tools.iter().find(|t| t["name"] == name))
-    else {
+    let Some(tool) = tool_definition(name) else {
         return Ok(());
     };
     let accepted: Vec<&str> = tool["inputSchema"]["properties"]
@@ -1754,6 +1792,273 @@ fn sender_thread(environment_id: &str, thread_id: &str, title: &str) -> String {
         .join("/")
 }
 
+/// `assertNotLinked`: below full access, work a link started may not change
+/// what this environment already has, nor use its links.
+fn assert_not_linked(caller: &Caller, what: &str) -> Result<(), Refusal> {
+    if caller.granted.peer_link && caller.granted.access != "full-access" {
+        return Err(failure(
+            "capability_denied",
+            format!(
+                "This work was started from {} through a linked environment, so it cannot {what}. A link paired with full access is not limited this way.",
+                caller.granted.label
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `McpToolAccess.writesEnvironment`: a caller that may change projects or
+/// environment settings. `refused` names what linked work may not do, or
+/// `None` where linked callers may.
+fn writes_environment(caller: &Caller, refused: Option<&str>) -> Result<(), Refusal> {
+    caller.refuse_read_only()?;
+    if let Some(what) = refused {
+        assert_not_linked(caller, what)?;
+    }
+    if caller.limits() != ("full-access", "default") {
+        return Err(failure("capability_denied", FULL_ACCESS_REQUIRED));
+    }
+    Ok(())
+}
+
+const LINKS_OFF_HERE: &str =
+    "Linked environments is off on this machine. Turn it on in Settings → Labs.";
+
+/// `t3_environment_links`: the environments this one links to, as an agent sees them.
+async fn environment_links<S: McpHost>(host: &Arc<S>, caller: &Caller) -> Outcome {
+    assert_not_linked(caller, "use this environment's links")?;
+    if !host.linked_environments_enabled() {
+        return Err(failure("capability_denied", LINKED_ENVIRONMENTS_OFF));
+    }
+    let links = host
+        .peer_links_listed()
+        .await
+        .map_err(|message| failure("orchestration_error", message))?;
+    Ok(json!({
+        "environmentId": host.environment_id(),
+        "links": links.iter().map(|link| json!({
+            "environmentId": link["environmentId"],
+            "label": link["label"],
+            "status": link["status"],
+            "access": link["access"],
+            "expiresAt": link["expiresAt"],
+            "lastError": link["lastError"],
+        })).collect::<Vec<_>>(),
+        "notListed": "Not listed: not linked yet. Call t3_environment_link with a hint from the user's words.",
+    }))
+}
+
+/// `t3_environment_unlink`: forgets a link here.
+fn environment_unlink<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcome {
+    let environment_id = required(a, "environmentId")?.to_owned();
+    writes_environment(caller, Some("change projects or environment settings"))?;
+    let removed = host
+        .unlink_peer(&environment_id)
+        .map_err(|message| failure("orchestration_error", message))?;
+    Ok(json!({"environmentId": environment_id, "removed": removed}))
+}
+
+/// The card id a link request gets: turn item ids are global, so the key is
+/// scoped to its thread and provider session (`cardId`).
+fn link_card_id(thread_id: &str, namespace: &str, key: &str) -> String {
+    use crate::thread_projection::uri_component;
+    format!(
+        "turn-item:link-request:{}:{}:{}",
+        uri_component(thread_id),
+        uri_component(namespace),
+        uri_component(key)
+    )
+}
+
+/// What a retry hears: the card's outcome, without anything the user typed.
+fn link_card_result(card: &Value) -> Value {
+    let target = card["url"]
+        .as_str()
+        .or(card["environmentId"].as_str())
+        .unwrap_or("a machine");
+    match card["linkStatus"].as_str() {
+        Some("linked") => json!({
+            "status": "linked",
+            "environmentId": card["linkedEnvironmentId"],
+            "label": card["linkedLabel"].as_str().unwrap_or(target),
+            "access": card["linkedAccess"],
+        }),
+        Some("failed") => json!({
+            "status": "failed",
+            "message": card["failure"].as_str().unwrap_or("The link could not be made."),
+        }),
+        Some(status @ ("declined" | "cancelled")) => json!({"status": status}),
+        _ => json!({"status": "pending", "turnItemId": card["id"]}),
+    }
+}
+
+/// `t3_environment_link` (`PeerLinkRequests.request`): shows a link card in
+/// the calling thread and returns at once; the answer reaches the agent as a
+/// notification.
+async fn environment_link<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> Outcome {
+    let url = arg_str(a, "url")?.map(str::to_owned);
+    let environment_id = arg_str(a, "environmentId")?.map(str::to_owned);
+    let hint = arg_str(a, "hint")?.map(str::to_owned);
+    let reason = arg_str(a, "reason")?.unwrap_or_default().to_owned();
+    let key = arg_str(a, "clientRequestId")?.map(str::to_owned);
+    let requested_access = match arg_str(a, "requestedAccess")? {
+        None => None,
+        Some(
+            access @ ("read-only" | "approval-required" | "auto-accept-edits" | "auto"
+            | "full-access"),
+        ) => Some(access.to_owned()),
+        Some(_) => return Err(invalid_arguments()),
+    };
+    writes_environment(caller, Some("change projects or environment settings"))?;
+    let (Some(thread), Some(scope)) = (caller.thread.as_ref(), caller.granted.thread.as_ref())
+    else {
+        return Err(failure(
+            "thread_credential_required",
+            "t3_environment_link acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread.",
+        ));
+    };
+    if !host.linked_environments_enabled() {
+        return Err(failure("capability_denied", LINKS_OFF_HERE));
+    }
+    if url.is_some() && environment_id.is_some() {
+        return Err(failure(
+            "invalid_request",
+            "Pass either environmentId or url, not both. Pass neither to let the user pick the machine.",
+        ));
+    }
+    let namespace = caller.request_namespace();
+    // A machine already linked needs no card: the agent can use it now.
+    if let Some(id) = &environment_id {
+        if let Some(link) = host.peer_link(id).filter(|l| !l.expired) {
+            if let Some(key) = &key {
+                // A card still waiting for this key is answered by the link.
+                let card_id = link_card_id(&thread.id, &namespace, key);
+                let pending = {
+                    let store = host.control_state().store.read().await;
+                    store
+                        .threads
+                        .get(&thread.id)
+                        .and_then(|t| {
+                            t.link_requests
+                                .iter()
+                                .find(|c| c["id"] == card_id.as_str())
+                                .cloned()
+                        })
+                        .filter(|card| card["linkStatus"] == "pending")
+                };
+                if let Some(card) = pending {
+                    let mut command =
+                        card_command(&card, &format!("link-request:{card_id}:linked-on-retry"));
+                    command["linkStatus"] = json!("linked");
+                    command["linkedEnvironmentId"] = json!(id);
+                    command["linkedLabel"] = json!(link.label);
+                    command["linkedAccess"] = json!(link.access);
+                    host.dispatch(command).await.map_err(|error| {
+                        failure(
+                            "orchestration_error",
+                            format!(
+                                "Could not close the link request: {}",
+                                dispatch_message(&error)
+                            ),
+                        )
+                    })?;
+                }
+            }
+            return Ok(
+                json!({"status": "linked", "environmentId": id, "label": link.label, "access": link.access}),
+            );
+        }
+    }
+    let key = key.unwrap_or_else(|| crate::platform::uuid_v4().to_string());
+    let card_id = link_card_id(&thread.id, &namespace, &key);
+    let run = {
+        let store = host.control_state().store.read().await;
+        let current = store
+            .threads
+            .get(&thread.id)
+            .ok_or_else(calling_thread_missing)?;
+        if let Some(card) = current
+            .link_requests
+            .iter()
+            .find(|c| c["id"] == card_id.as_str())
+        {
+            return Ok(link_card_result(card));
+        }
+        // The card shows in, and is answered from, the caller's running turn.
+        current
+            .runs
+            .iter()
+            .rev()
+            .find(|run| run.status == "running")
+            .filter(|_| thread.provider_instance_id == scope.provider_instance_id)
+            .and_then(|run| {
+                current
+                    .provider_run_ids(run)
+                    .map(|ids| (run.id.to_string(), ids.root_node))
+            })
+    };
+    let Some((run_id, node_id)) = run else {
+        return Err(failure(
+            "parent_not_active",
+            "Asking to link an environment requires an active run owned by this MCP provider session.",
+        ));
+    };
+    let mut command = json!({
+        "type": "link_request.record",
+        "commandId": format!(
+            "command:mcp:{}:link-pending:{}",
+            crate::thread_projection::uri_component(&namespace),
+            crate::thread_projection::uri_component(&key)
+        ),
+        "threadId": thread.id,
+        "runId": run_id,
+        "nodeId": node_id,
+        "turnItemId": card_id,
+        "reason": reason,
+        "linkStatus": "pending",
+    });
+    for (field, value) in [
+        ("url", &url),
+        ("environmentId", &environment_id),
+        ("hint", &hint),
+        ("requestedAccess", &requested_access),
+    ] {
+        if let Some(value) = value {
+            command[field] = json!(value);
+        }
+    }
+    host.dispatch(command).await.map_err(|error| {
+        failure(
+            "orchestration_error",
+            format!(
+                "Could not record the link request: {}",
+                dispatch_message(&error)
+            ),
+        )
+    })?;
+    Ok(json!({"status": "pending", "turnItemId": card_id}))
+}
+
+/// A `link_request.record` command that repeats `card` as it was asked.
+pub(crate) fn card_command(card: &Value, command_id: &str) -> Value {
+    let mut command = json!({
+        "type": "link_request.record",
+        "commandId": command_id,
+        "threadId": card["threadId"],
+        "runId": card["runId"],
+        "nodeId": card["nodeId"],
+        "turnItemId": card["id"],
+        "reason": card["reason"],
+        "linkStatus": card["linkStatus"],
+    });
+    for field in ["url", "environmentId", "label", "hint", "requestedAccess"] {
+        if !card[field].is_null() {
+            command[field] = card[field].clone();
+        }
+    }
+    command
+}
+
 #[cfg(test)]
 mod sender_tests {
     use super::*;
@@ -1761,12 +2066,15 @@ mod sender_tests {
     #[test]
     fn lists_the_served_tools_with_the_reference_definitions() {
         let reference: Value = serde_json::from_str(include_str!("tools.json")).unwrap();
-        let listed = TOOLS.as_array().unwrap();
+        let listed: Vec<&Value> = SERVED_TOOLS.iter().map(|(tool, _)| tool).collect();
         assert_eq!(listed.len(), SERVED.len());
         for tool in listed {
             let name = tool["name"].as_str().unwrap();
-            assert_eq!(
-                reference["listedTo"][name], "everyone",
+            assert!(
+                matches!(
+                    reference["listedTo"][name].as_str(),
+                    Some("everyone" | LINKS_ONLY)
+                ),
                 "{name} needs listing by caller"
             );
             assert!(reference["tools"]

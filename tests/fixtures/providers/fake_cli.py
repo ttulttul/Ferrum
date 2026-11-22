@@ -12,6 +12,8 @@ A scenario is {"steps": [...]} or {"variants": [{"argsContain": "...",
 "steps": [...]}, ...]}, where the first variant whose argsContain is in the
 arguments (or that has none) plays. A variant may name another scenario file
 in this directory ("scenario": "claude_turn.json") to play its steps instead.
+With "repeat": true (on the scenario or the variant) the steps play again
+from the start after the last, so one long-lived CLI answers every prompt.
 Steps:
 
   {"expect": "turn/start"}   read until a message whose method, type or
@@ -69,12 +71,14 @@ with open(log_path + ".launch", "a") as out:
 with open(os.environ["FAKE_PROVIDER_SCENARIO"]) as source:
     scenario = json.load(source)
 
+repeat = bool(scenario.get("repeat"))
 if "variants" in scenario:
     variant = next(
         v
         for v in scenario["variants"]
         if "argsContain" not in v or v["argsContain"] in " ".join(args)
     )
+    repeat = bool(variant.get("repeat", repeat))
     if "scenario" in variant:
         directory = os.path.dirname(os.path.abspath(os.environ["FAKE_PROVIDER_SCENARIO"]))
         with open(os.path.join(directory, variant["scenario"])) as source:
@@ -257,6 +261,8 @@ index = 0
 while index < len(steps):
     step = steps[index]
     index += 1
+    if index >= len(steps) and repeat:
+        index = 0
     if "branch" in step:
         while True:
             message = receive()

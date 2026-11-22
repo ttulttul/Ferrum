@@ -38,6 +38,8 @@ pub struct AppState {
     pub(crate) peer_links: crate::peer_links::PeerLinks,
     /// MCP sessions with linked environments.
     pub(crate) peer_mcp: crate::peer_mcp::PeerMcpClient,
+    /// The link cards being answered now.
+    pub(crate) link_answers: crate::peer_link_requests::Answering,
     /// `http://<host>:<port>/mcp` once the server listens: where provider
     /// CLIs reach T3's tools.
     pub(crate) mcp_endpoint: std::sync::OnceLock<String>,
@@ -326,6 +328,7 @@ impl AppState {
             oauth,
             peer_links: crate::peer_links::PeerLinks::new(&dir, &paths.secrets),
             peer_mcp: Default::default(),
+            link_answers: Default::default(),
             mcp_endpoint: Default::default(),
             connect,
             data_dir: dir.clone(),
@@ -1254,6 +1257,33 @@ impl mcp_oauth::McpHost for AppState {
     }
     fn control_state(&self) -> &crate::control_state::ControlState {
         &self.control
+    }
+    fn peer_links_listed(
+        self: &Arc<Self>,
+    ) -> mcp_oauth::HostFuture<Result<Vec<serde_json::Value>, String>> {
+        let state = self.clone();
+        Box::pin(async move {
+            state
+                .peer_links
+                .list()
+                .await
+                .map(|links| {
+                    links
+                        .into_iter()
+                        .map(|(link, status)| {
+                            let mut row = link.to_json();
+                            row["status"] = serde_json::json!(status);
+                            row
+                        })
+                        .collect()
+                })
+                .map_err(|error| error.message)
+        })
+    }
+    fn unlink_peer(&self, environment_id: &str) -> Result<bool, String> {
+        self.peer_links
+            .unlink(environment_id)
+            .map_err(|error| error.message)
     }
     fn peer_link(&self, environment_id: &str) -> Option<mcp_oauth::PeerLinkInfo> {
         let link = self.peer_links.get(environment_id).ok().flatten()?;

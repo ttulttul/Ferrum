@@ -413,20 +413,27 @@ def main():
                 same(f"{name} (link made on one server, used on the other; peer on {peer_kind})", normal)
 
     if args.reference_root is not None:
-        decoded = reference_client_steps(args, servers)
-        for index, (expected, actual) in enumerate(zip(decoded["reference"], decoded["rust"])):
+        decoded = reference_client_steps(args, servers, "full-access")
+        for expected, actual in zip(decoded["reference"], decoded["rust"]):
             name = expected.get("name")
             assert expected.get("ok"), f"the reference's own client failed on the reference: {expected}"
             same(f"reference client: {name}", {"reference": expected, "rust": actual})
         assert len(decoded["reference"]) == len(decoded["rust"]), decoded
+        # Linked with auto access, registering a project is refused: it needs full access.
+        decoded = reference_client_steps(args, servers, "auto")
+        for expected, actual in zip(decoded["reference"], decoded["rust"]):
+            same(f"reference client, auto access: {expected.get('name')}", {"reference": expected, "rust": actual})
+        assert len(decoded["reference"]) == len(decoded["rust"]), decoded
+        refused = next(step for step in decoded["reference"] if step.get("name") == "t3_project_create")
+        assert not refused.get("ok"), refused
     print(f"{len(checks)}/{len(checks)} link forwarding checks matched across the reference and the Rust server")
 
 
-def reference_client_steps(args, servers):
+def reference_client_steps(args, servers, access):
     """Each server's answers to the reference's own "link another machine" client, which decodes
     every one with the reference's schemas: its sign-in, its MCP handshake, and tool calls made
     as a linked environment (a client, not a thread), launching and reading a thread in a project.
-    Linked with full access, which registering the project needs."""
+    Registering the project needs full access; with less it is refused."""
     steps = {}
     for kind, command in servers.items():
         with TemporaryDirectory() as tmp, ExitStack() as stack:
@@ -437,10 +444,10 @@ def reference_client_steps(args, servers):
             project = Path(tmp) / "project"
             project.mkdir()
             status, _, body = http(server.url, "POST", "/api/auth/pairing-token",
-                                   encode({"purpose": "peer-link", "access": "full-access"}),
+                                   encode({"purpose": "peer-link", "access": access}),
                                    {"Cookie": server.cookie, "Content-Type": "application/json"})
             assert status == 200, (status, body)
-            env = {**os.environ, "T3_PEER_LINK_CODE": json.loads(body)["credential"], "T3_PEER_LINK_ACCESS": "full-access",
+            env = {**os.environ, "T3_PEER_LINK_CODE": json.loads(body)["credential"], "T3_PEER_LINK_ACCESS": access,
                    "T3_PEER_LINK_ROOT": str(project)}
             # parity-env: the Node sign-in driver, a client of the server, not a T3 server
             done = subprocess.run([args.node, str(Path(__file__).with_name("peer_link_sign_in.mjs")),

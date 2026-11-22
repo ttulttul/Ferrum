@@ -830,6 +830,7 @@ mod tests {
             unread: false,
             tags: vec![],
             checkpoints: vec![],
+            link_requests: Vec::new(),
             provider: Default::default(),
             stored: None,
         }
@@ -1059,6 +1060,7 @@ mod tests {
             creation_source: None,
             scheduled_task_id: None,
             follows_thread_selection: false,
+            notification: None,
         });
         accepted_thread_only(&mut a, id);
         let mut store = store(a);
@@ -1187,6 +1189,7 @@ mod tests {
             creation_source: None,
             scheduled_task_id: None,
             follows_thread_selection: false,
+            notification: None,
         });
         let commands = continuations(&store(a.clone()), &json!({}), "2026-01-01T00:00:00Z");
         assert_eq!(commands.len(), 1);
@@ -1219,6 +1222,7 @@ mod tests {
             creation_source: None,
             scheduled_task_id: Some("scheduled-task:a".into()),
             follows_thread_selection: true,
+            notification: None,
         });
         accepted_thread_only(&mut a, id);
         let mut store = store(a);
