@@ -29,10 +29,17 @@ pub struct ThreadScope {
     pub provider_instance_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Record {
     scope: ThreadScope,
     last_alive_ms: i64,
+    #[serde(default)]
+    browser_access: bool,
+    // Tab assignments only live as long as the broker.
+    #[serde(skip)]
+    preview_sequence: u64,
+    #[serde(skip)]
+    preview_tab: Option<(u64, Option<String>)>,
     /// Set when a request finds the token idle; only a turn's touch clears it.
     expired: bool,
 }
@@ -108,9 +115,9 @@ impl ThreadCredentials {
 
     fn mark(&self, record: &mut Record, now_ms: i64, expired: bool) -> io::Result<()> {
         let updated = Record {
-            scope: record.scope.clone(),
             last_alive_ms: now_ms,
             expired,
+            ..record.clone()
         };
         self.save(&updated)?;
         *record = updated;
@@ -126,10 +133,21 @@ impl ThreadCredentials {
         provider_instance_id: &str,
         now_ms: i64,
     ) -> io::Result<String> {
+        self.issue(thread_id, provider_instance_id, now_ms, false)
+    }
+
+    pub(super) fn issue(
+        &self,
+        thread_id: &str,
+        provider_instance_id: &str,
+        now_ms: i64,
+        browser_access: bool,
+    ) -> io::Result<String> {
         let mut records = self.records.lock().unwrap();
         if let Some(record) = records.values_mut().find(|r| {
             r.scope.thread_id == thread_id
                 && r.scope.provider_instance_id == provider_instance_id
+                && r.browser_access == browser_access
                 && !r.expired
                 && now_ms.saturating_sub(r.last_alive_ms) <= LIVENESS_WINDOW_MS
         }) {
@@ -144,6 +162,9 @@ impl ThreadCredentials {
             },
             last_alive_ms: now_ms,
             expired: false,
+            browser_access,
+            preview_sequence: 0,
+            preview_tab: None,
         };
         self.save(&record)?;
         let token = Self::token(&self.key, &record.scope);
@@ -168,6 +189,37 @@ impl ThreadCredentials {
         }
         self.mark(record, now_ms, false).ok()?;
         Some(record.scope.clone())
+    }
+
+    pub(super) fn preview_target(&self, scope: &ThreadScope) -> Option<(u64, Option<String>)> {
+        let mut records = self.records.lock().unwrap();
+        let record = records.get_mut(&super::hashed(&Self::token(&self.key, scope)))?;
+        if record.expired || !record.browser_access {
+            return None;
+        }
+        record.preview_sequence += 1;
+        Some((
+            record.preview_sequence,
+            record.preview_tab.as_ref().and_then(|(_, tab)| tab.clone()),
+        ))
+    }
+
+    pub(super) fn remember_preview_tab(
+        &self,
+        scope: &ThreadScope,
+        sequence: u64,
+        tab: Option<String>,
+    ) {
+        let mut records = self.records.lock().unwrap();
+        if let Some(record) = records.get_mut(&super::hashed(&Self::token(&self.key, scope))) {
+            if record
+                .preview_tab
+                .as_ref()
+                .is_none_or(|(last, _)| sequence >= *last)
+            {
+                record.preview_tab = Some((sequence, tab));
+            }
+        }
     }
 
     /// A turn of `thread_id` started: its tokens are live again.
@@ -243,6 +295,33 @@ mod tests {
         assert!(open().resolve(&token, 13).is_none());
         open().revoke_thread("t1").unwrap();
         assert!(open().resolve(&other, 14).is_none());
+    }
+
+    #[test]
+    fn preview_access_rotates_with_the_session_and_keeps_the_latest_successful_target() {
+        let docs = Arc::new(crate::persistence::MemoryStore::new());
+        let key = crate::platform::random_bytes();
+        let open =
+            || ThreadCredentials::open(docs.clone(), PathBuf::from("sessions"), key).unwrap();
+        let credentials = open();
+        let token = credentials.issue("thread", "codex", 0, true).unwrap();
+        let scope = credentials.resolve(&token, 0).unwrap();
+        let (first, _) = credentials.preview_target(&scope).unwrap();
+        let (second, _) = credentials.preview_target(&scope).unwrap();
+        credentials.remember_preview_tab(&scope, second, Some("tab-2".into()));
+        credentials.remember_preview_tab(&scope, first, Some("tab-1".into()));
+        assert_eq!(
+            credentials.preview_target(&scope).unwrap().1.as_deref(),
+            Some("tab-2")
+        );
+        let credentials = open();
+        assert_eq!(credentials.preview_target(&scope).unwrap().1, None);
+        let disabled = credentials.issue("thread", "codex", 1, false).unwrap();
+        assert_ne!(token, disabled);
+        assert!(credentials.preview_target(&scope).is_none());
+        let current = credentials.resolve(&disabled, 1).unwrap();
+        assert!(credentials.preview_target(&current).is_none());
+        assert!(open().preview_target(&current).is_none());
     }
 
     #[test]

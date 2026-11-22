@@ -484,11 +484,12 @@ fn provider_instance_id(row: &Value) -> &str {
 pub(crate) fn thread_provider_turn(
     settings: &Value,
     manifest: &Value,
-    thread: Option<&crate::Thread>,
+    store: &crate::Store,
+    thread_id: &str,
     oauth: &crate::mcp_oauth::OAuth,
     endpoint: Option<&str>,
 ) -> std::io::Result<Option<ProviderLaunch>> {
-    let Some(thread) = thread else {
+    let Some(thread) = store.threads.get(thread_id) else {
         return Ok(None);
     };
     let row = thread.stored_row();
@@ -497,7 +498,23 @@ pub(crate) fn thread_provider_turn(
         return Ok(None);
     };
     if let Some(endpoint) = endpoint {
-        let token = oauth.thread_credential(&thread.id, provider_instance_id(&row))?;
+        let overrides = &settings["projectSettingsOverrides"];
+        let project = store
+            .project_rows
+            .get(&thread.project_id)
+            .filter(|row| row["deletedAt"].is_null());
+        let unresolved = project.is_none()
+            && overrides.as_object().is_some_and(|entries| {
+                entries
+                    .values()
+                    .any(|entry| entry.get("enableAgentBrowserAccess").is_some())
+            });
+        let browser = !unresolved
+            && overrides[&thread.project_id]["enableAgentBrowserAccess"]
+                .as_bool()
+                .or(settings["enableAgentBrowserAccess"].as_bool())
+                .unwrap_or(true);
+        let token = oauth.provider_credential(&thread.id, provider_instance_id(&row), browser)?;
         provider.mcp = Some(provider::McpServer {
             url: endpoint.to_owned(),
             authorization: format!("Bearer {token}"),

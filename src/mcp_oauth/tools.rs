@@ -78,6 +78,9 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("t3_worktree_handoff", &[]),
     ("t3_preview_list", &[]),
     ("t3_preview_close", &[]),
+    // Chromium preview automation.
+    ("preview_evaluate", &[]),
+    ("preview_set_appearance", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -149,6 +152,9 @@ const SERVED: &[&str] = &[
     "t3_worktree_handoff",
     "t3_preview_list",
     "t3_preview_close",
+    // Chromium preview automation.
+    "preview_evaluate",
+    "preview_set_appearance",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -711,6 +717,10 @@ pub(super) async fn call<S: McpHost>(
         }
         "t3_worktree_status" => agent_tools::worktree_status(host, caller).await,
         "t3_worktree_handoff" => agent_tools::worktree_handoff(host, caller, args).await,
+        "preview_evaluate" => agent_tools::preview_automation(host, caller, "evaluate", args).await,
+        "preview_set_appearance" => {
+            agent_tools::preview_automation(host, caller, "setColorScheme", args).await
+        }
         "t3_preview_list" => agent_tools::preview_list(host, caller, args).await,
         "t3_preview_close" => agent_tools::preview_close(host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),

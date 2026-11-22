@@ -101,6 +101,18 @@ fn issue(
         }
     }
     if let Some(text) = value.as_str() {
+        let trimmed = crate::settings::schema::trim(text);
+        if tool == "preview_evaluate" && path == ["expression"] && trimmed != text {
+            return expected("a string with no leading or trailing whitespace".into());
+        }
+        if matches!(tool, "preview_evaluate" | "preview_set_appearance") && path == ["tabId"] {
+            if trimmed.is_empty() {
+                return expected("a non-blank string".into());
+            }
+            if trimmed.encode_utf16().count() > 128 {
+                return expected("a value with a length of at most 128".into());
+            }
+        }
         let length = text.encode_utf16().count() as f64;
         if let Some(max) = schema["maxLength"].as_f64().filter(|max| length > *max) {
             return expected(format!("a value with a length of at most {max}"));

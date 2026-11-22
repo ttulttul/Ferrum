@@ -98,6 +98,37 @@ fn base36(mut n: u64) -> String {
 }
 
 impl PreviewService {
+    pub(crate) async fn automate(&self, input: &Value, dir: &std::path::Path) -> Reply {
+        let thread = string(input, "threadId")?;
+        let operation = string(input, "operation")?;
+        let target = input["tabId"].as_str();
+        let mut browsers = self.browsers.lock().await;
+        let snap = self
+            .state
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .filter(|tab| tab["threadId"] == thread && tab["runtime"] == "server")
+            .filter(|tab| target.is_none_or(|id| tab["tabId"] == id))
+            .max_by_key(|tab| {
+                browsers.priority(thread, tab["tabId"].as_str().unwrap_or_default(), tab)
+            })
+            .cloned();
+        let missing = || {
+            json!({"message": match target {
+                Some(id) => format!("Preview tab {id} was not found for {operation}. Omit tabId to use the current tab, or call preview_open."),
+                None => format!("No active preview tab was found for {operation}. Call preview_open first.")
+            }})
+        };
+        let snap = snap.ok_or_else(missing)?;
+        let page = browsers.open(dir, &snap).await.ok_or_else(missing)?;
+        drop(browsers);
+        page.automate(self, operation, &input["arguments"])
+            .await
+            .map_err(|message| json!({"message":message}))
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
         self.events.subscribe()
     }

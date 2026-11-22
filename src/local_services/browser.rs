@@ -21,6 +21,8 @@ use tokio_tungstenite::{
 };
 use uuid::Uuid;
 
+mod automation;
+
 type Cdp = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[derive(Default)]
 pub(super) struct Browsers {
@@ -47,13 +49,20 @@ pub(super) struct Page {
     id: String,
     profile: String,
     endpoint: String,
-    initial_url: Arc<Mutex<Option<String>>>,
+    initial_url: Arc<tokio::sync::Mutex<Option<String>>>,
+    automation: Arc<tokio::sync::Mutex<Option<automation::Session>>>,
+    activity: Arc<Mutex<Activity>>,
+    dialog: Arc<std::sync::atomic::AtomicBool>,
     closed: watch::Sender<bool>,
     control: Arc<Mutex<Control>>,
     scratch: Arc<tempfile::TempDir>,
     downloads: Arc<Mutex<HashMap<String, String>>>,
     chooser: Arc<Mutex<Option<(Uuid, Uuid, u64)>>>,
     chooser_updates: watch::Sender<Option<Uuid>>,
+}
+struct Activity {
+    viewers: usize,
+    used: String,
 }
 struct Control {
     owner: Option<Uuid>,
@@ -128,6 +137,7 @@ impl Page {
         json!({"type":"control","canOperate":operate,"controller":match c.owner{None=>"unclaimed",Some(owner) if owner==id=>"you",_=>"another-viewer"},"generation":c.generation,"dialog":null})
     }
 }
+
 fn executable() -> Option<PathBuf> {
     if let Some(p) = env::var_os("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
         .map(PathBuf::from)
@@ -270,9 +280,15 @@ impl Browsers {
             id: r["id"].as_str()?.to_owned(),
             profile: key,
             endpoint: r["webSocketDebuggerUrl"].as_str()?.to_owned(),
-            initial_url: Arc::new(Mutex::new(
+            initial_url: Arc::new(tokio::sync::Mutex::new(
                 snap["navStatus"]["url"].as_str().map(str::to_owned),
             )),
+            automation: Default::default(),
+            dialog: Default::default(),
+            activity: Arc::new(Mutex::new(Activity {
+                viewers: 0,
+                used: super::timestamp(),
+            })),
             closed: watch::channel(false).0,
             scratch: Arc::new(tempfile::tempdir().ok()?),
             downloads: Default::default(),
@@ -384,8 +400,16 @@ pub(super) async fn viewer(
     params: HashMap<String, String>,
 ) {
     let viewer = Uuid::new_v4();
+    struct ViewerPresence(Page, Uuid);
+    impl Drop for ViewerPresence {
+        fn drop(&mut self) {
+            self.0.set_controller(self.1, false);
+            self.0.activity.lock().unwrap().viewers -= 1;
+        }
+    }
+    let _presence = ViewerPresence(page.clone(), viewer);
+    page.activity.lock().unwrap().viewers += 1;
     let _ = stream(socket, &page, state, viewer, &params).await;
-    page.set_controller(viewer, false);
 }
 
 fn jpeg(frame: &Value) -> Option<Vec<u8>> {
@@ -489,6 +513,7 @@ async fn stream(
     let can_operate = params.get("interactive").is_none_or(|s| s != "false");
     if can_operate {
         page.set_controller(viewer, true);
+        drop(page.automation.lock().await);
     }
     let mut control = page.control.lock().unwrap().events.subscribe();
     let owns = page.control.lock().unwrap().owner == Some(viewer);
@@ -526,9 +551,12 @@ async fn stream(
     )
     .await?;
     // Begin navigating when the target is ready, independently of Chromium's first paint.
-    let initial_url = page.initial_url.lock().unwrap().take();
-    if let Some(url) = initial_url {
-        command(&mut cdp, &mut sequence, "Page.navigate", json!({"url":url})).await?;
+    {
+        let mut initial = page.initial_url.lock().await;
+        if let Some(url) = initial.as_ref() {
+            command(&mut cdp, &mut sequence, "Page.navigate", json!({"url":url})).await?;
+            *initial = None;
+        }
     }
     let start = command(
         &mut cdp,
@@ -597,6 +625,8 @@ async fn stream(
                     }
                 }
                 match e["method"].as_str(){
+                    Some("Page.javascriptDialogOpening") => page.dialog.store(true, std::sync::atomic::Ordering::Release),
+                    Some("Page.javascriptDialogClosed") => page.dialog.store(false, std::sync::atomic::Ordering::Release),
                     Some("Page.fileChooserOpened") if page.control.lock().unwrap().owner==Some(viewer)=>{
                         if let Some(node)=e["params"]["backendNodeId"].as_u64(){
                             let id=Uuid::new_v4();*page.chooser.lock().unwrap()=Some((id,viewer,node));
@@ -641,10 +671,14 @@ async fn stream(
                 command(&mut cdp,&mut sequence,"Page.screencastFrameAck",json!({"sessionId":id})).await?;
             }
             msg=socket.recv()=>{
-                let Some(Ok(Message::Text(raw)))=msg else{break};let Ok(m)=serde_json::from_str::<Value>(&raw)else{continue};
+                let raw = match msg {
+                    Some(Ok(Message::Text(raw))) => raw,
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                    _ => break,
+                };let Ok(m)=serde_json::from_str::<Value>(&raw)else{continue};
                 match m["type"].as_str(){
                     Some("ack")=>frames.acknowledge(&mut socket).await?,
-                    Some("takeControl") if can_operate=>page.set_controller(viewer,true),
+                    Some("takeControl") if can_operate=>{page.set_controller(viewer,true);drop(page.automation.lock().await);},
                     Some("releaseControl") if can_operate=>page.set_controller(viewer,false),
                     _ if page.control.lock().unwrap().owner==Some(viewer)=>{if let Some((method,p))=user_command(&m){command(&mut cdp,&mut sequence,method,p).await?;}}
                     _=>{}
