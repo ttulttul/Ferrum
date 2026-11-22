@@ -916,23 +916,24 @@ async fn run_scheduled_task_now<S: McpHost>(
         .run_scheduled_task_now(id.to_owned())
         .await
         .map_err(|error| failure("orchestration_error", dispatch_message(&error)))?;
-    let link = task["threadId"].as_str().map(|thread_id| {
-        thread_link(
+    let mut result = json!({
+        "taskId":id,
+        "threadId":task["threadId"],
+        "lastRunStatus":task["lastRunStatus"],
+        "lastRunError":task["lastRunError"],
+        "runCount":task["runCount"],
+        "nextRunAt":task["nextRunAt"]
+    });
+    if let Some(thread_id) = task["threadId"].as_str() {
+        result["link"] = thread_link(
             &**host,
             caller,
             thread_id,
             task["title"].as_str().unwrap_or("Scheduled task"),
         )
-    });
-    Ok(json!({
-        "taskId":id,
-        "threadId":task["threadId"],
-        "link":link,
-        "lastRunStatus":task["lastRunStatus"],
-        "lastRunError":task["lastRunError"],
-        "runCount":task["runCount"],
-        "nextRunAt":task["nextRunAt"]
-    }))
+        .into();
+    }
+    Ok(result)
 }
 
 async fn project_list<S: McpHost>(host: &S, a: &Value) -> Outcome {

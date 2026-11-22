@@ -205,6 +205,42 @@ impl Database {
         Ok(changed != 0)
     }
 
+    pub fn release_claim(
+        &mut self,
+        id: &str,
+        started_at: &str,
+        previous_status: &str,
+        updated_at: &str,
+        next_run_at: Option<&str>,
+        error: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE scheduled_tasks
+             SET updated_at=?4,next_run_at=?5,last_run_status=?3,last_run_error=?6
+             WHERE task_id=?1 AND last_run_status='running' AND last_run_at=?2",
+            params![
+                id,
+                started_at,
+                previous_status,
+                updated_at,
+                next_run_at,
+                error
+            ],
+        )?;
+        Ok(changed != 0)
+    }
+
+    pub fn delete_completed_once(&mut self, id: &str, started_at: &str) -> anyhow::Result<bool> {
+        let changed = self.conn.execute(
+            "DELETE FROM scheduled_tasks
+             WHERE task_id=?1 AND last_run_status='succeeded' AND last_run_at=?2
+               AND next_run_at IS NULL AND json_extract(schedule_json, '$.type')='once'
+               AND julianday(last_run_at) >= julianday(json_extract(schedule_json, '$.runAt'))",
+            params![id, started_at],
+        )?;
+        Ok(changed != 0)
+    }
+
     pub fn delete(&mut self, id: &str) -> anyhow::Result<()> {
         let tx = self
             .conn

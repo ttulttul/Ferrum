@@ -137,7 +137,10 @@ pub(crate) async fn run_due_at(state: Arc<AppState>, now_ms: i64) {
                 continue;
             }
             match database.claim_due(task["id"].as_str().unwrap_or_default(), &now) {
-                Ok(Some(claimed_task)) => claimed.push(claimed_task),
+                Ok(Some(mut claimed_task)) => {
+                    claimed_task["_previousLastRunStatus"] = task["lastRunStatus"].clone();
+                    claimed.push(claimed_task)
+                }
                 Ok(None) => {}
                 Err(error) => tracing::warn!(%error, "could not claim scheduled task"),
             }
@@ -147,6 +150,25 @@ pub(crate) async fn run_due_at(state: Arc<AppState>, now_ms: i64) {
     for task in due {
         dispatch_claimed(state.clone(), task, now_ms, "scheduled").await;
     }
+}
+
+async fn has_queued_occurrence(state: &Arc<AppState>, task: &Value) -> bool {
+    let Some(thread_id) = task["threadId"].as_str() else {
+        return false;
+    };
+    let task_id = task["id"].as_str().unwrap_or_default();
+    let store = state.store.read().await;
+    let Some(thread) = store.threads.get(thread_id) else {
+        return false;
+    };
+    thread.runs.iter().any(|run| {
+        run.status == "queued"
+            && run
+                .user_message_id
+                .as_deref()
+                .and_then(|message_id| thread.messages.iter().find(|m| m.id == message_id))
+                .is_some_and(|message| message.scheduled_task_id.as_deref() == Some(task_id))
+    })
 }
 
 /// Runs an explicit task immediately. The caller has already applied its
@@ -214,6 +236,27 @@ async fn dispatch_claimed(state: Arc<AppState>, task: Value, started_ms: i64, tr
             next.as_deref(),
         ) {
             tracing::warn!(%error, task_id = %id, "could not record missed scheduled task");
+        }
+        let _ = state.scheduled_task_events.send(());
+        return;
+    }
+
+    if trigger == "scheduled"
+        && task["schedule"]["type"] != "once"
+        && has_queued_occurrence(&state, &task).await
+    {
+        let next = next_run_at(&task["schedule"], started_ms);
+        let previous = task["_previousLastRunStatus"].as_str().unwrap_or("never");
+        let mut database = state.scheduled_database.lock().await;
+        if let Err(error) = database.release_claim(
+            &id,
+            &started_at,
+            previous,
+            &auth_service::iso(started_ms),
+            next.as_deref(),
+            Some("Skipped because the previous scheduled run is still queued."),
+        ) {
+            tracing::warn!(%error, task_id = %id, "could not release queued scheduled task");
         }
         let _ = state.scheduled_task_events.send(());
         return;
@@ -367,6 +410,14 @@ async fn record_provider_outcome(
             };
             let mut database = state.scheduled_database.lock().await;
             let _ = database.record_failure(&task_id, &started_at, error);
+        } else {
+            let mut database = state.scheduled_database.lock().await;
+            if database
+                .delete_completed_once(&task_id, &started_at)
+                .unwrap_or(false)
+            {
+                let _ = state.scheduled_task_events.send(());
+            }
         }
         return;
     }
