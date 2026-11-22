@@ -185,7 +185,12 @@ pub(super) async fn handle<S: McpHost>(
                     json!({"content":[{"type":"text","text":msg}],"isError":true})
                 }
                 Err(super::tools::Refusal::Failure(code, msg)) => {
-                    json!({"content":[{"type":"text","text":json!({"_tag":"OrchestratorMcpFailure","code":code,"message":msg}).to_string()}],"isError":true})
+                    let tag = if matches!(name, "t3_worktree_handoff" | "t3_worktree_status") {
+                        "WorktreeMcpFailure"
+                    } else {
+                        "OrchestratorMcpFailure"
+                    };
+                    json!({"content":[{"type":"text","text":json!({"_tag":tag,"code":code,"message":msg}).to_string()}],"isError":true})
                 }
             }
         }
