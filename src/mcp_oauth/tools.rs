@@ -51,6 +51,7 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     // Delegation (batch 4b).
     ("delegate_task", &[]),
     ("task_status", &[]),
+    ("task_cancel", &[]),
     // Worktree and preview session controls (agent-tools audit).
     ("t3_worktree_status", &[]),
     ("t3_preview_list", &[]),
@@ -102,6 +103,7 @@ const SERVED: &[&str] = &[
     // Delegation (batch 4b).
     "delegate_task",
     "task_status",
+    "task_cancel",
     // Worktree and preview session controls (agent-tools audit).
     "t3_worktree_status",
     "t3_preview_list",
@@ -635,6 +637,7 @@ pub(super) async fn call<S: McpHost>(
 
         "delegate_task" => delegation::delegate_task(host, caller, args).await,
         "task_status" => delegation::task_status(host, caller, args).await,
+        "task_cancel" => delegation::task_cancel(host, caller, args).await,
         "t3_worktree_status" => agent_tools::worktree_status(host, caller).await,
         "t3_preview_list" => agent_tools::preview_list(host, caller, args).await,
         "t3_preview_close" => agent_tools::preview_close(host, caller, args).await,
@@ -958,7 +961,7 @@ fn capabilities<S: McpHost>(host: &S, caller: &Caller) -> Value {
         "interactionMode": caller.interaction(),
         "providers": provider_entries(host),
         "features": {
-            "appOwnedSubagents": false,
+            "appOwnedSubagents": true,
             "asyncPolling": true,
             "cancellation": true,
             "batchThreadCreation": false,

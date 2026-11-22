@@ -109,6 +109,15 @@ pub trait McpHost: AuthHost {
     /// Runs one orchestration command as `orchestration.dispatchCommand`
     /// does, returning the sequence it committed at or the failure.
     fn dispatch(self: &Arc<Self>, command: Value) -> HostFuture<Result<u64, Value>>;
+    /// `cancelDelegatedTask`: cancels `taskId` on `parentThreadId` with
+    /// `stop`, the child's `thread.stop`, after stopping the child's own
+    /// delegated tasks.
+    fn cancel_delegated_task(
+        self: &Arc<Self>,
+        parent_thread_id: String,
+        task_id: String,
+        stop: Value,
+    ) -> HostFuture<Result<(), Value>>;
     /// `projects.mutate` with a `project.create` command.
     fn mutate_project(self: &Arc<Self>, command: Value) -> HostFuture<Result<Value, Value>>;
     /// `projects.createNew`: a project started from its title, answering

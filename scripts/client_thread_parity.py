@@ -88,6 +88,14 @@ PROVIDER_SCENARIOS = [
     # with a delivery turn, which reads it with task_status.
     {"name": "claude delegate async", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate_async.json", "awaitStatus": True, "settleRuns": 2},
+    # A delegated task the parent cancels while its child runs: the child is interrupted, the
+    # task ends interrupted without waking the parent, and cancelling it again keeps its result.
+    {"name": "claude delegate cancel", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_cancel.json", "awaitStatus": True},
+    # The user stops a parent whose delegated task still runs: the stop reaches the child too.
+    {"name": "claude delegate stop", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_stop.json", "awaitStatus": True,
+     "change": {"type": "thread.stop"}, "changeAfter": "subagent"},
     {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
     # Runtime requests: what each server asks the user, and what it answers the CLI.
     {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
@@ -497,7 +505,7 @@ def seed_turn(url, cookie, root, scenario):
     return {"threadId": THREAD, "turnMs": 60000 if scenario.get("change") else 30000,
             "interrupt": scenario.get("interrupt", False), "settleRuns": scenario.get("settleRuns", 1),
             "respond": scenario.get("respond"), "change": scenario.get("change"),
-            "steer": scenario.get("steer"), "dispatch": {
+            "steer": scenario.get("steer"), "changeAfter": scenario.get("changeAfter"), "dispatch": {
         "type": "message.dispatch", "commandId": "turn-message", "threadId": THREAD,
         "messageId": "message:turn", "text": "Run echo hi and write notes.txt", "attachments": [],
         "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"},

@@ -32,7 +32,8 @@ Steps:
                              (or that has none), so one Claude CLI can take a
                              first prompt or a later delivery
   {"send": {...}}            write a message; "$id" becomes the remembered
-                             message's id, "$params.x" its params.x, and
+                             message's id ("$request_id" its control
+                             request_id), "$params.x" its params.x, and
                              "$session" the Claude session the CLI was
                              started on
   {"stderr": "text"}         write a line to standard error
@@ -344,6 +345,8 @@ def fill(value):
             return remembered.get("params", {}).get(value[len("$params."):])
         if value == "$session":
             return claude_session()
+        if value == "$request_id":
+            return remembered.get("request_id")
         return value
     if isinstance(value, list):
         return [fill(v) for v in value]

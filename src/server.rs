@@ -1402,6 +1402,17 @@ impl mcp_oauth::McpHost for AppState {
     ) -> mcp_oauth::HostFuture<Result<u64, serde_json::Value>> {
         Box::pin(crate::dispatch_orchestration_command(self.clone(), command))
     }
+    fn cancel_delegated_task(
+        self: &Arc<Self>,
+        parent_thread_id: String,
+        task_id: String,
+        stop: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<(), serde_json::Value>> {
+        let state = self.clone();
+        Box::pin(async move {
+            crate::orchestration::cancel_task(state, &parent_thread_id, &task_id, stop).await
+        })
+    }
     fn mutate_project(
         self: &Arc<Self>,
         command: serde_json::Value,
