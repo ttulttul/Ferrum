@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Nightly, the restart scenarios also run in real time (see PARITY_REAL_TIME below).
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
 
 # A newer push to a pull request supersedes its running checks; main runs every push.
 concurrency:
@@ -68,10 +72,9 @@ jobs:
       matrix:
         # scripts/ci_parity_shard.sh lists each shard's suites.
         include:
-          - shard: thread-1-4
-          - shard: thread-2-4
-          - shard: thread-3-4
-          - shard: thread-4-4
+          - shard: thread-1-3
+          - shard: thread-2-3
+          - shard: thread-3-3
           - shard: core
           - shard: integrations
             browser: true
@@ -125,6 +128,10 @@ jobs:
       - name: Build the Rust server
         run: cargo build --locked
       - name: Compare both servers
+        env:
+          # Pull requests skip the restart scenarios' fixed waits (faketime moves the reference's
+          # one-minute continuation retry on); main and the nightly run wait them out for real.
+          PARITY_REAL_TIME: ${{ github.event_name == 'pull_request' && '0' || '1' }}
         run: scripts/ci_parity_shard.sh "${{ matrix.shard }}" "$GITHUB_WORKSPACE/reference" "$GITHUB_WORKSPACE/target/debug/t3code-server"
 
   # One check that passes only when Rust validation and every shard passed.

@@ -200,3 +200,12 @@ public repo), larger runners (Q, the suite waits on timers rather than CPU).
 - Whether PRs may run ~8 runners each. That is free on a public repository and within
   the 20-job concurrency limit, but two pushes in quick succession will queue unless
   cancel-in-progress is on.
+
+## 5. Progress
+
+**Step 2 (restart waits).**
+- **Restart signal.** Both servers now give a positive "restart recovery finished" signal. The reference already ends a `server.startup` span in `userdata/logs/server.trace.ndjson` with the log "V2 orchestration recovery completed", once its recovery has queued every `provider-runtime.continue` effect. Rust now writes the same record (`src/startup_trace.rs`) once its startup continuation pass has dispatched everything it owes.
+- **What the script waits for after a restart.** That server's record (matched by port), no active run, and, for the reference, no effect due or running in its outbox. Fixed sleeps became waits on the state they stood in for: the prompt reaching the fake CLI, a queued run existing, the projection unchanged across two reads.
+- **Faketime.** `cli restored` moves both servers' clocks on 62 s with libfaketime (`FAKETIME_TIMESTAMP_FILE`).
+- **Real time.** `--real-time` (`PARITY_REAL_TIME=1`, nightly and on pushes to main) keeps the 8 s floor and the real minute.
+- **Local result.** `client_thread_parity.py` took 7 min 43 s, against 15 min 18 s before. Restart scenarios take 10–15 s each (25 s with a live watcher). Thread shards go from 4 to 3.
