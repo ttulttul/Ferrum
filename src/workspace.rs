@@ -326,6 +326,14 @@ pub trait Workspace: MaybeSendSync {
     ) -> WorkspaceFuture<'a, bool> {
         boxed_future(async { false })
     }
+    /// Unload the native Codex `thread` from `instance`'s shared app-server
+    /// once its turn ended (a detach), as the reference does.
+    fn unload_provider_thread(&self, _instance: &str, _thread: &str) {}
+    /// Stop the provider processes this workspace shares across turns (the
+    /// server is shutting down).
+    fn stop_providers(&self) -> WorkspaceFuture<'_, ()> {
+        boxed_future(async {})
+    }
     /// The local servers a `subscribeDiscoveredLocalServers` stream reports.
     fn local_servers<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply>;
     /// `preview.stopLocalServer`.

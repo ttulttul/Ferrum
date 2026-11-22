@@ -40,6 +40,10 @@ pub(crate) trait CommandHost:
     /// then ends that process instead of interrupting the turn, as the
     /// reference's detach does. Hosts without local provider turns ignore it.
     fn detach_turn(&self, _run: Uuid) {}
+    /// Unload the native Codex `thread` from `instance`'s shared app-server
+    /// once its turn ended (a detach). Hosts without local provider turns
+    /// ignore it.
+    fn unload_provider_thread(&self, _instance: &str, _thread: &str) {}
     /// Run a `thread-title.generate` effect in the background. Hosts that
     /// run no provider CLIs ignore it.
     fn generate_title(self: Arc<Self>, _effect: crate::title_generation::TitleEffect) {}
@@ -438,7 +442,7 @@ async fn detach_session<H: CommandHost>(
     thread_id: &str,
     reason: &str,
 ) -> anyhow::Result<()> {
-    let (live, run_ids) = {
+    let (live, run_ids, codex_thread) = {
         let store = state.store.read().await;
         let Some(thread) = store.threads.get(thread_id) else {
             return Ok(());
@@ -449,7 +453,19 @@ async fn detach_session<H: CommandHost>(
             .filter(|run| run.status == "running")
             .map(|run| run.id)
             .collect();
-        (thread.provider.session_live(), run_ids)
+        // The Codex thread the instance's shared app-server holds, which
+        // the detach unloads.
+        let row = thread.stored_row();
+        let instance = row["modelSelection"]["instanceId"]
+            .as_str()
+            .or(row["providerInstanceId"].as_str())
+            .unwrap_or(crate::workspace::provider::CODEX)
+            .to_owned();
+        let codex_thread = thread
+            .provider
+            .resume_for(crate::workspace::provider::CODEX)
+            .map(|native| (instance, native));
+        (thread.provider.session_live(), run_ids, codex_thread)
     };
     if !live && run_ids.is_empty() {
         return Ok(());
@@ -467,6 +483,10 @@ async fn detach_session<H: CommandHost>(
         if let Some(cancel) = cancellations.remove(&run_id) {
             let _ = cancel.send(());
         }
+    }
+    drop(cancellations);
+    if let Some((instance, native)) = codex_thread {
+        state.unload_provider_thread(&instance, &native);
     }
     Ok(())
 }

@@ -25,6 +25,9 @@ pub const CLAUDE_AGENT: &str = "claudeAgent";
 pub struct ProviderTurn {
     /// The instance's driver: [`CODEX`] or [`CLAUDE_AGENT`].
     pub driver: String,
+    /// The provider instance, whose turns share one Codex app-server.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance_id: String,
     /// The CLI to run; empty for the driver's default (`codex`, `claude`).
     #[serde(default)]
     pub binary_path: String,

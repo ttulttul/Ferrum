@@ -31,31 +31,13 @@ pub(super) async fn run(
     cancel: oneshot::Receiver<()>,
     responses: mpsc::UnboundedReceiver<RuntimeResponse>,
     sink: Sink,
+    servers: std::sync::Arc<super::codex_server::Registry>,
 ) {
-    let binary = program(&provider.binary_path, "codex");
-    let mut args = vec![
-        "app-server".to_string(),
-        "-c".into(),
-        "thread_unload_delay_secs=0".into(),
-    ];
-    args.extend(provider.launch_args.iter().cloned());
-    let cli = match Cli::spawn(
-        &spec,
-        Launch {
-            program: binary.clone(),
-            args,
-            home_var: "CODEX_HOME",
-            home: &provider.home_path,
-            // Codex names the client in its requests, as for the reference.
-            extra_env: vec![(
-                "CODEX_INTERNAL_ORIGINATOR_OVERRIDE".into(),
-                "T3 Code".into(),
-            )],
-        },
-    ) {
+    let cli = match super::codex_server::acquire(&servers, &spec, &provider) {
         Ok(cli) => cli,
         Err(_) => {
             // The reference's CodexAppServerSpawnError.
+            let binary = program(&provider.binary_path, "codex");
             let failure = ProviderFailure::new(
                 "provider_error",
                 format!(
@@ -68,7 +50,6 @@ pub(super) async fn run(
     let mut session = Session {
         cli,
         sink: sink.clone(),
-        next_id: 1,
         cancel: Some(cancel),
         cancelled: false,
         responses,
@@ -84,8 +65,15 @@ pub(super) async fn run(
         last_error: None,
     };
     let end = session.turn(&spec, &provider).await;
-    let Session { cli, .. } = session;
-    cli.stop().await;
+    // A thread whose turn failed resumes on its next turn, as the
+    // reference forgets what it loaded.
+    if end.status == TurnStatus::Failed {
+        if let Some(thread) = session.thread_id.as_deref() {
+            session.cli.server.mark_loaded(thread, None);
+        }
+    }
+    // The app-server stays for the instance's next turns.
+    drop(session);
     sink.finish(end);
 }
 
@@ -170,9 +158,8 @@ pub(super) async fn list_models(
 }
 
 struct Session {
-    cli: Cli,
+    cli: super::codex_server::Conn,
     sink: Sink,
-    next_id: u64,
     cancel: Option<oneshot::Receiver<()>>,
     cancelled: bool,
     /// Answers to the turn's runtime requests.
@@ -401,6 +388,18 @@ impl Session {
     }
 
     async fn drive(&mut self, spec: &TurnSpec, provider: &ProviderTurn) -> Result<TurnEnd, Failed> {
+        // The shared app-server is initialized once.
+        let server = self.cli.server.clone();
+        let mut initialized = server.initialized.lock().await;
+        if !*initialized {
+            self.initialize().await?;
+            *initialized = true;
+        }
+        drop(initialized);
+        self.open_thread(spec, provider).await
+    }
+
+    async fn initialize(&mut self) -> Result<(), Failed> {
         self.request(
             "initialize",
             json!({
@@ -413,8 +412,14 @@ impl Session {
             }),
         )
         .await?;
-        self.notify("initialized").await?;
+        self.notify("initialized").await
+    }
 
+    async fn open_thread(
+        &mut self,
+        spec: &TurnSpec,
+        provider: &ProviderTurn,
+    ) -> Result<TurnEnd, Failed> {
         let model = (!provider.model.trim().is_empty()).then(|| provider.model.clone());
         // The turn carries the runtime policy, as the reference sends it; the
         // thread carries the reference's thread config, with the app thread
@@ -450,7 +455,22 @@ impl Session {
         }
         let mut resumed = false;
         let mut thread = None;
-        if let Some(resume) = provider.resume.as_deref().filter(|id| !id.is_empty()) {
+        // What the thread was loaded with: a thread still loaded with the
+        // same model and runtime policy is not resumed again.
+        let load_key = json!({
+            "model": model, "effort": provider.reasoning_effort, "runtimeMode": self.runtime_mode,
+            "interactionMode": provider.interaction_mode(), "cwd": spec.cwd,
+        })
+        .to_string();
+        if let Some(loaded) = provider
+            .resume
+            .as_deref()
+            .filter(|id| !id.is_empty() && self.cli.server.holds(id, &load_key))
+        {
+            self.cli.bind(loaded);
+            resumed = true;
+            thread = Some(json!({"thread": {"id": loaded}}));
+        } else if let Some(resume) = provider.resume.as_deref().filter(|id| !id.is_empty()) {
             let mut params = thread_params.clone();
             params["threadId"] = json!(resume);
             // The reference resumes without replaying the thread's turns.
@@ -476,6 +496,8 @@ impl Session {
             ));
         };
         self.thread_id = Some(thread_id.clone());
+        self.cli.bind(&thread_id);
+        self.cli.server.mark_loaded(&thread_id, Some(load_key));
         self.sink.send(ProviderEvent::ProviderThread {
             driver: CODEX.into(),
             native_thread_id: thread_id.clone(),
@@ -607,8 +629,7 @@ impl Session {
         else {
             return;
         };
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.cli.next_id();
         let _ = self
             .cli
             .write(&json!({"id": id, "method": "turn/steer", "params": {
@@ -624,8 +645,7 @@ impl Session {
         else {
             return;
         };
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.cli.next_id();
         // The reply does not matter; `turn/completed` reports the outcome.
         let _ = self
             .cli
@@ -644,8 +664,7 @@ impl Session {
     /// Send a request and read until its reply, handling what arrives
     /// before it.
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, Failed> {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.cli.next_id();
         self.cli
             .write(&json!({"id": id, "method": method, "params": params}))
             .await

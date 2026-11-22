@@ -112,6 +112,10 @@ PROVIDER_SCENARIOS = [
     {"name": "codex interrupt", "instance": "codex", "model": "fixture", "scenario": "codex_interrupt.json",
      "interrupt": "command"},
     {"name": "claude turn", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_turn.json"},
+    # A second turn on the same server runs in the instance's shared app-server, on the thread it
+    # still has loaded.
+    {"name": "codex second turn", "instance": "codex", "model": "fixture", "scenario": "codex_two_turns.json",
+     "followUp": "Now append a line"},
     # A message steers the running turn (Codex `turn/steer`), which then answers it, and Stop
     # interrupts it.
     {"name": "codex steer then stop", "instance": "codex", "model": "fixture", "scenario": "codex_steer.json",
@@ -805,6 +809,27 @@ def title_outcome(url, cookie, scenario, log, root):
     return out
 
 
+def follow_up_turn(args, url, cookie, text):
+    """A second message once the first run settled; the thread as read once it settled too."""
+    runs = len(thread_projection(url, cookie).get("runs", []))
+    rpc(url, cookie, "orchestration.dispatchCommand", {
+        "type": "message.dispatch", "commandId": "follow-up-message", "threadId": THREAD,
+        "messageId": "message:follow-up", "text": text, "attachments": [],
+        "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
+    wait_for(url, cookie, lambda p: len(p.get("runs", [])) > runs
+             and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", [])), 40)
+    after = run_client(args, url, cookie, {"threadId": THREAD, "inspect": True})
+    return {step: value for step, value in after["steps"].items() if "live" not in step}
+
+
+def turn_app_servers(log):
+    """How many Codex app-servers a server started for turns (its status probe's aside): the
+    reference shares one per instance across turns and threads."""
+    launch = Path(str(log) + ".launch")
+    return sum(1 for line in (launch.read_text().splitlines() if launch.exists() else [])
+               if json.loads(line)["argv"][:3] == ["app-server", "-c", "thread_unload_delay_secs=0"])
+
+
 def thread_projection(url, cookie):
     return rpc(url, cookie, "orchestration.getThreadProjection", {"threadId": THREAD})
 
@@ -1120,6 +1145,9 @@ def compare_turn(original, rust):
             if a != b:
                 problems[f"title {key}"] = [f"original {json.dumps(a, sort_keys=True)[:4000]}",
                                             f"rust     {json.dumps(b, sort_keys=True)[:4000]}"]
+    servers = [original.get("appServers"), rust.get("appServers")]
+    if servers[0] != servers[1]:
+        problems["turn app-servers"] = [f"original {servers[0]}", f"rust     {servers[1]}"]
     launches = [original.get("launches", []), rust.get("launches", [])]
     if launches[0] != launches[1]:
         problems["cli launches"] = [f"original {launches[0]}", f"rust     {launches[1]}"]
@@ -1264,10 +1292,16 @@ def provider_turns(args, credentials):
                         provider_status(url, cookie, scenario["instance"], temporary)
                     seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
                     outcomes[name] = run_client(args, url, cookie, seeded)
+                    if scenario.get("followUp"):
+                        outcomes[name]["steps"].update(follow_up_turn(args, url, cookie, scenario["followUp"]))
                     if scenario.get("title"):
                         outcomes[name]["title"] = title_outcome(url, cookie, scenario, log, temporary)
                     if scenario.get("status"):
                         outcomes[name]["status"] = provider_status(url, cookie, scenario["instance"], temporary)
+                outcomes[name]["appServers"] = turn_app_servers(log)
+                if args.dump:
+                    launch_log = Path(str(log) + ".launch")
+                    outcomes[name]["allLaunches"] = launch_log.read_text().splitlines() if launch_log.exists() else []
                 outcomes[name]["cli"] = cli_approvals(log)
                 outcomes[name]["launch"] = cli_launch(log, temporary)
                 outcomes[name]["mcp"] = agent_mcp(log, temporary)

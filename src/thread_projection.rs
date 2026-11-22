@@ -821,6 +821,24 @@ impl Thread {
         };
         let mut messages = self.message_rows();
         messages.extend(provider.messages);
+        // The reference lists messages by creation time: each run's prompt,
+        // then what its provider said, run after run. A message without a
+        // run stays with the one before it.
+        let mut position = 0;
+        let mut keyed: Vec<(usize, Value)> = messages
+            .into_iter()
+            .map(|message| {
+                if let Some(index) = message["runId"]
+                    .as_str()
+                    .and_then(|id| self.runs.iter().position(|run| run.wire_id() == id))
+                {
+                    position = index;
+                }
+                (position, message)
+            })
+            .collect();
+        keyed.sort_by_key(|(index, _)| *index);
+        let mut messages: Vec<Value> = keyed.into_iter().map(|(_, message)| message).collect();
         // Rust's message times are whole seconds, so a steer goes right
         // after the message that was last when it arrived.
         for message in self.messages.iter().filter(|m| m.steer.is_some()) {

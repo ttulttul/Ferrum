@@ -554,6 +554,7 @@ pub(crate) fn provider_turn(
     };
     let turn = ProviderTurn {
         driver: driver.to_owned(),
+        instance_id: instance_id.to_owned(),
         binary_path: text("binaryPath"),
         launch_args: split_args(&text("launchArgs")),
         home_path: text("homePath"),

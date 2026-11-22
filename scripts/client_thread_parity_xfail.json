@@ -145,5 +145,8 @@
     "agent mcp": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the delegated task's delivery, to the CLI it already runs; the extra CLI adds a launch, its approval flags and its own MCP sign-in.",
     "cli approvals": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the delegated task's delivery, to the CLI it already runs; the extra CLI adds a launch, its approval flags and its own MCP sign-in.",
     "cli launch": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the delegated task's delivery, to the CLI it already runs; the extra CLI adds a launch, its approval flags and its own MCP sign-in."
+  },
+  "codex second turn": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
   }
 }

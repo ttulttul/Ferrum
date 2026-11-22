@@ -22,6 +22,8 @@ pub struct LocalWorkspace {
     pub(crate) terminals: TerminalService,
     pub(crate) previews: PreviewService,
     pub(crate) devices: DeviceService,
+    /// The provider instances' shared Codex app-servers.
+    codex_servers: std::sync::Arc<crate::local_services::provider_turns::CodexServers>,
 }
 
 impl LocalWorkspace {
@@ -40,6 +42,7 @@ impl LocalWorkspace {
             terminals,
             previews,
             devices,
+            codex_servers: Default::default(),
         }
     }
 }
@@ -199,7 +202,11 @@ impl Workspace for LocalWorkspace {
     ) -> WorkspaceFuture<'_, anyhow::Result<mpsc::UnboundedReceiver<TurnEvent>>> {
         async move {
             if spec.provider.is_some() {
-                crate::local_services::provider_turns::start(spec, cancel)
+                crate::local_services::provider_turns::start(
+                    spec,
+                    cancel,
+                    self.codex_servers.clone(),
+                )
             } else {
                 start_turn(spec, cancel)
             }
@@ -212,6 +219,21 @@ impl Workspace for LocalWorkspace {
         response: crate::workspace::provider::RuntimeResponse,
     ) -> WorkspaceFuture<'a, bool> {
         async move { crate::local_services::provider_turns::respond(turn_id, response) }.boxed()
+    }
+    fn unload_provider_thread(&self, instance: &str, thread: &str) {
+        crate::local_services::provider_turns::unload_codex_thread(
+            &self.codex_servers,
+            instance,
+            thread,
+        );
+    }
+    fn stop_providers(&self) -> WorkspaceFuture<'_, ()> {
+        // Their turns end first (an interrupt takes up to its grace).
+        crate::local_services::provider_turns::shutdown_codex(
+            &self.codex_servers,
+            std::time::Duration::from_secs(6),
+        )
+        .boxed()
     }
     fn provider_models<'a>(
         &'a self,
