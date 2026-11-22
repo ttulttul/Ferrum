@@ -43,9 +43,7 @@
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
   },
   "codex approval interrupted": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer.",
-    "items": "The reference captures a checkpoint after a turn interrupted while an approval waits; Rust captures one only after a completed turn.",
-    "live kinds": "The reference captures a checkpoint after a turn interrupted while an approval waits; Rust captures one only after a completed turn."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
   },
   "claude approval": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
@@ -148,8 +146,6 @@
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude delegate stop": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer.",
-    "items": "The reference captures a checkpoint after a turn the stop interrupts; Rust captures one only after a completed turn.",
-    "live kinds": "The reference captures a checkpoint after a turn the stop interrupts; Rust captures one only after a completed turn."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   }
 }

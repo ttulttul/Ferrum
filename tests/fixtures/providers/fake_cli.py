@@ -164,6 +164,7 @@ SIDE_REPLIES = {
     "account/read": {"account": {"type": "apiKey"}, "requiresOpenaiAuth": False},
     "config/read": {"config": {}, "origins": {}},
     "thread/unsubscribe": {},
+    "thread/backgroundTerminals/terminate": {"terminated": True},
     "turn/interrupt": {},
     **scenario.get("replies", {}),
 }

@@ -535,6 +535,12 @@ def rendered_turn(projection):
         "messages": [f"{m.get('role')} {m.get('createdBy')}/{m.get('creationSource')}: {str(m.get('text'))[:80]}"
                      for m in projection.get("messages", [])],
         "runs": [run.get("status") for run in projection.get("runs", [])],
+        # A stopped run owns the rollback point at its ordinal, even with other messages queued.
+        "stopped checkpoints": [
+            (run["ordinal"], cp.get("appRunOrdinal"), cp.get("status"), run.get("checkpointId") == cp["id"])
+            for run in projection.get("runs", []) if run.get("status") in ("interrupted", "cancelled")
+            for cp in projection.get("checkpoints", []) if cp.get("runId") == run["id"]
+        ],
         "runtimeRequests": [f"{r.get('kind')} {r.get('status')} {r.get('decision')} {r.get('answers')}"
                             for r in projection.get("runtimeRequests", [])],
         "attempts": [attempt.get("status") for attempt in projection.get("attempts", [])],

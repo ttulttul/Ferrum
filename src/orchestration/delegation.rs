@@ -918,6 +918,16 @@ async fn finalize_child<H: CommandHost>(
     else {
         return Ok(());
     };
+    let mut source_point =
+        context_source_point(&child, result_run["id"].as_str().unwrap_or_default());
+    // The result describes the child at its terminal run update. A stopped
+    // run gets its rollback checkpoint in a later update.
+    if matches!(
+        result_run["status"].as_str(),
+        Some("interrupted" | "cancelled")
+    ) {
+        source_point.as_object_mut().unwrap().remove("checkpointId");
+    }
     // A cancelled task's completed run ends it interrupted.
     let cancelled = task["cancelledRunId"] == result_run["id"];
     let terminal = if cancelled && terminal == "completed" {
@@ -1024,8 +1034,6 @@ async fn finalize_child<H: CommandHost>(
         item["completedAt"] = json!(at);
         item["updatedAt"] = json!(at);
     }
-    let mut source_point =
-        context_source_point(&child, result_run["id"].as_str().unwrap_or_default());
     if !turn_item.is_null() {
         source_point["turnItemId"] = turn_item;
     }
