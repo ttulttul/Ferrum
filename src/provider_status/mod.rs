@@ -50,7 +50,7 @@
 //! listed here are not checked yet: their rows keep the placeholder.
 mod acp;
 mod antigravity;
-mod claude;
+pub(crate) mod claude;
 mod codex;
 mod cursor;
 mod fx;

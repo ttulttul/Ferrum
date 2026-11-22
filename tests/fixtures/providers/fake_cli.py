@@ -59,6 +59,48 @@ import urllib.request
 
 args = sys.argv[1:]
 log_path = os.environ["FAKE_PROVIDER_LOG"]
+
+
+def title_generation():
+    """Answer a one-shot text generation run (a thread title) and exit.
+
+    `codex ... mcp list --json` prints the scenario's "mcpServers" (default
+    none). `codex exec ... -` and `claude -p ...` read the prompt from standard
+    input, append {argv, prompt, schema, env} to FAKE_PROVIDER_LOG.title, and
+    answer the scenario's "title" output ({"title", "needsRefinement"}); a
+    scenario without one fails at once, as a CLI that cannot run.
+    """
+    with open(os.environ["FAKE_PROVIDER_SCENARIO"]) as source:
+        scenario = json.load(source)
+    if "mcp" in args and args[args.index("mcp") + 1:args.index("mcp") + 3] == ["list", "--json"]:
+        sys.stdout.write(json.dumps(scenario.get("mcpServers", [])) + "\n")
+        sys.exit(0)
+    prompt = sys.stdin.read()
+    schema = None
+    for flag in ("--output-schema", "--json-schema"):
+        if flag in args:
+            value = args[args.index(flag) + 1]
+            schema = open(value).read() if flag == "--output-schema" else value
+    env = {k: v for k, v in os.environ.items()
+           if k.startswith(("CODEX_INTERNAL_", "CODEX_HOME", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CONFIG_DIR"))}
+    with open(log_path + ".title", "a") as out:
+        out.write(json.dumps({"argv": args, "prompt": prompt, "schema": schema, "env": env}) + "\n")
+    output = scenario.get("title")
+    if output is None:
+        sys.stderr.write("fake provider: this scenario generates no title\n")
+        sys.exit(1)
+    if args[0] == "exec":
+        with open(args[args.index("--output-last-message") + 1], "w") as out:
+            out.write(json.dumps(output))
+    else:
+        sys.stdout.write(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                                     "result": "", "structured_output": output}) + "\n")
+    sys.exit(0)
+
+
+if args[:1] in (["exec"], ["-p"]) or ("mcp" in args and "--json" in args and "app-server" not in args):
+    title_generation()
+
 with open(log_path + ".args", "a") as out:
     out.write(" ".join(args) + "\n")
 # The launch as JSON: the arguments and the environment a server sets for its CLIs.

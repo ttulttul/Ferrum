@@ -553,6 +553,11 @@ impl Store {
                 }
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.provider.apply(*run_id, event, at);
+                    if let crate::workspace::ProviderEvent::ProviderThread { driver, .. } = event {
+                        if driver == crate::workspace::provider::CLAUDE_AGENT {
+                            thread.provider.session_title = Some(thread.title.clone());
+                        }
+                    }
                 }
             }
             Event::RunFinished {

@@ -398,7 +398,12 @@ impl Thread {
                 json!({"bytesUsed": bytes, "pagesUsed": pages}),
             );
         }
-        let title = self.title.trim();
+        let title = self
+            .provider
+            .session_title
+            .as_deref()
+            .unwrap_or(&self.title)
+            .trim();
         if !title.is_empty() {
             metadata.insert("title".into(), json!(title));
         }

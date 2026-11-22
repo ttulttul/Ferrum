@@ -104,6 +104,37 @@ pub fn pending_continuations(conn: &Connection) -> rusqlite::Result<Vec<PendingC
     Ok(out)
 }
 
+/// Pending `thread-title.generate` effects, oldest first.
+pub fn pending_title_effects(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<crate::title_generation::TitleEffect>> {
+    let mut statement = conn.prepare(
+        "SELECT effect_id, command_id, thread_id, payload_json FROM orchestration_v2_effect_outbox
+         WHERE status = 'pending' AND effect_type = 'thread-title.generate'
+         ORDER BY available_at ASC, created_at ASC, effect_id ASC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (effect_id, command_id, thread_id, payload) = row?;
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        out.push(crate::title_generation::TitleEffect {
+            effect_id,
+            request_id: command_id,
+            thread_id,
+            kind: payload["kind"].clone(),
+        });
+    }
+    Ok(out)
+}
+
 /// Settles a pending effect this server carried out, as the reference's
 /// worker claims (attempt counted) and settles it.
 pub fn settle(conn: &Connection, effect_id: &str, status: &str) -> rusqlite::Result<()> {

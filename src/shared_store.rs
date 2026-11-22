@@ -26,6 +26,13 @@ pub trait SharedStore {
         Ok(Vec::new())
     }
 
+    /// The `thread-title.generate` effects the outbox still owes.
+    fn pending_title_effects(
+        &mut self,
+    ) -> anyhow::Result<Vec<crate::title_generation::TitleEffect>> {
+        Ok(Vec::new())
+    }
+
     /// Settles an outbox effect this server has taken over.
     fn settle_effect(&mut self, _effect_id: &str, _status: &str) -> anyhow::Result<()> {
         Ok(())
@@ -342,6 +349,23 @@ pub fn continuation_effects(store: &Store, event: &Event, occurred_at: &str) -> 
         })
     })
     .collect()
+}
+
+/// The `thread-title.generate` effect a commit enqueues: the title request
+/// its thread patch records.
+pub fn title_effects(event: &Event) -> Vec<EffectWrite> {
+    let Event::ThreadPatched { thread_id, patch } = event else {
+        return Vec::new();
+    };
+    crate::title_generation::TitleEffect::from_patch(thread_id, &patch["titleGeneration"])
+        .map(|effect| EffectWrite {
+            effect_id: effect.effect_id.clone(),
+            command_id: effect.request_id.clone(),
+            thread_id: thread_id.clone(),
+            request: effect.request(),
+        })
+        .into_iter()
+        .collect()
 }
 
 /// The reason of a commit that detached a thread's provider session.

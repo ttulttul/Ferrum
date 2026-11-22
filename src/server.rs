@@ -403,6 +403,9 @@ impl AppState {
 }
 
 impl crate::orchestration::CommandHost for AppState {
+    fn generate_title(self: Arc<Self>, effect: crate::title_generation::TitleEffect) {
+        tokio::spawn(crate::title_generation::execute(self, effect));
+    }
     fn mutation_lock(&self) -> &Mutex<()> {
         &self.project_mutation_lock
     }
@@ -1196,6 +1199,10 @@ where
     let startup = state.clone();
     tokio::spawn(async move {
         startup.clone().continue_restarted_runs().await;
+        // Title requests the other server (or this one) left unanswered.
+        for effect in startup.pending_title_effects().await {
+            tokio::spawn(crate::title_generation::execute(startup.clone(), effect));
+        }
         let span = crate::startup_trace::startup_span(
             &startup.runtime_config.mode,
             &bound.ip().to_string(),

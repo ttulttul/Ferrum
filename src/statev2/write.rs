@@ -26,6 +26,12 @@ impl SharedStore for Writer {
         Ok(super::outbox::pending_continuations(&self.conn)?)
     }
 
+    fn pending_title_effects(
+        &mut self,
+    ) -> anyhow::Result<Vec<crate::title_generation::TitleEffect>> {
+        Ok(super::outbox::pending_title_effects(&self.conn)?)
+    }
+
     fn settle_effect(&mut self, effect_id: &str, status: &str) -> anyhow::Result<()> {
         super::outbox::settle(&self.conn, effect_id, status)?;
         Ok(())
@@ -507,7 +513,7 @@ fn js_len(text: &str) -> usize {
 
 /// `assistantCitationsToPlainText`: each `[Assistant quote](t3-citation://…)`
 /// link that parses as a citation becomes its text, then its comment.
-fn citations_to_plain_text(text: &str) -> String {
+pub(crate) fn citations_to_plain_text(text: &str) -> String {
     static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let link = LINK.get_or_init(|| {
         regex::Regex::new(&format!(
