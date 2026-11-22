@@ -80,6 +80,14 @@ PROVIDER_SCENARIOS = [
     {"name": "claude agent mcp", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_mcp.json"},
     # The thread toolkit, called by the thread on itself and on a thread it forks.
     {"name": "codex thread tools", "instance": "codex", "model": "fixture", "scenario": "codex_thread_tools.json"},
+    # A delegated task the parent waits on: its child runs in a process of its own (Claude runs one
+    # per thread on both servers), and its result answers the wait.
+    {"name": "claude delegate", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate.json", "awaitStatus": True},
+    # A delegated task that runs on after the parent's turn: its result wakes the idle parent
+    # with a delivery turn, which reads it with task_status.
+    {"name": "claude delegate async", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_async.json", "awaitStatus": True, "settleRuns": 2},
     {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
     # Runtime requests: what each server asks the user, and what it answers the CLI.
     {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
@@ -453,7 +461,7 @@ def seed_turn(url, cookie, root, scenario):
                 "workspaceStrategy": {"type": "root"}, "modelSelection": {"instanceId": "codex", "model": "fixture"},
                 "runtimeMode": "approval-required", "interactionMode": "default"})
     return {"threadId": THREAD, "turnMs": 60000 if scenario.get("change") else 30000,
-            "interrupt": scenario.get("interrupt", False),
+            "interrupt": scenario.get("interrupt", False), "settleRuns": scenario.get("settleRuns", 1),
             "respond": scenario.get("respond"), "change": scenario.get("change"),
             "steer": scenario.get("steer"), "dispatch": {
         "type": "message.dispatch", "commandId": "turn-message", "threadId": THREAD,
@@ -1204,8 +1212,12 @@ def provider_turns(args, credentials):
             continue
         started = time.monotonic()
         outcomes = {}
-        with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
+        # T3_PARITY_KEEP=1 keeps each scenario's server homes (logs, fake CLI logs) to debug it.
+        keep = bool(os.environ.get("T3_PARITY_KEEP"))
+        with tempfile.TemporaryDirectory(delete=not keep) as temporary, contextlib.ExitStack() as stack:
             temporary = Path(temporary)
+            if keep:
+                print(f"keeping {scenario['name']} in {temporary}", flush=True)
             drivers = set() if scenario["scenario"] is None else {"codex" if scenario["instance"] == "codex" else "claude"}
             for name, command in (("original", shlex.split(args.original_command)),
                                   ("rust", shlex.split(args.rust_command))):
@@ -1217,6 +1229,9 @@ def provider_turns(args, credentials):
                     outcomes[name]["launches"] = turn_launches(log)
                 else:
                     url, cookie = managed_server(stack, command, root, *credentials, env=env)
+                    if scenario.get("awaitStatus"):
+                        # A delegated task's target must be a checked, installed provider.
+                        provider_status(url, cookie, scenario["instance"], temporary)
                     seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
                     outcomes[name] = run_client(args, url, cookie, seeded)
                     if scenario.get("title"):

@@ -42,6 +42,11 @@ pub struct ConversationMessage {
     /// the run's wire id and how many provider items it had then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steer: Option<Box<serde_json::Value>>,
+    /// The message's own wire fields where they differ from what its role
+    /// implies, such as an agent's `createdBy`, its `senderThreadId`, or a
+    /// delegated task's `delegatedCompletion`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<Box<serde_json::Value>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Run {

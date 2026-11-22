@@ -143,6 +143,14 @@ const settles = (item) =>
   (item.kind === "event" && item.event.type === "run.updated" && TERMINAL_RUN.has(item.event.payload?.status)) ||
   (item.kind === "snapshot" && (item.projection?.runs ?? []).some((run) => TERMINAL_RUN.has(run.status)));
 
+/** The ids of the runs a stream item shows ended. */
+const settledRunIds = (item) =>
+  item.kind === "event" && item.event.type === "run.updated" && TERMINAL_RUN.has(item.event.payload?.status)
+    ? [item.event.payload.id]
+    : item.kind === "snapshot"
+      ? (item.projection?.runs ?? []).filter((run) => TERMINAL_RUN.has(run.status)).map((run) => run.id)
+      : [];
+
 /** The run a stream item shows, and whether its provider turn is running. */
 const runOf = (item) => {
   if (item.kind === "event" && item.event.type.startsWith("run.")) return { runId: item.event.payload?.id };
@@ -218,13 +226,19 @@ const liveTurn = (client, seed) =>
     const pending = new Map();
     const withItems = new Set();
     let dispatched = false;
+    const ended = new Set();
     let runId;
     const fiber = yield* client["orchestration.subscribeThread"](threadInput(seed.threadId)).pipe(
       Stream.runForEach((item) =>
         Effect.gen(function* () {
           items.push({ ...plain(item), dispatched });
           if (item.kind === "synchronized") yield* Deferred.succeed(synchronized, undefined);
-          if (dispatched && settles(item)) yield* Deferred.succeed(settled, undefined);
+          // With `seed.settleRuns`, the turn settles once that many runs have ended (a
+          // delegated task's delivery is a run of its own).
+          if (dispatched) {
+            for (const id of settledRunIds(item)) ended.add(id);
+            if (settles(item) && ended.size >= (seed.settleRuns ?? 1)) yield* Deferred.succeed(settled, undefined);
+          }
           const run = runOf(item);
           if (dispatched && run.runId) runId = run.runId;
           if (dispatched && run.turnRunning) yield* Deferred.succeed(turnRunning, undefined);

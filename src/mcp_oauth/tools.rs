@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, LazyLock};
 
 mod arguments;
+mod delegation;
 mod projects;
 mod session;
 mod theme;
@@ -46,6 +47,9 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("schedule_task", &[]),
     ("delete_scheduled_task", &[]),
     ("run_scheduled_task_now", &[]),
+    // Delegation (batch 4b).
+    ("delegate_task", &[]),
+    ("task_status", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -90,6 +94,9 @@ const SERVED: &[&str] = &[
     "schedule_task",
     "delete_scheduled_task",
     "run_scheduled_task_now",
+    // Delegation (batch 4b).
+    "delegate_task",
+    "task_status",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -616,6 +623,9 @@ pub(super) async fn call<S: McpHost>(
         "schedule_task" => schedule_task(host, caller, args).await,
         "delete_scheduled_task" => delete_scheduled_task(&**host, caller, args).await,
         "run_scheduled_task_now" => run_scheduled_task_now(&**host, caller, args).await,
+
+        "delegate_task" => delegation::delegate_task(host, caller, args).await,
+        "task_status" => delegation::task_status(host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }
