@@ -178,7 +178,14 @@ async fn bitbucket_read(
     let result = bitbucket_pr::run(repository, op, input, number).await;
     if !matches!(
         op,
-        "detail" | "preview" | "checks" | "activity" | "reviewerCandidates"
+        "detail"
+            | "preview"
+            | "checks"
+            | "activity"
+            | "reviewerCandidates"
+            | "diff"
+            | "diffFileContents"
+            | "changeBreakdown"
     ) {
         state.pull_requests.clear(&p.id, named, number).await;
     }
