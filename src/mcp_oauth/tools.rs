@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, LazyLock};
 
 mod arguments;
+mod projects;
 mod threads;
 
 /// Tools whose arguments are checked against their advertised schema first,
@@ -29,6 +30,11 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("t3_pending_request", &[]),
     ("t3_workflow_stop", &[]),
     ("t3_thread_search", &[]),
+    ("t3_project_update", &[]),
+    ("t3_project_delete", &[]),
+    ("t3_project_clone", &[]),
+    ("t3_environment_preferences_update", &[]),
+    ("t3_worktree_list", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -57,6 +63,11 @@ const SERVED: &[&str] = &[
     "t3_pending_request",
     "t3_workflow_stop",
     "t3_thread_search",
+    "t3_project_update",
+    "t3_project_delete",
+    "t3_project_clone",
+    "t3_environment_preferences_update",
+    "t3_worktree_list",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -518,6 +529,13 @@ pub(super) async fn call<S: McpHost>(
         "t3_environment_link" => environment_link(host, caller, args).await,
         "t3_environment_unlink" => environment_unlink(&**host, caller, args),
         "t3_thread_search" => threads::search(host, caller, args).await,
+        "t3_project_update" => projects::update(host, caller, args).await,
+        "t3_project_delete" => projects::delete(host, caller, args).await,
+        "t3_project_clone" => projects::clone(host, caller, args).await,
+        "t3_environment_preferences_update" => {
+            projects::preferences_update(host, caller, args).await
+        }
+        "t3_worktree_list" => projects::worktree_list(host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }
@@ -630,36 +648,13 @@ async fn project_create<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -
 
 fn environment_read<S: McpHost>(host: &S) -> Value {
     let descriptor = host.descriptor();
-    let settings = host.settings();
-    let style = &settings["sourceControlWritingStyle"];
-    let mut read = json!({
+    json!({
         "environmentId": descriptor["environmentId"],
         "label": descriptor["label"],
         "serverVersion": descriptor["serverVersion"],
         "platform": descriptor["platform"],
-        "preferences": {
-            "newWorktreesStartFromOrigin": settings["newWorktreesStartFromOrigin"],
-            "enableProviderUpdateChecks": settings["enableProviderUpdateChecks"],
-            "backgroundActivity": {"profile": settings["backgroundActivity"]["profile"].as_str().unwrap_or("balanced")},
-            "sourceControlWritingStyle": {
-                "mode": style["mode"].as_str().unwrap_or("repo_conventions"),
-                "followChangeRequestTemplates": style["followChangeRequestTemplates"].as_bool().unwrap_or(true),
-                "customInstructions": style["customInstructions"].as_str().unwrap_or(""),
-                "truncated": false
-            }
-        }
-    });
-    // Present only when it is set, as the reference reads it.
-    if let Some(mode) = settings
-        .get("defaultThreadEnvMode")
-        .filter(|m| !m.is_null())
-    {
-        read["preferences"]
-            .as_object_mut()
-            .expect("preferences")
-            .insert("defaultThreadEnvMode".into(), mode.clone());
-    }
-    read
+        "preferences": projects::preferences(&host.settings()),
+    })
 }
 
 /// Providers as `orchestrator_capabilities` lists them.
@@ -1533,7 +1528,11 @@ fn remote_check(caller: &Caller, name: &str, args: &Value) -> Result<(), Refusal
                 Some(_) => Err(invalid_arguments()),
             }
         }
-        "t3_project_create" => {
+        "t3_project_create"
+        | "t3_project_update"
+        | "t3_project_delete"
+        | "t3_project_clone"
+        | "t3_environment_preferences_update" => {
             caller.refuse_read_only()?;
             if caller.limits() != ("full-access", "default") {
                 return Err(failure("capability_denied", FULL_ACCESS_REQUIRED));

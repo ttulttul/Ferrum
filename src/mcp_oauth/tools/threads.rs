@@ -95,7 +95,7 @@ fn fencing_origin(store: &crate::store::Store, caller: &Caller) -> Option<Value>
 
 /// `writingCaller`: a read-only client may not change anything, and a thread
 /// may act only while it owns a live run (`assertLiveCaller`).
-async fn writing_caller<S: McpHost>(host: &S, caller: &Caller) -> Result<(), Refusal> {
+pub(super) async fn writing_caller<S: McpHost>(host: &S, caller: &Caller) -> Result<(), Refusal> {
     caller.refuse_read_only()?;
     let (Some(thread), Some(scope)) = (&caller.thread, &caller.granted.thread) else {
         return Ok(());
@@ -318,7 +318,7 @@ fn thread_not_found_hint<S: McpHost>(
 }
 
 /// `readThread`'s lookup: the named thread, else the caller's own.
-async fn read_thread<S: McpHost>(
+pub(super) async fn read_thread<S: McpHost>(
     host: &S,
     caller: &Caller,
     id: Option<&str>,

@@ -62,6 +62,19 @@ pub struct PeerLinkInfo {
 }
 
 /// What the MCP sign-in and transport need from their server.
+/// Why a project mutation was refused, as the reference's `ProjectService`
+/// errors tell it (`ProjectNotFoundError`, `ProjectConflictError`, ...).
+#[derive(Debug)]
+pub enum ProjectRefusal {
+    NotFound,
+    Conflict,
+    NotEmpty,
+    /// A rule the project would break, with the reference's words.
+    Invalid(String),
+    /// Anything else: the operation could not be completed.
+    Operation,
+}
+
 pub trait McpHost: AuthHost {
     fn oauth(&self) -> &OAuth;
     fn environment_id(&self) -> &str;
@@ -91,6 +104,34 @@ pub trait McpHost: AuthHost {
     /// Runs `task` in the background, as the reference forks work into its
     /// layer's scope: it ends with the process.
     fn spawn(&self, task: crate::runtime::Task);
+    /// `projects.mutate`, with why a refused mutation was refused, as the
+    /// reference's `ProjectService` errors say.
+    fn project_mutation(
+        self: &Arc<Self>,
+        command: Value,
+    ) -> HostFuture<Result<Value, ProjectRefusal>> {
+        let mutation = self.mutate_project(command);
+        Box::pin(async move { mutation.await.map_err(|_| ProjectRefusal::Operation) })
+    }
+    /// Whether `project_id` is the built-in "No project" scratch project.
+    fn is_scratch_project(self: &Arc<Self>, _project_id: &str) -> HostFuture<bool> {
+        Box::pin(async { false })
+    }
+    /// Applies a settings `patch` (`server.updateSettings`); `Err` when it
+    /// cannot be written.
+    fn update_settings(self: &Arc<Self>, _patch: Value) -> HostFuture<Result<(), ()>> {
+        Box::pin(async { Err(()) })
+    }
+    /// `vcs.listRefs` for `input` (`query`, `cursor`, `limit`, `refKind`, ...)
+    /// in a thread's `worktreePath` while it exists, else its project's
+    /// `workspaceRoot`.
+    fn list_refs(self: &Arc<Self>, _input: Value) -> HostFuture<Result<Value, ()>> {
+        Box::pin(async { Err(()) })
+    }
+    /// `sourceControl.cloneRepository`, or the failure's `detail`.
+    fn clone_repository(self: &Arc<Self>, _input: Value) -> HostFuture<Result<Value, String>> {
+        Box::pin(async { Err("The source control operation could not be completed.".to_owned()) })
+    }
     /// Every link this server keeps, as `peerLinks.list` gives them.
     fn peer_links_listed(self: &Arc<Self>) -> HostFuture<Result<Vec<Value>, String>> {
         Box::pin(async { Ok(Vec::new()) })
