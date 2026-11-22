@@ -75,6 +75,8 @@ pub(crate) struct Sink {
     turn_id: String,
     /// Items reported as running and not finished since, in order.
     open: std::sync::Arc<std::sync::Mutex<Vec<ProviderItem>>>,
+    /// A Codex turn's token usage, held to go with its end.
+    usage: std::sync::Arc<std::sync::Mutex<Option<ProviderEvent>>>,
 }
 
 impl Sink {
@@ -84,9 +86,18 @@ impl Sink {
             driver,
             turn_id,
             open: std::sync::Arc::default(),
+            usage: std::sync::Arc::default(),
         }
     }
     fn send(&self, event: ProviderEvent) {
+        // A Codex turn's usage goes with its end; Claude's adapter reports
+        // it on its own first.
+        if let (ProviderEvent::TurnUsage { .. }, true) = (&event, self.driver == CODEX) {
+            if let Ok(mut usage) = self.usage.lock() {
+                *usage = Some(event);
+                return;
+            }
+        }
         if let ProviderEvent::TurnItem { item } = &event {
             if let Ok(mut open) = self.open.lock() {
                 open.retain(|known| known.id != item.id);
@@ -116,6 +127,15 @@ impl Sink {
             TurnStatus::Interrupted => "interrupted",
             _ => "cancelled",
         };
+        // A Codex turn's end goes with what it closes: its usage and its
+        // open items, as the reference writes them together.
+        let mut closing: Vec<ProviderEvent> = self
+            .usage
+            .lock()
+            .ok()
+            .and_then(|mut usage| usage.take())
+            .into_iter()
+            .collect();
         for mut item in open {
             // A Codex command can outlive a completed turn, as background
             // work; the reference ends only an interrupted or failed turn's.
@@ -133,7 +153,13 @@ impl Sink {
             if item.fields.contains_key("streaming") {
                 item.fields.insert("streaming".into(), false.into());
             }
-            self.send(ProviderEvent::TurnItem { item });
+            // Claude's adapter closes its open tool calls before it reports
+            // the turn's end; Codex's turn end closes its items.
+            if self.driver == CODEX {
+                closing.push(ProviderEvent::TurnItem { item });
+            } else {
+                self.send(ProviderEvent::TurnItem { item });
+            }
         }
         let success = end.status == TurnStatus::Completed;
         self.send(ProviderEvent::TurnTerminal {
@@ -141,6 +167,7 @@ impl Sink {
             failure: end.failure,
             thread_disposition: end.disposition,
             driver: Some(self.driver.clone()),
+            closing,
         });
         let _ = self.events.send(TurnEvent::Exited(TurnExit {
             success,

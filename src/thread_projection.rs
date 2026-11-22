@@ -185,7 +185,7 @@ impl Thread {
             .iter()
             .enumerate()
             .map(|(index, run)| {
-                let status = run_status(&run.status);
+                let (status, ended_at) = self.projected_run_status(run);
                 let waiting = matches!(status, "queued" | "preparing");
                 let requested_at = self
                     .messages
@@ -206,12 +206,16 @@ impl Thread {
                     "queuePosition": null,
                     "requestedAt": iso(requested_at),
                     "startedAt": if waiting { Value::Null } else { iso(run.started_at).into() },
-                    "completedAt": run.finished_at.map(iso),
+                    "completedAt": ended_at.map(iso),
                     "checkpointId": null,
                     "contextHandoffId": null
                 });
                 let turn_count = index as u64 + 1;
-                if self.checkpoints.iter().any(|c| c.turn_count == turn_count) {
+                // A completed turn's checkpoint shows on its run once the run
+                // completes, as the reference's capture completes it.
+                if status != "waiting"
+                    && self.checkpoints.iter().any(|c| c.turn_count == turn_count)
+                {
                     out["checkpointId"] = json!(checkpoint_id(&self.id, turn_count));
                 }
                 if let Some(ids) = self.provider_run_ids(run) {
@@ -247,6 +251,35 @@ impl Thread {
                 out
             })
             .collect()
+    }
+
+    /// `run`'s status and end time as the reference records them. A
+    /// provider turn that completed leaves its run `waiting` until the
+    /// turn's checkpoint completes it (here, until the run's end is
+    /// recorded, after the checkpoint); one interrupted or failed ends its
+    /// run at once, at the turn's end.
+    pub(crate) fn projected_run_status(&self, run: &crate::Run) -> (&'static str, Option<u64>) {
+        use crate::workspace::provider::TurnStatus;
+        let status = run_status(&run.status);
+        let turn = self
+            .provider
+            .terminals
+            .get(&run.id)
+            .map(|terminal| terminal.status);
+        let turn_end = || {
+            self.provider
+                .runs
+                .get(&run.id)
+                .map(|record| record.ended_at.unwrap_or(record.started_at))
+        };
+        match (status, turn) {
+            ("running", Some(TurnStatus::Completed)) => ("waiting", None),
+            ("running", Some(TurnStatus::Interrupted)) => ("interrupted", turn_end()),
+            ("running", Some(TurnStatus::Failed)) => ("failed", turn_end()),
+            ("interrupted", Some(TurnStatus::Interrupted))
+            | ("failed", Some(TurnStatus::Failed)) => (status, turn_end().or(run.finished_at)),
+            _ => (status, run.finished_at),
+        }
     }
 
     /// When the work `run` continues began: the start of the first run of

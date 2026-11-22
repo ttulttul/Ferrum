@@ -223,6 +223,11 @@ pub enum ProviderEvent {
         /// thread is still recorded as that driver's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         driver: Option<String>,
+        /// What the turn's end closes, applied first and recorded with it,
+        /// as the reference writes them with the turn's end: the turn's
+        /// token usage and the items it ends.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        closing: Vec<ProviderEvent>,
     },
 }
 
@@ -424,6 +429,7 @@ mod tests {
                 failure: Some(ProviderFailure::new("provider_error", "boom")),
                 thread_disposition: ThreadDisposition::Reusable,
                 driver: Some("codex".into()),
+                closing: Vec::new(),
             })
             .unwrap(),
             json!({"type":"turn.terminal","status":"failed","threadDisposition":"reusable","driver":"codex",

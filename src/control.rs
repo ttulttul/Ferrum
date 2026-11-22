@@ -3713,6 +3713,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
                     } else {
                         ThreadDisposition::Broken
                     },
+                    closing: Vec::new(),
                     driver: None,
                 }),
             );
@@ -3825,6 +3826,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             failure: Some(ProviderFailure::new("provider_error", "boom")),
             thread_disposition: ThreadDisposition::Reusable,
             driver: None,
+            closing: Vec::new(),
         });
         agentd.emit(
             stream,
@@ -3915,6 +3917,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
                     failure: Some(failure.clone()),
                     thread_disposition: ThreadDisposition::Reusable,
                     driver: Some("codex".into()),
+                    closing: Vec::new(),
                 },
             },
         );
@@ -3966,6 +3969,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             failure: Some(ProviderFailure::new("provider_error", "spawn failed")),
             thread_disposition: ThreadDisposition::Reusable,
             driver: Some("codex".into()),
+            closing: Vec::new(),
         });
         agentd.emit(
             stream,
@@ -4023,6 +4027,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             failure: None,
             thread_disposition: ThreadDisposition::Reusable,
             driver: Some("codex".into()),
+            closing: Vec::new(),
         });
         agentd.emit(
             stream,

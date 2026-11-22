@@ -921,22 +921,27 @@ async fn apply_command<H: CommandHost>(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                let requested: Vec<String> = run_ids.iter().map(Uuid::to_string).collect();
+                // The request is recorded before the runs are told to stop, so
+                // its card comes before what the stop ends, as the
+                // reference's does.
+                let sequence = state
+                    .commit_receipted(
+                        Event::ThreadPatched {
+                            thread_id: thread_id.to_owned(),
+                            patch: serde_json::json!({"status":"cancelled","interruptRequested":requested}),
+                        },
+                        Some(receipt.clone()),
+                    )
+                    .await?
+                    .id;
                 let mut cancellations = state.cancellations().lock().await;
                 for run_id in run_ids {
                     if let Some(cancel) = cancellations.remove(&run_id) {
                         let _ = cancel.send(());
                     }
                 }
-                return Ok(state
-                    .commit_receipted(
-                        Event::ThreadPatched {
-                            thread_id: thread_id.to_owned(),
-                            patch: serde_json::json!({"status":"cancelled"}),
-                        },
-                        Some(receipt.clone()),
-                    )
-                    .await?
-                    .id);
+                return Ok(sequence);
             }
         }
         "thread.pull-request-watch.checks-reopen" => {

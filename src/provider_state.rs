@@ -54,6 +54,9 @@ pub struct ProviderState {
     /// the last turn that ran there on its native thread.
     pub prior_session_id: Option<String>,
     pub prior_usage: Option<(Option<String>, u64, Option<u64>)>,
+    /// When a stop or interrupt asked each run to end, by run, and how many
+    /// items its turn had reported then (where the request's card goes).
+    pub interrupt_requests: HashMap<Uuid, (u64, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -154,6 +157,11 @@ pub struct PlanRecord {
 impl ProviderState {
     /// Apply `run`'s provider `event`, recorded at `at` (seconds).
     pub(crate) fn apply(&mut self, run: Uuid, event: &ProviderEvent, at: u64) {
+        if let ProviderEvent::TurnTerminal { closing, .. } = event {
+            for event in closing {
+                self.apply(run, event, at);
+            }
+        }
         // A turn after a restart runs in a session started again.
         self.session_stopped_at = None;
         // So does a turn after a detach, but not the detached turn ending.
@@ -295,6 +303,7 @@ impl ProviderState {
                 failure,
                 thread_disposition,
                 driver,
+                ..
             } => {
                 record.ended_at = Some(at);
                 if record.reported_model.is_some() {
@@ -418,7 +427,12 @@ impl ProviderState {
     pub(crate) fn detach_session(&mut self, at: u64, runs: &[Uuid]) {
         self.session_detached_at = Some(at);
         self.detached_runs.extend(runs.iter().copied());
-        if let Some(thread) = self.thread.as_mut().filter(|t| t.status == "active") {
+        // A turn the detach stops reports its thread idle when it ends.
+        if let Some(thread) = self
+            .thread
+            .as_mut()
+            .filter(|t| t.status == "active" && runs.is_empty())
+        {
             thread.status = "idle";
             thread.updated_at = at;
         }
