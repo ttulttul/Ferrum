@@ -520,6 +520,95 @@ async fn a_claude_turn_projects_what_a_client_renders() {
     provider_turn("claudeAgent", "claude_turn.json").await;
 }
 
+/// Add one link-card request to the normal Codex MCP fixture while keeping the
+/// rest of the provider transcript identical to the provider parity fixture.
+fn link_card_scenario(dir: &std::path::Path) -> std::path::PathBuf {
+    let source = fixture("codex_mcp.json");
+    let mut scenario: Value =
+        serde_json::from_str(&std::fs::read_to_string(source).unwrap()).expect("codex MCP fixture");
+    let steps = scenario["steps"].as_array_mut().unwrap();
+    let list = steps
+        .iter()
+        .position(|step| step["mcp"]["method"] == "tools/list")
+        .expect("tools/list in fixture");
+    steps.insert(
+        list + 1,
+        json!({"mcp":{"tool":"t3_environment_link","arguments":{"reason":"Connect the laptop","clientRequestId":"remote-card"}}}),
+    );
+    // Keep the provider turn alive while the client answers the card.
+    steps.insert(list + 2, json!({"sleep": 0.5}));
+    let path = dir.join("codex_link_card.json");
+    std::fs::write(&path, serde_json::to_vec(&scenario).unwrap()).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn a_remote_provider_can_show_and_answer_a_link_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let url = agentd(dir.path(), &root).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let documents = Arc::new(MemoryStore::new());
+    let scenario = link_card_scenario(dir.path());
+    let mut settings = fake_cli_settings(&scenario, &dir.path().join("cli.jsonl"));
+    settings["linkedEnvironmentsEnabled"] = json!(true);
+    write_settings(&documents, &settings);
+    let log = SharedLog::default();
+    let server = Server::start_at(1, &url, &documents, &log, Vec::new(), Some(address)).await;
+    let router = server.plane.router();
+    let http = tokio::spawn(async move { axum::serve(listener, router).await });
+
+    server
+        .start_thread(root.to_str().unwrap(), "codex", "Ask for a link")
+        .await;
+    wait_until(|| {
+        std::fs::read_to_string(dir.path().join("cli.jsonl.mcp"))
+            .ok()
+            .is_some_and(|calls| {
+                calls.lines().any(|line| {
+                    serde_json::from_str::<Value>(line)
+                        .ok()
+                        .is_some_and(|call| call["request"]["tool"] == "t3_environment_link")
+                })
+            })
+    })
+    .await;
+
+    let (projection, _) = server.projections().await;
+    let card = projection["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "link_request")
+        .expect("remote link card");
+    assert_eq!(card["linkStatus"], "pending", "{card}");
+
+    let mut connection = server.connection();
+    let answered = server
+        .send(
+            &mut connection,
+            "peerLinks.answerRequest",
+            json!({
+                "threadId": "t1",
+                "turnItemId": card["id"],
+                "answer": {"type": "decline"}
+            }),
+        )
+        .await;
+    assert_eq!(answered["exit"]["_tag"], "Success", "{answered}");
+    let (projection, _) = server.projections().await;
+    let card = projection["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "link_request")
+        .unwrap();
+    assert_eq!(card["linkStatus"], "declined", "{card}");
+    http.abort();
+}
+
 /// The provider keeps running in agentd. Leave its first HTTP call queued on
 /// the host listener until the replacement plane is ready to authenticate it.
 #[tokio::test]
