@@ -1,8 +1,7 @@
 //! Provider status checks, as the reference's managed provider snapshots
 //! (`makeManagedServerProvider`) and provider registry run them.
 //!
-//! Each enabled Codex, Claude, fx, Kiro, Grok, Pi, Cursor and OpenCode instance
-//! is checked once the
+//! Each enabled instance of every built-in driver is checked once the
 //! server is listening, again whenever its settings (or
 //! `enableProviderUpdateChecks`) change, when any settings change while it is
 //! signed out, on the background-activity interval (five minutes by default),
@@ -35,6 +34,11 @@
 //!   inventory or its settled 2.x model catalog, and its usage
 //!   ([`opencode`]). OpenCode is rechecked on the interval only while it is
 //!   not ready.
+//! - Antigravity: never started for a check; its sign-in settings and the
+//!   installed runtime are read from disk, then its Google quota
+//!   ([`antigravity`]).
+//! - Muse Code: `muse --version` (4s), then a read-only `muse serve` that
+//!   lists its models over MSP ([`muse`]).
 //!
 //! Grok's and Pi's version advisories come from how their CLI was installed
 //! ([`maintenance`]), as the reference's enrichment pass works it out.
@@ -45,6 +49,7 @@
 //! which the next start shows until its first check finishes. Drivers not
 //! listed here are not checked yet: their rows keep the placeholder.
 mod acp;
+mod antigravity;
 mod claude;
 mod codex;
 mod cursor;
@@ -52,6 +57,7 @@ mod fx;
 mod grok;
 mod kiro;
 mod maintenance;
+mod muse;
 mod opencode;
 mod pi;
 
@@ -63,7 +69,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The drivers this server checks.
-const CHECKED_DRIVERS: [&str; 8] = [
+const CHECKED_DRIVERS: [&str; 10] = [
     "codex",
     "claudeAgent",
     "fx",
@@ -72,10 +78,12 @@ const CHECKED_DRIVERS: [&str; 8] = [
     "pi",
     "cursor",
     "opencode",
+    "antigravity",
+    "muse",
 ];
 /// The drivers whose snapshot gets its version advisory from an enrichment
 /// pass after the probe, rather than from the probe itself.
-const ENRICHED_DRIVERS: [&str; 5] = ["codex", "claudeAgent", "grok", "pi", "opencode"];
+const ENRICHED_DRIVERS: [&str; 6] = ["codex", "claudeAgent", "grok", "pi", "opencode", "muse"];
 /// `AUTH_PROBE_TIMEOUT_MS`.
 const AUTH_PROBE_TIMEOUT_MS: u64 = 10_000;
 /// `FAILED_CHECK_RECHECK_DELAY`: a periodic check that failed over a ready
@@ -140,6 +148,7 @@ pub(crate) struct ProviderStatus {
     caches: PathBuf,
     state_dir: PathBuf,
     secrets: PathBuf,
+    base_dir: PathBuf,
     opencode: opencode::Owners,
     state: Mutex<State>,
     claude_caps: Mutex<HashMap<String, claude::CapabilitiesCache>>,
@@ -154,6 +163,7 @@ impl ProviderStatus {
             caches: paths.caches.clone(),
             state_dir: paths.state_dir.clone(),
             secrets: paths.secrets.clone(),
+            base_dir: paths.base_dir.clone(),
             opencode: Default::default(),
             state: Mutex::default(),
             claude_caps: Mutex::default(),
@@ -413,6 +423,21 @@ async fn check_instance(
         "fx" => fx::check(&instance.config, &env).await,
         "kiro" => kiro::check(&instance.config, &env).await,
         "grok" => grok::check(&instance.config, &env).await,
+        "antigravity" => {
+            antigravity::check(
+                &instance.config,
+                &env,
+                &instance.id,
+                &service.base_dir,
+                &service.state_dir,
+                &manifest,
+            )
+            .await
+        }
+        "muse" => {
+            let env = muse::environment(&base_env(&[]), &instance.environment);
+            muse::check(&instance.config, &env).await
+        }
         "opencode" => {
             opencode::check(&service.opencode, &instance.id, &instance.config, &env).await
         }
@@ -809,7 +834,31 @@ fn retain_missing_models(row: &Value) -> bool {
 
 /// `mergeProviderSnapshot`: the probed row, keeping models the probe no
 /// longer lists where the driver's catalog can omit them.
+/// `carrySavedAntigravityAccount`: a health check (which never signs in)
+/// keeps a verified Google account a previous snapshot carried.
+fn carry_antigravity_account(previous: &Value, next: &mut Value) {
+    let carries = next["driver"] == "antigravity"
+        && previous["driver"] == "antigravity"
+        && next["enabled"] == true
+        && next["auth"]["status"] == "unknown"
+        && previous["auth"]["status"] == "authenticated"
+        && (next["auth"].get("type").is_none() || next["auth"]["type"] == previous["auth"]["type"])
+        && (next["installed"] == true || next["status"] == "warning");
+    if !carries {
+        return;
+    }
+    let ready = next["installed"] == true && next["status"] == "warning";
+    next["auth"] = previous["auth"].clone();
+    if ready {
+        next["status"] = json!("ready");
+        if let Some(object) = next.as_object_mut() {
+            object.shift_remove("message");
+        }
+    }
+}
+
 fn merge_snapshot(previous: &Value, mut next: Value) -> Value {
+    carry_antigravity_account(previous, &mut next);
     let retain = retain_missing_models(&next);
     let update_required: Vec<&Value> = next["updateRequiredModels"]
         .as_array()
@@ -880,7 +929,9 @@ fn with_version_advisory(
         current.as_deref(),
         None,
         row["checkedAt"].as_str().unwrap_or(""),
-        maintenance::compare_semver,
+        capabilities
+            .and_then(|c| c.compare_versions)
+            .unwrap_or(maintenance::compare_semver),
     );
     row
 }
@@ -954,7 +1005,25 @@ fn resolve_compatibility(policies: &Value, driver: &str, version: Option<&str>) 
                 policy["t3CodeRange"].as_str().unwrap_or(""),
             )
     })?;
-    let stable = version.map(|v| v.trim_start_matches('v').to_owned());
+    // Cursor build hashes, Google ACP release prefixes and Muse revisions are
+    // stripped; semver prereleases stay unknown.
+    let stable = version.map(|v| {
+        let unprefixed = v.strip_prefix('v').unwrap_or(v);
+        let (pattern, keep) = match driver {
+            "cursor" => (r"^(\d{4}\.\d{2}\.\d{2})-[a-f0-9]+$", true),
+            "antigravity" => (r"^agy_acp_server_(\d+\.\d+\.\d+)$", true),
+            "muse" => (r"^(\d+\.\d+\.\d+)-R\d+(?:\.\d+)?$", true),
+            _ => ("", false),
+        };
+        if keep {
+            regex::Regex::new(pattern)
+                .unwrap()
+                .replace(unprefixed, "$1")
+                .into_owned()
+        } else {
+            unprefixed.to_owned()
+        }
+    });
     let is_stable = |v: &str| {
         let parts: Vec<&str> = v.split('.').collect();
         parts.len() == 3

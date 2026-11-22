@@ -635,6 +635,7 @@ async fn maintenance(binary: &str, env: &ProcessEnv) -> maintenance::Capabilitie
         }),
         install_path: None,
         manual_command: None,
+        compare_versions: None,
     }
 }
 

@@ -23,7 +23,7 @@ Based on `main` and the parity test suites:
 - **Environment links (outgoing):** Linking to another machine, listing and forgetting links (shared with the TypeScript server on the same home), forwarding MCP tool calls to a linked machine, and agents asking you to link one from inside a conversation (`t3_environment_link`), answered in a card.
 - **MCP server:** Serving MCP sign-in and thread/project tools over `/mcp`.
 - **Login-shell `PATH` discovery:** Reading the login shell's `PATH` at startup and again before source-control discovery, so provider CLIs and tools installed later are found; listing Codex models from its CLI.
-- **Provider status checks:** Claude Code, Codex, fx, Kiro, Grok, Pi, Cursor and OpenCode status (installed version, sign-in state, usage and models) checked at startup, on settings changes, every 5 minutes and on refresh, and pushed to clients.
+- **Provider status checks:** Every built-in provider (Claude Code, Codex, Cursor, OpenCode, Grok, Pi, fx, Kiro, Antigravity and Muse Code) has its status (installed version, sign-in state, usage and models) checked at startup, on settings changes, every 5 minutes and on refresh, and pushed to clients.
 - **Configuration, auth, and desktop adoption:** Shared `userdata/` layout (`settings.json`, secrets, managed policy, `server-owner.sqlite` exclusive lock, `server-runtime.json`), browser session cookies, WebSocket tickets with DPoP checks, CORS, and desktop SSH launcher adoption.
 - **Git, GitHub, and workspace operations:** File operations, terminals (PTY), git workflows, GitHub/Linear provider RPCs, and Chromium preview support.
 - **Split control/workspace architecture:** Out-of-process workspace execution via `t3-agentd` and an embeddable, `wasm32-unknown-unknown`-compatible control plane (`workers/`). Remote Codex and Claude turns can call the host's MCP endpoint as their thread. See [host configuration](docs/embedding.md#settings-and-provider-turns).
@@ -44,7 +44,6 @@ The Rust server can already run Codex and Claude Code conversations, manage proj
 
 ### AI providers
 
-- **Missing provider status checks (in progress):** Antigravity and Muse are not checked yet, so they still show as "not checked" in settings. (Claude Code, Codex, fx, Kiro, Grok, Pi, Cursor, and OpenCode are checked.)
 - **No update-available checks:** The server does not check online for newer versions of provider command-line tools, so settings always show the latest version as unknown and do not offer an update command.
 - **Claude skills and reset credits:** Installed Claude skills and plugins are not listed yet, and Claude reset credits are not shown.
 - **Background check timing:** Periodic provider checks always run on their timer instead of pausing when nobody is actively using the app.
