@@ -124,24 +124,11 @@ fn claude_env(config: &Value, env: &ProcessEnv) -> ProcessEnv {
     env
 }
 
-/// `ANTHROPIC_BASE_URL` from Claude's settings files, else the environment.
-fn base_url(config: &Value, env: &ProcessEnv) -> Option<String> {
-    let mut found = None;
-    for path in [
-        config_dir(config, env).join("settings.json"),
-        PathBuf::from("/etc/claude-code/managed-settings.json"),
-    ] {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(settings) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        if let Some(url) = settings["env"]["ANTHROPIC_BASE_URL"].as_str() {
-            found = Some(url.to_owned());
-        }
-    }
-    found.or_else(|| env.get("ANTHROPIC_BASE_URL").cloned())
+/// `ANTHROPIC_BASE_URL` from Claude's user and managed settings, else the environment.
+fn base_url(config: &Value, env: &ProcessEnv, cwd: &Path) -> Option<String> {
+    super::claude_skills::read_settings_env(config, Some(cwd), env)
+        .anthropic_base_url
+        .or_else(|| env.get("ANTHROPIC_BASE_URL").cloned())
 }
 
 /// `customClaudeApiEndpointHost` and the endpoint's origin.
@@ -1188,6 +1175,7 @@ pub(super) async fn check(
         provider_models(built_in, custom),
         caps.map(|c| c.effort_caps.as_slice()).unwrap_or(&[]),
     );
+    let skills = super::claude_skills::discover(config, state_dir, &resolved);
     let mut commands = vec![compact_slash_command()];
     commands.extend(caps.map(|c| c.commands.clone()).unwrap_or_default());
     let slash_commands = dedupe_commands(commands);
@@ -1198,7 +1186,7 @@ pub(super) async fn check(
         models,
         update_required_models,
         slash_commands,
-        skills: vec![],
+        skills,
         ..Default::default()
     };
     let Some(caps) = caps else {
@@ -1216,7 +1204,7 @@ pub(super) async fn check(
             ..base
         };
     };
-    let base_url = base_url(config, &resolved);
+    let base_url = base_url(config, &resolved, state_dir);
     let endpoint = custom_endpoint(base_url.as_deref());
     if endpoint.is_none() && auth_status(&caps.account) == "unauthenticated" {
         invalidate(service, instance_id);
@@ -1262,6 +1250,18 @@ pub(super) async fn check(
             caps.usage_checked_at.as_deref().unwrap_or(&checked_at),
         ),
     };
+    // A subscription's reset credits, when its usage could be read.
+    let mut usage = usage;
+    let subscribed = caps.account["subscriptionType"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty());
+    if let (true, None, Some(version)) = (subscribed, usage.get("unavailable"), &version) {
+        if let Some(credits) =
+            super::claude_credits::read(&config_dir(config, &resolved), version).await
+        {
+            usage["resetCredits"] = credits;
+        }
+    }
     Draft {
         status: "ready",
         auth,
