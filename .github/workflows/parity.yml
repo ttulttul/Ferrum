@@ -95,6 +95,8 @@ jobs:
           git diff --exit-code -- contracts
           # The schema a fresh statev2.sqlite gets must be the pinned reference's.
           python3 scripts/update_statev2_schema.py "$GITHUB_WORKSPACE/reference" --check
+          # Rust's agent tool definitions and docs/agent-tools.md must be the pinned reference's.
+          python3 scripts/update_agent_tools.py "$GITHUB_WORKSPACE/reference" --check
       - name: Validate Rust
         run: |
           cargo fmt --all -- --check

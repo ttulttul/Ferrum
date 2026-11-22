@@ -8,9 +8,37 @@ use super::{McpAccess, McpHost};
 use serde_json::{json, Value};
 use std::sync::{Arc, LazyLock};
 
-/// The reference's definitions of the tools served here, as `tools/list` returns them.
+/// The reference's agent tools that Rust serves. `tools.json` holds every tool
+/// the pinned reference advertises; `scripts/update_agent_tools.py` regenerates
+/// it and the checklist in docs/agent-tools.md, which reads this list.
+const SERVED: &[&str] = &[
+    "orchestrator_capabilities",
+    "t3_thread_list",
+    "t3_thread_read",
+    "t3_thread_send",
+    "t3_thread_wait",
+    "t3_thread_interrupt",
+    "t3_thread_launch",
+    "t3_project_list",
+    "t3_project_read",
+    "t3_project_create",
+    "t3_environment_read",
+];
+
+/// The reference's definitions of the tools served here, as `tools/list`
+/// returns them, in the reference's order.
 pub(super) static TOOLS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("tools.json")).expect("MCP tool definitions")
+    let reference: Value =
+        serde_json::from_str(include_str!("tools.json")).expect("MCP tool definitions");
+    let tools = reference["tools"]
+        .as_array()
+        .expect("MCP tool definitions")
+        .iter()
+        .filter(|tool| tool["name"].as_str().is_some_and(|n| SERVED.contains(&n)))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(tools.len(), SERVED.len(), "SERVED names an unknown tool");
+    Value::Array(tools)
 });
 
 const RUNTIME_MODES: [&str; 4] = [
@@ -1649,6 +1677,25 @@ fn sender_thread(environment_id: &str, thread_id: &str, title: &str) -> String {
 #[cfg(test)]
 mod sender_tests {
     use super::*;
+
+    #[test]
+    fn lists_the_served_tools_with_the_reference_definitions() {
+        let reference: Value = serde_json::from_str(include_str!("tools.json")).unwrap();
+        let listed = TOOLS.as_array().unwrap();
+        assert_eq!(listed.len(), SERVED.len());
+        for tool in listed {
+            let name = tool["name"].as_str().unwrap();
+            assert_eq!(
+                reference["listedTo"][name], "everyone",
+                "{name} needs listing by caller"
+            );
+            assert!(reference["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t == tool));
+        }
+    }
 
     #[test]
     fn the_sender_header_encodes_as_encode_uri_component_does() {
