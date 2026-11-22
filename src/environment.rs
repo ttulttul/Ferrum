@@ -106,40 +106,42 @@ pub fn descriptor(
     json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.10","orchestrationProtocolVersion":2,"databaseMigration":98,"capabilities":capabilities})
 }
 
+pub(crate) fn project_shell(row: &Value) -> Value {
+    // Native resolves the identity from the workspace's git remotes; a
+    // build without a local workspace keeps the stored value.
+    #[cfg(feature = "native")]
+    let row = &crate::repository_identity::with_identity(row);
+    let mut out = serde_json::Map::new();
+    for k in [
+        "id",
+        "title",
+        "hasCustomTitle",
+        "workspaceRoot",
+        "repositoryIdentity",
+        "defaultModelSelection",
+        "defaultThreadEnvMode",
+        "autoPull",
+        "faviconPath",
+        "projectIcon",
+        "scripts",
+        "pinnedAt",
+        "archivedAt",
+        "createdAt",
+        "updatedAt",
+    ] {
+        if let Some(v) = row.get(k) {
+            out.insert(k.to_owned(), v.clone());
+        }
+    }
+    Value::Object(out)
+}
+
 pub(crate) fn shell(store: &Store, sequence: u64) -> Value {
     let projects = store
         .project_rows
         .values()
         .filter(|r| r["deletedAt"].is_null())
-        .map(|row| {
-            // Native resolves the identity from the workspace's git remotes; a
-            // build without a local workspace keeps the stored value.
-            #[cfg(feature = "native")]
-            let row = &crate::repository_identity::with_identity(row);
-            let mut out = serde_json::Map::new();
-            for k in [
-                "id",
-                "title",
-                "hasCustomTitle",
-                "workspaceRoot",
-                "repositoryIdentity",
-                "defaultModelSelection",
-                "defaultThreadEnvMode",
-                "autoPull",
-                "faviconPath",
-                "projectIcon",
-                "scripts",
-                "pinnedAt",
-                "archivedAt",
-                "createdAt",
-                "updatedAt",
-            ] {
-                if let Some(v) = row.get(k) {
-                    out.insert(k.to_owned(), v.clone());
-                }
-            }
-            out
-        })
+        .map(project_shell)
         .collect::<Vec<_>>();
     json!({"schemaVersion":2,"snapshotSequence":sequence,"threads":store.threads.values().filter(|t|!t.archived).map(|t|t.shell()).collect::<Vec<_>>(),"archivedThreads":[],"projects":projects})
 }
@@ -153,13 +155,18 @@ pub(crate) fn shell_snapshot(
 ) -> Value {
     let seq = sequence;
     let mut snapshot = shell(store, seq);
-    let mut hash = Sha256::new();
-    for p in snapshot["projects"].as_array().unwrap() {
-        hash.update(json!([p["id"], p["repositoryIdentity"]]).to_string());
-    }
+    let identities = project_identities(&snapshot["projects"]);
     if query.get("omitOlderSettled").is_some_and(|v| v == "1") {
         snapshot["olderSettled"] = json!({"before":crate::auth_service::iso(crate::auth_service::now()),"asOfSequence":seq,"counts":[]});
     }
-    snapshot["projectIdentities"] = json!(URL_SAFE_NO_PAD.encode(hash.finalize()));
+    snapshot["projectIdentities"] = json!(identities);
     snapshot
+}
+
+pub(crate) fn project_identities(projects: &Value) -> String {
+    let mut hash = Sha256::new();
+    for p in projects.as_array().into_iter().flatten() {
+        hash.update(json!([p["id"], p["repositoryIdentity"]]).to_string());
+    }
+    URL_SAFE_NO_PAD.encode(hash.finalize())
 }

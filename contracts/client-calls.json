@@ -1531,14 +1531,22 @@
       "clientHarness": [
         "projects.shellFollow.start",
         "projects.shellFollow.sawProject",
+        "projects.shellRename.start",
+        "projects.shellRename.sawRename",
+        "projects.shellRename.replay",
         "threads.shellFollow.start",
         "threads.shellFollow.sawThread",
-        "threads.subscribeShell.synchronized"
+        "threads.subscribeShell.synchronized",
+        "threads.shellArchive.start",
+        "threads.shellArchive.sawArchive",
+        "threads.shellUnarchive.start",
+        "threads.shellUnarchive.sawUnarchive",
+        "threads.shellDelete.start",
+        "threads.shellDelete.sawDelete",
+        "projects.shellDelete.start",
+        "projects.shellDelete.sawDelete"
       ],
-      "knownGaps": [
-        "projects.shellFollow.sawProject",
-        "threads.shellFollow.sawThread"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc-stream",

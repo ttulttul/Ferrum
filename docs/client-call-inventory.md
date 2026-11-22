@@ -26,7 +26,7 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 | http-raw | 7 | 7 | 0 | 0 | 6 | 3 | 7 |
 | **all** | 294 | 279 | 0 | 15 | 178 | 115 | 213 |
 
-Newly covered by the client harness (no earlier parity script): 35. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 24.
+Newly covered by the client harness (no earlier parity script): 35. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 23.
 
 Calls the harness does not make need credentials or hardware it cannot have in CI (GitHub, Linear,
 model providers, T3 Connect relay, voice models, simulators, a browser), are destructive to the host
@@ -251,7 +251,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `orchestration.searchThreadStream` | user action | `packages/client-runtime/src/state/orchestration.ts:231` | OrchestrationV2SearchThreadInput | OrchestrationV2SearchThreadResult | session (orchestration:read) | client | rpc_edge_parity.py | 1 case(s), 1 xfail |
 | `orchestration.subscribeCommandOutput` | user action | `packages/client-runtime/src/state/orchestration.ts:167` | OrchestrationV2RpcSchemas.subscribeCommandOutput.input | OrchestrationV2RpcSchemas.subscribeCommandOutput.output | session (orchestration:read) | client | validation only | 1 case(s), 1 xfail |
 | `orchestration.subscribePromptSuggestion` | user action | `packages/client-runtime/src/state/orchestration.ts:181` | OrchestrationV2RpcSchemas.subscribePromptSuggestion.input | OrchestrationV2RpcSchemas.subscribePromptSuggestion.output | session (orchestration:read) | client | provider-parity.json | 1 case(s) |
-| `orchestration.subscribeShell` | connect | `packages/client-runtime/src/state/orchestration.ts:155`<br>`packages/client-runtime/src/state/shell.ts:636` | OrchestrationV2RpcSchemas.subscribeShell.input | OrchestrationV2RpcSchemas.subscribeShell.output | session (orchestration:read) | client | client_initial_sync_parity.py, client_thread_parity.py, provider-parity.json | 5 case(s), 2 xfail |
+| `orchestration.subscribeShell` | connect | `packages/client-runtime/src/state/orchestration.ts:155`<br>`packages/client-runtime/src/state/shell.ts:636` | OrchestrationV2RpcSchemas.subscribeShell.input | OrchestrationV2RpcSchemas.subscribeShell.output | session (orchestration:read) | client | client_initial_sync_parity.py, client_thread_parity.py, provider-parity.json | 16 case(s) |
 | `orchestration.subscribeThread` | open project/thread | `packages/client-runtime/src/state/orchestration.ts:159`<br>`packages/client-runtime/src/state/threads.ts:1027` | OrchestrationV2RpcSchemas.subscribeThread.input | OrchestrationV2RpcSchemas.subscribeThread.output | session (orchestration:read) | client | client_initial_sync_parity.py, client_thread_parity.py | 5 case(s), 1 xfail |
 | `provider.auth.subscribe` | user action | `packages/client-runtime/src/state/server.ts:1473` | ProviderSetupInput | ProviderAuthState | session (providers:manage) | client | validation only | — |
 | `provider.chatgpt.handoff.subscribe` | user action | `packages/client-runtime/src/state/server.ts:1505` | ChatGptHandoffInput | ChatGptHandoffState | session (providers:manage) | client | validation only | — |

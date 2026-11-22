@@ -85,12 +85,6 @@
       "reason": "projects.searchEntries does no fuzzy matching",
       "issue": "for query 'read' the reference returns README.md, .gitignore, docs/guide.md and scratch.txt; Rust returns only README.md"
     },
-    "projects.shellFollow.sawProject": {
-      "area": "connecting",
-      "severity": "critical",
-      "reason": "orchestration.subscribeShell sends nothing after its snapshot",
-      "issue": "a live shell subscriber never receives project.updated or thread.updated after a mutation, so an open client's sidebar does not change until it reconnects"
-    },
     "raw.projects.listEntries#3": {
       "area": "projects/files",
       "severity": "high",
@@ -150,12 +144,6 @@
       "severity": "high",
       "reason": "orchestration.searchThreads replies fail the client's decode",
       "issue": "matches[0].source must be \"user\" | \"assistant\""
-    },
-    "threads.shellFollow.sawThread": {
-      "area": "connecting",
-      "severity": "critical",
-      "reason": "orchestration.subscribeShell sends nothing after its snapshot",
-      "issue": "a live shell subscriber never receives project.updated or thread.updated after a mutation, so an open client's sidebar does not change until it reconnects"
     },
     "turns.getThreadProjection.afterMessage": {
       "area": "agent turns",
