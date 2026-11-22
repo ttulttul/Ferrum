@@ -180,8 +180,14 @@ const TEXT_FLUSH: Duration = Duration::from_millis(50);
 /// adapters do (`ProviderTextDeltaCoalescer`): the deltas that arrive within
 /// [`TEXT_FLUSH`] of an item's first held one become one update, and text
 /// whose item ends first is not recorded on its own, as the ended item
-/// carries all of it. Held deltas are acknowledged when they are held: an
-/// item that ends after a restart still reports its whole text.
+/// carries all of it. Held text is reported before the turn's end (also an
+/// interrupted or stopped turn's), and lost, as the reference loses it, when
+/// the server stops first.
+///
+/// Held deltas are acknowledged when they are held, and an update made of
+/// them is recorded without a stream position: by then later events may be
+/// recorded, and a restart must not resume from before them. An item that
+/// ends after a restart still reports its whole text.
 #[derive(Default)]
 struct StreamedText {
     /// Text held per item, in the order the items first streamed.
@@ -268,6 +274,9 @@ async fn record<H: TurnHost>(
             }
         };
         let Some(TurnItem { event, position }) = next else {
+            // Events that stop without the turn's end still report what is held.
+            text.flush_at = None;
+            text.flush(host, run).await;
             break;
         };
         if host.stopping() {

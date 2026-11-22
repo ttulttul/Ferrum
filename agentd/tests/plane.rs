@@ -59,13 +59,24 @@ impl SharedLog {
             .collect()
     }
 
+    /// The stream positions of the recorded provider events. Only streamed
+    /// text, recorded as held updates, has none.
     fn provider_seqs(&self) -> Vec<u64> {
         self.0
             .lock()
             .unwrap()
             .iter()
             .filter_map(|record| match &record.event {
-                Event::RunProvider { position, .. } => Some(position.expect("tracked").seq),
+                Event::RunProvider {
+                    position, event, ..
+                } => match position {
+                    Some(position) => Some(position.seq),
+                    None => {
+                        let value = serde_json::to_value(event).unwrap();
+                        assert_eq!(value["type"], "turn_item.delta", "untracked {value}");
+                        None
+                    }
+                },
                 _ => None,
             })
             .collect()
@@ -469,8 +480,13 @@ async fn stopping_a_thread_interrupts_its_provider_turn() {
     server
         .start_thread(root.to_str().unwrap(), "codex", "Say hello")
         .await;
-    // The scenario waits for the interrupt once it has streamed some text.
-    wait_until(|| log.provider_events() >= 10).await;
+    // The scenario waits for the interrupt once its command has started.
+    wait_until(|| {
+        log.provider_event_values().iter().any(|event| {
+            event["item"]["type"] == "command_execution" && event["item"]["status"] == "running"
+        })
+    })
+    .await;
     let mut connection = server.connection();
     let stopped = server
         .send(
@@ -539,10 +555,18 @@ async fn a_provider_turn_keeps_going_across_a_server_restart() {
     let (got, _) = server.projections().await;
     assert_rendered_turn(&got, "completed");
     // Every event of the turn is recorded once, in order: the recorded
-    // stream positions run 1, 2, 3, ... without a gap or a repeat.
+    // stream positions only rise. The ones skipped are streamed text, which
+    // is held and recorded as updates without a position.
     let seqs = log.provider_seqs();
-    assert!(seqs.len() > 20, "{seqs:?}");
-    assert_eq!(seqs, (1..=seqs.len() as u64).collect::<Vec<_>>());
+    assert!(seqs.len() > 10, "{seqs:?}");
+    assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]), "{seqs:?}");
+    let fixture = std::fs::read_to_string(&scenario).unwrap();
+    let deltas = fixture.matches("Delta\"").count() + fixture.matches("/delta\"").count();
+    let skipped = *seqs.last().unwrap() as usize - seqs.len();
+    assert!(
+        skipped <= deltas,
+        "{skipped} skipped, {deltas} deltas: {seqs:?}"
+    );
     let recorded = log.provider_event_values();
     assert_eq!(
         recorded
