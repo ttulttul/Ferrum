@@ -225,6 +225,7 @@ impl ReferenceSessions {
             peer_link: claims.plk == Some(1),
             session_id: claims.sid,
             label: label.unwrap_or_default(),
+            thread: None,
         }))
     }
 

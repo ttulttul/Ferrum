@@ -14,6 +14,7 @@ use std::sync::Mutex;
 /// The only MCP protocol version a T3 Code `/mcp` registers.
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const MODE_LIMIT_HEADER: &str = "t3-mode-limit";
+const SENDER_THREAD_HEADER: &str = "t3-sender-thread";
 
 /// `OrchestratorMcpFailure`'s codes; a peer's refusal keeps its own.
 const FAILURE_CODES: [&str; 16] = [
@@ -180,7 +181,8 @@ impl PeerMcpClient {
     }
 
     /// Calls `tool` in the linked environment `environment_id` with
-    /// `arguments`, limited to `limit` (`<runtime>/<interaction>`).
+    /// `arguments`, limited to `limit` (`<runtime>/<interaction>`), for the
+    /// thread `sender` names (`T3-Sender-Thread`) when a thread asks.
     pub(crate) async fn call(
         &self,
         links: &PeerLinks,
@@ -188,9 +190,10 @@ impl PeerMcpClient {
         tool: &str,
         arguments: Value,
         limit: &str,
+        sender: Option<&str>,
     ) -> Result<Value, Failure> {
         let ended = self
-            .attempt(links, environment_id, tool, arguments, limit)
+            .attempt(links, environment_id, tool, arguments, limit, sender)
             .await;
         match ended {
             Ok(value) => {
@@ -219,6 +222,7 @@ impl PeerMcpClient {
         tool: &str,
         arguments: Value,
         limit: &str,
+        sender: Option<&str>,
     ) -> Result<Value, Ended> {
         let resolved = links
             .resolve(environment_id)
@@ -235,18 +239,16 @@ impl PeerMcpClient {
             let body = &body;
             let resolved = &resolved;
             async move {
-                Self::post(
-                    links,
-                    &resolved.url,
-                    &resolved.token,
-                    body,
-                    &[
-                        (MODE_LIMIT_HEADER, limit),
-                        ("mcp-session-id", &session),
-                        ("mcp-protocol-version", PROTOCOL_VERSION),
-                    ],
-                )
-                .await
+                let mut headers = vec![
+                    (MODE_LIMIT_HEADER, limit),
+                    ("mcp-session-id", session.as_str()),
+                    ("mcp-protocol-version", PROTOCOL_VERSION),
+                ];
+                // So a message sent there names the thread that sent it.
+                if let Some(sender) = sender {
+                    headers.insert(1, (SENDER_THREAD_HEADER, sender));
+                }
+                Self::post(links, &resolved.url, &resolved.token, body, &headers).await
             }
         };
         let existing = self.sessions.lock().unwrap().get(&key).cloned();

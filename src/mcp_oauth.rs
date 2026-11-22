@@ -13,7 +13,9 @@ use crate::{
 };
 #[cfg(feature = "native")]
 mod reference_sessions;
+mod thread_credentials;
 mod tools;
+pub use thread_credentials::ThreadScope;
 pub(crate) use tools::answer_matches;
 mod transport;
 use axum::{
@@ -91,7 +93,8 @@ pub trait McpHost: AuthHost {
         None
     }
     /// Calls `tool` in the linked environment `environment_id`, limited to
-    /// `limit` (`<runtime>/<interaction>`). `None` when this server cannot
+    /// `limit` (`<runtime>/<interaction>`), sent for the thread `sender`
+    /// (`T3-Sender-Thread`) when a thread asks. `None` when this server cannot
     /// reach linked environments.
     fn forward_tool(
         self: &Arc<Self>,
@@ -99,6 +102,7 @@ pub trait McpHost: AuthHost {
         _tool: String,
         _arguments: Value,
         _limit: String,
+        _sender: Option<String>,
     ) -> Option<HostFuture<Result<Value, (&'static str, String)>>> {
         None
     }
@@ -150,6 +154,8 @@ pub struct OAuth {
     /// the MCP client sessions (and so the peer links) it issued.
     #[cfg(feature = "native")]
     reference: reference_sessions::ReferenceSessions,
+    /// The credentials of the MCP server each thread's provider CLI is given.
+    threads: thread_credentials::ThreadCredentials,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -214,6 +220,8 @@ pub struct McpAccess {
     pub session_id: String,
     /// What the client is called, as Connections lists it.
     pub label: String,
+    /// The thread a provider session's credential acts as; `None` for a client.
+    pub thread: Option<ThreadScope>,
 }
 enum Invalid {
     Page(&'static str),
@@ -258,6 +266,7 @@ impl OAuth {
             spend: Mutex::new(()),
             #[cfg(feature = "native")]
             reference: reference_sessions::ReferenceSessions::new(dir),
+            threads: Default::default(),
         })
     }
     fn mac(&self, payload: &str) -> Hmac<Sha256> {
@@ -385,6 +394,16 @@ impl OAuth {
     /// Besides this server's own tokens, it accepts the MCP client sessions the
     /// TypeScript server keeps in the same home, as that server checks them.
     pub fn mcp_access(&self, token: &str, issuer: &str) -> Option<McpAccess> {
+        if let Some(scope) = self.threads.resolve(token, now_ms()) {
+            // A thread acts within its own modes, which each call reads.
+            return Some(McpAccess {
+                access: "full-access".into(),
+                peer_link: false,
+                session_id: scope.provider_session_id.clone(),
+                label: String::new(),
+                thread: Some(scope),
+            });
+        }
         self.read::<Grant>("tokens", &hashed(token))
             .filter(|g| g.expires_ms > now_ms() && g.request.issuer == issuer)
             .map(|g| McpAccess {
@@ -392,6 +411,7 @@ impl OAuth {
                 peer_link: g.request.peer_link,
                 session_id: hashed(token)[..32].to_owned(),
                 label: g.request.name,
+                thread: None,
             })
             .or_else(|| self.reference_access(token))
     }
@@ -407,6 +427,20 @@ impl OAuth {
     #[cfg(not(feature = "native"))]
     fn reference_access(&self, _token: &str) -> Option<McpAccess> {
         None
+    }
+
+    /// The bearer token `thread_id`'s provider CLI calls `/mcp` with.
+    pub fn thread_credential(&self, thread_id: &str, provider_instance_id: &str) -> String {
+        self.threads
+            .for_thread(thread_id, provider_instance_id, now_ms())
+    }
+    /// A turn of `thread_id` started, so its credential stays live.
+    pub fn touch_thread_credential(&self, thread_id: &str) {
+        self.threads.touch(thread_id, now_ms());
+    }
+    /// Ends `thread_id`'s credential.
+    pub fn revoke_thread_credential(&self, thread_id: &str) {
+        self.threads.revoke_thread(thread_id);
     }
 
     /// Opens an MCP session for the holder of `token` and returns its id.

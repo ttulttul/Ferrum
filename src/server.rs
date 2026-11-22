@@ -38,6 +38,9 @@ pub struct AppState {
     pub(crate) peer_links: crate::peer_links::PeerLinks,
     /// MCP sessions with linked environments.
     pub(crate) peer_mcp: crate::peer_mcp::PeerMcpClient,
+    /// `http://<host>:<port>/mcp` once the server listens: where provider
+    /// CLIs reach T3's tools.
+    pub(crate) mcp_endpoint: std::sync::OnceLock<String>,
     pub(crate) connect: access_http::connect::Service,
     pub data_dir: PathBuf,
     pub paths: config::ServerPaths,
@@ -298,6 +301,7 @@ impl AppState {
             oauth,
             peer_links: crate::peer_links::PeerLinks::new(&dir, &paths.secrets),
             peer_mcp: Default::default(),
+            mcp_endpoint: Default::default(),
             connect,
             data_dir: dir.clone(),
             paths: paths.clone(),
@@ -402,6 +406,28 @@ impl crate::orchestration::CommandHost for AppState {
                         // Claude may read the thread's attachments, as the
                         // reference lets it.
                         provider.extra_dirs = vec![self.paths.attachments.display().to_string()];
+                        // T3's tools, acting as this thread.
+                        if let Some(endpoint) = self.mcp_endpoint.get() {
+                            let instance = self
+                                .store
+                                .read()
+                                .await
+                                .threads
+                                .get(&run.thread_id)
+                                .and_then(|thread| {
+                                    let row = thread.stored_row();
+                                    row["modelSelection"]["instanceId"]
+                                        .as_str()
+                                        .or(row["providerInstanceId"].as_str())
+                                        .map(str::to_owned)
+                                })
+                                .unwrap_or_else(|| provider.driver.clone());
+                            let token = self.oauth.thread_credential(&run.thread_id, &instance);
+                            provider.mcp = Some(crate::workspace::provider::McpServer {
+                                url: endpoint.clone(),
+                                authorization: format!("Bearer {token}"),
+                            });
+                        }
                         spec.provider = Some(provider);
                         spec.env = env;
                     }
@@ -1037,6 +1063,15 @@ where
     use std::future::IntoFuture;
     let bound = listener.local_addr()?;
     info!(listen = %bound, "t3code server listening");
+    // As the reference: an unspecified address is reached on loopback.
+    let host = match bound.ip() {
+        ip if ip.is_unspecified() => "127.0.0.1".to_owned(),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        ip => ip.to_string(),
+    };
+    let _ = state
+        .mcp_endpoint
+        .set(format!("http://{host}:{}/mcp", bound.port()));
     if let Some(owner) = &ownership {
         let record = server_runtime::RuntimeRecord::new(
             state.runtime_config.requested_host,
@@ -1208,12 +1243,20 @@ impl mcp_oauth::McpHost for AppState {
         tool: String,
         arguments: serde_json::Value,
         limit: String,
+        sender: Option<String>,
     ) -> Option<mcp_oauth::HostFuture<Result<serde_json::Value, (&'static str, String)>>> {
         let state = self.clone();
         Some(Box::pin(async move {
             state
                 .peer_mcp
-                .call(&state.peer_links, &environment_id, &tool, arguments, &limit)
+                .call(
+                    &state.peer_links,
+                    &environment_id,
+                    &tool,
+                    arguments,
+                    &limit,
+                    sender.as_deref(),
+                )
                 .await
         }))
     }

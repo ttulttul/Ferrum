@@ -58,6 +58,72 @@ pub(super) struct Caller {
     pub granted: McpAccess,
     pub runtime_limit: Option<String>,
     pub plan_only: bool,
+    /// The thread a provider session's credential acts as, read for this call.
+    pub thread: Option<ThreadCaller>,
+}
+
+/// The calling thread, as a provider session's tools see it.
+#[derive(Clone, Debug)]
+pub(super) struct ThreadCaller {
+    pub id: String,
+    pub title: String,
+    pub project_id: String,
+    pub runtime_mode: String,
+    pub interaction_mode: String,
+    pub provider_instance_id: String,
+    pub model: String,
+    /// The thread's model options, as `[{id, value}]`.
+    pub model_options: Value,
+}
+
+/// The thread `scope` acts as, if it still exists.
+pub(super) async fn thread_caller<S: McpHost>(
+    host: &S,
+    scope: &super::ThreadScope,
+) -> Option<ThreadCaller> {
+    let store = host.control_state().store.read().await;
+    let thread = find_thread(&store, &scope.thread_id).ok()?;
+    let row = thread.shell();
+    let summary_model = row["modelSelection"]["model"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    Some(ThreadCaller {
+        id: thread.id.clone(),
+        title: thread.title.clone(),
+        project_id: thread.project_id.clone(),
+        runtime_mode: row["runtimeMode"]
+            .as_str()
+            .unwrap_or("full-access")
+            .to_owned(),
+        interaction_mode: row["interactionMode"]
+            .as_str()
+            .unwrap_or("default")
+            .to_owned(),
+        provider_instance_id: row["providerInstanceId"]
+            .as_str()
+            .or(row["modelSelection"]["instanceId"].as_str())
+            .unwrap_or(&scope.provider_instance_id)
+            .to_owned(),
+        model: summary_model,
+        model_options: match &row["modelSelection"]["options"] {
+            Value::Array(options) => Value::Array(options.clone()),
+            _ => json!([]),
+        },
+    })
+}
+
+/// Whether `name` acts as its caller, so a thread credential whose thread is
+/// gone cannot use it (`readCaller`).
+pub(super) fn needs_caller(name: &str) -> bool {
+    !matches!(
+        name,
+        "t3_project_list" | "t3_project_read" | "t3_environment_read"
+    )
+}
+
+pub(super) fn calling_thread_missing() -> Refusal {
+    failure("thread_not_found", "The calling thread was not found.")
 }
 
 fn rank(mode: &str) -> Option<usize> {
@@ -74,11 +140,15 @@ impl Caller {
             granted,
             runtime_limit: runtime.filter(|r| rank(r).is_some()),
             plan_only: interaction,
+            thread: None,
         }
     }
     /// The broadest runtime mode this call may start or drive work in, or
     /// `None` when it may only read.
     fn ceiling(&self) -> Option<&str> {
+        if let Some(thread) = &self.thread {
+            return Some(RUNTIME_MODES[rank(&thread.runtime_mode).unwrap_or(0)]);
+        }
         let granted = rank(&self.granted.access)?;
         let limited = self
             .runtime_limit
@@ -88,6 +158,13 @@ impl Caller {
         Some(RUNTIME_MODES[granted.min(limited)])
     }
     fn interaction(&self) -> &'static str {
+        if let Some(thread) = &self.thread {
+            return if thread.interaction_mode == "plan" {
+                "plan"
+            } else {
+                "default"
+            };
+        }
         if self.plan_only {
             "plan"
         } else {
@@ -106,7 +183,7 @@ impl Caller {
 
 fn thread_link<S: McpHost>(host: &S, caller: &Caller, thread_id: &str, title: &str) -> String {
     let environment = host.environment_id();
-    if caller.granted.peer_link {
+    if caller.granted.peer_link || caller.thread.is_some() {
         let label = title
             .replace(['[', ']', '\\', '\r', '\n'], " ")
             .split_whitespace()
@@ -218,18 +295,50 @@ fn thread_summary<S: McpHost>(host: &S, caller: &Caller, thread: &crate::Thread)
         "interactionMode": row["interactionMode"].as_str().unwrap_or("default"),
         "linkedPullRequest": null,
         "pullRequests": row["pullRequests"].as_array().cloned().unwrap_or_default(),
+        "pullRequestCount": row["pullRequests"].as_array().map_or(0, Vec::len),
+        "openPullRequestCount": row["pullRequests"].as_array().map_or(0, |prs| {
+            prs.iter().filter(|pr| pr["state"] == "open").count()
+        }),
         "settled": thread.settled,
         "settledAt": row["settledAt"],
         "snoozed": snoozed(&row),
         "snoozedUntil": row["snoozedUntil"],
         "pinned": thread.pinned,
         "blockedOnThreadWait": false,
+        // This server runs no background tasks for a thread.
+        "pendingBackgroundTasks": [],
         "parentThreadId": row["lineage"]["parentThreadId"],
         "relationshipToParent": row["lineage"]["relationshipToParent"],
         "itemCount": projection["visibleTurnItems"].as_array().map_or(0, Vec::len),
         "createdAt": row["createdAt"],
         "updatedAt": row["updatedAt"],
     })
+}
+
+/// `threadNotFound` for a thread a read names: where it is no longer, and
+/// where else to look when this caller may use linked environments.
+fn no_longer_available<S: McpHost>(host: &S, caller: &Caller, id: &str) -> Refusal {
+    let links = if host.linked_environments_enabled() && !caller.granted.peer_link {
+        " Thread ids belong to one environment: for a thread on a linked one, find it with `t3_environment_links` and pass its `environmentId` to a tool that takes one."
+    } else {
+        ""
+    };
+    failure(
+        "thread_not_found",
+        format!("Thread {id} is no longer available.{links}"),
+    )
+}
+
+/// A project as the project tools return it: the reference leaves
+/// `hasCustomTitle` out until a title is chosen.
+fn project_out<S: McpHost>(host: &S, row: &Value) -> Value {
+    let mut out = host.project_row(row);
+    if out["hasCustomTitle"] == false {
+        if let Some(object) = out.as_object_mut() {
+            object.remove("hasCustomTitle");
+        }
+    }
+    out
 }
 
 fn thread_not_found() -> Refusal {
@@ -287,7 +396,7 @@ async fn project_list<S: McpHost>(host: &S, a: &Value) -> Outcome {
         .collect::<Vec<_>>();
     let end = cursor.saturating_add(limit);
     Ok(json!({
-        "projects": rows.iter().skip(cursor).take(limit).map(|row| host.project_row(row)).collect::<Vec<_>>(),
+        "projects": rows.iter().skip(cursor).take(limit).map(|row| project_out(host, row)).collect::<Vec<_>>(),
         "nextCursor": (end < rows.len()).then_some(end)
     }))
 }
@@ -298,7 +407,7 @@ async fn project_read<S: McpHost>(host: &S, a: &Value) -> Outcome {
         .as_str()
         .and_then(|id| store.project_rows.get(id))
         .filter(|r| r["deletedAt"].is_null())
-        .map(|row| host.project_row(row))
+        .map(|row| project_out(host, row))
         .ok_or_else(|| failure("invalid_request", "The project was not found."))
 }
 
@@ -356,7 +465,7 @@ async fn project_create<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -
         let mut project = created["projectId"]
             .as_str()
             .and_then(|id| store.project_rows.get(id))
-            .map(|row| host.project_row(row))
+            .map(|row| project_out(&**host, row))
             .ok_or_else(|| failure("orchestration_error", "The project was not recorded."))?;
         if let Some(error) = created.get("commitError").filter(|e| e.is_string()) {
             project["commitError"] = error.clone();
@@ -364,7 +473,7 @@ async fn project_create<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -
         return Ok(project);
     }
     match host.mutate_project(command).await {
-        Ok(row) => Ok(host.project_row(&row)),
+        Ok(row) => Ok(project_out(&**host, &row)),
         Err(error) => Err(failure(
             "orchestration_error",
             error["message"]
@@ -379,13 +488,12 @@ fn environment_read<S: McpHost>(host: &S) -> Value {
     let descriptor = host.descriptor();
     let settings = host.settings();
     let style = &settings["sourceControlWritingStyle"];
-    json!({
+    let mut read = json!({
         "environmentId": descriptor["environmentId"],
         "label": descriptor["label"],
         "serverVersion": descriptor["serverVersion"],
         "platform": descriptor["platform"],
         "preferences": {
-            "defaultThreadEnvMode": settings.get("defaultThreadEnvMode").cloned().unwrap_or(Value::Null),
             "newWorktreesStartFromOrigin": settings["newWorktreesStartFromOrigin"],
             "enableProviderUpdateChecks": settings["enableProviderUpdateChecks"],
             "backgroundActivity": {"profile": settings["backgroundActivity"]["profile"].as_str().unwrap_or("balanced")},
@@ -396,7 +504,18 @@ fn environment_read<S: McpHost>(host: &S) -> Value {
                 "truncated": false
             }
         }
-    })
+    });
+    // Present only when it is set, as the reference reads it.
+    if let Some(mode) = settings
+        .get("defaultThreadEnvMode")
+        .filter(|m| !m.is_null())
+    {
+        read["preferences"]
+            .as_object_mut()
+            .expect("preferences")
+            .insert("defaultThreadEnvMode".into(), mode.clone());
+    }
+    read
 }
 
 /// Providers as `orchestrator_capabilities` lists them.
@@ -443,9 +562,10 @@ fn provider_entries<S: McpHost>(host: &S) -> Vec<Value> {
 
 fn capabilities<S: McpHost>(host: &S, caller: &Caller) -> Value {
     json!({
-        "parentThreadId": null,
-        "inheritedProviderInstanceId": null,
-        "inheritedModel": null,
+        "parentThreadId": caller.thread.as_ref().map(|t| t.id.clone()),
+        "inheritedProviderInstanceId": caller.thread.as_ref().map(|t| t.provider_instance_id.clone()),
+        "inheritedModel": caller.thread.as_ref().map(|t| t.model.clone()),
+        "inheritedOptions": caller.thread.as_ref().map(|t| t.model_options.clone()),
         "runtimeMode": caller.ceiling().unwrap_or("approval-required"),
         "interactionMode": caller.interaction(),
         "providers": provider_entries(host),
@@ -464,7 +584,9 @@ fn capabilities<S: McpHost>(host: &S, caller: &Caller) -> Value {
 
 async fn thread_list<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcome {
     let all = arg_bool(a, "allProjects")?.unwrap_or(false);
-    let project = arg_str(a, "projectId")?;
+    // Inside a thread, its own project is the default.
+    let project =
+        arg_str(a, "projectId")?.or(caller.thread.as_ref().map(|t| t.project_id.as_str()));
     let title = arg_str(a, "titleContains")?.map(str::to_lowercase);
     let settled = arg_bool(a, "settled")?;
     let snoozed_only = arg_bool(a, "snoozed")?;
@@ -524,7 +646,7 @@ async fn thread_list<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
         .collect::<Vec<_>>();
     Ok(json!({
         "projectId": if all { None } else { project },
-        "currentThreadId": null,
+        "currentThreadId": caller.thread.as_ref().map(|t| t.id.clone()),
         "threads": page,
         "nextCursor": (cursor + limit < total).then_some(cursor + limit),
         "total": total
@@ -620,7 +742,7 @@ async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
     let max_chars = arg_count(a, "maxCharsPerItem", 1)?
         .map_or(DEFAULT_THREAD_ITEM_MAX_CHARS, |n| (n as usize).min(20_000));
     let store = host.control_state().store.read().await;
-    let thread = find_thread(&store, id)?;
+    let thread = find_thread(&store, id).map_err(|_| no_longer_available(host, caller, id))?;
     let projection = thread.projection();
     let row = thread.shell();
     let all_runs = runs(&projection);
@@ -773,7 +895,11 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
             "Pass projectId: this server has no Scratch folder.",
         ));
     }
-    let Some(project_id) = arg_str(a, "projectId")? else {
+    // Inside a thread, its own project, model and modes are the defaults.
+    let inherited = caller.thread.clone();
+    let Some(project_id) =
+        arg_str(a, "projectId")?.or(inherited.as_ref().map(|t| t.project_id.as_str()))
+    else {
         return Err(failure(
             "invalid_request",
             "Pass projectId or scratch: this MCP client is not running inside a T3 thread.",
@@ -820,6 +946,10 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
             selection.as_object_mut().map(|s| s.remove("provider"));
             selection
         }
+        None if inherited.as_ref().is_some_and(|t| !t.model.is_empty()) => {
+            let thread = inherited.as_ref().expect("checked");
+            json!({"instanceId": thread.provider_instance_id, "model": thread.model})
+        }
         None => default_selection(&**host, &project).ok_or_else(|| {
             failure(
                 "invalid_request",
@@ -833,11 +963,12 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
             if wanted > rank(&ceiling).unwrap_or(0) {
                 return Err(failure(
                     "runtime_mode_escalation_denied",
-                    format!("This client may start work in {ceiling} at most, not {mode}."),
+                    format!("Child runtime mode {mode} is broader than parent mode {ceiling}."),
                 ));
             }
             mode.to_owned()
         }
+        None if inherited.is_some() => ceiling.clone(),
         None => {
             let default = host.settings()["defaultRuntimeMode"]
                 .as_str()
@@ -848,10 +979,10 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
     };
     let interaction = match requested_interaction {
         Some("plan") => "plan",
-        Some("default") if caller.plan_only => {
+        Some("default") if caller.interaction() == "plan" => {
             return Err(failure(
                 "interaction_mode_escalation_denied",
-                "This client runs in plan mode, so it cannot start work in default mode.",
+                "Child interaction mode default is broader than parent mode plan.",
             ))
         }
         Some("default") => "default",
@@ -1176,6 +1307,12 @@ pub(super) fn linked_target<'a, S: McpHost>(
 impl Caller {
     /// The modes this caller's writes are capped at (`clientModeCeiling`).
     fn limits(&self) -> (&'static str, &'static str) {
+        if let Some(thread) = &self.thread {
+            return (
+                RUNTIME_MODES[rank(&thread.runtime_mode).unwrap_or(0)],
+                self.interaction(),
+            );
+        }
         let approved = rank(&self.granted.access).unwrap_or(0);
         let runtime = self
             .runtime_limit
@@ -1183,6 +1320,14 @@ impl Caller {
             .and_then(rank)
             .map_or(approved, |asked| asked.min(approved));
         (RUNTIME_MODES[runtime], self.interaction())
+    }
+    /// What scopes this caller's retry keys (`requestNamespace`): its
+    /// provider session, or `client:<session>` for an outside client.
+    fn request_namespace(&self) -> String {
+        match &self.granted.thread {
+            Some(scope) => scope.provider_session_id.clone(),
+            None => format!("client:{}", self.granted.session_id),
+        }
     }
     /// `refuseReadOnlyClient`: the check a changing tool makes before it goes to a link.
     fn refuse_read_only(&self) -> Result<(), Refusal> {
@@ -1307,7 +1452,7 @@ pub(super) async fn forward<S: McpHost>(
     // here reusing a key never collide there.
     if let Some(key) = args.get("clientRequestId").and_then(Value::as_str) {
         let digest = <sha2::Sha256 as sha2::Digest>::digest(
-            format!("client:{}\n{key}", caller.granted.session_id).as_bytes(),
+            format!("{}\n{key}", caller.request_namespace()).as_bytes(),
         );
         args.insert(
             "clientRequestId".into(),
@@ -1325,11 +1470,16 @@ pub(super) async fn forward<S: McpHost>(
         );
     }
     let (runtime, interaction) = caller.limits();
+    let sender = caller
+        .thread
+        .as_ref()
+        .map(|thread| sender_thread(host.environment_id(), &thread.id, &thread.title));
     let Some(call) = host.forward_tool(
         target.to_owned(),
         name.to_owned(),
         Value::Object(args),
         format!("{runtime}/{interaction}"),
+        sender,
     ) else {
         return Err(failure(
             "orchestration_error",
@@ -1469,4 +1619,44 @@ pub(super) fn unknown_arguments(name: &str, args: &Value) -> Result<(), Refusal>
             named.join(", ")
         ),
     ))
+}
+
+/// A title can be any length; the header carrying it stays well under HTTP header limits.
+const SENDER_TITLE_MAX_CHARS: usize = 200;
+
+/// `T3-Sender-Thread: <environmentId>/<threadId>/<title>`, each part encoded as
+/// `encodeURIComponent` encodes it, the title cut to whole characters.
+fn sender_thread(environment_id: &str, thread_id: &str, title: &str) -> String {
+    const COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'!')
+        .remove(b'~')
+        .remove(b'*')
+        .remove(b'\'')
+        .remove(b'(')
+        .remove(b')');
+    let title: String = title.chars().take(SENDER_TITLE_MAX_CHARS).collect();
+    [environment_id, thread_id, title.as_str()]
+        .iter()
+        .map(|part| percent_encoding::utf8_percent_encode(part, COMPONENT).to_string())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[cfg(test)]
+mod sender_tests {
+    use super::*;
+
+    #[test]
+    fn the_sender_header_encodes_as_encode_uri_component_does() {
+        // Expected values from Node's encodeURIComponent.
+        assert_eq!(
+            sender_thread("env-1", "thread:a/b", "Fix (it) — naïve 🚀 * ~ !' 100%"),
+            "env-1/thread%3Aa%2Fb/Fix%20(it)%20%E2%80%94%20na%C3%AFve%20%F0%9F%9A%80%20*%20~%20!'%20100%25"
+        );
+        let header = sender_thread("e", "t", &"é".repeat(250));
+        assert_eq!(header.len(), "e/t/".len() + 1200);
+    }
 }

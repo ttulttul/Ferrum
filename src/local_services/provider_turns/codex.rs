@@ -10,6 +10,11 @@ use crate::workspace::provider::{
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Value};
+
+/// A T3 tool such as `request_secret` can wait an hour; Codex's MCP timeout stays above that.
+const T3_MCP_TOOL_TIMEOUT_SEC: u64 = 65 * 60;
+/// T3 tools Codex must call directly, never from Code Mode (`t3-code-direct`).
+const DIRECT_ONLY_T3_TOOLS: [&str; 2] = ["t3_thread_wait", "delegate_task"];
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -421,6 +426,23 @@ impl Session {
         });
         if !provider.app_thread_id.is_empty() {
             config["shell_environment_policy.set.T3CODE_THREAD_ID"] = json!(provider.app_thread_id);
+        }
+        if let Some(mcp) = &provider.mcp {
+            // Only T3's servers, so MCP servers from the launch arguments survive.
+            let server = json!({
+                "url": mcp.url,
+                "tool_timeout_sec": T3_MCP_TOOL_TIMEOUT_SEC,
+                "http_headers": {"Authorization": mcp.authorization},
+            });
+            let mut all = server.clone();
+            all["disabled_tools"] = json!(DIRECT_ONLY_T3_TOOLS);
+            config["mcp_servers.t3-code"] = all;
+            // Code Mode runs a blocking wait as a nested call the model keeps
+            // polling; a direct-only registration makes it a plain tool call.
+            let mut direct = server;
+            direct["enabled_tools"] = json!(DIRECT_ONLY_T3_TOOLS);
+            direct["omit_tools_from"] = json!(["code_mode", "deferred"]);
+            config["mcp_servers.t3-code-direct"] = direct;
         }
         let mut thread_params = json!({"config": config, "cwd": spec.cwd});
         if let Some(model) = &model {
