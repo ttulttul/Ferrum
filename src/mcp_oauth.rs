@@ -118,6 +118,17 @@ pub trait McpHost: AuthHost {
         task_id: String,
         stop: Value,
     ) -> HostFuture<Result<(), Value>>;
+    /// Runs a provider RPC used by the MCP issue and pull-request toolkits.
+    /// Native hosts provide this through the same provider service as the
+    /// websocket RPC layer. Lightweight control-plane hosts may leave it
+    /// unavailable.
+    fn provider_dispatch(
+        self: &Arc<Self>,
+        _method: String,
+        _params: Value,
+    ) -> HostFuture<Option<Result<Value, Value>>> {
+        Box::pin(async { None })
+    }
     /// `projects.mutate` with a `project.create` command.
     fn mutate_project(self: &Arc<Self>, command: Value) -> HostFuture<Result<Value, Value>>;
     /// `projects.createNew`: a project started from its title, answering

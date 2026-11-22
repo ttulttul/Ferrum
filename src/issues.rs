@@ -63,6 +63,34 @@ pub(crate) async fn dispatch(
     }
 }
 
+/// The ordered tracker bindings available to MCP. Resolving a key does not
+/// query the tracker or list issues on the host.
+pub(crate) async fn project_scopes(state: &AppState) -> Reply {
+    let config = linear::record(state).await?;
+    let mut projects: Vec<_> = state
+        .store
+        .read()
+        .await
+        .projects
+        .values()
+        .cloned()
+        .collect();
+    projects.sort_by_key(|p| (p.created_at, p.id.clone()));
+    let mut scopes = Vec::new();
+    for p in projects {
+        let binding = &config["bindings"][&p.id];
+        if binding["tracker"] == "linear" {
+            scopes.push(json!({"projectId":p.id,"tracker":"linear","host":"linear.app","scope":binding["scope"]}));
+        }
+        if let Some(scope) = github_remote(&p).await {
+            scopes.push(
+                json!({"projectId":p.id,"tracker":"github","host":"github.com","scope":scope}),
+            );
+        }
+    }
+    Ok(Value::Array(scopes))
+}
+
 fn selected_fields(input: &Value, keys: &[&str]) -> Value {
     Value::Object(
         keys.iter()

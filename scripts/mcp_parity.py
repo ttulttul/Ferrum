@@ -61,6 +61,28 @@ def observations(url, cookie, root):
                             ("delete_scheduled_task", {"scheduledTaskId":"task:project:a"}),
                             ("run_scheduled_task_now", {"taskId":"task:project:a"})]:
         call("tools/call", dict(name=name, arguments=arguments))
+    # Pull-request and issue toolkit calls from a read-only outside client.
+    # The write calls exercise the caller gate without contacting a provider.
+    for name, arguments in [
+        ("list_thread_pull_requests", {"threadId":"thread-missing"}),
+        ("list_thread_issues", {"threadId":"thread-missing"}),
+        ("read_pull_request_guide", {"url":"https://github.com/example/parity/pull/3"}),
+        ("link_pull_request", {"url":"https://github.com/example/parity/pull/3"}),
+        ("link_pull_requests", {"urls":["https://github.com/example/parity/pull/3"]}),
+        ("unlink_pull_request", {"url":"https://github.com/example/parity/pull/3"}),
+        ("unlink_pull_requests", {"states":["open"]}),
+        ("watch_pull_request", {"url":"https://github.com/example/parity/pull/3"}),
+        ("unwatch_pull_request", {"url":"https://github.com/example/parity/pull/3"}),
+        ("write_pull_request_guides", {"pullRequests":[{"url":"https://github.com/example/parity/pull/3"}]}),
+        ("list_issues", {"projectId":"project:missing"}),
+        ("read_issue", {"url":"https://github.com/example/parity/issues/12"}),
+        ("create_issue", {"projectId":"project:missing","title":"Fixture"}),
+        ("comment_on_issue", {"url":"https://github.com/example/parity/issues/12","body":"Fixture"}),
+        ("set_issue_state", {"url":"https://github.com/example/parity/issues/12","state":"Open"}),
+        ("link_issue", {"url":"https://github.com/example/parity/issues/12","threadId":"thread-missing"}),
+        ("unlink_issue", {"url":"https://github.com/example/parity/issues/12","threadId":"thread-missing"}),
+    ]:
+        call("tools/call", dict(name=name, arguments=arguments))
     # The thread tools for a client outside any thread, approved read-only.
     for name, arguments in [
         ("t3_thread_configure", {}),

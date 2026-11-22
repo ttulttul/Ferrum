@@ -164,7 +164,8 @@ pub(crate) fn created(command: &Value, at: &str) -> Value {
         "id":command["threadId"],"projectId":command["projectId"],"title":command["title"],
         "providerInstanceId":command["modelSelection"]["instanceId"],"modelSelection":command["modelSelection"],
         "runtimeMode":command["runtimeMode"],"interactionMode":command["interactionMode"],
-        "branch":command["branch"],"worktreePath":command["worktreePath"],"pullRequests":[],
+        "branch":command["branch"],"worktreePath":command["worktreePath"],
+        "linkedPullRequest":null,"pullRequests":[],
         "activeProviderThreadId":null,"lineage":{"parentThreadId":null,"relationshipToParent":null,"rootThreadId":command["threadId"]},
         "forkedFrom":null,"createdAt":at,"updatedAt":at,"archivedAt":null,"settledOverride":null,
         "settledAt":null,"snoozedUntil":null,"snoozedAt":null,"lastVisitedAt":null,"deletedAt":null})
@@ -811,6 +812,12 @@ impl Thread {
                 .collect();
         }
         let mut app = ordered(APP_FIELDS, &row);
+        if app["issues"].as_array().is_some_and(Vec::is_empty) {
+            app.as_object_mut().unwrap().remove("issues");
+        }
+        if app["issues"].as_array().is_some_and(Vec::is_empty) {
+            app.as_object_mut().unwrap().remove("issues");
+        }
         if let Some(id) = self.provider_thread_id() {
             app["activeProviderThreadId"] = json!(id);
         }
@@ -1120,6 +1127,24 @@ fn stored_projection(thread_id: &str, stored: &Value, wire: bool) -> Value {
     // The thread's fields in the contract's order, as the reference encodes
     // it; a change made here adds its fields at the end of the stored record.
     projection["thread"] = ordered(APP_FIELDS, &stored["thread"]);
+    if projection["thread"]["issues"]
+        .as_array()
+        .is_some_and(Vec::is_empty)
+    {
+        projection["thread"]
+            .as_object_mut()
+            .unwrap()
+            .remove("issues");
+    }
+    if projection["thread"]["issues"]
+        .as_array()
+        .is_some_and(Vec::is_empty)
+    {
+        projection["thread"]
+            .as_object_mut()
+            .unwrap()
+            .remove("issues");
+    }
     sort_messages_by_turn_item_order(&mut projection);
     if wire {
         // As the reference's snapshot window reads them: without a rolled

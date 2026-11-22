@@ -74,7 +74,7 @@ async fn dispatch<S: McpHost>(host: &Arc<S>, command: Value) -> Result<u64, Refu
 
 /// The link a caller acts for, when it is fenced: paired below full access
 /// (`fencingLinkOrigin`).
-fn fencing_origin(store: &crate::store::Store, caller: &Caller) -> Option<Value> {
+pub(super) fn fencing_origin(store: &crate::store::Store, caller: &Caller) -> Option<Value> {
     let own = caller
         .thread
         .as_ref()
@@ -132,7 +132,7 @@ pub(super) async fn writing_caller<S: McpHost>(host: &S, caller: &Caller) -> Res
 /// own only if that thread runs within the caller's modes and, for a fenced
 /// caller, was started by the same link. Threads that do not exist are left
 /// to the tool, which names them.
-async fn check_targets<S: McpHost>(
+pub(super) async fn check_targets<S: McpHost>(
     host: &S,
     caller: &Caller,
     ids: &[Option<&str>],
@@ -271,7 +271,7 @@ fn suggested_thread_id(id: &str) -> Option<String> {
 
 /// `threadNotFound`: `message`, naming a live thread the agent probably meant
 /// and, where this caller may use them, linked environments.
-fn thread_not_found_hint<S: McpHost>(
+pub(super) fn thread_not_found_hint<S: McpHost>(
     host: &S,
     store: &crate::store::Store,
     caller: &Caller,

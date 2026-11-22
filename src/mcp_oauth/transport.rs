@@ -178,6 +178,12 @@ pub(super) async fn handle<S: McpHost>(
                 Err(super::tools::Refusal::Rpc(code, message)) => {
                     return rpc_error(id, code, &message)
                 }
+                Err(super::tools::Refusal::Text(message)) => {
+                    json!({"content":[{"type":"text","text":message}],"isError":true})
+                }
+                Err(super::tools::Refusal::Failure(_, msg)) if super::tools::text_errors(name) => {
+                    json!({"content":[{"type":"text","text":msg}],"isError":true})
+                }
                 Err(super::tools::Refusal::Failure(code, msg)) => {
                     json!({"content":[{"type":"text","text":json!({"_tag":"OrchestratorMcpFailure","code":code,"message":msg}).to_string()}],"isError":true})
                 }

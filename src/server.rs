@@ -1479,6 +1479,19 @@ impl mcp_oauth::McpHost for AppState {
             crate::orchestration::cancel_task(state, &parent_thread_id, &task_id, stop).await
         })
     }
+    fn provider_dispatch(
+        self: &Arc<Self>,
+        method: String,
+        params: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Option<crate::provider_rpc::Reply>> {
+        let state = self.clone();
+        Box::pin(async move {
+            if method == "issues.projectScopes" {
+                return Some(crate::issues::project_scopes(&state).await);
+            }
+            crate::provider_rpc::dispatch(&state, &method, &params).await
+        })
+    }
     fn mutate_project(
         self: &Arc<Self>,
         command: serde_json::Value,
