@@ -8,7 +8,7 @@ import secrets
 import shlex
 import subprocess
 from tempfile import TemporaryDirectory
-from time import monotonic, sleep
+from time import monotonic
 
 from config_parity import frame, identical, socket
 from parity_harness import encode, managed_server
@@ -94,19 +94,6 @@ def receive(ws, kind):
     raise AssertionError(f"missing {kind}")
 
 
-def await_manifest_refresh(homes, limit=20):
-    """Both servers refresh the upstream model manifest at startup and cache it
-    in the state directory. Compare model lists only once both have it, so they
-    read the same manifest; offline, both keep the bundled copy."""
-    deadline = monotonic() + limit
-    caches = [home/"userdata/model-manifest.json" for home in homes]
-    while monotonic() < deadline and not all(cache.exists() for cache in caches):
-        sleep(0.2)
-    if not all(cache.exists() for cache in caches):
-        print("Model manifest not refreshed by both servers:",
-              [cache.exists() for cache in caches])
-
-
 def verify_schema(root, node, samples):
     program = """
 import {createRequire} from "node:module";
@@ -148,7 +135,8 @@ def main():
         credential,key=secrets.token_urlsafe(32),secrets.token_bytes(32)
         servers=[managed_server(stack,shlex.split(cmd),home,credential,key)
                  for cmd,home in zip((args.original_command,args.rust_command),homes)]
-        await_manifest_refresh(homes)
+        # Neither server reaches the upstream model manifest (parity_harness.offline_env), so both
+        # list models from the bundled copy, which is the same file.
         clients=[socket(stack,*s,True) for s in servers]
         # The reference builds a provider row's models from the catalog as of that row's last
         # check: its startup check can finish before the manifest fetch it races, leaving a
