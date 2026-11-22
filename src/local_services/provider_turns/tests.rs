@@ -5,6 +5,9 @@ use crate::workspace::provider::{ProviderTurn, TurnStatus};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+static TEST_SERVERS: std::sync::LazyLock<std::sync::Arc<CodexServers>> =
+    std::sync::LazyLock::new(Default::default);
+
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/providers")
 }
@@ -48,7 +51,7 @@ async fn collect(mut events: mpsc::UnboundedReceiver<TurnEvent>) -> (Vec<Provide
 
 async fn run(spec: TurnSpec) -> (Vec<ProviderEvent>, TurnExit) {
     let (_cancel, cancelled) = oneshot::channel();
-    collect(start(spec, cancelled).unwrap()).await
+    collect(start(spec, cancelled, TEST_SERVERS.clone()).unwrap()).await
 }
 
 fn received(log: &Path) -> Vec<Value> {
@@ -212,7 +215,7 @@ async fn answered_turn(
     spec.turn_id = turn_id.into();
     spec.provider.as_mut().unwrap().runtime_mode = runtime_mode.into();
     let (_cancel, cancelled) = oneshot::channel();
-    let mut events = start(spec, cancelled).unwrap();
+    let mut events = start(spec, cancelled, TEST_SERVERS.clone()).unwrap();
     let request = loop {
         match events.recv().await.expect("the turn waits for an answer") {
             TurnEvent::Provider(ProviderEvent::RuntimeRequestOpened { request }) => break request,
@@ -321,6 +324,7 @@ async fn codex_turn_cancel_interrupts_the_turn() {
     let mut events = start(
         fake_spec(CODEX, "codex_interrupt.json", &log, None),
         cancelled,
+        TEST_SERVERS.clone(),
     )
     .unwrap();
     // Cancel once the turn is running.
@@ -562,6 +566,7 @@ async fn claude_turn_cancel_interrupts_the_turn() {
     let mut events = start(
         fake_spec(CLAUDE_AGENT, "claude_interrupt.json", &log, None),
         cancelled,
+        TEST_SERVERS.clone(),
     )
     .unwrap();
     while let Some(event) = events.recv().await {
@@ -615,7 +620,7 @@ async fn live_provider_turn() {
         ..TurnSpec::default()
     };
     let (cancel, cancelled) = oneshot::channel();
-    let receiver = start(spec, cancelled).unwrap();
+    let receiver = start(spec, cancelled, TEST_SERVERS.clone()).unwrap();
     if let Ok(seconds) = std::env::var("T3_LIVE_CANCEL_AFTER") {
         let seconds: u64 = seconds.parse().unwrap();
         tokio::spawn(async move {
@@ -630,4 +635,37 @@ async fn live_provider_turn() {
         println!("{}", serde_json::to_string(event).unwrap());
     }
     println!("{exit:?}");
+}
+
+#[tokio::test]
+async fn an_instance_runs_its_turns_in_one_app_server_on_its_loaded_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("provider.log");
+    let mut spec = fake_spec("codex", "codex_two_turns.json", &log, None);
+    spec.provider.as_mut().unwrap().instance_id = format!("codex-{}", uuid::Uuid::new_v4());
+    let (first, exit) = run(spec.clone()).await;
+    assert!(exit.success, "{first:#?}");
+    let native = first
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::ProviderThread {
+                native_thread_id, ..
+            } => Some(native_thread_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    // The second turn resumes the thread the shared app-server still has
+    // loaded, with the same model and runtime policy: no `thread/resume`.
+    spec.provider.as_mut().unwrap().resume = Some(native);
+    let (second, exit) = run(spec).await;
+    assert!(exit.success, "{second:#?}");
+    let launches = std::fs::read_to_string(format!("{}.launch", log.display())).unwrap();
+    assert_eq!(launches.lines().count(), 1, "one app-server for both turns");
+    let methods: Vec<String> = received(&log)
+        .iter()
+        .filter_map(|message| message["method"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(methods.iter().filter(|m| *m == "initialize").count(), 1);
+    assert_eq!(methods.iter().filter(|m| *m == "turn/start").count(), 2);
+    assert!(!methods.iter().any(|m| m == "thread/resume"), "{methods:?}");
 }

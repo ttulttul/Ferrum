@@ -229,6 +229,7 @@ def cross_turn(args, credentials, scenario, first, second, follow_up):
         outcome = turns.restart_turn(args, shlex.split(first), root, credentials, env, tmp / "checkouts",
                                      fake_bin, scenario, second=shlex.split(second), follow_up=follow_up)
         outcome["launches"] = turns.turn_launches(log)
+        outcome["appServers"] = turns.turn_app_servers(log)
         outcome["cli"] = turns.cli_approvals(log)
         outcome["launch"] = turns.cli_launch(log, tmp)
         outcome["mcp"] = turns.agent_mcp(log, tmp)

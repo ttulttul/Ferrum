@@ -1,15 +1,21 @@
 //! Provider turns: run a coding agent's CLI for one turn and translate its
 //! protocol into [`ProviderEvent`]s.
 //!
-//! Each turn starts the CLI, continues the thread's native session when the
-//! spec names one, sends the prompt, and stops the CLI once the turn ends.
+//! A Claude turn starts the CLI, continues the thread's native session when
+//! the spec names one, sends the prompt, and stops the CLI once the turn
+//! ends. Codex turns run in the app-server their provider instance shares
+//! across threads ([`codex_server`]), as the reference's do.
 //! The thread's runtime mode decides what the CLI may do without asking;
 //! every approval or question it still asks waits for the user (see
 //! [`requests`]).
 mod claude;
 mod codex;
+mod codex_server;
 mod requests;
 
+pub(crate) use codex_server::{
+    shutdown as shutdown_codex, unload_thread as unload_codex_thread, Registry as CodexServers,
+};
 pub(crate) use requests::respond;
 
 use crate::workspace::provider::{
@@ -28,6 +34,7 @@ use tokio::{
 pub(crate) fn start(
     spec: TurnSpec,
     cancel: oneshot::Receiver<()>,
+    codex_servers: std::sync::Arc<CodexServers>,
 ) -> anyhow::Result<mpsc::UnboundedReceiver<TurnEvent>> {
     let provider = spec
         .provider
@@ -46,7 +53,14 @@ pub(crate) fn start(
     }
     let responses = requests::register(&spec.turn_id);
     if provider.driver == CODEX {
-        tokio::spawn(codex::run(spec, provider, cancel, responses, sink));
+        tokio::spawn(codex::run(
+            spec,
+            provider,
+            cancel,
+            responses,
+            sink,
+            codex_servers,
+        ));
     } else {
         tokio::spawn(claude::run(spec, provider, cancel, responses, sink));
     }

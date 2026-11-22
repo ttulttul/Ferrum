@@ -113,6 +113,8 @@ impl AppState {
         for (_, cancel) in self.cancellations.lock().await.drain() {
             let _ = cancel.send(());
         }
+        // The instances' shared Codex app-servers do not outlive the server.
+        self.workspace.stop_providers().await;
     }
 
     /// Continue the turns a restart cut off or woke, as the reference's
@@ -507,6 +509,9 @@ impl crate::orchestration::CommandHost for AppState {
     }
     fn detach_turn(&self, run: Uuid) {
         crate::local_services::provider_turns::mark_detached(&run.to_string());
+    }
+    fn unload_provider_thread(&self, instance: &str, thread: &str) {
+        self.workspace().unload_provider_thread(instance, thread);
     }
     fn close_guest_thread(&self, thread_id: &str) -> Result<(), String> {
         self.guest.close_thread(thread_id).map_err(str::to_owned)
