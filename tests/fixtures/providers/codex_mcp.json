@@ -170,6 +170,16 @@
   },
   {
    "mcp": {
+    "tool": "t3_worktree_handoff",
+    "arguments": {
+     "branch": "main",
+     "startFromOrigin": false,
+     "runSetupScript": false
+    }
+   }
+  },
+  {
+   "mcp": {
     "tool": "t3_preview_list",
     "arguments": {}
    }

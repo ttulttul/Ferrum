@@ -86,12 +86,11 @@ Not yet in Rust, and each needs its own PR:
   Rust sends none of it, and `cli_launch` in `scripts/client_thread_parity.py` leaves it out of
   the comparison. It goes in after delegation is served, since it tells the model to use
   `delegate_task`, `task_status` and `task_cancel`.
-- **`orchestrator_capabilities`.** Rust's `features` say `batchThreadCreation` and
-  `scheduledTasks` are false and `maxBatchThreads` is 0; the reference always says true, true
-  and 20. Each flips when its tools are served (`appOwnedSubagents` did with `task_cancel`).
-  The `providers` list is compared separately from the caller's fields in `comparable_mcp`;
-  making it the reference's (model listing, pinned models, `omittedModels`, constraints) is its
-  own item.
+- **`orchestrator_capabilities`.** Rust's `features` say `appOwnedSubagents`,
+  `batchThreadCreation` and `scheduledTasks` are false and `maxBatchThreads` is 0; the reference
+  always says true, true, true and 20. Each flips when its tools are served. The `providers`
+  list is compared separately from the caller's fields in `comparable_mcp`; making it the
+  reference's (model listing, pinned models, `omittedModels`, constraints) is its own item.
 
 ## Batches
 
@@ -133,8 +132,7 @@ schemas.
    `t3_background_wait` matches no task id; Codex cannot mark work as awaited, as in the
    reference. Parity: the scenario `codex thread tools` (including a deferring session) and
    `scripts/mcp_parity.py` (thread-only tools refused to a client).
-4b. **Delegation**, in parts. Served: `delegate_task` (both modes), `task_status` and
-   `task_cancel`, on a port
+4b. **Delegation**, in parts. Served: `delegate_task` (both modes) and `task_status`, on a port
    of the reference orchestrator's delegated tasks (`src/orchestration/delegation.rs`):
    - `delegated_task.request` writes the child thread (`makeSubagentChildThread`), the task, its
      node and timeline card on the parent, starts the child's run, and records the
@@ -149,26 +147,15 @@ schemas.
    - a blocking wait reads the task when the child's run ends, before it is settled, and
      answers after, as the reference's `waitForTask` does; a wait that ends without a result
      upgrades the task's wake.
-   - `task_cancel` (`cancelTask`, `cancelDelegatedTask`): it checks the child and every task
-     under it against the parent's modes, records the run the task settles from
-     (`cancelledRunId`, so a completed run ends it interrupted and wakes nobody), stops the
-     child's own tasks and then the child, removes the task's queued turn and disposes its
-     delivery. A finished task keeps its result. `subagent.stop` on an app-owned task now
-     follows the reference (it leaves a task its child still runs to settle from that run)
-     instead of stopping the thread;
-   - a thread's stop reaches its delegated tasks (`delegatedTasksStopEffect`), and a stop or
-     interrupt closes the stopped runs' completion cohorts (`disposition: "stopped"`), so their
-     tasks' results wake nobody.
 
-   Parity: the scenarios `claude delegate` (a wait), `claude delegate async` (a delivery run
-   on an idle parent), `claude delegate cancel` (cancelled while its child runs) and
-   `claude delegate stop` (the user stops the parent) in `scripts/client_thread_parity.py`,
-   with fake CLIs for the parent and the child. Still pending, each its own PR:
+   Parity: the scenarios `claude delegate` (a wait) and `claude delegate async` (a delivery run
+   on an idle parent) in `scripts/client_thread_parity.py`, with fake CLIs for the parent and
+   the child. Still pending, each its own PR: `task_cancel` and cancel cascades,
    `create_threads`, follow-ups to a finished child (`recordSubagentFollowup`), restart recovery
    of delegated tasks, delivery into a parent's running turn (the reference steers it), worktree
-   isolation (`isolation: "worktree"` is refused), tasks in a linked environment (refused), a
-   cancelled child's pull request watches, and a stop's queued delivery runs (the reference
-   cancels a cohort's queued delivery).
+   isolation (`isolation: "worktree"` is refused) and tasks in a linked environment (refused).
+   `orchestrator_capabilities` still says `appOwnedSubagents` is false until `task_cancel` is
+   served.
 4c. **Attachments and secrets** (pending): `t3_attachment_prepare_upload`,
    `t3_attachment_discard`, `t3_thread_send_attachments`, `request_secret`.
 5. **Prompt context and capabilities**, as above.
@@ -217,10 +204,9 @@ Gaps the thread tools surface that live in shared code, not in the tools:
   restarts the turn), and the follow-up turn the reference starts when the provider refuses
   a steer. `t3_thread_send` still refuses `mode: "steer"`. Parity: `codex steer then stop`
   in `scripts/client_thread_parity.py`.
-- **Codex delegation parity.** Rust now runs an instance's Codex turns in one shared
-  app-server, as the reference does (#152), so a delegated child's Codex turn comes into the
-  parent's app-server. The delegation scenarios still compare Claude only; a Codex one is to
-  come.
+- **One Codex app-server per turn.** The reference runs every Codex thread of an instance in
+  one shared app-server, so a delegated child's turn comes into the parent's process; Rust starts
+  one per turn. Delegation works on Codex, but its parity is compared on Claude only.
 - **One Claude CLI per turn.** Rust starts a Claude CLI for each turn and resumes its session
   (`--resume`); the reference sends later turns, such as a delegated task's delivery, to the CLI
   it already runs. The `claude delegate async` scenario lists the launch and sign-in differences
@@ -241,7 +227,7 @@ still answer "Invalid tool arguments".
 ## Checklist
 
 <!-- tools:start -->
-<!-- Generated by scripts/update_agent_tools.py: 58 of 82 served. -->
+<!-- Generated by scripts/update_agent_tools.py: 59 of 82 served. -->
 
 | | Tool | Toolkit | Listed to | Caller check |
 |---|---|---|---|---|
@@ -324,7 +310,7 @@ still answer "Invalid tool arguments".
 | [x] | `t3_thread_organize` | thread | every caller | `writesThreads` |
 | [x] | `t3_thread_search` | thread | every caller | `reads` |
 | [x] | `t3_thread_transfer` | thread | every caller | `either(reads, writesThreads)` |
-| [ ] | `t3_worktree_handoff` | worktree | threads only | `actsAsCaller` |
+| [x] | `t3_worktree_handoff` | worktree | threads only | `actsAsCaller` |
 | [x] | `t3_worktree_list` | worktree | every caller | `reads` |
 | [x] | `t3_worktree_status` | worktree | threads only | `readsAsCaller` |
 <!-- tools:end -->

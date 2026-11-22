@@ -75,6 +75,7 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("list_thread_issues", &[]),
     // Worktree and preview session controls (agent-tools audit).
     ("t3_worktree_status", &[]),
+    ("t3_worktree_handoff", &[]),
     ("t3_preview_list", &[]),
     ("t3_preview_close", &[]),
 ];
@@ -145,6 +146,7 @@ const SERVED: &[&str] = &[
     "list_thread_issues",
     // Worktree and preview session controls (agent-tools audit).
     "t3_worktree_status",
+    "t3_worktree_handoff",
     "t3_preview_list",
     "t3_preview_close",
 ];
@@ -708,6 +710,7 @@ pub(super) async fn call<S: McpHost>(
             issues::call(host, caller, name, args).await
         }
         "t3_worktree_status" => agent_tools::worktree_status(host, caller).await,
+        "t3_worktree_handoff" => agent_tools::worktree_handoff(host, caller, args).await,
         "t3_preview_list" => agent_tools::preview_list(host, caller, args).await,
         "t3_preview_close" => agent_tools::preview_close(host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
