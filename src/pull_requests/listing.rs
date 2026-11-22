@@ -236,7 +236,7 @@ use super::bitbucket::{
 };
 
 /// The host and repository a Bitbucket project's identity names.
-fn bitbucket_repository(project: &Project) -> Option<(String, String)> {
+pub(super) fn bitbucket_repository(project: &Project) -> Option<(String, String)> {
     let identity = crate::repository_identity::resolve(&project.path)?;
     if identity["provider"] != "bitbucket" {
         return None;

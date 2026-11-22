@@ -7,6 +7,7 @@ use std::path::Path;
 
 mod actions;
 pub(crate) mod bitbucket;
+mod bitbucket_pr;
 mod detail;
 mod discussion;
 mod files;
@@ -33,6 +34,7 @@ pub(crate) fn handles(method: &str) -> bool {
             | "routing"
             | "routingIdentity"
             | "diffFileContents"
+            | "activity"
     ) || review::handles(op)
 }
 
@@ -141,6 +143,48 @@ fn valid_sha(v: &str) -> bool {
     (7..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// One pull request of a Bitbucket project (`bitbucket_pr`), its cached summaries cleared
+/// after a write.
+async fn bitbucket_read(
+    state: &AppState,
+    p: &crate::Project,
+    host: &str,
+    own: &str,
+    op: &str,
+    input: &Value,
+) -> Reply {
+    let named = input["repository"].as_str().unwrap_or("").trim();
+    if input["host"]
+        .as_str()
+        .is_some_and(|h| !h.trim().eq_ignore_ascii_case(host))
+    {
+        return Err(unavailable());
+    }
+    if !named.eq_ignore_ascii_case(own) {
+        return Err(error(
+            "resolveRepository",
+            "The change request does not belong to the selected project.",
+        ));
+    }
+    let number = input["number"]
+        .as_u64()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| error(op, "A pull request number is required."))?;
+    let repository = bitbucket_pr::Repository {
+        repository: named,
+        host,
+        project: p,
+    };
+    let result = bitbucket_pr::run(repository, op, input, number).await;
+    if !matches!(
+        op,
+        "detail" | "preview" | "checks" | "activity" | "reviewerCandidates"
+    ) {
+        state.pull_requests.clear(&p.id, named, number).await;
+    }
+    result
+}
+
 pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) -> Reply {
     if op == "list" {
         return listing::list(state, cli, input).await;
@@ -172,6 +216,12 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
         return Err(unavailable());
     }
     let p = project(state, input).await.ok_or_else(unavailable)?;
+    if let Some((host, own)) = listing::bitbucket_repository(&p) {
+        return bitbucket_read(state, &p, &host, &own, op, input).await;
+    }
+    if op == "activity" {
+        return Err(unavailable());
+    }
     let named = input["repository"].as_str().unwrap_or("").trim();
     let remote = github_remote(&p).await;
     if input["host"]

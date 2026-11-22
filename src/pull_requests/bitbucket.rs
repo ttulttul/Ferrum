@@ -27,12 +27,12 @@ pub(super) enum Viewer {
     Failed { detail: String, not_found: bool },
 }
 
-fn base_url() -> String {
+pub(super) fn base_url() -> String {
     std::env::var("T3CODE_BITBUCKET_API_BASE_URL")
         .unwrap_or_else(|_| "https://api.bitbucket.org/2.0".into())
 }
 
-fn origin(url: &str) -> Option<String> {
+pub(super) fn origin(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     Some(parsed.origin().ascii_serialization())
 }
@@ -87,7 +87,7 @@ async fn get(url: &str) -> Result<String, Failure> {
     response.text().await.map_err(|_| Failure::Send)
 }
 
-fn trimmed(value: &Value) -> Option<String> {
+pub(super) fn trimmed(value: &Value) -> Option<String> {
     value
         .as_str()
         .map(str::trim)
@@ -152,7 +152,7 @@ async fn viewer() -> Viewer {
     }
 }
 
-fn optional_strings(raw: &Value, keys: &[&str]) -> bool {
+pub(super) fn optional_strings(raw: &Value, keys: &[&str]) -> bool {
     keys.iter()
         .all(|k| raw.get(*k).is_none_or(|v| v.is_null() || v.is_string()))
 }
@@ -179,14 +179,14 @@ pub(super) fn iso_utc(value: &str) -> String {
 }
 
 /// `toActor`.
-fn actor(raw: &Value) -> Option<Value> {
+pub(super) fn actor(raw: &Value) -> Option<Value> {
     let login = trimmed(&raw["nickname"]).or_else(|| trimmed(&raw["display_name"]))?;
     Some(
         json!({"login": login, "name": trimmed(&raw["display_name"]), "avatarUrl": trimmed(&raw["links"]["avatar"]["href"])}),
     )
 }
 
-fn user_ok(raw: &Value) -> bool {
+pub(super) fn user_ok(raw: &Value) -> bool {
     raw.is_null()
         || raw.is_object()
             && optional_strings(raw, &["uuid", "nickname", "display_name"])
@@ -199,7 +199,7 @@ fn user_ok(raw: &Value) -> bool {
                                 .is_none_or(Value::is_string)))
 }
 
-fn branch(raw: &Value) -> Option<String> {
+pub(super) fn branch(raw: &Value) -> Option<String> {
     let commit_ok = raw["commit"].is_null()
         || raw["commit"].is_object()
             && raw["commit"]
@@ -227,7 +227,7 @@ pub(super) struct PullRequest {
     pub review_request_logins: Vec<String>,
 }
 
-fn pull_request(raw: &Value) -> Option<PullRequest> {
+pub(super) fn pull_request(raw: &Value) -> Option<PullRequest> {
     let number = raw["id"].as_u64()?;
     let title = raw["title"].as_str()?.to_owned();
     if !optional_strings(raw, &["description", "state", "closed_on"])
