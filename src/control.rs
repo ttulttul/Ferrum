@@ -182,6 +182,20 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
         });
         Box::pin(crate::dispatch_orchestration_command(host, command))
     }
+    fn cancel_delegated_task(
+        self: &Arc<Self>,
+        parent_thread_id: String,
+        task_id: String,
+        stop: Value,
+    ) -> crate::mcp_oauth::HostFuture<Result<(), Value>> {
+        #[allow(clippy::arc_with_non_send_sync)]
+        let host = Arc::new(PlaneCommands {
+            plane: self.clone(),
+        });
+        Box::pin(async move {
+            crate::orchestration::cancel_task(host, &parent_thread_id, &task_id, stop).await
+        })
+    }
     fn mutate_project(
         self: &Arc<Self>,
         command: Value,

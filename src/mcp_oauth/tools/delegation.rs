@@ -196,10 +196,16 @@ fn resolve_target(providers: &[Value], parent: &Value, target: &Value) -> Result
     Ok(selection)
 }
 
-/// `resolveRuntimeMode` and `resolveInteractionMode` for a child.
-fn child_modes(parent: &Value, a: &Value) -> Result<(String, String), Refusal> {
+/// `resolveRuntimeMode` and `resolveInteractionMode`: `runtime` and
+/// `interaction` for work this thread starts or stops, never broader than
+/// the thread's own.
+fn resolve_modes<'a>(
+    parent: &'a Value,
+    runtime: Option<&'a str>,
+    interaction: Option<&'a str>,
+) -> Result<(&'a str, &'a str), Refusal> {
     let parent_runtime = parent["runtimeMode"].as_str().unwrap_or("full-access");
-    let runtime = match arg_str(a, "runtimeMode")? {
+    let runtime = match runtime {
         None | Some("inherit") => parent_runtime,
         Some(mode) => mode,
     };
@@ -210,7 +216,7 @@ fn child_modes(parent: &Value, a: &Value) -> Result<(String, String), Refusal> {
         ));
     }
     let parent_interaction = parent["interactionMode"].as_str().unwrap_or("default");
-    let interaction = match arg_str(a, "interactionMode")? {
+    let interaction = match interaction {
         None | Some("inherit") => parent_interaction,
         Some(mode) => mode,
     };
@@ -220,6 +226,16 @@ fn child_modes(parent: &Value, a: &Value) -> Result<(String, String), Refusal> {
             format!("Child interaction mode {interaction} is broader than parent mode {parent_interaction}."),
         ));
     }
+    Ok((runtime, interaction))
+}
+
+/// The modes a child task runs in.
+fn child_modes(parent: &Value, a: &Value) -> Result<(String, String), Refusal> {
+    let (runtime, interaction) = resolve_modes(
+        parent,
+        arg_str(a, "runtimeMode")?,
+        arg_str(a, "interactionMode")?,
+    )?;
     Ok((runtime.to_owned(), interaction.to_owned()))
 }
 
@@ -348,6 +364,221 @@ pub(super) async fn task_status<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &
     let task_id = required(a, "taskId")?.to_owned();
     thread_scope(caller, "task_status")?;
     read_task(host, caller, &task_id, false, true).await
+}
+
+/// `agentStopReason`.
+fn agent_stop_reason(reason: Option<&str>) -> String {
+    match reason {
+        None => "Stopped by an agent".to_owned(),
+        Some(reason) => format!("Stopped by an agent: {reason}"),
+    }
+}
+
+/// `cancelTask`: stops a task's child, its delegates and the task's queued
+/// turn. A finished task keeps its result.
+pub(super) async fn task_cancel<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> Outcome {
+    thread_scope(caller, "This tool")?;
+    threads::writing_caller(&**host, caller).await?;
+    let task_id = required(a, "taskId")?.to_owned();
+    let reason = arg_str(a, "reason")?.map(str::to_owned);
+    let scope = thread_scope(caller, "task_cancel")?;
+    let current = read_task(host, caller, &task_id, false, false).await?;
+    let child_id = current["childThreadId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let key = arg_str(a, "clientRequestId")?
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::platform::uuid_v4().to_string());
+    let (parent_task, child_runs) = {
+        let store = host.control_state().store.read().await;
+        let parent = find_thread(&store, &scope.thread_id)?.full_projection();
+        // Cancelling stops the child and every task under it, each a write to a
+        // thread its user may have raised above the parent's modes since it was
+        // delegated. All of them are checked before anything is stopped.
+        let mut pending = vec![child_id.clone()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(thread) = store.threads.get(&id) else {
+                continue;
+            };
+            let row = thread.stored_row();
+            if row["deletedAt"].is_null() {
+                resolve_modes(
+                    &parent["thread"],
+                    row["runtimeMode"].as_str(),
+                    row["interactionMode"].as_str(),
+                )?;
+            }
+            pending.extend(
+                records(&row, "subagents")
+                    .iter()
+                    .filter(|t| t["origin"] == "app_owned")
+                    .filter_map(|t| t["childThreadId"].as_str().map(str::to_owned)),
+            );
+        }
+        let parent_task = records(&parent, "subagents")
+            .into_iter()
+            .find(|t| t["id"] == task_id.as_str() && t["origin"] == "app_owned");
+        let child_runs = store
+            .threads
+            .get(&child_id)
+            .map(|t| records(&t.full_projection(), "runs"))
+            .unwrap_or_default();
+        (parent_task, child_runs)
+    };
+    let dispatch_failure = |code: &'static str, what: String| {
+        move |error: Value| {
+            failure(
+                code,
+                format!(
+                    "{what}: {}",
+                    error["detail"]
+                        .as_str()
+                        .or(error["message"].as_str())
+                        .unwrap_or("The command was rejected.")
+                ),
+            )
+        }
+    };
+    let dispose = || async {
+        if parent_task
+            .as_ref()
+            .is_some_and(|t| t["completionDelivery"]["state"] == "disposed")
+        {
+            return Ok(());
+        }
+        host.dispatch(json!({
+            "type": "delegated_task.completion-delivery.dispose",
+            "commandId": stable_command_id(caller, "cancel-task-completion-delivery", &key),
+            "parentThreadId": scope.thread_id,
+            "taskId": task_id,
+        }))
+        .await
+        .map(|_| ())
+        .map_err(dispatch_failure(
+            "orchestration_error",
+            format!("Unable to dispose delegated task {task_id} completion delivery"),
+        ))
+    };
+    let stop_child = || async {
+        let stop = json!({
+            "type": "thread.stop",
+            "commandId": stable_command_id(caller, "cancel-task", &key),
+            "threadId": child_id,
+            "stopDelegatedTasks": false,
+            "reason": agent_stop_reason(reason.as_deref()),
+        });
+        host.cancel_delegated_task(scope.thread_id.clone(), task_id.clone(), stop)
+            .await
+            .map_err(dispatch_failure(
+                "task_not_cancellable",
+                format!("Unable to stop delegated task {task_id}"),
+            ))?;
+        let runs = {
+            let store = host.control_state().store.read().await;
+            store
+                .threads
+                .get(&child_id)
+                .map(|t| records(&t.full_projection(), "runs"))
+                .unwrap_or_default()
+        };
+        // Stop preserves the queue for Resume. Cancelling a task must also
+        // remove that task's queued turn, including a previously held one.
+        for run in runs.iter().filter(|r| {
+            r["status"] == "queued"
+                && (r["delegatedTaskId"] == task_id.as_str() || r["id"] == current["childRunId"])
+        }) {
+            let run_id = run["id"].as_str().unwrap_or_default();
+            host.dispatch(json!({
+                "type": "queued-run.cancel",
+                "commandId": stable_command_id(caller, &format!("cancel-task-queued-run:{run_id}"), &key),
+                "threadId": child_id,
+                "runId": run_id,
+            }))
+            .await
+            .map_err(dispatch_failure(
+                "orchestration_error",
+                format!("Unable to cancel delegated task {task_id}'s queued turn"),
+            ))?;
+        }
+        Ok::<(), Refusal>(())
+    };
+    // A follow-up that lost its child run stays running on the parent, while
+    // its status here comes from the child's last run. Stop on the parent
+    // cancels that task.
+    let cancel_orphan = || async {
+        let Some(task) = parent_task.as_ref().filter(|t| {
+            !t["runId"].is_null()
+                && matches!(
+                    t["status"].as_str(),
+                    Some("pending" | "starting" | "running" | "waiting")
+                )
+        }) else {
+            return Ok::<bool, Refusal>(false);
+        };
+        host.dispatch(json!({
+            "type": "subagent.stop",
+            "commandId": stable_command_id(caller, "cancel-task-orphan", &key),
+            "threadId": scope.thread_id,
+            "runId": task["runId"],
+            "subagentId": task["id"],
+        }))
+        .await
+        .map_err(dispatch_failure(
+            "orchestration_error",
+            "Unable to stop the task".into(),
+        ))?;
+        let store = host.control_state().store.read().await;
+        Ok(find_thread(&store, &scope.thread_id)
+            .map(|t| {
+                records(&t.stored_row(), "subagents")
+                    .iter()
+                    .any(|t| t["id"] == task_id.as_str() && t["status"] == "cancelled")
+            })
+            .unwrap_or(false))
+    };
+    let status = current["status"].as_str().unwrap_or_default();
+    if TERMINAL_TASK.contains(&status) {
+        // The child can still run work for another turn, so it is stopped either way.
+        stop_child().await?;
+        let cancelled = cancel_orphan().await?;
+        dispose().await?;
+        return Ok(json!({
+            "taskId": task_id,
+            "status": if cancelled { "cancelled" } else { status },
+        }));
+    }
+    let active_child = child_runs.iter().any(|r| {
+        matches!(
+            r["status"].as_str(),
+            Some("preparing" | "starting" | "running" | "waiting")
+        )
+    });
+    if current["workState"] != "waiting_for_children"
+        && !active_child
+        && !child_runs.iter().any(|r| {
+            r["status"] == "queued"
+                && (r["delegatedTaskId"] == task_id.as_str() || r["id"] == current["childRunId"])
+        })
+    {
+        if cancel_orphan().await? {
+            return Ok(json!({"taskId": task_id, "status": "cancelled"}));
+        }
+        return Err(failure(
+            "task_not_cancellable",
+            format!("Delegated task {task_id} has no interruptible child run."),
+        ));
+    }
+    stop_child().await?;
+    if let Err(error) = dispose().await {
+        let _ = error;
+        tracing::warn!(task_id, "could not dispose a cancelled task's delivery");
+    }
+    Ok(json!({"taskId": task_id, "status": "cancel_requested"}))
 }
 
 /// `awaitTask`: reads the task until it ends a wait or `timeout` passes.

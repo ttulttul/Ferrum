@@ -918,6 +918,15 @@ async fn finalize_child<H: CommandHost>(
     else {
         return Ok(());
     };
+    // A cancelled task's completed run ends it interrupted.
+    let cancelled = task["cancelledRunId"] == result_run["id"];
+    let terminal = if cancelled && terminal == "completed" {
+        "interrupted"
+    } else {
+        terminal
+    };
+    let mut result_run = result_run;
+    result_run["status"] = json!(terminal);
     let at = crate::auth_service::iso(crate::auth_service::now());
     let (text, turn_item) = result_for_run(&child, &result_run);
     let mut updated = task.clone();
@@ -933,6 +942,11 @@ async fn finalize_child<H: CommandHost>(
     let mut extras = parent_row["runExtras"].clone();
     if !extras.is_object() {
         extras = json!({});
+    }
+    // The cancelling parent gets no wake.
+    if cancelled {
+        updated["cancelledRunId"] = result_run["id"].clone();
+        updated["completionDelivery"] = json!({"state": "disposed", "observedByRunId": null});
     }
     let delivery_state = updated["completionDelivery"]["state"]
         .as_str()
@@ -1145,6 +1159,346 @@ async fn deliver_if_idle<H: CommandHost>(state: Arc<H>, thread_id: &str) {
             "could not deliver finished delegated tasks"
         );
     }
+}
+
+/// `disposeDelegatedCompletionCohort` with `disposition: "stopped"` for each
+/// of `run_ids` on `thread_id`, as a stop or interrupt closes them: the
+/// cohort takes no more deliveries, and its tasks' undelivered results are
+/// disposed. With `thread_stop`, also the runs whose cohorts hold a delivery
+/// or whose tasks still owe one (`holdStoppedThread`).
+pub(crate) async fn stop_cohorts<H: CommandHost>(
+    state: &Arc<H>,
+    thread_id: &str,
+    run_ids: &[String],
+    thread_stop: bool,
+) -> anyhow::Result<()> {
+    let (row, projection) = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(thread_id) else {
+            return Ok(());
+        };
+        (thread.stored_row(), thread.full_projection())
+    };
+    let runs = records(&projection, "runs");
+    let mut tasks = records(&row, "subagents");
+    let owes = |task: &Value| {
+        !matches!(
+            task["completionDelivery"]["state"].as_str(),
+            Some("acknowledged" | "delivered" | "disposed")
+        )
+    };
+    let mut cohort_runs: Vec<String> = run_ids.to_vec();
+    if thread_stop {
+        cohort_runs.extend(
+            runs.iter()
+                .filter(|run| {
+                    !run["delegatedCompletion"]["delivery"].is_null()
+                        && run["delegatedCompletion"].is_object()
+                })
+                .filter_map(|run| run["id"].as_str().map(str::to_owned)),
+        );
+        cohort_runs.extend(
+            tasks
+                .iter()
+                .filter(|task| task["origin"] == "app_owned" && owes(task))
+                .filter_map(|task| task["runId"].as_str().map(str::to_owned)),
+        );
+    }
+    let mut extras = row["runExtras"].clone();
+    if !extras.is_object() {
+        extras = json!({});
+    }
+    let at = crate::auth_service::iso(crate::auth_service::now());
+    let mut changed = false;
+    let mut seen = std::collections::HashSet::new();
+    for run_id in cohort_runs {
+        if !seen.insert(run_id.clone()) {
+            continue;
+        }
+        let Some(run) = runs.iter().find(|run| run["id"] == run_id.as_str()) else {
+            continue;
+        };
+        let cohort = &run["delegatedCompletion"];
+        let owned = tasks
+            .iter()
+            .any(|task| task["origin"] == "app_owned" && task["runId"] == run_id.as_str());
+        if !cohort.is_object() && !owned {
+            continue;
+        }
+        extras[run_id.as_str()]["delegatedCompletion"] = json!({
+            "disposition": if cohort["disposition"] == "disposed" { "disposed" } else { "stopped" },
+            "nextGeneration": cohort["nextGeneration"].as_u64().unwrap_or(1),
+            "delivery": null,
+        });
+        for task in tasks
+            .iter_mut()
+            .filter(|task| task["origin"] == "app_owned" && task["runId"] == run_id.as_str())
+        {
+            if owes(task) {
+                task["completionDelivery"] = json!({"state": "disposed", "observedByRunId": null});
+                task["updatedAt"] = json!(at);
+            }
+        }
+        changed = true;
+    }
+    if changed {
+        state
+            .commit(Event::ThreadPatched {
+                thread_id: thread_id.to_owned(),
+                patch: json!({"row": {"runExtras": extras, "subagents": tasks}}),
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+/// `isLiveRun`.
+fn live_run(run: &Value) -> bool {
+    matches!(
+        run["status"].as_str(),
+        Some("preparing" | "starting" | "running")
+    )
+}
+
+fn work_active(status: &Value) -> bool {
+    matches!(
+        status.as_str(),
+        Some("pending" | "starting" | "running" | "waiting")
+    )
+}
+
+/// The recursive stop's future: `Send` where the host's futures are.
+#[cfg(feature = "native")]
+pub(crate) type StopFuture<'a> = futures_util::future::BoxFuture<'a, Result<(), Value>>;
+#[cfg(not(feature = "native"))]
+pub(crate) type StopFuture<'a> = futures_util::future::LocalBoxFuture<'a, Result<(), Value>>;
+
+/// `stopDelegatedTasks`: stops each app-owned child of `thread_id`, then its
+/// children, each once.
+pub(crate) fn stop_delegated_tasks<'a, H: CommandHost + 'a>(
+    state: Arc<H>,
+    thread_id: String,
+    command_id: String,
+    reason: Option<String>,
+) -> StopFuture<'a> {
+    Box::pin(async move {
+        let tasks = {
+            let store = state.store.read().await;
+            store
+                .threads
+                .get(&thread_id)
+                .map(|thread| records(&thread.stored_row(), "subagents"))
+                .unwrap_or_default()
+        };
+        let mut stopped = std::collections::HashSet::new();
+        let mut failure = None;
+        for task in tasks {
+            if task["origin"] != "app_owned" {
+                continue;
+            }
+            // A task in a linked environment is not served here.
+            let Some(child) = task["childThreadId"].as_str().map(str::to_owned) else {
+                continue;
+            };
+            // Follow-up tasks reuse a child thread; walk its subtree only once.
+            if !stopped.insert(child.clone()) {
+                continue;
+            }
+            let mut stop = json!({
+                "type": "thread.stop",
+                "commandId": format!("{command_id}:stop:{child}"),
+                "threadId": child,
+                "stopDelegatedTasks": false,
+            });
+            if let Some(reason) = &reason {
+                stop["reason"] = json!(reason);
+            }
+            let outcome = match dispatch_command(state.clone(), stop, None).await {
+                Ok(_) => {
+                    stop_delegated_tasks(
+                        state.clone(),
+                        child.clone(),
+                        command_id.clone(),
+                        reason.clone(),
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = outcome {
+                tracing::warn!(parent = %thread_id, child = %child, "could not stop a delegated task");
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    })
+}
+
+/// `cancelDelegatedTask`: marks the run the task settles from as cancelled,
+/// stops the child's descendants, then the child itself with `stop`.
+pub(crate) async fn cancel_task<H: CommandHost>(
+    state: Arc<H>,
+    parent_id: &str,
+    task_id: &str,
+    stop: Value,
+) -> Result<(), Value> {
+    let child_id = stop["threadId"].as_str().unwrap_or_default().to_owned();
+    {
+        let _guard = state.mutation_lock().lock().await;
+        let (parent_row, child) = {
+            let store = state.store.read().await;
+            let parent_row = store.threads.get(parent_id).map(|t| t.stored_row());
+            let child = store.threads.get(&child_id).map(|t| t.full_projection());
+            (parent_row, child)
+        };
+        if let (Some(parent_row), Some(child)) = (parent_row, child) {
+            let mut tasks = records(&parent_row, "subagents");
+            let task = tasks
+                .iter()
+                .find(|t| {
+                    t["id"] == task_id
+                        && t["origin"] == "app_owned"
+                        && t["childThreadId"] == child_id.as_str()
+                        && work_active(&t["status"])
+                })
+                .cloned();
+            let (work, result_run) = progress(&child);
+            let unsettled = child["thread"]["forkedFrom"]["type"] == "node"
+                && child["thread"]["forkedFrom"]["nodeId"] == task_id
+                && work != "result_available";
+            let active = records(&child, "runs")
+                .into_iter()
+                .filter(live_run)
+                .max_by_key(|run| run["ordinal"].as_u64().unwrap_or(0));
+            let cancelled_run = active.or(result_run);
+            if let (Some(task), true, Some(run)) = (task, unsettled, cancelled_run) {
+                let at = crate::auth_service::iso(crate::auth_service::now());
+                replace_by_id(&mut tasks, &task["id"], |t| {
+                    t["cancelledRunId"] = run["id"].clone();
+                    t["updatedAt"] = json!(at);
+                });
+                state
+                    .commit(Event::ThreadPatched {
+                        thread_id: parent_id.to_owned(),
+                        patch: json!({"row": {"subagents": tasks}}),
+                    })
+                    .await
+                    .map_err(|e| json!({"message": e.to_string()}))?;
+            }
+        }
+    }
+    // Hold the child until its descendants stop, then stop it.
+    stop_delegated_tasks(
+        state.clone(),
+        child_id.clone(),
+        stop["commandId"].as_str().unwrap_or_default().to_owned(),
+        stop["reason"].as_str().map(str::to_owned),
+    )
+    .await?;
+    dispatch_command(state.clone(), stop, None).await?;
+    if let Err(error) = finalize_child(state.clone(), &child_id, parent_id).await {
+        tracing::warn!(%error, child_id, "could not settle a cancelled task");
+    }
+    deliver_if_idle(state, parent_id).await;
+    Ok(())
+}
+
+/// `subagent.stop` for an app-owned task (`dispatchSubagentStop`): one with
+/// no bound child run is cancelled; one whose child still runs it (its
+/// original task) is left to settle from that run. `None` when the task is
+/// not an app-owned one on that run.
+pub(crate) async fn stop_app_owned<H: CommandHost>(
+    state: &Arc<H>,
+    command: &Value,
+    receipt: &crate::store::CommandReceipt,
+) -> anyhow::Result<Option<u64>> {
+    let thread_id = command["threadId"].as_str().unwrap_or_default();
+    let (row, child) = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(thread_id) else {
+            return Ok(None);
+        };
+        let row = thread.stored_row();
+        let child = records(&row, "subagents")
+            .into_iter()
+            .find(|t| t["id"] == command["subagentId"])
+            .and_then(|t| t["childThreadId"].as_str().map(str::to_owned))
+            .and_then(|id| store.threads.get(&id).map(|t| t.full_projection()));
+        (row, child)
+    };
+    let mut tasks = records(&row, "subagents");
+    let Some(task) = tasks
+        .iter()
+        .find(|t| t["id"] == command["subagentId"])
+        .cloned()
+        .filter(|t| {
+            t["origin"] == "app_owned"
+                && t["childThreadId"].is_string()
+                && t["runId"] == command["runId"]
+        })
+    else {
+        return Ok(None);
+    };
+    let active = work_active(&task["status"]);
+    let bound = child.as_ref().is_some_and(|child| {
+        (child["thread"]["forkedFrom"]["type"] == "node"
+            && child["thread"]["forkedFrom"]["nodeId"] == task["id"])
+            || records(child, "runs")
+                .iter()
+                .any(|run| run["delegatedTaskId"] == task["id"])
+    });
+    if active && bound {
+        return Ok(Some(
+            state
+                .commit_receipted(
+                    Event::CommandDispatched {
+                        command_id: receipt.command_id.clone(),
+                        command_type: "subagent.stop".into(),
+                        thread_id: Some(thread_id.to_owned()),
+                        payload: command.clone(),
+                    },
+                    Some(receipt.clone()),
+                )
+                .await?
+                .id,
+        ));
+    }
+    let at = crate::auth_service::iso(crate::auth_service::now());
+    let mut written = task.clone();
+    if active {
+        // `cancelledAppOwnedTask`.
+        written["status"] = json!("cancelled");
+        written["completedAt"] = json!(at);
+        written["updatedAt"] = json!(at);
+        written["completionDelivery"] = json!({"state": "disposed", "observedByRunId": null});
+    }
+    replace_by_id(&mut tasks, &task["id"], |t| *t = written.clone());
+    let mut nodes = records(&row, "nodes");
+    replace_by_id(&mut nodes, &task["id"], |node| {
+        node["status"] = written["status"].clone();
+        node["completedAt"] = written["completedAt"].clone();
+    });
+    let mut items = records(&row, "appTurnItems");
+    for item in items
+        .iter_mut()
+        .filter(|i| i["type"] == "subagent" && i["subagentId"] == task["id"])
+    {
+        item["status"] = written["status"].clone();
+        item["completedAt"] = written["completedAt"].clone();
+        item["updatedAt"] = json!(at);
+    }
+    Ok(Some(
+        state
+            .commit_receipted(
+                Event::ThreadPatched {
+                    thread_id: thread_id.to_owned(),
+                    patch: json!({"row": {"subagents": tasks, "nodes": nodes, "appTurnItems": items}}),
+                },
+                Some(receipt.clone()),
+            )
+            .await?
+            .id,
+    ))
 }
 
 #[cfg(test)]

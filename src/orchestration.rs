@@ -153,7 +153,7 @@ async fn dispatch_command<H: CommandHost>(
             json!({"name":"OrchestratorDispatchError","message":format!("Failed to dispatch orchestration command {kind} ({command_id})."),"cause":detail}),
         )
     };
-    let _guard = state.mutation_lock().lock().await;
+    let guard = state.mutation_lock().lock().await;
     let store = state.store.read().await;
     if let Some((prior_id, seq)) = store.command_receipts.get(command_id) {
         if id == prior_id {
@@ -325,7 +325,7 @@ async fn dispatch_command<H: CommandHost>(
         thread_id: id.to_string(),
         command_type: kind.to_string(),
     };
-    let seq = apply_command(state.clone(), &command, &receipt, continuation_of)
+    let mut seq = apply_command(state.clone(), &command, &receipt, continuation_of)
         .await
         .map_err(|e| dispatch_error(e.to_string()))?;
     // Stopping, settling or archiving a thread means the user is done with
@@ -335,8 +335,20 @@ async fn dispatch_command<H: CommandHost>(
         "thread.archive" | "thread.settle" | "thread.stop" | "run.interrupt"
     ) {
         if let Some(last) = close_pending_link_requests(&state, id).await {
-            return Ok(last);
+            seq = last;
         }
+    }
+    drop(guard);
+    // A thread's stop then stops its delegated tasks, as the reference's
+    // effect after the interrupt does (`delegatedTasksStopEffect`).
+    if kind == "thread.stop" && command["stopDelegatedTasks"] != false {
+        let _ = delegation::stop_delegated_tasks(
+            state.clone(),
+            id.to_owned(),
+            command_id.to_owned(),
+            command["reason"].as_str().map(str::to_owned),
+        )
+        .await;
     }
     Ok(seq)
 }
@@ -533,7 +545,7 @@ pub(crate) fn provider_instance_enabled(settings: &Value, project: &str, instanc
 
 mod delegation;
 pub(crate) use delegation::{
-    after_run, subagent_result, task_node_id, task_thread_id, watch_run_end, RunEnd,
+    after_run, cancel_task, subagent_result, task_node_id, task_thread_id, watch_run_end, RunEnd,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -936,22 +948,35 @@ async fn apply_command<H: CommandHost>(
             return Ok(sequence);
         }
         "thread.stop" | "run.interrupt" | "subagent.stop" => {
+            if command_type == "subagent.stop" {
+                if let Some(sequence) = delegation::stop_app_owned(&state, command, receipt).await?
+                {
+                    return Ok(sequence);
+                }
+            }
             if let Some(thread_id) = thread_id {
-                let run_ids = state
+                let (run_ids, wire_ids) = state
                     .store
                     .read()
                     .await
                     .threads
                     .get(thread_id)
                     .map(|thread| {
-                        thread
-                            .runs
-                            .iter()
-                            .filter(|run| run.status == "running")
-                            .map(|run| run.id)
-                            .collect::<Vec<_>>()
+                        let running = thread.runs.iter().filter(|run| run.status == "running");
+                        (
+                            running.clone().map(|run| run.id).collect::<Vec<_>>(),
+                            running.map(|run| run.wire_id()).collect::<Vec<_>>(),
+                        )
                     })
                     .unwrap_or_default();
+                // The stopped runs' delegated results wake nobody.
+                delegation::stop_cohorts(
+                    &state,
+                    thread_id,
+                    &wire_ids,
+                    command_type == "thread.stop",
+                )
+                .await?;
                 let requested: Vec<String> = run_ids.iter().map(Uuid::to_string).collect();
                 // The request is recorded before the runs are told to stop, so
                 // its card comes before what the stop ends, as the

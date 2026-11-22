@@ -16,7 +16,7 @@
       "model": "claude-opus-5-5",
       "cwd": "/workspace",
       "permissionMode": "bypassPermissions",
-      "uuid": "00000000-0000-dd02-0000-000000000012",
+      "uuid": "00000000-0000-e474-0000-000000000012",
       "tools": [
        "Bash",
        "Edit",
@@ -70,7 +70,7 @@
       },
       "session_id": "$session",
       "parent_tool_use_id": null,
-      "uuid": "00000000-0000-a83a-0000-000000000013",
+      "uuid": "00000000-0000-4be8-0000-000000000013",
       "ttft_ms": 2418,
       "thinking_display": "updates",
       "api_message_id": "msg_child"
@@ -89,7 +89,7 @@
       },
       "session_id": "$session",
       "parent_tool_use_id": null,
-      "uuid": "00000000-0000-a83a-0000-000000000014",
+      "uuid": "00000000-0000-4be8-0000-000000000014",
       "api_message_id": "msg_child"
      }
     },
@@ -106,7 +106,7 @@
       },
       "session_id": "$session",
       "parent_tool_use_id": null,
-      "uuid": "00000000-0000-a83a-0000-000000000015",
+      "uuid": "00000000-0000-4be8-0000-000000000015",
       "api_message_id": "msg_child"
      }
     },
@@ -153,7 +153,7 @@
       },
       "parent_tool_use_id": null,
       "session_id": "$session",
-      "uuid": "00000000-0000-a83a-0000-000000000016"
+      "uuid": "00000000-0000-4be8-0000-000000000016"
      }
     },
     {
@@ -165,7 +165,7 @@
       },
       "session_id": "$session",
       "parent_tool_use_id": null,
-      "uuid": "00000000-0000-a83a-0000-000000000017",
+      "uuid": "00000000-0000-4be8-0000-000000000017",
       "api_message_id": "msg_child"
      }
     },
@@ -208,7 +208,7 @@
       },
       "session_id": "$session",
       "parent_tool_use_id": null,
-      "uuid": "00000000-0000-a83a-0000-000000000018",
+      "uuid": "00000000-0000-4be8-0000-000000000018",
       "api_message_id": "msg_child"
      }
     },
@@ -220,7 +220,7 @@
       },
       "session_id": "$session",
       "parent_tool_use_id": null,
-      "uuid": "00000000-0000-a83a-0000-000000000019",
+      "uuid": "00000000-0000-4be8-0000-000000000019",
       "api_message_id": "msg_child"
      }
     },
@@ -247,7 +247,7 @@
         "contextWindow": 1000000
        }
       },
-      "uuid": "00000000-0000-a83a-0000-00000000001a"
+      "uuid": "00000000-0000-4be8-0000-00000000001a"
      }
     }
    ]
@@ -267,7 +267,7 @@
           "model": "claude-opus-5-5",
           "cwd": "/workspace",
           "permissionMode": "bypassPermissions",
-          "uuid": "00000000-0000-dd02-0000-00000000001b",
+          "uuid": "00000000-0000-e474-0000-00000000001b",
           "tools": [
            "Bash",
            "Edit",
@@ -326,7 +326,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-1f2f-0000-000000000001",
+          "uuid": "00000000-0000-1098-0000-000000000001",
           "ttft_ms": 2418,
           "thinking_display": "updates",
           "api_message_id": "msg_parent_delivery"
@@ -345,7 +345,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-1f2f-0000-000000000002",
+          "uuid": "00000000-0000-1098-0000-000000000002",
           "api_message_id": "msg_parent_delivery"
          }
         },
@@ -362,7 +362,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-1f2f-0000-000000000003",
+          "uuid": "00000000-0000-1098-0000-000000000003",
           "api_message_id": "msg_parent_delivery"
          }
         },
@@ -409,7 +409,7 @@
           },
           "parent_tool_use_id": null,
           "session_id": "$session",
-          "uuid": "00000000-0000-1f2f-0000-000000000004"
+          "uuid": "00000000-0000-1098-0000-000000000004"
          }
         },
         {
@@ -421,7 +421,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-1f2f-0000-000000000005",
+          "uuid": "00000000-0000-1098-0000-000000000005",
           "api_message_id": "msg_parent_delivery"
          }
         },
@@ -464,7 +464,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-1f2f-0000-000000000006",
+          "uuid": "00000000-0000-1098-0000-000000000006",
           "api_message_id": "msg_parent_delivery"
          }
         },
@@ -476,7 +476,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-1f2f-0000-000000000007",
+          "uuid": "00000000-0000-1098-0000-000000000007",
           "api_message_id": "msg_parent_delivery"
          }
         },
@@ -503,7 +503,7 @@
             "contextWindow": 1000000
            }
           },
-          "uuid": "00000000-0000-1f2f-0000-000000000008"
+          "uuid": "00000000-0000-1098-0000-000000000008"
          }
         }
        ]
@@ -518,7 +518,7 @@
           "model": "claude-opus-5-5",
           "cwd": "/workspace",
           "permissionMode": "bypassPermissions",
-          "uuid": "00000000-0000-dd02-0000-000000000009",
+          "uuid": "00000000-0000-e474-0000-000000000009",
           "tools": [
            "Bash",
            "Edit",
@@ -579,7 +579,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-648e-0000-00000000000a",
+          "uuid": "00000000-0000-b83a-0000-00000000000a",
           "ttft_ms": 2418,
           "thinking_display": "updates",
           "api_message_id": "msg_parent_start"
@@ -598,7 +598,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-648e-0000-00000000000b",
+          "uuid": "00000000-0000-b83a-0000-00000000000b",
           "api_message_id": "msg_parent_start"
          }
         },
@@ -615,7 +615,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-648e-0000-00000000000c",
+          "uuid": "00000000-0000-b83a-0000-00000000000c",
           "api_message_id": "msg_parent_start"
          }
         },
@@ -662,7 +662,7 @@
           },
           "parent_tool_use_id": null,
           "session_id": "$session",
-          "uuid": "00000000-0000-648e-0000-00000000000d"
+          "uuid": "00000000-0000-b83a-0000-00000000000d"
          }
         },
         {
@@ -674,7 +674,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-648e-0000-00000000000e",
+          "uuid": "00000000-0000-b83a-0000-00000000000e",
           "api_message_id": "msg_parent_start"
          }
         },
@@ -717,7 +717,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-648e-0000-00000000000f",
+          "uuid": "00000000-0000-b83a-0000-00000000000f",
           "api_message_id": "msg_parent_start"
          }
         },
@@ -729,7 +729,7 @@
           },
           "session_id": "$session",
           "parent_tool_use_id": null,
-          "uuid": "00000000-0000-648e-0000-000000000010",
+          "uuid": "00000000-0000-b83a-0000-000000000010",
           "api_message_id": "msg_parent_start"
          }
         },
@@ -756,7 +756,7 @@
             "contextWindow": 1000000
            }
           },
-          "uuid": "00000000-0000-648e-0000-000000000011"
+          "uuid": "00000000-0000-b83a-0000-000000000011"
          }
         },
         {
@@ -771,7 +771,7 @@
               "model": "claude-opus-5-5",
               "cwd": "/workspace",
               "permissionMode": "bypassPermissions",
-              "uuid": "00000000-0000-dd02-0000-00000000001c",
+              "uuid": "00000000-0000-e474-0000-00000000001c",
               "tools": [
                "Bash",
                "Edit",
@@ -830,7 +830,7 @@
               },
               "session_id": "$session",
               "parent_tool_use_id": null,
-              "uuid": "00000000-0000-1f2f-0000-000000000001",
+              "uuid": "00000000-0000-1098-0000-000000000001",
               "ttft_ms": 2418,
               "thinking_display": "updates",
               "api_message_id": "msg_parent_delivery"
@@ -849,7 +849,7 @@
               },
               "session_id": "$session",
               "parent_tool_use_id": null,
-              "uuid": "00000000-0000-1f2f-0000-000000000002",
+              "uuid": "00000000-0000-1098-0000-000000000002",
               "api_message_id": "msg_parent_delivery"
              }
             },
@@ -866,7 +866,7 @@
               },
               "session_id": "$session",
               "parent_tool_use_id": null,
-              "uuid": "00000000-0000-1f2f-0000-000000000003",
+              "uuid": "00000000-0000-1098-0000-000000000003",
               "api_message_id": "msg_parent_delivery"
              }
             },
@@ -913,7 +913,7 @@
               },
               "parent_tool_use_id": null,
               "session_id": "$session",
-              "uuid": "00000000-0000-1f2f-0000-000000000004"
+              "uuid": "00000000-0000-1098-0000-000000000004"
              }
             },
             {
@@ -925,7 +925,7 @@
               },
               "session_id": "$session",
               "parent_tool_use_id": null,
-              "uuid": "00000000-0000-1f2f-0000-000000000005",
+              "uuid": "00000000-0000-1098-0000-000000000005",
               "api_message_id": "msg_parent_delivery"
              }
             },
@@ -968,7 +968,7 @@
               },
               "session_id": "$session",
               "parent_tool_use_id": null,
-              "uuid": "00000000-0000-1f2f-0000-000000000006",
+              "uuid": "00000000-0000-1098-0000-000000000006",
               "api_message_id": "msg_parent_delivery"
              }
             },
@@ -980,7 +980,7 @@
               },
               "session_id": "$session",
               "parent_tool_use_id": null,
-              "uuid": "00000000-0000-1f2f-0000-000000000007",
+              "uuid": "00000000-0000-1098-0000-000000000007",
               "api_message_id": "msg_parent_delivery"
              }
             },
@@ -1007,7 +1007,7 @@
                 "contextWindow": 1000000
                }
               },
-              "uuid": "00000000-0000-1f2f-0000-000000000008"
+              "uuid": "00000000-0000-1098-0000-000000000008"
              }
             }
            ]

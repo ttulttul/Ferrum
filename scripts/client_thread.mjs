@@ -167,6 +167,10 @@ const runOf = (item) => {
   return {};
 };
 
+/** Whether a stream item shows a delegated task's card. */
+const showsSubagent = (item) =>
+  item.kind === "event" && item.event.type === "turn-item.updated" && item.event.payload?.type === "subagent";
+
 /** Whether a stream item shows a running command's turn item. */
 const runsCommand = (item) =>
   item.kind === "event"
@@ -221,6 +225,7 @@ const liveTurn = (client, seed) =>
     const settled = yield* Deferred.make();
     const turnRunning = yield* Deferred.make();
     const commandRunning = yield* Deferred.make();
+    const subagentShown = yield* Deferred.make();
     const requestPending = yield* Deferred.make();
     const steerAnswered = yield* Deferred.make();
     const pending = new Map();
@@ -243,6 +248,7 @@ const liveTurn = (client, seed) =>
           if (dispatched && run.runId) runId = run.runId;
           if (dispatched && run.turnRunning) yield* Deferred.succeed(turnRunning, undefined);
           if (dispatched && runsCommand(item)) yield* Deferred.succeed(commandRunning, undefined);
+          if (dispatched && showsSubagent(item)) yield* Deferred.succeed(subagentShown, undefined);
           if (dispatched && seed.steer && JSON.stringify(plain(item)).includes(seed.steer.ack)) {
             yield* Deferred.succeed(steerAnswered, undefined);
           }
@@ -282,8 +288,9 @@ const liveTurn = (client, seed) =>
       yield* Effect.raceFirst(Deferred.await(steerAnswered), Effect.sleep(8000));
     }
     if (seed.change) {
-      // A thread change sent while the turn runs (archive, model, runtime mode, ...).
-      yield* Deferred.await(turnRunning);
+      // A thread change sent while the turn runs (archive, model, runtime mode, ...); with
+      // `seed.changeAfter === "subagent"`, once the turn has delegated a task.
+      yield* Deferred.await(seed.changeAfter === "subagent" ? subagentShown : turnRunning);
       changeReply = yield* client["orchestration.dispatchCommand"]({
         commandId: "turn-change",
         threadId: seed.threadId,
