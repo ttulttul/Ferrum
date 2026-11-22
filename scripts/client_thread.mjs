@@ -81,9 +81,9 @@ function plain(value) {
 const results = { environmentId: descriptor.environmentId, steps: {} };
 
 /** Records a step's decoded value or its failure, as the client sees it. */
-const record = (name, effect) =>
+const record = (name, effect, ms = waitMs) =>
   effect.pipe(
-    Effect.timeoutOption(waitMs),
+    Effect.timeoutOption(ms),
     Effect.matchCauseEffect({
       onSuccess: (outcome) =>
         Effect.sync(() => {
@@ -200,7 +200,8 @@ const requestsOf = (item, pending, withItems) => {
  * `seed.interrupt === "command"`, once a command it runs is (so the command's item comes before
  * the interrupt's on both servers, however fast each takes the CLI's frames); with
  * `seed.interrupt === "request"`, once a runtime request is pending. With `seed.respond`
- * ({decision} or {answers}), the first pending runtime request is answered with it.
+ * ({decision} or {answers}), the first pending runtime request is answered with it. With
+ * `seed.change` (a command without its ids), that command is sent once the provider turn runs.
  */
 const liveTurn = (client, seed) =>
   Effect.gen(function* () {
@@ -239,6 +240,26 @@ const liveTurn = (client, seed) =>
     const reply = yield* client["orchestration.dispatchCommand"](seed.dispatch);
     let interruptReply = null;
     let respondReply = null;
+    let changeReply = null;
+    if (seed.change) {
+      // A thread change sent while the turn runs (archive, model, runtime mode, ...).
+      yield* Deferred.await(turnRunning);
+      changeReply = yield* client["orchestration.dispatchCommand"]({
+        commandId: "turn-change",
+        threadId: seed.threadId,
+        ...seed.change,
+      }).pipe(
+        Effect.map(plain),
+        Effect.catch((error) => Effect.succeed({ error: String(error?._tag ?? error) })),
+        Effect.timeoutOption(10000),
+        Effect.map((reply) => Option.getOrElse(reply, () => ({ timedOut: true }))),
+      );
+      // A change may leave the turn running: settle or not, read what followed.
+      yield* Effect.raceFirst(Deferred.await(settled), Effect.sleep(8000));
+      yield* Effect.sleep(1500);
+      yield* Fiber.interrupt(fiber);
+      return { dispatchReply: plain(reply), interruptReply, respondReply, changeReply, items };
+    }
     if (seed.respond) {
       const request = yield* Deferred.await(requestPending);
       respondReply = yield* client["orchestration.dispatchCommand"]({
@@ -277,7 +298,7 @@ const liveTurn = (client, seed) =>
     // Let the run's last events arrive.
     yield* Effect.sleep(1500);
     yield* Fiber.interrupt(fiber);
-    return { dispatchReply: plain(reply), interruptReply, respondReply, items };
+    return { dispatchReply: plain(reply), interruptReply, respondReply, changeReply, items };
   });
 
 const program = Effect.gen(function* () {
@@ -300,6 +321,8 @@ const program = Effect.gen(function* () {
       yield* record(
         "orchestration.subscribeThread (live turn)",
         liveTurn(client, seed).pipe(Effect.timeoutOption(seed.turnMs ?? 30000), Effect.map(Option.getOrNull)),
+        // A thread change waits out its turn's reaction, longer than a reply.
+        seed.change ? seed.turnMs ?? 30000 : waitMs,
       );
       // A watcher of a turn its server stops (`seed.liveOnly`) has nothing more to read.
       if (seed.liveOnly) return;

@@ -495,6 +495,9 @@ impl crate::orchestration::CommandHost for AppState {
             }),
         );
     }
+    fn detach_turn(&self, run: Uuid) {
+        crate::local_services::provider_turns::mark_detached(&run.to_string());
+    }
     fn close_guest_thread(&self, thread_id: &str) -> Result<(), String> {
         self.guest.close_thread(thread_id).map_err(str::to_owned)
     }

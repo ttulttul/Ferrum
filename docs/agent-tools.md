@@ -130,12 +130,18 @@ schemas.
 
 Gaps the thread tools surface that live in shared code, not in the tools:
 
-- **Live provider sessions on a thread change.** When a thread's model selection, runtime mode
-  or workspace changes, or it is archived or settled, while a provider session is live, the
-  reference detaches the session (`provider-session.detached`) and interrupts the running turn.
-  Rust records the change and lets the turn run on. So `t3_thread_configure` with
-  `modelSelection` and `t3_thread_organize` `archive` answer as the reference does but differ
-  in what follows, and the parity scenario leaves them out mid-turn.
+- **Live provider sessions on a thread change** (fixed). As the reference does, Rust now
+  detaches the provider session (`provider-session.detached`) when a thread is archived or
+  settled, its worktree changes, its runtime mode changes on a driver that cannot switch mode in
+  its session (Claude), or its provider instance changes. A detach mid-turn stops the turn:
+  - a Codex turn is interrupted in the shared app-server, and ends with a "Stopped by the
+    provider" result and no user interrupt request;
+  - a Claude turn's process is stopped, and the run fails as its stream closes.
+
+  An instance change while a run is active is refused with the reference's busy error. A model
+  change on the same instance, or a Codex runtime-mode change, lets the turn run on. The
+  `* mid-turn` scenarios in `scripts/client_thread_parity.py` send these changes over the
+  WebSocket while a turn runs.
 - **Title regeneration.** `t3_thread_update` `regenerate_title` records the request as the
   reference does, but Rust generates no title, so the request stays pending.
 - **Claude workflows.** Rust's Claude sessions run no workflow tasks, so `t3_workflow_stop`

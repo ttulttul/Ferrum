@@ -344,6 +344,14 @@ pub fn continuation_effects(store: &Store, event: &Event, occurred_at: &str) -> 
     .collect()
 }
 
+/// The reason of a commit that detached a thread's provider session.
+pub(crate) fn detach_reason(event: &Event) -> Option<&str> {
+    match event {
+        Event::ProviderSessionDetached { reason, .. } => Some(reason.as_str()),
+        _ => None,
+    }
+}
+
 /// The thread a commit touches and the threads it deletes.
 fn touched_threads(store: &Store, event: &Event) -> Vec<String> {
     let mut ids: Vec<String> = event.thread_id().map(str::to_owned).into_iter().collect();
@@ -443,6 +451,7 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
             &diff_from,
             &after,
             occurred_at,
+            detach_reason(&record.event),
         ));
         planned.threads.push(ThreadWrite {
             thread_id,

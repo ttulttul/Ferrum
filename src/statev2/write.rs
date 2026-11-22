@@ -721,6 +721,17 @@ fn write_thread(conn: &Connection, write: &ThreadWrite) -> rusqlite::Result<()> 
         let current: std::collections::HashSet<&str> =
             records.iter().filter_map(|r| r["id"].as_str()).collect();
         for id in old.keys().filter(|id| !current.contains(id.as_str())) {
+            // A provider session leaves a thread by its binding, as the
+            // reference's provider-session.detached does: the session row
+            // stays (a Codex instance's session is shared by its threads).
+            if table.collection == "providerSessions" {
+                conn.execute(
+                    "DELETE FROM orchestration_v2_projection_provider_session_bindings
+                     WHERE provider_session_id = ?1 AND thread_id = ?2",
+                    params![id, write.thread_id],
+                )?;
+                continue;
+            }
             conn.execute(
                 &format!("DELETE FROM {} WHERE {} = ?1", table.table, table.id),
                 [id],
@@ -1009,6 +1020,47 @@ mod tests {
         assert_eq!(
             search_text("see [a\\_b](file:///a_b)").as_deref(),
             Some("see [a_b](file:///a_b)")
+        );
+    }
+
+    #[test]
+    fn a_detached_session_leaves_the_thread_by_its_binding() {
+        let home = tempfile::tempdir().unwrap();
+        let mut writer = Writer::new(crate::statev2::open(home.path()).unwrap());
+        let mut attached = crate::shared_store::empty_projection(&thread("A"));
+        attached["providerSessions"] = json!([{"id": "provider-session:provider-instance:codex:shared",
+            "providerInstanceId": "codex", "driver": "codex", "status": "ready", "updatedAt": "x"}]);
+        writer
+            .write(&commit(
+                vec![ThreadWrite {
+                    thread_id: "thread:w".into(),
+                    before: None,
+                    after: attached.clone(),
+                    deleted: false,
+                }],
+                vec![],
+            ))
+            .unwrap();
+        let detached = crate::shared_store::empty_projection(&thread("A"));
+        writer
+            .write(&commit(
+                vec![ThreadWrite {
+                    thread_id: "thread:w".into(),
+                    before: Some(attached),
+                    after: detached,
+                    deleted: false,
+                }],
+                vec![],
+            ))
+            .unwrap();
+        let count = |sql: &str| -> i64 { writer.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM orchestration_v2_projection_provider_sessions"),
+            1
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM orchestration_v2_projection_provider_session_bindings"),
+            0
         );
     }
 

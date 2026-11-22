@@ -185,6 +185,32 @@ impl TurnEnd {
     }
 }
 
+/// Turns a session detach stopped (by turn id), which a driver whose
+/// session is the thread's own process ends instead of interrupting.
+static DETACHED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Mark `turn_id` as stopped by a session detach, before its cancel fires.
+pub(crate) fn mark_detached(turn_id: &str) {
+    if let Ok(mut detached) = DETACHED.lock() {
+        detached.push(turn_id.to_owned());
+    }
+}
+
+/// Whether `turn_id` was detached, forgetting it.
+fn take_detached(turn_id: &str) -> bool {
+    DETACHED.lock().is_ok_and(|mut detached| {
+        let before = detached.len();
+        detached.retain(|id| id != turn_id);
+        detached.len() != before
+    })
+}
+
+/// How the reference ends a turn whose session a thread change detached
+/// by stopping its process: the event stream closed.
+fn detached_failure() -> ProviderFailure {
+    ProviderFailure::new("unknown", crate::workspace::provider::CODEX_STREAM_CLOSED)
+}
+
 /// The CLI of one provider turn: its process and protocol streams.
 pub(crate) struct Cli {
     child: Child,
@@ -284,6 +310,19 @@ impl Cli {
         line.push('\n');
         stdin.write_all(line.as_bytes()).await?;
         stdin.flush().await
+    }
+
+    /// Kill the CLI and everything it started, now, keeping the handle so
+    /// its closed output still ends the turn.
+    pub(crate) fn kill_now(&mut self) {
+        drop(self.stdin.take());
+        #[cfg(unix)]
+        if let Some(pid) = self.child.id().and_then(|pid| i32::try_from(pid).ok()) {
+            // SAFETY: kill(2) with a negative pid signals that process group;
+            // it touches no memory of ours.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+        let _ = self.child.start_kill();
     }
 
     /// Stop the CLI and everything it started.
