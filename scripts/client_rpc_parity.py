@@ -82,6 +82,7 @@ def seed_fixture(home, isolation):
     the fixture.
     """
     def git(*args, cwd):
+        # parity-env: git, not a T3 server
         subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
                        env={**os.environ, **GIT_ENV, **isolation, "HOME": str(home)})
 
@@ -117,6 +118,7 @@ def seed_fixture(home, isolation):
 def run_driver(args, url, credential, variables):
     env = {**os.environ, "T3_CLIENT_RPC_CREDENTIAL": credential, "T3_CLIENT_RPC_VARS": json.dumps(variables),
            "T3_CLIENT_RPC_REPLY_MS": str(args.reply_ms)}
+    # parity-env: the Node client driver, not a T3 server
     result = subprocess.run([args.node, str(ROOT / "scripts/client_rpc_driver.mjs"), args.reference_root, url,
                              str(args.cases)], capture_output=True, text=True, env=env, timeout=900)
     lines = [line for line in result.stdout.splitlines() if line.startswith("{")]

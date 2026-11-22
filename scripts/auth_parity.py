@@ -50,8 +50,7 @@ def seed_link(root, rust):
 
 def reference_cli(cli, root, *args):
     """Run the reference `t3` CLI against a home the way the desktop's SSH scripts do."""
-    env = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "LC_ALL", "SYSTEMROOT")}
-    return subprocess.run([*cli, *args, "--base-dir", str(root)], env={**env, "HOME": str(root), "T3CODE_HOME": str(root)},
+    return subprocess.run([*cli, *args, "--base-dir", str(root)], env=harness.server_env(root),
                           cwd=root, check=True, capture_output=True, text=True, timeout=120).stdout
 
 

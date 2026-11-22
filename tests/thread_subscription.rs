@@ -9,6 +9,8 @@
 //!
 //! Everything runs in a temporary T3 home on an ephemeral port.
 
+mod support;
+
 use std::{collections::BTreeSet, path::Path, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
@@ -51,6 +53,7 @@ impl Server {
             ..RuntimeConfig::default()
         };
         let auth = AuthService::with_bootstrap(CREDENTIAL);
+        support::isolate_host();
         let state = AppState::with_config(&paths.state_dir, vec!["false".into()], auth, config)
             .await
             .unwrap();

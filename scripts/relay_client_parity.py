@@ -33,7 +33,7 @@ import time
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, free_port, ready, run_concurrently, session_cookie
+from parity_harness import encode, free_port, ready, run_concurrently, session_cookie, server_env
 
 FAKE = Path(__file__).resolve().parent / "fake_cloudflared.py"
 # Shaped like a connector token, but never valid anywhere.
@@ -86,12 +86,11 @@ def server(prefix, root, port, secret, signing_key, env):
     with tempfile.TemporaryFile() as bootstrap:
         bootstrap.write(encode(envelope) + b"\n")
         bootstrap.seek(0)
-        base_env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL") if k in os.environ}
         process = subprocess.Popen(
             prefix + ["--bootstrap-fd", str(bootstrap.fileno())],
             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=root,
             pass_fds=(bootstrap.fileno(),),
-            env={**base_env, **env, "HOME": str(root), "T3CODE_HOME": str(root)},
+            env=server_env(root, {**env, "HOME": str(root), "T3CODE_HOME": str(root)}),
         )
         try:
             ready(url, process)

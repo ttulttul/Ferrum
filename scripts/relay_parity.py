@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa, utils
 
-from parity_harness import ROOT, TRACE, encode, free_port, http
+from parity_harness import ROOT, TRACE, encode, free_port, http, server_env
 
 ISSUER = "https://relay.example.test"
 
@@ -46,6 +46,7 @@ def pem(key):
 
 @contextlib.contextmanager
 def serve(cmd, port, env):
+    # parity-env: `env` is the server_env that run() built
     with subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL) as process:
         try:
             base = f"http://127.0.0.1:{port}"
@@ -72,10 +73,10 @@ def serve(cmd, port, env):
 def run(args, directory):
     clerk = rsa.generate_private_key(65537, 2048)
     mint = ed25519.Ed25519PrivateKey.generate()
-    env = dict(PATH=os.environ["PATH"], HOME=directory, RELAY_ISSUER=ISSUER, CLERK_ISSUER="https://clerk.example.test",
+    env = server_env(directory, dict(RELAY_ISSUER=ISSUER, CLERK_ISSUER="https://clerk.example.test",
                CLERK_JWT_KEY=pem(clerk), CLERK_JWT_AUDIENCE="fixture", CLOUD_MINT_PUBLIC_KEY=pem(mint),
                CLOUD_MINT_PRIVATE_KEY=mint.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                                                       serialization.NoEncryption()).decode())
+                                                       serialization.NoEncryption()).decode()))
     def identity(subject):
         return token(clerk, {"alg": "RS256", "typ": "JWT"}, {"iss": env["CLERK_ISSUER"], "aud": "fixture",
             "sub": subject, "exp": int(time.time())+600, "iat": int(time.time())})

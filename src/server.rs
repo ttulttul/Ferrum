@@ -82,9 +82,17 @@ pub struct AppState {
 }
 impl AppState {
     /// Do not check the provider CLIs (`claude`, `codex`) on PATH, for a
-    /// server in a test, which must never run the host's real CLIs.
+    /// server in a test, which must never run the host's real CLIs. This is
+    /// the default; see [`Self::enable_provider_status_checks`].
     pub fn disable_provider_status_checks(&self) {
         self.provider_status.disable();
+    }
+
+    /// Check the provider CLIs at start-up, on their refresh interval and
+    /// when a client asks, as the reference does. Only the server binary
+    /// turns this on: a server a test builds never runs the host's CLIs.
+    pub fn enable_provider_status_checks(&self) {
+        self.provider_status.enable();
     }
 
     /// The server is stopping: record how its running turns are cut off,

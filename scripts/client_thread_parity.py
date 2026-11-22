@@ -216,6 +216,7 @@ GIT_ISOLATION = {}
 
 
 def git(*args, cwd=None):
+    # parity-env: git, not a T3 server
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env={**os.environ, **GIT_ISOLATION})
 
 
@@ -253,6 +254,7 @@ def seed(url, cookie, root):
 def run_client(args, url, cookie, seeded):
     env = {**os.environ, "T3_CLIENT_SYNC_COOKIE": cookie, "T3_CLIENT_THREAD_SEED": json.dumps(seeded),
            "T3_CLIENT_THREAD_WAIT_MS": str(args.reply_ms)}
+    # parity-env: the Node client driver, not a T3 server
     result = subprocess.run([args.node, str(ROOT / "scripts/client_thread.mjs"), args.reference_root, url],
                             capture_output=True, text=True, env=env, timeout=args.reply_ms / 1000 + 120)
     lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
@@ -1038,7 +1040,7 @@ def scenario_env(temporary, name, root, scenario, drivers):
         fake_bin.mkdir(parents=True, exist_ok=True)
         (root / ".profile").write_text('PATH="$HOME/.local/bin:$PATH"\nexport PATH\n')
         path = hidden
-        login_shell = {"SHELL": "/bin/bash", "FAKE_PROVIDER_LAUNCH_PATH": "1"}
+        login_shell = {"FAKE_PROVIDER_LAUNCH_PATH": "1"}
     else:
         # Each server has its own fake CLIs, which a restart scenario may remove.
         fake_bin = temporary / f"{name}-fake-bin"

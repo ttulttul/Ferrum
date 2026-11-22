@@ -1,4 +1,6 @@
 //! What a server restart does to runs that were running.
+mod support;
+
 use serde_json::json;
 use t3code_server::{
     auth_service::AuthService,
@@ -7,6 +9,7 @@ use t3code_server::{
 };
 
 async fn open(paths: &ServerPaths) -> std::sync::Arc<AppState> {
+    support::isolate_host();
     AppState::with_config(
         &paths.state_dir,
         Vec::new(),

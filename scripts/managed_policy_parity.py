@@ -14,7 +14,7 @@ import time
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, free_port, http, managed_server
+from parity_harness import encode, free_port, http, managed_server, server_env
 
 def exercise(prefix, root, policy_path, seed, signing):
     with ExitStack() as stack:
@@ -131,8 +131,8 @@ def run_policy(original_command,rust_command):
                     fd.write(encode(envelope))
                     fd.seek(0)
                     result=subprocess.run(shlex.split(cmd)+["--mode",mode,"--bootstrap-fd",str(fd.fileno())],
-                        cwd=root,env={"HOME":str(root),"PATH":str(root)+":"+os.environ["PATH"],
-                            "T3CODE_HOME":str(root),"T3CODE_DEV_MANAGED_POLICY_PATH":str(path)},
+                        cwd=root,env=server_env(root,{"PATH":str(root)+":"+os.environ["PATH"],
+                            "T3CODE_DEV_MANAGED_POLICY_PATH":str(path)}),
                         pass_fds=(fd.fileno(),),capture_output=True,text=True,timeout=35)
                 assert result.returncode==code and reason in result.stdout+result.stderr, (label,result.returncode,result.stdout,result.stderr)
                 shutil.rmtree(root)

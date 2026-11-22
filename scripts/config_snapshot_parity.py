@@ -124,6 +124,7 @@ for(const [type,data] of JSON.parse(fs.readFileSync(0,"utf8"))){
   if(config && config.providers.length!==10) throw new Error("schema dropped a provider");
 }
 """
+    # parity-env: Node reading the reference's config, not a T3 server
     subprocess.run([node, "--input-type=module", "-e", program, str(root.resolve())],
                    input=encode(samples),check=True)
 

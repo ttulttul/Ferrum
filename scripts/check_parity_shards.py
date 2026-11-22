@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Check that every parity suite runs in CI exactly once.
+"""Check that every parity suite runs in CI exactly once, and never with a real provider CLI.
 
 Each scripts/*_parity.py (and parity_harness.py) must appear in exactly one shard of
 scripts/ci_parity_shard.sh, unless it is listed in NOT_SHARDED with the reason. The
 shards in .github/workflows/parity.yml's matrix must match the shard script's, and the
 thread shards must cover 1..N of one N.
+
+Every process a suite starts must take its environment from parity_harness.server_env
+(directly, or through managed_server), which hides the host's provider CLIs (codex,
+claude, ...) and its login profile from both servers. CI runners have no such CLIs, so
+only this check notices a suite that would start a developer's real ones. A process
+that is not a T3 server (git, a client driver, wrangler) says so with a
+`# parity-env: <reason>` comment on its call.
 """
 
+import ast
 from pathlib import Path
 import re
 import sys
@@ -43,8 +51,61 @@ def shard_commands(text):
     return shards
 
 
+PROCESS_CALLS = {"Popen", "run", "check_output", "check_call", "call", "launch"}
+ENV_MARKER = "# parity-env:"
+
+
+def call_name(node):
+    func = node.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and \
+            func.value.id in ("subprocess", "harness", "parity_harness"):
+        return func.attr
+    if isinstance(func, ast.Name) and func.id in ("Popen", "launch"):
+        return func.id
+    return None
+
+
+def unguarded_processes(path):
+    """Calls in `path` that start a process whose environment server_env did not build."""
+    text = path.read_text()
+    lines = text.splitlines()
+    tree = ast.parse(text)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+    def from_server_env(expression, node):
+        if "server_env(" in ast.get_source_segment(text, expression):
+            return True
+        if not isinstance(expression, ast.Name):
+            return False
+        scope = node
+        while scope in parents and not isinstance(scope, (ast.FunctionDef, ast.Module)):
+            scope = parents[scope]
+        return any(isinstance(assign, ast.Assign) and "server_env(" in ast.get_source_segment(text, assign.value)
+                   and any(isinstance(target, ast.Name) and target.id == expression.id for target in assign.targets)
+                   for assign in ast.walk(scope))
+
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or call_name(node) not in PROCESS_CALLS:
+            continue
+        span = lines[max(node.lineno - 2, 0):node.end_lineno]
+        if any(ENV_MARKER in line for line in span):
+            continue
+        env = next((keyword.value for keyword in node.keywords if keyword.arg == "env"), None)
+        if env is not None and from_server_env(env, node):
+            continue
+        found.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+    return found
+
+
 def main():
     problems = []
+    suites_and_harness = sorted((ROOT / "scripts").glob("*_parity.py")) + [ROOT / "scripts/parity_harness.py"]
+    for path in suites_and_harness:
+        for where in unguarded_processes(path):
+            problems.append(f"{where} starts a process without parity_harness.server_env, so a server could "
+                            f"run the host's real provider CLIs (use server_env or managed_server, or mark a "
+                            f"process that is not a T3 server with `{ENV_MARKER} <reason>`)")
     shards = shard_commands(SHARD_SCRIPT.read_text())
     shards.pop("*", None)
     placed = {}
@@ -87,7 +148,8 @@ def main():
         print(f"FAIL {problem}")
     if not problems:
         print(f"{len(suites) - len(NOT_SHARDED)} parity suites each run in one of "
-              f"{len(matrix)} shards ({len(NOT_SHARDED)} run elsewhere)")
+              f"{len(matrix)} shards ({len(NOT_SHARDED)} run elsewhere); every server they start "
+              f"gets its environment from server_env")
     return int(bool(problems))
 
 

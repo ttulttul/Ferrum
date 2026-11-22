@@ -48,6 +48,7 @@ def pairing_code(url, cookie, access):
 def sign_in(args, url, cookie, access, root):
     env = {**os.environ, "T3_PEER_LINK_CODE": pairing_code(url, cookie, access), "T3_PEER_LINK_ACCESS": access,
            "T3_PEER_LINK_ROOT": str(root)}
+    # parity-env: the Node sign-in driver, not a T3 server
     done = subprocess.run([args.node, str(ROOT / "scripts/peer_link_sign_in.mjs"), args.reference_root, url],
                           env=env, capture_output=True, text=True, timeout=120)
     if done.stderr:

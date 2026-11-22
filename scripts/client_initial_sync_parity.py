@@ -71,6 +71,7 @@ def run_client(args, url, cookie, seeded=None):
            "T3_CLIENT_SYNC_TIMEOUT_MS": str(args.timeout_ms), "T3_CLIENT_SYNC_STREAM_MS": str(args.reply_ms)}
     if seeded is not None:
         env["T3_CLIENT_SYNC_SEED"] = json.dumps(seeded)
+    # parity-env: the Node client driver, not a T3 server
     result = subprocess.run([args.node, str(ROOT / "scripts/client_initial_sync.mjs"), args.reference_root, url],
                             capture_output=True, text=True, env=env, timeout=args.timeout_ms / 1000 + 120)
     lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
@@ -204,7 +205,9 @@ def main():
         seeded = {}
         for name, (url, cookie) in servers.items():
             repo = root / f"{name}-repo"
+            # parity-env: git, not a T3 server
             subprocess.run(["git", "init", "-qb", "main", str(repo)], check=True)
+            # parity-env: git, not a T3 server
             subprocess.run(["git", "-C", str(repo), "-c", "user.email=test@example.test", "-c", "user.name=Parity",
                             "commit", "--allow-empty", "-qm", "Fixture"], check=True)
             seeded[name] = run_client(args, url, cookie, seed(url, cookie, repo))

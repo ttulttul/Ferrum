@@ -141,7 +141,9 @@ impl ProviderStatus {
             claude_caps: Mutex::default(),
             locks: Mutex::default(),
             changes: tokio::sync::broadcast::channel(16).0,
-            disabled: Default::default(),
+            // Off until the server binary turns them on, so a test that
+            // builds a server never runs the host's real provider CLIs.
+            disabled: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -149,6 +151,12 @@ impl ProviderStatus {
     pub(crate) fn disable(&self) {
         self.disabled
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check the provider CLIs, as the server binary does.
+    pub(crate) fn enable(&self) {
+        self.disabled
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn is_disabled(&self) -> bool {
@@ -1302,6 +1310,18 @@ fn compact_slash_command() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checks_are_off_until_the_binary_turns_them_on() {
+        // A server a test builds must never run the host's real provider CLIs.
+        let home = std::env::temp_dir().join(format!("t3-status-default-{}", std::process::id()));
+        let status = ProviderStatus::new(&crate::config::ServerPaths::from_base(&home));
+        assert!(status.is_disabled());
+        status.enable();
+        assert!(!status.is_disabled());
+        status.disable();
+        assert!(status.is_disabled());
+    }
 
     #[test]
     fn ranges_match_the_reference() {
