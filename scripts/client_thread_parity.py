@@ -1140,7 +1140,7 @@ def compare_turn(original, rust):
         problems["cli launch"] = [f"original {line}" for line in launch[0]] + [f"rust     {line}" for line in launch[1]]
     mcp = comparable_mcp(original.get("mcp", []), rust.get("mcp", []))
     if mcp[0] != mcp[1]:
-        problems["agent mcp"] = [f"original {line}" for line in mcp[0]] + [f"rust     {line}" for line in mcp[1]]
+        problems["agent mcp"] = mcp_diff_lines(mcp[0], mcp[1])
     cli = [original.get("cli", []), rust.get("cli", [])]
     if cli[0] != cli[1]:
         problems["cli approvals"] = [f"original {line}" for line in cli[0]] + [f"rust     {line}" for line in cli[1]]
@@ -1213,28 +1213,67 @@ def compare_turn(original, rust):
     return problems
 
 
+def mcp_record_tool(line):
+    """Return the tool or protocol method named by one normalized MCP record."""
+    try:
+        request = json.loads(line).get("request", {})
+    except (TypeError, ValueError):
+        return "<non-json>"
+    return request.get("tool") or request.get("method") or "<unknown>"
+
+
+def mcp_line(value, limit=1900):
+    """Compact one MCP record for the CI log while keeping the prefix readable."""
+    if value is None:
+        text = "<missing>"
+    else:
+        try:
+            text = json.dumps(json.loads(value), sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            text = str(value)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def mcp_diff_lines(original, rust, truncate=True):
+    """Pair only differing normalized MCP records, including length mismatches."""
+    lines = []
+    if len(original) != len(rust):
+        lines.append(f"answer-list counts: original {len(original)} rust {len(rust)}")
+    for index in range(max(len(original), len(rust))):
+        a = original[index] if index < len(original) else None
+        b = rust[index] if index < len(rust) else None
+        if a == b:
+            continue
+        tool = mcp_record_tool(a if a is not None else b)
+        compact = mcp_line if truncate else lambda value: mcp_line(value, limit=10**9)
+        lines.append(f"[{index}] {tool} original {compact(a)}")
+        lines.append(f"[{index}] {tool} rust     {compact(b)}")
+    return lines
+
+
 def print_mcp_diagnostics(outcomes, fake_hosts, stderr_paths):
-    """Print enough state to explain a CI-only agent MCP transcript mismatch."""
-    original = outcomes["original"].get("mcp", [])
-    rust = outcomes["rust"].get("mcp", [])
-    print(f"agent mcp answer-list counts: original {len(original)} rust {len(rust)}")
-    print(f"rust agent mcp full list ({len(rust)} answers):")
-    for line in rust:
+    """Print compact MCP differences and save complete diagnostics for CI artifacts."""
+    normalized = comparable_mcp(outcomes["original"].get("mcp", []), outcomes["rust"].get("mcp", []))
+    differences = mcp_diff_lines(*normalized)
+    print("agent mcp differing records:")
+    for line in differences:
         print(f"  {line}")
+    artifact = Path(os.environ.get("PARITY_DIAGNOSTICS_PATH", "agent-mcp-diff.txt"))
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    full = ["agent mcp normalized diff", *mcp_diff_lines(*normalized, truncate=False)]
     for name in ("original", "rust"):
         hosts = fake_hosts.get(name, {})
         for provider in ("github", "linear"):
-            requests = hosts.get(provider)
-            requests = [] if requests is None else requests
-            print(f"{name} fake {provider} request log ({len(requests)} requests):")
-            for request in requests:
-                print(f"  {request}")
+            requests = hosts.get(provider) or []
+            full.append(f"{name} fake {provider} request log ({len(requests)} requests):")
+            full.extend(f"  {request}" for request in requests)
         path = stderr_paths.get(name)
         tail = "<missing>"
         if path is not None and Path(path).exists():
             tail = Path(path).read_text(errors="replace")[-4000:] or "<empty>"
-        print(f"{name} server stderr tail:")
-        print(tail)
+        full.extend([f"{name} server stderr tail:", tail])
+    artifact.write_text("\n".join(full) + "\n")
+    print(f"agent mcp diagnostics: {artifact}")
 
 
 # Rough seconds the seeded thread checks take on shard 1, for balancing shards.

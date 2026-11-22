@@ -1033,11 +1033,11 @@ fn capabilities<S: McpHost>(host: &S, caller: &Caller) -> Value {
             "appOwnedSubagents": true,
             "asyncPolling": true,
             "cancellation": true,
-            "batchThreadCreation": false,
+            "batchThreadCreation": true,
             "threadManagement": true,
             "incrementalThreadRead": true,
-            "scheduledTasks": false,
-            "maxBatchThreads": 0
+            "scheduledTasks": true,
+            "maxBatchThreads": 20
         }
     })
 }
