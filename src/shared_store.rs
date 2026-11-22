@@ -8,6 +8,16 @@ use serde_json::{json, Map, Value};
 /// A database the commits are written to, in one transaction each, before
 /// the commit is logged or applied.
 pub trait SharedStore {
+    /// A bounded, unpruned range of sidebar invalidations for a reconnect.
+    fn shell_replay(
+        &mut self,
+        _after: u64,
+        _head: u64,
+        _store: &Store,
+    ) -> anyhow::Result<Option<Vec<crate::shell_stream::Change>>> {
+        Ok(None)
+    }
+
     fn write(&mut self, commit: &SharedCommit) -> anyhow::Result<()>;
 
     /// The restart continuations the outbox still owes
@@ -262,7 +272,9 @@ pub fn project_event(
             "pinnedAt",
             "archivedAt",
         ] {
-            if previous.get(key) != row.get(key) {
+            if previous.get(key) != row.get(key)
+                || (key == "title" && previous["hasCustomTitle"] != row["hasCustomTitle"])
+            {
                 payload.insert(key.into(), row[key].clone());
             }
         }

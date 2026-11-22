@@ -118,6 +118,7 @@ pub struct ControlPlane {
     host: Host,
     /// Whether changes are waiting for the host's next alarm to deliver.
     wake: std::sync::atomic::AtomicBool,
+    shell_deadline: Mutex<Option<i64>>,
     /// The models each Codex instance's CLI last listed, by instance, kept
     /// in the state documents.
     listed_models: Mutex<BTreeMap<String, Vec<Value>>>,
@@ -216,6 +217,7 @@ struct OpenStream {
 /// The channels the plane learns of changes on, drained after each message.
 struct Signals {
     events: broadcast::Receiver<ServerEvent>,
+    shell: broadcast::Receiver<crate::shell_stream::Change>,
     suggestions: broadcast::Receiver<Value>,
     linked: broadcast::Receiver<u64>,
     scheduled_tasks: broadcast::Receiver<()>,
@@ -231,6 +233,7 @@ impl Signals {
             workspace: workspace.bus_frames(),
             poll: false,
             events: state.events.subscribe(),
+            shell: state.shell_events.subscribe(),
             suggestions: state.prompt_suggestion_events.subscribe(),
             linked: state.pull_request_linked_events.subscribe(),
             scheduled_tasks: state.scheduled_task_events.subscribe(),
@@ -247,6 +250,20 @@ impl Signals {
                 Err(Lagged(_)) => signals.push(Signal::Resync),
                 Err(Empty | broadcast::error::TryRecvError::Closed) => break,
             }
+        }
+        let mut changes = Vec::new();
+        loop {
+            match self.shell.try_recv() {
+                Ok(change) => changes.push(change),
+                Err(Lagged(_)) => {
+                    changes.clear();
+                    signals.push(Signal::ShellResync);
+                }
+                Err(Empty | broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+        if !changes.is_empty() {
+            signals.push(Signal::Shell(changes));
         }
         while let Ok(revision) = self.linked.try_recv() {
             signals.push(Signal::LinkedRefresh(revision));
@@ -311,6 +328,7 @@ impl ControlPlane {
             cancellations: Default::default(),
             host,
             wake: Default::default(),
+            shell_deadline: Default::default(),
             listed_models: Default::default(),
         });
         let listed = plane
@@ -511,10 +529,18 @@ impl ControlPlane {
         let now = self.host.runtime.now_ms();
         if self.wake.load(std::sync::atomic::Ordering::Relaxed) {
             Some(now)
-        } else if self.host.workspace.is_ready() {
-            Some(now + MAINTAIN_INTERVAL_MS)
         } else {
-            None
+            let deadline = *self
+                .shell_deadline
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            self.host
+                .workspace
+                .is_ready()
+                .then_some(now + MAINTAIN_INTERVAL_MS)
+                .into_iter()
+                .chain(deadline)
+                .min()
         }
     }
 
@@ -523,6 +549,10 @@ impl ControlPlane {
     /// changed ([`take_signals`](Self::take_signals) and
     /// [`deliver`](Self::deliver)) to every connection.
     pub async fn on_alarm(&self) {
+        self.shell_deadline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         self.wake.store(false, std::sync::atomic::Ordering::Relaxed);
         self.signals.lock().unwrap_or_else(|e| e.into_inner()).poll = true;
         self.host.workspace.maintain().await;
@@ -856,6 +886,29 @@ impl ControlPlane {
                 continue;
             };
             let before = subscription.cursor.clone();
+            if subscription.method == "orchestration.subscribeShell" {
+                let now = self.host.runtime.now_ms();
+                let (batches, deadline) =
+                    crate::shell_stream::deliver(self, &mut subscription, signals, now).await;
+                frames.extend(
+                    batches
+                        .into_iter()
+                        .map(|batch| Reply::Chunk(batch).frame(&stream.id)),
+                );
+                if let Some(deadline) = deadline {
+                    let mut next = self
+                        .shell_deadline
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    *next = Some(next.map_or(deadline, |at| at.min(deadline)));
+                    drop(next);
+                    self.schedule();
+                }
+                if subscription.cursor != before {
+                    self.store(connection, key, &subscription);
+                }
+                continue;
+            }
             let workspace_stream = crate::control_streams::serves(&subscription.method);
             for signal in signals {
                 let batches = if workspace_stream {
@@ -992,6 +1045,14 @@ impl ControlPlane {
         let params = &request["payload"];
         match self.call(&connection.principal, method, params).await {
             Call::Done(reply) => vec![reply.frame(&id)],
+            Call::Live(subscription, values) if subscription.cursor["finished"] == true => {
+                let mut frames: Vec<_> = values
+                    .into_iter()
+                    .map(|v| Reply::Chunk(v).frame(&id))
+                    .collect();
+                frames.push(Reply::Success(Value::Null).frame(&id));
+                frames
+            }
             Call::Live(subscription, values) => {
                 self.store(connection, &key, &subscription);
                 connection.open.insert(
@@ -1155,29 +1216,6 @@ impl ControlPlane {
                         "error":crate::subscription::thread_projection_error(&params["threadId"])})),
                     },
                 )
-            }
-            "orchestration.subscribeShell" => {
-                let sequence = self.sequence_now();
-                let store = self.store_now();
-                let after = params.get("afterSequence").filter(|value| !value.is_null());
-                let resumable = after.and_then(Value::as_u64) == Some(sequence);
-                if after.is_some() && !resumable && params["httpSnapshotFallback"] == true {
-                    return Some(Call::Stream(vec![json!([{"kind":"snapshot-required"}])]));
-                }
-                let mut items = Vec::new();
-                if !resumable {
-                    items.push(
-                        json!({"kind":"snapshot","snapshot":environment::shell(&store, sequence)}),
-                    );
-                }
-                if params["requestCompletionMarker"] == true {
-                    items.push(json!({"kind":"synchronized"}));
-                }
-                Call::Stream(if items.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![Value::Array(items)]
-                })
             }
             _ => return None,
         })

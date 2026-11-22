@@ -104,6 +104,7 @@ mod provider_projection;
 mod provider_state;
 mod runtime_recovery;
 pub mod shared_store;
+mod shell_stream;
 mod store;
 pub use store::*;
 pub(crate) use store::{now, CommandReceipt};

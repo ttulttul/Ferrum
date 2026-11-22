@@ -18,6 +18,7 @@ pub struct ControlState {
     pub auth: AuthService,
     pub store: RwLock<Store>,
     pub events: broadcast::Sender<ServerEvent>,
+    pub(crate) shell_events: broadcast::Sender<crate::shell_stream::Change>,
     pub log: Mutex<Box<dyn EventLog + Send>>,
     /// The orchestration database shared with the reference, when this host
     /// has one: each commit is written there first (docs/shared-store.md).
@@ -59,6 +60,7 @@ impl ControlState {
             auth,
             store: RwLock::new(store),
             events: broadcast::channel(512).0,
+            shell_events: broadcast::channel(2048).0,
             log: Mutex::new(log),
             shared: Mutex::new(None),
             next_event_id: Mutex::new(next_event_id),
@@ -201,7 +203,8 @@ impl ControlState {
         // event per domain event, numbered from the next sequence.
         let mut stored_after = Vec::new();
         let mut commit = None;
-        if shared.is_some() {
+        let shell_listening = self.shell_events.receiver_count() > 0;
+        if shared.is_some() || shell_listening {
             let (planned_commit, stored) = shared_commit(&store, &record, *next_event_id);
             stored_after = stored;
             commit = Some(planned_commit);
@@ -225,6 +228,12 @@ impl ControlState {
             }
         }
         record.id = *next_event_id + live_events.max(stored_events).max(1);
+        let shell_changes: Vec<_> = commit
+            .iter()
+            .filter(|_| shell_listening)
+            .flat_map(|commit| &commit.events)
+            .filter_map(|event| crate::shell_stream::Change::from_event(event, &store))
+            .collect();
         if let (Some(writer), Some(mut commit)) = (shared.as_mut(), commit) {
             commit.sequence = record.id;
             if let Err(error) = writer.write(&commit) {
@@ -248,6 +257,9 @@ impl ControlState {
                 *revision = revision.saturating_add(1);
                 let _ = self.pull_request_linked_events.send(*revision);
             }
+        }
+        for change in shell_changes {
+            let _ = self.shell_events.send(change);
         }
         let _ = self.events.send(record.clone());
         Ok(record)

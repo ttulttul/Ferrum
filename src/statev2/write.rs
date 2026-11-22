@@ -31,6 +31,76 @@ impl SharedStore for Writer {
         Ok(())
     }
 
+    fn shell_replay(
+        &mut self,
+        after: u64,
+        head: u64,
+        store: &crate::Store,
+    ) -> anyhow::Result<Option<Vec<crate::shell_stream::Change>>> {
+        use crate::shell_stream::{transcript_only, Change};
+        let tx = self.conn.transaction()?;
+        let pruned: Option<i64> = tx
+            .query_row(
+                "SELECT last_sequence FROM orchestration_v2_projection_metadata
+             WHERE projection_name='event-log-pruned-through'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if pruned.is_some_and(|p| after < p as u64) {
+            return Ok(None);
+        }
+        // Count the restored payload as the reference does, without transferring
+        // transcript bodies from SQLite into each subscriber's replay buffer.
+        let mut stmt = tx.prepare(
+            "SELECT sequence, aggregate_kind, stream_id, event_type, json_extract(payload_json,'$.type'),
+                    json_extract(payload_json,'$.lineage.relationshipToParent'),
+                    octet_length(CASE WHEN event_type IN ('subagent.updated','turn-item.updated')
+                        AND json_type(payload_json,'$.promptSequence')='integer'
+                      THEN json_set(json_remove(payload_json,'$.promptSequence'),'$.prompt',
+                        (SELECT json_extract(a.payload_json,'$.prompt') FROM orchestration_events a
+                         WHERE a.sequence=json_extract(e.payload_json,'$.promptSequence')))
+                      ELSE payload_json END)
+             FROM orchestration_events e WHERE sequence > ?1 AND sequence <= ?2
+               AND (aggregate_kind='project' OR (application_event_version=2 AND aggregate_kind='thread'))
+             ORDER BY sequence")?;
+        let mut rows = stmt.query(params![after as i64, head as i64])?;
+        let mut changes = Vec::new();
+        let mut bytes = 0i64;
+        let mut children = std::collections::HashSet::new();
+        while let Some(row) = rows.next()? {
+            bytes += row.get::<_, i64>(6)?;
+            if bytes > 8 * 1024 * 1024 {
+                return Ok(None);
+            }
+            let id: String = row.get(2)?;
+            let kind: String = row.get(3)?;
+            if kind == "thread.created"
+                && row.get::<_, Option<String>>(5)?.as_deref() == Some("subagent")
+            {
+                children.insert(id.clone());
+            }
+            let project = row.get::<_, String>(1)? == "project";
+            if !project
+                && transcript_only(&kind, row.get::<_, Option<String>>(4)?.as_deref())
+                && (children.contains(&id)
+                    || store
+                        .threads
+                        .get(&id)
+                        .is_some_and(|t| t.row["lineage"]["relationshipToParent"] == "subagent"))
+            {
+                continue;
+            }
+            changes.push(Change {
+                id,
+                sequence: row.get::<_, i64>(0)? as u64,
+                deleted: kind == "project.deleted",
+                project,
+            });
+        }
+        Ok(Some(changes))
+    }
+
     fn write(&mut self, commit: &SharedCommit) -> anyhow::Result<()> {
         // IMMEDIATE, as the reference's writer: take the write lock up front.
         let transaction = self

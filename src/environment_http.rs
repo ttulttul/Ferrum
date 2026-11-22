@@ -56,7 +56,6 @@ fn valid_protocol(h: &HeaderMap) -> bool {
     h.get("x-t3-orchestration-protocol")
         .is_some_and(|v| v == "2")
 }
-pub(super) use crate::environment::shell;
 pub(super) async fn shell_snapshot(
     State(state): State<Arc<AppState>>,
     h: HeaderMap,
@@ -67,7 +66,13 @@ pub(super) async fn shell_snapshot(
     }
     let store = state.store.read().await;
     let seq = *state.next_event_id.lock().await;
-    if query.get("resumeFrom").and_then(|v| v.parse::<u64>().ok()) == Some(seq) {
+    let after = query.get("resumeFrom").and_then(|v| v.parse::<u64>().ok());
+    if crate::shell_stream::replay(&state, &store, after, seq)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    {
         return Json(json!({"resumable":true})).into_response();
     }
     let snapshot = crate::environment::shell_snapshot(&store, seq, &query);

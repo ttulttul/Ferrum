@@ -491,11 +491,18 @@ async fn run_call(
                 Err(reply) => return reply,
             };
         let mut subscription = opened.subscription;
-        let mut source = opened
-            .source
-            .expect("a listening subscription has a source");
+        let source = opened.source;
         for batch in opened.first {
             send(batch).await;
+        }
+        let Some(mut source) = source.filter(|_| subscription.cursor["finished"] != true) else {
+            state.runtime.yield_now().await;
+            return Reply::Success(Value::Null);
+        };
+        if let crate::subscription::Source::Shell(live) = &mut source {
+            return live
+                .stream(state, &mut subscription.cursor, id, &chunks, &window)
+                .await;
         }
         while let Some(signal) = source.next().await {
             for batch in subscription.advance(state, principal, signal).await {
@@ -3115,32 +3122,6 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 }}));
             }
             json!({"outcome":"released","sharedWithThreadIds":[]})
-        }
-        "orchestration.subscribeShell" => {
-            // As `subscribeOrchestrationV2Shell` in the reference ws.ts: a cursor at the
-            // head missed nothing and resumes without a snapshot; any other cursor gets an
-            // authoritative snapshot, since this server keeps no replayable shell events,
-            // unless the client offered to reload over HTTP instead. Clients that request
-            // it then get a `synchronized` marker, and the 0.1.10 client counts its shell
-            // as live only after that marker.
-            let after = params.get("afterSequence").filter(|value| !value.is_null());
-            let resumable = after.and_then(Value::as_u64) == Some(sequence);
-            if after.is_some() && !resumable && params["httpSnapshotFallback"] == true {
-                return Reply::Chunk(json!([{"kind":"snapshot-required"}]));
-            }
-            let mut items = Vec::new();
-            if !resumable {
-                items.push(json!({"kind":"snapshot","snapshot":crate::environment_http::shell(&store,sequence)}));
-            }
-            if params["requestCompletionMarker"] == true {
-                items.push(json!({"kind":"synchronized"}));
-            }
-            if items.is_empty() {
-                // Nothing to send until the client interrupts the subscription.
-                drop(store);
-                return std::future::pending().await;
-            }
-            return Reply::Chunk(Value::Array(items));
         }
         "orchestration.subscribeCommandOutput" => {
             return Reply::Chunk(

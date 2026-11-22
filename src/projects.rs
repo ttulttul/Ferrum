@@ -119,6 +119,9 @@ pub(super) async fn mutate(state: &AppState, input: &Value) -> Result<Value, Val
             .ok_or_else(|| error("A title is required."))?;
         p.name = title.into();
         row["title"] = json!(title);
+        if kind == "project.update" {
+            row["hasCustomTitle"] = json!(true);
+        }
     }
     if kind == "project.create" || kind == "project.update" {
         for key in [

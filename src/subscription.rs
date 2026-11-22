@@ -24,6 +24,7 @@ use tokio::sync::{broadcast, mpsc};
 
 /// The methods this module serves.
 pub const METHODS: &[&str] = &[
+    "orchestration.subscribeShell",
     "orchestration.subscribeThread",
     "orchestration.subscribePromptSuggestion",
     "pullRequests.subscribeLinkedThreadRefreshes",
@@ -51,6 +52,10 @@ pub enum Signal {
     Committed(Box<ServerEvent>),
     /// Events may have been missed; recompute from the store.
     Resync,
+    Shell(Vec<crate::shell_stream::Change>),
+    ShellResync,
+    ShellIdentities(Vec<String>),
+
     /// The linked pull requests or issues of some thread changed.
     LinkedRefresh(u64),
     ScheduledTasks,
@@ -89,6 +94,14 @@ impl Subscription {
             cursor: Value::Null,
         };
         let (source, first) = match method {
+            "orchestration.subscribeShell" => {
+                #[cfg(feature = "native")]
+                let source = listen.then(|| Source::Shell(crate::shell_stream::Live::new(control)));
+                #[cfg(not(feature = "native"))]
+                let source = None;
+                let first = crate::shell_stream::open(control, &mut subscription).await?;
+                (source, first)
+            }
             "orchestration.subscribeThread" => {
                 let source = listen.then(|| Source::Events(control.events.subscribe()));
                 let Some((snapshot, cursor)) = thread_snapshot(control, params).await else {
@@ -143,6 +156,21 @@ impl Subscription {
         signal: Signal,
     ) -> Vec<Value> {
         match (self.method.as_str(), signal) {
+            ("orchestration.subscribeShell", Signal::Shell(changes)) => {
+                let store = control.store.read().await;
+                crate::shell_stream::project(
+                    &store,
+                    &mut self.cursor,
+                    &changes,
+                    crate::platform::now_ms(),
+                )
+            }
+            ("orchestration.subscribeShell", Signal::ShellIdentities(roots)) => {
+                crate::shell_stream::refresh(control, &mut self.cursor, &roots).await
+            }
+            ("orchestration.subscribeShell", Signal::ShellResync) => {
+                crate::shell_stream::resync(control, &mut self.cursor).await
+            }
             ("orchestration.subscribeThread", Signal::Committed(event))
                 if matches!(event.event, Event::RunOutput { .. }) =>
             {
@@ -218,6 +246,8 @@ impl Subscription {
 /// Where a stream's signals arrive natively: the channel it subscribed to.
 pub enum Source {
     Events(broadcast::Receiver<ServerEvent>),
+    #[cfg(feature = "native")]
+    Shell(crate::shell_stream::Live),
     Suggestions(broadcast::Receiver<Value>),
     Linked(broadcast::Receiver<u64>),
     ScheduledTasks(broadcast::Receiver<()>),
@@ -230,6 +260,8 @@ impl Source {
         use broadcast::error::RecvError::{Closed, Lagged};
         loop {
             return match self {
+                #[cfg(feature = "native")]
+                Source::Shell(events) => events.next().await,
                 Source::Events(events) => match events.recv().await {
                     Ok(event) => Some(Signal::Committed(Box::new(event))),
                     Err(Lagged(_)) => Some(Signal::Resync),
@@ -406,6 +438,65 @@ mod tests {
             .advance(&control, &principal, Signal::Committed(Box::new(event)))
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn shell_batches_survive_hibernation_and_coalesce_in_sequence_order() {
+        use crate::shell_stream::deliver;
+        let (control, principal) = control();
+        let mut sub = Subscription::open(
+            &control,
+            &principal,
+            "orchestration.subscribeShell",
+            &json!({}),
+            false,
+        )
+        .await
+        .unwrap()
+        .subscription;
+        let mut rx = control.shell_events.subscribe();
+        control.commit(thread("a")).await.unwrap();
+        control.commit(thread("b")).await.unwrap();
+        control.commit(retitle("a", "Renamed")).await.unwrap();
+        let mut changes = Vec::new();
+        while let Ok(change) = rx.try_recv() {
+            changes.push(change);
+        }
+        let last = changes.last().unwrap().sequence;
+        let (early, deadline) = deliver(&control, &mut sub, &[Signal::Shell(changes)], 100).await;
+        assert!(early.is_empty());
+        assert_eq!(deadline, Some(150));
+        let mut sub = serde_json::from_value(serde_json::to_value(sub).unwrap()).unwrap();
+        assert!(deliver(&control, &mut sub, &[Signal::Poll], 149)
+            .await
+            .0
+            .is_empty());
+        let (batches, deadline) = deliver(&control, &mut sub, &[Signal::Poll], 150).await;
+        assert_eq!(deadline, None);
+        let items = batches[0].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["thread"]["id"], "b");
+        assert_eq!(items[1]["thread"]["title"], "Renamed");
+        assert_eq!(items[1]["sequence"], last);
+        let store = control.store.read().await;
+        let invalidation = |sequence| crate::shell_stream::Change {
+            id: "a".into(),
+            project: false,
+            deleted: false,
+            sequence,
+        };
+        assert!(crate::shell_stream::project(
+            &store,
+            &mut sub.cursor,
+            &[invalidation(last + 1)],
+            5149
+        )
+        .is_empty());
+        assert_eq!(
+            crate::shell_stream::project(&store, &mut sub.cursor, &[invalidation(last + 2)], 5150)
+                [0][0]["sequence"],
+            last + 2
+        );
     }
 
     #[tokio::test]

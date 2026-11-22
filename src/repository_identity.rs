@@ -536,6 +536,13 @@ pub fn resolve_uncached(cwd: &Path) -> Option<Value> {
 type IdentityCache = HashMap<String, (Instant, Option<Value>)>;
 static CACHE: LazyLock<Mutex<IdentityCache>> = LazyLock::new(Mutex::default);
 
+static CHANGES: LazyLock<tokio::sync::broadcast::Sender<String>> =
+    LazyLock::new(|| tokio::sync::broadcast::channel(256).0);
+
+pub(crate) fn changes() -> tokio::sync::broadcast::Receiver<String> {
+    CHANGES.subscribe()
+}
+
 /// A workspace's identity, cached as the reference caches it: found identities for 15
 /// minutes, missing ones for one.
 pub fn resolve(workspace_root: &str) -> Option<Value> {
@@ -565,6 +572,7 @@ pub fn resolve(workspace_root: &str) -> Option<Value> {
         }
     }
     cache.insert(workspace_root.to_owned(), (Instant::now(), value.clone()));
+    let _ = CHANGES.send(workspace_root.to_owned());
     value
 }
 
