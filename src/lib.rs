@@ -70,6 +70,8 @@ mod turn;
 mod wire_items;
 use orchestration::dispatch_orchestration_command;
 #[cfg(feature = "native")]
+mod background_policy;
+#[cfg(feature = "native")]
 pub mod provider_http;
 #[cfg(feature = "native")]
 pub mod provider_rpc;
