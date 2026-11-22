@@ -55,6 +55,7 @@ case "$shard" in
     run python3 scripts/linear_provider_parity.py "${both[@]}"
     run python3 scripts/source_control_hosts_parity.py "${both[@]}"
     run python3 scripts/git_workflow_parity.py "${both[@]}"
+    run python3 scripts/source_control_clone_parity.py "${both[@]}"
     run python3 scripts/preview_provider_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright"
     run python3 scripts/relay_parity.py --checkout "$checkout" --rust "$server"
     run python3 scripts/link_request_parity.py "${both[@]}"

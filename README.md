@@ -51,6 +51,7 @@ The Rust server can already run Codex and Claude Code conversations, manage proj
 
 ### Other
 
+- **Cloning by repository name (in progress):** Cloning from a URL or path works. Picking a repository by name from GitHub, GitLab or another host does not yet, and cloning into a new project does not yet show git's progress.
 - **File browsing and search:** Project file lists include `.git` and gitignored files. File and content search do not yet support fuzzy matching, regular expressions, or match highlighting.
 - **Storage cleanup report:** Settings streams automatic and manual cleanup reports. File retention and checkpoint pruning run automatically and on request. Worktree retention is still pending.
 
@@ -155,7 +156,7 @@ python3 scripts/github_provider_parity.py --original-command "$original" --rust-
 python3 scripts/relay_parity.py --checkout /tmp/t3code-reference --rust "$rust"
 ```
 
-Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `peer_forwarding_parity.py`, `link_request_parity.py`, `client_sessions_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
+Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `peer_forwarding_parity.py`, `link_request_parity.py`, `client_sessions_parity.py`, `source_control_clone_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
 
 Known gaps in `client_rpc_parity.py` and `client_thread_parity.py` are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json); both suites fail on any unlisted mismatch and on any listed case that starts passing.
 
