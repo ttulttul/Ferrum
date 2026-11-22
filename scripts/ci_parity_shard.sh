@@ -46,21 +46,20 @@ case "$shard" in
     ;;
   integrations)
     run python3 scripts/config_parity.py "${both[@]}"
-    run python3 scripts/client_rpc_parity.py "${both[@]}" --reference-root "$checkout"
     run python3 scripts/github_provider_parity.py "${both[@]}" --faketime-lib "$faketime"
     run python3 scripts/linear_provider_parity.py "${both[@]}"
     run python3 scripts/source_control_hosts_parity.py "${both[@]}"
     run python3 scripts/git_workflow_parity.py "${both[@]}"
     run python3 scripts/preview_provider_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright"
     run python3 scripts/relay_parity.py --checkout "$checkout" --rust "$server"
-    run python3 scripts/relay_client_parity.py "${both[@]}"
     ;;
-  provider-status)
-    # 23 scenarios, several of which wait out the providers' status timeouts.
+  status-relay)
+    # Suites that run their servers side by side, so mostly wait on the servers' timers.
+    # provider_status: 23 scenarios, several of which wait out the providers' status timeouts.
     run python3 scripts/provider_status_parity.py "${both[@]}"
-    ;;
-  relay-provisioning)
     run python3 scripts/relay_provisioning_parity.py "${both[@]}"
+    run python3 scripts/client_rpc_parity.py "${both[@]}" --reference-root "$checkout"
+    run python3 scripts/relay_client_parity.py "${both[@]}"
     ;;
   *)
     echo "unknown shard: $shard" >&2

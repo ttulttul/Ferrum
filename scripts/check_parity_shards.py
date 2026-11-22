@@ -66,7 +66,8 @@ def main():
         if not (ROOT / "scripts" / name).exists():
             problems.append(f"NOT_SHARDED lists {name}, which no longer exists")
 
-    matrix = re.findall(r"^\s*-\s*shard:\s*([\w-]+)\s*$", WORKFLOW.read_text(), re.MULTILINE)
+    listed = re.search(r"^\s*shard:\s*\[([^\]]*)\]\s*$", WORKFLOW.read_text(), re.MULTILINE)
+    matrix = [shard.strip() for shard in listed.group(1).split(",") if shard.strip()] if listed else []
     if not matrix:
         problems.append(f"no matrix shards found in {WORKFLOW.relative_to(ROOT)}")
     threads = [shard for shard in matrix if shard.startswith("thread-")]

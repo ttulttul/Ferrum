@@ -226,3 +226,10 @@ side by side (`--jobs`; 1 restores the serial order). Every run already had its 
 
 The timed check in `confirmed-restart` (connector "immediate" after HTTP) still measures 0.05–0.2 s
 with everything running at once.
+
+On #92 the server parity wall time was 5 min 14 s. Provider status took 89 s, relay provisioning 43 s, relay client 17 s and client RPC 23 s. The thread shards (174–197 s of comparisons) and `integrations` became the critical path.
+
+**Step 5 (docs-only changes, nightly run, rebalance).**
+- **Docs-only PRs.** A `changes` job lists the pull request's files. When only `README.md` and `docs/` change, Rust validation and the shards are skipped, and the `parity` check passes without them.
+- **Nightly run.** Pushes to main, the nightly schedule and manual runs always run everything. The nightly run runs every shard twice, with the second round named `… again`, to surface flaky tests.
+- **Rebalance.** The thread scenarios run in 4 shards. `provider-status` and `relay-provisioning` merge into one `status-relay` shard, which also takes `client_rpc` and `relay_client` from `integrations`. That is still 7 shards.
