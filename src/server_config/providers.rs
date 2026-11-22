@@ -103,6 +103,7 @@ fn initial_status(driver: &str) -> Option<(bool, &'static str)> {
         "kiro" => Some((true, "Checking Kiro CLI availability...")),
         "grok" => Some((true, "Checking Grok CLI availability...")),
         "pi" => Some((true, "Checking Pi CLI availability...")),
+        "cursor" => Some((true, "Checking Cursor SDK availability...")),
         _ => None,
     }
 }
@@ -211,6 +212,23 @@ pub(crate) fn list_with(
             // The driver's own snapshot until its first check reports.
             row["installed"] = installed.into();
             row["message"] = json!(message);
+        }
+        if driver == "cursor" {
+            // `stampSnapshot`: a configured CURSOR_API_KEY (the instance's own,
+            // else the server's) rules out a browser sign-in.
+            let key = entry["environment"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|v| v["name"] == "CURSOR_API_KEY")
+                .map(|v| v["value"].as_str().unwrap_or("").to_owned())
+                .or_else(|| std::env::var("CURSOR_API_KEY").ok());
+            let uses_api_key = key.is_some_and(|k| !k.trim().is_empty());
+            row["setup"] = json!({"canAuthenticate": !uses_api_key, "canInstall": false});
+            row["auth"]["canLogout"] = json!(!uses_api_key);
+            if enabled && denied.is_none() {
+                row["slashCommands"] = json!([{"name": "compact", "description": "Summarize the conversation and reduce context usage"}]);
+            }
         }
         if matches!(driver, "fx" | "kiro") {
             row["versionAdvisory"] = json!({"status":"unknown","currentVersion":null,"latestVersion":null,"updateCommand":null,"canUpdate":false,"canInstallVersion":false,"checkedAt":started_at,"message":null});

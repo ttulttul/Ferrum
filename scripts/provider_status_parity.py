@@ -26,6 +26,9 @@ that starts matching fails the run until it is removed.
 """
 import argparse
 import contextlib
+import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 import json
 import os
 from pathlib import Path
@@ -290,6 +293,76 @@ SCENARIOS += driver_scenarios("pi", "pi", "0.85.0", [PI_TEXT_GENERATION, pi_rpc(
     "bad launch arguments": ([pi_rpc()], {"settings": enabled("pi", launchArgs="--mode json")}),
     "absolute binaryPath": ([PI_TEXT_GENERATION, pi_rpc()], {}),
 })
+def cursor_credential(instance, **fields):
+    """A browser sign-in as the reference's secret store keeps it."""
+    digest = hashlib.sha256(f"6:cursor{instance}".encode()).hexdigest()
+    return {f"userdata/secrets/provider-auth-{digest}.bin": json.dumps({
+        "version": 1, "backendUrl": "https://api.cursor.com", "apiKey": "browser-key",
+        "createdAtMs": 1760000000000, **fields})}
+
+
+CURSOR_USER = {"status": 200, "body": {"apiKeyName": "laptop", "createdAt": "2026-01-01T00:00:00Z",
+                                       "userId": 7, "userEmail": " dev@example.com "}}
+CURSOR_MODELS = {"status": 200, "body": {"items": [
+    {"id": "composer-2", "displayName": "Composer 2", "aliases": ["composer", " "],
+     "parameters": [
+         {"id": "fast", "values": [{"value": "true"}, {"value": "false"}]},
+         {"id": "thinking", "displayName": "Thinking", "values": [{"value": "on"}]},
+         {"id": "effort", "values": [{"value": "low", "displayName": "Low"}, {"value": "high"}, {"value": " "}]},
+         {"id": "context", "displayName": "Context", "values": [{"value": "200k"}, {"value": "1m", "displayName": "1M"}]},
+         {"id": "empty", "values": []}],
+     "variants": [{"displayName": "Default", "isDefault": True,
+                   "params": [{"id": "effort", "value": "high"}, {"id": "fast", "value": "false"}]}]},
+    {"id": "claude-opus-5-5", "displayName": "Opus 5.5"},
+    {"id": "composer-2", "displayName": "Duplicate"}, {"id": "nameless", "displayName": " "}]}}
+CURSOR_USAGE = {"status": 200, "body": {"billingCycleStart": "1764547200000", "billingCycleEnd": 1767225600000,
+                                        "planUsage": {"totalPercentUsed": 42.5, "autoPercentUsed": 10,
+                                                      "apiPercentUsed": 120}}}
+CURSOR_API = {"GET /v1/me": CURSOR_USER, "GET /v1/models": CURSOR_MODELS,
+              "POST /aiserver.v1.DashboardService/GetCurrentPeriodUsage": CURSOR_USAGE}
+
+
+def cursor_key(**environment):
+    """Cursor with an API key, its usage read from the fake API (never the real endpoint)."""
+    env = {"CURSOR_API_KEY": "key-123", "CURSOR_AUTH_TOKEN": "token-456", **environment}
+    return {"providerInstances": {"cursor": {
+        "driver": "cursor", "enabled": True, "config": {"apiEndpoint": "<api>"},
+        "environment": [{"name": k, "value": v} for k, v in env.items() if v is not None]}}}
+
+
+def cursor(name, settings=None, api=None, **extra):
+    return {"name": f"cursor {name}", "instance": "cursor", "settings": settings or cursor_key(),
+            "api": {**CURSOR_API, **(api or {})}, "fakes": {}, **extra}
+
+
+SCENARIOS += [
+    cursor("signed out", enabled("cursor")),
+    cursor("signed in with an API key"),
+    cursor("disabled", {"providerInstances": {"cursor": {"driver": "cursor", "enabled": False}}}, settled=True),
+    cursor("API key rejected", api={"GET /v1/models": {"status": 401, "body": {"error": {"message": "bad key"}}}}),
+    cursor("plan required", api={"GET /v1/models": {"status": 403, "body": {"error": {"code": "plan_required"}}}}),
+    cursor("account details blocked", api={"GET /v1/me": {"status": 403, "body": {"code": "team_blocked"}}}),
+    cursor("catalog fails", api={"GET /v1/models": {"status": 500, "body": {}}}),
+    cursor("account response invalid", api={"GET /v1/me": {"status": 200, "body": {"apiKeyName": "x"}}}),
+    cursor("catalog times out", api={"GET /v1/models": {**CURSOR_MODELS, "sleep": 20}}, wait=60),
+    cursor("no models", api={"GET /v1/models": {"status": 200, "body": {"items": []}}}),
+    cursor("usage needs the default endpoint", cursor_key(CURSOR_AUTH_TOKEN=None)),
+    cursor("usage fails", api={"POST /aiserver.v1.DashboardService/GetCurrentPeriodUsage": {"status": 500}}),
+    cursor("usage without plan figures",
+           api={"POST /aiserver.v1.DashboardService/GetCurrentPeriodUsage": {"status": 200, "body": {}}}),
+    cursor("signed in with a browser", {"providerInstances": {"cursor": {
+        "driver": "cursor", "enabled": True, "config": {"apiEndpoint": "<api>"},
+        "environment": [{"name": "CURSOR_AUTH_TOKEN", "value": "token-456"}]}}},
+        files=cursor_credential("cursor", email="dev@example.com")),
+    cursor("browser sign-in expired", enabled("cursor"), files=cursor_credential("cursor", apiKeyExpiresAtMs=1000)),
+    cursor("browser sign-in rejected", enabled("cursor", apiEndpoint="<api>"),
+           api={"GET /v1/me": {"status": 401, "body": {}}}, files=cursor_credential("cursor")),
+    cursor("legacy browser sign-in", enabled("cursor", apiEndpoint="<api>"), files={
+        "userdata/provider-auth/cursor/cursor.json": json.dumps({
+            "version": 1, "backendUrl": "https://api.cursor.com", "apiKey": "legacy-key", "createdAtMs": 1})}),
+]
+
+
 PI_NPM = "npm-prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 SCENARIOS += [
     {"name": "pi installed as an npm global", "instance": "pi", "settings": enabled("pi"),
@@ -309,6 +382,51 @@ for scenario in SCENARIOS:
         scenario["fakes"]["pi"]["at"] = "tools/pi-abs"
     if scenario["name"] == "pi discovery fails":
         scenario["fakes"]["pi"]["spec"]["commands"][1]["pi"].pop("get_available_models")
+
+
+class FakeApi:
+    """A provider's HTTP API for one server: answers each `METHOD /path` from `routes`
+    ({"GET /v1/me": {"status": 200, "body": {...}, "sleep": seconds}}) and records the
+    requests it got, with their bearer token, for comparison."""
+
+    def __init__(self, routes):
+        self.routes, self.requests = routes, []
+        api = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def answer(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                path = self.path.split("?", 1)[0]
+                token = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
+                api.requests.append(f"{self.command} {path} {token}".strip())
+                route = api.routes.get(f"{self.command} {path}", {"status": 404, "body": {"error": "not found"}})
+                if route.get("sleep"):
+                    time.sleep(route["sleep"])
+                body = json.dumps(route.get("body", {})).encode()
+                try:
+                    self.send_response(route.get("status", 200))
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            do_GET = do_POST = answer
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
 
 
 def strip(value, root):
@@ -411,16 +529,24 @@ def run_server(args, command, root, scenario, temporary):
             link = root / fake["link"]
             link.parent.mkdir(parents=True, exist_ok=True)
             link.symlink_to(target)
+    api = FakeApi(scenario.get("api", {}))
     settings = json.loads(json.dumps({"enableProviderUpdateChecks": False, **scenario.get("settings", {})})
-                          .replace("<root>", str(root)))
+                          .replace("<root>", str(root)).replace("<api>", api.url))
+    for name, text in scenario.get("files", {}).items():
+        # Files seeded in the server's home before it starts, such as stored sign-ins.
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
     (root / "userdata").mkdir(parents=True, exist_ok=True)
     (root / "userdata/settings.json").write_text(json.dumps(settings))
     env = {"PATH": os.pathsep.join([str(bin_dir), path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "path")]),
            "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
-           "FAKE_STATUS_CLI": str(FIXTURES / "status_cli.py"), "FAKE_PROVIDER_LOG": str(log),
+           "FAKE_STATUS_CLI": str(FIXTURES / "status_cli.py"),
+           "CURSOR_BACKEND_URL": api.url, "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1", "FAKE_PROVIDER_LOG": str(log),
            "FAKE_PROVIDER_SCENARIO": str(fixture)}
     outcome = {}
     with contextlib.ExitStack() as stack:
+        stack.callback(api.close)
         url, cookie = managed_server(stack, command, root, secrets.token_hex(16), secrets.token_bytes(32), env=env)
         outcome["row"] = strip(wait_checked(url, cookie, scenario["instance"], scenario.get("wait", 20),
                                             scenario.get("settled", False), temporary), temporary)
@@ -438,6 +564,8 @@ def run_server(args, command, root, scenario, temporary):
     # `codex app-server --help` is the reference's managed Codex runtime deciding whether a
     # local codex can stand in for the one it downloads, not a status check; this server does
     # not manage a Codex runtime.
+    # The provider API requests each server made (distinct, as reads can repeat).
+    outcome["requests"] = sorted(set(api.requests))
     outcome["launches"] = sorted({line for line in launches.read_text().splitlines()
                                   if line != "app-server --help"}) if launches.exists() else []
     return outcome
@@ -451,6 +579,8 @@ def compare(outcomes):
             problems[check] = [f"original {json.dumps(original.get(check), sort_keys=True)}",
                                f"rust     {json.dumps(rust.get(check), sort_keys=True)}"]
     # The CLI sessions each server started for its checks (arguments only).
+    if original["requests"] != rust["requests"]:
+        problems["api requests"] = [f"original {original['requests']}", f"rust     {rust['requests']}"]
     if original["launches"] != rust["launches"]:
         problems["cli launches"] = [f"original {original['launches']}", f"rust     {rust['launches']}"]
     return problems
