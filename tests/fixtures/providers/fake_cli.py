@@ -4,8 +4,9 @@
 It plays the scenario named by FAKE_PROVIDER_SCENARIO: messages recorded from
 a real `codex app-server` or `claude --output-format stream-json` session,
 with steps that wait for what the client sends. Every line it receives is
-appended to FAKE_PROVIDER_LOG, its arguments to FAKE_PROVIDER_LOG.args, and its
-arguments and launch environment as JSON to FAKE_PROVIDER_LOG.launch.
+appended to FAKE_PROVIDER_LOG (and, with its process id, to
+FAKE_PROVIDER_LOG.messages), its arguments to FAKE_PROVIDER_LOG.args, and its
+arguments, launch environment and process id as JSON to FAKE_PROVIDER_LOG.launch.
 
 A scenario is {"steps": [...]} or {"variants": [{"argsContain": "...",
 "steps": [...]}, ...]}, where the first variant whose argsContain is in the
@@ -52,7 +53,7 @@ with open(log_path + ".launch", "a") as out:
     # A login-shell scenario also records the PATH the server gave its CLI.
     if os.environ.get("FAKE_PROVIDER_LAUNCH_PATH"):
         env.update({k: os.environ[k] for k in ("PATH", "__MISE_DIFF", "JAVA_HOME") if k in os.environ})
-    out.write(json.dumps({"argv": args, "env": env}) + "\n")
+    out.write(json.dumps({"argv": args, "env": env, "pid": os.getpid()}) + "\n")
 with open(os.environ["FAKE_PROVIDER_SCENARIO"]) as source:
     scenario = json.load(source)
 
@@ -115,6 +116,10 @@ def receive():
         sys.exit(0)
     with open(log_path, "a") as out:
         out.write(line if line.endswith("\n") else line + "\n")
+    # Each line again with the process that read it: a server runs several CLIs at once (a
+    # status probe beside a turn's session), and their lines interleave in the log.
+    with open(log_path + ".messages", "a") as out:
+        out.write(json.dumps({"pid": os.getpid(), "line": line.rstrip("\n")}) + "\n")
     try:
         return json.loads(line)
     except ValueError:
