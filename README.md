@@ -58,7 +58,7 @@ The Rust server can already run Codex and Claude Code conversations, manage proj
 ### Details for developers
 
 - **Shared database:** See [`docs/shared-store.md`](docs/shared-store.md) for the `statev2.sqlite` design and remaining migration/outbox work.
-- **Expected-failure lists:** Client-visible RPC and live-turn mismatches are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json) (including `projects.listEntries` / `searchEntries` / `searchContents`).
+- **Expected-failure lists:** Client-visible RPC and live-turn mismatches are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json) (including `searchEntries` / `searchContents`).
 - **Agent tools:** Rust currently exposes 11 of the reference's 79 MCP tools and does not inject the orchestration prompt context.
 
 ## Install and switching

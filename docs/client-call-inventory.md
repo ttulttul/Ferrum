@@ -26,7 +26,7 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 | http-raw | 7 | 7 | 0 | 0 | 6 | 3 | 7 |
 | **all** | 294 | 279 | 0 | 15 | 184 | 118 | 218 |
 
-Newly covered by the client harness (no earlier parity script): 34. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 9.
+Newly covered by the client harness (no earlier parity script): 35. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 7.
 
 Calls the harness does not make need credentials or hardware it cannot have in CI (GitHub, Linear,
 model providers, T3 Connect relay, voice models, simulators, a browser), are destructive to the host
@@ -113,8 +113,8 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `projects.createFromThread` | user action | `packages/client-runtime/src/state/projectCommands.ts:230` | ProjectCreateFromThreadInput | ProjectCreateFromThreadResult | session (orchestration:operate) | client | validation only | — |
 | `projects.createNew` | user action | `packages/client-runtime/src/state/projectCommands.ts:224` | ProjectCreateNewInput | ProjectCreateNewResult | session (orchestration:operate) | client | validation only | — |
 | `projects.ensureScratch` | user action | `packages/client-runtime/src/state/projectCommands.ts:203` | Struct{} | ProjectEnsureScratchResult | session (orchestration:operate) | client | validation only | — |
-| `projects.listEntries` | open project/thread | `packages/client-runtime/src/state/projectCommands.ts:159`<br>`packages/client-runtime/src/state/projectCommands.ts:164` | ProjectListEntriesInput | ProjectListEntriesResult | session (filesystem:read) | client | validation only | 4 case(s), 4 xfail |
-| `projects.listIgnoredFiles` | open project/thread | `packages/client-runtime/src/state/projectCommands.ts:170` | ProjectListIgnoredFilesInput | ProjectListIgnoredFilesResult | session (filesystem:read) | client | validation only | 1 case(s), 1 xfail |
+| `projects.listEntries` | open project/thread | `packages/client-runtime/src/state/projectCommands.ts:159`<br>`packages/client-runtime/src/state/projectCommands.ts:164` | ProjectListEntriesInput | ProjectListEntriesResult | session (filesystem:read) | client | validation only | 11 case(s) |
+| `projects.listIgnoredFiles` | open project/thread | `packages/client-runtime/src/state/projectCommands.ts:170` | ProjectListIgnoredFilesInput | ProjectListIgnoredFilesResult | session (filesystem:read) | client | validation only | 3 case(s) |
 | `projects.mutate` | user action | `packages/client-runtime/src/operations/commands.ts:417` | ProjectMutation | Project | session (orchestration:operate) | client | parity-fixtures.json, workers_initial_sync_parity.py | 5 case(s) |
 | `projects.readFile` | user action | `packages/client-runtime/src/state/projectCommands.ts:105`<br>`packages/client-runtime/src/state/projectCommands.ts:119` | ProjectReadFileInput | ProjectReadFileResult | session (filesystem:read) | client | validation only | 6 case(s), 4 xfail |
 | `projects.searchContents` | user action | `apps/web/src/state/projects.ts:24` | ProjectSearchContentsInput | ProjectSearchContentsResult | session (filesystem:read) | client | validation only | 2 case(s), 2 xfail |

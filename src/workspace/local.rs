@@ -17,6 +17,7 @@ pub struct LocalWorkspace {
     /// The server's state directory; host services keep their files under it.
     pub(crate) data_dir: PathBuf,
     vcs: VcsService,
+    listings: files::ListingIndexes,
     settings: std::sync::Arc<crate::settings::Settings>,
     pub(crate) terminals: TerminalService,
     pub(crate) previews: PreviewService,
@@ -35,6 +36,7 @@ impl LocalWorkspace {
             data_dir,
             settings,
             vcs: VcsService::default(),
+            listings: Default::default(),
             terminals,
             previews,
             devices,
@@ -63,7 +65,7 @@ impl LocalWorkspace {
 
 impl Workspace for LocalWorkspace {
     fn list_entries<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
-        files::list_entries(input).boxed()
+        self.listings.list_entries(input).boxed()
     }
     fn list_ignored_files<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
         files::list_ignored_files(input).boxed()

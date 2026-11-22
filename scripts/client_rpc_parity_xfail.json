@@ -13,24 +13,6 @@
       "reason": "GET /api/projects still lists a deleted project",
       "issue": "the reference omits projects with deletedAt set"
     },
-    "projects.listEntries": {
-      "area": "projects/files",
-      "severity": "high",
-      "reason": "projects.listEntries lists .git and gitignored paths, unsorted",
-      "issue": "the reference walks only tracked and untracked-unignored files, sorted; Rust returns .git/*, target/ and build.log"
-    },
-    "projects.listEntries.missingCwd": {
-      "area": "projects/files",
-      "severity": "low",
-      "reason": "projects.listEntries succeeds with no entries for a missing cwd",
-      "issue": "the reference fails with ProjectListEntriesError failure=workspace_root_not_found"
-    },
-    "projects.listIgnoredFiles": {
-      "area": "projects/files",
-      "severity": "medium",
-      "reason": "projects.listIgnoredFiles returns no files",
-      "issue": "the reference lists ignored files (build.log) with their byte length"
-    },
     "projects.readFile": {
       "area": "projects/files",
       "severity": "low",
@@ -60,18 +42,6 @@
       "severity": "high",
       "reason": "projects.searchEntries does no fuzzy matching",
       "issue": "for query 'read' the reference returns README.md, .gitignore, docs/guide.md and scratch.txt; Rust returns only README.md"
-    },
-    "raw.projects.listEntries#3": {
-      "area": "projects/files",
-      "severity": "high",
-      "reason": "projects.listEntries lists .git and gitignored paths, unsorted",
-      "issue": "the reference walks only tracked and untracked-unignored files, sorted; Rust returns .git/*, target/ and build.log"
-    },
-    "raw.projects.listEntries#4": {
-      "area": "projects/files",
-      "severity": "low",
-      "reason": "projects.listEntries succeeds with no entries for a missing cwd",
-      "issue": "the reference fails with ProjectListEntriesError failure=workspace_root_not_found"
     },
     "raw.projects.readFile#5": {
       "area": "projects/files",

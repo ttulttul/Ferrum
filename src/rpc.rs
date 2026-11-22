@@ -1977,18 +1977,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     }
     if matches!(
         method,
-        "projects.listEntries"
-            | "projects.listIgnoredFiles"
-            | "projects.searchEntries"
+        "projects.searchEntries"
             | "projects.searchContents"
             | "projects.readFile"
             | "projects.writeFile"
     ) {
         let cwd = params["cwd"].as_str().unwrap_or_default();
         let root = expand_user_path(cwd);
-        if method == "projects.listIgnoredFiles" {
-            return Reply::Success(json!({"files":[],"truncated":false}));
-        }
         if method == "projects.readFile" {
             let relative = params["relativePath"].as_str().unwrap_or_default();
             let target = if Path::new(relative).is_absolute() {
@@ -2049,7 +2044,6 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         let query = params["query"].as_str().unwrap_or_default();
         let limit = params["limit"].as_u64().unwrap_or(50).min(500) as usize;
         let mut stack = vec![root.clone()];
-        let mut entries = Vec::new();
         let mut matches = Vec::new();
         while let Some(dir) = stack.pop() {
             let Ok(mut read_dir) = tokio::fs::read_dir(&dir).await else {
@@ -2066,14 +2060,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                     .to_string_lossy()
                     .replace('\\', "/");
                 if kind.is_dir() {
-                    if method == "projects.listEntries" {
-                        entries.push(json!({"path":rel,"kind":"directory"}));
-                    }
                     stack.push(path);
                 } else if kind.is_file() {
-                    if method == "projects.listEntries" {
-                        entries.push(json!({"path":rel,"kind":"file"}));
-                    }
                     if method == "projects.searchEntries"
                         && rel.to_lowercase().contains(&query.to_lowercase())
                     {
@@ -2102,20 +2090,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                         }
                     }
                 }
-                if (method == "projects.listEntries" && entries.len() >= limit)
-                    || (method != "projects.listEntries" && matches.len() >= limit)
-                {
+                if matches.len() >= limit {
                     break;
                 }
             }
-            if (method == "projects.listEntries" && entries.len() >= limit)
-                || (method != "projects.listEntries" && matches.len() >= limit)
-            {
+            if matches.len() >= limit {
                 break;
             }
-        }
-        if method == "projects.listEntries" {
-            return Reply::Success(json!({"entries":entries,"truncated":false}));
         }
         if method == "projects.searchEntries" {
             return Reply::Success(json!({"entries":matches,"truncated":false}));
