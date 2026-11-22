@@ -44,6 +44,55 @@ fn stable_command_id(caller: &Caller, operation: &str, key: &str) -> String {
     .join(":")
 }
 
+/// `stableCommandId` with an `index`, `stableThreadId` or `stableMessageId`
+/// for the `index`th item of a request.
+fn stable_indexed(
+    caller: &Caller,
+    prefix: &str,
+    operation: Option<&str>,
+    key: &str,
+    index: usize,
+) -> String {
+    let part = crate::thread_projection::uri_component;
+    let mut parts = vec![
+        prefix.to_owned(),
+        "mcp".to_owned(),
+        part(&caller.request_namespace()),
+    ];
+    if let Some(operation) = operation {
+        parts.push(part(operation));
+    }
+    parts.push(part(key));
+    parts.push(index.to_string());
+    parts.join(":")
+}
+
+/// `threadTitle`: the title, else the prompt, cut to 80 characters, else
+/// "<parent> thread <n>" (`placeholderThreadTitle`).
+fn created_thread_title(
+    parent: &str,
+    prompt: Option<&str>,
+    title: Option<&str>,
+    index: usize,
+) -> String {
+    let detail = title
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .or_else(|| prompt.map(str::trim).filter(|p| !p.is_empty()));
+    let Some(detail) = detail else {
+        return format!("{parent} thread {}", index + 1);
+    };
+    let units: Vec<u16> = detail.encode_utf16().collect();
+    if units.len() <= 80 {
+        return detail.to_owned();
+    }
+    let mut end = 77;
+    if (0xd800..=0xdbff).contains(&units[end - 1]) && (0xdc00..=0xdfff).contains(&units[end]) {
+        end -= 1;
+    }
+    format!("{}...", String::from_utf16_lossy(&units[..end]))
+}
+
 /// `providerConstraints`: why an instance cannot run a child task.
 fn provider_constraints(provider: &Value) -> Vec<String> {
     let mut out = Vec::new();
@@ -581,6 +630,221 @@ pub(super) async fn task_cancel<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &
     Ok(json!({"taskId": task_id, "status": "cancel_requested"}))
 }
 
+/// `createThreads`: new top-level threads in this thread's project, each
+/// started with its prompt and recorded on the parent's timeline.
+pub(super) async fn create_threads<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    a: &Value,
+) -> Outcome {
+    thread_scope(caller, "This tool")?;
+    threads::writing_caller(&**host, caller).await?;
+    let requests = a["threads"].as_array().cloned().unwrap_or_default();
+    let scope = thread_scope(caller, "create_threads")?;
+    let (parent, parent_runs) = {
+        let store = host.control_state().store.read().await;
+        let thread = find_thread(&store, &scope.thread_id)?;
+        let projection = thread.full_projection();
+        (projection["thread"].clone(), records(&projection, "runs"))
+    };
+    let parent_run = parent_runs
+        .iter()
+        .filter(|run| {
+            matches!(
+                run["status"].as_str(),
+                Some("preparing" | "starting" | "running" | "waiting")
+            )
+        })
+        .max_by_key(|run| run["ordinal"].as_u64().unwrap_or(0))
+        .cloned()
+        .filter(|run| {
+            !run["rootNodeId"].is_null()
+                && run["providerInstanceId"] == scope.provider_instance_id.as_str()
+        })
+        .ok_or_else(|| {
+            failure(
+                "parent_not_active",
+                "Thread creation requires an active run owned by this MCP provider session.",
+            )
+        })?;
+    let providers = host.providers().as_array().cloned().unwrap_or_default();
+    let key = arg_str(a, "clientRequestId")?
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::platform::uuid_v4().to_string());
+    let mut created = Vec::new();
+    for (index, request) in requests.iter().enumerate() {
+        let command_id = stable_indexed(caller, "command", Some("create-thread"), &key, index);
+        let thread_id = stable_indexed(caller, "thread", None, &key, index);
+        let committed = {
+            let store = host.control_state().store.read().await;
+            store
+                .command_receipts
+                .contains_key(&command_id)
+                .then(|| {
+                    store
+                        .threads
+                        .get(&thread_id)
+                        .map(|t| t.full_projection()["thread"]["modelSelection"].clone())
+                })
+                .flatten()
+        };
+        let mut target = request.get("target").cloned().unwrap_or(Value::Null);
+        if let Some(selection) = &committed {
+            if !target.is_object() {
+                target = json!({});
+            }
+            target["providerInstanceId"] = selection["instanceId"].clone();
+        }
+        if target["environmentId"]
+            .as_str()
+            .is_some_and(|env| env != host.environment_id())
+        {
+            return Err(failure(
+                "invalid_request",
+                "A thread in a linked environment is not available on this server yet.",
+            ));
+        }
+        let selection = resolve_target(&providers, &parent, &target)?;
+        let (runtime, interaction) = resolve_modes(
+            &parent,
+            request["runtimeMode"].as_str(),
+            request["interactionMode"].as_str(),
+        )?;
+        let prompt = request["prompt"].as_str();
+        let title = created_thread_title(
+            parent["title"].as_str().unwrap_or_default(),
+            prompt,
+            request["title"].as_str(),
+            index,
+        );
+        let initial = prompt.map(|text| {
+            json!({
+                "senderThreadId": scope.thread_id,
+                "messageId": stable_indexed(caller, "message", None, &key, index),
+                "text": text,
+                "attachments": [],
+            })
+        });
+        let mut create = json!({
+            "type": "thread.create",
+            "createdBy": "agent",
+            "creationSource": "mcp",
+            "commandId": command_id,
+            "threadId": thread_id,
+            "projectId": parent["projectId"],
+            "title": title,
+            "modelSelection": selection,
+            "runtimeMode": runtime,
+            "interactionMode": interaction,
+            "branch": parent["branch"],
+            "worktreePath": parent["worktreePath"],
+        });
+        if parent["linkOrigin"].is_object() {
+            create["linkOrigin"] = parent["linkOrigin"].clone();
+        }
+        if let Some(initial) = &initial {
+            create["initialMessage"] = initial.clone();
+        }
+        let number = index + 1;
+        let reason = |error: &Value| {
+            error["detail"]
+                .as_str()
+                .or(error["message"].as_str())
+                .unwrap_or("The command was rejected.")
+                .to_owned()
+        };
+        host.dispatch(create).await.map_err(|error| {
+            failure(
+                "orchestration_error",
+                format!("Unable to create thread {number}: {}", reason(&error)),
+            )
+        })?;
+        // A receipt can appear after target resolution; use the committed thread's selection.
+        let (resolved, has_run) = {
+            let store = host.control_state().store.read().await;
+            let thread = find_thread(&store, &thread_id)?;
+            let projection = thread.full_projection();
+            let message_id = initial.as_ref().map(|m| m["messageId"].clone());
+            let has_run = records(&projection, "runs")
+                .iter()
+                .any(|run| Some(&run["userMessageId"]) == message_id.as_ref());
+            (projection["thread"]["modelSelection"].clone(), has_run)
+        };
+        // A replayed creation that carried no prompt has no run yet.
+        if let Some(initial) = initial.as_ref().filter(|_| !has_run) {
+            let mut dispatch = initial.clone();
+            dispatch["type"] = json!("message.dispatch");
+            dispatch["createdBy"] = json!("agent");
+            dispatch["creationSource"] = json!("mcp");
+            dispatch["commandId"] = json!(stable_indexed(
+                caller,
+                "command",
+                Some("dispatch-thread"),
+                &key,
+                index
+            ));
+            dispatch["threadId"] = json!(thread_id);
+            dispatch["modelSelection"] = resolved.clone();
+            dispatch["dispatchMode"] = json!({"type": "start_immediately"});
+            host.dispatch(dispatch).await.map_err(|error| {
+                failure(
+                    "orchestration_error",
+                    format!("Unable to start thread {number}: {}", reason(&error)),
+                )
+            })?;
+        }
+        let (run, thread_title, thread_row) = {
+            let store = host.control_state().store.read().await;
+            let thread = find_thread(&store, &thread_id)?;
+            let projection = thread.full_projection();
+            (
+                records(&projection, "runs").last().cloned(),
+                thread.title.clone(),
+                projection["thread"].clone(),
+            )
+        };
+        host.dispatch(json!({
+            "type": "thread.created.record",
+            "commandId": stable_indexed(caller, "command", Some("record-created-thread"), &key, index),
+            "parentThreadId": scope.thread_id,
+            "parentRunId": parent_run["id"],
+            "parentNodeId": parent_run["rootNodeId"],
+            "targetThreadId": thread_id,
+            "targetRunId": run.as_ref().map_or(Value::Null, |r| r["id"].clone()),
+        }))
+        .await
+        .map_err(|error| {
+            failure(
+                "orchestration_error",
+                format!(
+                    "Unable to record thread {number} in the parent timeline: {}",
+                    reason(&error)
+                ),
+            )
+        })?;
+        created.push(json!({
+            "threadId": thread_id,
+            "link": thread_link(&**host, caller, &thread_id, &thread_title),
+            "runId": run.as_ref().map_or(Value::Null, |r| r["id"].clone()),
+            // Rust records a run as running from its start; the reference's run is
+            // starting until its provider turn has an attempt.
+            "status": run.as_ref().map_or(json!("idle"), |r| {
+                if r["status"] == "running" && r["activeAttemptId"].is_null() {
+                    json!("starting")
+                } else {
+                    r["status"].clone()
+                }
+            }),
+            "title": thread_title,
+            "createdBy": thread_row["createdBy"],
+            "creationSource": thread_row["creationSource"],
+            "providerInstanceId": resolved["instanceId"],
+            "model": resolved["model"],
+        }));
+    }
+    Ok(json!({"threads": created}))
+}
+
 /// `awaitTask`: reads the task until it ends a wait or `timeout` passes.
 /// A wait that ends without a terminal result upgrades the task's wake, so a
 /// later result still reaches the parent.
@@ -967,4 +1231,27 @@ async fn read_task<S: McpHost>(
         })?;
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_created_thread_is_named_by_its_title_prompt_or_place() {
+        assert_eq!(
+            created_thread_title("P", Some("Say hi"), Some(" Greeter "), 0),
+            "Greeter"
+        );
+        assert_eq!(
+            created_thread_title("P", Some(" Say hi "), None, 0),
+            "Say hi"
+        );
+        assert_eq!(created_thread_title("P", None, Some(" "), 1), "P thread 2");
+        let long = "b".repeat(81);
+        assert_eq!(
+            created_thread_title("P", Some(&long), None, 0),
+            format!("{}...", "b".repeat(77))
+        );
+    }
 }

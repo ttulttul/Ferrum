@@ -55,6 +55,7 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("delegate_task", &[]),
     ("task_status", &[]),
     ("task_cancel", &[]),
+    ("create_threads", &[]),
     // Pull requests and issues (batch 7).
     ("link_pull_request", &[]),
     ("link_pull_requests", &[]),
@@ -129,6 +130,7 @@ const SERVED: &[&str] = &[
     "delegate_task",
     "task_status",
     "task_cancel",
+    "create_threads",
     // Pull requests and issues (batch 7).
     "link_pull_request",
     "link_pull_requests",
@@ -702,6 +704,7 @@ pub(super) async fn call<S: McpHost>(
         "delegate_task" => delegation::delegate_task(host, caller, args).await,
         "task_status" => delegation::task_status(host, caller, args).await,
         "task_cancel" => delegation::task_cancel(host, caller, args).await,
+        "create_threads" => delegation::create_threads(host, caller, args).await,
         "link_pull_request"
         | "link_pull_requests"
         | "unlink_pull_request"
