@@ -164,7 +164,8 @@ pub(crate) fn created(command: &Value, at: &str) -> Value {
         "id":command["threadId"],"projectId":command["projectId"],"title":command["title"],
         "providerInstanceId":command["modelSelection"]["instanceId"],"modelSelection":command["modelSelection"],
         "runtimeMode":command["runtimeMode"],"interactionMode":command["interactionMode"],
-        "branch":command["branch"],"worktreePath":command["worktreePath"],"pullRequests":[],
+        "branch":command["branch"],"worktreePath":command["worktreePath"],
+        "pullRequests":[],
         "activeProviderThreadId":null,"lineage":{"parentThreadId":null,"relationshipToParent":null,"rootThreadId":command["threadId"]},
         "forkedFrom":null,"createdAt":at,"updatedAt":at,"archivedAt":null,"settledOverride":null,
         "settledAt":null,"snoozedUntil":null,"snoozedAt":null,"lastVisitedAt":null,"deletedAt":null})

@@ -11,7 +11,10 @@ use std::sync::{Arc, LazyLock};
 mod agent_tools;
 mod arguments;
 mod delegation;
+mod forge;
+mod issues;
 mod projects;
+mod pull_requests;
 mod session;
 mod theme;
 mod threads;
@@ -52,6 +55,24 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("delegate_task", &[]),
     ("task_status", &[]),
     ("task_cancel", &[]),
+    // Pull requests and issues (batch 7).
+    ("link_pull_request", &[]),
+    ("link_pull_requests", &[]),
+    ("unlink_pull_request", &[]),
+    ("unlink_pull_requests", &[]),
+    ("list_thread_pull_requests", &[]),
+    ("watch_pull_request", &[]),
+    ("unwatch_pull_request", &[]),
+    ("write_pull_request_guides", &[]),
+    ("read_pull_request_guide", &[]),
+    ("list_issues", &[]),
+    ("read_issue", &[]),
+    ("create_issue", &[]),
+    ("comment_on_issue", &[]),
+    ("set_issue_state", &[]),
+    ("link_issue", &[]),
+    ("unlink_issue", &[]),
+    ("list_thread_issues", &[]),
     // Worktree and preview session controls (agent-tools audit).
     ("t3_worktree_status", &[]),
     ("t3_preview_list", &[]),
@@ -104,6 +125,24 @@ const SERVED: &[&str] = &[
     "delegate_task",
     "task_status",
     "task_cancel",
+    // Pull requests and issues (batch 7).
+    "link_pull_request",
+    "link_pull_requests",
+    "unlink_pull_request",
+    "unlink_pull_requests",
+    "list_thread_pull_requests",
+    "watch_pull_request",
+    "unwatch_pull_request",
+    "write_pull_request_guides",
+    "read_pull_request_guide",
+    "list_issues",
+    "read_issue",
+    "create_issue",
+    "comment_on_issue",
+    "set_issue_state",
+    "link_issue",
+    "unlink_issue",
+    "list_thread_issues",
     // Worktree and preview session controls (agent-tools audit).
     "t3_worktree_status",
     "t3_preview_list",
@@ -266,12 +305,29 @@ pub(super) const MODE_LIMIT_HEADER: &str = "t3-mode-limit";
 
 /// How a tool call ends when it does not succeed.
 pub(super) enum Refusal {
+    /// A domain error rendered as its message by the reference toolkit.
+    Text(String),
     /// A JSON-RPC error: unknown tool or malformed arguments.
     Rpc(i32, String),
     /// A tool failure the agent reads (`OrchestratorMcpFailure`).
     Failure(&'static str, String),
 }
 type Outcome = Result<Value, Refusal>;
+
+pub(super) fn text_errors(name: &str) -> bool {
+    name.contains("pull_request")
+        || matches!(
+            name,
+            "list_issues"
+                | "read_issue"
+                | "create_issue"
+                | "comment_on_issue"
+                | "set_issue_state"
+                | "link_issue"
+                | "unlink_issue"
+                | "list_thread_issues"
+        )
+}
 
 fn failure(code: &'static str, message: impl Into<String>) -> Refusal {
     Refusal::Failure(code, message.into())
@@ -638,6 +694,19 @@ pub(super) async fn call<S: McpHost>(
         "delegate_task" => delegation::delegate_task(host, caller, args).await,
         "task_status" => delegation::task_status(host, caller, args).await,
         "task_cancel" => delegation::task_cancel(host, caller, args).await,
+        "link_pull_request"
+        | "link_pull_requests"
+        | "unlink_pull_request"
+        | "unlink_pull_requests"
+        | "list_thread_pull_requests"
+        | "watch_pull_request"
+        | "unwatch_pull_request"
+        | "write_pull_request_guides"
+        | "read_pull_request_guide" => pull_requests::call(host, caller, name, args).await,
+        "list_issues" | "read_issue" | "create_issue" | "comment_on_issue" | "set_issue_state"
+        | "link_issue" | "unlink_issue" | "list_thread_issues" => {
+            issues::call(host, caller, name, args).await
+        }
         "t3_worktree_status" => agent_tools::worktree_status(host, caller).await,
         "t3_preview_list" => agent_tools::preview_list(host, caller, args).await,
         "t3_preview_close" => agent_tools::preview_close(host, caller, args).await,
@@ -964,11 +1033,11 @@ fn capabilities<S: McpHost>(host: &S, caller: &Caller) -> Value {
             "appOwnedSubagents": true,
             "asyncPolling": true,
             "cancellation": true,
-            "batchThreadCreation": false,
+            "batchThreadCreation": true,
             "threadManagement": true,
             "incrementalThreadRead": true,
-            "scheduledTasks": false,
-            "maxBatchThreads": 0
+            "scheduledTasks": true,
+            "maxBatchThreads": 20
         }
     })
 }
@@ -2347,7 +2416,12 @@ mod sender_tests {
             assert!(
                 matches!(
                     reference["listedTo"][name].as_str(),
-                    Some("everyone" | LINKS_ONLY | "hiddenFromOutsideClients")
+                    Some(
+                        "everyone"
+                            | LINKS_ONLY
+                            | "hiddenFromOutsideClients"
+                            | "hiddenFromSubagents",
+                    )
                 ),
                 "{name} needs listing by caller"
             );

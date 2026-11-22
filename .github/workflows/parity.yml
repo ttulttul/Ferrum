@@ -213,7 +213,15 @@ jobs:
           # Pull requests skip the restart scenarios' fixed waits (faketime moves the reference's
           # one-minute continuation retry on); main and the nightly run wait them out for real.
           PARITY_REAL_TIME: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          PARITY_DIAGNOSTICS_PATH: ${{ runner.temp }}/agent-mcp-diff.txt
         run: scripts/ci_parity_shard.sh "${{ matrix.shard }}" "$GITHUB_WORKSPACE/reference" "$GITHUB_WORKSPACE/target/debug/t3code-server"
+      - name: Upload parity diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-${{ matrix.shard }}-${{ matrix.round }}-diagnostics
+          path: ${{ runner.temp }}/agent-mcp-diff.txt
+          if-no-files-found: ignore
 
   # One check that passes only when Rust validation and every shard passed.
   # A docs-only pull request passes it without them.

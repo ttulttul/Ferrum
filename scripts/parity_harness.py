@@ -318,7 +318,7 @@ def server_env(home, env=None):
     return child
 
 
-def managed_server(stack, prefix, root, secret, signing_key, env=None):
+def managed_server(stack, prefix, root, secret, signing_key, env=None, stderr_path=None):
     """Launches one server in `root`. `env` adds variables (or replaces PATH) for the child; see
     server_env, which also takes the variables of a leading `env NAME=value` in `prefix`."""
     secrets_dir = root / "userdata" / "secrets"
@@ -343,10 +343,14 @@ def managed_server(stack, prefix, root, secret, signing_key, env=None):
             bootstrap.write(encode(envelope) + b"\n")
             bootstrap.seek(0)
             # Each child receives its own state directory, home and bootstrap descriptor.
+            stderr = None
+            if stderr_path is not None:
+                stderr_file = attempt_stack.enter_context(Path(stderr_path).open("w"))
+                stderr = stderr_file
             attempt_stack.enter_context(launch(prefix + ["--bootstrap-fd", str(bootstrap.fileno())], url,
                                                env=server_env(root, {**variables, **(env or {}), "HOME": str(root),
                                                                      "T3CODE_HOME": str(root)}),
-                                               cwd=root, pass_fds=(bootstrap.fileno(),)))
+                                               cwd=root, pass_fds=(bootstrap.fileno(),), stderr=stderr))
             cookie = session_cookie(url, secret)
         except RuntimeError as error:
             attempt_stack.close()

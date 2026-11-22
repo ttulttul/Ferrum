@@ -1140,7 +1140,7 @@ def compare_turn(original, rust):
         problems["cli launch"] = [f"original {line}" for line in launch[0]] + [f"rust     {line}" for line in launch[1]]
     mcp = comparable_mcp(original.get("mcp", []), rust.get("mcp", []))
     if mcp[0] != mcp[1]:
-        problems["agent mcp"] = [f"original {line}" for line in mcp[0]] + [f"rust     {line}" for line in mcp[1]]
+        problems["agent mcp"] = mcp_diff_lines(mcp[0], mcp[1])
     cli = [original.get("cli", []), rust.get("cli", [])]
     if cli[0] != cli[1]:
         problems["cli approvals"] = [f"original {line}" for line in cli[0]] + [f"rust     {line}" for line in cli[1]]
@@ -1211,6 +1211,69 @@ def compare_turn(original, rust):
         if rendered[0][key] != rendered[1][key]:
             problems[key] = [f"original {rendered[0][key]}", f"rust     {rendered[1][key]}"]
     return problems
+
+
+def mcp_record_tool(line):
+    """Return the tool or protocol method named by one normalized MCP record."""
+    try:
+        request = json.loads(line).get("request", {})
+    except (TypeError, ValueError):
+        return "<non-json>"
+    return request.get("tool") or request.get("method") or "<unknown>"
+
+
+def mcp_line(value, limit=1900):
+    """Compact one MCP record for the CI log while keeping the prefix readable."""
+    if value is None:
+        text = "<missing>"
+    else:
+        try:
+            text = json.dumps(json.loads(value), sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            text = str(value)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def mcp_diff_lines(original, rust, truncate=True):
+    """Pair only differing normalized MCP records, including length mismatches."""
+    lines = []
+    if len(original) != len(rust):
+        lines.append(f"answer-list counts: original {len(original)} rust {len(rust)}")
+    for index in range(max(len(original), len(rust))):
+        a = original[index] if index < len(original) else None
+        b = rust[index] if index < len(rust) else None
+        if a == b:
+            continue
+        tool = mcp_record_tool(a if a is not None else b)
+        compact = mcp_line if truncate else lambda value: mcp_line(value, limit=10**9)
+        lines.append(f"[{index}] {tool} original {compact(a)}")
+        lines.append(f"[{index}] {tool} rust     {compact(b)}")
+    return lines
+
+
+def print_mcp_diagnostics(outcomes, fake_hosts, stderr_paths):
+    """Print compact MCP differences and save complete diagnostics for CI artifacts."""
+    normalized = comparable_mcp(outcomes["original"].get("mcp", []), outcomes["rust"].get("mcp", []))
+    differences = mcp_diff_lines(*normalized)
+    print("agent mcp differing records:")
+    for line in differences:
+        print(f"  {line}")
+    artifact = Path(os.environ.get("PARITY_DIAGNOSTICS_PATH", "agent-mcp-diff.txt"))
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    full = ["agent mcp normalized diff", *mcp_diff_lines(*normalized, truncate=False)]
+    for name in ("original", "rust"):
+        hosts = fake_hosts.get(name, {})
+        for provider in ("github", "linear"):
+            requests = hosts.get(provider) or []
+            full.append(f"{name} fake {provider} request log ({len(requests)} requests):")
+            full.extend(f"  {request}" for request in requests)
+        path = stderr_paths.get(name)
+        tail = "<missing>"
+        if path is not None and Path(path).exists():
+            tail = Path(path).read_text(errors="replace")[-4000:] or "<empty>"
+        full.extend([f"{name} server stderr tail:", tail])
+    artifact.write_text("\n".join(full) + "\n")
+    print(f"agent mcp diagnostics: {artifact}")
 
 
 # Rough seconds the seeded thread checks take on shard 1, for balancing shards.
@@ -1292,6 +1355,7 @@ def provider_turns(args, credentials):
             if keep:
                 print(f"keeping {scenario['name']} in {temporary}", flush=True)
             drivers = set() if scenario["scenario"] is None else {"codex" if scenario["instance"] == "codex" else "claude"}
+            fake_hosts, stderr_paths = {}, {}
             for name, command in (("original", shlex.split(args.original_command)),
                                   ("rust", shlex.split(args.rust_command))):
                 root = temporary / name
@@ -1299,16 +1363,20 @@ def provider_turns(args, credentials):
                 if scenario["name"] == "codex thread tools":
                     from github_provider_parity import github_fixture
                     from linear_provider_parity import linear_fixture
-                    _, github_env = github_fixture(stack, temporary / f"{name}-gh")
+                    github, github_env = github_fixture(stack, temporary / f"{name}-gh")
                     linear = linear_fixture(stack)
+                    fake_hosts[name] = {"github": github.requests, "linear": linear.requests}
                     env.update(github_env, T3CODE_LINEAR_API_URL=f"http://127.0.0.1:{linear.server_port}/graphql",
                                GIT_ALLOW_PROTOCOL="file")
+                stderr_path = temporary / f"{name}-server.stderr"
+                stderr_paths[name] = stderr_path
                 if "restart" in scenario:
                     outcomes[name] = restart_turn(args, command, root, credentials, env,
                                                   temporary / f"{name}-checkouts", fake_bin, scenario)
                     outcomes[name]["launches"] = turn_launches(log)
                 else:
-                    url, cookie = managed_server(stack, command, root, *credentials, env=env)
+                    url, cookie = managed_server(stack, command, root, *credentials, env=env,
+                                                 stderr_path=stderr_path)
                     if scenario.get("awaitStatus"):
                         # A delegated task's target must be a checked, installed provider.
                         provider_status(url, cookie, scenario["instance"], temporary)
@@ -1332,6 +1400,8 @@ def provider_turns(args, credentials):
                 slug = scenario["name"].replace(" ", "-")
                 (args.dump / f"turn-{slug}-{name}.json").write_text(json.dumps(outcome, indent=2, sort_keys=True))
         problems = compare_turn(outcomes["original"], outcomes["rust"])
+        if "agent mcp" in problems:
+            print_mcp_diagnostics(outcomes, fake_hosts, stderr_paths)
         expected = set(xfail.get(scenario["name"], {}))
         for check in sorted(set(problems) | expected):
             label = f"{scenario['name']}: {check}"

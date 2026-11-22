@@ -123,6 +123,207 @@
   },
   {
    "mcp": {
+    "tool": "list_issues",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "create_issue",
+    "arguments": {
+     "title": "MCP fixture"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "read_issue",
+    "arguments": {
+     "key": "12"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "comment_on_issue",
+    "arguments": {
+     "key": "12",
+     "body": "MCP comment"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "link_issue",
+    "arguments": {
+     "url": "https://github.com/example/parity/issues/12"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "link_issue",
+    "arguments": {
+     "key": "12"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "list_thread_issues",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "unlink_issue",
+    "arguments": {
+     "key": "12"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "unlink_issue",
+    "arguments": {
+     "key": "12"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "create_issue",
+    "arguments": {
+     "projectId": "project:linear",
+     "title": "Linear fixture"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "set_issue_state",
+    "arguments": {
+     "projectId": "project:linear",
+     "key": "ENG-1",
+     "state": "Done"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "read_issue",
+    "arguments": {
+     "projectId": "project:linear",
+     "key": "ENG-1"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "link_pull_request",
+    "arguments": {
+     "url": "https://github.com/example/parity/pull/3"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "link_pull_request",
+    "arguments": {
+     "repository": "example/parity",
+     "number": 3
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "link_pull_requests",
+    "arguments": {
+     "urls": [
+      "https://github.com/example/parity/pull/3",
+      "https://bitbucket.org/example/repo/pull-requests/8",
+      "https://bitbucket.org/example/repo/pull-requests/8",
+      "invalid"
+     ]
+    }
+   }
+  },
+  {
+   "sleep": 0.2
+  },
+  {
+   "mcp": {
+    "tool": "list_thread_pull_requests",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "watch_pull_request",
+    "arguments": {
+     "url": "https://github.com/example/parity/pull/3"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "unwatch_pull_request",
+    "arguments": {
+     "url": "https://github.com/example/parity/pull/3"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "unlink_pull_requests",
+    "arguments": {
+     "states": [
+      "closed"
+     ]
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "unlink_pull_request",
+    "arguments": {
+     "url": "https://bitbucket.org/example/repo/pull-requests/8"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "unlink_pull_request",
+    "arguments": {
+     "url": "https://github.com/example/parity/pull/3"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "read_pull_request_guide",
+    "arguments": {
+     "url": "https://github.com/example/parity/pull/3"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "write_pull_request_guides",
+    "arguments": {
+     "pullRequests": [
+      {
+       "url": "invalid"
+      },
+      {
+       "url": "https://github.com/example/parity/pull/3"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "mcp": {
     "tool": "list_scheduled_tasks",
     "arguments": {}
    }
