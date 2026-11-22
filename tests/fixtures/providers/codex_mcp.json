@@ -163,6 +163,26 @@
    }
   },
   {
+   "mcp": {
+    "tool": "t3_worktree_status",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_preview_list",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_preview_close",
+    "arguments": {
+     "tabId": "tab_missing"
+    }
+   }
+  },
+  {
    "send": {
     "method": "item/started",
     "params": {

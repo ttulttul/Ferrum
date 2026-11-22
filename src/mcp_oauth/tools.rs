@@ -51,29 +51,10 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     // Delegation (batch 4b).
     ("delegate_task", &[]),
     ("task_status", &[]),
-    // Worktree, preview, device and HTML tools (agent-tools batch).
+    // Worktree and preview session controls (agent-tools audit).
     ("t3_worktree_status", &[]),
-    ("t3_worktree_handoff", &[]),
     ("t3_preview_list", &[]),
     ("t3_preview_close", &[]),
-    ("preview_dialog", &[]),
-    ("preview_status", &[]),
-    ("preview_open", &[]),
-    ("preview_navigate", &[]),
-    ("preview_resize", &[]),
-    ("preview_set_appearance", &[]),
-    ("preview_act", &[]),
-    ("preview_evaluate", &[]),
-    ("preview_wait_for", &[]),
-    ("preview_snapshot", &[]),
-    ("preview_recording_start", &[]),
-    ("preview_recording_stop", &[]),
-    ("device_list", &[]),
-    ("device_open", &[]),
-    ("device_close", &[]),
-    ("device_screenshot", &[]),
-    ("html_preview", &[]),
-    ("html_render", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -121,29 +102,10 @@ const SERVED: &[&str] = &[
     // Delegation (batch 4b).
     "delegate_task",
     "task_status",
-    // Worktree, preview, device and HTML tools (agent-tools batch).
+    // Worktree and preview session controls (agent-tools audit).
     "t3_worktree_status",
-    "t3_worktree_handoff",
     "t3_preview_list",
     "t3_preview_close",
-    "preview_dialog",
-    "preview_status",
-    "preview_open",
-    "preview_navigate",
-    "preview_resize",
-    "preview_set_appearance",
-    "preview_act",
-    "preview_evaluate",
-    "preview_wait_for",
-    "preview_snapshot",
-    "preview_recording_start",
-    "preview_recording_stop",
-    "device_list",
-    "device_open",
-    "device_close",
-    "device_screenshot",
-    "html_preview",
-    "html_render",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -674,27 +636,8 @@ pub(super) async fn call<S: McpHost>(
         "delegate_task" => delegation::delegate_task(host, caller, args).await,
         "task_status" => delegation::task_status(host, caller, args).await,
         "t3_worktree_status" => agent_tools::worktree_status(host, caller).await,
-        "t3_worktree_handoff" => agent_tools::worktree_handoff(host, caller, args).await,
         "t3_preview_list" => agent_tools::preview_list(host, caller, args).await,
         "t3_preview_close" => agent_tools::preview_close(host, caller, args).await,
-        name @ ("preview_dialog"
-        | "preview_status"
-        | "preview_open"
-        | "preview_navigate"
-        | "preview_resize"
-        | "preview_set_appearance"
-        | "preview_act"
-        | "preview_evaluate"
-        | "preview_wait_for"
-        | "preview_snapshot"
-        | "preview_recording_start"
-        | "preview_recording_stop") => agent_tools::preview_call(host, caller, name, args).await,
-        name @ ("device_list" | "device_open" | "device_close" | "device_screenshot") => {
-            agent_tools::device(host, caller, name, args).await
-        }
-        name @ ("html_preview" | "html_render") => {
-            agent_tools::html(host, caller, name, args).await
-        }
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }
