@@ -292,6 +292,10 @@ pub(crate) struct CommandReceipt {
 pub struct Store {
     pub projects: HashMap<String, Project>,
     pub(crate) project_rows: indexmap::IndexMap<String, serde_json::Value>,
+    /// Projects read from `statev2.sqlite` rather than committed here. The
+    /// reference already folded their settings into `settings.json` when it
+    /// migrated, so `server.getSettings` does not fold them again.
+    pub(crate) stored_project_ids: std::collections::HashSet<String>,
     pub(crate) project_receipts: HashMap<String, (String, String)>,
     pub(crate) deleted_thread_ids: std::collections::HashSet<String>,
     pub(crate) command_receipts: HashMap<String, (String, u64)>,
@@ -300,6 +304,17 @@ pub struct Store {
     pub(crate) turn_positions: HashMap<Uuid, crate::workspace::StreamPosition>,
 }
 impl Store {
+    /// The project rows whose fields fold into the settings clients read:
+    /// those committed here. The reference already folded the ones read from
+    /// `statev2.sqlite` into `settings.json` when it migrated its settings.
+    pub(crate) fn settings_project_rows(&self) -> indexmap::IndexMap<String, serde_json::Value> {
+        self.project_rows
+            .iter()
+            .filter(|(id, _)| !self.stored_project_ids.contains(*id))
+            .map(|(id, row)| (id.clone(), row.clone()))
+            .collect()
+    }
+
     pub(crate) fn apply_record(&mut self, record: &ServerEvent) {
         self.apply_at(&record.event, record.at);
         if let Some(receipt) = &record.receipt {

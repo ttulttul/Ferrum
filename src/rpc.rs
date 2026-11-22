@@ -454,7 +454,7 @@ async fn run_call(
             let result = state.settings.client(references);
             match result {
                 Ok(mut settings) => {
-                    let rows = state.store.read().await.project_rows.clone();
+                    let rows = state.store.read().await.settings_project_rows();
                     fold_project_rows_into_settings(&mut settings, &rows);
                     Ok(settings)
                 }

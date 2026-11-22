@@ -344,6 +344,7 @@ pub fn load_into(conn: &Connection, store: &mut crate::Store) -> rusqlite::Resul
             );
             loaded.projects += 1;
         }
+        store.stored_project_ids.insert(id.clone());
         store.project_rows.insert(id, row);
     }
     for id in read::thread_ids(conn)? {
@@ -462,6 +463,33 @@ mod tests {
             assert!(error.contains("was not changed"), "{error}");
             assert_eq!(snapshot(&path), before);
         }
+    }
+
+    #[test]
+    fn projects_read_from_the_database_stay_out_of_the_settings_fold() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = open(home.path()).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at, auto_pull, has_custom_title)
+               VALUES ('project:stored', 'S', '/tmp/s', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 1, 0);",
+        )
+        .unwrap();
+        let mut store = crate::Store::default();
+        store.project_rows.insert(
+            "project:own".into(),
+            serde_json::json!({"id": "project:own"}),
+        );
+        let loaded = load_into(&conn, &mut store).unwrap();
+        assert_eq!(
+            loaded,
+            Loaded {
+                projects: 1,
+                threads: 0
+            }
+        );
+        assert!(store.projects.contains_key("project:stored"));
+        let folded: Vec<_> = store.settings_project_rows().into_keys().collect();
+        assert_eq!(folded, vec!["project:own".to_string()]);
     }
 
     #[test]
