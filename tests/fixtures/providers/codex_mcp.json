@@ -1,0 +1,955 @@
+{
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "codexHome": "/tmp/codex-home",
+     "platformFamily": "unix",
+     "platformOs": "linux",
+     "userAgent": "codex_cli_rs/0.170.0"
+    }
+   }
+  },
+  {
+   "expect": "thread/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     },
+     "model": "gpt-6.1-sol",
+     "cwd": "/workspace",
+     "approvalPolicy": "never",
+     "sandbox": {
+      "type": "dangerFullAccess"
+     },
+     "approvalsReviewer": "user",
+     "modelProvider": "openai"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "thread/started",
+    "params": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     }
+    }
+   }
+  },
+  {
+   "expect": "turn/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": null,
+      "durationMs": null
+     }
+    },
+    "emittedAtMs": 1795225881428
+   }
+  },
+  {
+   "mcp": {
+    "method": "tools/list"
+   }
+  },
+  {
+   "mcp": {
+    "tool": "orchestrator_capabilities",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_list",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_environment_read",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_list",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_launch",
+    "arguments": {
+     "title": "Child",
+     "message": "Help",
+     "interactionMode": "plan",
+     "environmentId": "env-not-linked"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_read",
+    "arguments": {
+     "threadId": "thread-missing"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "01a1fbcd-0c79-7d90-b0b3-d0a56a423ddc",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "Run the shell command `echo hi` and then create a file named notes.txt containing the word hello. Then reply with one short sentence.",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225881722,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225881722
+    },
+    "emittedAtMs": 1795225881722
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "01a1fbcd-0c79-7d90-b0b3-d0a56a423ddc",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "Run the shell command `echo hi` and then create a file named notes.txt containing the word hello. Then reply with one short sentence.",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225881722,
+      "completedAtMs": 1795225881722
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225881722
+    },
+    "emittedAtMs": 1795225881725
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "reasoning",
+      "id": "rs_01060d5b32fa64b6016b00f91af37c87d2956c6bfafb7d9d10",
+      "summary": [],
+      "content": [],
+      "startedAtMs": 1795225883152,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225883152
+    },
+    "emittedAtMs": 1795225883152
+   }
+  },
+  {
+   "send": {
+    "method": "item/reasoning/summaryPartAdded",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "rs_01060d5b32fa64b6016b00f91af37c87d2956c6bfafb7d9d10",
+     "summaryIndex": 0
+    },
+    "emittedAtMs": 1795225886180
+   }
+  },
+  {
+   "send": {
+    "method": "item/reasoning/summaryTextDelta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "rs_01060d5b32fa64b6016b00f91af37c87d2956c6bfafb7d9d10",
+     "delta": "**Verifying git repository and fetching updates**",
+     "summaryIndex": 0
+    },
+    "emittedAtMs": 1795225886181
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "reasoning",
+      "id": "rs_01060d5b32fa64b6016b00f91af37c87d2956c6bfafb7d9d10",
+      "summary": [
+       "**Verifying git repository and fetching updates**"
+      ],
+      "content": [],
+      "startedAtMs": 1795225883152,
+      "completedAtMs": 1795225886185
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225886185
+    },
+    "emittedAtMs": 1795225886187
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+      "text": "",
+      "phase": "commentary",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225886191,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225886191
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": "I"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": "\u2019ll"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " run"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " the"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " requested"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " command"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " and"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " create"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " the"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " file"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " now"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": "."
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+      "text": "I\u2019ll run the requested command and create the file now.",
+      "phase": "commentary",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225886191,
+      "completedAtMs": 1795225886446
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": 13,
+     "completedAtMs": 1795225886446
+    },
+    "emittedAtMs": 1795225886447
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "commandExecution",
+      "id": "exec-725cbd6a-6ee5-4236-87ad-04230237f609",
+      "pluginId": null,
+      "scriptPath": null,
+      "command": "/bin/bash -lc \"echo hi && printf 'hello' > notes.txt\"",
+      "cwd": "/workspace",
+      "processId": "29302",
+      "source": "unifiedExecStartup",
+      "status": "inProgress",
+      "commandActions": [
+       {
+        "type": "unknown",
+        "command": "echo hi && printf 'hello' > notes.txt"
+       }
+      ],
+      "aggregatedOutput": null,
+      "exitCode": null,
+      "durationMs": null,
+      "startedAtMs": 1795225887656,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225887656
+    },
+    "emittedAtMs": 1795225887657
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "commandExecution",
+      "id": "exec-725cbd6a-6ee5-4236-87ad-04230237f609",
+      "pluginId": null,
+      "scriptPath": null,
+      "command": "/bin/bash -lc \"echo hi && printf 'hello' > notes.txt\"",
+      "cwd": "/workspace",
+      "processId": "29302",
+      "source": "unifiedExecStartup",
+      "status": "completed",
+      "commandActions": [
+       {
+        "type": "unknown",
+        "command": "echo hi && printf 'hello' > notes.txt"
+       }
+      ],
+      "aggregatedOutput": "hi\n",
+      "exitCode": 0,
+      "durationMs": 0,
+      "startedAtMs": 1795225887656,
+      "completedAtMs": 1795225887656
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225887656
+    },
+    "emittedAtMs": 1795225887660
+   }
+  },
+  {
+   "send": {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "tokenUsage": {
+      "total": {
+       "totalTokens": 14762,
+       "inputTokens": 14572,
+       "cachedInputTokens": 0,
+       "cacheWriteInputTokens": 0,
+       "outputTokens": 190,
+       "reasoningOutputTokens": 110
+      },
+      "last": {
+       "totalTokens": 14762,
+       "inputTokens": 14572,
+       "cachedInputTokens": 0,
+       "cacheWriteInputTokens": 0,
+       "outputTokens": 190,
+       "reasoningOutputTokens": 110
+      },
+      "modelContextWindow": 475000
+     }
+    },
+    "emittedAtMs": 1795225887675
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "reasoning",
+      "id": "rs_01060d5b32fa64b6016b00f92104bc87d2a438e112cabdb8d2",
+      "summary": [],
+      "content": [],
+      "startedAtMs": 1795225889090,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225889090
+    },
+    "emittedAtMs": 1795225889090
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "reasoning",
+      "id": "rs_01060d5b32fa64b6016b00f92104bc87d2a438e112cabdb8d2",
+      "summary": [],
+      "content": [],
+      "startedAtMs": 1795225889090,
+      "completedAtMs": 1795225889317
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225889317
+    },
+    "emittedAtMs": 1795225889319
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+      "text": "",
+      "phase": "final_answer",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225889320,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225889320
+    },
+    "emittedAtMs": 1795225889320
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": "Ran"
+    },
+    "emittedAtMs": 1795225889320
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": " `"
+    },
+    "emittedAtMs": 1795225889388
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": "echo"
+    },
+    "emittedAtMs": 1795225889388
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": " hi"
+    },
+    "emittedAtMs": 1795225889388
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": "`"
+    },
+    "emittedAtMs": 1795225889388
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": " and"
+    },
+    "emittedAtMs": 1795225889475
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": " created"
+    },
+    "emittedAtMs": 1795225889475
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": " `"
+    },
+    "emittedAtMs": 1795225889475
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": "notes"
+    },
+    "emittedAtMs": 1795225889475
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": ".txt"
+    },
+    "emittedAtMs": 1795225889544
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": "`"
+    },
+    "emittedAtMs": 1795225889544
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": " containing"
+    },
+    "emittedAtMs": 1795225889544
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": " `"
+    },
+    "emittedAtMs": 1795225889544
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": "hello"
+    },
+    "emittedAtMs": 1795225889603
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+     "delta": "`."
+    },
+    "emittedAtMs": 1795225889603
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+      "text": "Ran `echo hi` and created `notes.txt` containing `hello`.",
+      "phase": "final_answer",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225889320,
+      "completedAtMs": 1795225889708
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": 16,
+     "completedAtMs": 1795225889708
+    },
+    "emittedAtMs": 1795225889719
+   }
+  },
+  {
+   "send": {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "tokenUsage": {
+      "total": {
+       "totalTokens": 29656,
+       "inputTokens": 29435,
+       "cachedInputTokens": 14336,
+       "cacheWriteInputTokens": 0,
+       "outputTokens": 221,
+       "reasoningOutputTokens": 120
+      },
+      "last": {
+       "totalTokens": 14894,
+       "inputTokens": 14863,
+       "cachedInputTokens": 14336,
+       "cacheWriteInputTokens": 0,
+       "outputTokens": 31,
+       "reasoningOutputTokens": 10
+      },
+      "modelContextWindow": 475000
+     }
+    },
+    "emittedAtMs": 1795225889721
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "fileChange",
+      "id": "exec-f37cdcfe-c6e6-4bbe-83fe-7bd72cd445ed",
+      "changes": [
+       {
+        "path": "/workspace/notes.txt",
+        "kind": {
+         "type": "update",
+         "move_path": null
+        },
+        "diff": "@@ -1 +1,2 @@\n-hello\n\\ No newline at end of file\n+hello\n+world\n"
+       }
+      ],
+      "status": "inProgress",
+      "startedAtMs": 1795225908239,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225908239
+    },
+    "emittedAtMs": 1795225908239
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "fileChange",
+      "id": "exec-f37cdcfe-c6e6-4bbe-83fe-7bd72cd445ed",
+      "changes": [
+       {
+        "path": "/workspace/notes.txt",
+        "kind": {
+         "type": "update",
+         "move_path": null
+        },
+        "diff": "@@ -1 +1,2 @@\n-hello\n\\ No newline at end of file\n+hello\n+world\n"
+       }
+      ],
+      "status": "completed",
+      "startedAtMs": 1795225908239,
+      "completedAtMs": 1795225908239
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225908239
+    },
+    "emittedAtMs": 1795225908240
+   }
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [
+       {
+        "type": "agentMessage",
+        "moderation": null,
+        "id": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+        "text": "Ran `echo hi` and created `notes.txt` containing `hello`.",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null,
+        "startedAtMs": 1795225889320,
+        "completedAtMs": 1795225889708
+       }
+      ],
+      "itemsView": "summary",
+      "status": "completed",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": 1795225889,
+      "durationMs": 8490
+     }
+    },
+    "emittedAtMs": 1795225889755
+   }
+  }
+ ]
+}

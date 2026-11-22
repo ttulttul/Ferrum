@@ -75,6 +75,9 @@ FIXTURES = ROOT / "tests/fixtures/providers"
 # Each scenario: the thread's provider instance and model, and the recorded session its CLI replays.
 PROVIDER_SCENARIOS = [
     {"name": "codex turn", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"},
+    # The turn calls T3's tools on the MCP server the server gave its CLI.
+    {"name": "codex agent mcp", "instance": "codex", "model": "fixture", "scenario": "codex_mcp.json"},
+    {"name": "claude agent mcp", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_mcp.json"},
     {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
     # Runtime requests: what each server asks the user, and what it answers the CLI.
     {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
@@ -487,19 +490,94 @@ def cli_approvals(log):
 
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+BEARER = re.compile(r"Bearer [A-Za-z0-9_\-.]+")
+MCP_URL = re.compile(r"http://127\.0\.0\.1:\d+/mcp")
+
+
+# Of `orchestrator_capabilities`, what the calling thread decides. Its provider catalogue and
+# feature flags describe what each server implements, which is compared elsewhere.
+CALLER_CAPABILITIES = ("parentThreadId", "inheritedProviderInstanceId", "inheritedModel", "inheritedOptions",
+                       "runtimeMode", "interactionMode")
+
+
+def comparable_mcp(original, rust):
+    """Both servers' agent MCP records, comparable: Rust serves some of the reference's agent
+    tools, so its `tools/list` must hold only tools the reference lists, defined the same; a
+    thread's latest run id differs in form (the shared store gives Rust the reference's)."""
+    def shape(lines, listed=None):
+        out = []
+        for line in lines:
+            if not line.startswith("{"):
+                out.append(line)
+                continue
+            record = json.loads(line)
+            answer = record.get("answer")
+            request = record.get("request", {})
+            if request.get("method") == "tools/list" and isinstance(answer, dict):
+                tools = {t["name"]: t for t in (answer.get("result") or {}).get("tools", [])}
+                record["answer"] = {name: tools.get(name, "<not listed>") for name in sorted(listed or tools)}
+            elif request.get("tool") == "orchestrator_capabilities" and isinstance(answer, dict) \
+                    and isinstance(answer.get("content"), dict) and not answer.get("isError"):
+                answer["content"] = {k: answer["content"].get(k) for k in CALLER_CAPABILITIES}
+            text = re.sub(r'"latestRunId": "[^"]*"', '"latestRunId": "<run>"', json.dumps(record, sort_keys=True))
+            out.append(text)
+        return out
+    listed = None
+    for line in rust:
+        if line.startswith("{") and json.loads(line).get("request", {}).get("method") == "tools/list":
+            listed = [t["name"] for t in (json.loads(line).get("answer") or {}).get("result", {}).get("tools", [])]
+    return shape(original, listed), shape(rust, listed)
+
+
+def agent_mcp(log, root):
+    """The control requests that hand Claude Code its MCP servers, and each call the CLI made to
+    the T3 MCP server it was given, with the answer; ids, times, ports and tokens masked."""
+    def mask(value):
+        if isinstance(value, str):
+            value = MCP_URL.sub("http://127.0.0.1:<port>/mcp", BEARER.sub("Bearer <token>", value))
+            for server in ("original", "rust"):
+                value = value.replace(f"{root}/{server}", "<home>/<server>")
+            value = value.replace(str(root), "<home>")
+            value = re.sub(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z", "<time>", value)
+            return UUID.sub("<uuid>", value)
+        if isinstance(value, list):
+            return [mask(item) for item in value]
+        if isinstance(value, dict):
+            return {key: mask(item) for key, item in value.items()}
+        return value
+    out = []
+    for line in (Path(log).read_text().splitlines() if Path(log).exists() else []):
+        with contextlib.suppress(ValueError):
+            message = json.loads(line)
+            if (message.get("request") or {}).get("subtype") == "mcp_set_servers":
+                out.append(f"mcp_set_servers {json.dumps(mask(message['request']), sort_keys=True)}")
+    calls = Path(str(log) + ".mcp")
+    for line in (calls.read_text().splitlines() if calls.exists() else []):
+        record = json.loads(line)
+        answer = record.get("answer")
+        if isinstance(answer, dict):
+            result = answer.get("result") or {}
+            # A tool's answer is its text content; structuredContent repeats it.
+            if isinstance(result, dict) and "content" in result:
+                text = "".join(part.get("text", "") for part in result["content"])
+                with contextlib.suppress(ValueError):
+                    text = json.loads(text)
+                answer = {"isError": result.get("isError", False), "content": text}
+        out.append(json.dumps(mask({**record, "answer": answer}), sort_keys=True))
+    return out
 
 
 def cli_launch(log, root):
     """How a server launched the fake CLI for the turn: its arguments, the environment it set,
     and the Codex initialize, thread and turn parameters, then the initialize parameters of its
-    other app-servers, with generated ids and the server's temporary home masked. The
-    reference's own agent MCP server (`mcp__t3-code__*`, `mcp_servers.t3-code*`) and the
-    orchestration context that describes its tools are left out: Rust serves no agent MCP
-    tools, so it does not offer them."""
+    other app-servers, with generated ids, the server's temporary home, the agent MCP server's
+    port and its bearer token masked. The orchestration context that describes the reference's
+    agent tools is left out: Rust serves only some of them."""
     def mask(value):
         if isinstance(value, str):
             for server in ("original", "rust"):
                 value = value.replace(f"{root}/{server}", "<home>/<server>")
+            value = MCP_URL.sub("http://127.0.0.1:<port>/mcp", BEARER.sub("Bearer <token>", value))
             return UUID.sub("<uuid>", value.replace(str(root), "<home>"))
         if isinstance(value, list):
             return [mask(item) for item in value]
@@ -518,7 +596,7 @@ def cli_launch(log, root):
         # Claude Code probes at startup, not for a turn.
         if "--no-session-persistence" in entry["argv"]:
             continue
-        argv = [arg for arg in entry["argv"] if "mcp__t3-code" not in arg]
+        argv = entry["argv"]
         env = {k: v for k, v in entry["env"].items() if k != "T3CODE_HOME"}
         launches[entry.get("pid")] = f"launch {json.dumps(mask(argv))} env {json.dumps(mask(env), sort_keys=True)}"
         order.append(entry.get("pid"))
@@ -539,9 +617,6 @@ def cli_launch(log, root):
             params = dict(message.get("params") or {})
             params.pop("input", None)
             params.pop("additionalContext", None)
-            config = params.get("config")
-            if isinstance(config, dict):
-                params["config"] = {k: v for k, v in config.items() if not k.startswith("mcp_servers.t3-code")}
             calls.append(f"{method} {json.dumps(mask(params), sort_keys=True)}")
     session = sessions[-1] if sessions else None
     # Claude Code has no thread/start: its turn is the last CLI launched.
@@ -834,6 +909,9 @@ def compare_turn(original, rust):
     launch = [original.get("launch", []), rust.get("launch", [])]
     if launch[0] != launch[1]:
         problems["cli launch"] = [f"original {line}" for line in launch[0]] + [f"rust     {line}" for line in launch[1]]
+    mcp = comparable_mcp(original.get("mcp", []), rust.get("mcp", []))
+    if mcp[0] != mcp[1]:
+        problems["agent mcp"] = [f"original {line}" for line in mcp[0]] + [f"rust     {line}" for line in mcp[1]]
     cli = [original.get("cli", []), rust.get("cli", [])]
     if cli[0] != cli[1]:
         problems["cli approvals"] = [f"original {line}" for line in cli[0]] + [f"rust     {line}" for line in cli[1]]
@@ -976,6 +1054,7 @@ def provider_turns(args, credentials):
                         outcomes[name]["status"] = provider_status(url, cookie, scenario["instance"], temporary)
                 outcomes[name]["cli"] = cli_approvals(log)
                 outcomes[name]["launch"] = cli_launch(log, temporary)
+                outcomes[name]["mcp"] = agent_mcp(log, temporary)
         if args.dump:
             for name, outcome in outcomes.items():
                 slug = scenario["name"].replace(" ", "-")

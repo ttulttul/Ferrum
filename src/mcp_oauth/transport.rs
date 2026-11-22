@@ -115,7 +115,26 @@ pub(super) async fn handle<S: McpHost>(
             let limit = h
                 .get(super::tools::MODE_LIMIT_HEADER)
                 .and_then(|v| v.to_str().ok());
-            let caller = super::tools::Caller::new(granted, limit);
+            let scope = granted.thread.clone();
+            let mut caller = super::tools::Caller::new(granted, limit);
+            if let Some(scope) = &scope {
+                caller.thread =
+                    super::on_this_thread(super::tools::thread_caller(&*s, scope)).await;
+                // A deleted thread's credential ends with it.
+                if caller.thread.is_none() {
+                    s.oauth().revoke_thread_credential(&scope.thread_id);
+                }
+                if caller.thread.is_none() && super::tools::needs_caller(name) {
+                    let super::tools::Refusal::Failure(code, msg) =
+                        super::tools::calling_thread_missing()
+                    else {
+                        unreachable!()
+                    };
+                    return body(
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":json!({"_tag":"OrchestratorMcpFailure","code":code,"message":msg}).to_string()}],"isError":true}}),
+                    );
+                }
+            }
             let outcome = match super::tools::unknown_arguments(name, a)
                 .and_then(|()| super::tools::linked_target(&*s, name, a))
             {

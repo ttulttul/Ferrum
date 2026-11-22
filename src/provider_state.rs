@@ -467,6 +467,7 @@ pub(crate) fn provider_turn(
             .to_owned(),
         extra_dirs: Vec::new(),
         claude_settings: claude_launch.1,
+        mcp: None,
         context_window: (driver == provider::CLAUDE_AGENT)
             .then(|| crate::model_manifest::claude_context_window(manifest, selection))
             .flatten(),

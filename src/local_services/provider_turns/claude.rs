@@ -10,6 +10,9 @@ use crate::workspace::provider::{
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Value};
+
+/// A T3 tool such as `request_secret` can wait an hour; Claude's MCP timeout stays above that.
+const T3_MCP_TOOL_TIMEOUT_MS: u64 = 65 * 60 * 1000;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -166,6 +169,10 @@ impl<'a> Attempt<'a> {
         if let Some(resume) = resume {
             args.push(format!("--resume={resume}"));
         }
+        // T3's own tools run without asking, as the reference allows them.
+        if provider.mcp.is_some() {
+            args.push("--allowedTools=mcp__t3-code__*".into());
+        }
         args.push("--tools=default".into());
         args.push(format!("--permission-mode={mode}"));
         if mode == "bypassPermissions" {
@@ -273,6 +280,22 @@ impl<'a> Attempt<'a> {
         spec: &TurnSpec,
         cancel: &mut Option<oneshot::Receiver<()>>,
     ) -> Outcome {
+        // T3's MCP server, acting as the thread, as the reference's query
+        // sets it (`setMcpServers`) before the prompt.
+        if let Some(mcp) = spec.provider.as_ref().and_then(|p| p.mcp.as_ref()) {
+            let request_id = format!("t3-mcp-{}", self.next_control);
+            self.next_control += 1;
+            let request = json!({"type": "control_request", "request_id": request_id,
+            "request": {"subtype": "mcp_set_servers", "servers": {"t3-code": {
+                "type": "http",
+                "url": mcp.url,
+                "headers": {"Authorization": mcp.authorization},
+                "timeout": T3_MCP_TOOL_TIMEOUT_MS,
+            }}}});
+            if self.cli.write(&request).await.is_err() {
+                return self.closed().await;
+            }
+        }
         // A plain prompt goes as a string, as the reference's
         // makeClaudeUserMessage builds it.
         let content = json!(spec.prompt);

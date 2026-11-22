@@ -69,6 +69,19 @@ pub struct ProviderTurn {
     /// Claude Code `--settings` the model selection sets (`fastMode`).
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub claude_settings: Value,
+    /// The T3 MCP server the CLI is given, acting as the thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpServer>,
+}
+
+/// Where a provider CLI reaches T3's tools for its thread
+/// (`McpProviderSessionConfig` in the reference).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct McpServer {
+    /// `http://<host>:<port>/mcp` on this server.
+    pub url: String,
+    /// `Bearer <token>`: the thread's credential.
+    pub authorization: String,
 }
 
 impl ProviderTurn {

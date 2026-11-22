@@ -26,8 +26,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import secrets
+import os
 import shlex
 import sqlite3
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import threading
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -245,6 +248,11 @@ def main():
     parser.add_argument("--original-command", required=True)
     parser.add_argument("--rust-command", required=True)
     parser.add_argument("--show", action="store_true", help="print each answer as the reference gave it")
+    parser.add_argument("--reference-root", type=Path,
+                        help="checkout of the pinned reference with its client runtime installed: also link to "
+                             "each server with the reference's own sign-in and MCP client, whose schemas decode "
+                             "every answer (scripts/peer_link_sign_in.mjs)")
+    parser.add_argument("--node", default="node")
     args = parser.parse_args()
     servers = {"reference": args.original_command, "rust": args.rust_command}
     checks = []
@@ -404,7 +412,43 @@ def main():
                 normal = {("reference" if k == "reference" else "rust"): v for k, v in both.items()}
                 same(f"{name} (link made on one server, used on the other; peer on {peer_kind})", normal)
 
+    if args.reference_root is not None:
+        decoded = reference_client_steps(args, servers)
+        for index, (expected, actual) in enumerate(zip(decoded["reference"], decoded["rust"])):
+            name = expected.get("name")
+            assert expected.get("ok"), f"the reference's own client failed on the reference: {expected}"
+            same(f"reference client: {name}", {"reference": expected, "rust": actual})
+        assert len(decoded["reference"]) == len(decoded["rust"]), decoded
     print(f"{len(checks)}/{len(checks)} link forwarding checks matched across the reference and the Rust server")
+
+
+def reference_client_steps(args, servers):
+    """Each server's answers to the reference's own "link another machine" client, which decodes
+    every one with the reference's schemas: its sign-in, its MCP handshake, and tool calls made
+    as a linked environment (a client, not a thread), launching and reading a thread in a project.
+    Linked with full access, which registering the project needs."""
+    steps = {}
+    for kind, command in servers.items():
+        with TemporaryDirectory() as tmp, ExitStack() as stack:
+            home = Path(tmp) / "home"
+            set_linked_environments(home, True)
+            secret, key = secrets.token_urlsafe(32), secrets.token_bytes(32)
+            server = Server(stack, command, home, secret, key)
+            project = Path(tmp) / "project"
+            project.mkdir()
+            status, _, body = http(server.url, "POST", "/api/auth/pairing-token",
+                                   encode({"purpose": "peer-link", "access": "full-access"}),
+                                   {"Cookie": server.cookie, "Content-Type": "application/json"})
+            assert status == 200, (status, body)
+            env = {**os.environ, "T3_PEER_LINK_CODE": json.loads(body)["credential"], "T3_PEER_LINK_ACCESS": "full-access",
+                   "T3_PEER_LINK_ROOT": str(project)}
+            done = subprocess.run([args.node, str(Path(__file__).with_name("peer_link_sign_in.mjs")),
+                                   str(args.reference_root), server.url],
+                                  env=env, capture_output=True, text=True, timeout=180)
+            if done.stderr:
+                print(done.stderr[-4000:], file=sys.stderr)
+            steps[kind] = json.loads(done.stdout.strip().splitlines()[-1])["steps"]
+    return steps
 
 
 if __name__ == "__main__":

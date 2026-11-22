@@ -28,6 +28,13 @@ Steps:
   {"stderr": "text"}         write a line to standard error
   {"sleep": seconds}
   {"exit": code}
+  {"mcp": {"tool": "t3_thread_list", "arguments": {...}}}
+                             call a tool on the T3 MCP server the client gave
+                             this CLI (Codex: `mcp_servers.t3-code` in
+                             thread/start; Claude: `mcp_set_servers`), as the
+                             real CLI would; {"mcp": {"method": "tools/list"}}
+                             lists its tools. The request and the answer are
+                             appended to FAKE_PROVIDER_LOG.mcp as JSON.
 
 A request the scenario does not expect is answered from SIDE_REPLIES (or the
 scenario's own "replies" by method), so a client that reads its config or
@@ -41,6 +48,8 @@ import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 
 args = sys.argv[1:]
 log_path = os.environ["FAKE_PROVIDER_LOG"]
@@ -75,6 +84,8 @@ else:
     steps = scenario["steps"]
 
 remembered = {}
+# The T3 MCP server the client configured: {"url", "authorization"}, and its session.
+mcp_server = {}
 
 # Answers to requests a client may make between the scripted ones.
 SIDE_REPLIES = {
@@ -121,9 +132,70 @@ def receive():
     with open(log_path + ".messages", "a") as out:
         out.write(json.dumps({"pid": os.getpid(), "line": line.rstrip("\n")}) + "\n")
     try:
-        return json.loads(line)
+        message = json.loads(line)
     except ValueError:
         return {}
+    note_mcp_server(message)
+    return message
+
+
+def note_mcp_server(message):
+    """Remember the T3 MCP server a client hands its CLI."""
+    if not isinstance(message, dict):
+        return
+    if message.get("method") in ("thread/start", "thread/resume"):
+        server = ((message.get("params") or {}).get("config") or {}).get("mcp_servers.t3-code")
+        if isinstance(server, dict):
+            mcp_server.update(url=server.get("url"),
+                              authorization=(server.get("http_headers") or {}).get("Authorization"))
+    request = message.get("request") or {}
+    if message.get("type") == "control_request" and request.get("subtype") == "mcp_set_servers":
+        server = (request.get("servers") or {}).get("t3-code")
+        if isinstance(server, dict):
+            mcp_server.update(url=server.get("url"), authorization=(server.get("headers") or {}).get("Authorization"))
+
+
+def mcp_post(body):
+    headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+    if mcp_server.get("authorization"):
+        headers["authorization"] = mcp_server["authorization"]
+    if mcp_server.get("session"):
+        headers["mcp-session-id"] = mcp_server["session"]
+        headers["mcp-protocol-version"] = "2025-06-18"
+    request = urllib.request.Request(mcp_server["url"], data=json.dumps(body).encode(), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            status, received, text = response.status, dict(response.headers), response.read().decode()
+    except urllib.error.HTTPError as error:
+        status, received, text = error.code, dict(error.headers), error.read().decode()
+    if "text/event-stream" in received.get("Content-Type", received.get("content-type", "")):
+        text = "".join(line[5:].strip() for line in text.splitlines() if line.startswith("data:"))
+    try:
+        answer = json.loads(text) if text else None
+    except ValueError:
+        answer = text
+    return status, {k.lower(): v for k, v in received.items()}, answer
+
+
+def mcp_call(step):
+    """One call to the client's T3 MCP server, opening a session first."""
+    record = {"request": step}
+    if not mcp_server.get("url"):
+        record["error"] = "no T3 MCP server was configured"
+    else:
+        if not mcp_server.get("session"):
+            status, headers, answer = mcp_post({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake-cli", "version": "1"}}})
+            record["initialize"] = status
+            if status == 200:
+                mcp_server["session"] = headers.get("mcp-session-id")
+                mcp_post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        method = step.get("method", "tools/call")
+        params = {"name": step["tool"], "arguments": step.get("arguments", {})} if method == "tools/call" else {}
+        status, _, answer = mcp_post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+        record.update(status=status, answer=answer)
+    with open(log_path + ".mcp", "a") as out:
+        out.write(json.dumps(record) + "\n")
 
 
 def fill(value):
@@ -196,6 +268,8 @@ while index < len(steps):
         time.sleep(step["sleep"])
     elif "exit" in step:
         sys.exit(step["exit"])
+    elif "mcp" in step:
+        mcp_call(step["mcp"])
 
 while True:
     answer(receive())
