@@ -120,17 +120,6 @@ async fn sync_link<S: McpHost>(host: &Arc<S>, thread: &Value, target: &Value) {
     .await;
 }
 
-fn schedule_link_sync<S: McpHost + 'static>(host: &Arc<S>, thread: &Value, target: &Value) {
-    let host = Arc::clone(host);
-    let thread = thread.clone();
-    let target = target.clone();
-    let runtime = Arc::clone(&host);
-    runtime.spawn(Box::pin(async move {
-        host.sleep(std::time::Duration::from_millis(20)).await;
-        sync_link(&host, &thread, &target).await;
-    }));
-}
-
 async fn batch<S: McpHost>(host: &Arc<S>, thread: &Value, args: &Value, link: bool) -> Outcome {
     let existing = visible(thread);
     let mut changed = Vec::new();
@@ -166,7 +155,6 @@ async fn batch<S: McpHost>(host: &Arc<S>, thread: &Value, args: &Value, link: bo
             group(&mut present, &target, None);
         } else {
             change_link(host, thread, &target, true).await?;
-            schedule_link_sync(host, thread, &target);
             linked_targets.push(target.clone());
             group(&mut changed, &target, None);
         }
@@ -444,7 +432,7 @@ pub(super) async fn call<S: McpHost>(
     if link != existed {
         change_link(host, &row, &t, link).await?;
         if link {
-            schedule_link_sync(host, &row, &t);
+            sync_link(host, &row, &t).await;
         }
     }
     if link {
