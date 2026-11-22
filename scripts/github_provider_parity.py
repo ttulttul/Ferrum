@@ -82,7 +82,8 @@ class Provider(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        self.server.requests.append(f"GET {self.path}")
+        if hasattr(self.server, "requests"):
+            self.server.requests.append(f"GET {self.path}")
         path = urlsplit(self.path).path
         if path == f"/repos/{REPO}/pulls" and hasattr(self.server, "status_rows"):
             head = parse_qs(urlsplit(self.path).query).get("head", [""])[0]
@@ -115,7 +116,8 @@ class Provider(BaseHTTPRequestHandler):
             self.reply(404, {"message": "Unknown fixture path"})
 
     def do_POST(self):
-        self.server.requests.append(f"POST {self.path}")
+        if hasattr(self.server, "requests"):
+            self.server.requests.append(f"POST {self.path}")
         if self.headers.get("transfer-encoding", "").lower() == "chunked":
             chunks = []
             while True:

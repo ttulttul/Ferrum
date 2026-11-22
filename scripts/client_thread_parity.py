@@ -1213,13 +1213,11 @@ def compare_turn(original, rust):
     return problems
 
 
-def print_mcp_length_diagnostics(outcomes, fake_hosts, stderr_paths):
-    """Print enough local state to explain a CI-only missing agent MCP transcript."""
+def print_mcp_diagnostics(outcomes, fake_hosts, stderr_paths):
+    """Print enough state to explain a CI-only agent MCP transcript mismatch."""
     original = outcomes["original"].get("mcp", [])
     rust = outcomes["rust"].get("mcp", [])
-    if len(original) == len(rust):
-        return
-    print(f"agent mcp answer-list length mismatch: original {len(original)} rust {len(rust)}")
+    print(f"agent mcp answer-list counts: original {len(original)} rust {len(rust)}")
     print(f"rust agent mcp full list ({len(rust)} answers):")
     for line in rust:
         print(f"  {line}")
@@ -1364,7 +1362,7 @@ def provider_turns(args, credentials):
                 (args.dump / f"turn-{slug}-{name}.json").write_text(json.dumps(outcome, indent=2, sort_keys=True))
         problems = compare_turn(outcomes["original"], outcomes["rust"])
         if "agent mcp" in problems:
-            print_mcp_length_diagnostics(outcomes, fake_hosts, stderr_paths)
+            print_mcp_diagnostics(outcomes, fake_hosts, stderr_paths)
         expected = set(xfail.get(scenario["name"], {}))
         for check in sorted(set(problems) | expected):
             label = f"{scenario['name']}: {check}"
