@@ -41,6 +41,7 @@ pub struct Config {
     pub bootstrap_credential: String, // what the pairing exchange accepts
     pub cookie_port: u16,             // the port in `t3_session_<port>`
     pub provider_command: Vec<String>,// a turn's command; the prompt follows
+    pub workspace_mcp_endpoint: Option<url::Url>,
 }
 
 pub struct Host {
@@ -97,6 +98,21 @@ The instance's `config.binaryPath`, `config.launchArgs`, `config.homePath`
 and `environment` apply, along with the thread's model and reasoning
 effort. Any other instance runs `Config::provider_command`. The native
 thread or session a turn reports is resumed by the thread's next turn.
+
+Set `Config::workspace_mcp_endpoint` to the URL that reaches this plane's
+`/mcp` route **from agentd**, for example `https://env.example.org/mcp`.
+Use the environment's own trusted deployment configuration for this URL
+and HTTPS when crossing an untrusted network. The same URL must keep
+routing to this environment when the host restarts. The plane gives Codex
+and Claude turns a bearer scoped to their thread and provider instance.
+Agentd receives it with the turn spec over the authenticated workspace
+connection (use WSS across networks). Probes and plain commands receive no
+credential. A host without a reachable MCP route can leave the endpoint
+unset.
+
+The plane keeps the provider session ID and idle timestamp in its private
+documents. Its MCP signing key reproduces the bearer after a restart, so a
+provider still running in agentd can keep using its existing MCP session.
 
 ## The runtime
 

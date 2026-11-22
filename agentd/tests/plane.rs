@@ -2,6 +2,8 @@
 //! run, the turn runs in `t3-agentd` through `RemoteWorkspace`, and its
 //! output lands in the plane's event log, also across a server restart in
 //! the middle of the turn.
+mod support;
+
 use axum::http::HeaderMap;
 use serde_json::{json, Value};
 use std::{
@@ -142,6 +144,17 @@ impl Server {
         log: &SharedLog,
         command: Vec<String>,
     ) -> Self {
+        Self::start_at(epoch, url, documents, log, command, None).await
+    }
+
+    async fn start_at(
+        epoch: u64,
+        url: &str,
+        documents: &Arc<MemoryStore>,
+        log: &SharedLog,
+        command: Vec<String>,
+        address: Option<std::net::SocketAddr>,
+    ) -> Self {
         let runtime = Arc::new(StoppableRuntime::default());
         let workspace = RemoteWorkspace::new(epoch, None);
         let plane = ControlPlane::open(
@@ -151,6 +164,8 @@ impl Server {
                 bootstrap_credential: "secret".into(),
                 cookie_port: 3773,
                 provider_command: command,
+                workspace_mcp_endpoint: address
+                    .map(|addr| format!("http://{addr}/mcp").parse().unwrap()),
             },
             documents.clone(),
             Box::new(log.clone()),
@@ -234,6 +249,7 @@ async fn wait_until(mut ready: impl FnMut() -> bool) {
 
 /// agentd serving `root`, and its URL.
 async fn agentd(dir: &std::path::Path, root: &std::path::Path) -> String {
+    support::isolate_host();
     let local = Arc::new(LocalWorkspace::open(&dir.join("state")).unwrap());
     let agentd = Agentd::new(
         local,
@@ -452,6 +468,58 @@ async fn a_claude_turn_projects_what_a_client_renders() {
     provider_turn("claudeAgent", "claude_turn.json").await;
 }
 
+/// The provider keeps running in agentd. Leave its first HTTP call queued on
+/// the host listener until the replacement plane is ready to authenticate it.
+#[tokio::test]
+async fn remote_providers_can_call_mcp_as_their_thread_across_a_plane_restart() {
+    for (driver, scenario) in [
+        ("codex", "codex_mcp.json"),
+        ("claudeAgent", "claude_mcp.json"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let url = agentd(dir.path(), &root).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = Some(listener.local_addr().unwrap());
+        let documents = Arc::new(MemoryStore::new());
+        let mut settings = fake_cli_settings(&fixture(scenario), &dir.path().join("cli.jsonl"));
+        settings["providerInstances"]["work"] = settings["providerInstances"][driver].clone();
+        write_settings(&documents, &settings);
+        let log = SharedLog::default();
+        let server = Server::start_at(1, &url, &documents, &log, Vec::new(), address).await;
+        server
+            .start_thread(root.to_str().unwrap(), "work", "List my threads")
+            .await;
+        wait_until(|| log.provider_events() > 0).await;
+        drop(server);
+
+        let resumed = Server::start_at(2, &url, &documents, &log, Vec::new(), address).await;
+        let router = resumed.plane.router();
+        let http = tokio::spawn(async move { axum::serve(listener, router).await });
+        wait_until(|| log.run_status().is_some()).await;
+        assert_eq!(log.run_status().as_deref(), Some("completed"));
+        let calls = std::fs::read_to_string(dir.path().join("cli.jsonl.mcp")).unwrap();
+        let calls: Vec<Value> = calls
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let result = |tool: &str| {
+            let call = calls.iter().find(|c| c["request"]["tool"] == tool).unwrap();
+            assert_eq!(call["status"], 200);
+            assert_eq!(call["answer"]["result"]["isError"], false);
+            &call["answer"]["result"]["structuredContent"]
+        };
+        assert_eq!(result("t3_thread_list")["projectId"], "p1");
+        assert_eq!(result("t3_thread_list")["currentThreadId"], "t1");
+        assert_eq!(
+            result("orchestrator_capabilities")["inheritedProviderInstanceId"],
+            "work"
+        );
+        http.abort();
+    }
+}
+
 #[tokio::test]
 async fn stopping_a_thread_interrupts_its_provider_turn() {
     let dir = tempfile::tempdir().unwrap();
@@ -568,6 +636,7 @@ async fn deliveries(server: &Server, connection: &Connection, rounds: usize) -> 
 
 #[tokio::test]
 async fn a_terminal_stream_reports_output_as_it_arrives() {
+    support::enable_test_terminal();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project");
     std::fs::create_dir_all(&root).unwrap();

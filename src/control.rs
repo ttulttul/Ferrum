@@ -73,6 +73,9 @@ pub struct Config {
     /// The executable and leading arguments of a provider turn; the prompt
     /// follows them. Empty for one that echoes the prompt.
     pub provider_command: Vec<String>,
+    /// This environment's /mcp endpoint as reached from its workspace.
+    /// Supplied by the embedding host, independently of incoming requests.
+    pub workspace_mcp_endpoint: Option<url::Url>,
 }
 
 /// What the plane runs on: the host's event loop and the workspace it
@@ -313,12 +316,26 @@ impl ControlPlane {
         log: Box<dyn EventLog + Send>,
         host: Host,
     ) -> anyhow::Result<Arc<Self>> {
+        if let Some(url) = &config.workspace_mcp_endpoint {
+            anyhow::ensure!(
+                matches!(url.scheme(), "https" | "http")
+                    && url.has_host()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none(),
+                "workspace_mcp_endpoint must be an HTTP(S) URL without credentials, query or fragment"
+            );
+        }
         let auth = AuthService::with_bootstrap(config.bootstrap_credential.clone())
             .with_port(config.cookie_port)
             .open_in(documents.clone(), std::path::Path::new(STATE_DIR))?;
         let started_at = auth_service::iso(auth_service::now());
-        let oauth =
+        let mut oauth =
             crate::mcp_oauth::OAuth::open(documents.clone(), std::path::Path::new(STATE_DIR))?;
+        if config.workspace_mcp_endpoint.is_some() {
+            oauth.restore_thread_credentials()?;
+        }
         let state = ControlState::open(auth, documents, log, std::path::Path::new(STATE_DIR))?;
         let signals = Mutex::new(Signals::new(&state, &host.workspace));
         let plane = Arc::new(Self {
@@ -729,17 +746,19 @@ impl ControlPlane {
         run: &crate::Run,
         cwd: String,
         prompt: String,
-    ) -> crate::workspace::TurnSpec {
+    ) -> std::io::Result<crate::workspace::TurnSpec> {
         let provider = {
             let store = self.store.read().await;
-            store.threads.get(&run.thread_id).and_then(|thread| {
-                crate::provider_state::provider_turn(
-                    &self.settings(),
-                    &crate::model_manifest::BUNDLED,
-                    &thread.stored_row(),
-                    &thread.provider,
-                )
-            })
+            crate::provider_state::thread_provider_turn(
+                &self.settings(),
+                &crate::model_manifest::BUNDLED,
+                store.threads.get(&run.thread_id),
+                &self.oauth,
+                self.config
+                    .workspace_mcp_endpoint
+                    .as_ref()
+                    .map(url::Url::as_str),
+            )?
         };
         let mut spec = crate::workspace::TurnSpec {
             prompt,
@@ -760,7 +779,7 @@ impl ControlPlane {
                 };
             }
         }
-        spec
+        Ok(spec)
     }
 
     /// Ask the runtime for the alarm [`next_alarm`](Self::next_alarm) names.
@@ -1418,8 +1437,10 @@ impl crate::orchestration::CommandHost for PlaneCommands {
         let plane = self.plane.clone();
         let runtime = plane.host.runtime.clone();
         runtime.spawn(Box::pin(async move {
-            let spec = plane.turn_spec(&run, cwd, text).await;
-            crate::turn::launch(plane, run, spec, cancel).await
+            match plane.turn_spec(&run, cwd, text).await {
+                Ok(spec) => crate::turn::launch(plane, run, spec, cancel).await,
+                Err(error) => crate::turn::fail(&*plane, &run, error.into()).await,
+            }
         }));
     }
     fn close_guest_thread(&self, _: &str) -> Result<(), String> {
@@ -1629,6 +1650,7 @@ mod tests {
             bootstrap_credential: "secret".into(),
             cookie_port: 3773,
             provider_command: vec!["provider".into()],
+            workspace_mcp_endpoint: None,
         }
     }
 
@@ -2943,6 +2965,10 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
         assert!(start.command.is_empty());
         let provider = start.provider.as_ref().expect("a provider turn");
         assert_eq!(provider.driver, "codex");
+        assert!(
+            provider.mcp.is_none(),
+            "no reachable endpoint was configured"
+        );
         assert_eq!(provider.resume, None);
         assert_eq!(start.prompt, "hello");
         assert_eq!(start.cwd, "/workspace/one");

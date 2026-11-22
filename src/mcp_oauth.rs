@@ -291,6 +291,15 @@ impl OAuth {
             threads: Default::default(),
         })
     }
+    /// agentd can keep a provider running while the control plane is asleep.
+    pub(crate) fn restore_thread_credentials(&mut self) -> std::io::Result<()> {
+        self.threads = thread_credentials::ThreadCredentials::open(
+            self.documents.clone(),
+            self.dir.join("thread-sessions"),
+            self.key,
+        )?;
+        Ok(())
+    }
     fn mac(&self, payload: &str) -> Hmac<Sha256> {
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.key).expect("32-byte HMAC key");
         mac.update(payload.as_bytes());
@@ -452,17 +461,25 @@ impl OAuth {
     }
 
     /// The bearer token `thread_id`'s provider CLI calls `/mcp` with.
-    pub fn thread_credential(&self, thread_id: &str, provider_instance_id: &str) -> String {
+    pub fn thread_credential(
+        &self,
+        thread_id: &str,
+        provider_instance_id: &str,
+    ) -> std::io::Result<String> {
         self.threads
             .for_thread(thread_id, provider_instance_id, now_ms())
     }
     /// A turn of `thread_id` started, so its credential stays live.
     pub fn touch_thread_credential(&self, thread_id: &str) {
-        self.threads.touch(thread_id, now_ms());
+        if let Err(error) = self.threads.touch(thread_id, now_ms()) {
+            tracing::error!(%error, "could not refresh MCP thread credential");
+        }
     }
     /// Ends `thread_id`'s credential.
     pub fn revoke_thread_credential(&self, thread_id: &str) {
-        self.threads.revoke_thread(thread_id);
+        if let Err(error) = self.threads.revoke_thread(thread_id) {
+            tracing::error!(%error, "could not remove MCP thread credential");
+        }
     }
 
     /// Opens an MCP session for the holder of `token` and returns its id.

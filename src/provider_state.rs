@@ -407,6 +407,43 @@ impl ProviderState {
     }
 }
 
+type ProviderLaunch = (ProviderTurn, Vec<(String, String)>);
+
+fn provider_instance_id(row: &Value) -> &str {
+    row["modelSelection"]["instanceId"]
+        .as_str()
+        .or(row["providerInstanceId"].as_str())
+        .unwrap_or(provider::CODEX)
+}
+
+/// Build a real thread's provider launch, including the thread-scoped MCP
+/// server when the host has an address the provider can reach. Model probes
+/// only need the instance settings and use `provider_turn` directly.
+pub(crate) fn thread_provider_turn(
+    settings: &Value,
+    manifest: &Value,
+    thread: Option<&crate::Thread>,
+    oauth: &crate::mcp_oauth::OAuth,
+    endpoint: Option<&str>,
+) -> std::io::Result<Option<ProviderLaunch>> {
+    let Some(thread) = thread else {
+        return Ok(None);
+    };
+    let row = thread.stored_row();
+    let Some((mut provider, env)) = provider_turn(settings, manifest, &row, &thread.provider)
+    else {
+        return Ok(None);
+    };
+    if let Some(endpoint) = endpoint {
+        let token = oauth.thread_credential(&thread.id, provider_instance_id(&row))?;
+        provider.mcp = Some(provider::McpServer {
+            url: endpoint.to_owned(),
+            authorization: format!("Bearer {token}"),
+        });
+    }
+    Ok(Some((provider, env)))
+}
+
 /// How a turn of a thread runs its provider: the CLI of the thread's
 /// provider instance (from `settings.providerInstances`, or the built-in
 /// instance of the same name) with the thread's model selection, resuming
@@ -417,12 +454,9 @@ pub(crate) fn provider_turn(
     manifest: &Value,
     row: &Value,
     state: &ProviderState,
-) -> Option<(ProviderTurn, Vec<(String, String)>)> {
+) -> Option<ProviderLaunch> {
     let selection = &row["modelSelection"];
-    let instance_id = selection["instanceId"]
-        .as_str()
-        .or(row["providerInstanceId"].as_str())
-        .unwrap_or(provider::CODEX);
+    let instance_id = provider_instance_id(row);
     let instance = &settings["providerInstances"][instance_id];
     let driver = instance["driver"].as_str().unwrap_or(instance_id);
     if driver != provider::CODEX && driver != provider::CLAUDE_AGENT {

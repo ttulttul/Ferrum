@@ -103,7 +103,7 @@ pub(crate) fn interrupted(run: &Run) -> Event {
     }
 }
 
-async fn fail<H: TurnHost>(host: &H, run: &Run, error: anyhow::Error) {
+pub(crate) async fn fail<H: TurnHost>(host: &H, run: &Run, error: anyhow::Error) {
     host.cancellations().lock().await.remove(&run.id);
     if host.stopping() {
         return;
