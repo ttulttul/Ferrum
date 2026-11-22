@@ -33,6 +33,14 @@ pub struct ProviderState {
     /// Items a restart cancelled while they ran after their turn (run,
     /// native item id), with when.
     pub cancelled_items: HashMap<(Uuid, String), u64>,
+    /// When a thread change (archive, a new workspace, runtime mode or
+    /// provider) detached the provider session, until a later turn opens
+    /// one: the reference's `provider-session.detached` drops the session's
+    /// binding to the thread.
+    pub session_detached_at: Option<u64>,
+    /// Runs a detach stopped mid-turn: the provider, not the user, ended
+    /// them.
+    pub detached_runs: std::collections::HashSet<Uuid>,
     /// For a thread read from the shared database: the provider turns its
     /// provider thread already ran and the ordinal of the first run on it,
     /// so the turns this server adds continue that numbering.
@@ -144,6 +152,10 @@ impl ProviderState {
     pub(crate) fn apply(&mut self, run: Uuid, event: &ProviderEvent, at: u64) {
         // A turn after a restart runs in a session started again.
         self.session_stopped_at = None;
+        // So does a turn after a detach, but not the detached turn ending.
+        if !self.detached_runs.contains(&run) {
+            self.session_detached_at = None;
+        }
         let driver = match event {
             ProviderEvent::ProviderThread { driver, .. } => driver.clone(),
             _ => self
@@ -398,10 +410,22 @@ impl ProviderState {
         }
     }
 
+    /// A thread change detached the provider session, stopping `runs`.
+    pub(crate) fn detach_session(&mut self, at: u64, runs: &[Uuid]) {
+        self.session_detached_at = Some(at);
+        self.detached_runs.extend(runs.iter().copied());
+        if let Some(thread) = self.thread.as_mut().filter(|t| t.status == "active") {
+            thread.status = "idle";
+            thread.updated_at = at;
+        }
+    }
+
     /// Whether the thread's provider session is open: a turn opened it and
-    /// no restart stopped it since.
+    /// no restart stopped it, nor a thread change detached it, since.
     pub fn session_live(&self) -> bool {
-        self.thread.is_some() && self.session_stopped_at.is_none()
+        self.thread.is_some()
+            && self.session_stopped_at.is_none()
+            && self.session_detached_at.is_none()
     }
 
     /// The run and record of the request `id`.

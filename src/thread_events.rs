@@ -174,14 +174,33 @@ pub fn diff(
     after: &Value,
     occurred_at: &str,
 ) -> Option<Vec<Value>> {
-    diff_with(thread_id, before, after, occurred_at, false)
+    diff_with(thread_id, before, after, occurred_at, false, None)
+}
+
+/// [`diff`] for a commit that detached the thread's provider session for
+/// `reason`: a provider session that went away is
+/// `provider-session.detached`, as the reference names it.
+pub fn diff_detaching(
+    thread_id: &str,
+    before: &Value,
+    after: &Value,
+    occurred_at: &str,
+    reason: &str,
+) -> Option<Vec<Value>> {
+    diff_with(thread_id, before, after, occurred_at, false, Some(reason))
 }
 
 /// [`diff`]'s events for every record that is new or changed, also when
 /// records went away (which the shared database records by deleting their
 /// rows, not with an event).
-pub fn diff_all(thread_id: &str, before: &Value, after: &Value, occurred_at: &str) -> Vec<Value> {
-    diff_with(thread_id, before, after, occurred_at, true).unwrap_or_default()
+pub fn diff_all(
+    thread_id: &str,
+    before: &Value,
+    after: &Value,
+    occurred_at: &str,
+    detached: Option<&str>,
+) -> Vec<Value> {
+    diff_with(thread_id, before, after, occurred_at, true, detached).unwrap_or_default()
 }
 
 fn diff_with(
@@ -190,6 +209,7 @@ fn diff_with(
     after: &Value,
     occurred_at: &str,
     allow_removals: bool,
+    detached: Option<&str>,
 ) -> Option<Vec<Value>> {
     let mut out = Vec::new();
     if before["thread"] != after["thread"] && after["thread"].is_object() {
@@ -200,10 +220,36 @@ fn diff_with(
             occurred_at,
         ));
     }
+    // A detached session leaves the thread's records.
+    if let Some(reason) = detached {
+        let remaining = by_id(after, "providerSessions");
+        for session in before["providerSessions"].as_array().into_iter().flatten() {
+            let Some(id) = session["id"]
+                .as_str()
+                .filter(|id| !remaining.contains_key(*id))
+            else {
+                continue;
+            };
+            let mut detach = event(
+                thread_id,
+                "provider-session.detached",
+                &json!({"providerSessionId": id, "detachedAt": occurred_at, "reason": reason}),
+                occurred_at,
+            );
+            for key in ["driver", "providerInstanceId"] {
+                if let Some(value) = session[key].as_str() {
+                    detach[key] = json!(value);
+                }
+            }
+            out.push(detach);
+        }
+    }
     let changed = |collection: &str| -> Option<Vec<(bool, Value)>> {
         let old = by_id(before, collection);
         let new = by_id(after, collection);
-        if !allow_removals && old.keys().any(|id| !new.contains_key(id)) {
+        // A detached session's removal went out as its own event above.
+        let removable = allow_removals || (detached.is_some() && collection == "providerSessions");
+        if !removable && old.keys().any(|id| !new.contains_key(id)) {
             return None;
         }
         Some(
@@ -381,6 +427,30 @@ mod tests {
         assert!(diff("t", &after, &before, "x").is_none());
         // Nothing changed, nothing to send.
         assert!(diff("t", &after, &after, "x").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_detached_session_is_its_own_event() {
+        let before = json!({"thread": {"id": "t"}, "providerSessions": [
+            {"id": "s", "driver": "codex", "providerInstanceId": "codex"}]});
+        let after = json!({"thread": {"id": "t"}, "providerSessions": []});
+        assert!(diff("t", &before, &after, "x").is_none());
+        let events = diff_detaching(
+            "t",
+            &before,
+            &after,
+            "2026-01-01T00:00:00.000Z",
+            "Thread archived.",
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "provider-session.detached");
+        assert_eq!(
+            events[0]["payload"],
+            json!({"providerSessionId": "s",
+            "detachedAt": "2026-01-01T00:00:00.000Z", "reason": "Thread archived."})
+        );
+        assert_eq!(events[0]["driver"], "codex");
     }
 
     #[test]

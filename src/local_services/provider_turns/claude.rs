@@ -318,6 +318,16 @@ impl<'a> Attempt<'a> {
             let line = tokio::select! {
                 line = self.cli.next_line() => line,
                 _ = cancelled(cancel), if !self.interrupted => {
+                    // A thread change detached the session: the reference
+                    // stops the session's process, and the turn's stream
+                    // closes.
+                    if super::take_detached(&spec.turn_id) {
+                        self.cli.kill_now();
+                        return Outcome::Ended(TurnEnd::failed(
+                            super::detached_failure(),
+                            ThreadDisposition::Reusable,
+                        ));
+                    }
                     self.interrupted = true;
                     // A waiting request stays pending, as the reference
                     // leaves it, unless Claude Code withdraws it.

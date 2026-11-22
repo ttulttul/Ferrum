@@ -33,6 +33,11 @@ pub(crate) trait CommandHost:
         text: String,
         cancel: oneshot::Receiver<()>,
     );
+    /// Mark `run`'s turn as stopped by a session detach, before its cancel
+    /// fires: a driver whose session is the thread's own process (Claude)
+    /// then ends that process instead of interrupting the turn, as the
+    /// reference's detach does. Hosts without local provider turns ignore it.
+    fn detach_turn(&self, _run: Uuid) {}
     fn close_guest_thread(&self, thread_id: &str) -> Result<(), String>;
     fn resolve_guest_message(
         &self,
@@ -362,6 +367,103 @@ async fn close_pending_link_requests<H: CommandHost>(
         }
     }
     last
+}
+
+/// Why the reference detaches the provider session for a thread change
+/// (`provider-session.detached`), or `None` when the change keeps it.
+const PROVIDER_CHANGED: &str = "Provider or model selection changed.";
+
+fn detach_reason(command_type: &str, command: &Value, row: &Value) -> Option<&'static str> {
+    match command_type {
+        "thread.archive" => Some("Thread archived."),
+        "thread.settle" => Some("Thread settled."),
+        "thread.metadata.update"
+            if command.get("worktreePath").is_some()
+                && command["worktreePath"] != row["worktreePath"] =>
+        {
+            Some("Workspace changed.")
+        }
+        // Only a driver that cannot switch runtime mode in its session
+        // (`supportsRuntimeModeSwitchInSession`).
+        "thread.runtime-mode.set" => {
+            let instance = row["modelSelection"]["instanceId"]
+                .as_str()
+                .or(row["providerInstanceId"].as_str())
+                .unwrap_or_default();
+            let capabilities: Value =
+                serde_json::from_str(include_str!("provider_capabilities.json"))
+                    .unwrap_or_default();
+            (capabilities[instance]["sessions"]["supportsRuntimeModeSwitchInSession"] == false)
+                .then_some("Runtime mode changed.")
+        }
+        // A new provider instance releases the session (ProviderSwitchService).
+        "thread.model-selection.set" | "provider.switch" => {
+            let current = row["modelSelection"]["instanceId"]
+                .as_str()
+                .or(row["providerInstanceId"].as_str());
+            let next = command["modelSelection"]["instanceId"].as_str();
+            (next.is_some() && next != current).then_some(PROVIDER_CHANGED)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a run of the thread is preparing, starting, running or waiting.
+async fn thread_has_active_run<H: CommandHost>(state: &Arc<H>, thread_id: &str) -> bool {
+    state
+        .store
+        .read()
+        .await
+        .threads
+        .get(thread_id)
+        .is_some_and(|thread| {
+            thread.runs.iter().any(|run| {
+                matches!(
+                    run.status.as_str(),
+                    "preparing" | "starting" | "running" | "waiting"
+                )
+            })
+        })
+}
+
+/// Detach the thread's live provider session, as the reference does for a
+/// thread change: record it, then stop the turns it was running.
+async fn detach_session<H: CommandHost>(
+    state: &Arc<H>,
+    thread_id: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let (live, run_ids) = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(thread_id) else {
+            return Ok(());
+        };
+        let run_ids: Vec<Uuid> = thread
+            .runs
+            .iter()
+            .filter(|run| run.status == "running")
+            .map(|run| run.id)
+            .collect();
+        (thread.provider.session_live(), run_ids)
+    };
+    if !live && run_ids.is_empty() {
+        return Ok(());
+    }
+    state
+        .commit(Event::ProviderSessionDetached {
+            thread_id: thread_id.to_owned(),
+            run_ids: run_ids.clone(),
+            reason: reason.to_owned(),
+        })
+        .await?;
+    let mut cancellations = state.cancellations().lock().await;
+    for run_id in run_ids {
+        state.detach_turn(run_id);
+        if let Some(cancel) = cancellations.remove(&run_id) {
+            let _ = cancel.send(());
+        }
+    }
+    Ok(())
 }
 
 /// Drivers whose instances are off unless enabled, as the reference decodes
@@ -1329,7 +1431,16 @@ async fn apply_command<H: CommandHost>(
                     _ => {}
                 }
                 patch.insert("row".into(), row);
-                return Ok(state
+                let reason = detach_reason(command_type, command, &existing_row);
+                if let Some(reason) = reason {
+                    if reason == PROVIDER_CHANGED && thread_has_active_run(&state, thread_id).await
+                    {
+                        return Err(anyhow::anyhow!(format!(
+                            "Thread {thread_id} has an active turn. Wait for it to finish, then retry the provider selection change."
+                        )));
+                    }
+                }
+                let sequence = state
                     .commit_receipted(
                         Event::ThreadPatched {
                             thread_id: thread_id.to_owned(),
@@ -1338,7 +1449,11 @@ async fn apply_command<H: CommandHost>(
                         Some(receipt.clone()),
                     )
                     .await?
-                    .id);
+                    .id;
+                if let Some(reason) = reason {
+                    detach_session(&state, thread_id, reason).await?;
+                }
+                return Ok(sequence);
             }
         }
         "thread.delete" => {
@@ -2924,5 +3039,59 @@ mod tests {
         // A project's override wins.
         assert!(!enabled("p2", "codex"));
         assert!(enabled("p2", "work"));
+    }
+}
+
+#[cfg(test)]
+mod detach_tests {
+    use super::*;
+
+    #[test]
+    fn thread_changes_detach_the_session_as_the_reference_does() {
+        let codex =
+            json!({"modelSelection": {"instanceId": "codex", "model": "m"}, "worktreePath": null});
+        let claude = json!({"modelSelection": {"instanceId": "claudeAgent", "model": "m"}, "worktreePath": null});
+        assert_eq!(
+            detach_reason("thread.archive", &json!({}), &codex),
+            Some("Thread archived.")
+        );
+        assert_eq!(
+            detach_reason("thread.settle", &json!({}), &codex),
+            Some("Thread settled.")
+        );
+        // Codex switches runtime mode in its session; Claude cannot.
+        let mode = json!({"runtimeMode": "approval-required"});
+        assert_eq!(
+            detach_reason("thread.runtime-mode.set", &mode, &codex),
+            None
+        );
+        assert_eq!(
+            detach_reason("thread.runtime-mode.set", &mode, &claude),
+            Some("Runtime mode changed.")
+        );
+        // Only a new provider instance releases the session.
+        let same = json!({"modelSelection": {"instanceId": "codex", "model": "other"}});
+        let other = json!({"modelSelection": {"instanceId": "claudeAgent", "model": "m"}});
+        assert_eq!(
+            detach_reason("thread.model-selection.set", &same, &codex),
+            None
+        );
+        assert_eq!(
+            detach_reason("thread.model-selection.set", &other, &codex),
+            Some(PROVIDER_CHANGED)
+        );
+        // A new workspace does; a title change does not.
+        assert_eq!(
+            detach_reason(
+                "thread.metadata.update",
+                &json!({"worktreePath": "/w"}),
+                &codex
+            ),
+            Some("Workspace changed.")
+        );
+        assert_eq!(
+            detach_reason("thread.metadata.update", &json!({"title": "T"}), &codex),
+            None
+        );
     }
 }

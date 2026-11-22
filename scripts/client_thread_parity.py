@@ -115,6 +115,31 @@ PROVIDER_SCENARIOS = [
      "scenario": None, "install": "login-shell", "status": True},
     {"name": "claude interrupt", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_interrupt.json", "interrupt": "command"},
+    # A thread change sent over the WebSocket while the turn runs: what each server does to the
+    # turn and its provider session (detach, interrupt, or refuse the change).
+    {"name": "codex archive mid-turn", "instance": "codex", "model": "fixture",
+     "scenario": "codex_interrupt.json", "change": {"type": "thread.archive"}},
+    {"name": "codex model change mid-turn", "instance": "codex", "model": "fixture",
+     "scenario": "codex_interrupt.json", "change": {"type": "thread.model-selection.set",
+                                                    "modelSelection": {"instanceId": "codex", "model": "other"}}},
+    {"name": "codex provider change mid-turn", "instance": "codex", "model": "fixture",
+     "scenario": "codex_interrupt.json", "change": {"type": "thread.model-selection.set",
+                                                    "modelSelection": {"instanceId": "claudeAgent",
+                                                                       "model": "claude-opus-5-5"}}},
+    {"name": "codex settle mid-turn", "instance": "codex", "model": "fixture",
+     "scenario": "codex_interrupt.json", "change": {"type": "thread.settle"}},
+    {"name": "codex runtime mode change mid-turn", "instance": "codex", "model": "fixture",
+     "scenario": "codex_interrupt.json", "change": {"type": "thread.runtime-mode.set",
+                                                    "runtimeMode": "approval-required"}},
+    {"name": "claude archive mid-turn", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_interrupt.json", "change": {"type": "thread.archive"}},
+    {"name": "claude model change mid-turn", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_interrupt.json", "change": {"type": "thread.model-selection.set",
+                                                     "modelSelection": {"instanceId": "claudeAgent",
+                                                                        "model": "claude-sonnet-5-5"}}},
+    {"name": "claude runtime mode change mid-turn", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_interrupt.json", "change": {"type": "thread.runtime-mode.set",
+                                                     "runtimeMode": "approval-required"}},
     {"name": "claude approval", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_approval.json", "respond": {"decision": "accept"}},
     {"name": "claude approval declined", "instance": "claudeAgent", "model": "claude-opus-5-5",
@@ -398,8 +423,9 @@ def seed_turn(url, cookie, root, scenario):
         "title": "Thread", "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"]},
         "runtimeMode": scenario.get("runtimeMode", "full-access"), "interactionMode": "default", "branch": None,
         "worktreePath": None, "createdBy": "user", "creationSource": "web"})
-    return {"threadId": THREAD, "turnMs": 30000, "interrupt": scenario.get("interrupt", False),
-            "respond": scenario.get("respond"), "dispatch": {
+    return {"threadId": THREAD, "turnMs": 60000 if scenario.get("change") else 30000,
+            "interrupt": scenario.get("interrupt", False),
+            "respond": scenario.get("respond"), "change": scenario.get("change"), "dispatch": {
         "type": "message.dispatch", "commandId": "turn-message", "threadId": THREAD,
         "messageId": "message:turn", "text": "Run echo hi and write notes.txt", "attachments": [],
         "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"},
@@ -967,13 +993,14 @@ def compare_turn(original, rust):
     if failed_steps:
         return problems
     # A restart scenario reads the thread afterwards; nothing streamed live.
-    live = None if inspected else [original["steps"][live_step]["value"], rust["steps"][live_step]["value"]]
-    if live is None:
+    # A turn neither server ended in time (a change that lets it run on) has no live value.
+    live = None if inspected else [original["steps"][live_step].get("value"), rust["steps"][live_step].get("value")]
+    if live is None or live == [None, None]:
         pass
     elif live[0] is None or live[1] is None:
         problems["live"] = [f"run settled: original {live[0] is not None} rust {live[1] is not None}"]
     else:
-        for reply in ("respondReply", "interruptReply"):
+        for reply in ("respondReply", "interruptReply", "changeReply"):
             outcomes = [None if side.get(reply) is None else sorted(side[reply]) for side in live]
             if outcomes[0] != outcomes[1]:
                 problems[reply] = [f"original {live[0].get(reply)}", f"rust     {live[1].get(reply)}"]

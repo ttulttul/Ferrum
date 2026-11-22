@@ -274,6 +274,13 @@ pub enum Event {
         thread_ids: Vec<String>,
         project_ids: Vec<String>,
     },
+    /// A thread change detached the thread's provider session, stopping
+    /// `run_ids` mid-turn (the reference's `provider-session.detached`).
+    ProviderSessionDetached {
+        thread_id: String,
+        run_ids: Vec<Uuid>,
+        reason: String,
+    },
     ProviderRuntimeReconciled {
         thread_id: String,
         cut: Vec<(Uuid, RestartCut)>,
@@ -325,7 +332,8 @@ impl Event {
             | Event::CheckpointCaptured { thread_id, .. }
             | Event::ThreadPatched { thread_id, .. }
             | Event::LinkRequestRecorded { thread_id, .. }
-            | Event::ProviderRuntimeReconciled { thread_id, .. } => Some(thread_id),
+            | Event::ProviderRuntimeReconciled { thread_id, .. }
+            | Event::ProviderSessionDetached { thread_id, .. } => Some(thread_id),
             Event::RunStarted(run) | Event::RunUpdated(run) | Event::RunQueued { run, .. } => {
                 Some(&run.thread_id)
             }
@@ -631,6 +639,13 @@ impl Store {
                 self.deleted_thread_ids.insert(thread_id.clone());
             }
             Event::Imported { .. } => {}
+            Event::ProviderSessionDetached {
+                thread_id, run_ids, ..
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.provider.detach_session(at, run_ids);
+                }
+            }
             Event::ProviderRuntimeReconciled {
                 thread_id,
                 cut,

@@ -97,5 +97,33 @@
   },
   "codex thread tools": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
+  },
+  "codex archive mid-turn": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
+  },
+  "codex model change mid-turn": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer.",
+    "live kinds": "The turn is still running when the stream is read: the reference has already sent run-attempt.updated for the attempt starting, while Rust creates the attempt running and updates it only when it ends."
+  },
+  "codex provider change mid-turn": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer.",
+    "live kinds": "The turn is still running when the stream is read: the reference has already sent run-attempt.updated for the attempt starting, while Rust creates the attempt running and updates it only when it ends."
+  },
+  "codex settle mid-turn": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer.",
+    "live kinds": "The turn is still running when the stream is read: the reference has already sent run-attempt.updated for the attempt starting, while Rust creates the attempt running and updates it only when it ends."
+  },
+  "codex runtime mode change mid-turn": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer.",
+    "live kinds": "The turn is still running when the stream is read: the reference has already sent run-attempt.updated for the attempt starting, while Rust creates the attempt running and updates it only when it ends."
+  },
+  "claude archive mid-turn": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
+  },
+  "claude model change mid-turn": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
+  },
+  "claude runtime mode change mid-turn": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   }
 }

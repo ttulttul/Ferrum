@@ -414,6 +414,10 @@ impl Thread {
     /// Claude session (which the reference opens even when the CLI is
     /// missing). A Codex session whose app-server closed mid-turn is `error`.
     fn provider_session(&self, instance: &str) -> Option<Value> {
+        // A detached session no longer belongs to the thread.
+        if self.provider.session_detached_at.is_some() {
+            return None;
+        }
         let thread = self.provider.thread.as_ref()?;
         let first = self.runs.iter().find(|run| run.id == thread.first_run)?;
         let claude = thread.driver == provider::CLAUDE_AGENT;
@@ -565,6 +569,12 @@ impl Thread {
             "startedAt": started,
             "completedAt": completed
         });
+        // A turn a session detach stopped ends interrupted, whatever the
+        // closed stream made of its run, as the reference closes it.
+        let detached = self.provider.detached_runs.contains(&run.id);
+        if detached {
+            turn["status"] = json!("interrupted");
+        }
         if let Some((usage, at)) = &record.usage {
             turn["tokenUsage"] = json!({
                 "usedTokens": usage.used_tokens,
@@ -582,7 +592,10 @@ impl Thread {
                 turn["tokenUsage"]["promptCacheExpiresAt"] = json!(expires);
             }
         }
-        if let Some(usage) = &record.turn_usage {
+        // A Claude turn whose process a detach stopped never reported its
+        // whole-turn usage; a Codex turn interrupted in its shared session did.
+        let unreported = detached && record.driver == provider::CLAUDE_AGENT;
+        if let Some(usage) = record.turn_usage.as_ref().filter(|_| !unreported) {
             turn["turnTokenUsage"] = usage.clone();
         }
         if let Some(model) = &record.model {
@@ -784,26 +797,31 @@ impl Thread {
                         "message": "Stopped by user"
                     })
                 };
-                out.items.push((
-                    index,
-                    signal(
-                        request.clone(),
-                        Value::Null,
-                        "completed",
-                        "Interrupt requested",
-                        "run_interrupt_request",
-                    ),
-                ));
-                out.items.push((
-                    index,
-                    signal(
-                        join("turn-item:run", &[&ids.run]) + ":signal:interrupt-result",
-                        json!(request),
-                        "interrupted",
-                        "Interrupted",
-                        "run_interrupt_result",
-                    ),
-                ));
+                // A detach stopped it: the provider, not the user, did.
+                let detached = self.provider.detached_runs.contains(&run.id);
+                if !detached {
+                    out.items.push((
+                        index,
+                        signal(
+                            request.clone(),
+                            Value::Null,
+                            "completed",
+                            "Interrupt requested",
+                            "run_interrupt_request",
+                        ),
+                    ));
+                }
+                let mut result = signal(
+                    join("turn-item:run", &[&ids.run]) + ":signal:interrupt-result",
+                    json!(request),
+                    "interrupted",
+                    "Interrupted",
+                    "run_interrupt_result",
+                );
+                if detached {
+                    result["message"] = json!("Stopped by the provider");
+                }
+                out.items.push((index, result));
             }
             TurnStatus::Completed | TurnStatus::Running => {}
         }
