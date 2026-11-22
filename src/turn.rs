@@ -367,30 +367,36 @@ async fn record<H: TurnHost>(
         None if ok => ("completed", None),
         None => ("failed", Some(format!("provider exited with {status}"))),
     };
-    // A completed turn's checkpoint comes first: the reference's run waits
-    // for it, and its capture completes the run.
-    if run_status == "completed" {
-        if let Some(tree) = host.workspace().capture_git_tree(&cwd).await {
-            let turn_count = host
-                .store
-                .read()
-                .await
-                .threads
-                .get(&thread_id)
-                .map(|thread| thread.messages.len() as u64)
-                .unwrap_or_default();
-            let _ = host
-                .commit(Event::CheckpointCaptured {
-                    thread_id: thread_id.clone(),
-                    checkpoint: CheckpointRecord {
-                        turn_count,
-                        tree,
-                        cwd,
-                        captured_at: crate::now(),
-                        ready: true,
-                    },
-                })
-                .await;
+    // Stopped turns also leave a rollback point. A stopped provider run is
+    // already terminal in the projection; only a completed one waits for capture.
+    if matches!(run_status, "completed" | "interrupted" | "cancelled") {
+        let turn_count = host
+            .store
+            .read()
+            .await
+            .threads
+            .get(&thread_id)
+            .and_then(|thread| {
+                // Later input may already be queued. The checkpoint belongs to this
+                // run's ordinal, including when its exit is replayed after a reconnect.
+                let ordinal = thread.runs.iter().position(|r| r.id == run.id)? as u64 + 1;
+                (!thread.checkpoints.iter().any(|c| c.turn_count == ordinal)).then_some(ordinal)
+            });
+        if let Some(turn_count) = turn_count {
+            if let Some(tree) = host.workspace().capture_git_tree(&cwd).await {
+                let _ = host
+                    .commit(Event::CheckpointCaptured {
+                        thread_id: thread_id.clone(),
+                        checkpoint: CheckpointRecord {
+                            turn_count,
+                            tree,
+                            cwd,
+                            captured_at: crate::now(),
+                            ready: true,
+                        },
+                    })
+                    .await;
+            }
         }
         if host.stopping() {
             return Ok(());

@@ -138,18 +138,16 @@ const threadInput = (threadId) => ({
 
 const TERMINAL_RUN = new Set(["completed", "failed", "interrupted", "cancelled"]);
 
-/** Whether a stream item shows the thread's run settled. */
-const settles = (item) =>
-  (item.kind === "event" && item.event.type === "run.updated" && TERMINAL_RUN.has(item.event.payload?.status)) ||
-  (item.kind === "snapshot" && (item.projection?.runs ?? []).some((run) => TERMINAL_RUN.has(run.status)));
-
-/** The ids of the runs a stream item shows ended. */
-const settledRunIds = (item) =>
-  item.kind === "event" && item.event.type === "run.updated" && TERMINAL_RUN.has(item.event.payload?.status)
-    ? [item.event.payload.id]
-    : item.kind === "snapshot"
-      ? (item.projection?.runs ?? []).filter((run) => TERMINAL_RUN.has(run.status)).map((run) => run.id)
-      : [];
+/** A stopped run is terminal before its rollback checkpoint is attached. In
+ * stop scenarios keep reading until the capture updates that same run. */
+const settledRunIds = (item, awaitStoppedCheckpoint) => {
+  const runs = item.kind === "snapshot" ? (item.projection?.runs ?? [])
+    : item.kind === "event" && item.event.type === "run.updated" ? [item.event.payload] : [];
+  return runs.filter((run) =>
+    TERMINAL_RUN.has(run.status) &&
+    (!awaitStoppedCheckpoint || !["interrupted", "cancelled"].includes(run.status) || run.checkpointId != null)
+  ).map((run) => run.id);
+};
 
 /** The run a stream item shows, and whether its provider turn is running. */
 const runOf = (item) => {
@@ -232,6 +230,7 @@ const liveTurn = (client, seed) =>
     const withItems = new Set();
     let dispatched = false;
     const ended = new Set();
+    const awaitStoppedCheckpoint = seed.interrupt || seed.change?.type === "thread.stop";
     let runId;
     const fiber = yield* client["orchestration.subscribeThread"](threadInput(seed.threadId)).pipe(
       Stream.runForEach((item) =>
@@ -241,8 +240,8 @@ const liveTurn = (client, seed) =>
           // With `seed.settleRuns`, the turn settles once that many runs have ended (a
           // delegated task's delivery is a run of its own).
           if (dispatched) {
-            for (const id of settledRunIds(item)) ended.add(id);
-            if (settles(item) && ended.size >= (seed.settleRuns ?? 1)) yield* Deferred.succeed(settled, undefined);
+            for (const id of settledRunIds(item, awaitStoppedCheckpoint)) ended.add(id);
+            if (ended.size >= (seed.settleRuns ?? 1)) yield* Deferred.succeed(settled, undefined);
           }
           const run = runOf(item);
           if (dispatched && run.runId) runId = run.runId;

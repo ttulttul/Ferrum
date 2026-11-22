@@ -706,7 +706,7 @@
     "type": "control_response",
     "response": {
      "subtype": "success",
-     "request_id": "t3-interrupt-1"
+     "request_id": "$request_id"
     }
    }
   },
