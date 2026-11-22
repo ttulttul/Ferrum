@@ -115,12 +115,6 @@
       "reason": "projects.searchEntries does no fuzzy matching",
       "issue": "for query 'read' the reference returns README.md, .gitignore, docs/guide.md and scratch.txt; Rust returns only README.md"
     },
-    "settings.server.getStorageCleanupReport": {
-      "area": "settings",
-      "severity": "medium",
-      "reason": "getStorageCleanupReport fails the client's decode",
-      "issue": "startedAt must be a string; the storage settings page cannot show the report"
-    },
     "turns.getThreadProjection.afterMessage": {
       "area": "agent turns",
       "severity": "medium",

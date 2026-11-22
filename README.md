@@ -58,12 +58,12 @@ The Rust server can already run Codex and Claude Code conversations, manage proj
 
 - **Uploaded attachments:** Download links for uploaded attachments return "not found", so attached files and images do not load in the composer or conversation history.
 - **File browsing and search:** Project file lists include `.git` and gitignored files. File and content search do not yet support fuzzy matching, regular expressions, or match highlighting.
-- **Storage cleanup report:** The storage cleanup report in settings fails to load.
+- **Storage cleanup report:** Settings streams automatic and manual cleanup reports. The Rust cleanup command currently reports zero entries and zero bytes freed.
 
 ### Details for developers
 
 - **Shared database:** See [`docs/shared-store.md`](docs/shared-store.md) for the `statev2.sqlite` design and remaining migration/outbox work.
-- **Expected-failure lists:** Client-visible RPC and live-turn mismatches are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json) (including `server.getStorageCleanupReport`, and `projects.listEntries` / `searchEntries` / `searchContents`).
+- **Expected-failure lists:** Client-visible RPC and live-turn mismatches are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json) (including `projects.listEntries` / `searchEntries` / `searchContents`).
 - **Agent tools:** Rust currently exposes 11 of the reference's 79 MCP tools and does not inject the orchestration prompt context.
 
 ## Install and switching

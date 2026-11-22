@@ -3961,11 +3961,14 @@
       "existingCoverage": [],
       "validationOnly": true,
       "clientHarness": [
-        "settings.server.getStorageCleanupReport"
+        "settings.server.getStorageCleanupReport",
+        "settings.storageCleanup.follow",
+        "settings.storageCleanup.sawRun",
+        "settings.storageCleanup.reopen",
+        "settings.storageCleanup.followAutomatic",
+        "settings.storageCleanup.sawAutomatic"
       ],
-      "knownGaps": [
-        "settings.server.getStorageCleanupReport"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc",
@@ -4338,7 +4341,9 @@
       "usage": "client",
       "existingCoverage": [],
       "validationOnly": true,
-      "clientHarness": [],
+      "clientHarness": [
+        "settings.storageCleanup.run"
+      ],
       "knownGaps": []
     },
     {
@@ -4518,7 +4523,9 @@
         "vcs.worktreeDirectory.set",
         "vcs.worktreeDirectory.reset",
         "settings.updateSettings",
-        "settings.updateSettings.invalid"
+        "settings.updateSettings.invalid",
+        "settings.storageCleanup.changePolicy",
+        "settings.storageCleanup.restorePolicy"
       ],
       "knownGaps": []
     },

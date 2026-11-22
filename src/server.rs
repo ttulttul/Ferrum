@@ -62,7 +62,7 @@ pub struct AppState {
     pub worktree_setup: worktree_setup::WorktreeSetupTracker,
     pub(crate) project_mutation_lock: Mutex<()>,
     pub(crate) find_cache: std::sync::Mutex<crate::thread_search::FindCache>,
-    pub(crate) storage_cleanup_report: Mutex<Option<serde_json::Value>>,
+    pub(crate) storage_cleanup: crate::storage_cleanup::Reports,
     pub(crate) pull_request_refresh: Mutex<u64>,
     pub(crate) provider_install_states: Mutex<HashMap<String, serde_json::Value>>,
     pub(crate) provider_auth_states: Mutex<HashMap<String, serde_json::Value>>,
@@ -346,7 +346,7 @@ impl AppState {
             worktree_setup: worktree_setup::WorktreeSetupTracker::default(),
             project_mutation_lock: Mutex::new(()),
             find_cache: Default::default(),
-            storage_cleanup_report: Mutex::new(None),
+            storage_cleanup: Default::default(),
             pull_request_refresh: Mutex::new(0),
             provider_install_states: Mutex::new(HashMap::new()),
             provider_auth_states: Mutex::new(HashMap::new()),
@@ -1115,6 +1115,7 @@ where
             );
         }
     }
+    let cleanup = tokio::spawn(crate::storage_cleanup::automatic_runs(state.clone()));
     // Refresh the model manifest now and then on the provider-check cadence;
     // each refresh is TTL-gated, so most ticks read nothing.
     let manifest = state.model_manifest.clone();
@@ -1212,6 +1213,7 @@ where
             Ok(())
         }
     };
+    cleanup.abort();
     manifest_refresh.abort();
     if let Some(startup) = endpoint_startup {
         startup.abort();

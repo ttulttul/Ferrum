@@ -17,6 +17,8 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 pub struct ControlState {
     pub auth: AuthService,
     pub store: RwLock<Store>,
+    #[cfg(feature = "native")]
+    pub(crate) thread_deleted: tokio::sync::Notify,
     pub events: broadcast::Sender<ServerEvent>,
     pub(crate) shell_events: broadcast::Sender<crate::shell_stream::Change>,
     pub log: Mutex<Box<dyn EventLog + Send>>,
@@ -59,6 +61,8 @@ impl ControlState {
         Ok(Self {
             auth,
             store: RwLock::new(store),
+            #[cfg(feature = "native")]
+            thread_deleted: Default::default(),
             events: broadcast::channel(512).0,
             shell_events: broadcast::channel(2048).0,
             log: Mutex::new(log),
@@ -245,7 +249,13 @@ impl ControlState {
         drop(shared);
         self.log.lock().await.append(&record)?;
         *next_event_id = record.id;
+        #[cfg(feature = "native")]
+        let thread_count = store.threads.len();
         store.apply_record(&record);
+        #[cfg(feature = "native")]
+        if store.threads.len() < thread_count {
+            self.thread_deleted.notify_one();
+        }
         for (thread_id, stored) in stored_after {
             if let Some(thread) = store.threads.get_mut(&thread_id) {
                 thread.stored = Some(Box::new(stored));
