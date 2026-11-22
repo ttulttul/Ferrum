@@ -33,6 +33,7 @@ pub(super) async fn run(
     cancel: oneshot::Receiver<()>,
     mut responses: mpsc::UnboundedReceiver<RuntimeResponse>,
     sink: Sink,
+    sessions: std::sync::Arc<super::claude_sessions::Sessions>,
 ) {
     let mut cancel = Some(cancel);
     let mut resume = provider.resume.clone().filter(|id| !id.is_empty());
@@ -44,6 +45,7 @@ pub(super) async fn run(
             &mut cancel,
             &mut responses,
             &sink,
+            &sessions,
         )
         .await;
         match attempt {
@@ -91,6 +93,13 @@ struct Attempt<'a> {
     sink: &'a Sink,
     cli: Cli,
     resume: Option<&'a str>,
+    /// The thread's running CLI took the turn: it has its MCP servers.
+    reused: bool,
+    /// The native session the CLI was launched with (`--session-id` or
+    /// `--resume`), under which it stays running for the thread's next turn.
+    /// As the reference keys its live query: a session Claude Code reports
+    /// under another id is resumed by a new CLI.
+    session: Option<String>,
     /// Whether the CLI has said anything; refusals come before that.
     answered: bool,
     interrupted: bool,
@@ -135,6 +144,7 @@ impl<'a> Attempt<'a> {
         cancel: &mut Option<oneshot::Receiver<()>>,
         responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
         sink: &'a Sink,
+        sessions: &std::sync::Arc<super::claude_sessions::Sessions>,
     ) -> Outcome {
         let binary = program(&provider.binary_path, "claude");
         let mode = if provider.interaction_mode() == "plan" {
@@ -181,17 +191,14 @@ impl<'a> Attempt<'a> {
         for dir in &provider.extra_dirs {
             args.push(format!("--add-dir={dir}"));
         }
+        let mut session = resume.map(str::to_owned);
+        let mut new_session = None;
         if resume.is_none() {
             // The reference picks a new session's id itself, so the thread
             // names its session even if the CLI never starts.
-            let session = uuid::Uuid::new_v4().to_string();
-            args.push(format!("--session-id={session}"));
-            sink.send(ProviderEvent::ProviderThread {
-                driver: CLAUDE_AGENT.into(),
-                native_thread_id: session,
-                resumed: false,
-                model: Some(provider.model.clone()).filter(|model| !model.trim().is_empty()),
-            });
+            let id = uuid::Uuid::new_v4().to_string();
+            new_session = Some(format!("--session-id={id}"));
+            session = Some(id);
         }
         let mut settings = provider
             .claude_settings
@@ -217,19 +224,52 @@ impl<'a> Attempt<'a> {
         if !provider.app_thread_id.is_empty() {
             extra_env.push(("T3CODE_THREAD_ID".into(), provider.app_thread_id.clone()));
         }
+        // What the CLI is launched with, but for its session: a turn launched
+        // the same way goes to the thread's running CLI.
+        let launch = json!({
+            "binary": binary,
+            "args": args.iter().filter(|a| !a.starts_with("--resume=")).collect::<Vec<_>>(),
+            "env": spec.env, "extraEnv": extra_env, "home": provider.home_path,
+            "mcp": provider.mcp.as_ref().map(|mcp| (&mcp.url, &mcp.authorization)),
+        })
+        .to_string();
+        let running = match resume {
+            Some(id) => sessions.take(id, &launch).await,
+            None => None,
+        };
+        let reused = running.is_some();
+        if let (Some(flag), Some(id)) = (&new_session, &session) {
+            // A new session's id goes after the flags it shares with a
+            // resumed one, as before.
+            let at = args
+                .iter()
+                .position(|a| a == "--thinking-display")
+                .unwrap_or(args.len());
+            args.insert(at, flag.clone());
+            sink.send(ProviderEvent::ProviderThread {
+                driver: CLAUDE_AGENT.into(),
+                native_thread_id: id.clone(),
+                resumed: false,
+                model: Some(provider.model.clone()).filter(|model| !model.trim().is_empty()),
+            });
+        }
         // The reference marks only a turn that resumes an interrupted one
         // without a prompt (`resumeTurn`), which this server does not send;
         // a turn in a resumed session is not marked.
-        let cli = match Cli::spawn(
-            spec,
-            Launch {
-                program: binary.clone(),
-                args,
-                home_var: "CLAUDE_CONFIG_DIR",
-                home: &provider.home_path,
-                extra_env,
-            },
-        ) {
+        let cli = match running {
+            Some(cli) => Ok(cli),
+            None => Cli::spawn(
+                spec,
+                Launch {
+                    program: binary.clone(),
+                    args,
+                    home_var: "CLAUDE_CONFIG_DIR",
+                    home: &provider.home_path,
+                    extra_env,
+                },
+            ),
+        };
+        let cli = match cli {
             Ok(cli) => cli,
             Err(_) => {
                 // What the reference reports when the SDK cannot start
@@ -246,6 +286,8 @@ impl<'a> Attempt<'a> {
             sink,
             cli,
             resume,
+            reused,
+            session,
             answered: false,
             interrupted: false,
             message_id: None,
@@ -268,8 +310,17 @@ impl<'a> Attempt<'a> {
                 usage: turn_token_usage(attempt.result.as_ref(), end.status, &attempt.root_models),
             });
         }
-        let Attempt { cli, .. } = attempt;
-        cli.close().await;
+        // A turn that ended on its own leaves its CLI running for the
+        // thread's next turn; Stop closes it, as the reference's interrupt
+        // does, and a CLI that stopped (or was stopped) is gone.
+        let keep = matches!(&outcome, Outcome::Ended(end) if end.status != TurnStatus::Interrupted);
+        let Attempt {
+            mut cli, session, ..
+        } = attempt;
+        match session {
+            Some(session) if keep && cli.alive() => sessions.keep(session, cli, launch),
+            _ => cli.close().await,
+        }
         outcome
     }
 
@@ -279,8 +330,13 @@ impl<'a> Attempt<'a> {
         cancel: &mut Option<oneshot::Receiver<()>>,
     ) -> Outcome {
         // T3's MCP server, acting as the thread, as the reference's query
-        // sets it (`setMcpServers`) before the prompt.
-        if let Some(mcp) = spec.provider.as_ref().and_then(|p| p.mcp.as_ref()) {
+        // sets it (`setMcpServers`) before the prompt, once per CLI.
+        if let Some(mcp) = spec
+            .provider
+            .as_ref()
+            .and_then(|p| p.mcp.as_ref())
+            .filter(|_| !self.reused)
+        {
             let request_id = format!("t3-mcp-{}", self.next_control);
             self.next_control += 1;
             let request = json!({"type": "control_request", "request_id": request_id,

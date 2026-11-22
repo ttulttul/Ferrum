@@ -22,8 +22,8 @@ pub struct LocalWorkspace {
     pub(crate) terminals: TerminalService,
     pub(crate) previews: std::sync::Arc<PreviewService>,
     pub(crate) devices: DeviceService,
-    /// The provider instances' shared Codex app-servers.
-    codex_servers: std::sync::Arc<crate::local_services::provider_turns::CodexServers>,
+    /// The provider processes kept across turns.
+    providers: std::sync::Arc<crate::local_services::provider_turns::ProviderProcesses>,
 }
 
 impl LocalWorkspace {
@@ -42,7 +42,7 @@ impl LocalWorkspace {
             terminals,
             previews: std::sync::Arc::new(previews),
             devices,
-            codex_servers: Default::default(),
+            providers: Default::default(),
         }
     }
 }
@@ -202,11 +202,7 @@ impl Workspace for LocalWorkspace {
     ) -> WorkspaceFuture<'_, anyhow::Result<mpsc::UnboundedReceiver<TurnEvent>>> {
         async move {
             if spec.provider.is_some() {
-                crate::local_services::provider_turns::start(
-                    spec,
-                    cancel,
-                    self.codex_servers.clone(),
-                )
+                crate::local_services::provider_turns::start(spec, cancel, self.providers.clone())
             } else {
                 start_turn(spec, cancel)
             }
@@ -221,19 +217,13 @@ impl Workspace for LocalWorkspace {
         async move { crate::local_services::provider_turns::respond(turn_id, response) }.boxed()
     }
     fn unload_provider_thread(&self, instance: &str, thread: &str) {
-        crate::local_services::provider_turns::unload_codex_thread(
-            &self.codex_servers,
-            instance,
-            thread,
-        );
+        self.providers.unload_thread(instance, thread);
     }
     fn stop_providers(&self) -> WorkspaceFuture<'_, ()> {
         // Their turns end first (an interrupt takes up to its grace).
-        crate::local_services::provider_turns::shutdown_codex(
-            &self.codex_servers,
-            std::time::Duration::from_secs(6),
-        )
-        .boxed()
+        self.providers
+            .shutdown(std::time::Duration::from_secs(6))
+            .boxed()
     }
     fn provider_models<'a>(
         &'a self,

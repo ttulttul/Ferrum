@@ -130,6 +130,9 @@ PROVIDER_SCENARIOS = [
     {"name": "claude turn", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_turn.json"},
     # A second turn on the same server runs in the instance's shared app-server, on the thread it
     # still has loaded.
+    # A second Claude turn goes to the CLI the thread keeps running, as on the reference.
+    {"name": "claude second turn", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_two_turns.json", "followUp": "Now append a line"},
     {"name": "codex second turn", "instance": "codex", "model": "fixture", "scenario": "codex_two_turns.json",
      "followUp": "Now append a line"},
     # A message steers the running turn (Codex `turn/steer`), which then answers it, and Stop
