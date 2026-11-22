@@ -128,6 +128,10 @@ def exercise(command, home):
             time.sleep(0.1)
         assert not worktree.exists(), "deleted managed worktree was not removed"
         call("server.updateSettings", {"patch":{"storageCleanup":{"worktreeOnDelete":False}}})
+        # Settings changes queue an automatic sweep. Drain it before creating the
+        # files used by the concurrent manual-run assertion, or that sweep can
+        # legitimately remove the fixtures before either manual request starts.
+        call("server.runStorageCleanup", {})
         kept = seed_checkpoints(state, git, repo)
         logs = state / "logs"
         artifacts = state / "browser-artifacts"
@@ -144,7 +148,8 @@ def exercise(command, home):
         request(2)
         request(3)
         reports = sorted([response(), response()], key=lambda r: -r["bytesFreed"])
-        assert [r["bytesFreed"] for r in reports] == [28, 0], "eligible files must be removed exactly once"
+        bytes_freed = [r["bytesFreed"] for r in reports]
+        assert bytes_freed == [28, 0], f"eligible files must be removed exactly once, got {bytes_freed}"
         assert reports[0]["counts"] == {"removed": 2, "kept": 0, "failed": 0}
         assert [e["kind"] for e in reports[0]["entries"]] == ["browser-artifacts", "logs"]
         assert all(not p.exists() for p in old)
