@@ -637,6 +637,20 @@ impl Store {
                     if let Some(value) = patch.get("status").and_then(serde_json::Value::as_str) {
                         thread.status = value.to_owned();
                     }
+                    // The runs a stop or interrupt asked to end, as of then.
+                    for run in patch["interruptRequested"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|run| run.as_str()?.parse::<Uuid>().ok())
+                    {
+                        let slot = thread.provider.runs.get(&run).map_or(0, |r| r.items.len());
+                        thread
+                            .provider
+                            .interrupt_requests
+                            .entry(run)
+                            .or_insert((at, slot));
+                    }
                     if let Some(value) = patch.get("snoozed_until") {
                         thread.snoozed_until = value.as_str().map(str::to_owned);
                     }

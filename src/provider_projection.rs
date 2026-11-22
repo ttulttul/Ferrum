@@ -229,10 +229,12 @@ impl Thread {
     pub(crate) fn provider_records(&self) -> ProviderRecords {
         let mut out = ProviderRecords::default();
         let instance = self.instance_id();
-        let session = self.provider_session(&instance);
-        let session_id = session
-            .as_ref()
+        // A detached session leaves the thread's records, but the records
+        // that ran in it still name it, as the reference keeps them.
+        let session_id = self
+            .session_row(&instance)
             .map_or(Value::Null, |session| session["id"].clone());
+        let session = self.provider_session(&instance);
         let (mut turn_ordinal, mut first_ordinal, mut last_ordinal) =
             match self.provider.prior_turns {
                 Some((turns, first)) => (turns, Some(first), first),
@@ -423,6 +425,11 @@ impl Thread {
         if self.provider.session_detached_at.is_some() {
             return None;
         }
+        self.session_row(instance)
+    }
+
+    /// [`Self::provider_session`], detached or not.
+    fn session_row(&self, instance: &str) -> Option<Value> {
         let thread = self.provider.thread.as_ref()?;
         let first = self.runs.iter().find(|run| run.id == thread.first_run)?;
         let claude = thread.driver == provider::CLAUDE_AGENT;
@@ -537,6 +544,15 @@ impl Thread {
                 attempt["nativeThreadId"] = json!(native);
             }
         }
+        // Once its turn ends, the root node goes with the run (`waiting`
+        // until a completed turn's checkpoint completes both).
+        let (root_status, root_completed) = match terminal {
+            Some(_) if !requeued => {
+                let (status, end) = self.projected_run_status(run);
+                (status, end.map(iso).map_or(Value::Null, Value::from))
+            }
+            _ => (status, json!(completed)),
+        };
         out.nodes.push(json!({
             "id": ids.root_node,
             "threadId": self.id,
@@ -544,7 +560,7 @@ impl Thread {
             "parentNodeId": null,
             "rootNodeId": ids.root_node,
             "kind": "root_turn",
-            "status": status,
+            "status": root_status,
             "countsForRun": true,
             "providerThreadId": ids.provider_thread,
             "providerTurnId": null,
@@ -552,7 +568,7 @@ impl Thread {
             "runtimeRequestId": null,
             "checkpointScopeId": null,
             "startedAt": started_value,
-            "completedAt": completed
+            "completedAt": root_completed
         }));
         let native_turn = record
             .native_turn_id
@@ -563,6 +579,13 @@ impl Thread {
         } else {
             "weak"
         };
+        // A Codex app-server that closed mid-turn never reports the turn's
+        // end: the reference fails the session and the run, and leaves the
+        // provider turn running.
+        let crashed = driver == provider::CODEX
+            && terminal
+                .and_then(|terminal| terminal.failure.as_ref())
+                .is_some_and(|failure| failure.message == provider::CODEX_STREAM_CLOSED);
         let mut turn = json!({
             "id": ids.provider_turn,
             "providerThreadId": ids.provider_thread,
@@ -570,14 +593,14 @@ impl Thread {
             "runAttemptId": ids.attempt,
             "nativeTurnRef": native_ref(driver, &native_turn, strength),
             "ordinal": turn_ordinal,
-            "status": status,
+            "status": if crashed { "running" } else { status },
             "startedAt": started,
-            "completedAt": completed
+            "completedAt": if crashed { None } else { completed.clone() }
         });
         // A turn a session detach stopped ends interrupted, whatever the
         // closed stream made of its run, as the reference closes it.
         let detached = self.provider.detached_runs.contains(&run.id);
-        if detached {
+        if detached && terminal.is_some() {
             turn["status"] = json!("interrupted");
         }
         if let Some((usage, at)) = &record.usage {
@@ -611,7 +634,25 @@ impl Thread {
             out.provider_turns.push(turn);
         }
 
-        for item in &record.items {
+        // A stop or interrupt's request card, in the slot it took when it
+        // was asked for.
+        let request = join("turn-item:run", &[&ids.run]) + ":signal:interrupt-request";
+        let requested = self.provider.interrupt_requests.get(&run.id).copied();
+        let request_card = |at: u64| {
+            self.run_signal(
+                ids,
+                request.clone(),
+                Value::Null,
+                "completed",
+                "Interrupt requested",
+                "run_interrupt_request",
+                &iso(at),
+            )
+        };
+        for (position, item) in record.items.iter().enumerate() {
+            if let Some((at, _)) = requested.filter(|(_, slot)| *slot == position) {
+                out.items.push((index, request_card(at)));
+            }
             if matches!(
                 item.item.kind.as_str(),
                 "approval_request" | "user_input_request"
@@ -634,6 +675,9 @@ impl Thread {
                         .copied()
                 }),
             );
+        }
+        if let Some((at, _)) = requested.filter(|(_, slot)| *slot >= record.items.len()) {
+            out.items.push((index, request_card(at)));
         }
         if let Some(plan) = &record.plan {
             let native = format!("turn-plan:{native_turn}");
@@ -781,47 +825,32 @@ impl Thread {
                 })));
             }
             TurnStatus::Interrupted => {
-                let request = join("turn-item:run", &[&ids.run]) + ":signal:interrupt-request";
-                let signal = |id: String, parent: Value, status: &str, title: &str, kind: &str| {
-                    json!({
-                        "id": id,
-                        "threadId": self.id,
-                        "runId": ids.run,
-                        "nodeId": ids.root_node,
-                        "providerThreadId": ids.provider_thread,
-                        "providerTurnId": null,
-                        "nativeItemRef": null,
-                        "parentItemId": parent,
-                        "ordinal": 0,
-                        "status": status,
-                        "title": title,
-                        "startedAt": at,
-                        "completedAt": at,
-                        "updatedAt": at,
-                        "type": kind,
-                        "message": "Stopped by user"
-                    })
-                };
                 // A detach stopped it: the provider, not the user, did.
                 let detached = self.provider.detached_runs.contains(&run.id);
-                if !detached {
+                // A turn the provider interrupted without a request still
+                // shows one, as it always has here.
+                if !detached && requested.is_none() {
                     out.items.push((
                         index,
-                        signal(
+                        self.run_signal(
+                            ids,
                             request.clone(),
                             Value::Null,
                             "completed",
                             "Interrupt requested",
                             "run_interrupt_request",
+                            &at,
                         ),
                     ));
                 }
-                let mut result = signal(
+                let mut result = self.run_signal(
+                    ids,
                     join("turn-item:run", &[&ids.run]) + ":signal:interrupt-result",
                     json!(request),
                     "interrupted",
                     "Interrupted",
                     "run_interrupt_result",
+                    &at,
                 );
                 if detached {
                     result["message"] = json!("Stopped by the provider");
@@ -830,6 +859,38 @@ impl Thread {
             }
             TurnStatus::Completed | TurnStatus::Running => {}
         }
+    }
+
+    /// A run's interrupt request or result card.
+    #[allow(clippy::too_many_arguments)]
+    fn run_signal(
+        &self,
+        ids: &RunIds,
+        id: String,
+        parent: Value,
+        status: &str,
+        title: &str,
+        kind: &str,
+        at: &str,
+    ) -> Value {
+        json!({
+            "id": id,
+            "threadId": self.id,
+            "runId": ids.run,
+            "nodeId": ids.root_node,
+            "providerThreadId": ids.provider_thread,
+            "providerTurnId": null,
+            "nativeItemRef": null,
+            "parentItemId": parent,
+            "ordinal": 0,
+            "status": status,
+            "title": title,
+            "startedAt": at,
+            "completedAt": at,
+            "updatedAt": at,
+            "type": kind,
+            "message": "Stopped by user"
+        })
     }
 
     /// The notice the reference adds to a run a restart cut off
@@ -1405,5 +1466,134 @@ mod tests {
                 ("command_execution".into(), 1_000_003)
             ]
         );
+    }
+
+    fn terminal(status: TurnStatus) -> ProviderEvent {
+        ProviderEvent::TurnTerminal {
+            status,
+            failure: None,
+            thread_disposition: crate::workspace::provider::ThreadDisposition::Reusable,
+            driver: None,
+            closing: Vec::new(),
+        }
+    }
+
+    fn running_codex_thread(run_id: Uuid) -> Thread {
+        let mut live = thread(
+            serde_json::from_value(json!({
+                "id": run_id, "thread_id": "t1", "provider": "codex", "status": "running",
+                "started_at": 1, "finished_at": null, "error": null, "user_message_id": null
+            }))
+            .unwrap(),
+        );
+        for event in [
+            ProviderEvent::ProviderThread {
+                driver: "codex".into(),
+                native_thread_id: "thr".into(),
+                resumed: false,
+                model: None,
+            },
+            ProviderEvent::ProviderTurn {
+                native_turn_id: Some("turn".into()),
+                status: TurnStatus::Running,
+                model: None,
+            },
+        ] {
+            live.provider.apply(run_id, &event, 2);
+        }
+        live
+    }
+
+    #[test]
+    fn a_completed_turn_leaves_its_run_waiting_for_its_checkpoint() {
+        let run_id = Uuid::new_v4();
+        let mut live = running_codex_thread(run_id);
+        live.provider
+            .apply(run_id, &terminal(TurnStatus::Completed), 3);
+        live.checkpoints.push(crate::CheckpointRecord {
+            turn_count: 1,
+            tree: "tree".into(),
+            cwd: "/w".into(),
+            captured_at: 4,
+            ready: true,
+        });
+        let projection = live.projection();
+        let root = |projection: &Value| {
+            projection["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["kind"] == "root_turn")
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(projection["runs"][0]["status"], "waiting");
+        assert_eq!(projection["runs"][0]["completedAt"], Value::Null);
+        assert_eq!(projection["runs"][0]["checkpointId"], Value::Null);
+        assert_eq!(root(&projection)["status"], "waiting");
+        assert_eq!(projection["attempts"][0]["status"], "completed");
+        // The run's end, recorded after its checkpoint, completes both.
+        live.runs[0].status = "completed".into();
+        live.runs[0].finished_at = Some(5);
+        let projection = live.projection();
+        assert_eq!(projection["runs"][0]["status"], "completed");
+        assert!(projection["runs"][0]["checkpointId"].is_string());
+        assert_eq!(root(&projection)["status"], "completed");
+    }
+
+    #[test]
+    fn an_interrupt_request_shows_from_when_it_was_asked_for() {
+        let run_id = Uuid::new_v4();
+        let mut live = running_codex_thread(run_id);
+        live.provider.apply(
+            run_id,
+            &item("cmd", "command_execution", "running", None),
+            2,
+        );
+        live.provider.interrupt_requests.insert(run_id, (3, 1));
+        live.provider.apply(
+            run_id,
+            &item("late", "command_execution", "running", None),
+            3,
+        );
+        let kinds = |live: &Thread| -> Vec<String> {
+            live.projection()["turnItems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{} {}",
+                        item["type"].as_str().unwrap(),
+                        item["status"].as_str().unwrap()
+                    )
+                })
+                .collect()
+        };
+        // The request's card takes the slot after the items before it, and
+        // the run is still running.
+        assert_eq!(
+            kinds(&live),
+            [
+                "command_execution running",
+                "run_interrupt_request completed",
+                "command_execution running"
+            ]
+        );
+        assert_eq!(live.projection()["runs"][0]["status"], "running");
+        // The interrupted turn ends the run at once, with its result card.
+        live.provider
+            .apply(run_id, &terminal(TurnStatus::Interrupted), 4);
+        assert_eq!(
+            kinds(&live),
+            [
+                "command_execution interrupted",
+                "run_interrupt_request completed",
+                "command_execution interrupted",
+                "run_interrupt_result interrupted"
+            ]
+        );
+        assert_eq!(live.projection()["runs"][0]["status"], "interrupted");
+        assert!(live.projection()["runs"][0]["completedAt"].is_string());
     }
 }

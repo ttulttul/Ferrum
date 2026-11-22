@@ -476,6 +476,7 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
             &after,
             occurred_at,
             detach_reason(&record.event),
+            crate::thread_events::Order::of(&record.event),
         ));
         planned.threads.push(ThreadWrite {
             thread_id,

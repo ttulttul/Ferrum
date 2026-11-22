@@ -356,17 +356,9 @@ async fn record<H: TurnHost>(
         None if ok => ("completed", None),
         None => ("failed", Some(format!("provider exited with {status}"))),
     };
-    let ok = run_status == "completed";
-    host.commit(Event::RunFinished {
-        run_id: run.id,
-        thread_id: thread_id.clone(),
-        status: run_status.into(),
-        error,
-    })
-    .await?;
-    host.turn_finished(run);
-    done(exit_position);
-    if ok {
+    // A completed turn's checkpoint comes first: the reference's run waits
+    // for it, and its capture completes the run.
+    if run_status == "completed" {
         if let Some(tree) = host.workspace().capture_git_tree(&cwd).await {
             let turn_count = host
                 .store
@@ -378,7 +370,7 @@ async fn record<H: TurnHost>(
                 .unwrap_or_default();
             let _ = host
                 .commit(Event::CheckpointCaptured {
-                    thread_id,
+                    thread_id: thread_id.clone(),
                     checkpoint: CheckpointRecord {
                         turn_count,
                         tree,
@@ -389,6 +381,18 @@ async fn record<H: TurnHost>(
                 })
                 .await;
         }
+        if host.stopping() {
+            return Ok(());
+        }
     }
+    host.commit(Event::RunFinished {
+        run_id: run.id,
+        thread_id,
+        status: run_status.into(),
+        error,
+    })
+    .await?;
+    host.turn_finished(run);
+    done(exit_position);
     Ok(())
 }

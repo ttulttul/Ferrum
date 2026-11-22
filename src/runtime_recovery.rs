@@ -950,6 +950,7 @@ mod tests {
                 failure: None,
                 thread_disposition: ThreadDisposition::Reusable,
                 driver: None,
+                closing: Vec::new(),
             },
             12,
         );
@@ -1126,6 +1127,7 @@ mod tests {
                 failure: None,
                 thread_disposition: ThreadDisposition::Reusable,
                 driver: None,
+                closing: Vec::new(),
             },
         ] {
             a.provider.apply(id, &event, 11);

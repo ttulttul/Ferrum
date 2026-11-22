@@ -164,17 +164,136 @@ fn event(thread_id: &str, kind: &str, payload: &Value, occurred_at: &str) -> Val
     event
 }
 
-/// The domain events that take `before` to `after`, in the order the
-/// reference's turns emit them: thread, run and attempt, then each changed
-/// turn item preceded by its node and message, then provider records.
-/// `None` when a record went away, which no event expresses.
+/// The order a commit's domain events go in: the order the reference's
+/// writes of that kind put their records in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Order {
+    /// The thread, the run and its attempt, its root node, then each
+    /// changed turn item preceded by its node and message, then provider
+    /// records (a turn's progress, as the reference's ingestor writes it).
+    Default,
+    /// A turn's or run's end: what the provider reported (its session, its
+    /// turn, the turn's items), then the run's finalization
+    /// (`writeFinalRunEvents`): the attempt, the interrupt result or a
+    /// failure no turn reported, the run, its root node and the provider
+    /// thread.
+    End,
+    /// A checkpoint capture (`CheckpointCaptureService`): the checkpoints,
+    /// the checkpoint item, then the run and its root node.
+    Checkpoint,
+}
+
+impl Order {
+    /// The order of the events of a commit of `event`.
+    pub fn of(event: &crate::Event) -> Self {
+        use crate::workspace::provider::ProviderEvent;
+        match event {
+            crate::Event::RunProvider {
+                event: ProviderEvent::TurnTerminal { .. },
+                ..
+            }
+            | crate::Event::RunFinished { .. } => Order::End,
+            crate::Event::CheckpointCaptured { .. } => Order::Checkpoint,
+            _ => Order::Default,
+        }
+    }
+
+    fn steps(self) -> &'static [Step] {
+        use Step::*;
+        match self {
+            Order::Default => &[
+                Collection("runs"),
+                Collection("attempts"),
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Items(Phase::All),
+                Collection("providerSessions"),
+                Collection("providerThreads"),
+                Collection("providerTurns"),
+                Collection("runtimeRequests"),
+                Collection("subagents"),
+                Collection("plans"),
+                Collection("checkpoints"),
+                Collection("contextHandoffs"),
+                Collection("contextTransfers"),
+            ],
+            Order::End => &[
+                Collection("providerSessions"),
+                Collection("providerTurns"),
+                ReportedProviderThread,
+                Items(Phase::Reported),
+                Collection("attempts"),
+                Items(Phase::Finalized),
+                Collection("runs"),
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Collection("providerThreads"),
+                Collection("runtimeRequests"),
+                Collection("subagents"),
+                Collection("plans"),
+                Collection("checkpoints"),
+                Collection("contextHandoffs"),
+                Collection("contextTransfers"),
+            ],
+            Order::Checkpoint => &[
+                Collection("checkpoints"),
+                Items(Phase::All),
+                Collection("runs"),
+                Collection("attempts"),
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Collection("providerSessions"),
+                Collection("providerThreads"),
+                Collection("providerTurns"),
+                Collection("runtimeRequests"),
+                Collection("subagents"),
+                Collection("plans"),
+                Collection("contextHandoffs"),
+                Collection("contextTransfers"),
+            ],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Step {
+    Collection(&'static str),
+    /// Nodes that are not a changed turn item's (root nodes).
+    LooseNodes,
+    /// Messages that are not a changed turn item's.
+    LooseMessages,
+    /// Changed turn items, each preceded by its node and message.
+    Items(Phase),
+    /// A Claude provider thread at its turn's end, as Claude's adapter
+    /// reports it with the turn's end, before the run's finalization writes
+    /// it again.
+    ReportedProviderThread,
+}
+
+/// Which of a commit's changed turn items a step takes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    All,
+    /// What the provider reported, before the run's finalization.
+    Reported,
+    /// What the finalization adds: the interrupt result, and the error of a
+    /// run that ended without its provider reporting the turn's end.
+    Finalized,
+}
+
+/// The domain events that take `before` to `after`, in `order`. `None`
+/// when a record went away, which no event expresses.
 pub fn diff(
     thread_id: &str,
     before: &Value,
     after: &Value,
     occurred_at: &str,
+    order: Order,
 ) -> Option<Vec<Value>> {
-    diff_with(thread_id, before, after, occurred_at, false, None)
+    diff_with(thread_id, before, after, occurred_at, false, None, order)
 }
 
 /// [`diff`] for a commit that detached the thread's provider session for
@@ -186,8 +305,17 @@ pub fn diff_detaching(
     after: &Value,
     occurred_at: &str,
     reason: &str,
+    order: Order,
 ) -> Option<Vec<Value>> {
-    diff_with(thread_id, before, after, occurred_at, false, Some(reason))
+    diff_with(
+        thread_id,
+        before,
+        after,
+        occurred_at,
+        false,
+        Some(reason),
+        order,
+    )
 }
 
 /// [`diff`]'s events for every record that is new or changed, also when
@@ -199,8 +327,9 @@ pub fn diff_all(
     after: &Value,
     occurred_at: &str,
     detached: Option<&str>,
+    order: Order,
 ) -> Vec<Value> {
-    diff_with(thread_id, before, after, occurred_at, true, detached).unwrap_or_default()
+    diff_with(thread_id, before, after, occurred_at, true, detached, order).unwrap_or_default()
 }
 
 fn diff_with(
@@ -210,6 +339,7 @@ fn diff_with(
     occurred_at: &str,
     allow_removals: bool,
     detached: Option<&str>,
+    order: Order,
 ) -> Option<Vec<Value>> {
     let mut out = Vec::new();
     if before["thread"] != after["thread"] && after["thread"].is_object() {
@@ -296,67 +426,105 @@ fn diff_with(
             }
         }
     };
-    push_collection(&mut out, "runs");
-    push_collection(&mut out, "attempts");
-    // Nodes and messages go with their turn item; the rest after the run.
     let mut nodes: Vec<&Value> = collections["nodes"].iter().map(|(_, r)| r).collect();
     let mut messages: Vec<&Value> = collections["messages"].iter().map(|(_, r)| r).collect();
     let mut items: Vec<&Value> = collections["turnItems"].iter().map(|(_, r)| r).collect();
     items.sort_by_key(|item| item["ordinal"].as_u64().unwrap_or(0));
+    // A run's own items (its error, its interrupt) sit on its root node,
+    // which goes with the run instead.
+    let is_root = |id: &str| {
+        nodes
+            .iter()
+            .any(|node| node["id"] == id && node["kind"] == "root_turn")
+    };
     let item_nodes: std::collections::HashSet<&str> = items
         .iter()
         .filter_map(|item| item["nodeId"].as_str())
+        .filter(|id| !is_root(id))
         .collect();
     let item_messages: std::collections::HashSet<&str> = items
         .iter()
         .filter_map(|item| item["messageId"].as_str())
         .collect();
-    for node in nodes.iter().filter(|node| {
-        node["id"]
-            .as_str()
-            .is_none_or(|id| !item_nodes.contains(id))
-    }) {
-        out.push(event(thread_id, "node.updated", node, occurred_at));
-    }
-    push_collection(&mut out, "checkpointScopes");
-    for message in messages.iter().filter(|m| {
-        m["id"]
-            .as_str()
-            .is_none_or(|id| !item_messages.contains(id))
-    }) {
-        out.push(event(thread_id, "message.updated", message, occurred_at));
-    }
-    for item in items {
-        if let Some(index) = nodes.iter().position(|node| node["id"] == item["nodeId"]) {
-            out.push(event(
-                thread_id,
-                "node.updated",
-                nodes.remove(index),
-                occurred_at,
-            ));
+    // The reference writes a turn's error with the turn's end when the
+    // provider reports it, and with the run's end otherwise: when no turn
+    // end was reported, or the provider's event stream closed.
+    let turn_reported = !collections["providerTurns"].is_empty();
+    let finalized = |item: &Value| {
+        item["type"] == "run_interrupt_result"
+            || (item["type"] == "error"
+                && (!turn_reported
+                    || item["failure"]["message"]
+                        == crate::workspace::provider::CODEX_STREAM_CLOSED))
+    };
+    for step in order.steps() {
+        match *step {
+            Step::Collection(name) => push_collection(&mut out, name),
+            Step::ReportedProviderThread => {
+                // A turn whose event stream closed reported nothing more.
+                let closed = items.iter().any(|item| {
+                    item["failure"]["message"] == crate::workspace::provider::CODEX_STREAM_CLOSED
+                });
+                if turn_reported && !closed {
+                    for (_, record) in &collections["providerThreads"] {
+                        if record["driver"] == crate::workspace::provider::CLAUDE_AGENT {
+                            out.push(event(
+                                thread_id,
+                                "provider-thread.updated",
+                                record,
+                                occurred_at,
+                            ));
+                        }
+                    }
+                }
+            }
+            Step::LooseNodes => {
+                for node in nodes.iter().filter(|node| {
+                    node["id"]
+                        .as_str()
+                        .is_none_or(|id| !item_nodes.contains(id))
+                }) {
+                    out.push(event(thread_id, "node.updated", node, occurred_at));
+                }
+            }
+            Step::LooseMessages => {
+                for message in messages.iter().filter(|m| {
+                    m["id"]
+                        .as_str()
+                        .is_none_or(|id| !item_messages.contains(id))
+                }) {
+                    out.push(event(thread_id, "message.updated", message, occurred_at));
+                }
+            }
+            Step::Items(phase) => {
+                for item in items.iter().filter(|item| match phase {
+                    Phase::All => true,
+                    Phase::Reported => !finalized(item),
+                    Phase::Finalized => finalized(item),
+                }) {
+                    if let Some(index) = nodes.iter().position(|node| {
+                        node["id"] == item["nodeId"] && node["kind"] != "root_turn"
+                    }) {
+                        out.push(event(
+                            thread_id,
+                            "node.updated",
+                            nodes.remove(index),
+                            occurred_at,
+                        ));
+                    }
+                    if let Some(index) = messages.iter().position(|m| m["id"] == item["messageId"])
+                    {
+                        out.push(event(
+                            thread_id,
+                            "message.updated",
+                            messages.remove(index),
+                            occurred_at,
+                        ));
+                    }
+                    out.push(event(thread_id, "turn-item.updated", item, occurred_at));
+                }
+            }
         }
-        if let Some(index) = messages.iter().position(|m| m["id"] == item["messageId"]) {
-            out.push(event(
-                thread_id,
-                "message.updated",
-                messages.remove(index),
-                occurred_at,
-            ));
-        }
-        out.push(event(thread_id, "turn-item.updated", item, occurred_at));
-    }
-    for name in [
-        "providerSessions",
-        "providerThreads",
-        "providerTurns",
-        "runtimeRequests",
-        "subagents",
-        "plans",
-        "checkpoints",
-        "contextHandoffs",
-        "contextTransfers",
-    ] {
-        push_collection(&mut out, name);
     }
     Some(out)
 }
@@ -403,7 +571,14 @@ mod tests {
             "turnItems": [{"id": "i", "runId": "r", "nodeId": "n:1", "messageId": "m",
                 "type": "assistant_message", "ordinal": 2, "updatedAt": "2026-01-01T00:00:00.000Z"}]
         });
-        let events = diff("t", &before, &after, "2026-01-02T00:00:00.000Z").unwrap();
+        let events = diff(
+            "t",
+            &before,
+            &after,
+            "2026-01-02T00:00:00.000Z",
+            Order::Default,
+        )
+        .unwrap();
         let types: Vec<&str> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
         assert_eq!(
             types,
@@ -424,9 +599,11 @@ mod tests {
         assert_eq!(items[5]["sequence"], 10);
         assert_eq!(items[5]["event"]["id"], "event:thread:t:sequence:10");
         // A record that went away needs a snapshot.
-        assert!(diff("t", &after, &before, "x").is_none());
+        assert!(diff("t", &after, &before, "x", Order::Default).is_none());
         // Nothing changed, nothing to send.
-        assert!(diff("t", &after, &after, "x").unwrap().is_empty());
+        assert!(diff("t", &after, &after, "x", Order::Default)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -434,13 +611,14 @@ mod tests {
         let before = json!({"thread": {"id": "t"}, "providerSessions": [
             {"id": "s", "driver": "codex", "providerInstanceId": "codex"}]});
         let after = json!({"thread": {"id": "t"}, "providerSessions": []});
-        assert!(diff("t", &before, &after, "x").is_none());
+        assert!(diff("t", &before, &after, "x", Order::Default).is_none());
         let events = diff_detaching(
             "t",
             &before,
             &after,
             "2026-01-01T00:00:00.000Z",
             "Thread archived.",
+            Order::Default,
         )
         .unwrap();
         assert_eq!(events.len(), 1);
@@ -461,5 +639,107 @@ mod tests {
         assert_eq!(thread_event(&archived, &base), "thread.unarchived");
         let mode = json!({"archivedAt": null, "runtimeMode": "approval-required"});
         assert_eq!(thread_event(&base, &mode), "thread.runtime-mode-updated");
+    }
+
+    fn types(events: &[Value]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| {
+                let kind = e["type"].as_str().unwrap();
+                match e["payload"]["type"].as_str() {
+                    Some(item) if kind == "turn-item.updated" => format!("{kind} {item}"),
+                    _ => kind.to_owned(),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_turns_end_comes_as_the_reference_writes_it() {
+        let empty = json!({
+            "thread": {"id": "t"}, "runs": [], "attempts": [], "nodes": [], "messages": [],
+            "turnItems": [], "providerTurns": [], "providerThreads": []
+        });
+        let before = json!({
+            "thread": {"id": "t"},
+            "runs": [{"id": "r", "rootNodeId": "n:root", "status": "running"}],
+            "attempts": [{"id": "a", "runId": "r", "rootNodeId": "n:root", "status": "running"}],
+            "nodes": [{"id": "n:root", "kind": "root_turn", "runId": "r", "status": "running"},
+                      {"id": "n:cmd", "kind": "tool_call", "runId": "r", "status": "running"}],
+            "messages": [],
+            "turnItems": [{"id": "i:cmd", "type": "command_execution", "nodeId": "n:cmd", "runId": "r",
+                           "status": "running", "ordinal": 2}],
+            "providerTurns": [{"id": "pt", "runId": "r", "status": "running"}],
+            "providerThreads": [{"id": "pth", "driver": "codex", "status": "active"}]
+        });
+        let mut after = before.clone();
+        after["runs"][0]["status"] = json!("interrupted");
+        after["attempts"][0]["status"] = json!("interrupted");
+        after["nodes"][0]["status"] = json!("interrupted");
+        after["nodes"][1]["status"] = json!("interrupted");
+        after["turnItems"][0]["status"] = json!("interrupted");
+        after["turnItems"].as_array_mut().unwrap().push(
+            json!({"id": "i:result", "type": "run_interrupt_result", "nodeId": "n:root",
+                         "runId": "r", "status": "interrupted", "ordinal": 3}),
+        );
+        after["providerTurns"][0]["status"] = json!("interrupted");
+        after["providerThreads"][0]["status"] = json!("idle");
+        let events = diff("t", &before, &after, "x", Order::End).unwrap();
+        // The provider's report (its turn, the items it ends), then the
+        // run's finalization: attempt, interrupt result, run, root node,
+        // provider thread.
+        assert_eq!(
+            types(&events),
+            [
+                "provider-turn.updated",
+                "node.updated",
+                "turn-item.updated command_execution",
+                "run-attempt.updated",
+                "turn-item.updated run_interrupt_result",
+                "run.updated",
+                "node.updated",
+                "provider-thread.updated"
+            ]
+        );
+        assert_eq!(events[6]["payload"]["id"], "n:root");
+        // A Claude turn's end also carries the thread its adapter reports.
+        let mut claude = after.clone();
+        claude["providerThreads"][0]["driver"] = json!("claudeAgent");
+        let mut claude_before = before.clone();
+        claude_before["providerThreads"][0]["driver"] = json!("claudeAgent");
+        let events = diff("t", &claude_before, &claude, "x", Order::End).unwrap();
+        assert_eq!(types(&events)[1], "provider-thread.updated");
+        assert_eq!(types(&events).last().unwrap(), "provider-thread.updated");
+        // A run that ended without its turn reporting the end: its error
+        // comes with the finalization.
+        let mut failed = empty.clone();
+        failed["runs"] = json!([{"id": "r", "rootNodeId": "n:root", "status": "failed"}]);
+        failed["attempts"] = json!([{"id": "a", "runId": "r", "status": "failed"}]);
+        failed["turnItems"] =
+            json!([{"id": "e", "type": "error", "nodeId": "n:root", "runId": "r", "ordinal": 1}]);
+        let events = diff("t", &empty, &failed, "x", Order::End).unwrap();
+        assert_eq!(
+            types(&events),
+            [
+                "run-attempt.created",
+                "turn-item.updated error",
+                "run.created"
+            ]
+        );
+        // A checkpoint: the checkpoints, its item, then the run.
+        let mut captured = empty.clone();
+        captured["checkpoints"] = json!([{"id": "c0"}, {"id": "c1"}]);
+        captured["turnItems"] = json!([{"id": "ci", "type": "checkpoint", "ordinal": 1}]);
+        captured["runs"] = json!([{"id": "r", "status": "completed"}]);
+        let events = diff("t", &empty, &captured, "x", Order::Checkpoint).unwrap();
+        assert_eq!(
+            types(&events),
+            [
+                "checkpoint.captured",
+                "checkpoint.captured",
+                "turn-item.updated checkpoint",
+                "run.created"
+            ]
+        );
     }
 }
