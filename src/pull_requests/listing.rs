@@ -341,7 +341,7 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
     let viewer = if bitbucket.is_empty() {
         BitbucketViewer::Unauthenticated
     } else {
-        bitbucket::viewer().await
+        bitbucket::viewer_for(&bitbucket[0].1).await
     };
     let detail = match &viewer {
         BitbucketViewer::Known(_) => None,

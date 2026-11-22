@@ -134,10 +134,7 @@
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
   },
   "claude delegate async": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer.",
-    "agent mcp": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the delegated task's delivery, to the CLI it already runs; the extra CLI adds a launch, its approval flags and its own MCP sign-in.",
-    "cli approvals": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the delegated task's delivery, to the CLI it already runs; the extra CLI adds a launch, its approval flags and its own MCP sign-in.",
-    "cli launch": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the delegated task's delivery, to the CLI it already runs; the extra CLI adds a launch, its approval flags and its own MCP sign-in."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
   },
   "codex second turn": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
@@ -153,8 +150,11 @@
   },
   "claude delegate followup": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer.",
-    "agent mcp": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the follow-up and its result's delivery, to the CLI it already runs; the extra CLIs add launches, their approval flags and their own MCP sign-ins.",
-    "cli approvals": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the follow-up and its result's delivery, to the CLI it already runs; the extra CLIs add launches, their approval flags and their own MCP sign-ins.",
-    "cli launch": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the follow-up and its result's delivery, to the CLI it already runs; the extra CLIs add launches, their approval flags and their own MCP sign-ins."
+    "agent mcp": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories.",
+    "cli approvals": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories.",
+    "cli launch": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories."
+  },
+  "claude second turn": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
   }
 }

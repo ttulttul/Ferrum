@@ -7,9 +7,7 @@ well-known icon files, an icon an HTML page links, `t3.json`'s `iconPath`, a `fa
 override outside the workspace and one that is not an image, an `.icns` icon (served as its
 embedded PNG), a folder no project owns, and a project a clone is creating: no icon while the
 clone runs, its icon once the checkout lands. Clones come from a local bare repository over an
-SSH URL to 127.0.0.1 whose fake `ssh` runs `git-upload-pack` here after a delay. Nothing may
-leave loopback: the harness's refusing proxy must have seen nothing but the reference's
-model-manifest refresh. All data is fake.
+SSH URL to 127.0.0.1 whose fake `ssh` runs `git-upload-pack` here after a delay. Nothing may leave loopback: every server runs behind the harness's loopback proxy, which forwards nothing (parity_harness.assert_nothing_escaped). All data is fake.
 """
 import argparse
 import base64
@@ -31,7 +29,6 @@ from websockets.sync.client import connect
 import parity_harness
 from parity_harness import encode, http, isolated_git_env, managed_server
 
-ALLOWED_REFUSALS = {"raw.githubusercontent.com"}
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16"/></svg>\n'
 FAKE_SSH = """#!/usr/bin/env python3
 import os, sys, time
@@ -205,8 +202,8 @@ def main():
                 for path, mark in ((str(home), "<home>"), (str(tmp), "<tmp>")):
                     text = text.replace(path, mark)
                 answers[side] = json.loads(text)
-    refused = {urlsplit(f"//{entry.split(' ', 1)[1]}").hostname for entry in parity_harness.REFUSED}
-    assert refused <= ALLOWED_REFUSALS, f"requests left loopback: {sorted(refused - ALLOWED_REFUSALS)}"
+    # Every server ran behind a loopback proxy that forwards nothing; what it refused never left.
+    parity_harness.assert_nothing_escaped()
     failures = 0
     for name in answers["original"]:
         same = answers["original"][name] == answers["rust"].get(name)

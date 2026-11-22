@@ -212,15 +212,9 @@ impl Remote {
                     "{}/repositories/{repo}/pullrequests{suffix}",
                     base.trim_end_matches('/')
                 ));
-                if let Ok(token) = std::env::var("T3CODE_BITBUCKET_ACCESS_TOKEN") {
-                    req.bearer_auth(token)
-                } else if let (Ok(email), Ok(token)) = (
-                    std::env::var("T3CODE_BITBUCKET_EMAIL"),
-                    std::env::var("T3CODE_BITBUCKET_API_TOKEN"),
-                ) {
-                    req.basic_auth(email, Some(token))
-                } else {
-                    req
+                match crate::bitbucket_credential::current().await {
+                    Ok(Some(credential)) => credential.apply(req),
+                    _ => req,
                 }
             }
             "cursor-origin" => {

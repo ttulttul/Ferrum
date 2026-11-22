@@ -55,8 +55,25 @@ pub(crate) async fn launch<H: TurnHost>(
     host: Arc<H>,
     run: Run,
     spec: TurnSpec,
-    cancel: oneshot::Receiver<()>,
+    mut cancel: oneshot::Receiver<()>,
 ) {
+    // A run stopped before its provider started abandons that start, as the
+    // reference's interrupt does: no CLI is launched, and the run ends
+    // interrupted.
+    if cancel.try_recv().is_ok() {
+        host.cancellations().lock().await.remove(&run.id);
+        if !host.stopping() {
+            let _ = host
+                .commit(Event::RunFinished {
+                    run_id: run.id,
+                    thread_id: run.thread_id.clone(),
+                    status: "interrupted".into(),
+                    error: None,
+                })
+                .await;
+        }
+        return;
+    }
     let cwd = spec.cwd.clone();
     let result = match host.workspace().start_tracked_turn(spec, cancel).await {
         Ok(turn) => {

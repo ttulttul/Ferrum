@@ -243,10 +243,6 @@ Gaps the thread tools surface that live in shared code, not in the tools:
   app-server, as the reference does (#152), so a delegated child's Codex turn comes into the
   parent's app-server. The delegation scenarios still compare Claude only; a Codex one is to
   come.
-- **One Claude CLI per turn.** Rust starts a Claude CLI for each turn and resumes its session
-  (`--resume`); the reference sends later turns, such as a delegated task's delivery, to the CLI
-  it already runs. The `claude delegate async` scenario lists the launch and sign-in differences
-  as expected failures.
 - **Run start.** Rust records a run as running from its start; the reference's run is
   `starting` until its provider turn begins. `task_status` reads a run without a provider
   attempt as `starting`, as the reference reports it.

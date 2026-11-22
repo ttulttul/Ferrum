@@ -40,9 +40,9 @@ pub(crate) trait CommandHost:
     /// then ends that process instead of interrupting the turn, as the
     /// reference's detach does. Hosts without local provider turns ignore it.
     fn detach_turn(&self, _run: Uuid) {}
-    /// Unload the native Codex `thread` from `instance`'s shared app-server
-    /// once its turn ended (a detach). Hosts without local provider turns
-    /// ignore it.
+    /// Unload the detached thread's native Codex `thread` from `instance`'s
+    /// shared app-server once its turn ended, or close its Claude session's
+    /// CLI. Hosts without local provider turns ignore it.
     fn unload_provider_thread(&self, _instance: &str, _thread: &str) {}
     /// Run a `thread-title.generate` effect in the background. Hosts that
     /// run no provider CLIs ignore it.
@@ -486,17 +486,22 @@ async fn detach_session<H: CommandHost>(
             .filter(|run| run.status == "running")
             .map(|run| run.id)
             .collect();
-        // The Codex thread the instance's shared app-server holds, which
-        // the detach unloads.
         let row = thread.stored_row();
         let instance = row["modelSelection"]["instanceId"]
             .as_str()
             .or(row["providerInstanceId"].as_str())
             .unwrap_or(crate::workspace::provider::CODEX)
             .to_owned();
+        // The native Codex thread or Claude session the thread's provider
+        // process holds, which the detach unloads (Codex) or closes (Claude).
         let codex_thread = thread
             .provider
             .resume_for(crate::workspace::provider::CODEX)
+            .or_else(|| {
+                thread
+                    .provider
+                    .resume_for(crate::workspace::provider::CLAUDE_AGENT)
+            })
             .map(|native| (instance, native));
         (thread.provider.session_live(), run_ids, codex_thread)
     };

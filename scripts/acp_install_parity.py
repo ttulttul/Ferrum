@@ -17,8 +17,7 @@ local stand-ins only:
 - uninstall: a binary just prepared is kept, as is one a provider instance uses; another is
   removed with its folders; an unknown agent and an invalid id are reported.
 
-Nothing may leave loopback: the harness's refusing proxy must have seen only the ACP
-registry, the archive URL, and the reference's model-manifest refresh. All data is fake.
+Nothing may leave loopback: every server runs behind the harness's loopback proxy, which forwards nothing (parity_harness.assert_nothing_escaped). All data is fake.
 """
 import argparse
 import base64
@@ -44,7 +43,6 @@ from websockets.sync.client import connect
 import parity_harness
 from parity_harness import encode, managed_server, path_without
 
-ALLOWED_REFUSALS = {"raw.githubusercontent.com", "cdn.agentclientprotocol.com", "example.invalid"}
 TARGET = {("Linux", "x86_64"): "linux-x86_64", ("Linux", "aarch64"): "linux-aarch64"}.get(
     (platform.system(), platform.machine()))
 
@@ -230,8 +228,8 @@ def main():
                 text = re.sub(r"127\.0\.0\.1:\d+", "127.0.0.1:<port>", text)
                 text = re.sub(r"\d{4}-\d\d-\d\dT\d\d_\d\d_\d\d_\d+Z", "<time>", text)
                 answers[side] = json.loads(text)
-    refused = {urlsplit(f"//{entry.split(' ', 1)[1]}").hostname for entry in parity_harness.REFUSED}
-    assert refused <= ALLOWED_REFUSALS, f"requests left loopback: {sorted(refused - ALLOWED_REFUSALS)}"
+    # Every server ran behind a loopback proxy that forwards nothing; what it refused never left.
+    parity_harness.assert_nothing_escaped()
     failures = 0
     for name in answers["original"]:
         same = answers["original"][name] == answers["rust"].get(name)

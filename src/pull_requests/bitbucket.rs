@@ -3,8 +3,8 @@
 //! read them.
 //!
 //! The API is `T3CODE_BITBUCKET_API_BASE_URL` (Bitbucket Cloud by default), with
-//! the `T3CODE_BITBUCKET_ACCESS_TOKEN` (bearer) or `T3CODE_BITBUCKET_EMAIL` and
-//! `T3CODE_BITBUCKET_API_TOKEN` (basic) credential. A repository is listed newest
+//! the credential `bitbucket_credential` reads for each request (settings, then the
+//! `T3CODE_BITBUCKET_*` environment variables). A repository is listed newest
 //! first, 50 a page and at most ten pages, continuing from the shared list cursor;
 //! next-page links are followed only on the configured API's origin.
 use super::listing::Cursor;
@@ -42,6 +42,8 @@ enum Failure {
     Send,
     Status(u16),
     Untrusted,
+    /// A secret reference in the Bitbucket settings could not be read (`SettingsSecretUnresolvedError`).
+    Unresolved,
 }
 
 impl Failure {
@@ -50,6 +52,7 @@ impl Failure {
             Failure::Send => "Failed to send the Bitbucket request.".into(),
             Failure::Status(status) => format!("Bitbucket returned HTTP {status}."),
             Failure::Untrusted => "Bitbucket returned a link to another host.".into(),
+            Failure::Unresolved => "The Bitbucket credential could not be read.".into(),
         }
     }
 }
@@ -71,13 +74,10 @@ async fn get(url: &str) -> Result<String, Failure> {
         .build()
         .map_err(|_| Failure::Send)?;
     let mut request = client.get(&url).header("Accept", "application/json");
-    if let Ok(token) = std::env::var("T3CODE_BITBUCKET_ACCESS_TOKEN") {
-        request = request.bearer_auth(token);
-    } else if let (Ok(email), Ok(token)) = (
-        std::env::var("T3CODE_BITBUCKET_EMAIL"),
-        std::env::var("T3CODE_BITBUCKET_API_TOKEN"),
-    ) {
-        request = request.basic_auth(email, Some(token));
+    match crate::bitbucket_credential::current().await {
+        Ok(Some(credential)) => request = credential.apply(request),
+        Ok(None) => {}
+        Err(_) => return Err(Failure::Unresolved),
     }
     let response = request.send().await.map_err(|_| Failure::Send)?;
     let status = response.status().as_u16();
@@ -95,10 +95,39 @@ fn trimmed(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Viewers read in the last ten minutes, by host (`viewersByHost`); failures are not kept.
+static VIEWERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>,
+> = std::sync::LazyLock::new(Default::default);
+const VIEWER_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// `resolveViewers` for a Bitbucket host: the viewer kept from the last ten minutes, or a fresh one.
+pub(super) async fn viewer_for(host: &str) -> Viewer {
+    if let Some((at, name)) = VIEWERS.lock().unwrap().get(host) {
+        if at.elapsed() <= VIEWER_CACHE_TTL {
+            return Viewer::Known(name.clone());
+        }
+    }
+    let viewer = viewer().await;
+    if let Viewer::Known(name) = &viewer {
+        VIEWERS
+            .lock()
+            .unwrap()
+            .insert(host.to_owned(), (std::time::Instant::now(), name.clone()));
+    }
+    viewer
+}
+
+/// A whole refresh (`pullRequests.invalidate` without a reference) forgets the viewers.
+pub(crate) fn forget_viewers() {
+    VIEWERS.lock().unwrap().clear();
+}
+
 /// `getViewer`: the account's nickname, or its display name.
-pub(super) async fn viewer() -> Viewer {
+async fn viewer() -> Viewer {
     match get("/user").await {
-        Err(Failure::Status(401)) => Viewer::Unauthenticated,
+        // An unreadable secret is `unauthenticated`, as a rejected credential is.
+        Err(Failure::Status(401) | Failure::Unresolved) => Viewer::Unauthenticated,
         Err(failure) => Viewer::Failed {
             detail: failure.detail(),
             not_found: matches!(failure, Failure::Status(404)),

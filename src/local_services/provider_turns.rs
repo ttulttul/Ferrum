@@ -1,21 +1,44 @@
 //! Provider turns: run a coding agent's CLI for one turn and translate its
 //! protocol into [`ProviderEvent`]s.
 //!
-//! A Claude turn starts the CLI, continues the thread's native session when
-//! the spec names one, sends the prompt, and stops the CLI once the turn
-//! ends. Codex turns run in the app-server their provider instance shares
-//! across threads ([`codex_server`]), as the reference's do.
+//! A Claude turn writes its prompt to the CLI its thread keeps running
+//! ([`claude_sessions`]), or starts one that continues the thread's native
+//! session. Codex turns run in the app-server their provider instance
+//! shares across threads ([`codex_server`]), as the reference's do.
 //! The thread's runtime mode decides what the CLI may do without asking;
 //! every approval or question it still asks waits for the user (see
 //! [`requests`]).
 mod claude;
+mod claude_sessions;
 mod codex;
 mod codex_server;
 mod requests;
 
-pub(crate) use codex_server::{
-    shutdown as shutdown_codex, unload_thread as unload_codex_thread, Registry as CodexServers,
-};
+pub(crate) use codex_server::Registry as CodexServers;
+
+/// The provider processes a workspace keeps across turns: each Codex
+/// instance's shared app-server, and each thread's Claude CLI.
+#[derive(Default)]
+pub(crate) struct ProviderProcesses {
+    codex: std::sync::Arc<CodexServers>,
+    claude: std::sync::Arc<claude_sessions::Sessions>,
+}
+
+impl ProviderProcesses {
+    /// Unload a detached thread's native thread or session: its Codex thread
+    /// from its instance's app-server, its Claude CLI closed.
+    pub(crate) fn unload_thread(&self, instance: &str, thread: &str) {
+        codex_server::unload_thread(&self.codex, instance, thread);
+        self.claude.close(thread);
+    }
+
+    /// Stop them all (the server is shutting down), once their turns ended
+    /// or after `grace`.
+    pub(crate) async fn shutdown(&self, grace: std::time::Duration) {
+        codex_server::shutdown(&self.codex, grace).await;
+        self.claude.shutdown().await;
+    }
+}
 pub(crate) use requests::respond;
 
 use crate::workspace::provider::{
@@ -34,7 +57,7 @@ use tokio::{
 pub(crate) fn start(
     spec: TurnSpec,
     cancel: oneshot::Receiver<()>,
-    codex_servers: std::sync::Arc<CodexServers>,
+    processes: std::sync::Arc<ProviderProcesses>,
 ) -> anyhow::Result<mpsc::UnboundedReceiver<TurnEvent>> {
     let provider = spec
         .provider
@@ -59,10 +82,17 @@ pub(crate) fn start(
             cancel,
             responses,
             sink,
-            codex_servers,
+            processes.codex.clone(),
         ));
     } else {
-        tokio::spawn(claude::run(spec, provider, cancel, responses, sink));
+        tokio::spawn(claude::run(
+            spec,
+            provider,
+            cancel,
+            responses,
+            sink,
+            processes.claude.clone(),
+        ));
     }
     Ok(receiver)
 }
@@ -355,6 +385,11 @@ impl Cli {
 
     /// Kill the CLI and everything it started, now, keeping the handle so
     /// its closed output still ends the turn.
+    /// Whether the CLI is still running.
+    pub(crate) fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
     pub(crate) fn kill_now(&mut self) {
         drop(self.stdin.take());
         #[cfg(unix)]
