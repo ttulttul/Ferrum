@@ -119,10 +119,13 @@ pub struct ControlPlane {
     state: ControlState,
     /// The MCP sign-in's grants, kept in the state documents.
     oauth: crate::mcp_oauth::OAuth,
+    #[cfg(feature = "native")]
     /// Links from this environment to other environments.
     peer_links: crate::peer_links::PeerLinks,
+    #[cfg(feature = "native")]
     /// MCP sessions with linked environments.
     peer_mcp: crate::peer_mcp::PeerMcpClient,
+    #[cfg(feature = "native")]
     /// Link cards being answered now.
     link_answers: crate::peer_link_requests::Answering,
     asset_key: Mutex<Option<[u8; 32]>>,
@@ -205,6 +208,7 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
                 .map_err(|_| ())
         })
     }
+    #[cfg(feature = "native")]
     fn peer_links_listed(
         self: &Arc<Self>,
     ) -> crate::mcp_oauth::HostFuture<Result<Vec<Value>, String>> {
@@ -227,11 +231,13 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
                 .map_err(|error| error.message)
         })
     }
+    #[cfg(feature = "native")]
     fn unlink_peer(&self, environment_id: &str) -> Result<bool, String> {
         self.peer_links
             .unlink(environment_id)
             .map_err(|error| error.message)
     }
+    #[cfg(feature = "native")]
     fn peer_link(&self, environment_id: &str) -> Option<crate::mcp_oauth::PeerLinkInfo> {
         let link = self.peer_links.get(environment_id).ok().flatten()?;
         Some(crate::mcp_oauth::PeerLinkInfo {
@@ -240,6 +246,7 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
             access: link.access,
         })
     }
+    #[cfg(feature = "native")]
     fn forward_tool(
         self: &Arc<Self>,
         environment_id: String,
@@ -452,11 +459,14 @@ impl ControlPlane {
             started_at,
             state,
             oauth,
+            #[cfg(feature = "native")]
             peer_links: crate::peer_links::PeerLinks::new(
                 std::path::Path::new(STATE_DIR),
                 &std::path::Path::new(STATE_DIR).join("secrets"),
             ),
+            #[cfg(feature = "native")]
             peer_mcp: Default::default(),
+            #[cfg(feature = "native")]
             link_answers: Default::default(),
             signals,
             asset_key: Default::default(),
@@ -1152,15 +1162,19 @@ impl ControlPlane {
         if method == "assets.createUrl" {
             return Call::Done(self.create_asset_url(params).await);
         }
+        #[cfg(feature = "native")]
         if method == "peerLinks.list" {
             return Call::Done(self.peer_links_list().await);
         }
+        #[cfg(feature = "native")]
         if method == "peerLinks.link" {
             return Call::Done(self.peer_links_link(params).await);
         }
+        #[cfg(feature = "native")]
         if method == "peerLinks.unlink" {
             return Call::Done(self.peer_links_unlink(params));
         }
+        #[cfg(feature = "native")]
         if method == "peerLinks.answerRequest" {
             return Call::Done(self.peer_links_answer(params).await);
         }
@@ -1181,6 +1195,7 @@ impl ControlPlane {
         }
     }
 
+    #[cfg(feature = "native")]
     async fn peer_links_list(&self) -> Reply {
         match self.peer_links.list().await {
             Ok(links) => Reply::Success(json!({
@@ -1194,6 +1209,7 @@ impl ControlPlane {
         }
     }
 
+    #[cfg(feature = "native")]
     async fn peer_links_link(&self, params: &Value) -> Reply {
         let input = match crate::peer_links::LinkInput::from_json(params) {
             Ok(input) => input,
@@ -1218,6 +1234,7 @@ impl ControlPlane {
         }
     }
 
+    #[cfg(feature = "native")]
     fn peer_links_unlink(&self, params: &Value) -> Reply {
         let Some(environment_id) = params["environmentId"].as_str() else {
             return Reply::defect("Missing key\n  at [\"environmentId\"]".into());
@@ -1228,6 +1245,7 @@ impl ControlPlane {
         }
     }
 
+    #[cfg(feature = "native")]
     async fn peer_links_answer(self: &Arc<Self>, params: &Value) -> Reply {
         let descriptor = self.descriptor();
         let own = crate::peer_links::SelfDescriptor {
