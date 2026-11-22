@@ -1062,6 +1062,7 @@ mod tests {
             follows_thread_selection: false,
             notification: None,
             steer: None,
+            wire: None,
         });
         accepted_thread_only(&mut a, id);
         let mut store = store(a);
@@ -1192,6 +1193,7 @@ mod tests {
             follows_thread_selection: false,
             notification: None,
             steer: None,
+            wire: None,
         });
         let commands = continuations(&store(a.clone()), &json!({}), "2026-01-01T00:00:00Z");
         assert_eq!(commands.len(), 1);
@@ -1226,6 +1228,7 @@ mod tests {
             follows_thread_selection: true,
             notification: None,
             steer: None,
+            wire: None,
         });
         accepted_thread_only(&mut a, id);
         let mut store = store(a);

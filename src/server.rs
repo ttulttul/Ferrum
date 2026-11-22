@@ -495,7 +495,10 @@ impl crate::orchestration::CommandHost for AppState {
                 }
                 // A continuation that failed to start may be owed a retry.
                 let continues = run.restart_continuation_of.is_some().then(|| self.clone());
+                let (host, thread_id) = (self.clone(), run.thread_id.clone());
                 crate::turn::launch(self, run, spec, cancel).await;
+                // A delegated child's end settles its task; an idle parent gets its results.
+                crate::orchestration::after_run(host, &thread_id).await;
                 if let Some(state) = continues {
                     state.continue_restarted_runs().await;
                 }

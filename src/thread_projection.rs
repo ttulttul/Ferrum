@@ -84,7 +84,8 @@ fn model_selection(row: &Value) -> Value {
 }
 
 /// The reference's dedupeSnapshotBodies: a message item repeats its message's text, so the
-/// item carries `textOmitted` instead and the client restores the text from the message.
+/// item carries `textOmitted` instead and the client restores the text from the message;
+/// a subagent item likewise drops the prompt and result its task carries.
 fn dedupe_bodies(projection: &mut Value) {
     let texts: std::collections::HashMap<String, String> = projection["messages"]
         .as_array()
@@ -92,7 +93,30 @@ fn dedupe_bodies(projection: &mut Value) {
         .flatten()
         .filter_map(|m| Some((m["id"].as_str()?.to_owned(), m["text"].as_str()?.to_owned())))
         .collect();
+    let subagents: std::collections::HashMap<String, Value> = projection["subagents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| Some((t["id"].as_str()?.to_owned(), t.clone())))
+        .collect();
     let dedupe = |item: &mut Value| {
+        // `dedupeSubagentBodies`: a prompt or result its task record repeats.
+        if item["type"] == "subagent" {
+            let Some(task) = item["subagentId"].as_str().and_then(|id| subagents.get(id)) else {
+                return;
+            };
+            if item["prompt"].as_str().is_some_and(|p| !p.is_empty())
+                && task["prompt"] == item["prompt"]
+            {
+                item["prompt"] = json!("");
+                item["promptOmitted"] = json!(true);
+            }
+            if !item["result"].is_null() && task["result"] == item["result"] {
+                item["result"] = Value::Null;
+                item["resultOmitted"] = json!(true);
+            }
+            return;
+        }
         if !matches!(
             item["type"].as_str(),
             Some("user_message" | "assistant_message")
@@ -206,6 +230,15 @@ impl Thread {
                 if !run.background_work.is_empty() {
                     out["restartCancelledBackgroundWork"] = json!(run.background_work);
                 }
+                // Fields the orchestrator records on a run itself, such as a
+                // delegated task cohort (`delegatedCompletion`).
+                for (key, value) in row["runExtras"][run.wire_id()]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                {
+                    out[key] = value.clone();
+                }
                 if status == "queued" {
                     queue_position += 1;
                     out["queuePosition"] = json!(queue_position);
@@ -271,6 +304,9 @@ impl Thread {
                 if let Some(steer) = &message.steer {
                     row["runId"] = steer["runId"].clone();
                     row["nodeId"] = steer["nodeId"].clone();
+                }
+                for (key, value) in message.wire.iter().flat_map(|w| w.as_object()).flatten() {
+                    row[key] = value.clone();
                 }
                 row
             })
@@ -483,14 +519,21 @@ impl Thread {
         // A link card takes the next free slot of its run when it is asked, as
         // the reference's `nextTurnItemOrdinal`: after the provider items its
         // run had then (`afterProviderItems`), before the ones that came later.
+        // Items the orchestrator records itself, such as a delegated task's
+        // card, sit the same way.
+        let app_items = self.stored_row()["appTurnItems"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let mut cards: Vec<(usize, u64, Value)> = self
             .link_requests
             .iter()
+            .chain(app_items.iter())
             .filter_map(|card| {
-                let index = self
-                    .runs
-                    .iter()
-                    .position(|run| card["runId"] == run.id.to_string().as_str())?;
+                let index = self.runs.iter().position(|run| {
+                    card["runId"] == run.id.to_string().as_str()
+                        || card["runId"] == run.wire_id().as_str()
+                })?;
                 let after = card[LINK_CARD_POSITION].as_u64().unwrap_or(0);
                 let mut card = card.clone();
                 if let Some(fields) = card.as_object_mut() {
@@ -752,7 +795,7 @@ impl Thread {
         json!({"thread":app,"runs":self.run_rows(&row),"attempts":with("attempts",provider.attempts),"nodes":with("nodes",provider.nodes),"subagents":array("subagents"),
             "providerSessions":with("providerSessions",provider.provider_sessions),"providerThreads":with("providerThreads",provider.provider_threads),"providerTurns":with("providerTurns",provider.provider_turns),"runtimeRequests":with("runtimeRequests",provider.runtime_requests),
             "messages":messages,"plans":provider.plans,"turnItems":turn_items,"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
-            "contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":visible,"updatedAt":row["updatedAt"]})
+            "contextHandoffs":[],"contextTransfers":array("contextTransfers"),"visibleTurnItems":visible,"updatedAt":row["updatedAt"]})
     }
 
     /// The thread's whole timeline as `OrchestrationV2ThreadTranscript` items.
@@ -1087,6 +1130,7 @@ impl Thread {
                 follows_thread_selection: message["followsThreadSelection"] == true,
                 notification: None,
                 steer: None,
+                wire: None,
             })
             .collect();
         let thread_id = text("id").unwrap_or_default();

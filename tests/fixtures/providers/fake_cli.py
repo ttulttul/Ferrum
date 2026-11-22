@@ -10,7 +10,8 @@ arguments, launch environment and process id as JSON to FAKE_PROVIDER_LOG.launch
 
 A scenario is {"steps": [...]} or {"variants": [{"argsContain": "...",
 "steps": [...]}, ...]}, where the first variant whose argsContain is in the
-arguments (or that has none) plays. A variant may name another scenario file
+arguments (or that has none), and whose envContains {NAME: part} parts are
+all in those variables (a delegated child's T3CODE_THREAD_ID, say), plays. A variant may name another scenario file
 in this directory ("scenario": "claude_turn.json") to play its steps instead.
 With "repeat": true (on the scenario or the variant) the steps play again
 from the start after the last, so one long-lived CLI answers every prompt.
@@ -25,8 +26,15 @@ Steps:
                              then play the named scenario from the step after
                              its first {"expect"} of that key (so one Codex
                              session can start or resume its thread)
+  {"branchOnUser": [{"contains": "text", "steps": [...]}, {"steps": [...]}]}
+                             read until a user message, then play the steps
+                             of the first case whose text is in its content
+                             (or that has none), so one Claude CLI can take a
+                             first prompt or a later delivery
   {"send": {...}}            write a message; "$id" becomes the remembered
-                             message's id and "$params.x" its params.x
+                             message's id, "$params.x" its params.x, and
+                             "$session" the Claude session the CLI was
+                             started on
   {"stderr": "text"}         write a line to standard error
   {"sleep": seconds}
   {"exit": code}
@@ -41,6 +49,8 @@ Steps:
                              later argument "$mcp.name.a.b" is its field a.b;
                              "$env.NAME" is an environment variable, and
                              "headers" are sent with that request only.
+                             With "background": true the call runs while
+                             later steps play; {"await": "<as>"} waits for it.
 
 A request the scenario does not expect is answered from SIDE_REPLIES (or the
 scenario's own "replies" by method), so a client that reads its config or
@@ -52,7 +62,9 @@ After the last step the CLI waits for its input to close, as the real ones do.
 """
 import json
 import os
+import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -125,7 +137,8 @@ if "variants" in scenario:
     variant = next(
         v
         for v in scenario["variants"]
-        if "argsContain" not in v or v["argsContain"] in " ".join(args)
+        if ("argsContain" not in v or v["argsContain"] in " ".join(args))
+        and all(part in os.environ.get(name, "") for name, part in v.get("envContains", {}).items())
     )
     repeat = bool(variant.get("repeat", repeat))
     if "scenario" in variant:
@@ -201,7 +214,9 @@ def note_mcp_server(message):
         return
     if message.get("method") in ("thread/start", "thread/resume"):
         server = ((message.get("params") or {}).get("config") or {}).get("mcp_servers.t3-code")
-        if isinstance(server, dict):
+        # A shared app-server keeps each thread's MCP server apart; the steps act as the first
+        # thread, so a later thread (a delegated child) does not take its credential.
+        if isinstance(server, dict) and not mcp_server.get("url"):
             mcp_server.update(url=server.get("url"),
                               authorization=(server.get("http_headers") or {}).get("Authorization"))
     request = message.get("request") or {}
@@ -276,16 +291,24 @@ def mcp_call(step):
                 mcp_answers[step["as"]] = json.loads(text)
             except ValueError:
                 mcp_answers[step["as"]] = None
-    with open(log_path + ".mcp", "a") as out:
+    with mcp_log_lock, open(log_path + ".mcp", "a") as out:
         out.write(json.dumps(record) + "\n")
 
 
 mcp_answers = {}
+mcp_calls = {}
+mcp_log_lock = threading.Lock()
 
 
 def fill_mcp(value):
-    """Arguments with "$mcp.name.path" and "$env.NAME" filled in."""
+    """Arguments with "$mcp.name.path", "$env.NAME" and "$match:REGEX" (the first group
+    REGEX finds in the last expected message's user content, such as a task id in a
+    delivery prompt) filled in."""
     if isinstance(value, str):
+        if value.startswith("$match:"):
+            content = (remembered.get("message") or {}).get("content")
+            found = re.search(value[len("$match:"):], content if isinstance(content, str) else json.dumps(content))
+            return found.group(1) if found else value
         if value.startswith("$env."):
             return os.environ.get(value[len("$env."):])
         if value.startswith("$mcp."):
@@ -304,12 +327,23 @@ def fill_mcp(value):
     return value
 
 
+def claude_session():
+    """The Claude session this process was started on (--session-id or --resume)."""
+    for arg in args:
+        for flag in ("--session-id=", "--resume="):
+            if arg.startswith(flag):
+                return arg[len(flag):]
+    return None
+
+
 def fill(value):
     if isinstance(value, str):
         if value == "$id":
             return remembered.get("id")
         if value.startswith("$params."):
             return remembered.get("params", {}).get(value[len("$params."):])
+        if value == "$session":
+            return claude_session()
         return value
     if isinstance(value, list):
         return [fill(v) for v in value]
@@ -348,6 +382,18 @@ while index < len(steps):
         CONTROL_REPLIES.update(played.get("controlReplies", {}))
         after = next(i for i, s in enumerate(played["steps"]) if s.get("expect") == matched)
         steps, index = played["steps"], after + 1
+    elif "branchOnUser" in step:
+        # Read until a user message, then play the steps of the first case whose
+        # "contains" is in its content (or that has none).
+        while True:
+            message = receive()
+            if message.get("type") == "user":
+                remembered = message
+                break
+            answer(message)
+        content = json.dumps((message.get("message") or {}).get("content"))
+        case = next(c for c in step["branchOnUser"] if c.get("contains", "") in content)
+        steps, index = case["steps"], 0
     elif "expect" in step:
         while True:
             message = receive()
@@ -377,7 +423,16 @@ while index < len(steps):
     elif "exit" in step:
         sys.exit(step["exit"])
     elif "mcp" in step:
-        mcp_call(step["mcp"])
+        if step["mcp"].get("background"):
+            # The server may need this CLI to answer it before the call returns, as a real
+            # CLI does while a tool call is in flight; {"await": "<as>"} waits for it.
+            call = threading.Thread(target=mcp_call, args=(step["mcp"],), daemon=True)
+            call.start()
+            mcp_calls[step["mcp"].get("as", "")] = call
+        else:
+            mcp_call(step["mcp"])
+    elif "await" in step:
+        mcp_calls.pop(step["await"]).join(timeout=120)
 
 while True:
     answer(receive())

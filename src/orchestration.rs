@@ -511,6 +511,11 @@ pub(crate) fn provider_instance_enabled(settings: &Value, project: &str, instanc
     })
 }
 
+mod delegation;
+pub(crate) use delegation::{
+    after_run, subagent_result, task_node_id, task_thread_id, watch_run_end, RunEnd,
+};
+
 #[allow(clippy::too_many_arguments)]
 async fn start_run<H: CommandHost>(
     state: Arc<H>,
@@ -524,6 +529,7 @@ async fn start_run<H: CommandHost>(
     scheduled_task_id: Option<String>,
     follows_thread_selection: bool,
     notification: Option<Value>,
+    wire: Option<Value>,
 ) -> anyhow::Result<u64> {
     let (cwd, needs_baseline, wire_id) = state
         .store
@@ -576,6 +582,7 @@ async fn start_run<H: CommandHost>(
         follows_thread_selection,
         notification,
         steer: None,
+        wire: wire.map(Box::new),
     };
     let seq = state
         .commit_receipted(
@@ -783,7 +790,7 @@ async fn apply_command<H: CommandHost>(
         "message.dispatch" => {
             let thread_id =
                 thread_id.ok_or_else(|| anyhow::anyhow!("message.dispatch requires threadId"))?;
-            let text = command
+            let mut text = command
                 .get("text")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
@@ -798,6 +805,31 @@ async fn apply_command<H: CommandHost>(
                             .await;
                     }
                 }
+            }
+            // A delegated task delivery says what each task found.
+            let mut wire = None;
+            let mut wake_started = None;
+            if let Some(completion) = command.get("delegatedCompletion").filter(|c| c.is_object()) {
+                let tasks = state
+                    .store
+                    .read()
+                    .await
+                    .threads
+                    .get(thread_id)
+                    .map(|t| t.stored_row()["subagents"].clone())
+                    .and_then(|t| t.as_array().cloned())
+                    .unwrap_or_default();
+                let ids = completion["taskIds"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                text = delegation::wake_detail(&ids, &tasks);
+                wake_started = delegation::wake_work_started_at(&*state, thread_id).await;
+                wire = Some(json!({
+                    "createdBy": command["createdBy"],
+                    "creationSource": command["creationSource"],
+                    "delegatedCompletion": completion,
+                }));
             }
             let queued = (command["dispatchMode"]["type"] == "queue_after_active" || queue_steer)
                 && state
@@ -852,9 +884,20 @@ async fn apply_command<H: CommandHost>(
                     .map(str::to_owned),
                 command["scheduledTaskId"].as_str().map(str::to_owned),
                 command["scheduledTaskId"].is_string() && command["modelSelection"].is_null(),
-                None,
+                // A delegated task delivery shows as its notification.
+                wire.as_ref().and_then(|_| {
+                    command
+                        .get("notification")
+                        .filter(|n| n.is_object())
+                        .cloned()
+                }),
+                wire,
             )
             .await?;
+            if let Some(at) = wake_started {
+                delegation::record_work_started_at(&*state, thread_id, &command["messageId"], at)
+                    .await?;
+            }
             // Its effect runs once the message it titles is recorded.
             if let Some(effect) = title_effect {
                 state.clone().generate_title(effect);
@@ -2117,126 +2160,7 @@ async fn apply_command<H: CommandHost>(
             return Ok(sequence);
         }
         "delegated_task.request" => {
-            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
-            let generated_child_id;
-            let target_thread_id = if let Some(value) = command["childThreadId"]
-                .as_str()
-                .or_else(|| command["targetThreadId"].as_str())
-            {
-                value
-            } else {
-                generated_child_id = format!(
-                    "delegated-task:{}",
-                    command["commandId"].as_str().unwrap_or_default()
-                );
-                generated_child_id.as_str()
-            };
-            let parent = state
-                .store
-                .read()
-                .await
-                .threads
-                .get(parent_thread_id)
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(format!(
-                        "No orchestration projection exists for thread {parent_thread_id}."
-                    ))
-                })?;
-            let at = crate::auth_service::iso(crate::auth_service::now());
-            let mut row = parent.stored_row();
-            row["id"] = json!(target_thread_id);
-            row["title"] = command
-                .get("title")
-                .cloned()
-                .unwrap_or_else(|| json!("Subagent"));
-            row["createdAt"] = json!(at.clone());
-            row["updatedAt"] = json!(at);
-            row["lineage"] = json!({"parentThreadId":parent_thread_id,"relationshipToParent":"subagent","rootThreadId":parent.row["lineage"]["rootThreadId"].as_str().unwrap_or(parent_thread_id),"sideChat":false});
-            row["forkedFrom"] = json!({"type":"node","nodeId":command["parentNodeId"]});
-            let prompt = command["task"].as_str().unwrap_or_default();
-            let task_id = format!(
-                "node:delegated-task:{}",
-                command["commandId"].as_str().unwrap_or_default()
-            );
-            let task = json!({
-                "id": task_id,
-                "threadId": parent_thread_id,
-                "runId": command["parentRunId"],
-                "parentNodeId": command["parentNodeId"],
-                "origin": "app_owned",
-                "createdBy": command["createdBy"].as_str().unwrap_or("user"),
-                "driver": command["modelSelection"]["instanceId"],
-                "providerInstanceId": command["modelSelection"]["instanceId"],
-                "providerThreadId": Value::Null,
-                "childThreadId": target_thread_id,
-                "nativeTaskRef": Value::Null,
-                "prompt": prompt,
-                "title": command.get("title").cloned().unwrap_or(Value::Null),
-                "model": command["modelSelection"]["model"],
-                "modelSelection": command["modelSelection"],
-                "completionWake": command.get("completionWake").cloned().unwrap_or(json!("settled_only")),
-                "completionDelivery": {"state":"pending","observedByRunId":Value::Null},
-                "status": "running",
-                "result": Value::Null,
-                "startedAt": at,
-                "completedAt": Value::Null,
-                "updatedAt": at
-            });
-            let message = ConversationMessage {
-                id: format!(
-                    "{}:task",
-                    command["commandId"].as_str().unwrap_or(target_thread_id)
-                ),
-                role: "user".into(),
-                content: prompt.into(),
-                created_at: now(),
-                creation_source: None,
-                scheduled_task_id: None,
-                follows_thread_selection: false,
-                notification: None,
-                steer: None,
-            };
-            let thread = Thread {
-                row,
-                id: target_thread_id.to_owned(),
-                project_id: parent.project_id,
-                title: command
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Subagent")
-                    .to_owned(),
-                cwd: parent.cwd,
-                status: "idle".into(),
-                messages: vec![message],
-                runs: vec![],
-                created_at: now(),
-                archived: false,
-                settled: false,
-                snoozed_until: None,
-                pinned: false,
-                unread: false,
-                tags: vec![],
-                checkpoints: vec![],
-                link_requests: Vec::new(),
-                provider: Default::default(),
-                stored: None,
-            };
-            let mut subagents = parent.row["subagents"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            subagents.push(task);
-            state
-                .commit(Event::ThreadPatched {
-                    thread_id: parent_thread_id.to_owned(),
-                    patch: json!({"row":{"subagents":subagents}}),
-                })
-                .await?;
-            return Ok(state
-                .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
-                .await?
-                .id);
+            return delegation::request(state, command, receipt).await;
         }
         "delegated_task.wake-policy"
         | "delegated_task.completion-delivery.acknowledge"
@@ -3067,6 +2991,7 @@ async fn record_link_request<H: CommandHost>(
             None,
             false,
             Some(wake["notification"].clone()),
+            None,
         )
         .await?;
     }
