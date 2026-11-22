@@ -1,7 +1,7 @@
 //! Provider status checks, as the reference's managed provider snapshots
 //! (`makeManagedServerProvider`) and provider registry run them.
 //!
-//! Each enabled Codex, Claude, fx, Kiro, Grok and Pi instance is checked once the
+//! Each enabled Codex, Claude, fx, Kiro, Grok, Pi and Cursor instance is checked once the
 //! server is listening, again whenever its settings (or
 //! `enableProviderUpdateChecks`) change, when any settings change while it is
 //! signed out, on the background-activity interval (five minutes by default),
@@ -26,6 +26,9 @@
 //!   account's usage ([`grok`]).
 //! - Pi: `pi --version` (10s), then Pi's RPC mode for its state, models and
 //!   commands (30s) ([`pi`]).
+//! - Cursor: no CLI; its HTTP API's account and model catalog (15s, once
+//!   more after a timeout) with the instance's API key or a stored browser
+//!   sign-in, then the plan's usage ([`cursor`]).
 //!
 //! Grok's and Pi's version advisories come from how their CLI was installed
 //! ([`maintenance`]), as the reference's enrichment pass works it out.
@@ -38,6 +41,7 @@
 mod acp;
 mod claude;
 mod codex;
+mod cursor;
 mod fx;
 mod grok;
 mod kiro;
@@ -52,7 +56,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The drivers this server checks.
-const CHECKED_DRIVERS: [&str; 6] = ["codex", "claudeAgent", "fx", "kiro", "grok", "pi"];
+const CHECKED_DRIVERS: [&str; 7] = ["codex", "claudeAgent", "fx", "kiro", "grok", "pi", "cursor"];
 /// The drivers whose snapshot gets its version advisory from an enrichment
 /// pass after the probe, rather than from the probe itself.
 const ENRICHED_DRIVERS: [&str; 4] = ["codex", "claudeAgent", "grok", "pi"];
@@ -119,6 +123,7 @@ struct State {
 pub(crate) struct ProviderStatus {
     caches: PathBuf,
     state_dir: PathBuf,
+    secrets: PathBuf,
     state: Mutex<State>,
     claude_caps: Mutex<HashMap<String, claude::CapabilitiesCache>>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -131,6 +136,7 @@ impl ProviderStatus {
         Self {
             caches: paths.caches.clone(),
             state_dir: paths.state_dir.clone(),
+            secrets: paths.secrets.clone(),
             state: Mutex::default(),
             claude_caps: Mutex::default(),
             locks: Mutex::default(),
@@ -366,6 +372,16 @@ async fn check_instance(
         "fx" => fx::check(&instance.config, &env).await,
         "kiro" => kiro::check(&instance.config, &env).await,
         "grok" => grok::check(&instance.config, &env).await,
+        "cursor" => {
+            cursor::check(
+                &instance.config,
+                &env,
+                &instance.id,
+                &service.secrets,
+                &service.state_dir,
+            )
+            .await
+        }
         "pi" => pi::check(&instance.config, &env, &service.caches).await,
         _ => return CheckOutcome::Skipped,
     };
