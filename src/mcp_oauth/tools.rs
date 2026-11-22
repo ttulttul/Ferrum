@@ -565,7 +565,8 @@ fn capabilities<S: McpHost>(host: &S, caller: &Caller) -> Value {
         "parentThreadId": caller.thread.as_ref().map(|t| t.id.clone()),
         "inheritedProviderInstanceId": caller.thread.as_ref().map(|t| t.provider_instance_id.clone()),
         "inheritedModel": caller.thread.as_ref().map(|t| t.model.clone()),
-        "inheritedOptions": caller.thread.as_ref().map(|t| t.model_options.clone()),
+        // Always a list, as the reference gives it: empty with no thread to inherit from.
+        "inheritedOptions": caller.thread.as_ref().map_or_else(|| json!([]), |t| t.model_options.clone()),
         "runtimeMode": caller.ceiling().unwrap_or("approval-required"),
         "interactionMode": caller.interaction(),
         "providers": provider_entries(host),
