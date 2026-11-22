@@ -77,6 +77,10 @@ impl Confinement {
                 | op::IDLE_STATE
                 | op::STREAM_CLOSE
                 | op::TURN_CANCEL
+                | op::ASSET_PREPARE
+                | op::ASSET_OPEN
+                | op::ASSET_READ
+                | op::ASSET_CLOSE
         ) {
             return Ok(());
         }

@@ -1,8 +1,9 @@
 mod compression;
-mod grants;
+pub(crate) mod grants;
 mod image;
 mod response;
 use crate::AppState;
+use crate::{asset_grant, asset_grant::encode_component, config::ServerPaths, rpc_protocol::Reply};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -11,14 +12,9 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use futures_util::StreamExt;
 use grants::{attachment_path, workspace_image};
-pub(crate) use grants::{
-    attachment_url, delete_pending, draft_image_url, encode_component, file_extension,
-    is_draft_image, upload_url,
-};
-use hmac::{Hmac, Mac};
+pub(crate) use grants::{delete_pending, file_extension, upload_url};
 use image::image_dimensions;
 use response::valid_mime;
 use serde_json::Value;
@@ -47,18 +43,20 @@ async fn not_found() -> Response {
 }
 
 fn verify(state: &AppState, token: &str) -> Option<Value> {
-    let (encoded, signature) = token.split_once('.')?;
     let key: [u8; 32] = std::fs::read(state.paths.secrets.join("asset-access-signing-key.bin"))
         .ok()?
         .try_into()
         .ok()?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).ok()?;
-    mac.update(encoded.as_bytes());
-    mac.verify_slice(&URL_SAFE_NO_PAD.decode(signature).ok()?)
-        .ok()?;
-    let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).ok()?).ok()?;
-    (claims["version"] == 1 && claims["expiresAt"].as_u64()? > crate::platform::now_ms() as u64)
-        .then_some(claims)
+    asset_grant::verify(&key, token)
+}
+
+pub(crate) fn create_url(state: &AppState, params: &Value) -> Reply {
+    match grants::prepare(&state.paths, params) {
+        Ok(grant) => grant.issue(&params["resource"], |s| {
+            crate::rpc::sign_asset_payload(state, s)
+        }),
+        Err(error) => Reply::Failure(error),
+    }
 }
 
 async fn upload(
@@ -176,16 +174,26 @@ async fn asset(
     let Some(claims) = verify(&state, token) else {
         return not_found().await;
     };
+    serve(&state.paths, &claims, filename, &method, &headers).await
+}
+
+pub(crate) async fn serve(
+    paths: &ServerPaths,
+    claims: &Value,
+    filename: &str,
+    method: &Method,
+    headers: &HeaderMap,
+) -> Response {
     let file = match claims["kind"].as_str() {
         Some("attachment") => claims["attachmentId"]
             .as_str()
-            .and_then(|id| attachment_path(&state, id)),
+            .and_then(|id| attachment_path(paths, id)),
         Some("workspace-file-exact") => claims["relativePath"]
             .as_str()
             .map(FsPath::new)
             .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some(filename))
             .and_then(|p| {
-                workspace_image(&state, FsPath::new(claims["workspaceRoot"].as_str()?), p)
+                workspace_image(paths, FsPath::new(claims["workspaceRoot"].as_str()?), p)
             }),
         Some("media-file" | "workspace-file" | "draft-workspace-file") => claims["filePath"]
             .as_str()
@@ -196,7 +204,7 @@ async fn asset(
     let Some(file) = file else {
         return not_found().await;
     };
-    response::serve_file(&file, &claims, &method, &headers)
+    response::serve_file(&file, claims, method, headers)
         .await
         .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"))
 }

@@ -209,6 +209,23 @@ pub trait Workspace: MaybeSendSync {
     fn file_metadata<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>>;
     fn browse<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>>;
 
+    /// Filesystem side of a signed asset. Only native hosts serve these operations in agentd.
+    #[cfg(feature = "native")]
+    fn prepare_asset(&self, _input: &Value) -> Result<crate::asset_grant::AssetGrant, Value> {
+        Err(unavailable("assets.createUrl"))
+    }
+    #[cfg(feature = "native")]
+    fn open_asset<'a>(
+        &'a self,
+        _claims: &'a Value,
+        _name: &'a str,
+        _method: &'a axum::http::Method,
+        _headers: &'a axum::http::HeaderMap,
+    ) -> WorkspaceFuture<'a, axum::response::Response> {
+        use axum::response::IntoResponse;
+        Box::pin(async { axum::http::StatusCode::NOT_FOUND.into_response() })
+    }
+
     // git.*
     /// A `vcs.*` method. `fetch_upstream` lets a status read start a fetch.
     fn vcs<'a>(

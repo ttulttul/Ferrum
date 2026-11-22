@@ -87,6 +87,32 @@ impl Workspace for LocalWorkspace {
         files::browse(input).boxed()
     }
 
+    fn prepare_asset(&self, input: &Value) -> Result<crate::asset_grant::AssetGrant, Value> {
+        crate::asset_http::grants::prepare(
+            &crate::config::ServerPaths::from_state_dir(&self.data_dir),
+            input,
+        )
+    }
+    fn open_asset<'a>(
+        &'a self,
+        claims: &'a Value,
+        name: &'a str,
+        method: &'a axum::http::Method,
+        headers: &'a axum::http::HeaderMap,
+    ) -> WorkspaceFuture<'a, axum::response::Response> {
+        async move {
+            crate::asset_http::serve(
+                &crate::config::ServerPaths::from_state_dir(&self.data_dir),
+                claims,
+                name,
+                method,
+                headers,
+            )
+            .await
+        }
+        .boxed()
+    }
+
     fn vcs<'a>(
         &'a self,
         method: &'a str,

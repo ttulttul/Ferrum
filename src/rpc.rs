@@ -8,7 +8,6 @@ use crate::{dispatch_orchestration_command, provider_rpc, AppState};
 use axum::extract::ws::{Message, WebSocket};
 use base64::Engine;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
-use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -42,9 +41,7 @@ fn asset_signing_key(state: &crate::AppState) -> anyhow::Result<[u8; 32]> {
 
 pub(crate) fn sign_asset_payload(state: &crate::AppState, payload: &str) -> anyhow::Result<String> {
     let key = asset_signing_key(state)?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key");
-    mac.update(payload.as_bytes());
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+    Ok(crate::asset_grant::signature(&key, payload))
 }
 
 fn triage_client_description(client: &Value) -> String {
@@ -1813,96 +1810,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(json!({"attachments":persisted}));
     }
     if method == "assets.createUrl" {
-        let Some(resource) = params.get("resource").and_then(Value::as_object) else {
-            return Reply::defect(crate::control::ASSET_RESOURCE_DEFECT.into());
-        };
-        let tag = resource
-            .get("_tag")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let path = resource
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if !matches!(
-            tag,
-            "workspace-file"
-                | "media-file"
-                | "draft-workspace-file"
-                | "attachment"
-                | "tool-output-image"
-                | "project-favicon"
-                | "native-app-icon"
-                | "environment-theme-background"
-                | "github-media"
-        ) || matches!(
-            tag,
-            "media-file" | "workspace-file" | "draft-workspace-file"
-        ) && path.is_empty()
-        {
-            return Reply::defect(crate::control::ASSET_RESOURCE_DEFECT.into());
-        }
-        let file_path = match tag {
-            "draft-workspace-file" => resource
-                .get("cwd")
-                .and_then(Value::as_str)
-                .map(|cwd| expand_user_path(cwd).join(path)),
-            "media-file" | "workspace-file" => Some(expand_user_path(path)),
-            _ => None,
-        };
-        let expires = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            + 60 * 60 * 1000) as u64;
-        if tag == "attachment" {
-            return crate::asset_http::attachment_url(state, &params["resource"], expires);
-        }
-        if tag == "draft-workspace-file"
-            && Path::new(path).is_relative()
-            && crate::asset_http::is_draft_image(Path::new(path))
-        {
-            return crate::asset_http::draft_image_url(state, &params["resource"], expires);
-        }
-        let claims = json!({"version":1,"kind":tag,"filePath":file_path.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"expiresAt":expires});
-        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(crate::wire_json::compact(&claims));
-        let name = crate::asset_http::encode_component(
-            Path::new(path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("asset"),
-        );
-        let revision = file_path
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .map(|m| {
-                format!(
-                    "{}:{}",
-                    m.len(),
-                    m.modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|t| t.as_nanos())
-                        .unwrap_or(0)
-                )
-            });
-        let signature = match sign_asset_payload(state, &encoded) {
-            Ok(signature) => signature,
-            Err(error) => {
-                return Reply::Failure(
-                    json!({"_tag":"Fail","error":{"_tag":"AssetSigningKeyLoadError","resource":resource,"cause":{"name":"Error","message":error.to_string()}}}),
-                )
-            }
-        };
-        let mut result = json!({"relativeUrl":format!("/api/assets/{encoded}.{signature}/{name}"),"expiresAt":expires});
-        if let Some(path) = file_path {
-            result["sourcePath"] = json!(path);
-        }
-        if let Some(revision) = revision {
-            result["fileRevision"] = json!(revision);
-        }
-        return Reply::Success(result);
+        return crate::asset_http::create_url(state, params);
     }
     if method == "filesystem.browse" {
         let partial = params["partialPath"].as_str().unwrap_or_default();
