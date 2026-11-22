@@ -70,6 +70,12 @@ pub mod op {
     pub const FS_LIST_IGNORED_FILES: &str = "fs.listIgnoredFiles";
     pub const FS_SEARCH_ENTRIES: &str = "fs.searchEntries";
     pub const FS_SEARCH_CONTENTS: &str = "fs.searchContents";
+    /// Prepare a grant at the workspace, open its HTTP response, and pull its body.
+    /// Response bodies belong to the connection that opened them.
+    pub const ASSET_PREPARE: &str = "asset.prepare";
+    pub const ASSET_OPEN: &str = "asset.open";
+    pub const ASSET_READ: &str = "asset.read";
+    pub const ASSET_CLOSE: &str = "asset.close";
     pub const FS_READ_FILE: &str = "fs.readFile";
     pub const FS_WRITE_FILE: &str = "fs.writeFile";
     pub const FS_METADATA: &str = "fs.metadata";

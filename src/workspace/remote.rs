@@ -645,7 +645,17 @@ impl RemoteWorkspace {
             .map_err(|e| WireError::new(ErrorCode::Internal, e.to_string()))
     }
 
-    async fn request(&self, op: &str, args: Value) -> Result<Value, WireError> {
+    pub(crate) fn close_asset(&self, id: u64) {
+        if let Some(transport) = self.lock().transport.clone() {
+            let _ = transport.send(proto::request_frame(&Request {
+                id: None,
+                op: op::ASSET_CLOSE.into(),
+                args: json!({"body":id}),
+            }));
+        }
+    }
+
+    pub(crate) async fn request(&self, op: &str, args: Value) -> Result<Value, WireError> {
         self.send_request(op, args, None, true).await
     }
 

@@ -34,6 +34,7 @@ use tokio::{
     task::AbortHandle,
 };
 
+mod assets;
 mod buffer;
 mod confine;
 use buffer::DiskBuffer;
@@ -108,6 +109,7 @@ struct Session {
     id: u64,
     tx: mpsc::UnboundedSender<Frame>,
     authorized: bool,
+    assets: assets::Bodies,
     epoch: Option<u64>,
 }
 
@@ -189,6 +191,7 @@ impl Agentd {
             id,
             tx,
             authorized,
+            assets: Default::default(),
             epoch: None,
         };
         while let Some(Ok(message)) = incoming.next().await {
@@ -255,6 +258,15 @@ impl Agentd {
             id,
         };
         let result = match op.as_str() {
+            op::ASSET_OPEN => session.assets.open(id, &*self.workspace, &args).await,
+            op::ASSET_READ => {
+                session.assets.read(id, &session.tx, &args);
+                return;
+            }
+            op::ASSET_CLOSE => {
+                session.assets.close(&args);
+                Ok(Value::Null)
+            }
             op::PING => Ok(json!("pong")),
             op::ACK => parse::<Ack>(&args).map(|ack| {
                 self.ack(ack);
@@ -766,6 +778,11 @@ async fn call(workspace: &dyn Workspace, op: &str, args: &Value) -> OpResult {
         op::FS_LIST_IGNORED_FILES => proto::encode_routed(workspace.list_ignored_files(args).await),
         op::FS_SEARCH_ENTRIES => proto::encode_routed(workspace.search_entries(args).await),
         op::FS_SEARCH_CONTENTS => proto::encode_routed(workspace.search_contents(args).await),
+        op::ASSET_PREPARE => {
+            let grant = workspace.prepare_asset(args).map_err(WireError::rpc)?;
+            serde_json::to_value(grant)
+                .map_err(|e| WireError::new(ErrorCode::Internal, e.to_string()))
+        }
         op::FS_READ_FILE => proto::encode_routed(workspace.read_file(args).await),
         op::FS_WRITE_FILE => proto::encode_routed(workspace.write_file(args).await),
         op::FS_METADATA => proto::encode_routed(workspace.file_metadata(args).await),

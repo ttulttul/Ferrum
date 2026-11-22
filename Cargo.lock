@@ -3239,6 +3239,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "clap",
  "futures-util",
  "serde",
@@ -3247,6 +3248,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

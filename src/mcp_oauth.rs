@@ -229,13 +229,13 @@ impl<F: std::future::Future> std::future::Future for OneThread<F> {
     }
 }
 #[cfg(not(feature = "native"))]
-fn on_this_thread<F: std::future::Future>(
+pub(crate) fn on_this_thread<F: std::future::Future>(
     future: F,
 ) -> impl std::future::Future<Output = F::Output> + Send {
     OneThread(future)
 }
 #[cfg(feature = "native")]
-fn on_this_thread<F: std::future::Future + Send>(future: F) -> F {
+pub(crate) fn on_this_thread<F: std::future::Future + Send>(future: F) -> F {
     future
 }
 

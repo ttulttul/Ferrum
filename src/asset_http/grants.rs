@@ -1,28 +1,13 @@
 use super::{image_dimensions, AppState};
 use crate::rpc_protocol::Reply;
+use crate::{asset_grant::AssetGrant, config::ServerPaths};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
     sync::LazyLock,
 };
-
-const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'.')
-    .remove(b'!')
-    .remove(b'~')
-    .remove(b'*')
-    .remove(b'\'')
-    .remove(b'(')
-    .remove(b')');
-
-pub(crate) fn encode_component(text: &str) -> String {
-    utf8_percent_encode(text, COMPONENT).to_string()
-}
 
 pub(crate) fn file_extension(name: &str) -> String {
     Path::new(name)
@@ -167,7 +152,7 @@ pub(crate) async fn delete_pending(state: &AppState, id: &str) {
     if !pending_id(id) {
         return;
     }
-    if let Some(path) = attachment_path(state, id) {
+    if let Some(path) = attachment_path(&state.paths, id) {
         let mut sidecar = path.as_os_str().to_owned();
         sidecar.push(".txt");
         let _ = tokio::fs::remove_file(path).await;
@@ -220,14 +205,15 @@ fn sweep_pending(state: &AppState, now: i64) {
     }
 }
 
-pub(super) fn attachment_path(state: &AppState, id: &str) -> Option<PathBuf> {
+pub(super) fn attachment_path(paths: &ServerPaths, id: &str) -> Option<PathBuf> {
     if id.is_empty() || id.contains(['/', '\\', '.', '\0']) {
         return None;
     }
-    let candidate = |ext: &str| state.paths.attachments.join(format!("{id}.{ext}"));
+    let candidate = |ext: &str| paths.attachments.join(format!("{id}.{ext}"));
+    let stored_file = |p: &Path| p.symlink_metadata().is_ok_and(|m| m.is_file());
     if let Some(ext) = id_extension(id) {
         let path = candidate(&ext);
-        return path.is_file().then_some(path);
+        return stored_file(&path).then_some(path);
     }
     [
         "avif", "bmp", "gif", "heic", "heif", "ico", "jpeg", "jpg", "png", "svg", "tiff", "webp",
@@ -235,7 +221,7 @@ pub(super) fn attachment_path(state: &AppState, id: &str) -> Option<PathBuf> {
     ]
     .iter()
     .map(|ext| candidate(ext))
-    .find(|p| p.is_file())
+    .find(|p| stored_file(p))
 }
 
 // hostPreviewMimeTypeFromExtension in the pinned client. Selection for an inline grant
@@ -291,40 +277,100 @@ fn inline_mime(ext: &str) -> Option<&'static str> {
     })
 }
 
-fn asset_error(tag: &str, resource: &Value) -> Reply {
-    Reply::Failure(json!({"_tag":"Fail","error":{"_tag":tag,"resource":resource}}))
-}
-
-fn signed_url(
-    state: &AppState,
-    resource: &Value,
-    claims: Value,
-    name: &str,
-    dimensions: Option<Value>,
-) -> Reply {
-    let encoded = URL_SAFE_NO_PAD.encode(crate::wire_json::compact(&claims));
-    let signature = match crate::rpc::sign_asset_payload(state, &encoded) {
-        Ok(s) => s,
-        Err(e) => {
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"AssetSigningKeyLoadError","resource":resource,"cause":{"name":"Error","message":e.to_string()}}}),
-            )
-        }
+pub(crate) fn prepare(paths: &ServerPaths, params: &Value) -> Result<AssetGrant, Value> {
+    let Some(resource) = params.get("resource").and_then(Value::as_object) else {
+        return Err(defect(crate::control::ASSET_RESOURCE_DEFECT));
     };
-    let name = encode_component(name);
-    let mut result = json!({"relativeUrl":format!("/api/assets/{encoded}.{signature}/{name}"),"expiresAt":claims["expiresAt"]});
-    if let Some(dimensions) = dimensions {
-        result["imageDimensions"] = dimensions;
+    let tag = resource
+        .get("_tag")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let path = resource
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !matches!(
+        tag,
+        "workspace-file"
+            | "media-file"
+            | "draft-workspace-file"
+            | "attachment"
+            | "tool-output-image"
+            | "project-favicon"
+            | "native-app-icon"
+            | "environment-theme-background"
+            | "github-media"
+    ) || matches!(
+        tag,
+        "media-file" | "workspace-file" | "draft-workspace-file"
+    ) && path.is_empty()
+    {
+        return Err(defect(crate::control::ASSET_RESOURCE_DEFECT));
     }
-    Reply::Success(result)
+    let file_path = match tag {
+        "draft-workspace-file" => resource
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|cwd| crate::rpc::expand_user_path(cwd).join(path)),
+        "media-file" | "workspace-file" => Some(crate::rpc::expand_user_path(path)),
+        _ => None,
+    };
+    let expires = crate::platform::now_ms() as u64 + 3_600_000;
+    if tag == "attachment" {
+        return attachment_grant(paths, &params["resource"], expires);
+    }
+    if tag == "draft-workspace-file"
+        && Path::new(path).is_relative()
+        && is_draft_image(Path::new(path))
+    {
+        return draft_image_grant(paths, &params["resource"], expires);
+    }
+    let claims = json!({"version":1,"kind":tag,"filePath":file_path.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"expiresAt":expires});
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("asset");
+    let revision = file_path
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| {
+            format!(
+                "{}:{}",
+                m.len(),
+                m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|t| t.as_nanos())
+                    .unwrap_or(0)
+            )
+        });
+    Ok(AssetGrant {
+        claims,
+        name: name.to_owned(),
+        source_path: file_path,
+        revision,
+        dimensions: None,
+    })
 }
 
-pub(crate) fn attachment_url(state: &AppState, resource: &Value, mut expires: u64) -> Reply {
+fn asset_error(tag: &str, resource: &Value) -> Value {
+    json!({"_tag":"Fail","error":{"_tag":tag,"resource":resource}})
+}
+
+fn defect(message: &str) -> Value {
+    json!({"_tag":"Die","defect":message})
+}
+
+fn attachment_grant(
+    paths: &ServerPaths,
+    resource: &Value,
+    mut expires: u64,
+) -> Result<AssetGrant, Value> {
     let Some(id) = resource["attachmentId"].as_str().filter(|s| !s.is_empty()) else {
-        return Reply::defect("Missing key\n  at [\"resource\"][\"attachmentId\"]".into());
+        return Err(defect("Missing key\n  at [\"resource\"][\"attachmentId\"]"));
     };
-    let Some(path) = attachment_path(state, id) else {
-        return asset_error("AssetAttachmentNotFoundError", resource);
+    let Some(path) = attachment_path(paths, id) else {
+        return Err(asset_error("AssetAttachmentNotFoundError", resource));
     };
     let ext = id_extension(id);
     let supplied = resource["mimeType"].as_str();
@@ -362,7 +408,13 @@ pub(crate) fn attachment_url(state: &AppState, resource: &Value, mut expires: u6
     } else {
         None
     };
-    signed_url(state, resource, claims, name, dimensions)
+    Ok(AssetGrant {
+        claims,
+        name: name.into(),
+        dimensions,
+        source_path: None,
+        revision: None,
+    })
 }
 
 pub(crate) fn is_draft_image(path: &Path) -> bool {
@@ -372,19 +424,21 @@ pub(crate) fn is_draft_image(path: &Path) -> bool {
         .is_some_and(|m| m.starts_with("image/"))
 }
 
-pub(super) fn workspace_image(state: &AppState, root: &Path, relative: &Path) -> Option<PathBuf> {
+pub(super) fn workspace_image(
+    paths: &ServerPaths,
+    root: &Path,
+    relative: &Path,
+) -> Option<PathBuf> {
     let root = root.canonicalize().ok()?;
     let file = root.join(relative).canonicalize().ok()?;
-    let secrets = state
-        .paths
+    let secrets = paths
         .secrets
         .canonicalize()
-        .unwrap_or_else(|_| state.paths.secrets.clone());
-    let state_dir = state
-        .paths
+        .unwrap_or_else(|_| paths.secrets.clone());
+    let state_dir = paths
         .state_dir
         .canonicalize()
-        .unwrap_or_else(|_| state.paths.state_dir.clone());
+        .unwrap_or_else(|_| paths.state_dir.clone());
     let database = file.parent() == Some(&state_dir)
         && file
             .file_name()
@@ -397,24 +451,29 @@ pub(super) fn workspace_image(state: &AppState, root: &Path, relative: &Path) ->
     .then_some(file)
 }
 
-pub(crate) fn draft_image_url(state: &AppState, resource: &Value, expires: u64) -> Reply {
+fn draft_image_grant(
+    paths: &ServerPaths,
+    resource: &Value,
+    expires: u64,
+) -> Result<AssetGrant, Value> {
     let cwd = crate::rpc::expand_user_path(resource["cwd"].as_str().unwrap_or(""));
     let relative = Path::new(resource["path"].as_str().unwrap_or(""));
-    let Some(file) = workspace_image(state, &cwd, relative) else {
-        return asset_error("AssetWorkspaceAssetNotFoundError", resource);
+    let Some(file) = workspace_image(paths, &cwd, relative) else {
+        return Err(asset_error("AssetWorkspaceAssetNotFoundError", resource));
     };
     let Ok(root) = cwd.canonicalize() else {
-        return asset_error("AssetWorkspaceAssetNotFoundError", resource);
+        return Err(asset_error("AssetWorkspaceAssetNotFoundError", resource));
     };
     let claims = json!({"version":1,"kind":"workspace-file-exact","workspaceRoot":root,"relativePath":relative,"expiresAt":expires});
-    signed_url(
-        state,
-        resource,
+    Ok(AssetGrant {
         claims,
-        relative
+        name: relative
             .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("asset"),
-        image_dimensions(&file),
-    )
+            .unwrap_or("asset")
+            .into(),
+        dimensions: image_dimensions(&file),
+        source_path: None,
+        revision: None,
+    })
 }

@@ -4,7 +4,10 @@
 //! the middle of the turn.
 mod support;
 
-use axum::http::HeaderMap;
+use axum::{
+    body::to_bytes,
+    http::{HeaderMap, Request, StatusCode},
+};
 use serde_json::{json, Value};
 use std::{
     sync::{Arc, Mutex},
@@ -19,6 +22,7 @@ use t3code_server::{
     workspace::{connect, LocalWorkspace, NativeLink, RemoteWorkspace},
     Event, ServerEvent,
 };
+use tower::ServiceExt;
 
 const TOKEN: &str = "plane-test-token";
 
@@ -290,6 +294,42 @@ fn stub_provider(delay: &str) -> Vec<String> {
         format!("for word in $1; do echo \"$word\"; sleep {delay}; done"),
         "stub-provider".into(),
     ]
+}
+
+#[tokio::test]
+async fn a_control_plane_asset_url_serves_a_file_from_agentd() {
+    let (dir, server) = connected_plane().await;
+    let root = dir.path().join("project");
+    std::fs::write(root.join("asset.txt"), b"remote asset").unwrap();
+    let asset = exit(
+        &request(
+            &server,
+            "assets.createUrl",
+            json!({"resource":{"_tag":"workspace-file","path":root.join("asset.txt")}}),
+        )
+        .await,
+    );
+    assert_eq!(asset["_tag"], "Success", "{asset}");
+    let url = asset["value"]["relativeUrl"].as_str().unwrap();
+    let response = server
+        .plane
+        .router()
+        .oneshot(
+            Request::builder()
+                .uri(url)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"remote asset"
+    );
 }
 
 #[tokio::test]
