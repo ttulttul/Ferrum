@@ -14,11 +14,12 @@ than the reference's model-manifest refresh, which the recorder refuses.
 Telemetry is off for both servers. All data is fake.
 
 Covered: a clone that finishes (its progress stages, project, checkout and
-retention), a destination or project already being cloned, a destination that
-is not empty, a clone that stalls and recovers, a clone stalled and cancelled
-then retried, a failed clone and a retry refused for foreign files, a thread
-launch refused while a clone runs, a clone onto a folder another project owns,
-and a project deleted while its clone runs.
+retention), a destination git has started writing, a destination or project
+already being cloned (a cancelled clone's destination, a running clone's
+project), a destination that is not empty, a clone that stalls and recovers, a
+clone stalled and cancelled then retried, a failed clone and a retry refused
+for foreign files, a thread launch refused while a clone runs, a clone onto a
+folder another project owns, and a project deleted while its clone runs.
 """
 import argparse
 from contextlib import ExitStack
@@ -280,7 +281,14 @@ def main():
 
                 # A clone stalled and cancelled, while others try its destination and project.
                 record["stalling start"] = start("p-stall", work / "stall", remoteUrl=ssh_url("stall"))
-                record["same destination"] = start("p-other", work / "stall", remoteUrl=f"file://{repos['plain'][0]}")
+                # Both servers check the destination before the clones in progress, and git writes
+                # .git into it before it even calls ssh, so wait for that: then a second clone
+                # into it is refused for the files, on both, however fast the runner.
+                git_started = time.time() + 30
+                while not (work / "stall" / ".git").exists() and time.time() < git_started:
+                    time.sleep(0.1)
+                record["same destination, once git has started"] = start(
+                    "p-other", work / "stall", remoteUrl=f"file://{repos['plain'][0]}")
                 record["same project"] = start("p-stall", work / "elsewhere", remoteUrl=f"file://{repos['plain'][0]}")
                 record["launch while cloning"] = launch_thread("p-stall")
                 record["stalled"] = shape(server.wait("p-stall", lambda s: s and s.get("stalled")))
@@ -288,6 +296,10 @@ def main():
                 record["cancelled"] = shape(server.wait("p-stall", lambda s: s and s["phase"] == "cancelled"))
                 record["cancelled folder"] = listing(work / "stall")
                 record["cancel again"] = server.rpc("projectClone.cancel", {"projectId": "p-stall"})
+                # The cancelled clone is still tracked and its destination is empty again, so a
+                # clone of another project into it is refused as one in progress.
+                record["same destination as a cancelled clone"] = start(
+                    "p-other", work / "stall", remoteUrl=f"file://{repos['plain'][0]}")
                 record["launch after a cancel"] = launch_thread("p-stall")
                 delays.write_text(json.dumps({"recover.git": 23, "doomed.git": 600}))
                 record["retry"] = server.rpc("projectClone.retry", {"projectId": "p-stall"})
