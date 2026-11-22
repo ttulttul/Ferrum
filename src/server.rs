@@ -1282,6 +1282,23 @@ impl mcp_oauth::McpHost for AppState {
     fn control_state(&self) -> &crate::control_state::ControlState {
         &self.control
     }
+    fn clone_repository(
+        self: &Arc<Self>,
+        input: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, String>> {
+        Box::pin(async move {
+            // Agents' MCP calls have their own long budget, and an aborted
+            // call stops git, so the clone runs without a deadline.
+            crate::source_control_clone::clone_json(&input, None)
+                .await
+                .map_err(|refusal| match refusal {
+                    crate::source_control_clone::CloneRefusal::Defect(defect) => defect,
+                    crate::source_control_clone::CloneRefusal::Failure(error) => {
+                        error["detail"].as_str().unwrap_or_default().to_owned()
+                    }
+                })
+        })
+    }
     fn peer_links_listed(
         self: &Arc<Self>,
     ) -> mcp_oauth::HostFuture<Result<Vec<serde_json::Value>, String>> {

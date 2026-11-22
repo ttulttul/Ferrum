@@ -1045,14 +1045,11 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     }
     if method == "sourceControl.lookupRepository" {
         let provider = params["provider"].as_str().unwrap_or_default();
-        if provider == "github" {
-            return Reply::Failure(
-                json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":"github","operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":"Source control provider github failed in getRepositoryCloneUrls: No GitHub credential for github.com: run `gh auth login --hostname github.com`.","cause":{"name":"GitHubNotSignedInError","message":"No GitHub credential for github.com: run `gh auth login --hostname github.com`."}}}}),
-            );
-        }
-        return Reply::Failure(
-            json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("Source control provider {provider} failed in getRepositoryCloneUrls: No {provider} source control provider is registered.")}}}),
-        );
+        let repository = params["repository"].as_str().unwrap_or_default();
+        return match crate::source_control_clone::lookup_repository(provider, repository).await {
+            Ok(found) => Reply::Success(found),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+        };
     }
     if method == "sourceControl.appAccess" {
         let provider = params["provider"].as_str().unwrap_or_default();
@@ -1060,10 +1057,24 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":"appAccess","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("No {provider} source control provider is registered.")}}}),
         );
     }
-    if method == "sourceControl.cloneRepository" || method == "sourceControl.publishRepository" {
+    if method == "sourceControl.cloneRepository" {
+        return match crate::source_control_clone::clone_json(
+            params,
+            Some(crate::source_control_clone::CLONE_TIMEOUT),
+        )
+        .await
+        {
+            Ok(cloned) => Reply::Success(cloned),
+            Err(crate::source_control_clone::CloneRefusal::Defect(defect)) => Reply::defect(defect),
+            Err(crate::source_control_clone::CloneRefusal::Failure(error)) => {
+                Reply::Failure(json!({"_tag":"Fail","error":error}))
+            }
+        };
+    }
+    if method == "sourceControl.publishRepository" {
         let provider = params["provider"].as_str().unwrap_or_default();
         return Reply::Failure(
-            json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":if method.ends_with("cloneRepository"){"cloneRepository"}else{"publishRepository"},"detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("No {provider} source control provider is registered.")}}}),
+            json!({"_tag":"Fail","error":{"_tag":"SourceControlRepositoryError","provider":provider,"operation":"publishRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("No {provider} source control provider is registered.")}}}),
         );
     }
     if method == "server.getNpmRelease" {
