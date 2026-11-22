@@ -29,8 +29,11 @@ pub struct ProviderState {
     pub attachment_budget: Option<(u64, u64)>,
     /// The title the thread had when its Claude session last started a
     /// turn: the session's own title, which the reference names it with
-    /// then (and renames only while the session runs).
+    /// then (and renames only while the session runs). A title the thread
+    /// gets later in the turn (a generated one) does not change it.
     pub session_title: Option<String>,
+    /// The run whose start recorded [`Self::session_title`].
+    pub session_title_run: Option<Uuid>,
     /// When a server restart stopped the provider session, until a turn
     /// starts it again.
     pub session_stopped_at: Option<u64>,

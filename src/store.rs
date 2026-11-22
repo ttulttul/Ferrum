@@ -564,8 +564,13 @@ impl Store {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.provider.apply(*run_id, event, at);
                     if let crate::workspace::ProviderEvent::ProviderThread { driver, .. } = event {
-                        if driver == crate::workspace::provider::CLAUDE_AGENT {
+                        // As the turn starts (its session opening), not
+                        // when the CLI reports its session later on.
+                        if driver == crate::workspace::provider::CLAUDE_AGENT
+                            && thread.provider.session_title_run != Some(*run_id)
+                        {
                             thread.provider.session_title = Some(thread.title.clone());
+                            thread.provider.session_title_run = Some(*run_id);
                         }
                     }
                 }
@@ -879,5 +884,48 @@ mod tests {
             thread_events: None,
         });
         assert_eq!(store.threads["t1"].runs[0].finished_at, Some(7));
+    }
+
+    #[test]
+    fn a_claude_session_keeps_the_title_its_turn_started_with() {
+        // The reference names a Claude session as its turn starts; a title
+        // generated meanwhile reaches the session only on its next turn.
+        let run_id = Uuid::new_v4();
+        let mut store = Store::default();
+        store.threads.insert(
+            "t1".into(),
+            serde_json::from_value(json!({
+                "id": "t1", "project_id": "p1", "title": "Seed", "cwd": "/w",
+                "status": "running", "messages": [], "runs": [], "created_at": 1,
+                "archived": false, "settled": false, "snoozed_until": null,
+                "pinned": false, "unread": false, "tags": []
+            }))
+            .expect("a thread"),
+        );
+        let thread_event = |at| ServerEvent {
+            id: at,
+            at,
+            event: Event::RunProvider {
+                run_id,
+                thread_id: "t1".into(),
+                event: crate::workspace::ProviderEvent::ProviderThread {
+                    driver: crate::workspace::provider::CLAUDE_AGENT.into(),
+                    native_thread_id: "s1".into(),
+                    resumed: false,
+                    model: None,
+                },
+                position: None,
+            },
+            receipt: None,
+            thread_events: None,
+        };
+        store.apply_record(&thread_event(1));
+        store.threads.get_mut("t1").unwrap().title = "Generated".into();
+        // The CLI reports its session again once it is up.
+        store.apply_record(&thread_event(2));
+        assert_eq!(
+            store.threads["t1"].provider.session_title.as_deref(),
+            Some("Seed")
+        );
     }
 }
