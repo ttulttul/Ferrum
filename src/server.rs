@@ -1357,6 +1357,22 @@ impl mcp_oauth::McpHost for AppState {
     fn spawn(&self, task: crate::runtime::Task) {
         crate::runtime::Runtime::spawn(&*self.runtime, task)
     }
+    fn search_threads(
+        &self,
+        query: String,
+        limit: usize,
+        project: Option<String>,
+    ) -> mcp_oauth::HostFuture<Result<Vec<serde_json::Value>, ()>> {
+        let dir = self.data_dir.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                crate::thread_search::search_agent_threads(&dir, &query, limit, project.as_deref())
+            })
+            .await
+            .map_err(|_| ())?
+            .map_err(|_| ())
+        })
+    }
 }
 
 impl access_http::AuthHost for AppState {

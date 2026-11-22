@@ -53,6 +53,12 @@ fn issue(schema: &Value, value: &Value, optional: bool, path: &[&str]) -> Option
         });
     }
     if let Some(n) = value.as_f64() {
+        // effect's `isBetween` words a range with both ends as one.
+        if let (Some(min), Some(max)) = (schema["minimum"].as_f64(), schema["maximum"].as_f64()) {
+            if n < min || n > max {
+                return expected(format!("a value between {min} and {max}"));
+            }
+        }
         if let Some(min) = schema["minimum"].as_f64().filter(|min| n < *min) {
             return expected(format!("a value greater than or equal to {min}"));
         }
@@ -172,6 +178,10 @@ mod tests {
         assert_eq!(
             message("t3_thread_configure", json!({"modelSelection": {}})),
             "Invalid parameters for tool 't3_thread_configure': Missing key\n  at [\"modelSelection\"][\"model\"]"
+        );
+        assert_eq!(
+            message("t3_thread_search", json!({"query": "x", "limit": 51})),
+            "Invalid parameters for tool 't3_thread_search': Expected a value between 1 and 50\n  at [\"limit\"]"
         );
         assert_eq!(
             message("t3_queue", json!({"action": "list", "threadId": null})),

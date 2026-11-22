@@ -474,6 +474,63 @@
   },
   {
    "mcp": {
+    "tool": "t3_thread_search",
+    "arguments": {
+     "query": "renamed agent"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_search",
+    "arguments": {
+     "query": "notes"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_search",
+    "arguments": {
+     "query": "echo hi",
+     "limit": 1
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_search",
+    "arguments": {
+     "query": "nothing-matches-this"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_search",
+    "arguments": {
+     "query": "renamed",
+     "projectId": "project-missing"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_search",
+    "arguments": {
+     "query": "renamed",
+     "limit": 51
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_search",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
     "tool": "t3_thread_organize",
     "arguments": {
      "action": "pin"
