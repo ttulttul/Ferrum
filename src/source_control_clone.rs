@@ -710,6 +710,55 @@ pub(crate) async fn run_prepared(
     })
 }
 
+/// The clone URLs a host reports for `repository` (`lookupRepository`), or
+/// the `SourceControlRepositoryError` an RPC answers with.
+pub(crate) async fn lookup_repository(provider: &str, _repository: &str) -> Result<Value, Value> {
+    if provider == "github" {
+        return Err(
+            json!({"_tag":"SourceControlRepositoryError","provider":"github","operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":"Source control provider github failed in getRepositoryCloneUrls: No GitHub credential for github.com: run `gh auth login --hostname github.com`.","cause":{"name":"GitHubNotSignedInError","message":"No GitHub credential for github.com: run `gh auth login --hostname github.com`."}}}),
+        );
+    }
+    Err(
+        json!({"_tag":"SourceControlRepositoryError","provider":provider,"operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("Source control provider {provider} failed in getRepositoryCloneUrls: No {provider} source control provider is registered.")}}),
+    )
+}
+
+/// Why `clone_json` did not clone.
+pub(crate) enum CloneRefusal {
+    /// The input does not decode (`Reply::defect`).
+    Defect(String),
+    /// `SourceControlRepositoryError`.
+    Failure(Value),
+}
+
+/// `sourceControl.cloneRepository` for an RPC or tool payload: the
+/// `SourceControlCloneRepositoryResult`, run with `timeout` (`None` for none).
+pub(crate) async fn clone_json(
+    params: &Value,
+    timeout: Option<Duration>,
+) -> Result<Value, CloneRefusal> {
+    let input = CloneInput::from_json(params).map_err(CloneRefusal::Defect)?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let lookup = lookup_repository(
+        input.provider.as_deref().unwrap_or_default(),
+        input.repository.as_deref().unwrap_or_default(),
+    );
+    let prepared = prepare_clone(&input, &home, lookup)
+        .await
+        .map_err(CloneRefusal::Failure)?;
+    let options = CloneOptions {
+        on_progress: &|_| {},
+        timeout,
+        cancel: None,
+    };
+    let cloned = run_prepared(&input, &prepared, options)
+        .await
+        .map_err(CloneRefusal::Failure)?;
+    Ok(json!({"cwd": cloned.cwd, "remoteUrl": cloned.remote_url, "repository": cloned.repository}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

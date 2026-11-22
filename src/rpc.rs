@@ -1046,7 +1046,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
     if method == "sourceControl.lookupRepository" {
         let provider = params["provider"].as_str().unwrap_or_default();
         let repository = params["repository"].as_str().unwrap_or_default();
-        return match lookup_repository(provider, repository).await {
+        return match crate::source_control_clone::lookup_repository(provider, repository).await {
             Ok(found) => Reply::Success(found),
             Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
         };
@@ -1058,32 +1058,17 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         );
     }
     if method == "sourceControl.cloneRepository" {
-        let input = match crate::source_control_clone::CloneInput::from_json(params) {
-            Ok(input) => input,
-            Err(defect) => return Reply::defect(defect),
-        };
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        let lookup = lookup_repository(
-            input.provider.as_deref().unwrap_or_default(),
-            input.repository.as_deref().unwrap_or_default(),
-        );
-        let prepared = match crate::source_control_clone::prepare_clone(&input, &home, lookup).await
+        return match crate::source_control_clone::clone_json(
+            params,
+            Some(crate::source_control_clone::CLONE_TIMEOUT),
+        )
+        .await
         {
-            Ok(prepared) => prepared,
-            Err(error) => return Reply::Failure(json!({"_tag":"Fail","error":error})),
-        };
-        let options = crate::source_control_clone::CloneOptions {
-            on_progress: &|_| {},
-            timeout: Some(crate::source_control_clone::CLONE_TIMEOUT),
-            cancel: None,
-        };
-        return match crate::source_control_clone::run_prepared(&input, &prepared, options).await {
-            Ok(cloned) => Reply::Success(
-                json!({"cwd":cloned.cwd,"remoteUrl":cloned.remote_url,"repository":cloned.repository}),
-            ),
-            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+            Ok(cloned) => Reply::Success(cloned),
+            Err(crate::source_control_clone::CloneRefusal::Defect(defect)) => Reply::defect(defect),
+            Err(crate::source_control_clone::CloneRefusal::Failure(error)) => {
+                Reply::Failure(json!({"_tag":"Fail","error":error}))
+            }
         };
     }
     if method == "sourceControl.publishRepository" {
@@ -3679,17 +3664,4 @@ pub(crate) async fn create_new_project(state: &AppState, name: &str) -> Result<V
         result["commitError"] = json!(error);
     }
     Ok(result)
-}
-
-/// The clone URLs a host reports for `repository` (`lookupRepository`), or
-/// the `SourceControlRepositoryError` an RPC answers with.
-async fn lookup_repository(provider: &str, _repository: &str) -> Result<Value, Value> {
-    if provider == "github" {
-        return Err(
-            json!({"_tag":"SourceControlRepositoryError","provider":"github","operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":"Source control provider github failed in getRepositoryCloneUrls: No GitHub credential for github.com: run `gh auth login --hostname github.com`.","cause":{"name":"GitHubNotSignedInError","message":"No GitHub credential for github.com: run `gh auth login --hostname github.com`."}}}),
-        );
-    }
-    Err(
-        json!({"_tag":"SourceControlRepositoryError","provider":provider,"operation":"lookupRepository","detail":"The source control operation could not be completed.","cause":{"name":"SourceControlProviderError","message":format!("Source control provider {provider} failed in getRepositoryCloneUrls: No {provider} source control provider is registered.")}}),
-    )
 }

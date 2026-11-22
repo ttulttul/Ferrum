@@ -9,7 +9,8 @@ the clone falls back to HTTPS on a closed loopback port. Nothing contacts a
 real host. Covered: destination rules (empty, `~`, missing parents, existing
 files and folders), a clone that succeeds and the commit it checks out, a
 repository that is not there, redacted credentials, and the SSH-to-HTTPS
-fallback and its combined failure. All data is fake.
+fallback and its combined failure, and the same clone run by an agent with
+`t3_project_clone`. All data is fake.
 """
 import argparse
 from contextlib import ExitStack
@@ -25,7 +26,8 @@ from tempfile import TemporaryDirectory
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, isolated_git_env, managed_server
+from parity_harness import encode, http, isolated_git_env, managed_server
+from peer_forwarding_parity import McpClient, mcp_token
 
 FAKE_SSH = """#!/bin/sh
 echo "git@127.0.0.1: Permission denied (publickey)." >&2
@@ -60,11 +62,18 @@ def bare_repository(root, env):
 class Server:
     def __init__(self, stack, command, home, secret, key, env):
         self.url, cookie = managed_server(stack, shlex.split(command), home, secret, key, env=env)
+        self.cookie = cookie
         self.home = home
         self.socket = stack.enter_context(connect(
             self.url.replace("http", "ws", 1) + "/ws?orchestrationProtocol=2",
             additional_headers={"Cookie": cookie}, compression=None, proxy=None))
         self.sequence = 0
+
+    def pairing_code(self):
+        status, _, body = http(self.url, "POST", "/api/auth/pairing-token", encode({}),
+                               {"Cookie": self.cookie, "Content-Type": "application/json"})
+        assert status == 200, (status, body)
+        return json.loads(body)["credential"]
 
     def rpc(self, tag, payload, timeout=150):
         self.sequence += 1
@@ -136,6 +145,16 @@ def main():
                       destinationPath=str(work / "ssh-only"))
                 clone("a custom ssh port is not rewritten", remoteUrl=f"ssh://git@127.0.0.1:{port}/fixture/repo.git",
                       destinationPath=str(work / "ssh-port"))
+                # An agent clones with t3_project_clone: the same clone, its failure as the tool's.
+                agent = McpClient(server.url, mcp_token(server, "full-access"))
+                record["t3_project_clone"] = agent.call("t3_project_clone", {
+                    "remoteUrl": f"file://{bare}", "destinationPath": str(work / "agent")})
+                record["t3_project_clone checked out"] = (work / "agent" / ".git").exists() and git(
+                    "rev-parse", "HEAD", cwd=work / "agent", env=git_env) == commit
+                record["t3_project_clone, a repository that is not there"] = agent.call("t3_project_clone", {
+                    "remoteUrl": f"file://{tmp}/missing.git", "destinationPath": str(work / "agent-missing")})
+                record["t3_project_clone, a folder that is not empty"] = agent.call("t3_project_clone", {
+                    "remoteUrl": str(bare), "destinationPath": str(work / "full")})
                 text = re.sub(r"after \d+ ms", "after <n> ms", json.dumps(record))
                 for path, mark in ((str(home), "<home>"), (str(bare), "<bare>"), (str(tmp), "<tmp>"), (str(port), "<port>")):
                     text = text.replace(path, mark)
