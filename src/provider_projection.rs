@@ -1812,4 +1812,28 @@ mod tests {
         live.row["modelSelection"] = json!({"instanceId": "codex", "model": "other"});
         assert_eq!(live.projection()["runs"][0]["modelSelection"]["model"], "m");
     }
+
+    #[test]
+    fn a_queued_run_has_no_checkpoint_scope_until_it_is_sent() {
+        let run_id = Uuid::new_v4();
+        let mut live = thread(
+            serde_json::from_value(json!({
+                "id": run_id, "thread_id": "t1", "provider": "default", "status": "queued",
+                "started_at": 1, "finished_at": null, "error": null, "user_message_id": null,
+                "driver": "codex"
+            }))
+            .unwrap(),
+        );
+        // A deferred message's run waits in the queue: the reference has no
+        // scope yet.
+        assert_eq!(live.projection()["checkpointScopes"], json!([]));
+        live.runs[0].status = "running".into();
+        assert_eq!(
+            live.projection()["checkpointScopes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 }

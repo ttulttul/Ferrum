@@ -735,10 +735,13 @@ impl Thread {
                 .and_then(|(_, ids)| ids.map(|ids| ids.root_node))
                 .unwrap_or_else(|| format!("node:{}", self.id))
         };
-        // The scope exists from the thread's first provider run, as the
-        // reference creates it when it sends that run; else from the
+        // The scope exists from the thread's first provider run once it is
+        // sent to start, as the reference creates it then (not while the
+        // run waits in the queue or for its workspace); else from the
         // baseline checkpoint.
-        let first_run = self.runs.first().filter(|run| run.driver.is_some());
+        let first_run = self.runs.first().filter(|run| {
+            run.driver.is_some() && !matches!(run.status.as_str(), "queued" | "preparing")
+        });
         let scope_from = self
             .checkpoints
             .first()
