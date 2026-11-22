@@ -131,6 +131,11 @@ async fn dispatch_command<H: CommandHost>(
                 json!({"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":msg}}),
             ));
         };
+        if thread.stored.is_some() {
+            return Err(dispatch_error(format!(
+                "Thread {id} was last changed by another T3 Code server on this home. This server shows it but cannot change or continue it yet."
+            )));
+        }
         if kind == "thread.archive" && thread.archived {
             return Err(dispatch_error(format!("Thread {id} is already archived.")));
         }
@@ -542,6 +547,7 @@ async fn apply_command<H: CommandHost>(
                 tags: vec![],
                 checkpoints: vec![],
                 provider: Default::default(),
+                stored: None,
             };
             return Ok(state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
@@ -1732,6 +1738,7 @@ async fn apply_command<H: CommandHost>(
                 tags: source.tags,
                 checkpoints: vec![],
                 provider: Default::default(),
+                stored: None,
             };
             return Ok(state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
@@ -1894,6 +1901,7 @@ async fn apply_command<H: CommandHost>(
                 tags: vec![],
                 checkpoints: vec![],
                 provider: Default::default(),
+                stored: None,
             };
             let mut subagents = parent.row["subagents"]
                 .as_array()

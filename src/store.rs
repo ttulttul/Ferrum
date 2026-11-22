@@ -136,6 +136,11 @@ pub struct Thread {
     /// What provider turns left behind; rebuilt from the log.
     #[serde(skip)]
     pub(crate) provider: Box<crate::provider_state::ProviderState>,
+    /// The thread's projection as `statev2.sqlite` holds it, when it was read
+    /// from there rather than built by this server's events
+    /// (docs/shared-store.md).
+    #[serde(skip)]
+    pub(crate) stored: Option<Box<serde_json::Value>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -694,6 +699,7 @@ mod tests {
                 tags: vec![],
                 checkpoints: vec![],
                 provider: Box::default(),
+                stored: None,
             },
         );
         store.apply_record(&ServerEvent {

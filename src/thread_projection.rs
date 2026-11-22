@@ -458,6 +458,9 @@ impl Thread {
     /// The projection; with `wire`, its turn items as snapshots and events
     /// carry them (output omitted).
     fn projection_with(&self, wire: bool) -> Value {
+        if let Some(stored) = &self.stored {
+            return stored_projection(&self.id, stored, wire);
+        }
         let row = self.stored_row();
         let array = |key: &str| {
             row.get(key)
@@ -646,6 +649,9 @@ impl Thread {
     }
 
     pub(crate) fn shell(&self) -> Value {
+        if self.stored.is_some() {
+            return crate::projection_shell::shell(&self.projection(), SHELL_FIELDS);
+        }
         let mut row = self.stored_row();
         for key in [
             "latestRunId",
@@ -886,4 +892,105 @@ pub(crate) fn linked(store: &Store, input: &Value, issue: bool) -> Value {
             .then_with(|| a.id.cmp(&b.id))
     });
     json!({"threads":rows.into_iter().map(|t|json!({"id":t.id,"projectId":t.project_id,"title":t.title,"archivedAt":t.row["archivedAt"],"settled":t.settled})).collect::<Vec<_>>()})
+}
+
+/// The projection of a thread read from `statev2.sqlite`: its stored records,
+/// with turn items as snapshots carry them when `wire`, and each turn item a
+/// local visible row, as Rust's own projections are.
+fn stored_projection(thread_id: &str, stored: &Value, wire: bool) -> Value {
+    let mut projection = stored.clone();
+    if wire {
+        if let Some(items) = projection["turnItems"].as_array_mut() {
+            for item in items.iter_mut() {
+                *item = crate::wire_items::wire_item(item);
+            }
+        }
+    }
+    let visible = crate::projection_shell::visible_turn_items(&projection)
+        .into_iter()
+        .enumerate()
+        .map(|(position, item)| {
+            json!({"position":position,"visibility":"local","sourceThreadId":thread_id,
+                "sourceItemId":item["id"],"item":item})
+        })
+        .collect::<Vec<_>>();
+    let updated_at = projection["updatedAt"].clone();
+    if let Some(object) = projection.as_object_mut() {
+        // The reference's field order (OrchestrationV2ThreadProjection).
+        object.remove("updatedAt");
+        object.insert("visibleTurnItems".into(), Value::Array(visible));
+        object.insert("updatedAt".into(), updated_at);
+    }
+    projection
+}
+
+/// Seconds since the epoch of an ISO timestamp, 0 when it does not parse.
+fn iso_seconds(value: &Value) -> u64 {
+    value
+        .as_str()
+        .and_then(|text| {
+            time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
+        })
+        .map_or(0, |at| at.unix_timestamp().max(0) as u64)
+}
+
+impl Thread {
+    /// A thread read from `statev2.sqlite` (`projection` as
+    /// `statev2::read::thread_projection` returns it). Its snapshots serve the
+    /// stored records; the typed fields hold what listing and commands read.
+    pub(crate) fn from_stored(projection: Value, project_root: Option<&str>) -> Thread {
+        let row = projection["thread"].clone();
+        let text = |key: &str| row[key].as_str().map(str::to_owned);
+        let active = projection["runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|run| {
+                matches!(
+                    run["status"].as_str(),
+                    Some("preparing" | "starting" | "running" | "waiting")
+                )
+            });
+        let messages = projection["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|message| crate::ConversationMessage {
+                id: message["id"].as_str().unwrap_or_default().to_owned(),
+                role: message["role"].as_str().unwrap_or("assistant").to_owned(),
+                content: message["text"].as_str().unwrap_or_default().to_owned(),
+                created_at: iso_seconds(&message["createdAt"]),
+                creation_source: message["creationSource"].as_str().map(str::to_owned),
+                scheduled_task_id: message["scheduledTaskId"].as_str().map(str::to_owned),
+                follows_thread_selection: message["followsThreadSelection"] == true,
+            })
+            .collect();
+        Thread {
+            id: text("id").unwrap_or_default(),
+            project_id: text("projectId").unwrap_or_default(),
+            title: text("title").unwrap_or_default(),
+            cwd: text("worktreePath")
+                .or_else(|| project_root.map(str::to_owned))
+                .unwrap_or_default(),
+            status: if active { "running" } else { "idle" }.into(),
+            messages,
+            runs: vec![],
+            created_at: iso_seconds(&row["createdAt"]),
+            archived: !row["archivedAt"].is_null(),
+            settled: !row["settledAt"].is_null(),
+            snoozed_until: text("snoozedUntil"),
+            pinned: !row["pinnedAt"].is_null(),
+            unread: false,
+            tags: row["tags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tag| tag.as_str().map(str::to_owned))
+                .collect(),
+            checkpoints: vec![],
+            provider: Default::default(),
+            stored: Some(Box::new(projection)),
+            row,
+        }
+    }
 }

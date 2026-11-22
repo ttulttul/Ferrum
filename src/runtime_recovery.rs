@@ -830,6 +830,7 @@ mod tests {
             tags: vec![],
             checkpoints: vec![],
             provider: Default::default(),
+            stored: None,
         }
     }
 

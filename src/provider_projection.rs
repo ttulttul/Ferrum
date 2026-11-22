@@ -139,9 +139,14 @@ impl Thread {
     /// The reference's pendingRuntimeRequestSummary: the newest pending
     /// approval, or else the newest pending question.
     pub(crate) fn pending_runtime_request(&self) -> Option<Value> {
-        let records = self.provider_records();
-        records
-            .runtime_requests
+        let requests = match &self.stored {
+            Some(stored) => stored["runtimeRequests"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            None => self.provider_records().runtime_requests,
+        };
+        requests
             .iter()
             .filter(|request| request["status"] == "pending")
             .min_by(|a, b| {
@@ -1104,6 +1109,7 @@ mod tests {
             tags: vec![],
             checkpoints: vec![],
             provider: Box::default(),
+            stored: None,
         }
     }
 
