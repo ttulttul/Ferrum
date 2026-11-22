@@ -178,6 +178,27 @@ fn inside_git_work_tree(dir: &Path) -> bool {
         })
 }
 
+/// The themes directory and each file in it, as last modified: a theme file
+/// edited in place changes only its own time, which the reference's watch
+/// of the directory also sees.
+fn themes_revision(dir: &Path) -> Vec<(String, Option<(SystemTime, u64)>)> {
+    let mut entries: Vec<(String, Option<(SystemTime, u64)>)> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let at = revision(&entry.path());
+                    (name, at)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort();
+    entries.push((String::new(), revision(dir)));
+    entries
+}
+
 fn revision(path: &Path) -> Option<(SystemTime, u64)> {
     let m = path.metadata().ok()?;
     Some((m.modified().ok()?, m.len()))
@@ -197,7 +218,7 @@ pub(crate) struct Subscription {
     provider_checks: broadcast::Receiver<()>,
     providers_due: Option<tokio::time::Instant>,
     /// The themes directory as last read, and the published themes last sent.
-    themes_dir: Option<(SystemTime, u64)>,
+    themes_dir: Vec<(String, Option<(SystemTime, u64)>)>,
     themes: Value,
 }
 
@@ -237,7 +258,7 @@ impl Subscription {
         let settings_file = revision(&state.paths.settings);
         let bindings_file = revision(&state.paths.keybindings);
         let config = snapshot(state, references, options).await?;
-        let themes_dir = revision(&state.paths.themes);
+        let themes_dir = themes_revision(&state.paths.themes);
         let themes = json!(crate::environment_theme::published(&state.paths.themes));
         let initial_events = initial_events(&themes, &config, options);
         Ok(Self {
@@ -329,10 +350,10 @@ impl Subscription {
                             return Ok(event);
                         }
                     }
-                    // A publish renames its file into place, which the directory's
-                    // time records; the reference watches the directory.
+                    // The reference watches the directory: a publish, a new or removed
+                    // file, or a file edited in place.
                     if options["environmentThemes"] == true {
-                        let themes_dir = revision(&state.paths.themes);
+                        let themes_dir = themes_revision(&state.paths.themes);
                         if themes_dir != self.themes_dir {
                             self.themes_dir = themes_dir;
                             let themes = json!(crate::environment_theme::published(&state.paths.themes));
@@ -369,5 +390,21 @@ impl Subscription {
             self.config["settings"] = view.clone();
             return Ok(json!({"version":1,"type":"settingsUpdated","payload":{"settings":view}}));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::themes_revision;
+
+    #[test]
+    fn a_theme_file_edited_in_place_changes_the_themes_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ocean.json");
+        std::fs::write(&file, "{}").unwrap();
+        let before = themes_revision(dir.path());
+        // Same name, so the directory itself does not change.
+        std::fs::write(&file, "{\"name\":\"Ocean\"}").unwrap();
+        assert_ne!(themes_revision(dir.path()), before);
     }
 }

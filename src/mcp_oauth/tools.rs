@@ -10,6 +10,7 @@ use std::sync::{Arc, LazyLock};
 
 mod arguments;
 mod projects;
+mod session;
 mod theme;
 mod threads;
 
@@ -37,6 +38,9 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("t3_environment_preferences_update", &[]),
     ("t3_worktree_list", &[]),
     ("t3_theme_read", &[]),
+    ("send_to_user", &[]),
+    ("t3_background_wait", &[]),
+    ("tool_search", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -73,6 +77,9 @@ const SERVED: &[&str] = &[
     // Themes (batch 3b).
     "t3_theme_read",
     "t3_theme_set",
+    // The calling thread's session (batch 4a).
+    "send_to_user",
+    "t3_background_wait",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -109,20 +116,68 @@ pub(super) static TOOLS: LazyLock<Value> = LazyLock::new(|| {
     )
 });
 
-/// The tools `tools/list` offers: the links-only ones too while Linked
-/// environments is on, as the reference lists them.
-pub(super) fn listed<S: McpHost>(host: &S) -> Value {
-    let links = host.linked_environments_enabled();
-    Value::Array(
-        SERVED_TOOLS
+/// `tool_search`, which only a provider session that defers its tools lists.
+static TOOL_SEARCH: LazyLock<Value> = LazyLock::new(|| {
+    let reference: Value =
+        serde_json::from_str(include_str!("tools.json")).expect("MCP tool definitions");
+    reference["toolSearch"].clone()
+});
+
+/// Whether `caller` may see a tool listed to `listed` (its `McpSchema.EnabledWhen`):
+/// thread-only tools need a thread credential; links tools, the beta on.
+/// This server issues no credential to a subagent, so `hiddenFromSubagents`
+/// never hides a tool here.
+fn visible_to<S: McpHost>(host: &S, granted: &McpAccess, listed: &str) -> bool {
+    match listed {
+        LINKS_ONLY => host.linked_environments_enabled(),
+        "hiddenFromOutsideClients" => granted.thread.is_some(),
+        _ => true,
+    }
+}
+
+/// The tools `tools/list` offers `granted`, as the reference lists them: by
+/// each tool's `EnabledWhen`, and for a provider session that sends
+/// `t3-tool-exposure: deferred`, only the direct tools and those its
+/// `tool_search` calls loaded.
+pub(super) fn listed<S: McpHost>(host: &S, granted: &McpAccess, deferred: bool) -> Value {
+    let session = granted
+        .thread
+        .as_ref()
+        .filter(|_| deferred)
+        .map(|scope| scope.provider_session_id.as_str());
+    let mut tools: Vec<Value> = SERVED_TOOLS
+        .iter()
+        .filter(|(_, listed)| visible_to(host, granted, listed))
+        .filter(|(tool, _)| {
+            session.is_none_or(|session| {
+                session::is_listed(session, tool["name"].as_str().unwrap_or_default())
+            })
+        })
+        .map(|(tool, _)| sendable(tool))
+        .collect();
+    if session.is_some() {
+        tools.push(sendable(&TOOL_SEARCH));
+    }
+    Value::Array(tools)
+}
+
+/// Refuses a tool a client from outside a thread is not offered, as if it did
+/// not exist: the reference registers a thread-only tool for threads alone.
+pub(super) fn callable(caller: &Caller, name: &str) -> Result<(), Refusal> {
+    let thread_only = name == "tool_search"
+        || SERVED_TOOLS
             .iter()
-            .filter(|(_, listed)| listed == "everyone" || (links && listed == LINKS_ONLY))
-            .map(|(tool, _)| sendable(tool))
-            .collect(),
-    )
+            .any(|(tool, listed)| tool["name"] == name && listed == "hiddenFromOutsideClients");
+    if thread_only && caller.granted.thread.is_none() {
+        return Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found")));
+    }
+    Ok(())
 }
 
 fn tool_definition(name: &str) -> Option<&'static Value> {
+    if name == "tool_search" {
+        return Some(&TOOL_SEARCH);
+    }
     SERVED_TOOLS
         .iter()
         .map(|(tool, _)| tool)
@@ -543,6 +598,9 @@ pub(super) async fn call<S: McpHost>(
         "t3_worktree_list" => projects::worktree_list(host, caller, args).await,
         "t3_theme_read" => theme::read(host, args).await,
         "t3_theme_set" => theme::set(host, caller, args).await,
+        "tool_search" => session::tool_search(caller, args),
+        "send_to_user" => session::send_to_user(&**host, caller, args).await,
+        "t3_background_wait" => session::background_wait(&**host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }
@@ -2082,7 +2140,7 @@ mod sender_tests {
             assert!(
                 matches!(
                     reference["listedTo"][name].as_str(),
-                    Some("everyone" | LINKS_ONLY)
+                    Some("everyone" | LINKS_ONLY | "hiddenFromOutsideClients")
                 ),
                 "{name} needs listing by caller"
             );

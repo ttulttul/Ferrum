@@ -16,6 +16,15 @@ fn body(value: Value) -> Response {
     )
         .into_response()
 }
+/// Messages streamed as server-sent events: a notification the call raised,
+/// then its answer, as the reference streams a call that changed the tool list.
+fn events(messages: &[Value]) -> Response {
+    let text: String = messages
+        .iter()
+        .map(|message| format!("event: message\ndata: {message}\n\n"))
+        .collect();
+    ([(header::CONTENT_TYPE, "text/event-stream")], text).into_response()
+}
 fn rpc_error(id: &Value, code: i32, message: &str) -> Response {
     body(json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}))
 }
@@ -108,7 +117,13 @@ pub(super) async fn handle<S: McpHost>(
     }
     let result = match operation {
         "ping" => json!({}),
-        "tools/list" => json!({"tools":super::tools::listed(&*s)}),
+        "tools/list" => {
+            let deferred = h
+                .get("t3-tool-exposure")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v == "deferred");
+            json!({"tools":super::tools::listed(&*s, &granted, deferred)})
+        }
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or("");
             let a = &req["params"]["arguments"];
@@ -135,7 +150,8 @@ pub(super) async fn handle<S: McpHost>(
                     );
                 }
             }
-            let outcome = match super::tools::unknown_arguments(name, a)
+            let outcome = match super::tools::callable(&caller, name)
+                .and_then(|()| super::tools::unknown_arguments(name, a))
                 .and_then(|()| super::tools::linked_target(&*s, name, a))
             {
                 Err(refusal) => Err(refusal),
@@ -145,6 +161,17 @@ pub(super) async fn handle<S: McpHost>(
                 Ok(None) => super::on_this_thread(super::tools::call(&s, &caller, name, a)).await,
             };
             match outcome {
+                // A search that loaded tools changes this session's tool list.
+                Ok(v)
+                    if name == "tool_search"
+                        && v["tools"].as_array().is_some_and(|t| !t.is_empty()) =>
+                {
+                    let result = json!({"content":[{"type":"text","text":v.to_string()}],"structuredContent":v,"isError":false});
+                    return events(&[
+                        json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{}}),
+                        json!({"jsonrpc":"2.0","id":id,"result":result}),
+                    ]);
+                }
                 Ok(v) => {
                     json!({"content":[{"type":"text","text":v.to_string()}],"structuredContent":v,"isError":false})
                 }

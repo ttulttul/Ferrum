@@ -39,7 +39,8 @@ Steps:
                              appended to FAKE_PROVIDER_LOG.mcp as JSON. With
                              "as": "name", the tool's answer is kept, and a
                              later argument "$mcp.name.a.b" is its field a.b;
-                             "$env.NAME" is an environment variable.
+                             "$env.NAME" is an environment variable, and
+                             "headers" are sent with that request only.
 
 A request the scenario does not expect is answered from SIDE_REPLIES (or the
 scenario's own "replies" by method), so a client that reads its config or
@@ -162,8 +163,9 @@ def note_mcp_server(message):
             mcp_server.update(url=server.get("url"), authorization=(server.get("headers") or {}).get("Authorization"))
 
 
-def mcp_post(body):
+def mcp_post(body, extra=None):
     headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+    headers.update(extra or {})
     if mcp_server.get("authorization"):
         headers["authorization"] = mcp_server["authorization"]
     if mcp_server.get("session"):
@@ -175,13 +177,27 @@ def mcp_post(body):
             status, received, text = response.status, dict(response.headers), response.read().decode()
     except urllib.error.HTTPError as error:
         status, received, text = error.code, dict(error.headers), error.read().decode()
-    if "text/event-stream" in received.get("Content-Type", received.get("content-type", "")):
-        text = "".join(line[5:].strip() for line in text.splitlines() if line.startswith("data:"))
+    received = {k.lower(): v for k, v in received.items()}
+    if "text/event-stream" in received.get("content-type", ""):
+        # One message per event: notifications the call raised, then its answer.
+        messages = []
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                try:
+                    messages.append(json.loads(line[5:].strip()))
+                except ValueError:
+                    messages.append(line[5:].strip())
+        answers = [m for m in messages if not (isinstance(m, dict) and "method" in m and "id" not in m)]
+        notes = [m["method"] for m in messages if isinstance(m, dict) and "method" in m and "id" not in m]
+        answer = answers[-1] if answers else None
+        if notes:
+            received["x-notifications"] = notes
+        return status, received, answer
     try:
         answer = json.loads(text) if text else None
     except ValueError:
         answer = text
-    return status, {k.lower(): v for k, v in received.items()}, answer
+    return status, received, answer
 
 
 def mcp_call(step):
@@ -200,8 +216,11 @@ def mcp_call(step):
         method = step.get("method", "tools/call")
         arguments = fill_mcp(step.get("arguments", {}))
         params = {"name": step["tool"], "arguments": arguments} if method == "tools/call" else {}
-        status, _, answer = mcp_post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+        status, received, answer = mcp_post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                                            step.get("headers"))
         record.update(status=status, answer=answer)
+        if received.get("x-notifications"):
+            record["notifications"] = received["x-notifications"]
         if "as" in step:
             result = (answer or {}).get("result") if isinstance(answer, dict) else None
             text = "".join(part.get("text", "") for part in (result or {}).get("content", []))

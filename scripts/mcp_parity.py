@@ -69,6 +69,9 @@ def observations(url, cookie, root):
         ("t3_worktree_list", dict(threadId="thread-missing")),
         ("t3_theme_read", {}),
         ("t3_theme_set", dict(appearance="dark")),
+        ("send_to_user", dict(message="Hello")),
+        ("t3_background_wait", dict(taskIds=["bg-1"])),
+        ("tool_search", dict(query="theme")),
     ]:
         call("tools/call", dict(name=name, arguments=arguments))
     call("tools/call",dict(name="missing-tool",arguments={}))

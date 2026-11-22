@@ -532,10 +532,19 @@ CALLER_CAPABILITIES = ("parentThreadId", "inheritedProviderInstanceId", "inherit
 
 def comparable_mcp(original, rust):
     """Both servers' agent MCP records, comparable: Rust serves some of the reference's agent
-    tools, so its `tools/list` must hold only tools the reference lists, defined the same; a
-    thread's latest run id differs in form (the shared store gives Rust the reference's)."""
-    def shape(lines, listed=None):
+    tools, so each `tools/list` must hold only tools the reference lists in its own answer to that
+    call, defined the same, and a `tool_search` finds only the tools Rust serves; a thread's latest
+    run id differs in form (the shared store gives Rust the reference's)."""
+    def lists(lines):
+        return [json.loads(line) for line in lines if line.startswith("{")
+                and json.loads(line).get("request", {}).get("method") == "tools/list"]
+    listings = [[t["name"] for t in (record.get("answer") or {}).get("result", {}).get("tools", [])]
+                for record in lists(rust)]
+    served = {name for names in listings for name in names} | {"tool_search"}
+
+    def shape(lines):
         out = []
+        listing = iter(listings)
         for line in lines:
             if not line.startswith("{"):
                 out.append(line)
@@ -545,20 +554,21 @@ def comparable_mcp(original, rust):
             request = record.get("request", {})
             if request.get("method") == "tools/list" and isinstance(answer, dict):
                 tools = {t["name"]: t for t in (answer.get("result") or {}).get("tools", [])}
-                record["answer"] = {name: tools.get(name, "<not listed>") for name in sorted(listed or tools)}
+                names = next(listing, None)
+                record["answer"] = {name: tools.get(name, "<not listed>") for name in sorted(names or tools)}
             elif request.get("tool") == "orchestrator_capabilities" and isinstance(answer, dict) \
                     and isinstance(answer.get("content"), dict) and not answer.get("isError"):
                 answer["content"] = {k: answer["content"].get(k) for k in CALLER_CAPABILITIES}
+            elif request.get("tool") == "tool_search" and isinstance(answer, dict) \
+                    and isinstance(answer.get("content"), dict) and not answer.get("isError"):
+                answer["content"]["tools"] = [t for t in answer["content"].get("tools", [])
+                                              if t.get("name") in served]
             text = re.sub(r'"latestRunId": "[^"]*"', '"latestRunId": "<run>"', json.dumps(record, sort_keys=True))
             # Each server numbers its own orchestration events.
             text = re.sub(r'"sequence": \d+', '"sequence": "<sequence>"', text)
             out.append(text)
         return out
-    listed = None
-    for line in rust:
-        if line.startswith("{") and json.loads(line).get("request", {}).get("method") == "tools/list":
-            listed = [t["name"] for t in (json.loads(line).get("answer") or {}).get("result", {}).get("tools", [])]
-    return shape(original, listed), shape(rust, listed)
+    return shape(original), shape(rust)
 
 
 def agent_mcp(log, root):
