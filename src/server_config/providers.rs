@@ -101,6 +101,8 @@ fn initial_status(driver: &str) -> Option<(bool, &'static str)> {
     match driver {
         "fx" => Some((true, "Checking fx CLI availability...")),
         "kiro" => Some((true, "Checking Kiro CLI availability...")),
+        "grok" => Some((true, "Checking Grok CLI availability...")),
+        "pi" => Some((true, "Checking Pi CLI availability...")),
         _ => None,
     }
 }

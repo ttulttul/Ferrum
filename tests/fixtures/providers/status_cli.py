@@ -19,7 +19,15 @@ exits with "exit". An entry with "rpc" instead speaks newline-delimited
 JSON-RPC 2.0 on stdin and stdout: each request is answered with the result
 named by its method (or the error in "rpcErrors"), a request with neither is
 left unanswered, and the CLI exits when its input closes. "notify" lists
-notifications sent after a method's reply: {"initialize": [{...}]}.
+notifications sent after a method's reply: {"initialize": [{...}]}. An entry
+with "pi" speaks Pi's RPC mode instead: each {"type": ..., "id": ...} record
+is answered with {"type": "response", "id", "command", "success": true,
+"data"} from "pi" by type, or "success": false for a type in "piErrors"; a
+type in neither is left unanswered. "exitAfter": n exits after n records.
+"closeOutputAfter": n closes standard output after n records and exits a
+few seconds later, so a client sees the closed output, not a failed write;
+"closeInputAfter": n closes standard input before the nth reply instead,
+so every later write fails while the output is still open.
 
 Every launch appends its arguments to FAKE_PROVIDER_LOG.args; requests are
 appended to FAKE_PROVIDER_LOG.
@@ -54,6 +62,42 @@ def write(stream, text):
         stream.write(text if text.endswith("\n") else text + "\n")
         stream.flush()
 
+
+if "pi" in entry:
+    answered = 0
+    for line in sys.stdin:
+        if log_path:
+            with open(log_path, "a") as out:
+                out.write(line if line.endswith("\n") else line + "\n")
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        kind = record.get("type")
+        if kind in entry.get("piErrors", []):
+            reply = {"type": "response", "id": record.get("id"), "command": kind, "success": False,
+                     "error": "not available"}
+        elif kind in entry["pi"]:
+            reply = {"type": "response", "id": record.get("id"), "command": kind, "success": True,
+                     "data": entry["pi"][kind]}
+        else:
+            continue
+        answered += 1
+        if entry.get("closeInputAfter") == answered:
+            # Closed before the reply goes out, so no request written after it can land.
+            os.close(0)
+        write(sys.stdout, json.dumps(reply))
+        if entry.get("exitAfter") == answered:
+            sys.exit(1)
+        if entry.get("closeOutputAfter") == answered:
+            sys.stdout.flush()
+            os.close(1)
+            time.sleep(3)
+            os._exit(1)
+        if entry.get("closeInputAfter") == answered:
+            time.sleep(3)
+            os._exit(1)
+    sys.exit(0)
 
 if "rpc" not in entry:
     write(sys.stdout, entry.get("stdout", ""))
