@@ -5,7 +5,7 @@ use crate::workspace::provider::{ProviderTurn, TurnStatus};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-static TEST_SERVERS: std::sync::LazyLock<std::sync::Arc<CodexServers>> =
+static TEST_SERVERS: std::sync::LazyLock<std::sync::Arc<ProviderProcesses>> =
     std::sync::LazyLock::new(Default::default);
 
 fn fixtures() -> PathBuf {
@@ -668,4 +668,35 @@ async fn an_instance_runs_its_turns_in_one_app_server_on_its_loaded_thread() {
     assert_eq!(methods.iter().filter(|m| *m == "initialize").count(), 1);
     assert_eq!(methods.iter().filter(|m| *m == "turn/start").count(), 2);
     assert!(!methods.iter().any(|m| m == "thread/resume"), "{methods:?}");
+}
+
+#[tokio::test]
+async fn a_claude_thread_sends_its_next_turn_to_its_running_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("provider.log");
+    let mut spec = fake_spec(CLAUDE_AGENT, "claude_two_turns.json", &log, None);
+    let (first, exit) = run(spec.clone()).await;
+    assert!(exit.success, "{first:#?}");
+    let session = first
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            ProviderEvent::ProviderThread {
+                native_thread_id, ..
+            } => Some(native_thread_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    // The next turn resumes the session the thread's CLI still runs: it is
+    // written to that CLI, not to a new one.
+    spec.provider.as_mut().unwrap().resume = Some(session);
+    let (second, exit) = run(spec).await;
+    assert!(exit.success, "{second:#?}");
+    let launches = std::fs::read_to_string(format!("{}.launch", log.display())).unwrap();
+    assert_eq!(launches.lines().count(), 1, "one CLI for both turns");
+    let prompts = received(&log)
+        .iter()
+        .filter(|message| message["type"] == "user")
+        .count();
+    assert_eq!(prompts, 2);
 }

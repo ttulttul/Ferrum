@@ -326,8 +326,9 @@ pub trait Workspace: MaybeSendSync {
     ) -> WorkspaceFuture<'a, bool> {
         boxed_future(async { false })
     }
-    /// Unload the native Codex `thread` from `instance`'s shared app-server
-    /// once its turn ended (a detach), as the reference does.
+    /// Unload a detached thread's native Codex `thread` from `instance`'s
+    /// shared app-server once its turn ended, or close its Claude session's
+    /// running CLI, as the reference does.
     fn unload_provider_thread(&self, _instance: &str, _thread: &str) {}
     /// Stop the provider processes this workspace shares across turns (the
     /// server is shutting down).
