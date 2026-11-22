@@ -1,20 +1,27 @@
 use super::schema;
+#[cfg(feature = "native")]
 use crate::persistence::DocumentStore;
 use anyhow::{anyhow, ensure, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+#[cfg(feature = "native")]
 use std::path::Path;
+#[cfg(feature = "native")]
 mod platform;
 mod providers;
+#[cfg(feature = "native")]
 mod reachability;
 
+#[cfg(feature = "native")]
 #[derive(Debug)]
 pub struct ManagedPolicyFileError(anyhow::Error);
+#[cfg(feature = "native")]
 impl std::fmt::Display for ManagedPolicyFileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#}", self.0)
     }
 }
+#[cfg(feature = "native")]
 impl std::error::Error for ManagedPolicyFileError {}
 
 #[derive(Default, Debug)]
@@ -22,6 +29,7 @@ pub(crate) struct Policy {
     summary: Option<Value>,
     /// `ManagedPolicy.loadedPolicy` in the reference: where the policy came
     /// from and which document it was. `None` when no policy applies.
+    #[cfg(feature = "native")]
     loaded: Option<Value>,
     defaults: Vec<Entry>,
     locks: Vec<Entry>,
@@ -133,6 +141,7 @@ fn above(mode: &Value, ceiling: &Value) -> bool {
 /// leaves it before `loadedPolicy` hashes it: struct keys in schema order,
 /// `TrimmedNonEmptyString` fields trimmed, records and `Schema.Unknown`
 /// setting values as written. Called with a document `parse` accepts.
+#[cfg(feature = "native")]
 fn encode_document(raw: &Value) -> Value {
     type Field = (&'static str, fn(&Value) -> Value);
     fn pick(v: &Value, fields: &[Field]) -> Value {
@@ -215,9 +224,11 @@ fn encode_document(raw: &Value) -> Value {
 }
 impl Policy {
     /// The managed policy, read from its system path in `documents`.
+    #[cfg(feature = "native")]
     pub(crate) fn load(documents: &dyn DocumentStore) -> Result<Self> {
         Self::load_document(documents).map_err(|e| ManagedPolicyFileError(e).into())
     }
+    #[cfg(feature = "native")]
     fn load_document(documents: &dyn DocumentStore) -> Result<Self> {
         if cfg!(debug_assertions) {
             if let Some(path) = std::env::var_os("T3CODE_DEV_MANAGED_POLICY_PATH") {
@@ -236,12 +247,14 @@ impl Policy {
         }
         Self::from_path(documents, file)
     }
+    #[cfg(feature = "native")]
     fn from_path(documents: &dyn DocumentStore, path: &Path) -> Result<Self> {
         let Some(bytes) = documents.read_optional(path)? else {
             return Ok(Self::default());
         };
         serde_json::from_slice(&bytes).map_err(anyhow::Error::from).and_then(|doc|Self::parse_at(&path.display().to_string(),doc)).map_err(|e|anyhow!("T3 Code cannot use the managed policy at {}: {e}. It will not start until an administrator fixes this.",path.display()))
     }
+    #[cfg(feature = "native")]
     fn parse_at(source: &str, raw: Value) -> Result<Self> {
         let encoded = encode_document(&raw);
         let mut p = Self::parse(raw)?;
@@ -253,7 +266,7 @@ impl Policy {
         }));
         Ok(p)
     }
-    fn parse(raw: Value) -> Result<Self> {
+    pub(crate) fn parse(raw: Value) -> Result<Self> {
         // Optional fields, when present, still have to satisfy their schema.
         for key in ["settings", "limits", "supportUrl"] {
             ensure!(raw.get(key) != Some(&Value::Null), "{key} cannot be null");
@@ -439,6 +452,7 @@ impl Policy {
     }
     /// The runtime record's `managedPolicy`: `{source, organization,
     /// fingerprint}` for the loaded policy, `null` for none.
+    #[cfg(feature = "native")]
     pub(crate) fn loaded(&self) -> Value {
         self.loaded.clone().unwrap_or(Value::Null)
     }
@@ -451,6 +465,13 @@ impl Policy {
             .and_then(|v| v["limits"].get("clients"))
             .is_none_or(|v| list(v).any(|c| c == kind))
     }
+    pub(crate) fn pairing_refusal(&self) -> Option<String> {
+        (!self.allows_client("remote")).then(|| format!(
+            "{}'s policy does not allow remote clients, so this server cannot create pairing links.",
+            self.org()
+        ))
+    }
+    #[cfg(feature = "native")]
     pub(crate) fn denial(&self, action: &str) -> String {
         format!("{}'s policy does not allow {action}.", self.org())
     }
@@ -608,7 +629,7 @@ fn restore(result: &mut Value, settings: &Value, stored: &Value, path: &[String]
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use crate::persistence::FsStore;

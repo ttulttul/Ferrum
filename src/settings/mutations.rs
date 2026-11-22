@@ -1,11 +1,9 @@
 //! Migrations for persistent settings and the entry-specific semantics of a settings patch.
-#[cfg(feature = "native")]
 use anyhow::Context;
 #[cfg(feature = "native")]
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
-#[cfg(feature = "native")]
 use std::path::Path;
 
 const LEGACY_PROJECT: [(&str, &str); 3] = [
@@ -613,10 +611,8 @@ fn historical_providers(
     }
     Ok((drivers, instances))
 }
-#[cfg(feature = "native")]
-fn migrate_providers(s: &mut Value, legacy: &Value, db: Option<&Connection>) -> anyhow::Result<()> {
-    let (used_drivers, used_instances) =
-        historical_providers(db).context("read-provider-history")?;
+fn migrate_providers(s: &mut Value, legacy: &Value, history: (HashSet<String>, HashSet<String>)) {
+    let (used_drivers, used_instances) = history;
     let mut instances = object(&s["providerInstances"]);
     for (name, instance) in &mut instances {
         if instance["enabled"].is_null()
@@ -653,7 +649,6 @@ fn migrate_providers(s: &mut Value, legacy: &Value, db: Option<&Connection>) -> 
         instances.insert(driver, instance);
     }
     s["providerInstances"] = instances.into();
-    Ok(())
 }
 #[cfg(feature = "native")]
 fn decode_model(text: Option<String>) -> Option<Value> {
@@ -666,8 +661,11 @@ fn decode_scripts(text: &str) -> Option<Value> {
     super::schema::persisted_field("defaultProjectScripts", &scripts)
         .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
 }
-#[cfg(feature = "native")]
-fn fold_projects(s: &mut Value, raw: &Value, db: Option<&Connection>) -> anyhow::Result<()> {
+fn fold_projects(
+    s: &mut Value,
+    raw: &Value,
+    #[cfg(feature = "native")] db: Option<&Connection>,
+) -> anyhow::Result<()> {
     if s["projectSettingsFolded"] == true {
         return Ok(());
     }
@@ -691,6 +689,7 @@ fn fold_projects(s: &mut Value, raw: &Value, db: Option<&Connection>) -> anyhow:
             }
         }
     }
+    #[cfg(feature = "native")]
     if let Some(db) = db {
         if table_exists(db, "projection_projects")? {
             let mut stmt=db.prepare("SELECT project_id,default_model_selection_json,default_thread_env_mode,auto_pull,scripts_json FROM projection_projects WHERE deleted_at IS NULL")?;
@@ -729,21 +728,36 @@ fn fold_projects(s: &mut Value, raw: &Value, db: Option<&Connection>) -> anyhow:
     }
     Ok(())
 }
-#[cfg(feature = "native")]
-pub(super) fn migrate(s: &mut Value, raw: &Value, state_dir: &Path) -> anyhow::Result<()> {
-    let path = state_dir.join("statev2.sqlite");
-    let conn = if path.try_exists()? {
-        Some(Connection::open_with_flags(
+pub(super) fn migrate(
+    s: &mut Value,
+    raw: &Value,
+    history_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    // Only the native host owns a legacy project/provider history database.
+    #[cfg(feature = "native")]
+    let conn = match history_dir.map(|dir| dir.join("statev2.sqlite")) {
+        Some(path) if path.try_exists()? => Some(Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?)
-    } else {
-        None
+        )?),
+        _ => None,
     };
+    #[cfg(not(feature = "native"))]
+    debug_assert!(history_dir.is_none());
     if let Some(legacy) = raw.get("providers").filter(|v| v.is_object()) {
-        migrate_providers(s, legacy, conn.as_ref())?;
+        #[cfg(feature = "native")]
+        let history = historical_providers(conn.as_ref()).context("read-provider-history")?;
+        #[cfg(not(feature = "native"))]
+        let history = Default::default();
+        migrate_providers(s, legacy, history);
     }
-    fold_projects(s, raw, conn.as_ref()).context("read-project-settings")?;
+    fold_projects(
+        s,
+        raw,
+        #[cfg(feature = "native")]
+        conn.as_ref(),
+    )
+    .context("read-project-settings")?;
     for kind in ["bitbucket", "github"] {
         if s["sourceControlHosts"].get(kind).is_none() {
             if let Some(host) = raw.get(kind).filter(|v| v.is_object()) {
@@ -793,7 +807,7 @@ mod tests {
             "projectScriptOverrides":{"p":null},"projectAgentBrowserAccessOverrides":{"p":true},
             "github":{"authMode":"cli"}});
         let mut settings = raw.clone();
-        migrate(&mut settings, &raw, temp.path()).unwrap();
+        migrate(&mut settings, &raw, Some(temp.path())).unwrap();
         assert_eq!(
             settings["providerInstances"]["custom"],
             json!({"driver":"cursor","config":{},"enabled":false})
@@ -812,7 +826,7 @@ mod tests {
         assert!(projects.get("bad").is_none() && projects.get("removed").is_none());
         assert_eq!(settings["projectSettingsFolded"], true);
         settings["projectSettingsOverrides"] = json!({});
-        migrate(&mut settings, &json!({}), temp.path()).unwrap();
+        migrate(&mut settings, &json!({}), Some(temp.path())).unwrap();
         assert_eq!(settings["projectSettingsOverrides"], json!({}));
     }
     #[test]

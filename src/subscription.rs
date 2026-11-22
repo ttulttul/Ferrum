@@ -59,6 +59,8 @@ pub enum Signal {
     /// The linked pull requests or issues of some thread changed.
     LinkedRefresh(u64),
     ScheduledTasks,
+    /// Client-redacted settings, without and with secret reference support.
+    SettingsChanged(std::sync::Arc<(Value, Value)>),
     /// A prompt suggestion was generated (`threadId`, `runId`, `text`).
     PromptSuggestion(Value),
     AuthAccess(Change),

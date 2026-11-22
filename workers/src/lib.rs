@@ -105,7 +105,8 @@ impl DurableObject for T3EnvironmentDO {
         // settings.json, when it has none yet.
         if let Ok(initial) = env.var("T3_INITIAL_SETTINGS") {
             use t3code_server::persistence::{DocumentStore, WriteMode};
-            let path = std::path::Path::new(t3code_server::control::STATE_DIR).join("settings.json");
+            let path =
+                std::path::Path::new(t3code_server::control::STATE_DIR).join("settings.json");
             if matches!(documents.read_optional(&path), Ok(None)) {
                 documents
                     .write(&path, initial.to_string().as_bytes(), WriteMode::Replace)
@@ -129,6 +130,9 @@ impl DurableObject for T3EnvironmentDO {
                 cookie_port: 3773,
                 provider_command: Vec::new(),
                 workspace_mcp_endpoint: None,
+                managed_policy: env.var("T3_MANAGED_POLICY").ok().map(|value| {
+                    serde_json::from_str(&value.to_string()).expect("parse T3_MANAGED_POLICY")
+                }),
             },
             Arc::new(documents),
             Box::new(storage::SqlLog(sql.clone())),
@@ -141,6 +145,10 @@ impl DurableObject for T3EnvironmentDO {
             },
         )
         .expect("open control plane");
+        assert!(
+            plane.allows_client("remote"),
+            "managed policy disallows remote clients"
+        );
         // Sockets can close without a close event; their stream records
         // would stay forever. Keep only the records of sockets still open.
         let open: Vec<Connection> = state
