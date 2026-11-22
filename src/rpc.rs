@@ -1776,6 +1776,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         );
         jj_row["implemented"] = json!(false);
         vcs.push(jj_row);
+        // Bitbucket has no CLI: its sign-in is what its API says (`probeAuth`).
+        let bitbucket_auth = crate::bitbucket_credential::probe_auth().await;
         let provider = |kind: &str,
                         label: &str,
                         executable: Option<&str>,
@@ -1809,7 +1811,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                     auth["accounts"] = json!([]);
                     auth
                 }
-                ("bitbucket", _, _) => auth("unauthenticated", None, host, auth_detail),
+                ("bitbucket", _, _) => bitbucket_auth.clone(),
                 _ => auth("unknown", None, host, auth_detail),
             };
             let mut row = json!({"kind":kind,"label":label,"status":status,"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail,"auth":auth});
@@ -1980,6 +1982,9 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Chunk(json!([{"type":"progress","stage":"checking"}]));
     }
     if method == "pullRequests.invalidate" {
+        if params.get("reference").is_none() && params["filesViewedOnly"] != true {
+            crate::pull_requests::bitbucket::forget_viewers();
+        }
         let mut revision = state.pull_request_refresh.lock().await;
         *revision = revision.saturating_add(1);
         return Reply::Success(Value::Null);

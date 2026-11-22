@@ -357,6 +357,7 @@ impl AppState {
         if let Err(error) = control.adopt_continuations().await {
             tracing::warn!(%error, "could not take over restart continuations from the outbox");
         }
+        crate::bitbucket_credential::install(settings.clone());
         let local = Arc::new(crate::workspace::LocalWorkspace::new(
             dir.clone(),
             settings.clone(),
