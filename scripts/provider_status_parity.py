@@ -208,6 +208,12 @@ KIRO_TEMPLATE = {"configOptions": [{"id": "mode", "type": "select", "currentValu
 KIRO_ACP = {"prefix": ["acp"], "rpc": {
     "initialize": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}, "authMethods": []},
     "_kiro/config/template": KIRO_TEMPLATE}}
+# Agents that refuse over JSON-RPC rather than exit: a process that exits while the reference writes
+# its first request races that write against the exit, and the reference can then never finish
+# the check (seen on CI). A refusal fails the same request deterministically.
+KIRO_ACP_NO_AGENTS = {"prefix": ["acp"], "rpc": {
+    "initialize": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}, "authMethods": []}},
+    "rpcErrors": {"_kiro/config/template": {"code": -32603, "message": "agents unavailable"}}}
 KIRO_WHOAMI = {"args": ["whoami", "--format", "json"],
                **ok('{"accountType": "BuilderId", "email": "dev@example.com"}\nProfile: default')}
 KIRO_MODELS = {"args": ["chat", "--list-models", "--format", "json"], **ok(json.dumps({
@@ -219,7 +225,7 @@ SCENARIOS += driver_scenarios("kiro", "kiro-cli", "kiro-cli 2.32.0", [KIRO_WHOAM
     "api key": ([{"args": ["whoami", "--format", "json"], **ok('{"accountType": "ApiKey"}')}, KIRO_MODELS,
                  KIRO_ACP], {}),
     "without a model list or agents": ([KIRO_WHOAMI, {"args": ["chat", "--list-models", "--format", "json"],
-                                                      **ok("", 1)}, {"prefix": ["acp"], **ok("", 1)}], {}),
+                                                      **ok("", 1)}, KIRO_ACP_NO_AGENTS], {}),
     "default model not listed": ([KIRO_WHOAMI, {"args": ["chat", "--list-models", "--format", "json"], **ok(
         json.dumps({"models": [{"model_id": "claude-sonnet-5", "model_name": "Sonnet 5"}]}))}, KIRO_ACP], {}),
 })
@@ -241,10 +247,12 @@ GROK_INITIALIZE = {"protocolVersion": 1, "agentCapabilities": {"loadSession": Tr
                           {"name": "context", "description": "Show context"},
                           {"name": "always-approve", "description": "Approve all"}, {"name": "bad"}]}}
 GROK_ACP = {"prefix": ["agent", "stdio"], "rpc": {"initialize": GROK_INITIALIZE}}
+GROK_ACP_REFUSES = {"prefix": ["agent", "stdio"], "rpc": {},
+                    "rpcErrors": {"initialize": {"code": -32603, "message": "agent failed to start"}}}
 SCENARIOS += driver_scenarios("grok", "grok", "grok 1.0.52", [GROK_MODELS, GROK_SKILLS, GROK_ACP], {
     "signed out": ([{"args": ["models"], **ok("Not authenticated. Run `grok login`.")}, GROK_SKILLS, GROK_ACP], {}),
     "sign-in unknown": ([{"args": ["models"], **ok("", 1, "boom")}, GROK_SKILLS, GROK_ACP], {}),
-    "acp initialize fails": ([GROK_MODELS, GROK_SKILLS, {"prefix": ["agent", "stdio"], **ok("", 1)}], {}),
+    "acp initialize fails": ([GROK_MODELS, GROK_SKILLS, GROK_ACP_REFUSES], {}),
     "no models listed": ([{"args": ["models"], **ok("You are logged in.")}, GROK_SKILLS,
                           {"prefix": ["agent", "stdio"], "rpc": {"initialize": {
                               "protocolVersion": 1, "agentCapabilities": {}, "authMethods": []}}}], {}),
@@ -564,6 +572,10 @@ MUSE_MODELS = {"providerId": "meta", "models": [
     {"modelId": "muse-lite", "displayLabel": "Duplicate", "providerId": "meta", "isDefault": False}]}
 
 
+MUSE_SERVE_REFUSES = {"prefix": ["serve"], "rpc": {}, "rpcErrors": {"initialize": {
+    "code": -32603, "message": "host failed to start", "data": {"kind": "internal", "retryable": False}}}}
+
+
 def muse_serve(models=MUSE_MODELS, init=MUSE_INIT):
     return {"prefix": ["serve"], "rpc": {"initialize": init, "model/list": models}}
 
@@ -572,7 +584,7 @@ SCENARIOS += driver_scenarios("muse", "muse", "muse 2.1.0-R4", [muse_serve()], {
     "not finished installing": ([], {"fakes": {"muse": {"spec": {"commands": [{"args": ["--version"], **ok(
         "", 1, "error: installed binary is missing; run muse --version to finish setup")}]}}}}),
     "no models": ([muse_serve({"providerId": "meta", "models": []})], {}),
-    "catalog fails": ([{"prefix": ["serve"], **ok("", 3, "boom")}], {}),
+    "catalog fails": ([MUSE_SERVE_REFUSES], {}),
     "catalog for another provider": ([muse_serve({"providerId": "openai", "models": []})], {}),
     "unsupported protocol": ([muse_serve(init={"schema": {"version": 2, "fingerprint": "x"}})], {}),
     "custom models": ([muse_serve()], {"settings": enabled("muse", customModels=["mine/one"])}),
@@ -607,10 +619,16 @@ for scenario in SCENARIOS:
 class FakeApi:
     """A provider's HTTP API for one server: answers each `METHOD /path` from `routes`
     ({"GET /v1/me": {"status": 200, "body": {...}, "sleep": seconds}}) and records the
-    requests it got, with their bearer token, for comparison."""
+    requests to its own API, with their bearer token, for comparison.
+
+    Its own API is every path whose first segment one of `routes` starts with (`/v1/...` for
+    `GET /v1/me`), so a server calling an unexpected route is still recorded. Anything else is
+    answered but not recorded: servers pick free ports by binding port 0, so a T3 client of
+    another scenario can briefly reach this port (`GET /ws`)."""
 
     def __init__(self, routes):
         self.routes, self.requests = routes, []
+        self.prefixes = {"/" + route.split(" ", 1)[1].lstrip("/").split("/", 1)[0] for route in routes}
         api = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -620,7 +638,8 @@ class FakeApi:
                     self.rfile.read(length)
                 path = self.path.split("?", 1)[0]
                 token = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
-                api.requests.append(f"{self.command} {path} {token}".strip())
+                if api.owns(path):
+                    api.requests.append(f"{self.command} {path} {token}".strip())
                 route = api.routes.get(f"{self.command} {path}", {"status": 404, "body": {"error": "not found"}})
                 if route.get("sleep"):
                     time.sleep(route["sleep"])
@@ -643,6 +662,11 @@ class FakeApi:
         self.server.daemon_threads = True
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def owns(self, path):
+        """Whether `path` belongs to this API (see the class)."""
+        segment = "/" + path.lstrip("/").split("/", 1)[0]
+        return segment in self.prefixes
 
     def close(self):
         self.server.shutdown()
