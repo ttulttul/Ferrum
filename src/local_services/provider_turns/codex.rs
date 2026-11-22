@@ -770,6 +770,7 @@ impl Session {
                     (params["itemId"].as_str(), params["delta"].as_str())
                 {
                     self.sink.send(ProviderEvent::TurnItemDelta {
+                        held: false,
                         item_id: item_id.into(),
                         delta: delta.into(),
                     });

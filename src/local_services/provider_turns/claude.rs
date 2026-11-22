@@ -605,6 +605,7 @@ impl<'a> Attempt<'a> {
                 let text = delta["text"].as_str().or(delta["thinking"].as_str());
                 if let Some(text) = text {
                     self.sink.send(ProviderEvent::TurnItemDelta {
+                        held: false,
                         item_id: id.clone(),
                         delta: text.into(),
                     });

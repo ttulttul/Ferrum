@@ -1614,6 +1614,7 @@ mod tests {
         assert!(live.projection()["messages"].as_array().unwrap().is_empty());
         for event in [
             ProviderEvent::TurnItemDelta {
+                held: false,
                 item_id: "msg".into(),
                 delta: "Hi".into(),
             },
