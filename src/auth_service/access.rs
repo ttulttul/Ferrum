@@ -84,7 +84,23 @@ fn link(g: &Grant) -> Value {
     }
     v
 }
-fn snapshot(r: &Credentials, at: i64) -> Value {
+/// `bySessionPriority`: sessions that may manage access first, then the
+/// connected ones, then the newest; the sort keeps the order otherwise.
+fn by_session_priority(clients: &mut [Value]) {
+    clients.sort_by(|a, b| {
+        let manages = |row: &Value| {
+            row["permissions"]
+                .as_array()
+                .is_some_and(|p| p.iter().any(|s| s == "access:write"))
+        };
+        manages(b)
+            .cmp(&manages(a))
+            .then_with(|| (b["connected"] == true).cmp(&(a["connected"] == true)))
+            .then_with(|| b["issuedAt"].as_str().cmp(&a["issuedAt"].as_str()))
+    });
+}
+
+fn snapshot(r: &Credentials, at: i64, external: &[Value]) -> Value {
     let mut links = r
         .links
         .values()
@@ -116,6 +132,18 @@ fn snapshot(r: &Credentials, at: i64) -> Value {
             "lastConnectedAt":r.last_connected.get(&s.id).copied().map(iso),"connected":r.open_sockets.contains_key(&s.id),"current":false
         })
     }).collect::<Vec<_>>();
+    // The TypeScript server's sessions on this home, which this server honours too.
+    let mut clients = clients;
+    for row in external {
+        if !clients.iter().any(|c| c["sessionId"] == row["sessionId"]) {
+            clients.push(row.clone());
+        }
+    }
+    clients.sort_by(|a, b| {
+        (b["issuedAt"].as_str(), b["sessionId"].as_str())
+            .cmp(&(a["issuedAt"].as_str(), a["sessionId"].as_str()))
+    });
+    by_session_priority(&mut clients);
     let mut devices = r
         .devices
         .iter()
@@ -143,8 +171,9 @@ impl AuthService {
                 return;
             }
             let at = now();
-            let before = snapshot(previous, at);
-            let after = snapshot(committed, at);
+            let external = self.external_clients(at);
+            let before = snapshot(previous, at, &external);
+            let after = snapshot(committed, at, &external);
             for (table, id, remove, upsert) in [
                 (
                     "pairingLinks",
@@ -208,12 +237,39 @@ impl AuthService {
             }
         })
     }
+    /// The TypeScript server's live client sessions on this home.
+    pub(super) fn external_clients(&self, at: i64) -> Vec<Value> {
+        let Some(db) = self.external_pairing.as_deref() else {
+            return Vec::new();
+        };
+        #[cfg(feature = "native")]
+        {
+            external_pairing::client_sessions(db, &iso(at)).unwrap_or_else(|error| {
+                tracing::warn!(%error, "could not read client sessions in statev2.sqlite");
+                Vec::new()
+            })
+        }
+        #[cfg(not(feature = "native"))]
+        {
+            let _ = (db, at);
+            Vec::new()
+        }
+    }
+    /// Tells subscribers the TypeScript server's sessions `ids` are gone.
+    pub(super) fn external_clients_removed(&self, ids: &[String]) {
+        for id in ids {
+            self.changes.send(Change {
+                kind: "clientRemoved",
+                payload: json!({"sessionId": id}),
+            });
+        }
+    }
     pub(crate) fn subscribe_access(&self) -> (Change, mpsc::UnboundedReceiver<Change>) {
         self.records.read(|r| {
             (
                 Change {
                     kind: "snapshot",
-                    payload: snapshot(r, now()),
+                    payload: snapshot(r, now(), &self.external_clients(now())),
                 },
                 self.changes.subscribe(),
             )
