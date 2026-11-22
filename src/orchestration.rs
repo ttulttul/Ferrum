@@ -131,11 +131,6 @@ async fn dispatch_command<H: CommandHost>(
                 json!({"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":msg}}),
             ));
         };
-        if thread.stored.is_some() && runs_turns(kind) {
-            return Err(dispatch_error(format!(
-                "Thread {id} was last changed by another T3 Code server on this home. This server can rename, archive, settle, pin or delete it, but cannot run or continue its turns yet."
-            )));
-        }
         if kind == "thread.archive" && thread.archived {
             return Err(dispatch_error(format!("Thread {id} is already archived.")));
         }
@@ -259,37 +254,6 @@ async fn dispatch_command<H: CommandHost>(
         .map_err(|e| dispatch_error(e.to_string()))
 }
 
-/// Commands that start, steer, stop or answer a thread's turns. A thread
-/// read from the shared database has no turn state here yet, so these are
-/// refused on it (docs/shared-store.md, pull request 3).
-fn runs_turns(kind: &str) -> bool {
-    matches!(
-        kind,
-        "message.dispatch"
-            | "thread.stop"
-            | "run.interrupt"
-            | "subagent.stop"
-            | "provider-session.detach"
-            | "queue.resume"
-            | "queued-message.promote-to-steer"
-            | "runtime-request.respond"
-            | "runtime-request.delivery.fail"
-            | "thread.user-input.dismiss"
-            | "thread.fork"
-            | "thread.merge_back"
-            | "thread.mark-unread"
-            | "thread.interrupt.unresponsive"
-            | "thread.background-work.settle"
-            | "secret_request.record"
-            | "link_request.record"
-            | "notification.delivery.accept"
-            | "checkpoint.rollback"
-            | "checkpoint.rollback.fail"
-    ) || ["prepared-run.", "queued-run.", "delegated_task."]
-        .iter()
-        .any(|prefix| kind.starts_with(prefix))
-}
-
 /// Drivers whose instances are off unless enabled, as the reference decodes
 /// them.
 const DEFAULT_DISABLED_DRIVERS: &[&str] = &[
@@ -343,17 +307,27 @@ async fn start_run<H: CommandHost>(
     scheduled_task_id: Option<String>,
     follows_thread_selection: bool,
 ) -> anyhow::Result<u64> {
-    let (cwd, needs_baseline) = state
+    let (cwd, needs_baseline, wire_id) = state
         .store
         .read()
         .await
         .threads
         .get(thread_id)
-        .map(|t| (t.cwd.clone(), t.checkpoints.is_empty()))
+        .map(|t| {
+            // A run on a thread read from the shared database takes the
+            // reference's id, as its other runs have.
+            let wire_id = t
+                .stored
+                .is_some()
+                .then(|| Run::reference_id(thread_id, t.runs.len() + 1));
+            (t.cwd.clone(), t.checkpoints.is_empty(), wire_id)
+        })
         .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
     let baseline = needs_baseline.then(|| cwd.clone());
     let run = Run {
-        id: crate::platform::uuid_v4(),
+        id: wire_id
+            .as_deref()
+            .map_or_else(crate::platform::uuid_v4, Run::uuid_for),
         thread_id: thread_id.to_owned(),
         provider: "default".into(),
         status: if queued { "queued" } else { "running" }.into(),
@@ -369,6 +343,7 @@ async fn start_run<H: CommandHost>(
         continuation: None,
         resend_owed: false,
         resends: 0,
+        wire_id,
     };
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),
@@ -446,7 +421,7 @@ async fn start_existing_run<H: CommandHost>(
             .runs
             .iter()
             .find(|candidate| {
-                candidate.id.to_string() == run_id
+                candidate.wire_id() == run_id
                     && (candidate.status == "queued" || candidate.status == "preparing")
             })
             .cloned()
@@ -1285,7 +1260,7 @@ async fn apply_command<H: CommandHost>(
                 .await
                 .threads
                 .get(thread_id.unwrap_or_default())
-                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .and_then(|thread| thread.runs.iter().find(|run| run.wire_id() == run_id))
                 .is_some_and(|run| run.status == "preparing");
             if !valid {
                 return Err(anyhow::anyhow!(format!(
@@ -1313,7 +1288,7 @@ async fn apply_command<H: CommandHost>(
                 .await
                 .threads
                 .get(thread_id.unwrap_or_default())
-                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .and_then(|thread| thread.runs.iter().find(|run| run.wire_id() == run_id))
                 .is_some_and(|run| run.status == "preparing");
             if !valid {
                 return Err(anyhow::anyhow!(format!(
@@ -1338,7 +1313,7 @@ async fn apply_command<H: CommandHost>(
                 .await
                 .threads
                 .get(thread_id)
-                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .and_then(|thread| thread.runs.iter().find(|run| run.wire_id() == run_id))
                 .is_some_and(|run| run.status == "preparing");
             if !valid {
                 return Err(anyhow::anyhow!(format!(
@@ -1348,7 +1323,7 @@ async fn apply_command<H: CommandHost>(
             return Ok(state
                 .commit_receipted(
                     Event::RunFinished {
-                        run_id: Uuid::parse_str(run_id)?,
+                        run_id: Run::uuid_for(run_id),
                         thread_id: thread_id.to_owned(),
                         status: "failed".into(),
                         error: command["failure"]["message"].as_str().map(str::to_owned),
@@ -1367,7 +1342,7 @@ async fn apply_command<H: CommandHost>(
                 .await
                 .threads
                 .get(thread_id)
-                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .and_then(|thread| thread.runs.iter().find(|run| run.wire_id() == run_id))
                 .cloned();
             let Some(mut run) = current else {
                 return Err(anyhow::anyhow!(format!(
@@ -1402,7 +1377,7 @@ async fn apply_command<H: CommandHost>(
                 .await
                 .threads
                 .get(thread_id.unwrap_or_default())
-                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .and_then(|thread| thread.runs.iter().find(|run| run.wire_id() == run_id))
                 .is_some_and(|run| run.status == "queued");
             if !valid {
                 return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
@@ -1410,7 +1385,7 @@ async fn apply_command<H: CommandHost>(
             return Ok(state
                 .commit_receipted(
                     Event::RunFinished {
-                        run_id: Uuid::parse_str(run_id)?,
+                        run_id: Run::uuid_for(run_id),
                         thread_id: thread_id.unwrap_or_default().to_owned(),
                         status: "cancelled".into(),
                         error: None,
@@ -1428,7 +1403,7 @@ async fn apply_command<H: CommandHost>(
                 .await
                 .threads
                 .get(thread_id.unwrap_or_default())
-                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .and_then(|thread| thread.runs.iter().find(|run| run.wire_id() == run_id))
                 .filter(|run| run.status == "queued")
                 .and_then(|run| run.user_message_id.clone())
                 .map(|message_id| (message_id, thread_id.unwrap_or_default().to_owned()))
@@ -1456,20 +1431,20 @@ async fn apply_command<H: CommandHost>(
                 .await
                 .threads
                 .get(thread_id)
-                .and_then(|thread| thread.runs.iter().find(|run| run.id.to_string() == run_id))
+                .and_then(|thread| thread.runs.iter().find(|run| run.wire_id() == run_id))
                 .is_some_and(|run| run.status == "queued");
             if !valid {
                 return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
             }
             let before_run_id = match command.get("beforeRunId") {
                 Some(Value::Null) | None => None,
-                Some(value) => Some(Uuid::parse_str(value.as_str().unwrap_or_default())?),
+                Some(value) => Some(Run::uuid_for(value.as_str().unwrap_or_default())),
             };
             return Ok(state
                 .commit_receipted(
                     Event::RunReordered {
                         thread_id: thread_id.to_owned(),
-                        run_id: Uuid::parse_str(run_id)?,
+                        run_id: Run::uuid_for(run_id),
                         before_run_id,
                     },
                     Some(receipt.clone()),
@@ -1548,7 +1523,7 @@ async fn apply_command<H: CommandHost>(
                             command_type: receipt.command_type.clone(),
                         },
                         thread_id,
-                        &run.id.to_string(),
+                        &run.wire_id(),
                         "running",
                     )
                     .await?;
@@ -1585,7 +1560,7 @@ async fn apply_command<H: CommandHost>(
                 let queued_run = thread
                     .runs
                     .iter()
-                    .find(|run| run.id.to_string() == queued_run_id && run.status == "queued")
+                    .find(|run| run.wire_id() == queued_run_id && run.status == "queued")
                     .cloned()
                     .ok_or_else(|| {
                         anyhow::anyhow!(format!("Queued run {queued_run_id} is not queued."))
@@ -1593,7 +1568,7 @@ async fn apply_command<H: CommandHost>(
                 let target_run = thread
                     .runs
                     .iter()
-                    .find(|run| run.id.to_string() == target_run_id)
+                    .find(|run| run.wire_id() == target_run_id)
                     .cloned()
                     .ok_or_else(|| {
                         anyhow::anyhow!(format!("Target run {target_run_id} was not found."))
@@ -2378,22 +2353,14 @@ async fn apply_command<H: CommandHost>(
                 )));
             }
             let parent_run_id = command["parentRunId"].as_str().unwrap_or_default();
-            if !parent
-                .runs
-                .iter()
-                .any(|run| run.id.to_string() == parent_run_id)
-            {
+            if !parent.runs.iter().any(|run| run.wire_id() == parent_run_id) {
                 return Err(anyhow::anyhow!(format!(
                     "Parent node {} is not the root of run {parent_run_id}.",
                     command["parentNodeId"].as_str().unwrap_or_default()
                 )));
             }
             if let Some(target_run_id) = command["targetRunId"].as_str() {
-                if !target
-                    .runs
-                    .iter()
-                    .any(|run| run.id.to_string() == target_run_id)
-                {
+                if !target.runs.iter().any(|run| run.wire_id() == target_run_id) {
                     return Err(anyhow::anyhow!(format!(
                         "Target run {target_run_id} does not belong to thread {target_thread_id}."
                     )));

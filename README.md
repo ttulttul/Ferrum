@@ -34,7 +34,7 @@ The Rust server can already run Codex and Claude Code conversations, manage proj
 
 ### Threads and history
 
-- **Continuing turns across a server switch (in progress):** Threads and projects created on either server show up on the other, and you can rename, archive, settle, pin, or delete them. Continuing a turn that the other server started—or recovering an interrupted turn after switching servers—is not finished yet. Older threads from an earlier Rust-only setup also only move into the shared database the first time they change.
+- **Switching between the Rust and TypeScript servers:** Threads and projects created on either server show up on the other, and you can keep working in them: rename, archive or delete them, start new turns, and a turn cut off by a server switch is picked up by the other server. A few edge cases still differ: a message queued just before a switch from Rust back to TypeScript, and a pending Claude approval at the moment of a switch. Older threads from an earlier Rust-only setup only move into the shared database the first time they change (in progress).
 - **Live update order:** As an agent streams a reply, live updates arrive in a different order and grouping than on the TypeScript server. Most conversations still read normally, though some edge cases (like interrupting a turn while waiting for approval) can look slightly different.
 - **Live sidebar updates:** The sidebar list of projects and threads does not update automatically when something changes. You have to reconnect or reload the app to see new or updated items.
 - **Thread search:** Searching across all threads does not work yet, and searching inside a single thread cannot step through matches.

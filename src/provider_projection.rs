@@ -170,7 +170,7 @@ impl Thread {
     pub(crate) fn provider_thread_id(&self) -> Option<String> {
         let thread = self.provider.thread.as_ref()?;
         let run = self.runs.iter().find(|run| run.id == thread.first_run)?;
-        let run_id = run.id.to_string();
+        let run_id = run.wire_id();
         Some(format!(
             "provider-thread:provider:{}:native-thread:{}",
             uri_component(&thread.driver),
@@ -181,7 +181,7 @@ impl Thread {
     /// The ids of `run`'s provider records, when it ran a provider turn.
     pub(crate) fn provider_run_ids(&self, run: &Run) -> Option<RunIds> {
         let record = self.provider.runs.get(&run.id)?;
-        let run_id = run.id.to_string();
+        let run_id = run.wire_id();
         let attempt = join("run-attempt:run", &[&run_id]) + ":attempt:1";
         let native_turn = record
             .native_turn_id
@@ -209,9 +209,11 @@ impl Thread {
         let session_id = session
             .as_ref()
             .map_or(Value::Null, |session| session["id"].clone());
-        let mut turn_ordinal = 0;
-        let mut first_ordinal = None;
-        let mut last_ordinal = 0;
+        let (mut turn_ordinal, mut first_ordinal, mut last_ordinal) =
+            match self.provider.prior_turns {
+                Some((turns, first)) => (turns, Some(first), first),
+                None => (0, None, 0),
+            };
         for (index, run) in self.runs.iter().enumerate() {
             let (Some(record), Some(ids)) =
                 (self.provider.runs.get(&run.id), self.provider_run_ids(run))
@@ -296,9 +298,17 @@ impl Thread {
             })
             .filter_map(|record| record.usage.as_ref())
             .max_by_key(|(_, at)| *at)
-            .map_or(Value::Null, |(usage, _)| {
-                let mut out = json!({"usedTokens": usage.used_tokens});
-                if let Some(max) = usage.max_tokens.filter(|max| *max > 0) {
+            .map(|(usage, _)| (usage.used_tokens, usage.max_tokens))
+            // A thread read from the shared database: its earlier turns ran
+            // on the other server.
+            .or_else(|| {
+                let (thread, used, max) = self.provider.prior_usage.clone()?;
+                (claude_resumed || (native.is_some() && thread.as_ref() == native))
+                    .then_some((used, max))
+            })
+            .map_or(Value::Null, |(used, max)| {
+                let mut out = json!({"usedTokens": used});
+                if let Some(max) = max.filter(|max| *max > 0) {
                     out["maxTokens"] = json!(max);
                 }
                 out
@@ -340,12 +350,14 @@ impl Thread {
         if !claude && thread.native_id.is_none() {
             return None;
         }
-        let id = if claude {
+        let id = if let Some(id) = &self.provider.prior_session_id {
+            id.clone()
+        } else if claude {
             format!(
                 "provider-session:provider-instance:{}:thread:{}:{}",
                 uri_component(instance),
                 uri_component(&self.id),
-                first.id
+                first.wire_id()
             )
         } else {
             format!(
@@ -738,9 +750,9 @@ impl Thread {
         let at = iso(restart.at);
         let startup = restart.trigger == "startup";
         json!({
-            "id": join("turn-item:run", &[&run.id.to_string()]) + ":signal:server-recovery",
+            "id": join("turn-item:run", &[&run.wire_id()]) + ":signal:server-recovery",
             "threadId": self.id,
-            "runId": run.id.to_string(),
+            "runId": run.wire_id(),
             "nodeId": ids.map(|ids| ids.root_node.clone()),
             "providerThreadId": ids.map(|ids| ids.provider_thread.clone()),
             "providerTurnId": null,
@@ -1138,6 +1150,7 @@ mod tests {
             continuation: None,
             resend_owed: false,
             resends: 0,
+            wire_id: None,
         };
         let mut live = thread(run.clone());
         for event in [

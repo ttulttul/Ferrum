@@ -277,6 +277,17 @@ impl AppState {
                 );
             }
             drop(store);
+            // What the previous process (either server) left in the outbox.
+            let (requeued, cancelled) =
+                crate::statev2::outbox::reconcile_after_process_loss(&shared_store)
+                    .map_err(read_error)?;
+            if requeued + cancelled > 0 {
+                tracing::info!(
+                    requeued,
+                    cancelled,
+                    "reconciled the effect outbox after a restart"
+                );
+            }
             let sequence = crate::statev2::read::max_sequence(&shared_store).map_err(read_error)?;
             // Every later commit is written to the shared database first.
             control.attach_shared_store(
@@ -286,6 +297,10 @@ impl AppState {
         }
         // Turns run as this process's children, so none survives a restart.
         let startup_recovery = reconcile_provider_runtime(&control, &settings, "startup").await;
+        // Restart continuations the other server (or this one) left owed.
+        if let Err(error) = control.adopt_continuations().await {
+            tracing::warn!(%error, "could not take over restart continuations from the outbox");
+        }
         let (project_clone_events, _) = broadcast::channel(64);
         let local = Arc::new(crate::workspace::LocalWorkspace::new(
             dir.clone(),

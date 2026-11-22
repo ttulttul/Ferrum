@@ -772,14 +772,21 @@ class Clock:
         time.sleep(1.2)
 
 
-def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, scenario):
-    """A turn on a server that is stopped and started again: what the client sees afterwards."""
+def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, scenario, second=None,
+                 follow_up=None):
+    """A turn on a server that is stopped and started again: what the client sees afterwards.
+
+    With `second`, that server is started on the home instead, and with `follow_up` the
+    restarted server is then sent that message as a new turn (shared_store_parity.py)."""
     restart = scenario["restart"]
     watched = {}
     with contextlib.ExitStack() as first:
         url, cookie = managed_server(first, command, root, *credentials, env=env)
         seeded = seed_turn(url, cookie, checkouts, scenario)
-        if restart.get("live"):
+        if restart["after"] == "created":
+            # Only the thread: its first turn runs on the restarted server (follow_up).
+            pass
+        elif restart.get("live"):
             # A client watches the thread, sends the message, and sees what the stop does.
             watcher = threading.Thread(target=lambda: watched.update(
                 run_client(args, url, cookie, {**seeded, "turnMs": 60000, "liveOnly": True})))
@@ -795,8 +802,11 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
                 "messageId": f"message:queued-{index}", "text": text,
                 "dispatchMode": {"type": "queue_after_active"}})
         queued = len(restart.get("queue", []))
-        wait_for(url, cookie, lambda p: len(p.get("runs", [])) > queued, 30)
-        if restart["after"] == "started":
+        if restart["after"] != "created":
+            wait_for(url, cookie, lambda p: len(p.get("runs", [])) > queued, 30)
+        if restart["after"] == "created":
+            pass
+        elif restart["after"] == "started":
             # The run started, and its provider got the prompt but has not taken it.
             log = Path(env["FAKE_PROVIDER_LOG"])
             wait_for(url, cookie, lambda p: any(r.get("status") == "running" for r in p.get("runs", []))
@@ -805,6 +815,10 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
             # The turn has run a command and holds on.
             wait_for(url, cookie, lambda p: any(i.get("type") == "command_execution"
                                                 for i in p.get("turnItems", [])), 30)
+        elif restart["after"] == "waiting":
+            # The turn asked for an approval or an answer, which nobody gave.
+            wait_for(url, cookie, lambda p: any(r.get("status") == "pending"
+                                                for r in p.get("runtimeRequests", [])), 30)
         elif restart["after"] == "settled":
             wait_for(url, cookie, lambda p: not any(r.get("status") in ACTIVE_RUN for r in p["runs"]), 30)
         # Whatever the server is still recording about it lands before the stop. A turn the
@@ -822,8 +836,8 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
     if restart.get("restoreCli") and args.faketime_lib and not args.real_time:
         clock = Clock(args.faketime_lib, fake_bin.parent)
         env = {**env, **clock.env}
-    with contextlib.ExitStack() as second:
-        url, cookie = managed_server(second, command, root, *credentials, env=env)
+    with contextlib.ExitStack() as restarted:
+        url, cookie = managed_server(restarted, second or command, root, *credentials, env=env)
         listening = time.time()
         offset = lambda: clock.offset if clock else 0
         if restart.get("restoreCli"):
@@ -847,6 +861,14 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
         wait_for(url, cookie, lambda p: time.monotonic() - started >= floor and startup_recorded(root, url)
                  and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", []))
                  and not effects_due(root, offset()), 40)
+        if follow_up is not None:
+            runs = len(thread_projection(url, cookie).get("runs", []))
+            rpc(url, cookie, "orchestration.dispatchCommand", {
+                "type": "message.dispatch", "commandId": "follow-up-message", "threadId": THREAD,
+                "messageId": "message:follow-up", "text": follow_up, "attachments": [],
+                "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
+            wait_for(url, cookie, lambda p: len(p.get("runs", [])) > runs
+                     and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", [])), 40)
         quiet(root, url, cookie, clock_offset=offset())
         outcome = run_client(args, url, cookie, {"threadId": THREAD, "inspect": True})
         outcome["continuationDelay"] = continuation_delay(thread_projection(url, cookie), listening)
@@ -1004,6 +1026,35 @@ def shard_scenarios(index, count, real_time=False):
     return set(loads[index - 1][2])
 
 
+def scenario_env(temporary, name, root, scenario, drivers):
+    """The environment a scenario's server runs in, with its fake CLIs: (env, fake bin, log)."""
+    hidden = path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "bin")
+    login_shell = {}
+    if scenario.get("install") == "login-shell":
+        # The CLI is in the server's ~/.local/bin, which only its login shell's
+        # profile puts on PATH, as for a server a service manager starts.
+        fake_bin = root / ".local/bin"
+        write_fake_clis(fake_bin, drivers)
+        fake_bin.mkdir(parents=True, exist_ok=True)
+        (root / ".profile").write_text('PATH="$HOME/.local/bin:$PATH"\nexport PATH\n')
+        path = hidden
+        login_shell = {"SHELL": "/bin/bash", "FAKE_PROVIDER_LAUNCH_PATH": "1"}
+    else:
+        # Each server has its own fake CLIs, which a restart scenario may remove.
+        fake_bin = temporary / f"{name}-fake-bin"
+        write_fake_clis(fake_bin, drivers)
+        path = os.pathsep.join([str(fake_bin), hidden])
+    log = temporary / f"{name}-provider.log"
+    env = {**GIT_ISOLATION, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
+           "FAKE_PROVIDER_LOG": str(log), **login_shell,
+           "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}
+    return env, fake_bin, log
+
+
+def scenario_drivers(scenario):
+    return set() if scenario["scenario"] is None else {"codex" if scenario["instance"] == "codex" else "claude"}
+
+
 def provider_turns(args, credentials):
     """Run each provider scenario on both servers; the number of unexpected results."""
     xfail = json.loads((ROOT / "scripts/client_thread_parity_xfail.json").read_text())
@@ -1022,26 +1073,7 @@ def provider_turns(args, credentials):
             for name, command in (("original", shlex.split(args.original_command)),
                                   ("rust", shlex.split(args.rust_command))):
                 root = temporary / name
-                hidden = path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "bin")
-                login_shell = {}
-                if scenario.get("install") == "login-shell":
-                    # The CLI is in the server's ~/.local/bin, which only its login shell's
-                    # profile puts on PATH, as for a server a service manager starts.
-                    fake_bin = root / ".local/bin"
-                    write_fake_clis(fake_bin, drivers)
-                    fake_bin.mkdir(parents=True, exist_ok=True)
-                    (root / ".profile").write_text('PATH="$HOME/.local/bin:$PATH"\nexport PATH\n')
-                    path = hidden
-                    login_shell = {"SHELL": "/bin/bash", "FAKE_PROVIDER_LAUNCH_PATH": "1"}
-                else:
-                    # Each server has its own fake CLIs, which a restart scenario may remove.
-                    fake_bin = temporary / f"{name}-fake-bin"
-                    write_fake_clis(fake_bin, drivers)
-                    path = os.pathsep.join([str(fake_bin), hidden])
-                log = temporary / f"{name}-provider.log"
-                env = {**GIT_ISOLATION, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
-                       "FAKE_PROVIDER_LOG": str(log), **login_shell,
-                       "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}
+                env, fake_bin, log = scenario_env(temporary, name, root, scenario, drivers)
                 if "restart" in scenario:
                     outcomes[name] = restart_turn(args, command, root, credentials, env,
                                                   temporary / f"{name}-checkouts", fake_bin, scenario)

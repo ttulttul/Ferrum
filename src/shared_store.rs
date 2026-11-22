@@ -9,6 +9,38 @@ use serde_json::{json, Map, Value};
 /// the commit is logged or applied.
 pub trait SharedStore {
     fn write(&mut self, commit: &SharedCommit) -> anyhow::Result<()>;
+
+    /// The restart continuations the outbox still owes
+    /// (`provider-runtime.continue` effects that are pending).
+    fn pending_continuations(&mut self) -> anyhow::Result<Vec<PendingContinuation>> {
+        Ok(Vec::new())
+    }
+
+    /// Settles an outbox effect this server has taken over.
+    fn settle_effect(&mut self, _effect_id: &str, _status: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// A pending `provider-runtime.continue` effect.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingContinuation {
+    pub effect_id: String,
+    pub thread_id: String,
+    /// The wire id of the run to continue.
+    pub source_run_id: String,
+    pub process_loss_count: u32,
+}
+
+/// An `orchestration_v2_effect_outbox` row to enqueue (`ON CONFLICT DO
+/// NOTHING`, as the reference's `EffectOutbox.enqueue`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectWrite {
+    pub effect_id: String,
+    pub command_id: String,
+    pub thread_id: String,
+    /// The request, with its `type`.
+    pub request: Value,
 }
 
 /// One thread's records after the commit.
@@ -74,6 +106,7 @@ pub struct SharedCommit {
     pub projects: Vec<ProjectWrite>,
     pub events: Vec<StoredEvent>,
     pub receipt: Option<ReceiptWrite>,
+    pub effects: Vec<EffectWrite>,
     /// The commit's last sequence: the last event's, or the one it took
     /// without events.
     pub sequence: u64,
@@ -256,6 +289,49 @@ pub fn project_event(
     }
 }
 
+/// The restart continuations a reconcile owes, as outbox effects the
+/// reference's `ProviderRuntimeRecoveryService` writes: at shutdown with no
+/// lost process (`command:restart-prepare:<run>`), at start-up with the
+/// processes lost in a row. Either server's recovery then continues the run.
+pub fn continuation_effects(store: &Store, event: &Event, occurred_at: &str) -> Vec<EffectWrite> {
+    let Event::ProviderRuntimeReconciled {
+        thread_id,
+        cut,
+        continued,
+        ..
+    } = event
+    else {
+        return Vec::new();
+    };
+    let Some(thread) = store.threads.get(thread_id) else {
+        return Vec::new();
+    };
+    let owed = cut
+        .iter()
+        .filter_map(|(run, cut)| Some((*run, cut.continuation?, cut.trigger.as_str())))
+        .chain(
+            continued
+                .iter()
+                .map(|(run, losses)| (*run, *losses, "startup")),
+        );
+    owed.filter_map(|(run, losses, trigger)| {
+        let wire = thread.runs.iter().find(|r| r.id == run)?.wire_id();
+        let shutdown = trigger == "shutdown";
+        Some(EffectWrite {
+            effect_id: format!("effect:restart-continuation:{wire}"),
+            command_id: if shutdown {
+                format!("command:restart-prepare:{wire}")
+            } else {
+                format!("command:runtime-reconcile:{trigger}:{thread_id}:{occurred_at}")
+            },
+            thread_id: thread_id.clone(),
+            request: json!({"type": "provider-runtime.continue", "sourceRunId": wire,
+                "processLossCount": if shutdown { 0 } else { losses }}),
+        })
+    })
+    .collect()
+}
+
 /// The thread a commit touches and the threads it deletes.
 fn touched_threads(store: &Store, event: &Event) -> Vec<String> {
     let mut ids: Vec<String> = event.thread_id().map(str::to_owned).into_iter().collect();
@@ -327,8 +403,8 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
         };
         let after = match (&thread.stored, &computed_before) {
             (Some(stored), Some(computed_before)) => {
-                let stored_after =
-                    overlay(stored, computed_before, &thread.computed_full_projection());
+                let computed_after = thread.computed_full_projection();
+                let stored_after = overlay(stored, computed_before, &computed_after);
                 planned
                     .stored
                     .push((thread_id.clone(), stored_after.clone()));
@@ -367,12 +443,117 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
-    struct Recorded(Arc<Mutex<Vec<SharedCommit>>>);
+    struct Recorded(
+        Arc<Mutex<Vec<SharedCommit>>>,
+        Arc<Mutex<Vec<PendingContinuation>>>,
+        Arc<Mutex<Vec<(String, String)>>>,
+    );
     impl SharedStore for Recorded {
         fn write(&mut self, commit: &SharedCommit) -> anyhow::Result<()> {
             self.0.lock().unwrap().push(commit.clone());
             Ok(())
         }
+        fn pending_continuations(&mut self) -> anyhow::Result<Vec<PendingContinuation>> {
+            Ok(self.1.lock().unwrap().clone())
+        }
+        fn settle_effect(&mut self, effect_id: &str, status: &str) -> anyhow::Result<()> {
+            self.2
+                .lock()
+                .unwrap()
+                .push((effect_id.into(), status.into()));
+            Ok(())
+        }
+    }
+
+    fn cancelled_run(wire: &str) -> crate::Run {
+        serde_json::from_value(json!({
+            "id": crate::Run::uuid_for(wire), "thread_id": "t1", "provider": "default",
+            "status": "cancelled", "started_at": 1, "finished_at": 2, "error": null, "wire_id": wire
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_restart_cut_owes_its_continuation_as_the_reference_writes_it() {
+        let mut store = Store::default();
+        let Event::ThreadCreated(mut thread) = thread() else {
+            unreachable!()
+        };
+        thread.runs.push(cancelled_run("run:thread:t1:ordinal:1"));
+        store.threads.insert("t1".into(), thread);
+        let run = crate::Run::uuid_for("run:thread:t1:ordinal:1");
+        let cut = |trigger: &str| Event::ProviderRuntimeReconciled {
+            thread_id: "t1".into(),
+            cut: vec![(
+                run,
+                crate::RestartCut {
+                    trigger: trigger.into(),
+                    at: 2,
+                    continuation: Some(2),
+                },
+            )],
+            held: vec![],
+            requeued: vec![],
+            resent: vec![],
+            stale_items: vec![],
+            background: vec![],
+            continued: None,
+        };
+        let shutdown = continuation_effects(&store, &cut("shutdown"), "2026-01-01T00:00:00.000Z");
+        assert_eq!(
+            shutdown,
+            vec![EffectWrite {
+                effect_id: "effect:restart-continuation:run:thread:t1:ordinal:1".into(),
+                command_id: "command:restart-prepare:run:thread:t1:ordinal:1".into(),
+                thread_id: "t1".into(),
+                request: json!({"type": "provider-runtime.continue", "sourceRunId": "run:thread:t1:ordinal:1", "processLossCount": 0}),
+            }]
+        );
+        let startup = continuation_effects(&store, &cut("startup"), "2026-01-01T00:00:00.000Z");
+        assert_eq!(
+            startup[0].command_id,
+            "command:runtime-reconcile:startup:t1:2026-01-01T00:00:00.000Z"
+        );
+        assert_eq!(startup[0].request["processLossCount"], 2);
+    }
+
+    #[test]
+    fn a_continuation_the_outbox_owes_is_taken_over_and_settled() {
+        let recorded = Recorded::default();
+        let control = control(&recorded, 0);
+        control.commit_now(thread()).unwrap();
+        let wire = "run:thread:t1:ordinal:1";
+        control
+            .commit_now(Event::RunStarted(cancelled_run(wire)))
+            .unwrap();
+        recorded.1.lock().unwrap().extend([
+            PendingContinuation {
+                effect_id: "effect:restart-continuation:run:thread:t1:ordinal:1".into(),
+                thread_id: "t1".into(),
+                source_run_id: wire.into(),
+                process_loss_count: 1,
+            },
+            PendingContinuation {
+                effect_id: "effect:other".into(),
+                thread_id: "elsewhere".into(),
+                source_run_id: "run:x".into(),
+                process_loss_count: 0,
+            },
+        ]);
+        let adopted = futures_util::FutureExt::now_or_never(control.adopt_continuations())
+            .unwrap()
+            .unwrap();
+        assert_eq!(adopted, 1);
+        let store = control.store_now();
+        let run = &store.threads["t1"].runs[0];
+        assert_eq!(run.owed_continuation(), Some(1));
+        assert_eq!(
+            *recorded.2.lock().unwrap(),
+            vec![(
+                "effect:restart-continuation:run:thread:t1:ordinal:1".to_string(),
+                "succeeded".to_string()
+            )]
+        );
     }
 
     fn control(recorded: &Recorded, sequence: u64) -> crate::control_state::ControlState {

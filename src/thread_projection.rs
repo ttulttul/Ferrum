@@ -166,13 +166,13 @@ impl Thread {
                     .find(|message| Some(&message.id) == run.user_message_id.as_ref())
                     .map_or(run.started_at, |message| message.created_at);
                 let mut out = json!({
-                    "id": run.id.to_string(),
+                    "id": run.wire_id(),
                     "threadId": self.id,
                     "ordinal": index + 1,
                     "providerInstanceId": instance,
                     "modelSelection": selection,
                     "providerThreadId": null,
-                    "userMessageId": run.user_message_id.clone().filter(|id| !id.trim().is_empty()).unwrap_or_else(|| run.id.to_string()),
+                    "userMessageId": run.user_message_id.clone().filter(|id| !id.trim().is_empty()).unwrap_or_else(|| run.wire_id()),
                     "rootNodeId": null,
                     "activeAttemptId": null,
                     "status": status,
@@ -245,7 +245,7 @@ impl Thread {
                     "creationSource": if message.role == "user" { message.creation_source.as_deref().unwrap_or("web") } else { "provider" },
                     "id": message.id,
                     "threadId": self.id,
-                    "runId": self.run_of(&message.id).map(|(_, run)| run.id.to_string()),
+                    "runId": self.run_of(&message.id).map(|(_, run)| run.wire_id()),
                     "nodeId": null,
                     "role": message_role(&message.role),
                     "text": message.content,
@@ -279,7 +279,7 @@ impl Thread {
                 Some((index, _)) => ((index as u64 + 1) * 1_000_000).max(ordinal) + 1,
                 None => ordinal + 1,
             };
-            let run_id = run.map(|(_, run)| run.id.to_string());
+            let run_id = run.map(|(_, run)| run.wire_id());
             let at = iso(message.created_at);
             let base = |id: String,
                         ordinal: u64,
@@ -388,7 +388,7 @@ impl Thread {
             let mut failure = base(
                 format!(
                     "turn-item:run:{}:signal:provider-failure",
-                    uri_component(&run.id.to_string())
+                    uri_component(&run.wire_id())
                 ),
                 ordinal,
                 "failed",
@@ -502,7 +502,7 @@ impl Thread {
             let index = turn_count.max(1) as usize - 1;
             self.runs
                 .get(index)
-                .map(|run| (run.id.to_string(), self.provider_run_ids(run)))
+                .map(|run| (run.wire_id(), self.provider_run_ids(run)))
         };
         let node_of = |turn_count: u64| {
             run_ids(turn_count)
@@ -874,12 +874,16 @@ fn stored_projection(thread_id: &str, stored: &Value, wire: bool) -> Value {
     // The thread's fields in the contract's order, as the reference encodes
     // it; a change made here adds its fields at the end of the stored record.
     projection["thread"] = ordered(APP_FIELDS, &stored["thread"]);
+    sort_messages_by_turn_item_order(&mut projection);
     if wire {
-        if let Some(items) = projection["turnItems"].as_array_mut() {
-            for item in items.iter_mut() {
-                *item = crate::wire_items::wire_item(item);
-            }
-        }
+        // As the reference's snapshot window reads them: without a rolled
+        // back run's items or input still waiting in the queue. (Only when
+        // serving: the full projection is what the database holds.)
+        let items: Vec<Value> = crate::projection_shell::visible_turn_items(&projection)
+            .into_iter()
+            .map(crate::wire_items::wire_item)
+            .collect();
+        projection["turnItems"] = Value::Array(items);
     }
     let visible = crate::projection_shell::visible_turn_items(&projection)
         .into_iter()
@@ -927,13 +931,22 @@ impl Thread {
                     Some("preparing" | "starting" | "running" | "waiting")
                 )
             });
+        // As this server keeps its own threads' messages: what was sent to
+        // the thread (users' messages, and the notifications that continue a
+        // run). Provider messages are the provider turns' records.
         let messages = projection["messages"]
             .as_array()
             .into_iter()
             .flatten()
+            .filter(|message| message["role"] == "user")
             .map(|message| crate::ConversationMessage {
                 id: message["id"].as_str().unwrap_or_default().to_owned(),
-                role: message["role"].as_str().unwrap_or("assistant").to_owned(),
+                role: if message["notification"].is_object() {
+                    NOTIFICATION_ROLE
+                } else {
+                    "user"
+                }
+                .to_owned(),
                 content: message["text"].as_str().unwrap_or_default().to_owned(),
                 created_at: iso_seconds(&message["createdAt"]),
                 creation_source: message["creationSource"].as_str().map(str::to_owned),
@@ -941,8 +954,12 @@ impl Thread {
                 follows_thread_selection: message["followsThreadSelection"] == true,
             })
             .collect();
+        let thread_id = text("id").unwrap_or_default();
+        let runs = stored_runs(&thread_id, &projection);
+        let checkpoints = stored_checkpoints(&projection);
+        let provider = Box::new(stored_provider(&thread_id, &row, &projection));
         Thread {
-            id: text("id").unwrap_or_default(),
+            id: thread_id,
             project_id: text("projectId").unwrap_or_default(),
             title: text("title").unwrap_or_default(),
             cwd: text("worktreePath")
@@ -950,7 +967,7 @@ impl Thread {
                 .unwrap_or_default(),
             status: if active { "running" } else { "idle" }.into(),
             messages,
-            runs: vec![],
+            runs,
             created_at: iso_seconds(&row["createdAt"]),
             archived: !row["archivedAt"].is_null(),
             settled: !row["settledAt"].is_null(),
@@ -963,10 +980,284 @@ impl Thread {
                 .flatten()
                 .filter_map(|tag| tag.as_str().map(str::to_owned))
                 .collect(),
-            checkpoints: vec![],
-            provider: Default::default(),
+            checkpoints,
+            provider,
             stored: Some(Box::new(projection)),
             row,
         }
+    }
+}
+
+/// The typed runs of a thread read from the shared database, in ordinal
+/// order, each keeping its wire id, so this server can queue, start,
+/// continue and stop runs on it as on its own threads.
+fn stored_runs(thread_id: &str, projection: &Value) -> Vec<crate::Run> {
+    let id_of = |wire: &str| crate::Run::uuid_for(wire);
+    projection["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|run| {
+            let wire = run["id"].as_str()?.to_owned();
+            let started = if run["startedAt"].is_null() {
+                &run["requestedAt"]
+            } else {
+                &run["startedAt"]
+            };
+            Some(crate::Run {
+                id: id_of(&wire),
+                thread_id: thread_id.to_owned(),
+                provider: "default".into(),
+                status: run["status"].as_str().unwrap_or("failed").to_owned(),
+                started_at: iso_seconds(started),
+                finished_at: (!run["completedAt"].is_null())
+                    .then(|| iso_seconds(&run["completedAt"])),
+                error: None,
+                user_message_id: run["userMessageId"].as_str().map(str::to_owned),
+                queue_held: run["queueHeld"] == true,
+                restart_cut: None,
+                restart_continuation_of: run["restartContinuationOfRunId"].as_str().map(id_of),
+                requeued_at: None,
+                background_work: run["restartCancelledBackgroundWork"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+                continuation: None,
+                resend_owed: false,
+                resends: 0,
+                // A run this server made keeps its own (UUID) id.
+                wire_id: uuid::Uuid::parse_str(&wire).is_err().then_some(wire),
+            })
+        })
+        .collect()
+}
+
+/// The checkpoints of a thread read from the shared database.
+fn stored_checkpoints(projection: &Value) -> Vec<crate::CheckpointRecord> {
+    let scopes = projection["checkpointScopes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    projection["checkpoints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|checkpoint| crate::CheckpointRecord {
+            turn_count: checkpoint["appRunOrdinal"].as_u64().unwrap_or(0),
+            tree: checkpoint["ref"].as_str().unwrap_or_default().to_owned(),
+            cwd: scopes
+                .iter()
+                .find(|scope| scope["id"] == checkpoint["scopeId"])
+                .and_then(|scope| scope["cwd"].as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            captured_at: iso_seconds(&checkpoint["capturedAt"]),
+            ready: checkpoint["status"] == "ready",
+        })
+        .collect()
+}
+
+/// What a thread read from the shared database tells the provider runtime:
+/// its provider thread record (named after the run that first used it) and
+/// the native thread the next turn resumes.
+fn stored_provider(
+    thread_id: &str,
+    row: &Value,
+    projection: &Value,
+) -> crate::provider_state::ProviderState {
+    let mut state = crate::provider_state::ProviderState::default();
+    let threads = projection["providerThreads"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let record = threads
+        .iter()
+        .find(|t| t["id"] == row["activeProviderThreadId"])
+        .or_else(|| {
+            threads
+                .iter()
+                .filter(|t| t["appThreadId"] == thread_id && t["ownerNodeId"].is_null())
+                .max_by_key(|t| iso_seconds(&t["updatedAt"]))
+        });
+    let Some(record) = record else {
+        return state;
+    };
+    let driver = record["driver"].as_str().unwrap_or("codex").to_owned();
+    let native = &record["nativeThreadRef"];
+    let native_id = native["nativeId"].as_str().map(str::to_owned);
+    if let Some(id) = native_id.clone().filter(|_| native["strength"] == "strong") {
+        state.native_thread = Some(crate::provider_state::NativeThread {
+            driver: driver.clone(),
+            id,
+        });
+    }
+    // `provider-thread:provider:<driver>:native-thread:pending:<run id>`.
+    let first_run = record["id"]
+        .as_str()
+        .and_then(|id| id.split_once(":native-thread:"))
+        .map(|(_, rest)| {
+            percent_encoding::percent_decode_str(rest)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .and_then(|rest| rest.strip_prefix("pending:").map(str::to_owned));
+    let turns = projection["providerTurns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|turn| turn["providerThreadId"] == record["id"])
+        .filter_map(|turn| turn["ordinal"].as_u64())
+        .max()
+        .unwrap_or(0) as usize;
+    if let Some(first) = record["firstRunOrdinal"].as_u64() {
+        state.prior_turns = Some((turns, first as usize));
+    }
+    let instance = row["providerInstanceId"].clone();
+    state.prior_session_id = projection["providerSessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|session| session["providerInstanceId"] == instance)
+        .max_by_key(|session| iso_seconds(&session["updatedAt"]))
+        .and_then(|session| session["id"].as_str().map(str::to_owned));
+    state.prior_usage = projection["providerTurns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|turn| turn["providerThreadId"] == record["id"])
+        .max_by_key(|turn| turn["ordinal"].as_u64())
+        .and_then(|turn| {
+            let usage = &turn["tokenUsage"];
+            Some((
+                record["nativeThreadRef"]["nativeId"]
+                    .as_str()
+                    .map(str::to_owned),
+                usage["usedTokens"].as_u64()?,
+                usage["maxTokens"].as_u64(),
+            ))
+        });
+    let budget = &record["nativeMetadata"]["claudeAttachmentBudget"];
+    if let (Some(bytes), Some(pages)) = (budget["bytesUsed"].as_u64(), budget["pagesUsed"].as_u64())
+    {
+        state.attachment_budget = Some((bytes, pages));
+    }
+    if let Some(first_run) = first_run {
+        state.thread = Some(crate::provider_state::ThreadRecord {
+            driver,
+            first_run: crate::Run::uuid_for(&first_run),
+            created_at: iso_seconds(&record["createdAt"]),
+            updated_at: iso_seconds(&record["updatedAt"]),
+            native_id,
+            status: match record["status"].as_str() {
+                Some("active") => "active",
+                Some("idle") => "idle",
+                Some("error") => "error",
+                _ => "not_loaded",
+            },
+        });
+    }
+    state
+}
+
+/// The reference's `sortMessagesByTurnItemOrder`: messages in the order of
+/// the first user or assistant turn item that shows each, then by creation
+/// time and id.
+fn sort_messages_by_turn_item_order(projection: &mut Value) {
+    let mut ordinals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for item in projection["turnItems"].as_array().into_iter().flatten() {
+        if !matches!(
+            item["type"].as_str(),
+            Some("user_message" | "assistant_message")
+        ) {
+            continue;
+        }
+        let (Some(message), Some(ordinal)) = (item["messageId"].as_str(), item["ordinal"].as_i64())
+        else {
+            continue;
+        };
+        let entry = ordinals.entry(message.to_owned()).or_insert(ordinal);
+        *entry = (*entry).min(ordinal);
+    }
+    let millis = |value: &Value| {
+        value
+            .as_str()
+            .and_then(|text| {
+                time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .map_or(0, |at| at.unix_timestamp_nanos() / 1_000_000)
+    };
+    if let Some(messages) = projection["messages"].as_array_mut() {
+        messages.sort_by(|left, right| {
+            let ordinal = |m: &Value| {
+                m["id"]
+                    .as_str()
+                    .and_then(|id| ordinals.get(id))
+                    .copied()
+                    .unwrap_or(i64::MAX)
+            };
+            ordinal(left)
+                .cmp(&ordinal(right))
+                .then_with(|| millis(&left["createdAt"]).cmp(&millis(&right["createdAt"])))
+                .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+        });
+    }
+}
+
+#[cfg(test)]
+mod stored_tests {
+    use super::*;
+
+    #[test]
+    fn a_stored_thread_gets_the_typed_state_to_run_and_continue_turns() {
+        let pending =
+            "provider-thread:provider:codex:native-thread:pending%3Arun%3Athread%3At%3Aordinal%3A1";
+        let projection = json!({
+            "thread": {"id": "t", "projectId": "p", "title": "T", "providerInstanceId": "codex",
+                "activeProviderThreadId": pending, "createdAt": "2026-01-01T00:00:00.000Z", "archivedAt": null},
+            "runs": [{"id": "run:thread:t:ordinal:1", "status": "cancelled", "requestedAt": "2026-01-01T00:00:01.000Z",
+                "startedAt": "2026-01-01T00:00:01.000Z", "completedAt": "2026-01-01T00:00:05.000Z", "userMessageId": "m1"}],
+            "messages": [
+                {"id": "m1", "role": "user", "text": "hi", "createdAt": "2026-01-01T00:00:01.000Z"},
+                {"id": "m2", "role": "assistant", "text": "hello", "createdAt": "2026-01-01T00:00:02.000Z"}],
+            "providerThreads": [{"id": pending, "driver": "codex", "appThreadId": "t", "ownerNodeId": null,
+                "nativeThreadRef": {"driver": "codex", "nativeId": "native-1", "strength": "strong"},
+                "status": "idle", "firstRunOrdinal": 1, "createdAt": "2026-01-01T00:00:01.000Z", "updatedAt": "2026-01-01T00:00:05.000Z"}],
+            "providerTurns": [{"id": "turn-1", "providerThreadId": pending, "ordinal": 1,
+                "tokenUsage": {"usedTokens": 100, "maxTokens": 1000}}],
+            "providerSessions": [{"id": "provider-session:provider-instance:codex:shared", "providerInstanceId": "codex",
+                "updatedAt": "2026-01-01T00:00:05.000Z"}],
+            "checkpoints": [], "checkpointScopes": [], "turnItems": []
+        });
+        let thread = Thread::from_stored(projection, Some("/work"));
+        assert_eq!(thread.runs.len(), 1);
+        assert_eq!(thread.runs[0].wire_id(), "run:thread:t:ordinal:1");
+        assert_eq!(
+            thread.runs[0].id,
+            crate::Run::uuid_for("run:thread:t:ordinal:1")
+        );
+        assert_eq!(thread.runs[0].status, "cancelled");
+        // Only what was sent to the thread; provider messages are provider records.
+        assert_eq!(thread.messages.len(), 1);
+        let provider = &thread.provider;
+        assert_eq!(
+            provider.native_thread.as_ref().map(|n| n.id.as_str()),
+            Some("native-1")
+        );
+        assert_eq!(
+            provider.thread.as_ref().map(|t| t.first_run),
+            Some(thread.runs[0].id)
+        );
+        assert_eq!(provider.prior_turns, Some((1, 1)));
+        assert_eq!(
+            provider.prior_session_id.as_deref(),
+            Some("provider-session:provider-instance:codex:shared")
+        );
+        assert_eq!(
+            provider.prior_usage,
+            Some((Some("native-1".into()), 100, Some(1000)))
+        );
+        // The provider thread record keeps the reference's id.
+        assert_eq!(thread.provider_thread_id().as_deref(), Some(pending));
     }
 }

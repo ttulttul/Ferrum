@@ -33,6 +33,15 @@ pub struct ProviderState {
     /// Items a restart cancelled while they ran after their turn (run,
     /// native item id), with when.
     pub cancelled_items: HashMap<(Uuid, String), u64>,
+    /// For a thread read from the shared database: the provider turns its
+    /// provider thread already ran and the ordinal of the first run on it,
+    /// so the turns this server adds continue that numbering.
+    pub prior_turns: Option<(usize, usize)>,
+    /// For a thread read from the shared database: the id of the provider
+    /// session it ran in, and the token usage (`usedTokens`, `maxTokens`) of
+    /// the last turn that ran there on its native thread.
+    pub prior_session_id: Option<String>,
+    pub prior_usage: Option<(Option<String>, u64, Option<u64>)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

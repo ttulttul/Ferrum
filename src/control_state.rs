@@ -86,6 +86,52 @@ impl ControlState {
         *next = (*next).max(sequence);
     }
 
+    /// Takes over the restart continuations the shared outbox owes for
+    /// threads this server holds: each source run is marked owed a
+    /// continuation (unless it already is), which the startup continuation
+    /// pass then sends, and the effect is settled so the other server never
+    /// sends it too. Effects for threads this server does not hold stay
+    /// pending.
+    pub async fn adopt_continuations(&self) -> anyhow::Result<usize> {
+        let pending = match self.shared.lock().await.as_mut() {
+            Some(shared) => shared.pending_continuations()?,
+            None => return Ok(0),
+        };
+        let mut adopted = 0;
+        for effect in pending {
+            let run_id = crate::Run::uuid_for(&effect.source_run_id);
+            let owed = {
+                let store = self.store.read().await;
+                let Some(run) = store
+                    .threads
+                    .get(&effect.thread_id)
+                    .and_then(|thread| thread.runs.iter().find(|run| run.id == run_id))
+                else {
+                    continue;
+                };
+                run.owed_continuation().is_some()
+            };
+            if !owed {
+                self.commit(Event::ProviderRuntimeReconciled {
+                    thread_id: effect.thread_id.clone(),
+                    cut: vec![],
+                    held: vec![],
+                    requeued: vec![],
+                    resent: vec![],
+                    stale_items: vec![],
+                    background: vec![],
+                    continued: Some((run_id, effect.process_loss_count)),
+                })
+                .await?;
+            }
+            if let Some(shared) = self.shared.lock().await.as_mut() {
+                shared.settle_effect(&effect.effect_id, "succeeded")?;
+            }
+            adopted += 1;
+        }
+        Ok(adopted)
+    }
+
     pub(crate) async fn persist_scheduled_tasks(&self) -> anyhow::Result<()> {
         let tasks = self.scheduled_tasks.lock().await;
         let bytes = serde_json::to_vec(&tasks.values().collect::<Vec<_>>())?;
@@ -181,7 +227,11 @@ impl ControlState {
         record.id = *next_event_id + live_events.max(stored_events).max(1);
         if let (Some(writer), Some(mut commit)) = (shared.as_mut(), commit) {
             commit.sequence = record.id;
-            writer.write(&commit)?;
+            if let Err(error) = writer.write(&commit) {
+                // Nothing is logged or applied: the commit fails as a whole.
+                tracing::error!(error = %format!("{error:#}"), "could not write a commit to the shared orchestration database");
+                return Err(error);
+            }
         }
         drop(shared);
         self.log.lock().await.append(&record)?;
@@ -262,11 +312,13 @@ fn shared_commit(
     for (index, event) in events.iter_mut().enumerate() {
         event.sequence = last + 1 + index as u64;
     }
+    let effects = crate::shared_store::continuation_effects(store, &record.event, &occurred_at);
     let commit = crate::shared_store::SharedCommit {
         threads: planned.threads,
         projects,
         events,
         receipt,
+        effects,
         sequence: 0,
         occurred_at,
     };
