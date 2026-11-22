@@ -10,7 +10,9 @@ version and compatibility advisories, with check times left out and the
 temporary home masked. A scenario with "refresh" then changes what the fake
 CLI answers, calls `server.refreshProviders` with a config subscription open,
 and compares the refresh's row and the `providerStatuses` event the
-subscription receives.
+subscription receives. A scenario with "interval" checks every 3 s, has a client
+report its activity (`server.reportClientActivity`), and compares whether any
+periodic check ran in the next 12 s.
 
 Every scenario turns `enableProviderUpdateChecks` off, so neither server
 looks up the latest CLI version or the model manifest on the network, and
@@ -672,6 +674,57 @@ SCENARIOS += [
 ]
 
 
+def activity(scopes=({"type": "provider-status"},), visible=True, focused=True, **fields):
+    """A client's `server.reportClientActivity` report."""
+    return {"clientId": "parity-tab", "clientKind": "web", "visible": visible, "focused": focused,
+            "recentlyInteracted": False, "scopes": list(scopes), "observedAt": "2026-11-22T00:00:00.000Z", **fields}
+
+
+def every(milliseconds, profile="balanced", **overrides):
+    """Background activity settings that check provider status every `milliseconds`."""
+    return {"backgroundActivity": {"profile": "custom", "baseProfile": profile,
+                                   "overrides": {"providerHealthRefreshInterval": milliseconds, **overrides}}}
+
+
+# Periodic checks run only while a client reports activity on provider status (BackgroundPolicy):
+# each scenario checks grok every 3 s and reports whether any periodic check ran in 12 s while a
+# client held its report (or none did).
+GROK_ON_INTERVAL = {**enabled("grok"), **every(3000)}
+SCENARIOS += [
+    {"name": "interval check skipped without a client", "instance": "grok", "settings": GROK_ON_INTERVAL,
+     "fakes": {"grok": GROK_FAKE}, "interval": {"report": None}},
+    {"name": "interval check runs for a focused client", "instance": "grok", "settings": GROK_ON_INTERVAL,
+     "fakes": {"grok": GROK_FAKE}, "interval": {"report": activity()}},
+    {"name": "interval check waits for a background client", "instance": "grok", "settings": GROK_ON_INTERVAL,
+     "fakes": {"grok": GROK_FAKE}, "interval": {"report": activity(focused=False)}},
+    {"name": "interval check runs for a background client under performance", "instance": "grok",
+     "settings": {**enabled("grok"), **every(3000, "performance")},
+     "fakes": {"grok": GROK_FAKE}, "interval": {"report": activity(focused=False)}},
+    {"name": "interval check runs for a client watching the instance", "instance": "grok",
+     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_FAKE},
+     "interval": {"report": activity([{"type": "provider-status", "instanceId": "grok"}])}},
+    {"name": "interval check skipped for a client watching another instance", "instance": "grok",
+     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_FAKE},
+     "interval": {"report": activity([{"type": "provider-status", "instanceId": "codex"}, {"type": "diagnostics"}])}},
+    {"name": "interval check paused for a low-power client", "instance": "grok", "settings": GROK_ON_INTERVAL,
+     "fakes": {"grok": GROK_FAKE}, "interval": {"report": activity(lowPowerMode="true")}},
+    {"name": "interval check runs for a low-power client when allowed", "instance": "grok",
+     "settings": {**enabled("grok"), **every(3000, pauseWhenClientLowPower=False)},
+     "fakes": {"grok": GROK_FAKE}, "interval": {"report": activity(lowPowerMode="true")}},
+    # A report outlives its socket until it expires, as the reference's leases do.
+    {"name": "interval check continues after the client disconnects", "instance": "grok",
+     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_FAKE},
+     "interval": {"report": activity(), "disconnect": True}},
+    # The same client reporting again from another socket replaces its earlier report.
+    {"name": "interval check follows the latest report from the same client", "instance": "grok",
+     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_FAKE},
+     "interval": {"report": activity(), "disconnect": True, "then": activity(focused=False)}},
+    {"name": "interval check skipped after the client report expires", "instance": "grok",
+     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_FAKE},
+     "interval": {"report": activity(ttlMs=1000), "settle": 2}},
+]
+
+
 PI_NPM = "npm-prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 SCENARIOS += [
     {"name": "pi installed as an npm global", "instance": "pi", "settings": enabled("pi"),
@@ -958,6 +1011,47 @@ def next_provider_event(ws, instance, seconds=15):
     return None
 
 
+def report_activity(url, cookie, report):
+    """A socket that has reported `report` (`server.reportClientActivity`); the report lasts while it
+    stays open."""
+    ws = connect(url.replace("http", "ws", 1) + "/ws?orchestrationProtocol=2",
+                 additional_headers={"Cookie": cookie}, proxy=None, compression=None, max_size=None)
+    ws.send(encode({"_tag": "Request", "id": "activity", "tag": "server.reportClientActivity", "payload": report,
+                    "headers": []}).decode())
+    while True:
+        frame = json.loads(ws.recv(timeout=20))
+        if frame.get("_tag") == "Exit" and frame.get("requestId") == "activity":
+            if frame["exit"]["_tag"] != "Success":
+                raise RuntimeError(f"server.reportClientActivity failed: {frame}")
+            return ws
+
+
+def version_launches(log):
+    launches = Path(str(log) + ".args")
+    return sum(line.strip() == "--version" for line in launches.read_text().splitlines()) if launches.exists() else 0
+
+
+def interval_checks(url, cookie, log, interval):
+    """Whether a periodic check ran in a 12 s window after a client reported `interval["report"]`
+    (none when it is None; the socket closes first with "disconnect"; `interval["then"]` is a
+    second report from another socket; the window starts `interval["settle"]` seconds after the
+    reports)."""
+    with contextlib.ExitStack() as stack:
+        if interval["report"] is not None:
+            ws = report_activity(url, cookie, interval["report"])
+            if interval.get("disconnect"):
+                ws.close()
+                time.sleep(0.5)
+            else:
+                stack.callback(ws.close)
+        if interval.get("then") is not None:
+            stack.callback(report_activity(url, cookie, interval["then"]).close)
+        time.sleep(interval.get("settle", 0))
+        before = version_launches(log)
+        time.sleep(12)
+        return version_launches(log) > before
+
+
 def run_server(args, command, root, scenario, temporary):
     """One server's outcome for `scenario`."""
     root.mkdir(parents=True)
@@ -1019,6 +1113,8 @@ def run_server(args, command, root, scenario, temporary):
         outcome["row"] = strip(wait_checked(url, cookie, scenario["instance"], scenario.get("wait", 20),
                                             scenario.get("settled", False), temporary,
                                             scenario.get("stable", 1.5)), temporary)
+        if "interval" in scenario:
+            outcome["interval"] = interval_checks(url, cookie, log, scenario["interval"])
         if "refresh" in scenario:
             if isinstance(scenario["refresh"], dict):
                 for cli, spec in scenario["refresh"].items():
@@ -1049,7 +1145,7 @@ def run_server(args, command, root, scenario, temporary):
 def compare(outcomes):
     problems = {}
     original, rust = outcomes["original"], outcomes["rust"]
-    for check in ("row", "refresh", "event"):
+    for check in ("row", "refresh", "event", "interval"):
         if original.get(check) != rust.get(check):
             problems[check] = [f"original {json.dumps(original.get(check), sort_keys=True)}",
                                f"rust     {json.dumps(rust.get(check), sort_keys=True)}"]

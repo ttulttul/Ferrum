@@ -692,6 +692,19 @@ pub(crate) async fn run(state: Arc<AppState>) {
                     Duration::from_millis(interval_ms as u64)
                 }
             };
+            // `shouldRefreshOnInterval`: the driver wants a periodic check and
+            // a client is watching provider status (generally or this instance).
+            let wanted = || {
+                refresh_on_interval(
+                    &instance.driver,
+                    state
+                        .provider_status
+                        .published_row(&instance.id, &instance.fingerprint)
+                        .as_ref(),
+                ) && state
+                    .background
+                    .provider_status_demand(&instance.id, &settings)
+            };
             let signed_out = state
                 .provider_status
                 .published_row(&instance.id, &instance.fingerprint)
@@ -701,22 +714,20 @@ pub(crate) async fn run(state: Arc<AppState>) {
                 next_refresh.insert(instance.id.clone(), interval());
                 recheck.remove(&instance.id);
             } else if recheck.get(&instance.id).is_some_and(|at| now >= *at) {
+                // The quick recheck after a failed periodic check is a periodic
+                // check too, so it waits for demand as well.
                 recheck.remove(&instance.id);
-                start.push((instance, Reason::Apply));
                 next_refresh.insert(instance.id.clone(), interval());
+                if wanted() {
+                    start.push((instance, Reason::Apply));
+                }
             } else if next_refresh.get(&instance.id).is_some_and(|at| now >= *at) {
                 next_refresh.insert(instance.id.clone(), interval());
                 if interval_ms > 0
                     && state
                         .provider_status
                         .checked_in_process(&instance.id, &instance.fingerprint)
-                    && refresh_on_interval(
-                        &instance.driver,
-                        state
-                            .provider_status
-                            .published_row(&instance.id, &instance.fingerprint)
-                            .as_ref(),
-                    )
+                    && wanted()
                 {
                     start.push((instance, Reason::Interval));
                 }

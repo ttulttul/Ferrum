@@ -74,6 +74,8 @@ pub struct AppState {
         Arc<crate::model_manifest::ModelManifest<crate::model_manifest::NativeHost>>,
     /// The provider CLIs' status checks.
     pub(crate) provider_status: crate::provider_status::ProviderStatus,
+    /// Client activity leases and host power, which gate background work.
+    pub(crate) background: crate::background_policy::BackgroundPolicy,
     /// Background tasks, timers and the open sockets.
     pub(crate) runtime: Arc<crate::runtime::TokioRuntime>,
     /// Set once the server starts to stop; see [`crate::turn::TurnHost::stopping`].
@@ -402,6 +404,7 @@ impl AppState {
                 crate::model_manifest::NativeHost::new(&paths.state_dir, settings.clone()),
             )),
             provider_status: crate::provider_status::ProviderStatus::new(&paths),
+            background: Default::default(),
             runtime: Arc::default(),
             stopping: Default::default(),
             closing: tokio::sync::watch::Sender::new(false),

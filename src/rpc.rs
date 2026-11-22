@@ -224,6 +224,12 @@ async fn run_call(
         Err(reply) => return reply,
     };
     let params = decoded.as_ref().unwrap_or(params);
+    if method == "server.reportClientActivity" {
+        state
+            .background
+            .report_client_activity(&principal.id, params);
+        return Reply::Success(Value::Null);
+    }
     if method == "server.checkSecretSource" {
         let settings = state.settings.internal().unwrap_or_default();
         let source = &params["source"];
