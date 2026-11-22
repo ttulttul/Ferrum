@@ -5016,6 +5016,7 @@
       "usage": "client",
       "existingCoverage": [
         "client_initial_sync_parity.py",
+        "git_workflow_parity.py",
         "host-parity.json",
         "workers_initial_sync_parity.py"
       ],
@@ -5395,7 +5396,9 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
-        "provider-parity.json"
+        "git_workflow_parity.py",
+        "provider-parity.json",
+        "source_control_hosts_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [

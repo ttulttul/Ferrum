@@ -911,6 +911,7 @@ impl Workspace for RemoteWorkspace {
         &'a self,
         input: &'a Value,
         fetch_upstream: bool,
+        _initial: bool,
     ) -> WorkspaceFuture<'a, Option<Reply>> {
         let args = json!({"input": input, "fetchUpstream": fetch_upstream});
         boxed(self.polled(op::WATCH_VCS_STATUS, args, "subscribeVcsStatus"))

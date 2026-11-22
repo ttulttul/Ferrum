@@ -681,10 +681,10 @@ impl Agentd {
                 let reading = match op.as_str() {
                     op::WATCH_VCS_STATUS => Polled::from_routed(
                         this.workspace
-                            .vcs(
-                                "refreshStatus",
+                            .vcs_status(
                                 input,
                                 args["fetchUpstream"].as_bool().unwrap_or(false),
+                                previous.is_none(),
                             )
                             .await,
                     ),

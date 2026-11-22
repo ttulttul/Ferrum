@@ -34,7 +34,7 @@ impl LocalWorkspace {
         Self {
             data_dir,
             settings,
-            vcs: VcsService,
+            vcs: VcsService::default(),
             terminals,
             previews,
             devices,
@@ -102,6 +102,7 @@ impl Workspace for LocalWorkspace {
                             input,
                             &self.data_dir,
                             settings["worktreesDirectory"].as_str().unwrap_or_default(),
+                            settings["worktreeSubmodules"].as_str(),
                         )
                         .await,
                 )
@@ -111,6 +112,14 @@ impl Workspace for LocalWorkspace {
         self.vcs
             .call_with(method, input, &self.data_dir, fetch_upstream)
             .boxed()
+    }
+    fn vcs_status<'a>(
+        &'a self,
+        input: &'a Value,
+        fetch_upstream: bool,
+        initial: bool,
+    ) -> WorkspaceFuture<'a, Option<Reply>> {
+        async move { Some(self.vcs.subscription(input, fetch_upstream, initial).await) }.boxed()
     }
     fn vcs_branch<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
         self.vcs.branch_status(input).boxed()

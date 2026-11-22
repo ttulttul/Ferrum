@@ -3284,8 +3284,8 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             json!({"cwd": "/workspace/one"}),
         );
         assert_eq!(first[0]["local"]["branch"], "main", "{first:?}");
-        assert_eq!(first[0]["remote"], Value::Null);
-        assert_eq!(first[1]["_tag"], "remoteUpdated");
+        assert_eq!(first[0]["remote"], json!({"hasUpstream":false}));
+        assert_eq!(first.len(), 1);
         host.plane.take_signals();
         assert!(alarm(&host.plane, &connection).is_empty());
 

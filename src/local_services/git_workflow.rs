@@ -9,6 +9,7 @@ use std::path::Path;
 
 mod hosts;
 mod stacked;
+pub(super) mod status;
 pub use stacked::stream;
 
 fn manager(cwd: &str, op: &str, detail: &str) -> Value {
@@ -166,6 +167,49 @@ fn fork_branch(head: &str, number: u64, branches: &[&str]) -> String {
     }
     name
 }
+async fn fetch_tracking(cwd: &str, remote: &str, head: &str) -> Option<String> {
+    let tracking = format!("refs/remotes/{remote}/{head}");
+    let spec = format!("+refs/heads/{head}:{tracking}");
+    read(
+        cwd,
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-auto-gc",
+            "--",
+            remote,
+            &spec,
+        ],
+    )
+    .await?;
+    Some(tracking)
+}
+
+async fn set_tracking(cwd: &str, branch: &str, remote: &str, head: &str) {
+    let upstream = format!("refs/remotes/{remote}/{head}");
+    let args = ["branch", "--set-upstream-to", &upstream, "--", branch];
+    if let Ok(out) = super::vcs::run(cwd, &args).await {
+        if !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("is not a branch")
+        {
+            let mapping = format!("+refs/heads/{head}*:refs/remotes/{remote}/{head}*");
+            if read(
+                cwd,
+                &[
+                    "config",
+                    "--add",
+                    &format!("remote.{remote}.fetch"),
+                    &mapping,
+                ],
+            )
+            .await
+            .is_some()
+            {
+                let _ = read(cwd, &args).await;
+            }
+        }
+    }
+}
 pub async fn pull_request(
     workspace: &LocalWorkspace,
     tools: &GitTools,
@@ -320,6 +364,12 @@ pub async fn pull_request(
         if let Some(host) = &host {
             if host.local_checkout(cwd, reference, number, &remote).await? {
                 let local = branch(cwd).await.unwrap_or_else(|| head.to_owned());
+                if row["isCrossRepository"] != true
+                    && row["headRepository"]["nameWithOwner"].is_null()
+                    && fetch_tracking(cwd, &remote, head).await.is_some()
+                {
+                    set_tracking(cwd, &local, &remote, head).await;
+                }
                 let sha = row["headRefOid"].as_str().filter(|s| {
                     (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
                 });
@@ -344,21 +394,12 @@ pub async fn pull_request(
             }
         }
     }
-    let mut tracking = None;
-    if let Some(remote) = head_remote {
-        let spec = format!("+refs/heads/{head}:refs/remotes/{remote}/{head}");
-        if read(
-            cwd,
-            &["fetch", "--quiet", "--no-tags", "--", &remote, &spec],
-        )
-        .await
-        .is_some()
-        {
-            tracking = Some(format!("{remote}/{head}"))
-        }
-    }
+    let tracking = match &head_remote {
+        Some(remote) => fetch_tracking(cwd, remote, head).await,
+        None => None,
+    };
     let target = if let Some(target) = &tracking {
-        format!("refs/remotes/{target}")
+        target.clone()
     } else {
         checked(
             cwd,
@@ -430,17 +471,8 @@ pub async fn pull_request(
             sync?;
         }
     }
-    if let Some(upstream) = tracking {
-        let _ = read(
-            checkout,
-            &[
-                "branch",
-                &format!("--set-upstream-to={upstream}"),
-                "--",
-                &local,
-            ],
-        )
-        .await;
+    if let (Some(_), Some(remote)) = (tracking, head_remote) {
+        set_tracking(checkout, &local, &remote, head).await;
     }
     let actual = read(checkout, &["rev-parse", "HEAD"]).await;
     let on_head = actual
