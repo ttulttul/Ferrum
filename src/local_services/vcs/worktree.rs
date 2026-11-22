@@ -11,7 +11,7 @@ fn nonempty(value: &Value, max: usize) -> bool {
         .is_some_and(|s| !s.trim().is_empty() && s.encode_utf16().count() <= max)
 }
 
-fn project_file(text: &str) -> Option<Value> {
+pub(crate) fn project_file(text: &str) -> Option<Value> {
     // t3.json permits comments and trailing commas, including in nested scripts.
     static COMMENTS: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#"("(?:[^"\\]|\\.)*")|//[^\r\n]*|/\*(?s:.*?)\*/"#).unwrap());
