@@ -20,6 +20,7 @@ native = [
     "dep:hostname",
     "dep:if-addrs",
     "dep:rusqlite",
+    "dep:rustix",
     "dep:pulldown-cmark",
     "dep:scraper",
     "dep:tokio-tungstenite",
@@ -92,3 +93,4 @@ winreg = "0.10.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+rustix = { version = "1", features = ["fs"], optional = true }

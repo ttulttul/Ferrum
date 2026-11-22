@@ -1212,7 +1212,7 @@ where
     let stopping_state = state.clone();
     let server = axum::serve(
         listener,
-        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        router(state.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
         shutdown.await;
@@ -1235,6 +1235,7 @@ where
         }
     };
     cleanup.abort();
+    state.storage_cleanup.shutdown().await;
     manifest_refresh.abort();
     if let Some(startup) = endpoint_startup {
         startup.abort();

@@ -52,7 +52,7 @@ The Rust server can already run Codex and Claude Code conversations, manage proj
 ### Other
 
 - **File browsing and search:** Project file lists include `.git` and gitignored files. File and content search do not yet support fuzzy matching, regular expressions, or match highlighting.
-- **Storage cleanup report:** Settings streams automatic and manual cleanup reports. The Rust cleanup command currently reports zero entries and zero bytes freed.
+- **Storage cleanup report:** Settings streams automatic and manual cleanup reports. File retention and checkpoint pruning run automatically and on request. Worktree retention is still pending.
 
 ### Details for developers
 

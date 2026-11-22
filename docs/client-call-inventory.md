@@ -20,13 +20,13 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 
 | Kind | Calls | Used by the client | Mobile only | Server-only / unused | Existing parity | Client harness | Either |
 |---|---|---|---|---|---|---|---|
-| rpc | 205 | 202 | 0 | 3 | 121 | 78 | 146 |
+| rpc | 205 | 202 | 0 | 3 | 122 | 78 | 146 |
 | rpc-stream | 30 | 30 | 0 | 0 | 17 | 23 | 25 |
 | http | 52 | 40 | 0 | 12 | 39 | 14 | 40 |
 | http-raw | 7 | 7 | 0 | 0 | 6 | 3 | 7 |
-| **all** | 294 | 279 | 0 | 15 | 183 | 118 | 218 |
+| **all** | 294 | 279 | 0 | 15 | 184 | 118 | 218 |
 
-Newly covered by the client harness (no earlier parity script): 35. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 9.
+Newly covered by the client harness (no earlier parity script): 34. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 9.
 
 Calls the harness does not make need credentials or hardware it cannot have in CI (GitHub, Linear,
 model providers, T3 Connect relay, voice models, simulators, a browser), are destructive to the host
@@ -207,7 +207,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `server.removeKeybinding` | user action | `packages/client-runtime/src/state/server.ts:1746` | ServerRemoveKeybindingInput | ServerRemoveKeybindingResult | session (settings:write) | client | validation only | 2 case(s) |
 | `server.reportClientActivity` | background | `apps/web/src/lib/backgroundActivityReporter.ts:206`<br>`apps/web/src/rpc/requestLatencyState.ts:34` | ClientActivityReportInput | void | session (orchestration:read) | client | client_initial_sync_parity.py | 1 case(s) |
 | `server.retryResourceTelemetry` | user action | `packages/client-runtime/src/state/server.ts:1911` | Struct{} | ResourceTelemetryRetryResult | session (diagnostics:read) | client | validation only | — |
-| `server.runStorageCleanup` | user action | `packages/client-runtime/src/state/server.ts:1446` | Struct{} | StorageCleanupReport | session (settings:write) | client | validation only | 1 case(s) |
+| `server.runStorageCleanup` | user action | `packages/client-runtime/src/state/server.ts:1446` | Struct{} | StorageCleanupReport | session (settings:write) | client | storage_cleanup_parity.py | 1 case(s) |
 | `server.searchAcpRegistry` | user action | `packages/client-runtime/src/state/server.ts:1633` | AcpRegistrySearchInput | AcpRegistrySearchResult | session (orchestration:read) | client | rpc_edge_parity.py | — |
 | `server.setAcpRegistryProvider` | user action | `packages/client-runtime/src/state/server.ts:1815` | AcpRegistrySetProviderInput | AcpRegistrySetProviderResult | session (providers:manage) | client | validation only | — |
 | `server.signalProcess` | user action | `packages/client-runtime/src/state/server.ts:1841` | ServerSignalProcessInput | ServerSignalProcessResult | session (environment:maintain) | client | validation only | — |
@@ -338,7 +338,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 
 | Call | Trigger | Callers | Request | Response | Auth | Usage | Existing | Client harness |
 |---|---|---|---|---|---|---|---|---|
-| `GET /ws` | connect | `packages/client-runtime/src/rpc/session.ts:251`<br>`packages/client-runtime/src/rpc/session.ts:252` | websocket upgrade: orchestrationProtocol=2, frameParts=1, clientCapabilities; cookie, or wsTicket from a bearer/DPoP ticket |  | session | client | auth_parity.py, client_initial_sync_parity.py, client_sessions_parity.py, config_parity.py, cors_parity.py, git_workflow_parity.py, github_provider_parity.py, linear_provider_parity.py, link_request_parity.py, login_shell_refresh_parity.py, managed_policy_parity.py, orchestration_parity.py, parity-fixtures.json, peer_link_outgoing_parity.py, preview_provider_parity.py, provider-parity.json, provider_status_parity.py, relay_client_parity.py, rpc_edge_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, source_control_hosts_parity.py | 1 case(s) |
+| `GET /ws` | connect | `packages/client-runtime/src/rpc/session.ts:251`<br>`packages/client-runtime/src/rpc/session.ts:252` | websocket upgrade: orchestrationProtocol=2, frameParts=1, clientCapabilities; cookie, or wsTicket from a bearer/DPoP ticket |  | session | client | auth_parity.py, client_initial_sync_parity.py, client_sessions_parity.py, config_parity.py, cors_parity.py, git_workflow_parity.py, github_provider_parity.py, linear_provider_parity.py, link_request_parity.py, login_shell_refresh_parity.py, managed_policy_parity.py, orchestration_parity.py, parity-fixtures.json, peer_link_outgoing_parity.py, preview_provider_parity.py, provider-parity.json, provider_status_parity.py, relay_client_parity.py, rpc_edge_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, source_control_hosts_parity.py, storage_cleanup_parity.py | 1 case(s) |
 | `GET /api/attachments/:id` | user action | `packages/client-runtime/src/pullRequestMarkdown.ts:361` | attachment bytes shown in the transcript |  | session | client | cors_parity.py | — |
 | `POST /api/attachments/upload/:token` | user action | `apps/web/src/lib/attachmentUploadQueue.ts:154` | unauthenticated XHR upload to the signed URL attachments.createUploadUrl returns |  | signed URL | client | cors_parity.py | 9 case(s) |
 | `GET /api/assets/:token` | user action | `packages/shared/src/preview.ts:16` | asset URLs from assets.createUrl |  | signed URL | client | — | 17 case(s) |

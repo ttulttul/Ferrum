@@ -49,6 +49,7 @@ case "$shard" in
     run python3 scripts/login_shell_refresh_parity.py "${both[@]}"
     ;;
   integrations)
+    run python3 scripts/storage_cleanup_parity.py "${both[@]}"
     run python3 scripts/config_parity.py "${both[@]}"
     run python3 scripts/github_provider_parity.py "${both[@]}" --faketime-lib "$faketime"
     run python3 scripts/linear_provider_parity.py "${both[@]}"
