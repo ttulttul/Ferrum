@@ -9,7 +9,43 @@ permissions:
   contents: read
 
 jobs:
-  workers:
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.files.outputs.code }}
+    steps:
+      - name: Look for changes outside README.md and docs/
+        id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Both sides of a rename count.
+          gh api "repos/$REPOSITORY/pulls/$PULL_REQUEST/files" --paginate \
+            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"
+          cat "$RUNNER_TEMP/files"
+          if [ ! -s "$RUNNER_TEMP/files" ] || grep -qvE '^(README\.md|docs/.*)$' "$RUNNER_TEMP/files"; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Only README.md and docs/ changed: skipping the workers build and parity suites."
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: workers build
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -58,3 +94,24 @@ jobs:
             --rust-command "$GITHUB_WORKSPACE/target/debug/t3code-server" \
             --reference-root "$GITHUB_WORKSPACE/reference" \
             --wrangler "npx --yes wrangler@4.166.0"
+
+  workers:
+    name: workers
+    if: always()
+    needs: [changes, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the workers build, or report a docs-only skip
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          CODE: ${{ needs.changes.outputs.code }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          echo "changes: $CHANGES (code: $CODE), workers build: $BUILD"
+          test "$CHANGES" = success
+          if [ "$CODE" = false ]; then
+            echo "Only README.md and docs/ changed; nothing to build."
+            exit 0
+          fi
+          test "$BUILD" = success

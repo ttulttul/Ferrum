@@ -111,7 +111,7 @@ jobs:
           cargo build --locked -p t3-agentd
 
   shard:
-    name: parity (${{ matrix.shard }}${{ matrix.round > 1 && ' again' || '' }})
+    name: parity shard
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
