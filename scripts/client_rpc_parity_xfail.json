@@ -1,17 +1,4 @@
 {
   "about": "Known client-visible Rust gaps found by client_rpc_parity.py against the pinned reference. Each case fails CI if it starts passing; remove it then. severity is for real client use: critical breaks a core flow, high breaks a feature, medium shows wrong data, low differs without visible effect.",
-  "cases": {
-    "turns.getThreadProjection.afterMessage": {
-      "area": "agent turns",
-      "severity": "medium",
-      "reason": "the projection after a message lacks the reference's provider runtime records and uses other ids",
-      "issue": "no attempts, nodes or providerThreads; runs have UUID ids, not run:thread:<id>:ordinal:<n>, and messages carry no nodeId; extra checkpoint and checkpointScope records"
-    },
-    "turns.subscribeCommandOutput.missing": {
-      "area": "agent turns",
-      "severity": "low",
-      "reason": "subscribeCommandOutput for an unknown item streams an empty replace",
-      "issue": "the reference fails with OrchestrationV2CommandOutputError"
-    }
-  }
+  "cases": {}
 }

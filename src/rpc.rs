@@ -2560,9 +2560,23 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"outcome":"released","sharedWithThreadIds":[]})
         }
         "orchestration.subscribeCommandOutput" => {
+            let thread_id = params["threadId"].as_str().unwrap_or_default();
+            let item_id = params["itemId"].as_str().unwrap_or_default();
+            let is_command = store
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.turn_item_detail(item_id))
+                .is_some_and(|item| item["type"] == "command_execution");
+            if !is_command {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"OrchestrationV2CommandOutputError",
+                    "threadId":thread_id,
+                    "message":"No such command."
+                }}));
+            }
             return Reply::Chunk(
                 json!([{"kind":"replace","text":"","truncated":false,"running":false}]),
-            )
+            );
         }
         "orchestration.subscribePromptSuggestion" => return Reply::Chunk(json!([null])),
         _ => {

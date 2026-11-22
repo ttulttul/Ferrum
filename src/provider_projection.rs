@@ -173,12 +173,19 @@ impl Thread {
     /// The provider thread record's id, named after the run that first used
     /// it (`pending:<run id>`), as the reference names a new thread's record.
     pub(crate) fn provider_thread_id(&self) -> Option<String> {
-        let thread = self.provider.thread.as_ref()?;
-        let run = self.runs.iter().find(|run| run.id == thread.first_run)?;
-        let run_id = run.wire_id();
+        let (driver, run_id) = if let Some(thread) = self.provider.thread.as_ref() {
+            let run = self.runs.iter().find(|run| run.id == thread.first_run)?;
+            (thread.driver.clone(), run.wire_id())
+        } else {
+            let run = self
+                .runs
+                .iter()
+                .find(|run| matches!(run.status.as_str(), "queued" | "preparing"))?;
+            (self.instance_id(), run.wire_id())
+        };
         Some(format!(
             "provider-thread:provider:{}:native-thread:{}",
-            uri_component(&thread.driver),
+            uri_component(&driver),
             uri_component(&format!("pending:{run_id}"))
         ))
     }
@@ -186,17 +193,24 @@ impl Thread {
     /// The ids a run still waiting in the queue has on the thread's provider
     /// thread, once the thread has one, before its provider turn runs.
     pub(crate) fn queued_run_ids(&self, run: &Run) -> Option<RunIds> {
-        if run.status != "queued" || self.provider.runs.contains_key(&run.id) {
+        if !matches!(run.status.as_str(), "queued" | "preparing")
+            || self.provider.runs.contains_key(&run.id)
+        {
             return None;
         }
-        let thread = self.provider.thread.as_ref()?;
         let run_id = run.wire_id();
         let attempt = join("run-attempt:run", &[&run_id]) + ":attempt:1";
+        let driver = self
+            .provider
+            .thread
+            .as_ref()
+            .map(|thread| thread.driver.clone())
+            .unwrap_or_else(|| self.instance_id());
         Some(RunIds {
             root_node: join("node:run", &[&run_id]) + ":root",
             provider_thread: self.provider_thread_id()?,
             provider_turn: String::new(),
-            driver: thread.driver.clone(),
+            driver,
             run: run_id,
             attempt,
         })
@@ -264,13 +278,19 @@ impl Thread {
                 self.provider_request(&mut out, index, run, &ids, request, &session_id);
             }
         }
-        // A run waiting in the queue already has its pending attempt and
-        // root node on the thread's provider thread, as the reference gives
-        // a queued run them when it queues it.
+        // A run waiting in the queue or workspace preparation already has its
+        // pending attempt and root node on the thread's provider thread.
         for run in &self.runs {
             let Some(ids) = self.queued_run_ids(run) else {
                 continue;
             };
+            let run_index = self
+                .runs
+                .iter()
+                .position(|candidate| candidate.id == run.id)
+                .unwrap_or_default();
+            first_ordinal.get_or_insert(run_index + 1);
+            last_ordinal = run_index + 1;
             out.attempts.push(json!({
                 "id": ids.attempt,
                 "runId": ids.run,
@@ -301,6 +321,36 @@ impl Thread {
                 "startedAt": null,
                 "completedAt": null
             }));
+            if run.status == "preparing" {
+                let at = self
+                    .messages
+                    .iter()
+                    .find(|message| run.user_message_id.as_deref() == Some(message.id.as_str()))
+                    .map(|message| iso(message.created_at))
+                    .unwrap_or_else(|| iso(run.started_at));
+                let native = format!("workspace-preparation:{}", ids.run);
+                out.items.push((
+                    run_index,
+                    json!({
+                        "id": item_id("turn-item", &ids.driver, &native),
+                        "threadId": self.id,
+                        "runId": ids.run,
+                        "nodeId": ids.root_node,
+                        "providerThreadId": ids.provider_thread,
+                        "providerTurnId": null,
+                        "nativeItemRef": null,
+                        "parentItemId": null,
+                        "ordinal": 0,
+                        "status": "running",
+                        "title": "Preparing workspace",
+                        "startedAt": at,
+                        "completedAt": null,
+                        "updatedAt": at,
+                        "type": "command_execution",
+                        "input": "Preparing workspace"
+                    }),
+                ));
+            }
         }
         // Attempts in their runs' order, as the reference reads them.
         let position = |attempt: &Value| {
@@ -311,28 +361,66 @@ impl Thread {
         };
         out.attempts.sort_by_key(position);
         out.provider_sessions.extend(session);
-        if let (Some(thread), Some(id)) = (&self.provider.thread, self.provider_thread_id()) {
+        if let Some(id) = self.provider_thread_id() {
+            let pending = self.provider.thread.is_none();
+            let driver = self
+                .provider
+                .thread
+                .as_ref()
+                .map(|thread| thread.driver.clone())
+                .unwrap_or_else(|| instance.clone());
+            let (native_thread_ref, status, created_at, updated_at, metadata) = self
+                .provider
+                .thread
+                .as_ref()
+                .map(|thread| {
+                    (
+                        thread.native_id.as_deref().map_or(Value::Null, |native| {
+                            native_ref(&thread.driver, native, "strong")
+                        }),
+                        thread.status,
+                        iso(thread.created_at),
+                        iso(thread.updated_at),
+                        self.claude_native_metadata(&thread.driver),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    let at = self
+                        .runs
+                        .iter()
+                        .find(|run| matches!(run.status.as_str(), "queued" | "preparing"))
+                        .map(|run| iso(run.started_at))
+                        .unwrap_or_else(|| iso(crate::store::now()));
+                    (Value::Null, "not_loaded", at.clone(), at, Value::Null)
+                });
+            let provider_session_id = if pending {
+                json!(format!(
+                    "provider-session:provider-instance:{}:shared",
+                    uri_component(&instance)
+                ))
+            } else {
+                session_id.clone()
+            };
             out.provider_threads.push(json!({
                 "id": id,
-                "driver": thread.driver,
+                "driver": driver,
                 "providerInstanceId": instance,
-                "providerSessionId": session_id,
+                "providerSessionId": provider_session_id,
                 "appThreadId": self.id,
                 "ownerNodeId": null,
-                "nativeThreadRef": thread.native_id.as_deref()
-                    .map_or(Value::Null, |native| native_ref(&thread.driver, native, "strong")),
+                "nativeThreadRef": native_thread_ref,
                 "nativeConversationHeadRef": null,
-                "status": thread.status,
+                "status": status,
                 "firstRunOrdinal": first_ordinal,
                 "lastRunOrdinal": last_ordinal,
                 "handoffIds": [],
                 "forkedFrom": null,
                 "pendingBackgroundTasks": [],
                 "contextUsage": self.context_usage(),
-                "nativeMetadata": self.claude_native_metadata(&thread.driver),
+                "nativeMetadata": metadata,
                 "goal": null,
-                "createdAt": iso(thread.created_at),
-                "updatedAt": iso(thread.updated_at)
+                "createdAt": created_at,
+                "updatedAt": updated_at
             }));
         }
         out.messages

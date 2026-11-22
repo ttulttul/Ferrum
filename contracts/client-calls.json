@@ -1003,6 +1003,7 @@
         "orchestration_parity.py",
         "parity-fixtures.json",
         "shared_store_parity.py",
+        "storage_cleanup_parity.py",
         "workers_initial_sync_parity.py"
       ],
       "validationOnly": false,
@@ -1224,9 +1225,7 @@
         "threads.getThreadProjection",
         "turns.getThreadProjection.afterMessage"
       ],
-      "knownGaps": [
-        "turns.getThreadProjection.afterMessage"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc",
@@ -1489,9 +1488,7 @@
       "clientHarness": [
         "turns.subscribeCommandOutput.missing"
       ],
-      "knownGaps": [
-        "turns.subscribeCommandOutput.missing"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc-stream",
@@ -2098,6 +2095,7 @@
       "existingCoverage": [
         "parity-fixtures.json",
         "project_clone_parity.py",
+        "storage_cleanup_parity.py",
         "workers_initial_sync_parity.py"
       ],
       "validationOnly": false,
@@ -3570,7 +3568,8 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
-        "rpc_edge_parity.py"
+        "rpc_edge_parity.py",
+        "shared_store_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [],
@@ -3613,8 +3612,12 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "client_thread_parity.py",
+        "mcp_parity.py",
+        "shared_store_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -4248,6 +4251,7 @@
       "usage": "client",
       "existingCoverage": [
         "client_initial_sync_parity.py",
+        "config_snapshot_parity.py",
         "provider_status_parity.py"
       ],
       "validationOnly": false,
@@ -4540,6 +4544,7 @@
         "settings_mutation_parity.py",
         "settings_secrets_parity.py",
         "settings_syntax_parity.py",
+        "storage_cleanup_parity.py",
         "workers_peer_link_parity.py"
       ],
       "validationOnly": false,
