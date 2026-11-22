@@ -36,8 +36,10 @@ import sqlite3
 import subprocess
 from tempfile import TemporaryDirectory
 import time
+from types import SimpleNamespace
 
 import client_thread_parity as turns
+from client_rpc_parity import run_driver
 from client_initial_sync_parity import rpc
 from parity_harness import PROVIDER_CLIS, encode, free_port, http, managed_server, path_without, run_concurrently, server_env
 
@@ -85,9 +87,13 @@ def seed(url, cookie, root, project=PROJECT, thread=THREAD, made_on="the referen
         "title": f"Made on {made_on}", "modelSelection": {"instanceId": "codex", "model": "fixture"},
         "runtimeMode": "full-access", "interactionMode": "default", "branch": None, "worktreePath": None,
         "createdBy": "user", "creationSource": "web"})
+    citation = ("[Assistant quote](t3-citation://v1/env/thread/message?"
+                "text=Kestrel&start=0&end=7&prefix=&suffix=&comment=Orchard)")
+    text = ("Hello from the **shared store** fixture. Hello again! Café 部署 " + citation
+            if thread == THREAD else "A shared storehouse fixture also says hello.")
     rpc(url, cookie, "orchestration.dispatchCommand", {
         "type": "message.dispatch", "commandId": f"send-{thread}", "threadId": thread,
-        "messageId": f"message:{thread.split(':')[1]}", "text": "Hello from the shared store fixture", "attachments": [],
+        "messageId": f"message:{thread.split(':')[1]}", "text": text, "attachments": [],
         "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
 
 
@@ -116,6 +122,49 @@ def views(url, cookie, project=PROJECT, thread=THREAD):
         "threads": [row for row in shell.get("threads", []) if row.get("id") == thread],
         "projection": rpc(url, cookie, "orchestration.getThreadProjection", {"threadId": thread}),
     }
+
+
+def search_views(args, root, url, credential):
+    """Compare decoded results on precisely the same rows, including IDs, dates and revision."""
+    entry = "message:shared-store-reference"
+    find = {"threadId": THREAD, "query": "hello"}
+    plan = [
+        ("rank", "searchThreads", {"query": "shared store"}, False),
+        ("phrase", "searchThreads", {"query": "hello", "limit": 1}, False),
+        ("accent", "searchThreads", {"query": "cafe"}, False),
+        ("cjk", "searchThreads", {"query": "部署"}, False),
+        ("quote", "searchThreads", {"query": "kestrel"}, False),
+        ("settled", "searchThreads", {"query": "Renamed", "titlesOnly": True,
+                                     "olderSettledBefore": "2100", "projectIds": [PROJECT]}, False),
+        ("scoped", "searchThreads", {"query": "hello", "olderSettledBefore": "2100", "projectIds": []}, False),
+        ("skipQuote", "searchThread", {**find, "query": "Kestrel"}, False),
+        ("comment", "searchThread", {**find, "query": "orchard"}, False),
+        ("stream", "searchThreadStream", find, True),
+        ("warm", "searchThreadStream", find, True),
+        ("next", "searchThread", {**find, "start": {"entryId": entry, "occurrence": 0}, "offset": 1}, False),
+        ("wrap", "searchThread", {**find, "start": {"entryId": entry, "occurrence": 0}, "offset": -1}, False),
+        ("clamp", "searchThread", {**find, "index": 99}, False),
+        ("rendered", "searchThread", {**find, "query": "the shared store"}, False),
+        ("miss", "searchThreadStream", {**find, "query": "unmatched-needle"}, True),
+    ]
+    cases = root / "search-cases.json"
+    cases.write_text(json.dumps({"steps": [
+        {"name": name, "rpc": "orchestration." + rpc, "input": payload,
+         **({"stream": {"take": 3}} if stream else {})}
+        for name, rpc, payload, stream in plan]}))
+    result = run_driver(SimpleNamespace(**vars(args), cases=cases), url, credential, {})
+    found = {s["name"]: s.get("value") for s in result["steps"] if s["outcome"] == "reply"}
+    assert all(name in found for name, *_ in plan), "search RPC did not decode or finish"
+    assert [hit["threadId"] for hit in found["rank"]["matches"]] == [THREAD, RUST_THREAD]
+    assert all(len(found[name]["matches"]) == 1 for name in ["accent", "cjk", "quote"])
+    assert found["skipQuote"]["totalMatches"] == 0 and found["comment"]["totalMatches"] == 1
+    assert [row["id"] for row in found["settled"]["threads"]] == [THREAD]
+    assert found["scoped"]["threads"] == [] and len(found["scoped"]["matches"]) == 2
+    assert [item.get("complete") for item in found["stream"]["items"]] == [False, None]
+    assert len(found["warm"]["items"]) == 1
+    assert found["next"]["totalMatches"] == 2 and found["next"]["match"]["occurrence"] == 1
+    assert found["rendered"]["totalMatches"] == 1
+    return {name: found[name] for name, *_ in plan}
 
 
 def comparable(view):
@@ -295,13 +344,18 @@ def main():
             rpc(url, cookie, "orchestration.dispatchCommand", {
                 "type": "thread.metadata.update", "commandId": "rename-reference-thread", "threadId": THREAD,
                 "title": "Renamed on the Rust server"})
+            rpc(url, cookie, "orchestration.dispatchCommand", {
+                "type": "thread.settle", "commandId": "settle-reference-thread", "threadId": THREAD})
             rust_made = views(url, cookie, RUST_PROJECT, RUST_THREAD)
             rust_renamed = views(url, cookie)
+            rust_search = search_views(args, root, url, credentials[0])
         assert rust_made["threads"], "the Rust server's shell lists its thread"
         assert rust_renamed["projection"]["thread"]["title"] == "Renamed on the Rust server", rust_renamed["projection"]["thread"]
         with running(reference, home, credentials) as (url, cookie):
             reference_made = views(url, cookie, RUST_PROJECT, RUST_THREAD)
             reference_renamed = views(url, cookie)
+            same("ranked message search and navigating visible occurrences",
+                 search_views(args, root, url, credentials[0]), rust_search)
         same("project made on the Rust server", comparable(rust_made)["projects"], comparable(reference_made)["projects"], ("rust", "reference"))
         same("thread shell made on the Rust server", rust_made["threads"], reference_made["threads"], ("rust", "reference"))
         same("thread projection made on the Rust server", rust_made["projection"], reference_made["projection"], ("rust", "reference"))

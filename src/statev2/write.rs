@@ -529,7 +529,7 @@ fn citations_to_plain_text(text: &str) -> String {
 
 /// `parseAssistantCitationHref` and the `AssistantCitation` schema's checks:
 /// the citation's text and comment, when `href` is a valid citation.
-fn parse_citation(href: &str) -> Option<(String, Option<String>)> {
+pub(crate) fn parse_citation(href: &str) -> Option<(String, Option<String>)> {
     if js_len(href) > CITATION_MAX_HREF {
         return None;
     }

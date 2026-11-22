@@ -87,6 +87,8 @@ pub mod server_runtime;
 #[cfg(feature = "native")]
 mod static_http;
 #[cfg(feature = "native")]
+mod thread_search;
+#[cfg(feature = "native")]
 pub mod voice;
 pub mod workspace;
 pub mod workspace_protocol;

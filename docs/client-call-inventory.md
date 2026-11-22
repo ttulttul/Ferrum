@@ -26,7 +26,7 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 | http-raw | 7 | 7 | 0 | 0 | 6 | 3 | 7 |
 | **all** | 294 | 279 | 0 | 15 | 182 | 117 | 216 |
 
-Newly covered by the client harness (no earlier parity script): 34. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 16.
+Newly covered by the client harness (no earlier parity script): 34. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 13.
 
 Calls the harness does not make need credentials or hardware it cannot have in CI (GitHub, Linear,
 model providers, T3 Connect relay, voice models, simulators, a browser), are destructive to the host
@@ -91,8 +91,8 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `orchestration.getWorkflowScript` | user action | `packages/client-runtime/src/state/orchestration.ts:192` | OrchestrationV2RpcSchemas.getWorkflowScript.input | OrchestrationV2RpcSchemas.getWorkflowScript.output | session (orchestration:read) | client | orchestration_parity.py | — |
 | `orchestration.getWorktreeThreadIds` | open project/thread | `packages/client-runtime/src/state/orchestration.ts:261` | OrchestrationV2RpcSchemas.getWorktreeThreadIds.input | OrchestrationV2RpcSchemas.getWorktreeThreadIds.output | session (orchestration:read) | client | provider-parity.json | 2 case(s) |
 | `orchestration.launchThread` | user action | `packages/client-runtime/src/operations/commands.ts:793` | OrchestrationV2RpcSchemas.launchThread.input | OrchestrationV2RpcSchemas.launchThread.output | session (orchestration:operate) | client | validation only | — |
-| `orchestration.searchThread` | user action | `packages/client-runtime/src/state/orchestration.ts:225` | OrchestrationV2SearchThreadInput | OrchestrationV2SearchThreadResult | session (orchestration:read) | client | validation only | 1 case(s), 1 xfail |
-| `orchestration.searchThreads` | open project/thread | `packages/client-runtime/src/state/olderSettledThreads.ts:405`<br>`packages/client-runtime/src/state/orchestration.ts:237` | OrchestrationV2SearchThreadsInput | OrchestrationV2SearchThreadsResult | session (orchestration:read) | client | validation only | 1 case(s), 1 xfail |
+| `orchestration.searchThread` | user action | `packages/client-runtime/src/state/orchestration.ts:225` | OrchestrationV2SearchThreadInput | OrchestrationV2SearchThreadResult | session (orchestration:read) | client | validation only | 1 case(s) |
+| `orchestration.searchThreads` | open project/thread | `packages/client-runtime/src/state/olderSettledThreads.ts:405`<br>`packages/client-runtime/src/state/orchestration.ts:237` | OrchestrationV2SearchThreadsInput | OrchestrationV2SearchThreadsResult | session (orchestration:read) | client | validation only | 1 case(s) |
 | `orchestration.stopWorkflow` | user action | `packages/client-runtime/src/state/orchestration.ts:205` | OrchestrationV2RpcSchemas.stopWorkflow.input | OrchestrationV2RpcSchemas.stopWorkflow.output | session (orchestration:operate) | client | orchestration_parity.py | — |
 | `peerLinks.answerRequest` | user action | `packages/client-runtime/src/state/peerLinks.ts:36` | PeerLinkRequestAnswerInput | void | session (access:write) | client | validation only | — |
 | `peerLinks.link` | user action | `packages/client-runtime/src/state/peerLinks.ts:23` | PeerLinkCreateInput | PeerLink | session (access:write) | client | peer_forwarding_parity.py, peer_link_outgoing_parity.py | — |
@@ -248,7 +248,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 |---|---|---|---|---|---|---|---|---|
 | `cloud.installRelayClient` | user action | `apps/web/src/cloud/linkEnvironment.ts:93` | Struct{} | RelayClientInstallProgressEventSchema | session (relay:write) | client | validation only | — |
 | `git.runStackedAction` | user action | `packages/client-runtime/src/state/vcsAction.ts:550` | GitRunStackedActionInput | GitActionProgressEvent | session (source-control:write) | client | git_workflow_parity.py | — |
-| `orchestration.searchThreadStream` | user action | `packages/client-runtime/src/state/orchestration.ts:231` | OrchestrationV2SearchThreadInput | OrchestrationV2SearchThreadResult | session (orchestration:read) | client | rpc_edge_parity.py | 1 case(s), 1 xfail |
+| `orchestration.searchThreadStream` | user action | `packages/client-runtime/src/state/orchestration.ts:231` | OrchestrationV2SearchThreadInput | OrchestrationV2SearchThreadResult | session (orchestration:read) | client | rpc_edge_parity.py | 1 case(s) |
 | `orchestration.subscribeCommandOutput` | user action | `packages/client-runtime/src/state/orchestration.ts:167` | OrchestrationV2RpcSchemas.subscribeCommandOutput.input | OrchestrationV2RpcSchemas.subscribeCommandOutput.output | session (orchestration:read) | client | validation only | 1 case(s), 1 xfail |
 | `orchestration.subscribePromptSuggestion` | user action | `packages/client-runtime/src/state/orchestration.ts:181` | OrchestrationV2RpcSchemas.subscribePromptSuggestion.input | OrchestrationV2RpcSchemas.subscribePromptSuggestion.output | session (orchestration:read) | client | provider-parity.json | 1 case(s) |
 | `orchestration.subscribeShell` | connect | `packages/client-runtime/src/state/orchestration.ts:155`<br>`packages/client-runtime/src/state/shell.ts:636` | OrchestrationV2RpcSchemas.subscribeShell.input | OrchestrationV2RpcSchemas.subscribeShell.output | session (orchestration:read) | client | client_initial_sync_parity.py, client_thread_parity.py, provider-parity.json | 16 case(s) |

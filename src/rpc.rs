@@ -4,7 +4,7 @@ use crate::rpc_protocol::{
 };
 use crate::runtime::Runtime;
 use crate::subscription::{scheduled_public_task, thread_projection_error};
-use crate::{auth_service, dispatch_orchestration_command, provider_rpc, AppState};
+use crate::{dispatch_orchestration_command, provider_rpc, AppState};
 use axum::extract::ws::{Message, WebSocket};
 use base64::Engine;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
@@ -482,6 +482,65 @@ async fn run_call(
             let _ = chunks.send((id.clone(), values)).await;
         }
     };
+    if method == "orchestration.searchThreads" {
+        let dir = state.data_dir.clone();
+        let input = params.clone();
+        let job =
+            tokio::task::spawn_blocking(move || crate::thread_search::search_threads(&dir, &input));
+        return match job.await {
+            Ok(Ok(result)) => Reply::Success(result),
+            _ => Reply::Failure(
+                json!({"_tag":"Fail","error":{"_tag":"OrchestrationSearchThreadsError",
+                "message":"Failed to search threads","cause":{"name":"ThreadSearchError","message":"Thread search query failed."}}}),
+            ),
+        };
+    }
+    if matches!(
+        method,
+        "orchestration.searchThread" | "orchestration.searchThreadStream"
+    ) {
+        let stream = method.ends_with("Stream");
+        let worker_state = state.clone();
+        let input = params.clone();
+        let (tx, rx) = oneshot::channel();
+        let job = tokio::task::spawn_blocking(move || {
+            crate::thread_search::find_thread(
+                &worker_state.data_dir,
+                &worker_state.find_cache,
+                &input,
+                stream.then_some(tx),
+            )
+        });
+        if stream {
+            if let Ok(first) = rx.await {
+                send(json!([first])).await;
+            }
+        }
+        let result = match job.await {
+            Ok(Ok(Some(result))) => result,
+            failure => {
+                let thread_id = params["threadId"].as_str().unwrap_or_default();
+                let cause = if matches!(failure, Ok(Ok(None))) {
+                    json!({"name":"ProjectionStoreThreadNotFoundError",
+                        "message":format!("No orchestration projection exists for thread {thread_id}.")})
+                } else {
+                    json!({"name":"ProjectionStoreReadError",
+                        "message":format!("Failed to read orchestration projection for thread {thread_id}.")})
+                };
+                return Reply::Failure(
+                    json!({"_tag":"Fail","error":{"_tag":"OrchestrationV2SearchThreadError",
+                    "cause":{"name":"OrchestratorProjectionError",
+                        "message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":cause}}}),
+                );
+            }
+        };
+        if stream {
+            send(json!([result])).await;
+            state.runtime.yield_now().await;
+            return Reply::Success(Value::Null);
+        }
+        return Reply::Success(result);
+    }
     if crate::subscription::serves(method) {
         let opened =
             match crate::subscription::Subscription::open(state, principal, method, params, true)
@@ -927,21 +986,6 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         publish_project_clone_change(state).await;
         launch_project_clone(state.clone(), project_id.to_owned(), remote, destination).await;
         return Reply::Success(json!({"applied":true}));
-    }
-    if method == "orchestration.searchThreadStream" {
-        let thread_id = params["threadId"].as_str().unwrap_or_default();
-        if !state.store.read().await.threads.contains_key(thread_id) {
-            return Reply::Failure(json!({"_tag":"Fail","error":{
-                "_tag":"OrchestrationV2SearchThreadError",
-                "cause":{"name":"OrchestratorProjectionError",
-                    "message":format!("Failed to load orchestration projection for thread {thread_id}."),
-                    "cause":{"name":"ProjectionStoreThreadNotFoundError",
-                        "message":format!("No orchestration projection exists for thread {thread_id}.")}}
-            }}));
-        }
-        let sequence = *state.next_event_id.lock().await;
-        return Reply::Chunk(json!([{"complete":true,"snapshotSequence":sequence,
-            "totalMatches":0,"activeIndex":0,"match":null}]));
     }
     if method == "server.updateProvider" {
         return Reply::Failure(
@@ -2777,143 +2821,6 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 })
                 .collect::<Vec<_>>();
             json!({"schemaVersion":2,"snapshotSequence":sequence,"projects":projects,"threads":store.threads.values().filter(|t|t.archived).map(|t|t.shell()).collect::<Vec<_>>()})
-        }
-        "orchestration.searchThreads" => {
-            let query = params["query"].as_str().unwrap_or_default().to_lowercase();
-            let limit = params["limit"].as_u64().unwrap_or(50).clamp(1, 50) as usize;
-            let project_id = params["projectId"].as_str();
-            let mut title_matches: Vec<&crate::Thread> = store
-                .threads
-                .values()
-                .filter(|thread| {
-                    store.projects.contains_key(&thread.project_id)
-                        && project_id.is_none_or(|id| id == thread.project_id)
-                })
-                .filter(|thread| thread.title.to_lowercase().contains(&query))
-                .collect();
-            title_matches.sort_by(|a, b| {
-                b.row["updatedAt"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(a.row["updatedAt"].as_str().unwrap_or_default())
-                    .then_with(|| a.id.cmp(&b.id))
-            });
-            let title_matches = title_matches.into_iter().take(limit).collect::<Vec<_>>();
-            let title_ids = title_matches
-                .iter()
-                .map(|thread| thread.id.as_str())
-                .collect::<std::collections::HashSet<_>>();
-            let mut message_matches = Vec::new();
-            for thread in store.threads.values().filter(|thread| {
-                store.projects.contains_key(&thread.project_id)
-                    && project_id.is_none_or(|id| id == thread.project_id)
-                    && !title_ids.contains(thread.id.as_str())
-            }) {
-                let Some(message) = thread
-                    .messages
-                    .iter()
-                    .find(|message| message.content.to_lowercase().contains(&query))
-                else {
-                    continue;
-                };
-                let folded = message.content.to_lowercase();
-                let offset = folded.find(&query).unwrap_or_default();
-                let start = offset.saturating_sub(24);
-                let end = (start + 240).min(message.content.len());
-                let snippet = message
-                    .content
-                    .get(start..end)
-                    .unwrap_or(&message.content)
-                    .to_owned();
-                message_matches.push(json!({
-                    "threadId":thread.id,
-                    "projectId":thread.project_id,
-                    "source":if message.role == "assistant" {"assistant"} else {"user"},
-                    "snippet":snippet,
-                    "messageCreatedAt":auth_service::iso((message.created_at as i64).saturating_mul(1000)),
-                    "title":thread.title,
-                }));
-            }
-            let message_slots = message_matches.len().min(limit / 5);
-            let mut matches = title_matches
-                .into_iter()
-                .take(limit.saturating_sub(message_slots))
-                .map(|thread| {
-                    json!({"threadId":thread.id,"projectId":thread.project_id,"title":thread.title,"source":"title"})
-                })
-                .collect::<Vec<_>>();
-            matches.extend(message_matches.into_iter().take(message_slots));
-            json!({"matches":matches})
-        }
-        "orchestration.searchThread" => {
-            let thread_id = params["threadId"].as_str().unwrap_or_default();
-            let Some(thread) = store.threads.get(thread_id) else {
-                return Reply::Failure(json!({"_tag":"Fail","error":{
-                    "_tag":"OrchestrationV2SearchThreadError",
-                    "cause":{"name":"OrchestratorProjectionError",
-                        "message":format!("Failed to load orchestration projection for thread {thread_id}."),
-                        "cause":{"name":"ProjectionStoreThreadNotFoundError",
-                            "message":format!("No orchestration projection exists for thread {thread_id}.")}}
-                }}));
-            };
-            let query = params["query"].as_str().unwrap_or_default();
-            let query_folded = query
-                .to_lowercase()
-                .replace('ς', "σ")
-                .replace(['‘', '’'], "'");
-            let mut entries = Vec::new();
-            for message in &thread.messages {
-                let text = message
-                    .content
-                    .to_lowercase()
-                    .replace('ς', "σ")
-                    .replace(['‘', '’'], "'");
-                if query_folded.is_empty() {
-                    continue;
-                }
-                let mut count = 0usize;
-                let mut cursor = 0usize;
-                while cursor <= text.len() {
-                    let Some(offset) = text[cursor..].find(&query_folded) else {
-                        break;
-                    };
-                    count += 1;
-                    cursor += offset + query_folded.len();
-                    if query_folded.is_empty() {
-                        break;
-                    }
-                }
-                if count > 0 {
-                    entries.push((message.id.clone(), count));
-                }
-            }
-            let total_matches: usize = entries.iter().map(|(_, count)| *count).sum();
-            let requested = params["index"].as_u64().unwrap_or(0) as usize;
-            let offset = params["offset"].as_i64().unwrap_or(0);
-            let active_index = if total_matches == 0 {
-                0
-            } else if params.get("index").is_none() {
-                ((requested as i64 + offset).rem_euclid(total_matches as i64)) as usize
-            } else {
-                requested.min(total_matches.saturating_sub(1))
-            };
-            let mut start_index = 0usize;
-            let mut navigation = Vec::new();
-            let mut selected = None;
-            let mut remaining = active_index;
-            for (entry_id, count) in &entries {
-                navigation.push(
-                    json!({"entryId":entry_id,"runId":null,"startIndex":start_index,"count":count}),
-                );
-                if selected.is_none() && remaining < *count {
-                    selected =
-                        Some(json!({"entryId":entry_id,"runId":null,"occurrence":remaining}));
-                } else if selected.is_none() {
-                    remaining -= *count;
-                }
-                start_index += count;
-            }
-            json!({"complete":true,"snapshotSequence":sequence,"totalMatches":total_matches,"activeIndex":active_index,"navigation":navigation,"match":selected})
         }
         "orchestration.getOlderSettledThreads" => {
             crate::store::older_settled_threads(&store, sequence, params)
