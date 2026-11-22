@@ -6,7 +6,7 @@ use std::{collections::HashSet, sync::LazyLock};
 use unicode_normalization::UnicodeNormalization;
 
 // ECMAScript WhiteSpace plus LineTerminator excludes NEXT LINE and includes BOM.
-fn trim(s: &str) -> &str {
+pub(crate) fn trim(s: &str) -> &str {
     s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{0085}') || c == '\u{feff}')
 }
 

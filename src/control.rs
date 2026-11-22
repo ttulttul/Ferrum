@@ -333,7 +333,7 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
                 automatic_git_fetch: true,
                 ..Default::default()
             };
-            match dispatch::workspace(&plane.host.workspace, &settings, &method, &input).await {
+            match dispatch::mcp_workspace(&plane.host.workspace, &settings, &method, &input).await {
                 Some(result) => result,
                 None => Err(json!({
                     "_tag": "Unavailable",
@@ -790,7 +790,8 @@ impl ControlPlane {
             crate::provider_state::thread_provider_turn(
                 &self.settings.internal().map_err(std::io::Error::other)?,
                 &crate::model_manifest::BUNDLED,
-                store.threads.get(&run.thread_id),
+                &store,
+                &run.thread_id,
                 &self.oauth,
                 self.config
                     .workspace_mcp_endpoint

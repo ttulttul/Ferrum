@@ -14,13 +14,14 @@ import shlex
 import sys
 from tempfile import TemporaryDirectory
 from threading import Condition, Event, Thread
-from time import monotonic
+from time import monotonic, sleep
 from urllib.parse import urlencode
 
 from PIL import Image
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 
+from client_thread_parity import FIXTURES, THREAD, rpc, scenario_env, seed_turn
 from parity_harness import http, managed_server
 
 
@@ -231,6 +232,97 @@ def seed_reference_browser(root, reference_root, cache):
     target.symlink_to(playwright_headless_shell(cache).resolve(), target_is_directory=True)
 
 
+def tool_turn(name, server, fixture, log, dispatch, cases):
+    url, cookie = server
+    turn = json.loads((FIXTURES / "codex_turn.json").read_text())
+    started = next(i for i, step in enumerate(turn["steps"]) if step.get("send", {}).get("method") == "turn/started")
+    turn["steps"][started + 1:started + 1] = [{"mcp": {"tool": tool, "arguments": args}} for tool, args, _ in cases]
+    fixture.write_text(json.dumps(turn))
+    calls = Path(str(log) + ".mcp")
+    rpc(url, cookie, "orchestration.dispatchCommand", dispatch)
+    deadline = monotonic() + 90
+    while monotonic() < deadline:
+        lines = calls.read_text().splitlines() if calls.exists() else []
+        if len(lines) >= len(cases):
+            break
+        sleep(0.1)
+    if len(lines) != len(cases):
+        raise RuntimeError(f"{name}: fake CLI completed {len(lines)} of {len(cases)} preview calls")
+    for line, (tool, _, expected) in zip(lines, cases, strict=True):
+        answer = json.loads(line)["answer"]
+        if "error" in answer:
+            actual = answer["error"]["message"]
+            if actual == expected and answer["error"]["code"] == -32602:
+                continue
+            raise RuntimeError(f"{name} {tool}: unexpected RPC error {actual!r}")
+        result = answer["result"]
+        content = "".join(item.get("text", "") for item in result.get("content", []))
+        actual = content if result.get("isError") else json.loads(content)
+        if actual != expected or bool(result.get("isError")) != isinstance(expected, str):
+            raise RuntimeError(f"{name} {tool}: expected {expected!r}, got {str(actual)[:500]!r}")
+
+
+def automation(name, server, page_url, directory, fixture, log, scenario):
+    """Drive the thread's MCP tools using its provider credential, on actual Chromium tabs."""
+    url, cookie = server
+    seed = seed_turn(url, cookie, directory / f"{name}-checkouts", scenario)
+
+    def open_tab(thread):
+        return rpc(url, cookie, "preview.open", dict(threadId=thread, url=page_url, runtime="server"))["tabId"]
+
+    tab, human, foreign = open_tab(THREAD), open_tab(THREAD), open_tab("other-thread")
+    viewer_url = url.replace("http", "ws", 1) + "/api/preview-stream/ws?" + urlencode(dict(threadId=THREAD, tabId=human))
+    icon = {"_tag": "website", "pageUrl": page_url}
+    missing = f"Preview tab {foreign} was not found for evaluate. Omit tabId to use the current tab, or call preview_open."
+    held = "A human controls this browser tab. Wait until they release control."
+    cases = [
+        ("preview_evaluate", {"expression": " 1"}, "Invalid parameters for tool 'preview_evaluate': Expected a string with no leading or trailing whitespace\n  at [\"expression\"]"),
+        ("preview_evaluate", {"tabId": foreign, "expression": "1"}, missing),
+        ("preview_evaluate", {"tabId": human, "expression": "1"}, held),
+        ("preview_set_appearance", {"tabId": human, "colorScheme": "dark"}, held),
+        ("preview_set_appearance", {"tabId": tab, "colorScheme": "dark"}, {"tabId": tab, "colorScheme": "dark", "toolIcon": icon}),
+        ("preview_evaluate", {"expression": "[document.title,matchMedia('(prefers-color-scheme: dark)').matches]"},
+         {"value": ["Preview fixture", True], "toolIcon": icon}),
+        ("preview_evaluate", {"expression": "await Promise.resolve(17)"}, {"value": 17, "toolIcon": icon}),
+        ("preview_evaluate", {"expression": "[innerWidth, innerHeight, devicePixelRatio]"}, {"value": [1280, 800, 2], "toolIcon": icon}),
+        ("preview_evaluate", {"expression": "new Promise(() => {})", "awaitPromise": False}, {"value": {}, "toolIcon": icon}),
+        ("preview_evaluate", {"expression": "undefined"}, {"value": None, "toolIcon": icon}),
+        ("preview_evaluate", {"expression": "'界'.repeat(22000)"}, "Preview automation evaluate produced a result larger than 64000 bytes."),
+        ("preview_evaluate", {"expression": "const end = Date.now() + 25000; while (Date.now() < end) {}"},
+         "Preview automation evaluate timed out after 15000ms."),
+        ("preview_set_appearance", {"colorScheme": "system"}, {"tabId": tab, "colorScheme": "system", "toolIcon": icon}),
+        ("preview_evaluate", {"expression": "matchMedia('(prefers-color-scheme: dark)').matches"}, {"value": False, "toolIcon": icon}),
+    ]
+    # The reference starts Chromium during the upgrade on a busy runner.
+    with connect(viewer_url, additional_headers={"Cookie": cookie}, open_timeout=60,
+                 proxy=None, compression=None) as viewer:
+        while True:
+            event = viewer.recv(timeout=30)
+            if isinstance(event, bytes):
+                viewer.send('{"type":"ack"}')
+            elif json.loads(event).get("controller") == "you":
+                break
+        tool_turn(name, server, fixture, log, seed["dispatch"], cases)
+    for thread, target in ((THREAD, human), (THREAD, tab), ("other-thread", foreign)):
+        rpc(url, cookie, "preview.close", dict(threadId=thread, tabId=target))
+    print(f"PASS {name} Chromium MCP evaluation and appearance ({len(cases)} calls)")
+
+
+def disabled_automation(name, server, directory, fixture, log, scenario):
+    url, cookie = server
+    seed = seed_turn(url, cookie, directory / f"{name}-checkouts", scenario)
+    rpc(url, cookie, "server.updateSettings", {"patch": {"projectSettingsOverrides": {
+        "project:github": {"enableAgentBrowserAccess": False}}}})
+    denied = ('MCP credential does not grant the preview capability: browser preview tools are off for this thread. '
+              'Do not retry them. To check a page, use a headless browser from the shell, such as Playwright, or curl. '
+              'The user can turn on "Agent browser access" in Settings; it applies when the agent session next starts.')
+    tool_turn(name, server, fixture, log, seed["dispatch"], [
+        ("preview_evaluate", {"expression": "1"}, denied),
+        ("preview_set_appearance", {"colorScheme": "light"}, denied),
+    ])
+    print(f"PASS {name} project browser access refusals")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command", required=True)
@@ -251,13 +343,28 @@ def main():
         secret = secrets.token_urlsafe(32)
         signing_key = secrets.token_bytes(32)
         servers = {}
-        for name, cmd in (("original", args.original_command), ("rust", args.rust_command)):
+        scenario = {"name": "preview tools", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"}
+
+        def start(lifetime, name, cmd):
             root = Path(directory, name)
             (root / ".cache").mkdir(parents=True)
             (root / ".cache/ms-playwright").symlink_to(args.browser_cache.resolve(), target_is_directory=True)
-            if name == "original":
+            if name.startswith("original"):
                 seed_reference_browser(root, args.reference_root, args.browser_cache)
-            servers[name] = managed_server(stack, shlex.split(cmd), root, secret, signing_key)
+            env, _, log = scenario_env(Path(directory), name, root, scenario, {"codex"})
+            fixture = root / "preview-turn.json"
+            fixture.write_bytes((FIXTURES / "codex_turn.json").read_bytes())
+            env["FAKE_PROVIDER_SCENARIO"] = str(fixture)
+            server = managed_server(lifetime, shlex.split(cmd), root, secret, signing_key, env=env)
+            return server, fixture, log
+
+        for name, cmd in (("original", args.original_command), ("rust", args.rust_command)):
+            with ExitStack() as denied_stack:
+                label = f"{name}-disabled"
+                server, fixture, log = start(denied_stack, label, cmd)
+                disabled_automation(label, server, Path(directory), fixture, log, scenario)
+            servers[name], fixture, log = start(stack, name, cmd)
+            automation(name, servers[name], url + "#fixture", Path(directory), fixture, log, scenario)
         try:
             original = observe_with_retry("original", servers["original"], url, page)
         except FrameStall as stall:

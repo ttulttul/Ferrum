@@ -589,6 +589,19 @@ pub(crate) struct WorkspaceSettings {
     pub automatic_git_fetch: bool,
 }
 
+/// Only authenticated thread tool handlers can dispatch browser automation.
+pub(crate) async fn mcp_workspace(
+    workspace: &dyn Workspace,
+    host: &WorkspaceSettings,
+    method: &str,
+    input: &Value,
+) -> Option<Result<Value, Value>> {
+    if method == "preview.automation" {
+        return workspace.preview("automation", input).await;
+    }
+    self::workspace(workspace, host, method, input).await
+}
+
 /// Dispatch a host-backed unary RPC or obtain the first value of its stream.
 pub(crate) async fn workspace(
     workspace: &dyn Workspace,
@@ -640,7 +653,7 @@ pub(crate) async fn workspace(
             }
             Some(workspace.preview_profile(name, input).await)
         }
-        "preview" => {
+        "preview" if name != "automation" => {
             let reply = workspace.preview(name, input).await;
             if name == "close" && reply.as_ref().is_some_and(Result::is_ok) {
                 workspace

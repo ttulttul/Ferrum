@@ -85,6 +85,8 @@ def observations(url, cookie, root):
         call("tools/call", dict(name=name, arguments=arguments))
     # The thread tools for a client outside any thread, approved read-only.
     for name, arguments in [
+        ("preview_evaluate", {"expression": "1"}),
+        ("preview_set_appearance", {"colorScheme": "dark"}),
         ("t3_thread_configure", {}),
         ("t3_thread_configure", dict(threadId="thread-missing")),
         ("t3_queue", dict(action="list", threadId="thread-missing")),

@@ -524,7 +524,8 @@ impl crate::orchestration::CommandHost for AppState {
                         crate::provider_state::thread_provider_turn(
                             &settings,
                             &self.model_manifest.current(),
-                            store.threads.get(&run.thread_id),
+                            &store,
+                            &run.thread_id,
                             &self.oauth,
                             self.mcp_endpoint.get().map(String::as_str),
                         )
@@ -1650,7 +1651,9 @@ impl mcp_oauth::McpHost for AppState {
         let state = self.clone();
         Box::pin(async move {
             let settings = state.workspace_settings(&method).await;
-            match crate::dispatch::workspace(&*state.workspace, &settings, &method, &input).await {
+            match crate::dispatch::mcp_workspace(&*state.workspace, &settings, &method, &input)
+                .await
+            {
                 Some(result) => result,
                 None => Err(serde_json::json!({
                     "_tag": "Unavailable",

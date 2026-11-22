@@ -20,7 +20,7 @@ pub struct LocalWorkspace {
     listings: files::ListingIndexes,
     settings: std::sync::Arc<crate::settings::Settings>,
     pub(crate) terminals: TerminalService,
-    pub(crate) previews: PreviewService,
+    pub(crate) previews: std::sync::Arc<PreviewService>,
     pub(crate) devices: DeviceService,
     /// The provider instances' shared Codex app-servers.
     codex_servers: std::sync::Arc<crate::local_services::provider_turns::CodexServers>,
@@ -40,7 +40,7 @@ impl LocalWorkspace {
             vcs: VcsService::default(),
             listings: Default::default(),
             terminals,
-            previews,
+            previews: std::sync::Arc::new(previews),
             devices,
             codex_servers: Default::default(),
         }
@@ -253,6 +253,19 @@ impl Workspace for LocalWorkspace {
         method: &'a str,
         input: &'a Value,
     ) -> WorkspaceFuture<'a, Option<Reply>> {
+        if method == "automation" {
+            let previews = self.previews.clone();
+            let dir = self.data_dir.clone();
+            let input = input.clone();
+            // A disconnected MCP caller must not cancel the timer that stops its renderer script.
+            return async move {
+                let operation = tokio::spawn(async move { previews.automate(&input, &dir).await });
+                Some(operation.await.unwrap_or_else(|_| {
+                    Err(serde_json::json!({"message":"The browser session ended."}))
+                }))
+            }
+            .boxed();
+        }
         futures_util::future::ready(self.previews.call(method, input)).boxed()
     }
     fn preview_profile<'a>(

@@ -591,6 +591,15 @@ impl OAuth {
         self.threads
             .for_thread(thread_id, provider_instance_id, now_ms())
     }
+    pub(crate) fn provider_credential(
+        &self,
+        thread: &str,
+        instance: &str,
+        browser: bool,
+    ) -> std::io::Result<String> {
+        self.threads.issue(thread, instance, now_ms(), browser)
+    }
+
     /// A turn of `thread_id` started, so its credential stays live.
     pub fn touch_thread_credential(&self, thread_id: &str) {
         if let Err(error) = self.threads.touch(thread_id, now_ms()) {

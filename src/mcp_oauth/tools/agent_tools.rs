@@ -405,3 +405,52 @@ pub(super) async fn preview_close<S: McpHost>(
     workspace(host, "preview.close", json!({"threadId": id, "tabId": tab})).await?;
     Ok(json!({}))
 }
+
+pub(super) async fn preview_automation<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    operation: &str,
+    args: &Value,
+) -> Outcome {
+    let thread_id = thread_id(caller)?;
+    threads::writing_caller(&**host, caller).await?;
+    let scope = caller
+        .granted
+        .thread
+        .as_ref()
+        .ok_or_else(calling_thread_missing)?;
+    let credentials = &host.oauth().threads;
+    let (sequence, current) = credentials.preview_target(scope).ok_or_else(|| Refusal::Text(
+        r#"MCP credential does not grant the preview capability: browser preview tools are off for this thread. Do not retry them. To check a page, use a headless browser from the shell, such as Playwright, or curl. The user can turn on "Agent browser access" in Settings; it applies when the agent session next starts."#.into()
+    ))?;
+    let explicit = args["tabId"].as_str().map(crate::settings::schema::trim);
+    let input = json!({"threadId":thread_id, "tabId":explicit.or(current.as_deref()), "operation":operation, "arguments":args});
+    let result = host
+        .workspace_call("preview.automation".into(), input)
+        .await
+        .map_err(|error| {
+            Refusal::Text(
+                error["message"]
+                    .as_str()
+                    .unwrap_or("The browser workspace is unavailable.")
+                    .to_owned(),
+            )
+        })?;
+    let payload = if operation == "evaluate" {
+        &result["value"]
+    } else {
+        &result
+    };
+    match payload.get("tabId") {
+        Some(Value::Null) => credentials.remember_preview_tab(scope, sequence, None),
+        value => {
+            let result_id = value.and_then(Value::as_str).filter(|id| {
+                !crate::settings::schema::trim(id).is_empty() && id.encode_utf16().count() <= 128
+            });
+            if let Some(id) = result_id.or(explicit) {
+                credentials.remember_preview_tab(scope, sequence, Some(id.to_owned()));
+            }
+        }
+    }
+    Ok(result)
+}
