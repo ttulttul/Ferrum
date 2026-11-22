@@ -534,7 +534,19 @@ fn run_detached(program: &str, args: &[&str], timeout: Duration) -> Result<Strin
     };
     let bytes = match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(bytes) => bytes,
-        Err(_) => return Err(timed_out(&mut child)),
+        Err(_) => {
+            // The reader is scheduled independently from the child. Under
+            // load, a shell can have exited while its reader thread has not
+            // run yet. Do not turn that scheduling delay into a shell timeout.
+            if child.try_wait().ok().flatten().is_some() {
+                match receiver.recv_timeout(Duration::from_secs(1)) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Err(timed_out(&mut child)),
+                }
+            } else {
+                return Err(timed_out(&mut child));
+            }
+        }
     };
     let status = loop {
         match child.try_wait() {

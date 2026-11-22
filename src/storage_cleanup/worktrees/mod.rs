@@ -355,15 +355,14 @@ pub(super) fn clean(state: Arc<AppState>, settings: Value, now: i64) -> Vec<Valu
         deleted: vec![],
         projects: vec![],
     };
-    if let Ok(store) = state.control.store.try_read() {
-        snapshot.live = store.threads.values().map(|t| t.shell()).collect();
-        snapshot.projects = store.project_rows.values().cloned().collect();
-        for project in store.projects.values() {
-            if !snapshot.projects.iter().any(|row| row["id"] == project.id) {
-                snapshot
-                    .projects
-                    .push(json!({"id": project.id, "workspaceRoot": project.path}));
-            }
+    let store = state.control.store.blocking_read();
+    snapshot.live = store.threads.values().map(|t| t.shell()).collect();
+    snapshot.projects = store.project_rows.values().cloned().collect();
+    for project in store.projects.values() {
+        if !snapshot.projects.iter().any(|row| row["id"] == project.id) {
+            snapshot
+                .projects
+                .push(json!({"id": project.id, "workspaceRoot": project.path}));
         }
     }
     if let Ok(conn) = crate::statev2::open(&state.paths.state_dir) {
