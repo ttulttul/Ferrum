@@ -34,6 +34,8 @@ pub struct AppState {
     pub(crate) startup_recovery: crate::startup_trace::RecoverySummary,
     pub(crate) environment_id: String,
     pub oauth: mcp_oauth::OAuth,
+    /// Links from this environment to others.
+    pub(crate) peer_links: crate::peer_links::PeerLinks,
     pub(crate) connect: access_http::connect::Service,
     pub data_dir: PathBuf,
     pub paths: config::ServerPaths,
@@ -265,6 +267,7 @@ impl AppState {
             startup_recovery,
             environment_id: environment_http::identity(&dir)?,
             oauth,
+            peer_links: crate::peer_links::PeerLinks::new(&dir, &paths.secrets),
             connect,
             data_dir: dir.clone(),
             paths: paths.clone(),

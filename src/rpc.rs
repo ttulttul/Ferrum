@@ -955,7 +955,13 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         );
     }
     if method == "peerLinks.unlink" {
-        return Reply::Success(json!({"removed":false}));
+        let Some(environment_id) = params["environmentId"].as_str() else {
+            return Reply::defect("Missing key\n  at [\"environmentId\"]".into());
+        };
+        return match state.peer_links.unlink(environment_id) {
+            Ok(removed) => Reply::Success(json!({"removed":removed})),
+            Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e.to_json()})),
+        };
     }
     if method == "scheduledTasks.upsert" {
         return scheduled_task_upsert(state, params).await;
@@ -2234,7 +2240,14 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         );
     }
     if method == "peerLinks.list" {
-        return Reply::Success(json!({"links":[]}));
+        return match state.peer_links.list().await {
+            Ok(links) => Reply::Success(json!({"links":links.into_iter().map(|(link, status)| {
+                let mut row = link.to_json();
+                row["status"] = json!(status);
+                row
+            }).collect::<Vec<_>>()})),
+            Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e.to_json()})),
+        };
     }
     if method == "server.discoverSourceControl" {
         // As the reference: re-read the login shell first, so a tool installed
@@ -2361,18 +2374,20 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         );
     }
     if method == "peerLinks.link" {
-        if !matches!(
-            params["access"].as_str(),
-            Some("read-only" | "approval-required" | "auto-accept-edits" | "auto" | "full-access")
-        ) {
-            return Reply::defect("Expected \"read-only\" | \"approval-required\" | \"auto-accept-edits\" | \"auto\" | \"full-access\"\n  at [\"access\"]".into());
-        }
-        return Reply::Failure(
-            json!({"_tag":"Fail","error":{"_tag":"PeerLinkError","reason":"disabled","message":"Linked environments is off on this machine. Turn it on in Settings → Labs."}}),
-        );
-    }
-    if method == "peerLinks.unlink" {
-        return Reply::Success(json!({"removed":false}));
+        let input = match crate::peer_links::LinkInput::from_json(params) {
+            Ok(input) => input,
+            Err(path) => return Reply::defect(path),
+        };
+        let descriptor = crate::environment_http::descriptor_value(state);
+        let own = crate::peer_links::SelfDescriptor {
+            environment_id: state.environment_id.clone(),
+            label: descriptor["label"].as_str().unwrap_or("T3 Code").to_owned(),
+        };
+        let enabled = crate::mcp_oauth::McpHost::linked_environments_enabled(&**state);
+        return match state.peer_links.link(enabled, &own, &input).await {
+            Ok(link) => Reply::Success(link.to_json()),
+            Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e.to_json()})),
+        };
     }
     if method == "peerLinks.answerRequest" {
         let thread_id = params["threadId"].as_str().unwrap_or_default();
