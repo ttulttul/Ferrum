@@ -28,19 +28,46 @@ Based on `main` and the parity test suites:
 - **Split control/workspace architecture:** Out-of-process workspace execution via `t3-agentd` and an embeddable, `wasm32-unknown-unknown`-compatible control plane (`workers/`).
 - **Parity test suites:** Automated suites comparing HTTP, WebSocket RPC, client initial sync, live provider turns, settings, auth, MCP, git/GitHub, previews, and relay behavior directly against the pinned TypeScript reference.
 
-## Known gaps
+## What's still missing compared with the original
 
-- **Shared thread store:** Rust opens the TypeScript server's `statev2.sqlite` (creating it with the reference's exact schema when missing, and refusing a migration version it does not support) and writes every orchestration change there, so threads and projects created on either server show on the other. Rust can rename, archive, settle, pin or delete a thread the TypeScript server created, but cannot yet run or continue its turns, and restart recovery and the effect outbox are not shared yet. See [docs/shared-store.md](docs/shared-store.md).
-- **Live event ordering:** Rust derives live thread domain events from projection commits rather than emitting them in the reference server's exact order and grouping (one per streamed text delta, records grouped by kind).
-- **Provider status checks:** Claude Code, Codex, fx, Kiro, Grok, Pi and Cursor are checked (installed version, sign-in state, models). Other providers still show "not checked", Claude skills are always empty, and the latest-release version advisory is reported as unknown.
-- **Outgoing environment links are partial:** The server can link to another machine, list and forget its links, share them with the TypeScript server on the same home, and forward an MCP client's tool calls over a link. Agents in its own threads cannot yet ask the user to link a machine (`t3_environment_link`).
-- **Agent tools are partial:** A thread's Codex or Claude Code CLI is given T3's MCP server, acting as that thread, as the reference gives it. The server offers 11 of the reference's agent tools (threads, projects, environment and orchestration capabilities) and not the orchestration context that describes the rest.
-- **Live shell subscriptions:** `orchestration.subscribeShell` currently sends only the initial snapshot and does not push subsequent `project.updated` / `thread.updated` events until reconnect.
-- **Other client-visible RPC gaps:** Tracked as explicit expected failures in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json), including:
-  - uploaded attachment asset URLs returning 404;
-  - `projects.listEntries` including `.git` and gitignored files, and `projects.searchEntries` / `projects.searchContents` lacking fuzzy matching, regex support, and match highlight ranges;
-  - `orchestration.searchThreads` and `server.getStorageCleanupReport` decode mismatches;
-  - `vcs.removeWorktree` failing on newly created worktrees, missing `branchChanges.baseRef` in VCS status, and missing `changeType` in `review.getDiffPreview`.
+The Rust server can already run Codex and Claude Code conversations, manage projects, and share a data folder with the TypeScript original. That said, several features are still missing or behave differently.
+
+### Threads and history
+
+- **Continuing turns across a server switch (in progress):** Threads and projects created on either server show up on the other, and you can rename, archive, settle, pin, or delete them. Continuing a turn that the other server started—or recovering an interrupted turn after switching servers—is not finished yet. Older threads from an earlier Rust-only setup also only move into the shared database the first time they change.
+- **Live update order:** As an agent streams a reply, live updates arrive in a different order and grouping than on the TypeScript server. Most conversations still read normally, though some edge cases (like interrupting a turn while waiting for approval) can look slightly different.
+- **Live sidebar updates:** The sidebar list of projects and threads does not update automatically when something changes. You have to reconnect or reload the app to see new or updated items.
+- **Thread search:** Searching across all threads does not work yet, and searching inside a single thread cannot step through matches.
+
+### Agents and tools
+
+- **Few built-in T3 tools for agents:** An agent running on the Rust server can use only a small set of T3's built-in tools (for threads, projects, and basic environment info) and does not receive the instructions that describe the rest. Most built-in T3 actions—such as browser previews, scheduled tasks, and pull request helpers—are not available to agents yet.
+- **Remote workspace credentials:** When workspaces run in a separate remote process (`t3-agentd`), agents are not yet given credentials to call back into T3's built-in tools.
+
+### AI providers
+
+- **Missing provider status checks (in progress):** OpenCode, Antigravity, and Muse are not checked yet, so they still show as "not checked" in settings. (Claude Code, Codex, fx, Kiro, Grok, Pi, and Cursor are checked.)
+- **No update-available checks:** The server does not check online for newer versions of provider command-line tools, so settings always show the latest version as unknown and do not offer an update command.
+- **Claude skills and reset credits:** Installed Claude skills and plugins are not listed yet, and Claude reset credits are not shown.
+- **Background check timing:** Periodic provider checks always run on their timer instead of pausing when nobody is actively using the app.
+
+### Connecting machines
+
+- **Agent-started machine links (in progress):** Agents cannot yet ask you to link another machine from inside a conversation. Linking, listing, unlinking, and forwarding requests to already-linked machines do work.
+- **Connected-clients list:** Sessions started on the TypeScript server are not shown in the connected-clients list yet.
+
+### Other
+
+- **Uploaded attachments:** Download links for uploaded attachments return "not found", so attached files and images do not load in the composer or conversation history.
+- **File browsing and search:** Project file lists include `.git` and gitignored files. File and content search do not yet support fuzzy matching, regular expressions, or match highlighting.
+- **Git worktrees and diffs:** Removing a newly created worktree can fail, branch status does not compare against the upstream base branch yet, and the review diff preview is missing per-file change types.
+- **Storage cleanup report:** The storage cleanup report in settings fails to load.
+
+### Details for developers
+
+- **Shared database:** See [`docs/shared-store.md`](docs/shared-store.md) for the `statev2.sqlite` design and remaining migration/outbox work.
+- **Expected-failure lists:** Client-visible RPC and live-turn mismatches are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json) (including `orchestration.subscribeShell`, `orchestration.searchThreads`, `server.getStorageCleanupReport`, `vcs.removeWorktree`, `review.getDiffPreview`, and `projects.listEntries` / `searchEntries` / `searchContents`).
+- **Agent tools:** Rust currently exposes 11 of the reference's 79 MCP tools and does not inject the orchestration prompt context.
 
 ## Install and switching
 
