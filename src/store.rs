@@ -286,6 +286,9 @@ impl Event {
 pub(crate) struct CommandReceipt {
     pub(crate) command_id: String,
     pub(crate) thread_id: String,
+    /// The command's `type`, for the shared database's receipt row.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) command_type: String,
 }
 
 #[derive(Default)]
@@ -296,6 +299,10 @@ pub struct Store {
     /// reference already folded their settings into `settings.json` when it
     /// migrated, so `server.getSettings` does not fold them again.
     pub(crate) stored_project_ids: std::collections::HashSet<String>,
+    /// The sequence of the last commit that touched each thread and project,
+    /// to tell at start-up whether the shared database changed it since.
+    pub(crate) thread_sequences: HashMap<String, u64>,
+    pub(crate) project_sequences: HashMap<String, u64>,
     pub(crate) project_receipts: HashMap<String, (String, String)>,
     pub(crate) deleted_thread_ids: std::collections::HashSet<String>,
     pub(crate) command_receipts: HashMap<String, (String, u64)>,
@@ -316,6 +323,29 @@ impl Store {
     }
 
     pub(crate) fn apply_record(&mut self, record: &ServerEvent) {
+        match &record.event {
+            Event::ProjectCreated(project) => {
+                self.project_sequences.insert(project.id.clone(), record.id);
+            }
+            Event::ProjectCommitted {
+                project,
+                removed_threads,
+                ..
+            } => {
+                self.project_sequences.insert(project.id.clone(), record.id);
+                for id in removed_threads {
+                    self.thread_sequences.insert(id.clone(), record.id);
+                }
+            }
+            Event::ThreadDeleted { thread_id } | Event::RunOutput { thread_id, .. } => {
+                self.thread_sequences.insert(thread_id.clone(), record.id);
+            }
+            event => {
+                if let Some(id) = event.thread_id() {
+                    self.thread_sequences.insert(id.to_owned(), record.id);
+                }
+            }
+        }
         self.apply_at(&record.event, record.at);
         if let Some(receipt) = &record.receipt {
             self.command_receipts.insert(

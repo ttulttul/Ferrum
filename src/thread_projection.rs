@@ -429,14 +429,26 @@ impl Thread {
     }
 
     pub(crate) fn stored_row(&self) -> Value {
-        if self.row.is_object() {
+        if self.row.get("id").is_some() {
             return self.row.clone();
         }
+        // A thread logged without its row; a patch may since have set a few
+        // fields on it, which win over the defaults.
         let at = auth_service::iso((self.created_at as i64).saturating_mul(1000));
+        let mut row = self.default_row(&at);
+        if let (Some(row), Some(set)) = (row.as_object_mut(), self.row.as_object()) {
+            for (key, value) in set {
+                row.insert(key.clone(), value.clone());
+            }
+        }
+        row
+    }
+
+    fn default_row(&self, at: &str) -> Value {
         created(
             &json!({"createdBy":"user","creationSource":"web","threadId":self.id,"projectId":self.project_id,
             "title":self.title,"modelSelection":null,"runtimeMode":"full-access","interactionMode":"default","worktreePath":self.cwd}),
-            &at,
+            at,
         )
     }
 
@@ -461,6 +473,21 @@ impl Thread {
         if let Some(stored) = &self.stored {
             return stored_projection(&self.id, stored, wire);
         }
+        self.computed_projection(wire)
+    }
+
+    /// The projection as `statev2.sqlite` holds it: every record in full.
+    pub(crate) fn full_projection(&self) -> Value {
+        self.projection_with(false)
+    }
+
+    /// The projection this server's own state gives, in full, ignoring any
+    /// records read from `statev2.sqlite`.
+    pub(crate) fn computed_full_projection(&self) -> Value {
+        self.computed_projection(false)
+    }
+
+    fn computed_projection(&self, wire: bool) -> Value {
         let row = self.stored_row();
         let array = |key: &str| {
             row.get(key)
@@ -648,66 +675,11 @@ impl Thread {
         item
     }
 
+    /// The thread's `OrchestrationV2ThreadShell` row, derived from its
+    /// projection as the reference's `threadShellFromProjection` derives it,
+    /// so a thread lists the same on both servers.
     pub(crate) fn shell(&self) -> Value {
-        if self.stored.is_some() {
-            return crate::projection_shell::shell(&self.projection(), SHELL_FIELDS);
-        }
-        let mut row = self.stored_row();
-        for key in [
-            "latestRunId",
-            "latestRunRequestedAt",
-            "latestRunStartedAt",
-            "latestRunCompletedAt",
-            "activeRunId",
-            "activityRunStartedAt",
-            "activityRunStatus",
-            "lastError",
-            "lastErrorClass",
-            "lastErrorCode",
-            "usageLimitResetAt",
-            "pendingRuntimeRequest",
-            "latestVisibleMessage",
-            "latestUserMessageAt",
-            "latestUserAuthoredMessageAt",
-            "goal",
-            "unsettledAt",
-            "limitRecovery",
-            "pinnedAt",
-            "autoSettleDisabledAt",
-            "pinOrderKey",
-            "opens",
-            "titleRegeneration",
-            "lastTitleRegeneration",
-        ] {
-            row.as_object_mut()
-                .unwrap()
-                .entry(key)
-                .or_insert(Value::Null);
-        }
-        for key in [
-            "latestRunStopRequested",
-            "latestRunBackgroundWake",
-            "blockedOnThreadWait",
-            "hasActionableProposedPlan",
-        ] {
-            row[key] = false.into();
-        }
-        for key in ["pendingBackgroundTasks", "providerInstanceHistory"] {
-            row[key] = json!([]);
-        }
-        row["status"] = json!(self.status);
-        if let Some(pending) = self.pending_runtime_request() {
-            row["pendingRuntimeRequest"] = pending;
-        }
-        row["pendingGuestMessageCount"] = json!(row["guestShare"]["messages"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|m| m["status"] == "pending")
-            .count());
-        row["itemCount"] = json!(self.messages.len());
-        row["visibleItemCount"] = row["itemCount"].clone();
-        ordered(SHELL_FIELDS, &row)
+        crate::projection_shell::shell(&self.projection(), SHELL_FIELDS)
     }
 }
 
@@ -899,6 +871,9 @@ pub(crate) fn linked(store: &Store, input: &Value, issue: bool) -> Value {
 /// local visible row, as Rust's own projections are.
 fn stored_projection(thread_id: &str, stored: &Value, wire: bool) -> Value {
     let mut projection = stored.clone();
+    // The thread's fields in the contract's order, as the reference encodes
+    // it; a change made here adds its fields at the end of the stored record.
+    projection["thread"] = ordered(APP_FIELDS, &stored["thread"]);
     if wire {
         if let Some(items) = projection["turnItems"].as_array_mut() {
             for item in items.iter_mut() {
@@ -914,7 +889,8 @@ fn stored_projection(thread_id: &str, stored: &Value, wire: bool) -> Value {
                 "sourceItemId":item["id"],"item":item})
         })
         .collect::<Vec<_>>();
-    let updated_at = projection["updatedAt"].clone();
+    // As the reference reads it: the thread's own `updatedAt`.
+    let updated_at = projection["thread"]["updatedAt"].clone();
     if let Some(object) = projection.as_object_mut() {
         // The reference's field order (OrchestrationV2ThreadProjection).
         object.remove("updatedAt");

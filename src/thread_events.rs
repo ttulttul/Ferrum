@@ -174,6 +174,23 @@ pub fn diff(
     after: &Value,
     occurred_at: &str,
 ) -> Option<Vec<Value>> {
+    diff_with(thread_id, before, after, occurred_at, false)
+}
+
+/// [`diff`]'s events for every record that is new or changed, also when
+/// records went away (which the shared database records by deleting their
+/// rows, not with an event).
+pub fn diff_all(thread_id: &str, before: &Value, after: &Value, occurred_at: &str) -> Vec<Value> {
+    diff_with(thread_id, before, after, occurred_at, true).unwrap_or_default()
+}
+
+fn diff_with(
+    thread_id: &str,
+    before: &Value,
+    after: &Value,
+    occurred_at: &str,
+    allow_removals: bool,
+) -> Option<Vec<Value>> {
     let mut out = Vec::new();
     if before["thread"] != after["thread"] && after["thread"].is_object() {
         out.push(event(
@@ -186,7 +203,7 @@ pub fn diff(
     let changed = |collection: &str| -> Option<Vec<(bool, Value)>> {
         let old = by_id(before, collection);
         let new = by_id(after, collection);
-        if old.keys().any(|id| !new.contains_key(id)) {
+        if !allow_removals && old.keys().any(|id| !new.contains_key(id)) {
             return None;
         }
         Some(

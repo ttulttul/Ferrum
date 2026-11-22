@@ -6,8 +6,9 @@ they share its orchestration database, `userdata/statev2.sqlite`
 Checks:
 - a database the Rust server creates is the reference's schema at the pinned
   migration head, and the reference opens it without migrating;
-- projects and threads created on the reference are seen identically by the
-  Rust server (shell, thread projection);
+- projects and threads created on either server are seen identically by the
+  other (shell, thread projection), and so is a thread the Rust server
+  renamed after reading it from the reference;
 - a database at a migration head the Rust server does not support is refused,
   clearly and without being changed.
 
@@ -33,6 +34,8 @@ from parity_harness import PROVIDER_CLIS, encode, free_port, http, managed_serve
 
 PROJECT = "project:shared-store"
 THREAD = "thread:shared-store-reference"
+RUST_PROJECT = "project:shared-store-rust"
+RUST_THREAD = "thread:shared-store-rust"
 HEADERS = {"x-t3-orchestration-protocol": "2"}
 
 
@@ -59,31 +62,31 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def seed(url, cookie, root):
+def seed(url, cookie, root, project=PROJECT, thread=THREAD, made_on="the reference"):
     """A project and a thread with one message, created as the web client does."""
-    workspace = root / "workspace"
+    workspace = root / f"workspace-{project.split(':')[1]}"
     workspace.mkdir(parents=True, exist_ok=True)
     status, _, body = http(url, "POST", "/api/projects/mutate", encode({
-        "type": "project.create", "commandId": "create-project", "projectId": PROJECT,
-        "title": "Shared store", "workspaceRoot": str(workspace)}),
+        "type": "project.create", "commandId": f"create-{project}", "projectId": project,
+        "title": f"Made on {made_on}", "workspaceRoot": str(workspace)}),
         {"Cookie": cookie, "Content-Type": "application/json"})
     assert status == 200, (status, body[:400])
     rpc(url, cookie, "orchestration.dispatchCommand", {
-        "type": "thread.create", "commandId": "create-thread", "threadId": THREAD, "projectId": PROJECT,
-        "title": "Made on the reference", "modelSelection": {"instanceId": "codex", "model": "fixture"},
+        "type": "thread.create", "commandId": f"create-{thread}", "threadId": thread, "projectId": project,
+        "title": f"Made on {made_on}", "modelSelection": {"instanceId": "codex", "model": "fixture"},
         "runtimeMode": "full-access", "interactionMode": "default", "branch": None, "worktreePath": None,
         "createdBy": "user", "creationSource": "web"})
     rpc(url, cookie, "orchestration.dispatchCommand", {
-        "type": "message.dispatch", "commandId": "send-message", "threadId": THREAD,
-        "messageId": "message:shared-store", "text": "Hello from the shared store fixture", "attachments": [],
+        "type": "message.dispatch", "commandId": f"send-{thread}", "threadId": thread,
+        "messageId": f"message:{thread.split(':')[1]}", "text": "Hello from the shared store fixture", "attachments": [],
         "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
 
 
-def settle(url, cookie, seconds=60):
-    """Waits until the seeded thread has no run in flight (no provider CLI is installed)."""
+def settle(url, cookie, thread=THREAD, seconds=60):
+    """Waits until a seeded thread has no run in flight (no provider CLI is installed)."""
     deadline = time.monotonic() + seconds
     while True:
-        projection = rpc(url, cookie, "orchestration.getThreadProjection", {"threadId": THREAD})
+        projection = rpc(url, cookie, "orchestration.getThreadProjection", {"threadId": thread})
         runs = projection.get("runs", [])
         if runs and not any(run["status"] in ("preparing", "starting", "running", "waiting") for run in runs):
             return
@@ -91,8 +94,8 @@ def settle(url, cookie, seconds=60):
         time.sleep(0.5)
 
 
-def views(url, cookie):
-    """What a client sees of the seeded state: the shell's projects and threads, and the thread."""
+def views(url, cookie, project=PROJECT, thread=THREAD):
+    """What a client sees of a seeded project and thread: shell rows and the thread's projection."""
     def get(path):
         status, _, body = http(url, "GET", path, headers={"Cookie": cookie, **HEADERS})
         assert status == 200, (path, status, body[:400])
@@ -100,9 +103,9 @@ def views(url, cookie):
 
     shell = get("/api/orchestration/shell")
     return {
-        "projects": [project for project in shell.get("projects", []) if project.get("id") == PROJECT],
-        "threads": [thread for thread in shell.get("threads", []) if thread.get("id") == THREAD],
-        "projection": rpc(url, cookie, "orchestration.getThreadProjection", {"threadId": THREAD}),
+        "projects": [row for row in shell.get("projects", []) if row.get("id") == project],
+        "threads": [row for row in shell.get("threads", []) if row.get("id") == thread],
+        "projection": rpc(url, cookie, "orchestration.getThreadProjection", {"threadId": thread}),
     }
 
 
@@ -113,6 +116,20 @@ def comparable(view):
         # Each server derives it from the workspace's Git remote on read.
         project.pop("repositoryIdentity", None)
     return view
+
+
+def differences(left, right, path="$"):
+    """Where two JSON values differ, as `path: left != right` lines."""
+    if isinstance(left, dict) and isinstance(right, dict):
+        if list(left) != list(right) and set(left) == set(right):
+            return [f"{path}: key order {list(left)} != {list(right)}"]
+        out = []
+        for key in dict.fromkeys([*left, *right]):
+            out += differences(left.get(key, "<absent>"), right.get(key, "<absent>"), f"{path}.{key}")
+        return out
+    if isinstance(left, list) and isinstance(right, list) and len(left) == len(right):
+        return [line for index, (a, b) in enumerate(zip(left, right)) for line in differences(a, b, f"{path}[{index}]")]
+    return [] if left == right else [f"{path}: {json.dumps(left)[:300]} != {json.dumps(right)[:300]}"]
 
 
 def refused(command, home, credentials, root):
@@ -136,8 +153,13 @@ def main():
     credentials = secrets.token_urlsafe(32), secrets.token_bytes(32)
     checks = []
 
-    def same(name, expected, actual):
-        assert expected == actual, f"{name}\n reference {json.dumps(expected)[:4000]}\n rust      {json.dumps(actual)[:4000]}"
+    def same(name, expected, actual, labels=("reference", "rust")):
+        if expected != actual:
+            print(f"{name}: first differences ({labels[0]} vs {labels[1]}):")
+            for line in differences(expected, actual)[:12]:
+                print("  " + line)
+        assert expected == actual, (f"{name}\n {labels[0]:<9} {json.dumps(expected)[:4000]}"
+                                    f"\n {labels[1]:<9} {json.dumps(actual)[:4000]}")
         checks.append(name)
 
     with TemporaryDirectory() as tmp:
@@ -172,7 +194,29 @@ def main():
             same("the reference still reads the home after the Rust server", comparable(reference_view),
                  comparable(views(url, cookie)))
 
-        # 3. Migration heads the Rust server does not support.
+        # 3. A project and a thread made on the Rust server, and a change it
+        # makes to the reference's thread, read back by the reference.
+        with running(rust, home, credentials) as (url, cookie):
+            seed(url, cookie, root, RUST_PROJECT, RUST_THREAD, "the Rust server")
+            settle(url, cookie, RUST_THREAD)
+            rpc(url, cookie, "orchestration.dispatchCommand", {
+                "type": "thread.metadata.update", "commandId": "rename-reference-thread", "threadId": THREAD,
+                "title": "Renamed on the Rust server"})
+            rust_made = views(url, cookie, RUST_PROJECT, RUST_THREAD)
+            rust_renamed = views(url, cookie)
+        assert rust_made["threads"], "the Rust server's shell lists its thread"
+        assert rust_renamed["projection"]["thread"]["title"] == "Renamed on the Rust server", rust_renamed["projection"]["thread"]
+        with running(reference, home, credentials) as (url, cookie):
+            reference_made = views(url, cookie, RUST_PROJECT, RUST_THREAD)
+            reference_renamed = views(url, cookie)
+        same("project made on the Rust server", comparable(rust_made)["projects"], comparable(reference_made)["projects"], ("rust", "reference"))
+        same("thread shell made on the Rust server", rust_made["threads"], reference_made["threads"], ("rust", "reference"))
+        same("thread projection made on the Rust server", rust_made["projection"], reference_made["projection"], ("rust", "reference"))
+        same("rename made on the Rust server", comparable(rust_renamed), comparable(reference_renamed), ("rust", "reference"))
+        same("the reference opens the database the Rust server wrote without migrating",
+             reference_schema, schema(database(home)))
+
+        # 4. Migration heads the Rust server does not support.
         for name, statement, expected in [
             ("newer", "INSERT INTO effect_sql_migrations (migration_id, name) VALUES (99, 'FixtureFuture')", "newer"),
             ("older", "DELETE FROM effect_sql_migrations WHERE migration_id = (SELECT MAX(migration_id) FROM effect_sql_migrations)", "older"),

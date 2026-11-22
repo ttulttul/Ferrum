@@ -136,31 +136,6 @@ impl Thread {
         }
     }
 
-    /// The reference's pendingRuntimeRequestSummary: the newest pending
-    /// approval, or else the newest pending question.
-    pub(crate) fn pending_runtime_request(&self) -> Option<Value> {
-        let requests = match &self.stored {
-            Some(stored) => stored["runtimeRequests"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default(),
-            None => self.provider_records().runtime_requests,
-        };
-        requests
-            .iter()
-            .filter(|request| request["status"] == "pending")
-            .min_by(|a, b| {
-                let question = |r: &Value| r["kind"] == "user_input";
-                question(a)
-                    .cmp(&question(b))
-                    .then_with(|| b["createdAt"].as_str().cmp(&a["createdAt"].as_str()))
-            })
-            .map(|request| {
-                json!({"id": request["id"], "kind": request["kind"], "createdAt": request["createdAt"],
-                    "blocking": request["responseCapability"]["type"] != "message"})
-            })
-    }
-
     /// The projection id of a request of `run`.
     pub(crate) fn request_id(&self, ids: &RunIds, request: &RequestRecord) -> String {
         format!(
@@ -458,9 +433,19 @@ impl Thread {
             "reason": "initial",
             "status": status,
             "startedAt": started_value,
-            "completedAt": completed,
-            "nativeThreadId": self.provider.thread.as_ref().and_then(|t| t.native_id.clone())
+            "completedAt": completed
         }));
+        // `nativeThreadId` is optional in the contract: absent, never null.
+        if let Some(native) = self
+            .provider
+            .thread
+            .as_ref()
+            .and_then(|t| t.native_id.clone())
+        {
+            if let Some(attempt) = out.attempts.last_mut() {
+                attempt["nativeThreadId"] = json!(native);
+            }
+        }
         out.nodes.push(json!({
             "id": ids.root_node,
             "threadId": self.id,
@@ -1181,7 +1166,7 @@ mod tests {
         );
         assert_eq!(pending[0]["responseCapability"]["type"], "live");
         // An approval comes before a question in the shell's summary.
-        assert_eq!(live.pending_runtime_request().unwrap()["kind"], "command");
+        assert_eq!(live.shell()["pendingRuntimeRequest"]["kind"], "command");
         let items = live.provider_records().items;
         let approval = items
             .iter()
@@ -1222,9 +1207,6 @@ mod tests {
             .find(|(_, item)| item["type"] == "approval_request")
             .unwrap();
         assert_eq!(approval.1["status"], "cancelled");
-        assert_eq!(
-            live.pending_runtime_request().unwrap()["kind"],
-            "user_input"
-        );
+        assert_eq!(live.shell()["pendingRuntimeRequest"]["kind"], "user_input");
     }
 }
