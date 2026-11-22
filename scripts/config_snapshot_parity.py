@@ -139,9 +139,8 @@ def main():
         # list models from the bundled copy, which is the same file.
         clients=[socket(stack,*s,True) for s in servers]
         # The reference builds a provider row's models from the catalog as of that row's last
-        # check: its startup check can finish before the manifest fetch it races, leaving a
-        # disabled instance on the bundled catalog until the next check. Refresh both servers
-        # once both have the fetched manifest, so each row reflects the manifest it now holds.
+        # check, which can race its start-up manifest fetch. The fetch is refused here, but
+        # refresh both servers anyway so each row reflects the manifest it now holds.
         for ws in clients:
             frame(ws,"refresh-providers","server.refreshProviders",{})
         streams=[socket(stack,*s,True) for s in servers]
