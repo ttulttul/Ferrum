@@ -1,21 +1,86 @@
 # t3code-rust
 
-A Rust implementation of the headless T3 Code environment server and standalone relay. Compatibility work targets [upstream commit 052ca497](https://github.com/pingdotgg/t3code/tree/052ca497cf1103b001327bcd964188a71dfec213). The pinned source declares 235 WebSocket RPC methods and 86 typed HTTP operations, including 30 relay operations. Its dispatch RPC accepts 58 command types.
+> [!WARNING]
+> **Alpha-quality software under heavy development.** Do **not** use this for anything important. Expect breaking changes, incomplete features, and data loss.
 
-## Run
+**No affiliation:** `t3code-rust` is an unofficial, independent Rust port of the headless [T3 Code](https://github.com/pingdotgg/t3code) server (`t3 serve`) and standalone relay. This project has **no affiliation with T3 Code or T3 Tools Inc., and is not endorsed by them in any way**. T3 Code is a product of T3 Tools Inc.
+
+---
+
+## Overview
+
+`t3code-rust` reimplements the TypeScript T3 Code environment server and standalone relay in Rust. Compatibility work targets [upstream commit `052ca497`](https://github.com/pingdotgg/t3code/tree/052ca497cf1103b001327bcd964188a71dfec213), which declares 235 WebSocket RPC methods, 86 typed HTTP operations (including 30 relay operations), and 58 orchestration dispatch command types.
+
+## What works now
+
+Based on `main` and the parity test suites:
+
+- **Codex and Claude Code agent turns:** Launching Codex and Claude Code sessions, streaming responses, tool calls, approvals (allow, allow for session, decline, `approval-required`, `auto-accept-edits`), and user-input / question requests.
+- **Checkpoints, interrupts, and token usage:** Reference-compatible checkpoint naming, turn interrupts (including stopping spawned child processes), token usage reporting, model reporting, and usage-limit reset times.
+- **Restart recovery:** Resuming and continuing interrupted turns, retries, rewinds, and background work after a server restart.
+- **T3 Connect relay tunnel:** Provisioning, running, and releasing the T3 Connect managed tunnel, plus handing off an active tunnel cleanly across Rust/TypeScript switches.
+- **Environment links (incoming):** Accepting environment links and pairing tokens issued by the TypeScript server on the same home directory, plus pairing-link administration.
+- **MCP server:** Serving MCP sign-in and thread/project tools over `/mcp`.
+- **Login-shell `PATH` discovery:** Finding provider CLIs on the login shell's `PATH` and listing Codex models from its CLI.
+- **Configuration, auth, and desktop adoption:** Shared `userdata/` layout (`settings.json`, secrets, managed policy, `server-owner.sqlite` exclusive lock, `server-runtime.json`), browser session cookies, WebSocket tickets with DPoP checks, CORS, and desktop SSH launcher adoption.
+- **Git, GitHub, and workspace operations:** File operations, terminals (PTY), git workflows, GitHub/Linear provider RPCs, and Chromium preview support.
+- **Split control/workspace architecture:** Out-of-process workspace execution via `t3-agentd` and an embeddable, `wasm32-unknown-unknown`-compatible control plane (`workers/`).
+- **Parity test suites:** Automated suites comparing HTTP, WebSocket RPC, client initial sync, live provider turns, settings, auth, MCP, git/GitHub, previews, and relay behavior directly against the pinned TypeScript reference.
+
+## Known gaps
+
+- **Separate thread store:** Rust stores its orchestration event log in `events.jsonl` and does **not** read existing threads from the TypeScript server's `statev2.sqlite`.
+- **Live event ordering:** Rust derives live thread domain events from projection commits rather than emitting them in the reference server's exact order and grouping (one per streamed text delta, records grouped by kind).
+- **Provider status checks (in progress):** Provider CLI status probing (installed version, auth state, model catalog) is currently in progress in [PR #85](https://github.com/ttulttul/t3code-rust/pull/85) and only targets Claude Code and Codex.
+- **No outgoing environment links:** The server can accept links issued by the TypeScript server, but cannot initiate outgoing environment links to other machines.
+- **Live shell subscriptions:** `orchestration.subscribeShell` currently sends only the initial snapshot and does not push subsequent `project.updated` / `thread.updated` events until reconnect.
+- **Other client-visible RPC gaps:** Tracked as explicit expected failures in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json), including:
+  - uploaded attachment asset URLs returning 404;
+  - `projects.listEntries` including `.git` and gitignored files, and `projects.searchEntries` / `projects.searchContents` lacking fuzzy matching, regex support, and match highlight ranges;
+  - `orchestration.searchThreads` and `server.getStorageCleanupReport` decode mismatches;
+  - `vcs.removeWorktree` failing on newly created worktrees, missing `branchChanges.baseRef` in VCS status, and missing `changeType` in `review.getDiffPreview`.
+
+## Install and switching
+
+From the repository root, use `./install` to temporarily replace a running standalone TypeScript server with the Rust build and restore it later:
+
+```bash
+./install --status     # Show the discovered server and switch state
+./install --rust       # Build and start the Rust server in place
+./install --original   # Stop Rust and restore the TypeScript server
+```
+
+How `./install --rust` works:
+- Discovers the live server via `server-runtime.json`, verifies `GET /` answers 2xx, and saves the original command, environment, working directory, and T3 home under `${XDG_STATE_HOME:-~/.local/state}/t3code-rust-switch`.
+- Installs Rust via `rustup` if `cargo` is missing, builds a locked release binary, and starts `t3code-server` on the same host, port, and data directory.
+- On Linux, stops, disables, and runtime-masks a discovered user `systemd` service while Rust is running; `./install --original` unmasks and restores it.
+- Automatically restores the TypeScript server if the Rust server fails to start.
+- Uses the reference update-restart marker (`runtime/desktop-update-restart`) on each switch so the T3 Connect managed tunnel is handed over immediately instead of reprovisioning.
+- Logs at `info` by default (override with `RUST_LOG`) to `rust-server.log` in the switch state directory.
+
+Notes and safety checks:
+- Supports Linux and macOS.
+- Run `./install --status` first on an unfamiliar machine, and quit the T3 desktop app before switching its server.
+- Set `T3CODE_HOME` before running `./install` if your server uses a custom T3 home.
+- Refuses to act if it finds multiple live servers, a stale or incomplete runtime record, an unidentifiable background service, a desktop-managed server, or a missing original binary/working directory.
+
+## Build and run from source
 
 ```bash
 cargo build --locked
 target/debug/t3code-server --listen 127.0.0.1:3773 --data-dir .t3
 ```
 
-An environment launcher can pass the desktop bootstrap envelope on an inherited file descriptor with `--bootstrap-fd`. It contains the bind address, port, T3 home directory, and desktop bootstrap credential. Exchange the credential at `POST /api/auth/browser-session` and send the resulting cookie to authenticated HTTP operations. For a separate standalone process, set `T3CODE_BOOTSTRAP_CREDENTIAL` to a fresh high-entropy credential before launching.
+### Bootstrap and configuration
 
-The Rust binary follows the TypeScript server's configuration layout. `T3CODE_HOME` and `--base-dir` select a base directory, with mutable files under `userdata`. This includes `settings.json`, `keybindings.json`, `themes`, `attachments`, `browser-artifacts`, `logs`, `secrets`, `environment-id`, `anonymous-id`, and `server-runtime.json`. `T3CODE_HOST`, `T3CODE_PORT`, `T3CODE_MODE`, `T3CODE_NO_BROWSER`, `T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD`, `T3CODE_LOG_WS_EVENTS`, `T3CODE_DEV_ALLOWED_ORIGINS`, `T3CODE_TAILSCALE_SERVE`, and `T3CODE_TAILSCALE_SERVE_PORT` are loaded with the same environment names. `server.getSettings` reads the shared settings file and `server.updateSettings` persists sparse settings atomically through symlinks. Both RPCs return normalized settings with credentials redacted. Clients advertising `settingsSecretReferences` receive supported secret references. Legacy provider and project settings migrate from the shared home and SQLite state. Machine policy supplies defaults, locks, and provider and client restrictions.
+- **Desktop bootstrap:** An environment launcher can pass the desktop bootstrap envelope on an inherited file descriptor with `--bootstrap-fd` (bind address, port, T3 home, and bootstrap credential). Exchange the credential at `POST /api/auth/browser-session` and send the resulting cookie to authenticated HTTP endpoints. For a standalone process, set `T3CODE_BOOTSTRAP_CREDENTIAL` to a high-entropy secret.
+- **Directory layout and environment variables:** `T3CODE_HOME` and `--base-dir` select the base directory, with mutable files under `userdata/` (`settings.json`, `keybindings.json`, `themes`, `attachments`, `browser-artifacts`, `logs`, `secrets`, `environment-id`, `anonymous-id`, `server-runtime.json`). Standard variables (`T3CODE_HOST`, `T3CODE_PORT`, `T3CODE_MODE`, `T3CODE_NO_BROWSER`, `T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD`, `T3CODE_LOG_WS_EVENTS`, `T3CODE_DEV_ALLOWED_ORIGINS`, `T3CODE_TAILSCALE_SERVE`, `T3CODE_TAILSCALE_SERVE_PORT`, `T3CODE_STATIC_DIR`) match the TypeScript server.
+- **Exclusive ownership:** At startup, the server acquires an exclusive SQLite lock on `userdata/server-owner.sqlite` (waiting up to 250 ms) and exits with status `78` if another Rust or TypeScript server already owns the home directory. Once listening, it atomically writes `userdata/server-runtime.json` and removes it on `SIGINT`/`SIGTERM`.
+- **Static client:** `GET /` serves the built web client from `--static-dir` / `T3CODE_STATIC_DIR` when set, or a placeholder page otherwise.
 
-Like the TypeScript server, the Rust server owns its state directory exclusively. At startup, before opening any database, it holds an exclusive SQLite transaction on `userdata/server-owner.sqlite` for the life of the process. Taking the lock waits up to 250 ms for a holder to let go, as the TypeScript server does. A second Rust or TypeScript server on the same T3 home therefore refuses to start, and the Rust server exits with status 78 when another server already owns it. It also refuses when `server-runtime.json` names a live pre-lock server (a record without an `ownerId` whose process started before the record was written), and it logs an error if the lock file is later deleted or replaced. Once listening it atomically publishes `userdata/server-runtime.json` in the TypeScript shape. That record holds the real bound port, the configured host when one was given, a loopback `origin` for an unset or wildcard host, and the loaded managed policy (`null` when none applies). The desktop SSH launcher needs this before it adopts a running server instead of starting another. On SIGINT or SIGTERM the record is removed if its `ownerId` is still this process's. `GET /` serves the built web client from `--static-dir` / `T3CODE_STATIC_DIR` when one is set, and otherwise answers 200 with a placeholder page.
+### WebSocket RPC
 
-Connect to `/ws?orchestrationProtocol=2` with a session cookie or a WebSocket ticket. The client sends Effect RPC messages as JSON text frames. A request id is a string or a number, and replies, `Ack` and `Interrupt` carry it back unchanged; the 0.1.10 clients number their requests from `0`. With `frameParts` in the socket URL, text frames over 48 KiB go out as parts the client joins, as the reference server sends them. For example, the following request obtains the server probe response.
+Connect to `/ws?orchestrationProtocol=2` with a session cookie or WebSocket ticket. Clients send Effect RPC messages as JSON text frames (string or numeric request IDs; add `frameParts` to the URL for >48 KiB frame chunking):
 
 ```json
 {"_tag":"Request","id":"1","tag":"server.probe","payload":{},"headers":[]}
@@ -25,41 +90,40 @@ Connect to `/ws?orchestrationProtocol=2` with a session cookie or a WebSocket ti
 {"_tag":"Exit","requestId":"1","exit":{"_tag":"Success","value":{}}}
 ```
 
-Workspace operations (files, git, terminals, provider turns, previews and devices) can also run in a separate `t3-agentd` process that the server reaches over a WebSocket, so the server core can run where it has no local filesystem or processes. See [`docs/agentd.md`](docs/agentd.md).
+### Standalone relay
 
-## Evaluate the Rust server in place
-
-From this repository's root, use the switcher to replace a running standalone TypeScript server and restore it later.
+Run the relay separately with `--relay`:
 
 ```bash
-./install --status
-./install --rust
-./install --original
+target/debug/t3code-server --relay --listen 127.0.0.1:3774 --data-dir .t3
 ```
 
-`./install --rust` finds the live server through its `server-runtime.json`, verifies that `GET /` answers 2xx, captures the original command, environment, working directory, and T3 home in a private state directory, installs Rust with rustup when `cargo` is unavailable, builds a locked release binary, and starts the Rust server on the same host, port, and data directory, then confirms that `server-runtime.json` names the Rust process with a loopback origin. On Linux, a discovered user-systemd service is stopped, disabled, and runtime-masked for the duration of the Rust run. `./install --original` stops Rust, removes the mask, restores the service's enable state, and starts the original TypeScript service. A failed Rust start automatically restores the TypeScript process or service. Each switch stops the outgoing server with the reference's update-restart marker (`runtime/desktop-update-restart`), so it keeps its T3 Connect managed tunnel and the incoming server starts that confirmed tunnel at once rather than provisioning a new one, which takes tens of seconds to become routable. The Rust server logs at `info` unless `RUST_LOG` says otherwise; its output goes to `rust-server.log` in the state directory.
+Configure `RELAY_ISSUER` (canonical public URL), `CLERK_JWT_KEY` (RS256 public PEM), `CLERK_ISSUER`, `CLERK_JWT_AUDIENCE`, `CLOUD_MINT_PRIVATE_KEY` (Ed25519 PKCS#8 PEM), and `CLOUD_MINT_PUBLIC_KEY` (SPKI PEM). Relay links, mobile registrations, and replay protection persist in SQLite.
 
-The switcher refuses to act when it finds more than one live server, a stale or incomplete runtime record, an unidentifiable background service, a desktop-managed server, a process that cannot be stopped cleanly, or a missing original executable or working directory. It supports Linux and macOS. It does not modify the repository with credentials. Saved process state lives under `${XDG_STATE_HOME:-~/.local/state}/t3code-rust-switch` and is removed after a successful restore.
+## Testing and parity suites
 
-Set `T3CODE_HOME` before running the command when the server uses a custom T3 home. Run `./install --status` first when evaluating an unfamiliar machine. Quit the T3 desktop app before switching its server. If the server is supervised by a service manager the installer must be able to identify and control that service as the current user.
+Run the Rust unit and integration tests:
 
-Launch the relay separately with `target/debug/t3code-server --relay --listen 127.0.0.1:3774 --data-dir .t3`. Set `RELAY_ISSUER` to its canonical public URL. Local RS256 Clerk session JWT verification uses `CLERK_JWT_KEY` (public PEM), `CLERK_ISSUER`, and `CLERK_JWT_AUDIENCE`. Relay signing uses `CLOUD_MINT_PRIVATE_KEY` (Ed25519 PKCS#8 PEM) and `CLOUD_MINT_PUBLIC_KEY` (SPKI PEM). Relay links, mobile registrations and replay protection persist in SQLite.
+```bash
+cargo test --locked
+```
 
-## Compare against upstream
+### Comparing against the TypeScript reference
 
-Use Git, the GitHub CLI, Node 26.13.1, pnpm 12.14.0, Python with `websockets` 16 and `cryptography`, and the Rust toolchain pinned in this repo.
+Prerequisites: Git, GitHub CLI (`gh`), Node 26.13.1, pnpm 12.14.0, Python 3 with `websockets` 16 and `cryptography`, and the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ```bash
 git clone https://github.com/pingdotgg/t3code /tmp/t3code-reference
 git -C /tmp/t3code-reference checkout 052ca497cf1103b001327bcd964188a71dfec213
-pnpm --dir /tmp/t3code-reference --filter t3 --filter t3code-relay install --frozen-lockfile
+pnpm --dir /tmp/t3code-reference --filter t3 --filter t3code-relay --filter @t3tools/client-runtime install --frozen-lockfile
 cargo build --locked
-cargo test --locked
+
 original="node /tmp/t3code-reference/apps/server/src/bin.ts"
 rust="$PWD/target/debug/t3code-server"
-pnpm --dir /tmp/t3code-reference --filter @t3tools/client-runtime install --frozen-lockfile
+
 python3 scripts/client_initial_sync_parity.py --original-command "$original" --rust-command "$rust" --reference-root /tmp/t3code-reference
 python3 scripts/client_rpc_parity.py --original-command "$original" --rust-command "$rust" --reference-root /tmp/t3code-reference
+python3 scripts/client_thread_parity.py --original-command "$original" --rust-command "$rust" --reference-root /tmp/t3code-reference
 python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$original" --rust-command "$rust"
 python3 scripts/orchestration_parity.py --original-command "$original" --rust-command "$rust"
 python3 scripts/config_parity.py --original-command "$original" --rust-command "$rust"
@@ -71,11 +135,27 @@ python3 scripts/github_provider_parity.py --original-command "$original" --rust-
 python3 scripts/relay_parity.py --checkout /tmp/t3code-reference --rust "$rust"
 ```
 
-The client initial sync suite runs the pinned client runtime's own RPC session and shell snapshot loader against each server. It requires the environment to finish its initial sync, then checks that each RPC a freshly connected desktop or web client issues ends the same way on both servers. It runs once on an empty server and once with a project and thread. It also compares exact frames for numeric ids, invalid ids, interrupts and frame parts. The client RPC suite connects the way the desktop renderer does (bootstrap credential exchanged for a bearer session, a websocket ticket, `Origin: t3code://app`) and runs the plan in `scripts/client_rpc_cases.json` through the client runtime: connect-time subscriptions, projects, files, threads with live shell and thread subscribers, messages, attachments, terminals, VCS, preview, settings and auth. It compares decoded results after normalizing paths, ids and timestamps, then replays read-only calls over a raw socket and compares exact frames. Known Rust gaps are listed with a reason in `scripts/client_rpc_parity_xfail.json`; the suite fails on any other mismatch and on a listed case that now passes. [`docs/client-call-inventory.md`](docs/client-call-inventory.md) lists every server call the client makes and which suite covers it; regenerate it with `python3 scripts/update_client_call_inventory.py /tmp/t3code-reference`. The managed harness starts both processes on loopback with temporary homes, separate authentication sessions, and the same signing key for deterministic registration. It compares HTTP status, selected headers and raw body bytes, and compares WebSocket application frames without reserializing JSON. The GitHub suite also compares the writes each server makes to an isolated provider. The relay suite runs upstream HTTP handlers with test storage and local keys. The orchestration suite restarts both servers and checks opaque thread IDs, conflict responses and command replay. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to the GitHub suite to include timestamped reads. A separate Chromium suite compares rendered frames and file transfers using the same browser installation. See `scripts/preview_provider_parity.py --help`.
+Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
 
-The settings suite compares complete RPC frames, sparse settings files and secret sidecars. It exercises schema errors, redaction, credential migration, managed writes, recovery, and restarts. The config snapshot suite compares deterministic fields and complete settings change events. CI also checks the native decoder against inputs evaluated by the pinned Effect schemas.
+Known gaps in `client_rpc_parity.py` and `client_thread_parity.py` are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json); both suites fail on any unlisted mismatch and on any listed case that starts passing.
 
-Fixtures cover specific requests and state transitions. Time, random credentials, provider output and platform-specific behavior require normalization in comparisons. The inventory in `contracts/` lists the upstream surface. Regenerate it with `python3 scripts/update_contract_inventory.py /tmp/t3code-reference`.
+Contract and client-call inventories:
+- [`contracts/`](contracts/) lists the pinned upstream RPC/HTTP surface (`python3 scripts/update_contract_inventory.py /tmp/t3code-reference`).
+- [`docs/client-call-inventory.md`](docs/client-call-inventory.md) lists every server call the client makes and its test coverage (`python3 scripts/update_client_call_inventory.py /tmp/t3code-reference`).
+
+## Architecture overview
+
+The workspace consists of two crates and a WebAssembly host:
+
+- **`t3code-server` (root crate):** Implements the HTTP/WebSocket server, auth, settings/policy, orchestration event log (`events.jsonl`) and projections, provider turn execution, MCP endpoints, and standalone relay. Builds natively (`--features native`, default) and for `wasm32-unknown-unknown` (`--no-default-features --features workers`).
+- **`t3-agentd` ([`agentd/`](agentd/)):** Separate workspace process that executes local files, git, terminals, provider turns, previews, and device operations over a WebSocket, allowing the control plane to run without local filesystem or process access. See [`docs/agentd.md`](docs/agentd.md).
+- **Embeddable control plane ([`workers/`](workers/)):** `t3code_server::control::ControlPlane` separates control state from sockets, timers, and storage behind traits (`DocumentStore`, `EventLog`, `Runtime`, `workspace::Transport`). See [`docs/embedding.md`](docs/embedding.md).
+
+## Contributing
+
+1. Run `cargo test --locked` and the relevant parity scripts in `scripts/` against the pinned reference checkout.
+2. If your change fixes a gap listed in `scripts/client_rpc_parity_xfail.json` or `scripts/client_thread_parity_xfail.json`, remove that entry so the suite enforces it going forward.
+3. Keep changes focused and verify links and formatting before opening a pull request.
 
 ## License
 
