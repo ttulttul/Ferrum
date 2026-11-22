@@ -257,7 +257,34 @@ def tool_turn(name, server, fixture, log, dispatch, cases):
             raise RuntimeError(f"{name} {tool}: unexpected RPC error {actual!r}")
         result = answer["result"]
         content = "".join(item.get("text", "") for item in result.get("content", []))
-        actual = content if result.get("isError") else json.loads(content)
+        if result.get("isError"):
+            actual = content
+        else:
+            try:
+                actual = json.loads(content)
+            except json.JSONDecodeError:
+                if expected == {"__snapshot__": True}:
+                    decoder = json.JSONDecoder()
+                    offset = 0
+                    values = []
+                    while offset < len(content):
+                        value, end = decoder.raw_decode(content, offset)
+                        values.append(value)
+                        offset = end
+                    actual = values[-1] if values else {"_raw": content}
+                else:
+                    raise
+        if expected == {"__status__": True}:
+            if result.get("isError") or not isinstance(actual, dict) or not actual.get("available") or not actual.get("tabId"):
+                raise RuntimeError(f"{name} {tool}: expected a live preview status, got {actual!r}")
+            continue
+        if expected == {"__snapshot__": True}:
+            required = {"url", "title", "loading", "visibleText", "accessibilityTree", "screenshot"}
+            if result.get("isError") or not isinstance(actual, dict) or not required <= actual.keys():
+                raise RuntimeError(f"{name} {tool}: expected a snapshot, got {actual!r}")
+            if "data" in actual["screenshot"]:
+                raise RuntimeError(f"{name} {tool}: metadata snapshot unexpectedly included image data")
+            continue
         if actual != expected or bool(result.get("isError")) != isinstance(expected, str):
             raise RuntimeError(f"{name} {tool}: expected {expected!r}, got {str(actual)[:500]!r}")
 
@@ -346,6 +373,14 @@ def automation(name, server, page_url, directory, fixture, log, scenario):
           "viewport": {"width": 701, "height": 397}, "toolIcon": icon}),
         ("preview_evaluate", {"expression": "[innerWidth, innerHeight, devicePixelRatio, screen.width === parityScreen[0], screen.height === parityScreen[1]]"},
          {"value": [351, 199, 4, True, True], "toolIcon": icon}),
+    ])
+    cases.extend([
+        ("preview_act", {"action": "hover", "selector": "a"}, {"toolIcon": icon}),
+        ("preview_act", {"action": "click", "selector": "a"}, {"toolIcon": icon}),
+        ("preview_wait_for", {"urlIncludes": "#fixture"}, {"toolIcon": icon}),
+        ("preview_open", {"url": page_url, "open": False, "reuseExistingTab": False}, {"__status__": True}),
+        ("preview_navigate", {"url": page_url}, {"__status__": True}),
+        ("preview_snapshot", {"includeImage": False}, {"__snapshot__": True}),
     ])
     # Leave the tab at a fixed size so the session list and a passive viewer can confirm it.
     fixed = {"_tag": "freeform", "width": 844, "height": 540}

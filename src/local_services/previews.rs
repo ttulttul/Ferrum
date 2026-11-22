@@ -104,7 +104,10 @@ impl PreviewService {
         dir: std::path::PathBuf,
     ) -> Reply {
         let operation = string(&input, "operation")?.to_owned();
-        let timeout_ms = if operation == "resize" {
+        let timeout_ms = if matches!(
+            operation.as_str(),
+            "resize" | "navigate" | "act" | "waitFor" | "open"
+        ) {
             input["arguments"]["timeoutMs"]
                 .as_f64()
                 .unwrap_or(15_000.0)
@@ -137,6 +140,44 @@ impl PreviewService {
     ) -> Reply {
         let thread = string(input, "threadId")?;
         let target = input["tabId"].as_str();
+        if operation == "open" {
+            let args = &input["arguments"];
+            let reuse = args["reuseExistingTab"].as_bool().unwrap_or(true);
+            let existing = target.filter(|_| reuse).and_then(|id| {
+                self.state
+                    .lock()
+                    .unwrap()
+                    .tabs
+                    .iter()
+                    .find(|tab| tab["threadId"] == thread && tab["tabId"] == id)
+                    .cloned()
+            });
+            let tab = if let Some(tab) = existing {
+                tab
+            } else {
+                let mut open = json!({"threadId":thread,"runtime":"server","reveal":false});
+                if let Some(url) = navigation_url(args) {
+                    open["url"] = json!(url);
+                }
+                if let Some(profile) = args.get("profileId") {
+                    open["profileId"] = profile.clone();
+                }
+                self.call("open", &open)
+                    .ok_or_else(|| json!({"message":"The browser workspace is unavailable."}))??
+            };
+            let mut browsers = tokio::time::timeout_at(deadline, self.browsers.lock())
+                .await
+                .map_err(|_| json!({"message":format!("Preview automation {operation} timed out after {timeout_ms}ms.")}))?;
+            let page = browsers
+                .open(dir, &tab)
+                .await
+                .ok_or_else(|| json!({"message":"The browser workspace is unavailable."}))?;
+            drop(browsers);
+            return page
+                .automate(self, "open", args, deadline, timeout_ms)
+                .await
+                .map_err(|message| json!({"message":message}));
+        }
         let timeout = |_| json!({"message":format!("Preview automation {operation} timed out after {timeout_ms}ms.")});
         let mut browsers = tokio::time::timeout_at(deadline, self.browsers.lock())
             .await
@@ -346,6 +387,25 @@ impl PreviewService {
     }
 }
 
+fn navigation_url(args: &Value) -> Option<String> {
+    let target = &args["target"];
+    if target.is_object() {
+        if target["kind"] == "url" {
+            return target["url"].as_str().and_then(|u| normalize_url(u).ok());
+        }
+        if target["kind"] == "environment-port" {
+            let port = target["port"].as_u64()?;
+            let protocol = target["protocol"].as_str().unwrap_or("http");
+            let path = target["path"].as_str().unwrap_or("");
+            return normalize_url(&format!("{protocol}://localhost:{port}{path}")).ok();
+        }
+    }
+    if let Some(url) = args["url"].as_str() {
+        return normalize_url(url).ok();
+    }
+    None
+}
+
 impl PreviewService {
     pub fn tab(&self, thread: &str, id: &str) -> Option<Value> {
         self.state
@@ -355,6 +415,17 @@ impl PreviewService {
             .iter()
             .find(|t| t["threadId"] == thread && t["tabId"] == id)
             .cloned()
+    }
+
+    pub(super) fn status_tabs(&self, thread: &str) -> Vec<Value> {
+        self.state
+            .lock()
+            .unwrap()
+            .tabs
+            .iter()
+            .filter(|tab| tab["threadId"] == thread)
+            .cloned()
+            .collect()
     }
     pub fn profile(&self, method: &str, input: &Value, base: &std::path::Path) -> Reply {
         let directory = base.join("server-browser");

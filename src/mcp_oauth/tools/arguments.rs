@@ -119,7 +119,14 @@ fn issue(
         }
         if matches!(
             tool,
-            "preview_evaluate" | "preview_set_appearance" | "preview_resize"
+            "preview_evaluate"
+                | "preview_set_appearance"
+                | "preview_resize"
+                | "preview_open"
+                | "preview_navigate"
+                | "preview_snapshot"
+                | "preview_act"
+                | "preview_wait_for"
         ) && path == ["tabId"]
         {
             if trimmed.is_empty() {

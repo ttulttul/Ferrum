@@ -84,6 +84,11 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("preview_set_appearance", &[]),
     // Chromium viewport sizing.
     ("preview_resize", &[]),
+    ("preview_open", &[]),
+    ("preview_navigate", &[]),
+    ("preview_snapshot", &[]),
+    ("preview_act", &[]),
+    ("preview_wait_for", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -161,6 +166,12 @@ const SERVED: &[&str] = &[
     "preview_set_appearance",
     // Chromium viewport sizing.
     "preview_resize",
+    // Chromium preview lifecycle, inspection and interaction.
+    "preview_open",
+    "preview_navigate",
+    "preview_snapshot",
+    "preview_act",
+    "preview_wait_for",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -726,6 +737,11 @@ pub(super) async fn call<S: McpHost>(
         "t3_worktree_handoff" => agent_tools::worktree_handoff(host, caller, args).await,
         "preview_evaluate" => agent_tools::preview_automation(host, caller, "evaluate", args).await,
         "preview_resize" => agent_tools::preview_automation(host, caller, "resize", args).await,
+        "preview_open" => agent_tools::preview_automation(host, caller, "open", args).await,
+        "preview_navigate" => agent_tools::preview_automation(host, caller, "navigate", args).await,
+        "preview_snapshot" => agent_tools::preview_automation(host, caller, "snapshot", args).await,
+        "preview_act" => agent_tools::preview_automation(host, caller, "act", args).await,
+        "preview_wait_for" => agent_tools::preview_automation(host, caller, "waitFor", args).await,
         "preview_set_appearance" => {
             agent_tools::preview_automation(host, caller, "setColorScheme", args).await
         }
