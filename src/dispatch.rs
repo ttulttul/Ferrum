@@ -159,11 +159,36 @@ pub(crate) fn check(
     if matches!(
         method,
         "server.prepareAcpRegistryAgent" | "server.uninstallAcpRegistryManagedBinary"
-    ) && params
-        .get("agentId")
-        .is_some_and(|value| !value.is_string())
-    {
-        return Err(Reply::defect("Expected string\n  at [\"agentId\"]".into()));
+    ) {
+        match params.get("agentId") {
+            Some(value) if !value.is_string() => {
+                return Err(Reply::defect("Expected string\n  at [\"agentId\"]".into()));
+            }
+            // `AcpRegistryAgentId`: trimmed, non-blank, at most 128, lowercase id characters.
+            Some(Value::String(id)) => {
+                let id = id.trim();
+                let defect = if id.is_empty() {
+                    Some("Expected a non-blank string".to_owned())
+                } else if id.encode_utf16().count() > 128 {
+                    Some("Expected a value with a length of at most 128".to_owned())
+                } else if !id
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    || !id
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
+                {
+                    Some("Expected a string matching the RegExp ^[a-z0-9][a-z0-9._-]*$".to_owned())
+                } else {
+                    None
+                };
+                if let Some(defect) = defect {
+                    return Err(Reply::defect(format!("{defect}\n  at [\"agentId\"]")));
+                }
+            }
+            _ => {}
+        }
     }
     if method == "server.acceptAcpRegistryUrlAuth"
         && params

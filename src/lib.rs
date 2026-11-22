@@ -118,6 +118,8 @@ mod store;
 pub use store::*;
 pub(crate) use store::{now, CommandReceipt};
 #[cfg(feature = "native")]
+mod acp_install;
+#[cfg(feature = "native")]
 mod acp_registry;
 #[cfg(feature = "native")]
 mod peer_link_requests;
