@@ -440,6 +440,7 @@ impl Thread {
             item["ordinal"] = json!(next);
             items.push(item);
         }
+        items.retain(|item| item.get(crate::provider_projection::HIDDEN_ITEM).is_none());
         items.sort_by(|a, b| {
             (a["ordinal"].as_u64(), a["id"].as_str())
                 .cmp(&(b["ordinal"].as_u64(), b["id"].as_str()))

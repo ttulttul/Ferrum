@@ -1,77 +1,77 @@
 {
   "codex turn": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex approval": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex crash": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer.",
     "providerTurns": "The reference leaves the crashed turn's provider turn running; Rust marks it failed."
   },
   "codex missing": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer.",
     "live kinds": "Rust creates the attempt already failed, where the reference creates it pending and then updates it."
   },
   "claude turn": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude crash": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude missing": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex interrupt": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude interrupt": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex approval for session": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex approval declined": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex approval-required": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex auto-accept-edits": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex user input": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex approval interrupted": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer.",
     "items": "The reference captures a checkpoint after a turn interrupted while an approval waits; Rust captures one only after a completed turn.",
     "live kinds": "The reference captures a checkpoint after a turn interrupted while an approval waits; Rust captures one only after a completed turn."
   },
   "claude approval": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude approval declined": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude approval-required": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude auto-accept-edits": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude approval interrupted": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex failed turn": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude question": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind.",
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer.",
     "items": "The reference holds the turn's streamed frames while it asks, so the question's tool call comes before the command streamed ahead of it, and a question call that never gets a result ends failed; Rust keeps stream order and ends it cancelled."
   },
   "codex background command": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude restart cli restored": {
     "nativeMetadata": "The reference hands the failed continuation's items to its retry as a context handoff (delta_since_target_last_seen), which Rust does not build, and counts the handoff in the session's attachment budget."
@@ -85,21 +85,21 @@
     "attempts": "The reference gives a queued run a pending attempt and root node on the thread's provider thread; Rust gives a queued run none until it starts."
   },
   "claude in the login shell PATH": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex in the login shell PATH": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude missing from the login shell": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex agent mcp": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "claude agent mcp": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   },
   "codex thread tools": {
-    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but not in its order or grouping: one per streamed text delta, and a commit's records grouped by kind."
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start, its end, and a runtime request's answer."
   }
 }

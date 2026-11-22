@@ -5,6 +5,7 @@
 //! machine only through [`Workspace::start_tracked_turn`], and its host
 //! starts it with [`crate::runtime::Runtime::spawn`], so it builds for every
 //! target.
+use crate::workspace::provider::ProviderEvent;
 use crate::workspace::provider::TurnStatus;
 use crate::{
     control_state::ControlState,
@@ -12,7 +13,7 @@ use crate::{
     CheckpointRecord, Event, Run,
 };
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
@@ -26,6 +27,8 @@ pub(crate) trait TurnHost:
     std::ops::Deref<Target = ControlState> + crate::workspace::MaybeSendSync
 {
     fn workspace(&self) -> &dyn Workspace;
+    /// A wait on the host's runtime (streamed text is held this long).
+    fn turn_wait(&self, duration: Duration) -> crate::runtime::Wait;
     /// Running runs by id; resolving a sender stops its run.
     fn cancellations(&self) -> &Mutex<HashMap<Uuid, oneshot::Sender<()>>>;
     /// `run`'s turn started on workspace stream `stream`, before any of its
@@ -169,6 +172,69 @@ fn recorded(run: &Run, event: TurnEvent, position: Option<StreamPosition>) -> Re
     }
 }
 
+/// How long streamed text is held before it is recorded: the reference's
+/// adapters' text delta flush interval.
+const TEXT_FLUSH: Duration = Duration::from_millis(50);
+
+/// Streamed text a turn holds before recording it, as the reference's
+/// adapters do (`ProviderTextDeltaCoalescer`): the deltas that arrive within
+/// [`TEXT_FLUSH`] of an item's first held one become one update, and text
+/// whose item ends first is not recorded on its own, as the ended item
+/// carries all of it. Held deltas are acknowledged when they are held: an
+/// item that ends after a restart still reports its whole text.
+#[derive(Default)]
+struct StreamedText {
+    /// Text held per item, in the order the items first streamed.
+    held: Vec<(String, String)>,
+    flush_at: Option<crate::runtime::Wait>,
+}
+
+impl StreamedText {
+    /// `event`, or `None` when it is held.
+    fn take<H: TurnHost>(&mut self, host: &H, event: TurnEvent) -> Option<TurnEvent> {
+        match event {
+            TurnEvent::Provider(ProviderEvent::TurnItemDelta { item_id, delta }) => {
+                if !delta.is_empty() {
+                    match self.held.iter_mut().find(|(id, _)| *id == item_id) {
+                        Some((_, text)) => text.push_str(&delta),
+                        None => self.held.push((item_id, delta)),
+                    }
+                    if self.flush_at.is_none() {
+                        self.flush_at = Some(host.turn_wait(TEXT_FLUSH));
+                    }
+                }
+                None
+            }
+            event => {
+                if let TurnEvent::Provider(ProviderEvent::TurnItem { item }) = &event {
+                    if item.status != "running" {
+                        self.held.retain(|(id, _)| *id != item.id);
+                    }
+                }
+                Some(event)
+            }
+        }
+    }
+
+    /// Record the held text, one update per item.
+    async fn flush<H: TurnHost>(&mut self, host: &H, run: &Run) {
+        for (item_id, delta) in std::mem::take(&mut self.held) {
+            if host.stopping() {
+                return;
+            }
+            let event = Event::RunProvider {
+                run_id: run.id,
+                thread_id: run.thread_id.clone(),
+                event: ProviderEvent::TurnItemDelta { item_id, delta },
+                position: None,
+            };
+            if let Err(error) = host.commit(event).await {
+                tracing::error!(%error, "could not record streamed text");
+            }
+        }
+    }
+}
+
 /// Record `turn`'s events as `run`'s, acknowledging each once it is in the
 /// event log, so a workspace that keeps unacknowledged events redelivers
 /// the rest after a reconnect or a restart.
@@ -185,9 +251,42 @@ async fn record<H: TurnHost>(
         }
     };
     let mut exit = None;
-    while let Some(TurnItem { event, position }) = turn.recv().await {
+    let mut text = StreamedText::default();
+    loop {
+        let next = match text.flush_at.as_mut() {
+            None => turn.recv().await,
+            Some(flush) => {
+                let receive = std::pin::pin!(turn.recv());
+                match futures_util::future::select(receive, flush).await {
+                    futures_util::future::Either::Left((next, _)) => next,
+                    futures_util::future::Either::Right(_) => {
+                        text.flush_at = None;
+                        text.flush(host, run).await;
+                        continue;
+                    }
+                }
+            }
+        };
+        let Some(TurnItem { event, position }) = next else {
+            break;
+        };
         if host.stopping() {
             return Ok(());
+        }
+        let event = match text.take(host, event) {
+            Some(event) => event,
+            None => {
+                done(position);
+                continue;
+            }
+        };
+        // The turn's end reports what is still held first.
+        if matches!(
+            event,
+            TurnEvent::Exited(_) | TurnEvent::Provider(ProviderEvent::TurnTerminal { .. })
+        ) {
+            text.flush_at = None;
+            text.flush(host, run).await;
         }
         match recorded(run, event, position) {
             Recorded::Event(event) => {

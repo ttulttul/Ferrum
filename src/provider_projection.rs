@@ -18,6 +18,10 @@ use crate::{
 };
 use serde_json::{json, Map, Value};
 
+/// The key of a placeholder turn item: one the reference does not show yet,
+/// which still takes its slot (see [`ProviderRecords::items`]).
+pub(crate) const HIDDEN_ITEM: &str = "\u{0}hidden";
+
 fn join(prefix: &str, parts: &[&str]) -> String {
     let mut id = prefix.to_owned();
     for part in parts {
@@ -60,7 +64,8 @@ pub(crate) struct ProviderRecords {
     pub messages: Vec<Value>,
     pub plans: Vec<Value>,
     pub runtime_requests: Vec<Value>,
-    /// Turn items by the index of their run, in the order they take slots.
+    /// Turn items by the index of their run, in the order they take slots;
+    /// an item with [`HIDDEN_ITEM`] only holds its slot.
     pub items: Vec<(usize, Value)>,
 }
 
@@ -995,6 +1000,21 @@ impl Thread {
         }
         .to_owned();
         let running = status == "running";
+        // The reference's adapters report an assistant message only once it
+        // has text, and a Codex file change only once it ends. Such an item
+        // keeps its place among the turn's items while it is not shown.
+        let empty = item
+            .fields
+            .get("text")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty);
+        if running
+            && ((item.kind == "assistant_message" && empty)
+                || (driver == provider::CODEX && item.kind == "file_change"))
+        {
+            out.items.push((index, json!({ HIDDEN_ITEM: true })));
+            return;
+        }
         let node = item_id("node", driver, native);
         let reference = native_ref(driver, native, "strong");
         let started = iso(record.first_at);
@@ -1222,5 +1242,80 @@ mod tests {
             .unwrap();
         assert_eq!(approval.1["status"], "cancelled");
         assert_eq!(live.shell()["pendingRuntimeRequest"]["kind"], "user_input");
+    }
+
+    fn item(id: &str, kind: &str, status: &str, text: Option<&str>) -> ProviderEvent {
+        let mut fields = Map::new();
+        if let Some(text) = text {
+            fields.insert("text".into(), json!(text));
+        }
+        ProviderEvent::TurnItem {
+            item: crate::workspace::provider::ProviderItem {
+                id: id.into(),
+                kind: kind.into(),
+                status: status.into(),
+                title: None,
+                fields,
+            },
+        }
+    }
+
+    #[test]
+    fn items_the_reference_does_not_report_yet_keep_their_place_unshown() {
+        let run_id = Uuid::new_v4();
+        let mut live = thread(
+            serde_json::from_value(json!({
+                "id": run_id, "thread_id": "t1", "provider": "codex", "status": "running",
+                "started_at": 1, "finished_at": null, "error": null, "user_message_id": null
+            }))
+            .unwrap(),
+        );
+        let shown = |live: &Thread| -> Vec<(String, u64)> {
+            live.projection()["turnItems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| {
+                    (
+                        item["type"].as_str().unwrap().to_owned(),
+                        item["ordinal"].as_u64().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        for event in [
+            ProviderEvent::ProviderThread {
+                driver: "codex".into(),
+                native_thread_id: "thr".into(),
+                resumed: false,
+                model: None,
+            },
+            item("msg", "assistant_message", "running", Some("")),
+            item("patch", "file_change", "running", None),
+            item("cmd", "command_execution", "running", None),
+        ] {
+            live.provider.apply(run_id, &event, 2);
+        }
+        // An assistant message without text and a running Codex file change
+        // are not shown, but take their slots.
+        assert_eq!(shown(&live), [("command_execution".into(), 1_000_003)]);
+        assert!(live.projection()["messages"].as_array().unwrap().is_empty());
+        for event in [
+            ProviderEvent::TurnItemDelta {
+                item_id: "msg".into(),
+                delta: "Hi".into(),
+            },
+            item("patch", "file_change", "completed", None),
+        ] {
+            live.provider.apply(run_id, &event, 3);
+        }
+        assert_eq!(
+            shown(&live),
+            [
+                ("assistant_message".into(), 1_000_001),
+                ("file_change".into(), 1_000_002),
+                ("command_execution".into(), 1_000_003)
+            ]
+        );
     }
 }
