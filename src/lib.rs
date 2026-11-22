@@ -99,6 +99,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 pub mod event_log;
 pub mod persistence;
 pub mod platform;
+mod projection_shell;
 mod provider_projection;
 mod provider_state;
 mod runtime_recovery;
@@ -111,6 +112,8 @@ mod peer_links;
 mod server;
 #[cfg(feature = "native")]
 mod startup_trace;
+#[cfg(feature = "native")]
+pub mod statev2;
 pub use access_http::{auth_error, trace_id};
 #[cfg(feature = "native")]
 pub use server::*;

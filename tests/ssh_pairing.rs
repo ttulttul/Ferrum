@@ -18,22 +18,6 @@ use t3code_server::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// `auth_pairing_links` exactly as the TypeScript 0.1.10 migrations leave it.
-const TS_SCHEMA: &str = "CREATE TABLE auth_pairing_links (
-      id TEXT PRIMARY KEY,
-      credential TEXT NOT NULL UNIQUE,
-      method TEXT NOT NULL,
-      scopes TEXT NOT NULL,
-      subject TEXT NOT NULL,
-      label TEXT,
-      created_at TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
-      consumed_at TEXT,
-      revoked_at TEXT
-    , proof_key_thumbprint TEXT, requires_connect_approval INTEGER NOT NULL DEFAULT 0, requested_client_json TEXT, connect_denied INTEGER NOT NULL DEFAULT 0);
-    CREATE INDEX idx_auth_pairing_links_active
-    ON auth_pairing_links(revoked_at, consumed_at, expires_at);";
-
 const STANDARD_SCOPES: &str = r#"["orchestration:read","orchestration:operate","settings:write","providers:manage","environment:maintain","preview:operate","diagnostics:read","terminal:read","terminal:operate","source-control:write","filesystem:read","filesystem:write","relay:read","access:read","access:write","relay:write"]"#;
 
 fn iso(offset: time::Duration) -> String {
@@ -119,8 +103,8 @@ async fn exchanges_a_pairing_token_issued_out_of_process_by_the_cli() {
     let home = tempfile::tempdir().unwrap();
     let paths = ServerPaths::from_base(home.path());
     std::fs::create_dir_all(&paths.state_dir).unwrap();
-    let db = Connection::open(paths.state_dir.join("statev2.sqlite")).unwrap();
-    db.execute_batch(TS_SCHEMA).unwrap();
+    // The reference's schema at the pinned migration head, as `t3` creates it.
+    let db = t3code_server::statev2::open(&paths.state_dir).unwrap();
 
     let ownership = ServerOwnership::acquire(&paths.runtime_state).unwrap();
     let config = RuntimeConfig {

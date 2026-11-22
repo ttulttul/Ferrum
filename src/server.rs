@@ -248,10 +248,30 @@ impl AppState {
             connect.clear_disabled_link()?;
             guest.set_tunnel_hostname(None);
         }
+        // The orchestration database both servers share. An unsupported one
+        // stops start-up here, unchanged (docs/shared-store.md).
+        let shared_store = crate::statev2::open(&dir)?;
         let log: Box<dyn event_log::EventLog + Send> =
             Box::new(event_log::NdjsonLog::open(dir.join("events.jsonl"))?);
         let oauth = mcp_oauth::OAuth::open(documents.clone(), &dir)?;
         let control = crate::control_state::ControlState::open(auth, documents, log, &dir)?;
+        {
+            let mut store = control.store.write().await;
+            let loaded = crate::statev2::load_into(&shared_store, &mut store).map_err(|error| {
+                anyhow::anyhow!(
+                    "Could not read {}: {error}",
+                    dir.join(crate::statev2::FILE_NAME).display()
+                )
+            })?;
+            if loaded != crate::statev2::Loaded::default() {
+                tracing::info!(
+                    projects = loaded.projects,
+                    threads = loaded.threads,
+                    "read threads from the shared orchestration database"
+                );
+            }
+        }
+        drop(shared_store);
         // Turns run as this process's children, so none survives a restart.
         let startup_recovery = reconcile_provider_runtime(&control, &settings, "startup").await;
         let (project_clone_events, _) = broadcast::channel(64);

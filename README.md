@@ -30,7 +30,7 @@ Based on `main` and the parity test suites:
 
 ## Known gaps
 
-- **Separate thread store:** Rust stores its orchestration event log in `events.jsonl` and does **not** read existing threads from the TypeScript server's `statev2.sqlite`.
+- **Shared thread store, read-only so far:** Rust opens the TypeScript server's `statev2.sqlite` (creating it with the reference's exact schema when missing, and refusing a migration version it does not support) and shows the threads and projects it holds. Rust still records its own threads in `events.jsonl`, and cannot yet change or continue a thread the TypeScript server created. See [docs/shared-store.md](docs/shared-store.md).
 - **Live event ordering:** Rust derives live thread domain events from projection commits rather than emitting them in the reference server's exact order and grouping (one per streamed text delta, records grouped by kind).
 - **Provider status checks:** Claude Code, Codex, fx and Kiro are checked (installed version, sign-in state, models). Other providers still show "not checked", Claude skills are always empty, and the latest-release version advisory is reported as unknown.
 - **Outgoing environment links are partial:** The server can link to another machine, list and forget its links, and shares them with the TypeScript server on the same home, but it cannot yet forward tool calls over a link.
