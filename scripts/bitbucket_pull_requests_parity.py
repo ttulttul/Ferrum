@@ -12,8 +12,7 @@ two updated in the same millisecond, a draft, ones the viewer wrote or is asked 
 one that does not decode. It applies Bitbucket's `q` filters itself and pages four at a time with
 next links on its own origin. Covered: each state, a search, author, draft and label filters,
 following the list cursor to the end, and two more repositories whose reads fail (an error, and
-a next link to another origin). All data is fake. Nothing may leave loopback: the harness's
-refusing proxy must have seen nothing but the reference's model-manifest refresh.
+a next link to another origin). All data is fake. Nothing may leave loopback: every server runs behind the harness's loopback proxy, which forwards nothing (parity_harness.assert_nothing_escaped).
 """
 import argparse
 from contextlib import ExitStack
@@ -37,9 +36,6 @@ import parity_harness
 from parity_harness import encode, http, isolated_git_env, managed_server
 
 CASES = ("401", "404", "500", "dropped connection", "closed port", "an account with no name")
-# The reference refreshes its model manifest from GitHub at start-up with no switch for it;
-# the harness's proxy refuses it like anything else off loopback.
-ALLOWED_REFUSALS = {"raw.githubusercontent.com"}
 TOKEN = "fixture-bitbucket-token"
 VIEWER = "fixture-viewer"
 REPOSITORIES = {"project:main": "example-org/example-repo", "project:broken": "example-org/broken",
@@ -272,8 +268,8 @@ def main():
                 record.update({f"listing: {k}": v for k, v in listing(url, cookie, port).items()})
                 # Repositories are read side by side, so compare the set of requests.
                 record["listing: requests"] = sorted(set(json.loads(json.dumps(seen).replace(str(port), "<port>"))))
-    refused = {urlsplit(f"//{entry.split(' ', 1)[1]}").hostname for entry in parity_harness.REFUSED}
-    assert refused <= ALLOWED_REFUSALS, f"requests left loopback: {sorted(refused - ALLOWED_REFUSALS)}"
+    # Every server ran behind a loopback proxy that forwards nothing; what it refused never left.
+    parity_harness.assert_nothing_escaped()
     failures = 0
     for name in answers["original"]:
         same = answers["original"][name] == answers["rust"].get(name)

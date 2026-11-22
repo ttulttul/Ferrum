@@ -4,7 +4,7 @@
 //!
 //! GitHub answers through its REST API via `gh api` (which honours the
 //! CLI's `http_unix_socket`), GitLab through `glab api`, Bitbucket through its
-//! REST API (`T3CODE_BITBUCKET_API_BASE_URL`, `T3CODE_BITBUCKET_ACCESS_TOKEN`),
+//! REST API (`T3CODE_BITBUCKET_API_BASE_URL`, with the credential `bitbucket_credential` reads),
 //! Azure DevOps through `az repos show`, Forgejo/Gitea through `tea api`,
 //! GitCafe through its API with the `cafe` credential helper's token, and
 //! Cursor Origin through its API with `origin auth token`'s. Every answer is
@@ -419,8 +419,15 @@ async fn bitbucket(repository: &str) -> Result<Value, LookupFailure> {
             component(slug)
         ))
         .header("Accept", "application/json");
-    if let Ok(token) = std::env::var("T3CODE_BITBUCKET_ACCESS_TOKEN") {
-        request = request.bearer_auth(token);
+    match crate::bitbucket_credential::current().await {
+        Ok(Some(credential)) => request = credential.apply(request),
+        Ok(None) => {}
+        Err(message) => {
+            return Err(LookupFailure::provider(
+                "Failed to get repository clone URLs.",
+                Some(json!({"name": "SettingsSecretUnresolvedError", "message": message})),
+            ))
+        }
     }
     let response = request.send().await.map_err(|_| {
         failed("Bitbucket API failed in getRepository: Bitbucket could not be reached.".into())
