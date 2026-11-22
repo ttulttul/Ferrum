@@ -75,10 +75,6 @@
   "claude restart cli restored": {
     "nativeMetadata": "The reference hands the failed continuation's items to its retry as a context handoff (delta_since_target_last_seen), which Rust does not build, and counts the handoff in the session's attachment budget."
   },
-  "codex restart queued": {
-    "messages": "The reference lists a queued run's message after the messages of runs that started; Rust lists messages in the order they were sent.",
-    "shape": "The reference lists a queued run's message after the messages of runs that started; Rust lists messages in the order they were sent."
-  },
   "claude in the login shell PATH": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
   },
