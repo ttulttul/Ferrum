@@ -12,7 +12,7 @@ mod previews;
 pub(crate) mod provider_turns;
 pub(crate) mod review;
 mod terminals;
-mod vcs;
+pub(crate) mod vcs;
 mod vcs_upstream;
 
 pub use devices::DeviceService;

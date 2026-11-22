@@ -1467,6 +1467,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(json!({"attachments":persisted}));
     }
     if method == "assets.createUrl" {
+        if params["resource"]["_tag"] == "project-favicon" && params["resource"]["cwd"].is_string()
+        {
+            return crate::project_favicon::create_url(state, params).await;
+        }
         return crate::asset_http::create_url(state, params);
     }
     if method == "filesystem.browse" {

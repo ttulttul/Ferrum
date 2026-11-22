@@ -184,6 +184,32 @@ pub(crate) async fn serve(
     method: &Method,
     headers: &HeaderMap,
 ) -> Response {
+    if matches!(
+        claims["kind"].as_str(),
+        Some("project-favicon" | "project-favicon-external")
+    ) {
+        return match crate::project_favicon::served(claims) {
+            Some(crate::project_favicon::Served::File(file)) => {
+                response::serve_file(&file, claims, method, headers)
+                    .await
+                    .unwrap_or_else(|_| {
+                        text(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+                    })
+            }
+            // The PNG inside an `.icns` icon, served from memory as the reference does.
+            Some(crate::project_favicon::Served::Png(png)) => (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "image/png"),
+                    (header::CACHE_CONTROL, "private, max-age=3600"),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                ],
+                png,
+            )
+                .into_response(),
+            None => not_found().await,
+        };
+    }
     let file = match claims["kind"].as_str() {
         Some("attachment") => claims["attachmentId"]
             .as_str()

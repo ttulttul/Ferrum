@@ -142,7 +142,7 @@ pub(super) async fn default_ref(cwd: &str) -> Option<String> {
 }
 mod base;
 mod removal;
-mod worktree;
+pub(crate) mod worktree;
 pub(super) use base::{branch_base, read_branch_base, record_worktree_base, review_base};
 fn nonrepo() -> Value {
     json!({"isRepo":false,"hasPrimaryRemote":false,"isDefaultRef":false,"refName":null,"hasWorkingTreeChanges":false,"workingTree":{"files":[],"insertions":0,"deletions":0},"hasUpstream":false,"aheadCount":0,"behindCount":0,"aheadOfDefaultCount":0,"pr":null})
