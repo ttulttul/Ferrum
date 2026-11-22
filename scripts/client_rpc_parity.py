@@ -202,7 +202,13 @@ def view(step, mode):
     if mode == "shape":
         if outcome != "reply":
             return {"outcome": outcome, "signature": step.get("signature")}
-        return {"outcome": outcome, "shape": shape(value)}
+        shaped = shape(value)
+        pricing = shaped.get("pricing") if isinstance(shaped, dict) else None
+        if isinstance(pricing, dict) and pricing.get("fetchedAt") in (None, "str"):
+            # The reference fetches its usage rates from GitHub at request time, and leaves
+            # fetchedAt null when that fetch fails, so it depends on the network, not the server.
+            pricing["fetchedAt"] = "str or null"
+        return {"outcome": outcome, "shape": shaped}
     return {"outcome": outcome, "signature": step.get("signature"), "value": value}
 
 

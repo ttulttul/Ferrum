@@ -781,13 +781,45 @@ def compare_turn(original, rust):
     return problems
 
 
+# Rough seconds the seeded thread checks take on shard 1, for balancing shards.
+THREAD_CHECKS_COST = 20
+
+
+def scenario_cost(scenario):
+    """Rough seconds a scenario takes on both servers in CI, for balancing shards."""
+    restart = scenario.get("restart")
+    if not restart:
+        return 10
+    if restart.get("restoreCli"):
+        # The reference retries the continuation after a hard-coded 60 s.
+        return 150
+    # Each queued message and a live subscription add fixed waits to the restart.
+    return 30 + 5 * len(restart.get("queue", [])) + (5 if restart.get("live") else 0)
+
+
+def shard_scenarios(index, count):
+    """The provider scenarios of shard `index` (from 1) of `count`, balanced by scenario_cost.
+
+    Shard 1 also runs the seeded thread checks, so it starts with their cost."""
+    loads = [[THREAD_CHECKS_COST if n == 0 else 0, n, []] for n in range(count)]
+    for scenario in sorted(PROVIDER_SCENARIOS, key=scenario_cost, reverse=True):
+        lightest = min(loads, key=lambda load: (load[0], load[1]))
+        lightest[0] += scenario_cost(scenario)
+        lightest[2].append(scenario["name"])
+    return set(loads[index - 1][2])
+
+
 def provider_turns(args, credentials):
     """Run each provider scenario on both servers; the number of unexpected results."""
     xfail = json.loads((ROOT / "scripts/client_thread_parity_xfail.json").read_text())
     failures = 0
+    shard = shard_scenarios(*args.shard) if args.shard else None
     for scenario in PROVIDER_SCENARIOS:
         if args.scenario and scenario["name"] not in args.scenario:
             continue
+        if shard is not None and scenario["name"] not in shard:
+            continue
+        started = time.monotonic()
         outcomes = {}
         with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
             temporary = Path(temporary)
@@ -847,6 +879,7 @@ def provider_turns(args, credentials):
                 print(f"XPASS {label}: remove it from client_thread_parity_xfail.json")
         if not problems:
             print(f"PASS {scenario['name']}")
+        print(f"  ({scenario['name']}: {time.monotonic() - started:.0f} s)", flush=True)
     return failures
 
 
@@ -917,14 +950,24 @@ def main():
     parser.add_argument("--dump", type=Path, help="write each server's decoded results here")
     parser.add_argument("--scenario", action="append", help="run only this provider scenario (repeatable)")
     parser.add_argument("--skip-thread-checks", action="store_true", help="run only the provider scenarios")
+    parser.add_argument("--shard", type=lambda text: tuple(int(n) for n in text.split("/")), metavar="I/N",
+                        help="run provider scenario shard I of N (from 1); the thread checks run on shard 1 only")
+    parser.add_argument("--list-shard", action="store_true", help="print the --shard's scenarios and exit")
     args = parser.parse_args()
+    if args.shard and not 1 <= args.shard[0] <= args.shard[1]:
+        parser.error("--shard must be I/N with 1 <= I <= N")
+    if args.list_shard:
+        if not args.shard:
+            parser.error("--list-shard needs --shard")
+        print("\n".join(sorted(shard_scenarios(*args.shard))))
+        return 0
     credentials = secrets.token_urlsafe(32), secrets.token_bytes(32)
     if args.dump:
         args.dump.mkdir(parents=True, exist_ok=True)
     failures = 0
     with tempfile.TemporaryDirectory() as temporary:
         GIT_ISOLATION.update(isolated_git_env(Path(temporary) / "git"))
-        if not args.skip_thread_checks:
+        if not args.skip_thread_checks and (not args.shard or args.shard[0] == 1):
             failures += thread_checks(args, credentials, Path(temporary) / "thread")
         failures += provider_turns(args, credentials)
     return int(failures != 0)
