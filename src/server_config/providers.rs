@@ -104,6 +104,8 @@ fn initial_status(driver: &str) -> Option<(bool, &'static str)> {
         "grok" => Some((true, "Checking Grok CLI availability...")),
         "pi" => Some((true, "Checking Pi CLI availability...")),
         "cursor" => Some((true, "Checking Cursor SDK availability...")),
+        "antigravity" => Some((false, "Checking Antigravity availability.")),
+        "muse" => Some((false, "Checking Muse Code CLI availability...")),
         _ => None,
     }
 }
@@ -184,7 +186,10 @@ pub(crate) fn list_with(
         row["status"] = json!(if enabled { "warning" } else { "disabled" });
         row["auth"] = match driver {
             "cursor" => json!({"status":"unknown","canLogout":true}),
-            "antigravity" => json!({"status":"unknown","type":"oauth-personal"}),
+            // The configured sign-in method names the auth it waits for.
+            "antigravity" => {
+                json!({"status":"unknown","type":config["authMethod"].as_str().unwrap_or("oauth-personal")})
+            }
             _ => json!({"status":"unknown"}),
         };
         row["checkedAt"] = json!(started_at);
@@ -218,6 +223,9 @@ pub(crate) fn list_with(
             // The driver's own snapshot until its first check reports.
             row["installed"] = installed.into();
             row["message"] = json!(message);
+        }
+        if driver == "muse" && enabled && denied.is_none() {
+            row["slashCommands"] = json!([{"name": "compact", "description": "Summarize the conversation and reduce context usage"}]);
         }
         if driver == "cursor" {
             // `stampSnapshot`: a configured CURSOR_API_KEY (the instance's own,

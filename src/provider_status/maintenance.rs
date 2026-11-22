@@ -29,12 +29,14 @@ pub(crate) struct Update {
 }
 
 /// `ProviderMaintenanceCapabilities`, without the latest-version lookups.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Capabilities {
     pub package_name: Option<String>,
     pub update: Option<Update>,
     pub install_path: Option<String>,
     pub manual_command: Option<String>,
+    /// `compareVersions`, where the driver orders its versions its own way.
+    pub compare_versions: Option<fn(&str, &str) -> std::cmp::Ordering>,
 }
 
 /// `ProviderMaintenanceResolutionContext`.
@@ -104,6 +106,7 @@ fn capabilities(
         }),
         install_path: None,
         manual_command: None,
+        compare_versions: None,
     }
 }
 

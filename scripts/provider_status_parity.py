@@ -499,6 +499,90 @@ SCENARIOS += [
 ]
 
 
+AGY_RELEASE = "a" * 64
+AGY_MANAGED = "tools/antigravity-acp/linux-x64"
+AGY_RUNTIME = "#!/bin/sh\nexit 0\n"
+
+
+def agy_managed(version="1.6.2", **record):
+    """A managed Antigravity runtime as the reference's installer leaves it."""
+    directory = f"{AGY_MANAGED}/versions/{AGY_RELEASE}"
+    files = {f"{directory}/agy_acp_server.par": AGY_RUNTIME, f"{directory}/localharness_external": AGY_RUNTIME,
+             f"{AGY_MANAGED}/active.json": json.dumps({"releaseId": AGY_RELEASE})}
+    files[f"{directory}/.install-complete.json"] = json.dumps({
+        "releaseId": AGY_RELEASE, "version": version,
+        "executable": {"name": "agy_acp_server.par", "bytes": len(AGY_RUNTIME)},
+        "harness": {"name": "localharness_external", "bytes": len(AGY_RUNTIME)}, **record})
+    return {"files": files, "executables": [f"{directory}/agy_acp_server.par", f"{directory}/localharness_external"]}
+
+
+def agy(name, settings=None, **extra):
+    return {"name": f"antigravity {name}", "instance": "antigravity", "settings": settings or enabled("antigravity"),
+            "fakes": {}, **extra}
+
+
+SCENARIOS += [
+    agy("not installed"),
+    agy("disabled", {"providerInstances": {"antigravity": {"driver": "antigravity", "enabled": False}}}, settled=True),
+    agy("agy CLI on PATH", files={"fake-bin/agy": AGY_RUNTIME}, executables=["fake-bin/agy"]),
+    agy("ACP runtime on PATH", files={"fake-bin/agy_acp_server.par": AGY_RUNTIME, "fake-bin/localharness_external": AGY_RUNTIME},
+        executables=["fake-bin/agy_acp_server.par", "fake-bin/localharness_external"]),
+    agy("ACP runtime without its harness", files={"fake-bin/agy_acp_server.par": AGY_RUNTIME},
+        executables=["fake-bin/agy_acp_server.par"]),
+    agy("managed runtime", **agy_managed()),
+    agy("managed runtime incomplete", **{**agy_managed(), "executables": []}),
+    agy("managed runtime withdrawn", **agy_managed("0.0.1")),
+    agy("custom executable", enabled("antigravity", binaryPath="~/tools/agy"),
+        files={"tools/agy": AGY_RUNTIME}, executables=["tools/agy"]),
+    agy("custom executable missing", enabled("antigravity", binaryPath="/nonexistent/agy")),
+    agy("Gemini API key missing", enabled("antigravity", authMethod="gemini-api-key"),
+        files={"fake-bin/agy": AGY_RUNTIME}, executables=["fake-bin/agy"]),
+    agy("Gemini API key", enabled("antigravity", authMethod="gemini-api-key", apiKey="gk-1"),
+        files={"fake-bin/agy": AGY_RUNTIME}, executables=["fake-bin/agy"]),
+    # Global MCP servers in the profile could act before a helper denies a tool: no text generation.
+    agy("profile with MCP servers", files={
+        "fake-bin/agy": AGY_RUNTIME,
+        f"userdata/providers/antigravity/{hashlib.sha256(b'antigravity').hexdigest()}/config/mcp_config.json":
+            json.dumps({"mcpServers": {"docs": {"command": "docs-server"}}})}, executables=["fake-bin/agy"]),
+    agy("profile with empty hooks", files={
+        "fake-bin/agy": AGY_RUNTIME,
+        f"userdata/providers/antigravity/{hashlib.sha256(b'antigravity').hexdigest()}/config/hooks.json":
+            json.dumps({"hooks": {}})}, executables=["fake-bin/agy"]),
+    agy("Gemini Enterprise without a project", enabled("antigravity", authMethod="oauth-business"),
+        files={"fake-bin/agy": AGY_RUNTIME}, executables=["fake-bin/agy"]),
+]
+
+
+MUSE_INIT = {"schema": {"version": 1, "fingerprint": "sha256:fixture"}, "grantedCapabilities": []}
+MUSE_MODELS = {"providerId": "meta", "models": [
+    {"modelId": "muse-spark-pro", "displayLabel": "muse-spark-pro", "providerId": "meta", "isDefault": True,
+     "variants": ["low", "high", "ultra", "turbo"], "defaultReasoningEffort": "ultra",
+     "reasoningEffortVariants": [{"tier": "ultra", "description": "Deepest"}]},
+    {"modelId": "muse-lite", "displayLabel": " Muse Lite ", "providerId": "meta", "isDefault": False, "variants": "unknown"},
+    {"modelId": "muse-none", "displayLabel": "", "providerId": "meta", "isDefault": False, "variants": ["turbo"]},
+    {"modelId": "other-model", "displayLabel": "Other", "providerId": "openai", "isDefault": False},
+    {"modelId": "muse-lite", "displayLabel": "Duplicate", "providerId": "meta", "isDefault": False}]}
+
+
+def muse_serve(models=MUSE_MODELS, init=MUSE_INIT):
+    return {"prefix": ["serve"], "rpc": {"initialize": init, "model/list": models}}
+
+
+SCENARIOS += driver_scenarios("muse", "muse", "muse 2.1.0-R4", [muse_serve()], {
+    "not finished installing": ([], {"fakes": {"muse": {"spec": {"commands": [{"args": ["--version"], **ok(
+        "", 1, "error: installed binary is missing; run muse --version to finish setup")}]}}}}),
+    "no models": ([muse_serve({"providerId": "meta", "models": []})], {}),
+    "catalog fails": ([{"prefix": ["serve"], **ok("", 3, "boom")}], {}),
+    "catalog for another provider": ([muse_serve({"providerId": "openai", "models": []})], {}),
+    "unsupported protocol": ([muse_serve(init={"schema": {"version": 2, "fingerprint": "x"}})], {}),
+    "custom models": ([muse_serve()], {"settings": enabled("muse", customModels=["mine/one"])}),
+    "installed by its launcher": ([muse_serve()], {}),
+}, wait=30)
+for scenario in SCENARIOS:
+    if scenario["name"] == "muse installed by its launcher":
+        scenario["fakes"]["muse"]["comment"] = "muse-code/launcher-v3 (refreshes with MUSE_SYNC_UPDATE=1)"
+
+
 PI_NPM = "npm-prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 SCENARIOS += [
     {"name": "pi installed as an npm global", "instance": "pi", "settings": enabled("pi"),
@@ -585,12 +669,13 @@ def row_of(providers, instance):
 def pending(row):
     """Whether `row` is the placeholder an instance shows until its first check reports."""
     message = str(row.get("message"))
-    return "has not been checked" in message or (message.startswith("Checking ") and message.endswith("..."))
+    return "has not been checked" in message or (
+        message.startswith("Checking ") and (message.endswith("...") or message.endswith("availability.")))
 
 
 # Drivers whose version advisory is added by an enrichment pass after the probe's row is
 # published: their row is final only once it carries the advisory.
-ENRICHED_DRIVERS = {"codex", "claudeAgent", "grok", "pi", "opencode"}
+ENRICHED_DRIVERS = {"codex", "claudeAgent", "grok", "pi", "opencode", "muse"}
 # How long a server may take to finish an instance's first check on a loaded machine.
 CHECK_DEADLINE = 180
 
@@ -676,7 +761,9 @@ def run_server(args, command, root, scenario, temporary):
         elif "spec" in fake:
             spec = root / f"{cli}.spec.json"
             spec.write_text(json.dumps(fake["spec"]))
-            target.write_text(f'#!/bin/sh\nexec python3 "$FAKE_STATUS_CLI" {shlex.quote(str(spec))} "$@"\n')
+            # A "comment" is written into the wrapper, as an installer's marker would be.
+            comment = "".join(f"# {line}\n" for line in fake.get("comment", "").splitlines())
+            target.write_text(f'#!/bin/sh\n{comment}exec python3 "$FAKE_STATUS_CLI" {shlex.quote(str(spec))} "$@"\n')
         else:
             target.write_text(claude_script(fake["version"]) if cli == "claude"
                               else codex_script(fake["version"], fake["app"]))
@@ -695,6 +782,8 @@ def run_server(args, command, root, scenario, temporary):
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
+        if name in scenario.get("executables", ()):
+            target.chmod(0o755)
     (root / "userdata").mkdir(parents=True, exist_ok=True)
     (root / "userdata/settings.json").write_text(json.dumps(settings))
     env = {"PATH": os.pathsep.join([str(bin_dir), path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "path")]),
