@@ -712,12 +712,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return scheduled_task_rotate_token(state, params).await;
     }
     if method == "scheduledTasks.delete" {
-        state
-            .scheduled_tasks
-            .lock()
-            .await
-            .shift_remove(params["id"].as_str().unwrap_or_default());
-        let _ = state.persist_scheduled_tasks().await;
+        let id = params["id"].as_str().unwrap_or_default();
+        if state.scheduled_database.lock().await.delete(id).is_err() {
+            return scheduled_task_error("Could not delete schedule task.", Some(id));
+        }
         let _ = state.scheduled_task_events.send(());
         return Reply::Success(json!({"id":params["id"]}));
     }
@@ -2728,13 +2726,6 @@ fn random_webhook_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn encode_task_id(value: &str) -> String {
-    value
-        .replace('%', "%25")
-        .replace('/', "%2F")
-        .replace(':', "%3A")
-}
-
 async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
     let now = crate::auth_service::now();
     let id = params["id"]
@@ -2746,8 +2737,14 @@ async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
                 .map(|v| format!("scheduled-task:{v}"))
         })
         .unwrap_or_else(|| format!("scheduled-task:{}", uuid::Uuid::new_v4()));
-    let mut tasks = state.scheduled_tasks.lock().await;
-    let existing = tasks.get(&id).cloned();
+    let mut tasks = state.scheduled_database.lock().await;
+    let existing = match tasks.get(&id) {
+        Ok(task) => task,
+        Err(_) => return scheduled_task_error("Could not read schedule task.", Some(&id)),
+    };
+    if existing.is_none() && params["requireExisting"] == true {
+        return scheduled_task_error("Schedule task not found.", Some(&id));
+    }
     let thread_mode = params["threadMode"]
         .as_str()
         .map(str::to_owned)
@@ -2844,12 +2841,13 @@ async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
         let secret = webhook_secret.map(Value::String).unwrap_or(Value::Null);
         task["_webhookToken"] = token.clone().into();
         task["_webhookSecret"] = secret.clone();
-        task["webhook"] = json!({"path":format!("/api/hooks/{}/{}",encode_task_id(&id),token),"url":null,"hasSecret":!secret.is_null()});
+        task["webhook"] = json!({"path":format!("/api/hooks/{}/{}",crate::asset_grant::encode_component(&id),token),"url":null,"hasSecret":!secret.is_null()});
     }
     let public = scheduled_public_task(&task);
-    tasks.insert(id, task);
+    if tasks.save(&task).is_err() {
+        return scheduled_task_error("Could not save schedule task.", task["id"].as_str());
+    }
     drop(tasks);
-    let _ = state.persist_scheduled_tasks().await;
     let _ = state.scheduled_task_events.send(());
     Reply::Success(json!({"task":public}))
 }
@@ -2857,29 +2855,35 @@ async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
 async fn scheduled_task_set_enabled(state: &Arc<AppState>, params: &Value) -> Reply {
     let id = params["id"].as_str().unwrap_or_default();
     let enabled = params["enabled"].as_bool().unwrap_or(false);
-    let mut tasks = state.scheduled_tasks.lock().await;
-    let Some(task) = tasks.get_mut(id) else {
-        return scheduled_task_error("Schedule task not found.", Some(id));
+    let mut tasks = state.scheduled_database.lock().await;
+    let mut task = match tasks.get(id) {
+        Ok(Some(task)) => task,
+        Ok(None) => return scheduled_task_error("Schedule task not found.", Some(id)),
+        Err(_) => return scheduled_task_error("Could not read schedule task.", Some(id)),
     };
     if task["enabled"] == enabled {
-        return Reply::Success(json!({"task":scheduled_public_task(task)}));
+        return Reply::Success(json!({"task":scheduled_public_task(&task)}));
     }
     let now = crate::auth_service::now();
     task["enabled"] = enabled.into();
     task["updatedAt"] = crate::auth_service::iso(now).into();
     task["nextRunAt"] = scheduled_task_next_run(enabled, &task["schedule"], now);
-    let public = scheduled_public_task(task);
+    let public = scheduled_public_task(&task);
+    if tasks.save(&task).is_err() {
+        return scheduled_task_error("Could not save schedule task.", task["id"].as_str());
+    }
     drop(tasks);
-    let _ = state.persist_scheduled_tasks().await;
     let _ = state.scheduled_task_events.send(());
     Reply::Success(json!({"task":public}))
 }
 
 async fn scheduled_task_run_now(state: &Arc<AppState>, params: &Value) -> Reply {
     let id = params["id"].as_str().unwrap_or_default();
-    let mut tasks = state.scheduled_tasks.lock().await;
-    let Some(task) = tasks.get_mut(id) else {
-        return scheduled_task_error("Schedule task not found.", Some(id));
+    let mut tasks = state.scheduled_database.lock().await;
+    let mut task = match tasks.get(id) {
+        Ok(Some(task)) => task,
+        Ok(None) => return scheduled_task_error("Schedule task not found.", Some(id)),
+        Err(_) => return scheduled_task_error("Could not read schedule task.", Some(id)),
     };
     if task["schedule"]["type"] == "webhook" {
         return scheduled_task_error(
@@ -2899,18 +2903,22 @@ async fn scheduled_task_run_now(state: &Arc<AppState>, params: &Value) -> Reply 
         .saturating_add(1)
         .into();
     task["updatedAt"] = crate::auth_service::iso(now).into();
-    let public = scheduled_public_task(task);
+    let public = scheduled_public_task(&task);
+    if tasks.save(&task).is_err() {
+        return scheduled_task_error("Could not save schedule task.", task["id"].as_str());
+    }
     drop(tasks);
-    let _ = state.persist_scheduled_tasks().await;
     let _ = state.scheduled_task_events.send(());
     Reply::Success(json!({"task":public}))
 }
 
 async fn scheduled_task_rotate_token(state: &Arc<AppState>, params: &Value) -> Reply {
     let id = params["id"].as_str().unwrap_or_default();
-    let mut tasks = state.scheduled_tasks.lock().await;
-    let Some(task) = tasks.get_mut(id) else {
-        return scheduled_task_error("Schedule task not found.", Some(id));
+    let mut tasks = state.scheduled_database.lock().await;
+    let mut task = match tasks.get(id) {
+        Ok(Some(task)) => task,
+        Ok(None) => return scheduled_task_error("Schedule task not found.", Some(id)),
+        Err(_) => return scheduled_task_error("Could not read schedule task.", Some(id)),
     };
     if task["schedule"]["type"] != "webhook" {
         return scheduled_task_error("Only webhook tasks have a URL token.", Some(id));
@@ -2918,10 +2926,17 @@ async fn scheduled_task_rotate_token(state: &Arc<AppState>, params: &Value) -> R
     let token = random_webhook_token();
     task["_webhookToken"] = token.clone().into();
     task["updatedAt"] = crate::auth_service::iso(crate::auth_service::now()).into();
-    task["webhook"]["path"] = format!("/api/hooks/{}/{}", encode_task_id(id), token).into();
-    let public = scheduled_public_task(task);
+    task["webhook"]["path"] = format!(
+        "/api/hooks/{}/{}",
+        crate::asset_grant::encode_component(id),
+        token
+    )
+    .into();
+    let public = scheduled_public_task(&task);
+    if tasks.save(&task).is_err() {
+        return scheduled_task_error("Could not save schedule task.", task["id"].as_str());
+    }
     drop(tasks);
-    let _ = state.persist_scheduled_tasks().await;
     let _ = state.scheduled_task_events.send(());
     Reply::Success(json!({"task":public}))
 }

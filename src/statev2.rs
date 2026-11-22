@@ -16,6 +16,7 @@
 //!   creating one here would hide its threads from the reference.
 pub mod outbox;
 pub mod read;
+pub(crate) mod scheduled_tasks;
 pub mod write;
 
 use rusqlite::{Connection, OpenFlags};

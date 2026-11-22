@@ -28,6 +28,7 @@ pub struct AppState {
     /// The event log, store, auth and state documents; AppState dereferences
     /// to it.
     pub control: crate::control_state::ControlState,
+    pub(crate) scheduled_database: Arc<Mutex<crate::statev2::scheduled_tasks::Database>>,
     pub(crate) config_started_at: String,
     /// What the startup's provider runtime recovery did, for the
     /// `server.startup` trace span ([`crate::startup_trace`]).
@@ -265,10 +266,19 @@ impl AppState {
         // The orchestration database both servers share. An unsupported one
         // stops start-up here, unchanged (docs/shared-store.md).
         let shared_store = crate::statev2::open(&dir)?;
+        let webhook_denial = settings
+            .policy
+            .summary()
+            .filter(|summary| summary["limits"]["webhookTasks"] == false)
+            .map(|_| settings.policy.denial("webhook tasks"));
+        let scheduled_database =
+            crate::statev2::scheduled_tasks::Database::open(&dir, webhook_denial)?;
         let log: Box<dyn event_log::EventLog + Send> =
             Box::new(event_log::NdjsonLog::open(dir.join("events.jsonl"))?);
         let oauth = mcp_oauth::OAuth::open(documents.clone(), &dir)?;
         let mut control = crate::control_state::ControlState::open(auth, documents, log, &dir)?;
+        let scheduled_database = Arc::new(Mutex::new(scheduled_database));
+        control.scheduled_database = Some(scheduled_database.clone());
         {
             let database = dir.join(crate::statev2::FILE_NAME);
             let read_error = |error: rusqlite::Error| {
@@ -354,6 +364,7 @@ impl AppState {
         ));
         Ok(Arc::new(Self {
             control,
+            scheduled_database,
             config_started_at: auth_service::iso(auth_service::now()),
             startup_recovery,
             environment_id: environment_http::identity(&dir)?,
@@ -772,15 +783,19 @@ pub(crate) async fn webhook_handler(
             )
         }
     };
-    let tasks = state.scheduled_tasks.lock().await;
-    let task = tasks
-        .values()
-        .find(|task| {
+    let task = match state.scheduled_database.lock().await.get(&hook_id) {
+        Ok(task) => task.filter(|task| {
             task["schedule"]["type"] == "webhook"
-                && task["id"].as_str().is_some_and(|id| id == hook_id)
                 && task["_webhookToken"].as_str() == Some(token.as_str())
-        })
-        .cloned();
+        }),
+        Err(_) => {
+            return outcome(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error":"internal_error"}),
+                "error",
+            )
+        }
+    };
     let Some(task) = task else {
         return outcome(
             StatusCode::NOT_FOUND,

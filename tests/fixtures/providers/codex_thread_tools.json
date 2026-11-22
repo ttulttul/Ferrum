@@ -123,6 +123,36 @@
   },
   {
    "mcp": {
+    "tool": "list_scheduled_tasks",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "list_scheduled_tasks",
+    "arguments": {
+     "scheduledTaskId": "task:project:other"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "list_scheduled_tasks",
+    "arguments": {
+     "projectId": "project:other"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "list_scheduled_tasks",
+    "arguments": {
+     "scheduledTaskId": 12
+    }
+   }
+  },
+  {
+   "mcp": {
     "tool": "t3_thread_configure",
     "arguments": {}
    }

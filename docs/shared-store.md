@@ -277,6 +277,11 @@ on it. Rust rebuilds:
 Rust's computed records then name the same entities as the stored ones, and the overlay
 applies only what Rust's turns change.
 
+The native server also reads and writes the reference's `scheduled_tasks` rows. On first
+open with a legacy `scheduled-tasks.json`, it imports missing ids in one transaction.
+An existing SQLite row wins. After commit, the file moves to `scheduled-tasks.imported.json`
+so deleting a task survives the next restart.
+
 ### 2.3 Existing Rust homes: a one-time import, keeping the old file
 
 At start-up, before anything else commits, Rust lists the threads and projects its

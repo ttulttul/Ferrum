@@ -440,6 +440,14 @@ def seed_turn(url, cookie, root, scenario):
         "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"]},
         "runtimeMode": scenario.get("runtimeMode", "full-access"), "interactionMode": "default", "branch": None,
         "worktreePath": None, "createdBy": "user", "creationSource": "web"})
+    if scenario["name"] == "codex thread tools":
+        for project, trigger in [("project:github", {"type": "interval", "everyMs": 60000}),
+                                 ("project:other", {"type": "webhook"})]:
+            rpc(url, cookie, "scheduledTasks.upsert", {
+                "id": "task:" + project, "projectId": project, "title": "Read report", "prompt": "Read report",
+                "enabled": False, "schedule": trigger, "threadMode": "fresh_session",
+                "workspaceStrategy": {"type": "root"}, "modelSelection": {"instanceId": "codex", "model": "fixture"},
+                "runtimeMode": "approval-required", "interactionMode": "default"})
     return {"threadId": THREAD, "turnMs": 60000 if scenario.get("change") else 30000,
             "interrupt": scenario.get("interrupt", False),
             "respond": scenario.get("respond"), "change": scenario.get("change"), "dispatch": {
