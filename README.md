@@ -51,7 +51,7 @@ The [client RPC parity suite](scripts/client_rpc_parity_xfail.json) has no expec
 - **Steering.** You can redirect a running Codex turn with a text message. Claude queues the message for later. Changing the model or including an attachment in a steering message still behaves differently.
 - **Titles and workflows.** Codex and Claude can generate thread titles. Custom title generators and titles that draw on the source thread’s history after a fork are still missing. Claude workflow tasks are also unsupported.
 - **ACP Registry agents.** Rust searches the ACP Registry, installs its agents (downloaded binaries, and npm or uv packages) and removes managed binaries. It cannot run turns with ACP agents yet.
-- **Provider settings.** Rust checks all built-in providers, including whether a newer CLI release is out. Claude skill and plugin listings and Claude reset credits are still missing. Periodic checks can continue when nobody is using the app.
+- **Provider settings.** Rust checks all built-in providers, including whether a newer CLI release is out. It lists Claude's skills, including plugin skills, and the reset credits on a Claude subscription, but cannot redeem a reset credit yet. Periodic checks can continue when nobody is using the app.
 
 ## Install and switching
 

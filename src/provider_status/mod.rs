@@ -59,6 +59,8 @@
 mod acp;
 mod antigravity;
 pub(crate) mod claude;
+mod claude_credits;
+mod claude_skills;
 mod codex;
 mod cursor;
 mod fx;

@@ -693,6 +693,119 @@ for scenario in SCENARIOS:
         scenario["fakes"]["pi"]["spec"]["commands"][1]["pi"].pop("get_available_models")
 
 
+def skill(description=None, **fields):
+    """A SKILL.md with YAML frontmatter (`None` for none at all)."""
+    if description is None and not fields:
+        return "Instructions only.\n"
+    lines = ([f"description: {description}"] if description is not None else []) + [
+        f"{key.replace('_', '-')}: {value}" for key, value in fields.items()]
+    return "---\n" + "\n".join(lines) + "\n---\nInstructions.\n"
+
+
+CLAUDE_SIGNED_IN = {"claude": {"version": "ok", "fixture": "status_claude_signed_in.json"}}
+ORG, ACCOUNT = "0f8e2a6c-1b3d-4e5f-8a9b-0c1d2e3f4a5b", "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d"
+CEDAR_EMBER = {"eligible": True, "next_grant_id": "weekly_2", "grants": [
+    {"id": "session_1", "resets_left": 1, "usable_now": True, "clears": ["five_hour"]},
+    {"id": "weekly_2", "resets_left": 2, "usable_now": True, "type": "weekly", "ends_at": "2099-01-01T05:00:00.5+05:00"},
+    {"id": "paused_3", "resets_left": 3, "usable_now": True, "paused": True},
+    {"id": "ended_4", "resets_left": 1, "usable_now": True, "ends_at": "2020-01-01T00:00:00Z"},
+    {"id": "fable_5", "resets_left": 1, "usable_now": True, "gives_back_weekly": True, "ends_at": None},
+    {"id": "Bad-Id", "resets_left": 1, "usable_now": True}]}
+USAGE_ROUTE = "GET api.anthropic.com/api/oauth/usage"
+SCENARIOS += [
+    # User skills in the config directory, project skills in the server's state directory (the
+    # status check's cwd), `--add-dir` launch directories, and `skillOverrides` from settings files.
+    {"name": "claude skills", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "settings": {"providerInstances": {"claudeAgent": {"driver": "claudeAgent", "config": {
+         "launchArgs": "--add-dir extra --model x --add-dir=/nonexistent"}}}},
+     "files": {".claude/skills/zeta/SKILL.md": skill("Last one"),
+               ".claude/skills/alpha/SKILL.md": skill("First", disable_model_invocation="yes"),
+               ".claude/skills/quiet/SKILL.md": skill("Quiet", user_invocable="off"),
+               ".claude/skills/colon/SKILL.md": skill("Deploys: to prod  # a comment"),
+               ".claude/skills/plain/SKILL.md": skill(),
+               ".claude/skills/hidden/SKILL.md": skill("Hidden"),
+               ".claude/skills/broken/SKILL.md": "---\ndescription: [unclosed\n---\n",
+               ".claude/skills/empty/SKILL.md": "---\n\n---\n",
+               ".claude/skills/no-skill-file/README.md": "nothing",
+               ".claude/settings.json": '{\n  // Claude allows comments\n  "skillOverrides": {"hidden": "off", "plain": '
+                                        '"user-invocable-only", "Zeta": "off",},\n}\n',
+               "userdata/.claude/skills/zeta/SKILL.md": skill("Shadowed by the user skill"),
+               "userdata/.claude/skills/project-only/SKILL.md": skill("Project"),
+               "userdata/.claude/settings.local.json": '{"skillOverrides": {"project-only": "name-only", "alpha": "on"}}',
+               "userdata/extra/.claude/skills/added/SKILL.md": skill("From --add-dir")}},
+    # One unknown override value drops every override in that file, as Claude Code does.
+    {"name": "claude skill overrides rejected", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "files": {".claude/skills/hidden/SKILL.md": skill("Hidden"),
+               ".claude/skills/shown/SKILL.md": skill("Shown"),
+               ".claude/settings.json": '{"skillOverrides": {"hidden": "off", "shown": "sometimes"}}',
+               "userdata/.claude/settings.json": '{"skillOverrides": {"shown": "off"}}'}},
+    # Installed plugins enabled in settings (user and project scope), a plugin's declared skill
+    # roots, a single-SKILL.md plugin, and inline plugin folders from the settings `env`.
+    {"name": "claude plugin skills", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "files": {
+         ".claude/settings.json": json.dumps({
+             "enabledPlugins": {"tools@market": True, "dup@market": True, "bad@market": True, "solo@market": True, "here@market": True,
+                                "elsewhere@market": True, "off@market": False, "gone@market": True,
+                                "quiet@inline": False},
+             "env": {"CLAUDE_CODE_PLUGIN_DIRS": "<root>/inline:relative/ignored"}}),
+         ".claude/plugins/installed_plugins.json": json.dumps({"plugins": {
+             "tools@market": [{"scope": "user", "installPath": "<root>/plugins/tools"}],
+             "solo@market": [{"scope": "user", "installPath": "<root>/plugins/solo"}],
+             "here@market": [{"scope": "project", "installPath": "<root>/plugins/here", "projectPath": "<root>/userdata"}],
+             "elsewhere@market": [{"scope": "local", "installPath": "<root>/plugins/elsewhere", "projectPath": "<root>/other"}],
+             "off@market": [{"scope": "user", "installPath": "<root>/plugins/off"}],
+             "gone@market": [{"scope": "user", "installPath": "<root>/plugins/gone"}],
+             "dup@market": [{"scope": "user", "installPath": "<root>/plugins/dup"}],
+             "bad@market": [{"scope": "nowhere", "installPath": "x"}]}}),
+         "plugins/dup/.claude-plugin/plugin.json": json.dumps({"name": "dup"}),
+         "plugins/dup/skills/installed-copy/SKILL.md": skill("Replaced by the inline copy"),
+         "plugins/tools/.claude-plugin/plugin.json": json.dumps({"name": "toolkit", "skills": ["./more", "../escape"]}),
+         "plugins/tools/skills/lint it/SKILL.md": skill("Lints", name="ignored"),
+         "plugins/tools/skills/format/SKILL.md": skill("Formats"),
+         "plugins/tools/more/review/SKILL.md": skill("Reviews"),
+         "plugins/escape/SKILL.md": skill("Outside the plugin"),
+         "plugins/solo/SKILL.md": skill("A single skill", name="solo:Deploy Now"),
+         "plugins/here/skills/local/SKILL.md": skill("Project plugin"),
+         "plugins/elsewhere/skills/other/SKILL.md": skill("Another project's plugin"),
+         "plugins/off/skills/never/SKILL.md": skill("Disabled plugin"),
+         "inline/alpha/.claude-plugin/plugin.json": json.dumps({"name": "alpha"}),
+         "inline/alpha/skills/run/SKILL.md": skill("Inline"),
+         "inline/quiet/.claude-plugin/plugin.json": json.dumps({"name": "quiet"}),
+         "inline/quiet/skills/hush/SKILL.md": skill("Disabled inline"),
+         "inline/shy/.claude-plugin/plugin.json": json.dumps({"name": "shy", "defaultEnabled": False}),
+         "inline/shy/skills/hide/SKILL.md": skill("Off by default"),
+         "inline/dup-copy/.claude-plugin/plugin.json": json.dumps({"name": "DUP"}),
+         "inline/dup-copy/skills/inline-tool/SKILL.md": skill("The inline copy wins")}},
+    # The signed-in account's claude.ai plugins, synced into `plugins/synced/<org>_<account>`.
+    {"name": "claude synced plugin skills", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "files": {
+         ".claude.json": json.dumps({"oauthAccount": {"organizationUuid": ORG.upper(), "accountUuid": ACCOUNT}}),
+         ".claude/settings.json": json.dumps({"enabledPlugins": {"muted@synced": False}}),
+         f".claude/plugins/synced/.bucket-{ORG}_{ACCOUNT}": "",
+         f".claude/plugins/synced/{ORG}_{ACCOUNT}/manifest.json": json.dumps({"plugins": [
+             {"pluginId": "p1", "name": "Docs: Writer.", "generation": 2},
+             {"pluginId": "p2", "name": "muted"},
+             {"pluginId": "p3", "name": "Docs"},
+             {"pluginId": "p4", "name": ".hidden"}]}),
+         f".claude/plugins/synced/{ORG}_{ACCOUNT}/Docs_ Writer~g2/.claude-plugin/plugin.json": json.dumps({"name": "docs"}),
+         f".claude/plugins/synced/{ORG}_{ACCOUNT}/Docs_ Writer~g2/skills/draft/SKILL.md": skill("Drafts"),
+         f".claude/plugins/synced/{ORG}_{ACCOUNT}/muted/skills/mute/SKILL.md": skill("Muted"),
+         f".claude/plugins/synced/{ORG}_{ACCOUNT}/Docs/skills/dupe/SKILL.md": skill("Same name, so not loaded")}},
+    # A subscription's reset credits, read with the stored claude.ai login through the test proxy.
+    {"name": "claude reset credits", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "files": {".claude/.credentials.json": json.dumps({"claudeAiOauth": {"accessToken": "test-token"}})},
+     "proxy": {USAGE_ROUTE: {"body": {"cedar_ember": CEDAR_EMBER}}}},
+    {"name": "claude reset credits ineligible", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "files": {".claude/.credentials.json": json.dumps({"claudeAiOauth": {"accessToken": "test-token"}})},
+     "proxy": {USAGE_ROUTE: {"body": {"cedar_ember": {"eligible": False}}}}},
+    {"name": "claude reset credits unavailable", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "files": {".claude/.credentials.json": json.dumps({"claudeAiOauth": {"accessToken": "test-token"}})},
+     "proxy": {USAGE_ROUTE: {"status": 500, "body": {"error": "down"}}}},
+    {"name": "claude reset credits without a login", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "proxy": {USAGE_ROUTE: {"body": {"cedar_ember": CEDAR_EMBER}}}},
+]
+
+
 class FakeApi:
     """A provider's HTTP API for one server: answers each `METHOD /path` from `routes`
     ({"GET /v1/me": {"status": 200, "body": {...}, "sleep": seconds}}) and records the
@@ -883,7 +996,7 @@ def run_server(args, command, root, scenario, temporary):
         # Files seeded in the server's home before it starts, such as stored sign-ins.
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text)
+        target.write_text(text.replace("<root>", str(root)))
         if name in scenario.get("executables", ()):
             target.chmod(0o755)
     (root / "userdata").mkdir(parents=True, exist_ok=True)
