@@ -36,6 +36,8 @@ pub struct AppState {
     pub oauth: mcp_oauth::OAuth,
     /// Links from this environment to others.
     pub(crate) peer_links: crate::peer_links::PeerLinks,
+    /// MCP sessions with linked environments.
+    pub(crate) peer_mcp: crate::peer_mcp::PeerMcpClient,
     pub(crate) connect: access_http::connect::Service,
     pub data_dir: PathBuf,
     pub paths: config::ServerPaths,
@@ -288,6 +290,7 @@ impl AppState {
             environment_id: environment_http::identity(&dir)?,
             oauth,
             peer_links: crate::peer_links::PeerLinks::new(&dir, &paths.secrets),
+            peer_mcp: Default::default(),
             connect,
             data_dir: dir.clone(),
             paths: paths.clone(),
@@ -1183,6 +1186,29 @@ impl mcp_oauth::McpHost for AppState {
     }
     fn control_state(&self) -> &crate::control_state::ControlState {
         &self.control
+    }
+    fn peer_link(&self, environment_id: &str) -> Option<mcp_oauth::PeerLinkInfo> {
+        let link = self.peer_links.get(environment_id).ok().flatten()?;
+        Some(mcp_oauth::PeerLinkInfo {
+            expired: link.expired(crate::platform::now_ms()),
+            label: link.label,
+            access: link.access,
+        })
+    }
+    fn forward_tool(
+        self: &Arc<Self>,
+        environment_id: String,
+        tool: String,
+        arguments: serde_json::Value,
+        limit: String,
+    ) -> Option<mcp_oauth::HostFuture<Result<serde_json::Value, (&'static str, String)>>> {
+        let state = self.clone();
+        Some(Box::pin(async move {
+            state
+                .peer_mcp
+                .call(&state.peer_links, &environment_id, &tool, arguments, &limit)
+                .await
+        }))
     }
     fn project_row(&self, row: &serde_json::Value) -> serde_json::Value {
         crate::repository_identity::with_identity(row)

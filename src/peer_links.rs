@@ -157,6 +157,12 @@ impl LinkInput {
     }
 }
 
+/// A usable link: where to reach the peer and the token to send there.
+pub(crate) struct Resolved {
+    pub url: String,
+    pub token: String,
+}
+
 /// What this environment knows of itself when linking.
 pub(crate) struct SelfDescriptor {
     pub environment_id: String,
@@ -311,6 +317,10 @@ impl PeerLinks {
         }
     }
 
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     // --- storage -----------------------------------------------------------
 
     /// The link table: in `statev2.sqlite` when this home has it, otherwise in
@@ -386,6 +396,14 @@ impl PeerLinks {
         Ok(())
     }
 
+    fn read_secret(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        match std::fs::read(self.secret_path(name)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(PeerLinkError::storage(e)),
+        }
+    }
+
     fn remove_secret(&self, name: &str) -> Result<()> {
         match std::fs::remove_file(self.secret_path(name)) {
             Ok(()) => Ok(()),
@@ -449,6 +467,24 @@ impl PeerLinks {
         link
     }
 
+    /// Records the outcome of a call, so listing shows whether the peer answered last time.
+    pub(crate) fn record_outcome(&self, environment_id: &str, error: Option<&str>) {
+        let Ok(conn) = self.open() else { return };
+        let done = match error {
+            None => conn.execute(
+                "UPDATE peer_environment_links SET last_reached_at = ?1, last_error = NULL WHERE environment_id = ?2",
+                params![iso(crate::platform::now_ms()), environment_id],
+            ),
+            Some(error) => conn.execute(
+                "UPDATE peer_environment_links SET last_error = ?1 WHERE environment_id = ?2",
+                params![error, environment_id],
+            ),
+        };
+        if let Err(e) = done {
+            tracing::warn!("could not record a peer link's outcome: {e}");
+        }
+    }
+
     /// Forgets the link here. The peer still lists the session until it is revoked there.
     pub(crate) fn unlink(&self, environment_id: &str) -> Result<bool> {
         if !self.has_store() {
@@ -488,7 +524,13 @@ impl PeerLinks {
             return Err(ProbeError::Shape);
         };
         let capabilities = &body["capabilities"];
-        if !capabilities.is_object() {
+        let non_empty = |v: &Value| v.as_str().is_some_and(|s| !s.trim().is_empty());
+        if !capabilities.is_object()
+            || !non_empty(&body["serverVersion"])
+            || !non_empty(&body["label"])
+            || !body["platform"]["os"].is_string()
+            || !body["platform"]["arch"].is_string()
+        {
             return Err(ProbeError::Shape);
         }
         Ok(Descriptor {
@@ -617,6 +659,22 @@ impl PeerLinks {
             }
             _ => return Err(stopped()),
         };
+        // `AuthMcpRegisteredClient`, every key of which the reference decodes.
+        let only = |key: &str, value: &str| {
+            registered[key]
+                .as_array()
+                .is_some_and(|items| items.iter().all(|v| v == value))
+        };
+        if !registered["client_name"].is_string()
+            || !registered["redirect_uris"]
+                .as_array()
+                .is_some_and(|uris| uris.iter().all(Value::is_string))
+            || !only("grant_types", "authorization_code")
+            || !only("response_types", "code")
+            || registered["token_endpoint_auth_method"] != "none"
+        {
+            return Err(incompatible());
+        }
         let client_id = registered["client_id"]
             .as_str()
             .ok_or_else(incompatible)?
@@ -917,6 +975,62 @@ impl PeerLinks {
             }))
             .await,
         )
+    }
+    /// An address that answers as the linked peer, with its token, ready to call.
+    pub(crate) async fn resolve(&self, environment_id: &str) -> Result<Resolved> {
+        let not_linked = || {
+            PeerLinkError::new(
+                "unknown_link",
+                format!("This environment is not linked to {environment_id}. t3_environment_links lists the linked ones."),
+            )
+        };
+        let row = self.read_row(environment_id)?.ok_or_else(not_linked)?;
+        let secret_name = row.secret_name.clone();
+        let link = row.into_link()?;
+        if link.expired(crate::platform::now_ms()) {
+            return Err(PeerLinkError::new(
+                "expired",
+                format!(
+                    "The link to {label} expired. Link it again with a new pairing code from {label}.",
+                    label = link.label
+                ),
+            ));
+        }
+        let Some(token) = self.read_secret(&secret_name)? else {
+            // An unlink between the two reads removes the row before its secret.
+            if self.read_row(environment_id)?.is_none() {
+                return Err(not_linked());
+            }
+            return Err(PeerLinkError::new(
+                "unknown_link",
+                format!(
+                    "The link to {} lost its credential. Link it again.",
+                    link.label
+                ),
+            ));
+        };
+        let Some((url, peer)) = self.first_answering(&link.urls, environment_id).await else {
+            return Err(PeerLinkError::unreachable(format!(
+                "{} did not answer at {}.",
+                link.label,
+                link.urls.join(", ")
+            )));
+        };
+        if !peer.link_limits_hold {
+            return Err(PeerLinkError::new(
+                "incompatible",
+                format!(
+                    "{} runs a T3 Code version that cannot keep a linked agent's limits. Update it, then link again.",
+                    link.label
+                ),
+            ));
+        }
+        // A peer's label follows its machine name.
+        self.with_label(link, &peer.label);
+        Ok(Resolved {
+            url,
+            token: String::from_utf8_lossy(&token).into_owned(),
+        })
     }
 }
 

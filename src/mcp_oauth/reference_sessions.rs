@@ -197,12 +197,18 @@ impl ReferenceSessions {
         };
         let row = conn
             .query_row(
-                "SELECT scopes, revoked_at FROM auth_sessions WHERE session_id = ?1",
+                "SELECT scopes, revoked_at, client_label FROM auth_sessions WHERE session_id = ?1",
                 [&claims.sid],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((scopes, None)) = row else {
+        let Some((scopes, None, label)) = row else {
             return Ok(None);
         };
         if claims.sub != MCP_CLIENT_SUBJECT || claims.method != BEARER {
@@ -217,6 +223,8 @@ impl ReferenceSessions {
         Ok(Some(McpAccess {
             access,
             peer_link: claims.plk == Some(1),
+            session_id: claims.sid,
+            label: label.unwrap_or_default(),
         }))
     }
 
@@ -362,11 +370,11 @@ pub(crate) mod tests {
             false,
         );
         assert_eq!(
-            sessions.verify(&token, now).unwrap(),
-            Some(McpAccess {
-                access: "auto".into(),
-                peer_link: true
-            })
+            sessions
+                .verify(&token, now)
+                .unwrap()
+                .map(|a| (a.access, a.peer_link, a.label)),
+            Some(("auto".into(), true, "T3 Code · fixture".into()))
         );
         // Expired claims, a forged signature and a revoked row are all refused.
         assert_eq!(sessions.verify(&token, now + 60_000).unwrap(), None);
@@ -420,11 +428,11 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(issued.expires_ms, now + TTL_MS);
         assert_eq!(
-            sessions.verify(&issued.token, now).unwrap(),
-            Some(McpAccess {
-                access: "read-only".into(),
-                peer_link: true
-            })
+            sessions
+                .verify(&issued.token, now)
+                .unwrap()
+                .map(|a| (a.access, a.peer_link)),
+            Some(("read-only".into(), true))
         );
         let (subject, scopes, label, device, agent): (String, String, String, String, String) = conn
             .query_row(

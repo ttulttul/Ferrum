@@ -112,16 +112,19 @@ pub(super) async fn handle<S: McpHost>(
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or("");
             let a = &req["params"]["arguments"];
-            if a.get("environmentId")
-                .is_some_and(|id| id != s.environment_id())
-            {
-                return rpc_error(id, -32602, "Environment is unavailable.");
-            }
             let limit = h
                 .get(super::tools::MODE_LIMIT_HEADER)
                 .and_then(|v| v.to_str().ok());
             let caller = super::tools::Caller::new(granted, limit);
-            let outcome = super::on_this_thread(super::tools::call(&s, &caller, name, a)).await;
+            let outcome = match super::tools::unknown_arguments(name, a)
+                .and_then(|()| super::tools::linked_target(&*s, name, a))
+            {
+                Err(refusal) => Err(refusal),
+                Ok(Some(target)) => {
+                    super::on_this_thread(super::tools::forward(&s, &caller, name, a, target)).await
+                }
+                Ok(None) => super::on_this_thread(super::tools::call(&s, &caller, name, a)).await,
+            };
             match outcome {
                 Ok(v) => {
                     json!({"content":[{"type":"text","text":v.to_string()}],"structuredContent":v,"isError":false})
