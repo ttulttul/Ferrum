@@ -1,0 +1,27 @@
+<script>
+(() => {
+  try {
+    const initial = new URLSearchParams(location.search).get("t3-color-scheme");
+    if (initial === "light" || initial === "dark") {
+      // A meta tag, unlike an inline style, survives the app's own <html style> attribute.
+      const meta = document.createElement("meta");
+      meta.name = "color-scheme";
+      meta.content = initial;
+      document.head.append(meta);
+    }
+  } catch {}
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== "2.0") return;
+    const theme = message.method === "ui/notifications/host-context-changed"
+      ? message.params?.theme
+      : message.id !== undefined && message.method === undefined
+        ? message.result?.hostContext?.theme
+        : undefined;
+    if (theme === "light" || theme === "dark") {
+      document.documentElement.style.colorScheme = theme;
+    }
+  });
+})();
+</script>

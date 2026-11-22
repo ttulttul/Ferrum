@@ -24,8 +24,10 @@ no longer exists.
         --rust-command target/debug/t3code-server --reference-root ref
 """
 import argparse
+import base64
 import contextlib
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -62,6 +64,9 @@ RAW_REPLAYS = [
     ("pullRequests.listStats", {"refs": []}),
     # Every provider auth needs account, host and detail; the 0.1.10 client rejects the reply without them.
     ("server.discoverSourceControl", {}),
+    ("attachments.createUploadUrl", {"type": "file", "name": "large.bin", "mimeType": "application/octet-stream", "sizeBytes": 52_428_801}),
+    ("attachments.createUploadUrl", {"name": "large.png", "mimeType": "image/png", "sizeBytes": 10_485_761}),
+    ("attachments.createUploadUrl", {"type": "file", "name": "empty.bin", "mimeType": "application/octet-stream", "sizeBytes": 0}),
 ]
 ISO_TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)")
 UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
@@ -139,6 +144,49 @@ def seed_fixture(home, isolation):
     identity = f"{(repo / '.git').resolve()}\0feature/client-rpc"
     worktree_hash = hashlib.sha256(identity.encode()).hexdigest()[:16]
     return {"WORKTREE_HASH": worktree_hash, "HOME": str(home), "REPO": str(repo), "PLAIN": str(plain), "REMOTE": str(remote)}
+
+
+def seed_asset_grants(home, key):
+    """Known signatures with expired claims for otherwise readable/writable attachments."""
+    def signed(claims):
+        def b64(raw):
+            return base64.urlsafe_b64encode(raw).rstrip(b"=")
+        encoded = b64(encode(claims))
+        return (encoded + b"." + b64(hmac.digest(key, encoded, "sha256"))).decode()
+
+    secrets_dir = home / "userdata/secrets"
+    secrets_dir.mkdir(parents=True)
+    key_file = secrets_dir / "asset-access-signing-key.bin"
+    key_file.write_bytes(key)
+    key_file.chmod(0o600)
+    attachment_id = "pending-aaaaaaaa-bbbb-cccc-dddd-000000000000-txt"
+    attachments = home / "userdata/attachments"
+    attachments.mkdir()
+    (attachments / f"{attachment_id}.txt").write_bytes(b"x")
+    common = dict(version=1, attachmentId=attachment_id, expiresAt=1)
+    upload = signed(dict(common, kind="attachment-upload", type="file", name="x.txt", mimeType="text/plain", sizeBytes=1))
+    asset = signed(dict(common, kind="attachment", download=True))
+    return {"EXPIRED_UPLOAD": f"/api/attachments/upload/{upload}", "EXPIRED_ASSET": f"/api/assets/{asset}/x.txt"}
+
+
+def inspect_grant(value, key, before, after):
+    """Compare the actual signed claims, URL filename and TTL without reporting bearer URLs."""
+    parts = value["relativeUrl"].split("/")
+    upload = parts[1:4] == ["api", "attachments", "upload"]
+    encoded, signature = parts[4 if upload else 3].split(".")
+    expected = base64.urlsafe_b64encode(hmac.digest(key, encoded.encode(), "sha256")).rstrip(b"=").decode()
+    if not hmac.compare_digest(expected, signature):
+        raise ValueError("invalid grant signature")
+    claims = json.loads(base64.urlsafe_b64decode(encoded + "==="))
+    expires = claims.pop("expiresAt")
+    ttl = (10 if upload else 60) * 60_000
+    bucket = 30 * 60_000 if claims.get("mimeType") == "text/html" and not upload else 1
+    def expiry(now):
+        return ((now + ttl + bucket - 1) // bucket) * bucket
+    if expires != value["expiresAt"] or expires % bucket or not expiry(before) <= expires <= expiry(after):
+        raise ValueError("incorrect grant expiry")
+    return {**{k: v for k, v in value.items() if k not in ("relativeUrl", "expiresAt")},
+            "claims": claims, "route": parts[1:4] if upload else parts[1:3], "filename": None if upload else parts[4]}
 
 
 def run_driver(args, url, credential, variables):
@@ -291,6 +339,7 @@ def main():
     xfail = json.loads(args.xfail.read_text())["cases"]
     modes = plan_modes(args.cases)
     credential, signing_key = secrets.token_urlsafe(32), secrets.token_bytes(32)
+    asset_key = secrets.token_bytes(32)
     started = time.monotonic()
     results, frames = {}, {}
     with tempfile.TemporaryDirectory(prefix="t3-client-rpc-") as temporary:
@@ -302,10 +351,15 @@ def main():
             # Each server has its own home, port and driver, so both run side by side.
             home = root / name
             home.mkdir()
-            variables = seed_fixture(home, isolation)
+            variables = {**seed_fixture(home, isolation), **seed_asset_grants(home, asset_key)}
             with contextlib.ExitStack() as server:
                 url, _ = managed_server(server, shlex.split(command), home, credential, signing_key, env=isolation)
+                before = time.time_ns() // 1_000_000
                 result = run_driver(args, url, credential, variables)
+                after = time.time_ns() // 1_000_000
+                for step in result["steps"]:
+                    if modes.get(step["name"]) == "grant" and step["outcome"] == "reply":
+                        step["value"] = inspect_grant(step["value"], asset_key, before, after)
                 with urllib.request.urlopen(url + "/.well-known/t3/environment", timeout=10) as response:
                     environment_id = json.load(response)["environmentId"]
                 # Placeholders are numbered per step, so an extra id in one step does not shift the next.

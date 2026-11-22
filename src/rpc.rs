@@ -40,7 +40,7 @@ fn asset_signing_key(state: &crate::AppState) -> anyhow::Result<[u8; 32]> {
         .map_err(|_| anyhow::anyhow!("invalid asset signing key"))
 }
 
-fn sign_asset_payload(state: &crate::AppState, payload: &str) -> anyhow::Result<String> {
+pub(crate) fn sign_asset_payload(state: &crate::AppState, payload: &str) -> anyhow::Result<String> {
     let key = asset_signing_key(state)?;
     let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key");
     mac.update(payload.as_bytes());
@@ -1684,70 +1684,11 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         }}));
     }
     if method == "attachments.createUploadUrl" {
-        let Some(name) = params["name"].as_str().filter(|s| !s.trim().is_empty()) else {
-            return Reply::defect("Missing key\n  at [\"name\"]".into());
-        };
-        let mime = params["mimeType"]
-            .as_str()
-            .unwrap_or("application/octet-stream");
-        let size = params["sizeBytes"].as_u64().unwrap_or(0);
-        let ty = params["type"].as_str().unwrap_or("image");
-        if ty == "image"
-            && !matches!(
-                mime.to_ascii_lowercase().as_str(),
-                "image/gif" | "image/jpeg" | "image/png" | "image/webp"
-            )
-        {
-            return Reply::defect("Expected \"image/gif\" | \"image/jpeg\" | \"image/png\" | \"image/webp\"\n  at [\"mimeType\"]".into());
-        }
-        let mut id = format!("pending-{}", uuid::Uuid::new_v4());
-        if ty == "file" {
-            let extension = Path::new(name)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase())
-                .filter(|e| e.len() <= 10 && e.chars().all(|c| c.is_ascii_alphanumeric()))
-                .unwrap_or_else(|| "bin".into());
-            id.push('-');
-            id.push_str(&extension);
-        }
-        let expires = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            + 10 * 60 * 1000) as u64;
-        let claims = json!({"version":1,"kind":"attachment-upload","type":ty,"attachmentId":id,"name":name,"mimeType":mime,"sizeBytes":size,"expiresAt":expires});
-        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(crate::wire_json::compact(&claims));
-        let signature = match sign_asset_payload(state, &encoded) {
-            Ok(signature) => signature,
-            Err(error) => {
-                return Reply::Failure(
-                    json!({"_tag":"Fail","error":{"_tag":"AttachmentUploadSigningKeyError","cause":{"name":"Error","message":error.to_string()}}}),
-                )
-            }
-        };
-        return Reply::Success(
-            json!({"attachmentId":id,"relativeUrl":format!("/api/attachments/upload/{encoded}.{signature}"),"expiresAt":expires}),
-        );
+        return crate::asset_http::upload_url(state, params);
     }
     if method == "attachments.delete" {
         let id = params["attachmentId"].as_str().unwrap_or_default();
-        // The TypeScript server only deletes pending uploads. Any other id is a
-        // deliberate no-op so callers can safely retry cleanup.
-        if id.starts_with("pending-") && !id.contains('/') && !id.contains('\\') {
-            if let Ok(mut dir) = tokio::fs::read_dir(&state.paths.attachments).await {
-                while let Ok(Some(entry)) = dir.next_entry().await {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name == id
-                        || name.starts_with(&format!("{id}."))
-                        || name == format!("{id}.txt")
-                    {
-                        let _ = tokio::fs::remove_file(entry.path()).await;
-                    }
-                }
-            }
-        }
+        crate::asset_http::delete_pending(state, id).await;
         return Reply::Success(Value::Null);
     }
     if method == "assets.persistChatAttachments" {
@@ -1903,52 +1844,24 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             .unwrap_or_default()
             .as_millis()
             + 60 * 60 * 1000) as u64;
-        let claims = if tag == "attachment" {
-            let attachment_id = resource
-                .get("attachmentId")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if attachment_id.is_empty() {
-                return Reply::defect("Missing key\n  at [\"resource\"][\"attachmentId\"]".into());
-            }
-            let mut claims = json!({"version":1,"kind":"attachment","attachmentId":attachment_id,"expiresAt":expires});
-            if let Some(file_name) = resource.get("fileName") {
-                claims["fileName"] = file_name.clone();
-            }
-            if let Some(mime_type) = resource.get("mimeType") {
-                claims["mimeType"] = mime_type.clone();
-            }
-            claims
-        } else {
-            json!({"version":1,"kind":tag,"filePath":file_path.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"expiresAt":expires})
-        };
+        if tag == "attachment" {
+            return crate::asset_http::attachment_url(state, &params["resource"], expires);
+        }
+        if tag == "draft-workspace-file"
+            && Path::new(path).is_relative()
+            && crate::asset_http::is_draft_image(Path::new(path))
+        {
+            return crate::asset_http::draft_image_url(state, &params["resource"], expires);
+        }
+        let claims = json!({"version":1,"kind":tag,"filePath":file_path.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),"expiresAt":expires});
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(crate::wire_json::compact(&claims));
-        let name = if tag == "attachment" {
-            resource
-                .get("fileName")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| {
-                    resource
-                        .get("attachmentId")
-                        .and_then(Value::as_str)
-                        .and_then(|id| {
-                            std::fs::read_dir(&state.paths.attachments)
-                                .ok()?
-                                .filter_map(Result::ok)
-                                .map(|e| e.file_name().to_string_lossy().into_owned())
-                                .find(|n| n.starts_with(id))
-                        })
-                })
-                .unwrap_or_else(|| "asset".into())
-        } else {
+        let name = crate::asset_http::encode_component(
             Path::new(path)
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("asset")
-                .to_owned()
-        };
+                .unwrap_or("asset"),
+        );
         let revision = file_path
             .as_ref()
             .and_then(|p| std::fs::metadata(p).ok())
@@ -3426,7 +3339,7 @@ async fn scheduled_task_rotate_token(state: &Arc<AppState>, params: &Value) -> R
     Reply::Success(json!({"task":public}))
 }
 
-fn expand_user_path(path: &str) -> PathBuf {
+pub(crate) fn expand_user_path(path: &str) -> PathBuf {
     if path == "~" {
         return std::env::var_os("HOME")
             .map(PathBuf::from)

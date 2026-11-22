@@ -65,11 +65,17 @@
       "validationOnly": false,
       "clientHarness": [
         "attachments.assets.createUrl",
-        "attachments.assets.workspaceFile"
+        "attachments.assets.workspaceFile",
+        "attachments.assets.named",
+        "attachments.assets.html",
+        "attachments.assets.mcpHtml",
+        "attachments.assets.htmlDownload",
+        "attachments.assets.image",
+        "attachments.assets.video",
+        "attachments.assets.large",
+        "attachments.assets.missing"
       ],
-      "knownGaps": [
-        "attachments.assets.workspaceFile"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc",
@@ -112,7 +118,13 @@
       "validationOnly": true,
       "clientHarness": [
         "attachments.createUploadUrl",
-        "attachments.createUploadUrl.tooLarge"
+        "attachments.createUploadUrl.tooLarge",
+        "attachments.htmlUploadUrl",
+        "attachments.imageUploadUrl",
+        "attachments.largeUrl",
+        "raw.attachments.createUploadUrl#16",
+        "raw.attachments.createUploadUrl#17",
+        "raw.attachments.createUploadUrl#18"
       ],
       "knownGaps": []
     },
@@ -988,6 +1000,7 @@
       "existingCoverage": [
         "client_initial_sync_parity.py",
         "client_thread_parity.py",
+        "link_request_parity.py",
         "managed_policy_parity.py",
         "orchestration_parity.py",
         "parity-fixtures.json",
@@ -1204,6 +1217,7 @@
       "usage": "client",
       "existingCoverage": [
         "client_thread_parity.py",
+        "link_request_parity.py",
         "orchestration_parity.py",
         "shared_store_parity.py"
       ],
@@ -1590,8 +1604,10 @@
       "stream": false,
       "auth": "session (access:write)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "link_request_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -1611,6 +1627,7 @@
       "auth": "session (access:write)",
       "usage": "client",
       "existingCoverage": [
+        "link_request_parity.py",
         "peer_forwarding_parity.py",
         "peer_link_outgoing_parity.py"
       ],
@@ -1634,6 +1651,7 @@
       "auth": "session (access:read)",
       "usage": "client",
       "existingCoverage": [
+        "link_request_parity.py",
         "peer_forwarding_parity.py",
         "peer_link_outgoing_parity.py"
       ],
@@ -4772,7 +4790,8 @@
       "usage": "client",
       "existingCoverage": [
         "auth_parity.py",
-        "client_initial_sync_parity.py"
+        "client_initial_sync_parity.py",
+        "client_sessions_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -5511,6 +5530,7 @@
         "client_initial_sync_parity.py",
         "client_thread_parity.py",
         "cors_parity.py",
+        "link_request_parity.py",
         "peer_forwarding_parity.py",
         "peer_link_outgoing_parity.py",
         "peer_link_parity.py",
@@ -5567,6 +5587,7 @@
       "usage": "client",
       "existingCoverage": [
         "auth_parity.py",
+        "client_sessions_parity.py",
         "cors_parity.py"
       ],
       "validationOnly": false,
@@ -5673,6 +5694,7 @@
       "usage": "client",
       "existingCoverage": [
         "auth_parity.py",
+        "client_sessions_parity.py",
         "managed_policy_parity.py",
         "mcp_parity.py",
         "peer_forwarding_parity.py",
@@ -5728,6 +5750,7 @@
       "usage": "client",
       "existingCoverage": [
         "auth_parity.py",
+        "client_sessions_parity.py",
         "peer_forwarding_parity.py",
         "peer_link_parity.py"
       ],
@@ -5795,7 +5818,8 @@
       "auth": "session (cookie/bearer/DPoP)",
       "usage": "client",
       "existingCoverage": [
-        "auth_parity.py"
+        "auth_parity.py",
+        "client_sessions_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -6708,11 +6732,13 @@
       "existingCoverage": [
         "auth_parity.py",
         "client_initial_sync_parity.py",
+        "client_sessions_parity.py",
         "config_parity.py",
         "cors_parity.py",
         "git_workflow_parity.py",
         "github_provider_parity.py",
         "linear_provider_parity.py",
+        "link_request_parity.py",
         "login_shell_refresh_parity.py",
         "managed_policy_parity.py",
         "orchestration_parity.py",
@@ -6777,11 +6803,15 @@
       "clientHarness": [
         "attachments.upload",
         "attachments.upload.again",
-        "attachments.upload.badToken"
+        "attachments.upload.conflict",
+        "attachments.upload.short",
+        "attachments.upload.expired",
+        "attachments.upload.badToken",
+        "attachments.uploadHtml",
+        "attachments.uploadImage",
+        "attachments.uploadLarge"
       ],
-      "knownGaps": [
-        "attachments.upload.badToken"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "http-raw",
@@ -6803,12 +6833,23 @@
       "clientHarness": [
         "attachments.assets.fetch",
         "attachments.assets.fetchAttachment",
-        "attachments.assets.fetch.badToken"
+        "attachments.assets.fetch.badToken",
+        "attachments.assets.namedDownload",
+        "attachments.assets.partial",
+        "attachments.assets.suffix",
+        "attachments.assets.unsatisfiable",
+        "attachments.assets.ifRange",
+        "attachments.assets.inlineHtml",
+        "attachments.assets.inlineMcpHtml",
+        "attachments.assets.compressedMcpHtml",
+        "attachments.assets.downloadHtml",
+        "attachments.assets.imageBytes",
+        "attachments.assets.inlineVideo",
+        "attachments.assets.largeTail",
+        "attachments.assets.expired",
+        "attachments.assets.deleted"
       ],
-      "knownGaps": [
-        "attachments.assets.fetchAttachment",
-        "attachments.assets.fetch.badToken"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "http-raw",
