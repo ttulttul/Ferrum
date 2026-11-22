@@ -16,12 +16,65 @@ pub async fn snapshot(State(s): State<Arc<AppState>>) -> Json<Value> {
     )
 }
 
+pub(crate) use crate::mcp_oauth::ProjectRefusal as Refusal;
+
 pub(super) async fn mutate(state: &AppState, input: &Value) -> Result<Value, Value> {
+    mutate_checked(state, input)
+        .await
+        .map_err(|(error, _)| error)
+}
+
+/// The script ids a project may gain: 1-24 lowercase letters, digits or
+/// hyphens, starting with a letter or digit (`SCRIPT_RUN_COMMAND_PATTERN`).
+fn valid_script_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.encode_utf16().count() <= 24
+        && id
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// About how many characters a reader sees in `text` (`Intl.Segmenter`'s
+/// graphemes): marks, variation selectors, skin tones and joined emoji do not
+/// start a new one.
+fn graphemes(text: &str) -> usize {
+    let mut count = 0;
+    let mut joined = false;
+    for c in text.chars() {
+        let extends = matches!(c as u32,
+            0x0300..=0x036f | 0x1ab0..=0x1aff | 0x20d0..=0x20ff | 0xfe00..=0xfe0f
+            | 0x1f3fb..=0x1f3ff | 0xe0020..=0xe007f);
+        if c == '\u{200d}' {
+            joined = true;
+            continue;
+        }
+        if !extends && !joined {
+            count += 1;
+        }
+        joined = false;
+    }
+    count
+}
+
+/// [`mutate`], with why a refused mutation was refused.
+pub(crate) async fn mutate_checked(
+    state: &AppState,
+    input: &Value,
+) -> Result<Value, (Value, Refusal)> {
     let command = input["commandId"].as_str().unwrap_or_default();
     let id = input["projectId"].as_str().unwrap_or_default();
     let kind = input["type"].as_str().unwrap_or_default();
-    let error =
-        |msg: &str| json!({"_tag":"ProjectMutationError","commandId":command,"message":msg});
+    let fail = |msg: &str, refusal: Refusal| {
+        (
+            json!({"_tag":"ProjectMutationError","commandId":command,"message":msg}),
+            refusal,
+        )
+    };
+    let error = |msg: &str| fail(msg, Refusal::Operation);
     if command.trim().is_empty()
         || id.trim().is_empty()
         || !matches!(kind, "project.create" | "project.update" | "project.delete")
@@ -38,9 +91,44 @@ pub(super) async fn mutate(state: &AppState, input: &Value) -> Result<Value, Val
     }
     let mut record = store.projects.get(id).cloned();
     let mut row = store.project_rows.get(id).cloned();
-    if (kind == "project.create") == row.is_some() || (kind != "project.create" && record.is_none())
-    {
-        return Err(error("Failed to mutate project."));
+    if kind == "project.create" && row.is_some() {
+        return Err(fail(
+            "Failed to mutate project.",
+            Refusal::Invalid(format!(
+                "Project '{id}' already exists and cannot be created twice."
+            )),
+        ));
+    }
+    if kind != "project.create" && record.is_none() {
+        return Err(fail("Failed to mutate project.", Refusal::NotFound));
+    }
+    if kind == "project.update" {
+        let monogram = &input["projectIcon"];
+        if monogram["kind"] == "monogram"
+            && graphemes(monogram["text"].as_str().unwrap_or_default()) > 2
+        {
+            return Err(fail(
+                "Failed to mutate project.",
+                Refusal::Invalid("Project monograms must contain at most two characters.".into()),
+            ));
+        }
+        let existing: Vec<&Value> = row
+            .as_ref()
+            .and_then(|r| r["scripts"].as_array())
+            .map(|scripts| scripts.iter().map(|s| &s["id"]).collect())
+            .unwrap_or_default();
+        for script in input["scripts"].as_array().into_iter().flatten() {
+            let script_id = script["id"].as_str().unwrap_or_default();
+            if !existing.contains(&&script["id"]) && !valid_script_id(script_id) {
+                return Err(fail(
+                    "Failed to mutate project.",
+                    Refusal::Invalid(format!(
+                        "Script IDs must be 1-24 lowercase letters, digits or hyphens, starting with a letter or digit (got {} characters).",
+                        script_id.encode_utf16().count()
+                    )),
+                ));
+            }
+        }
     }
     let removed_threads: Vec<_> = store
         .threads
@@ -49,7 +137,10 @@ pub(super) async fn mutate(state: &AppState, input: &Value) -> Result<Value, Val
         .map(|t| t.id.clone())
         .collect();
     if !removed_threads.is_empty() && input["force"] != true {
-        return Err(error(&format!("Project {id} is not empty.")));
+        return Err(fail(
+            &format!("Project {id} is not empty."),
+            Refusal::NotEmpty,
+        ));
     }
     drop(store);
     let at = iso(time::OffsetDateTime::now_utc());
@@ -84,7 +175,7 @@ pub(super) async fn mutate(state: &AppState, input: &Value) -> Result<Value, Val
             .values()
             .any(|p| p.id != id && p.path == path)
         {
-            return Err(error("Failed to mutate project."));
+            return Err(fail("Failed to mutate project.", Refusal::Conflict));
         }
         workspace = Some(path);
     }
@@ -136,9 +227,14 @@ pub(super) async fn mutate(state: &AppState, input: &Value) -> Result<Value, Val
                 row[key] = v.clone();
             }
         }
+        // Repeating a pin or archive keeps the original time.
         for (key, field) in [("pinned", "pinnedAt"), ("archived", "archivedAt")] {
             if let Some(v) = input[key].as_bool() {
-                row[field] = if v { json!(at) } else { Value::Null }
+                row[field] = match (v, row[field].is_null()) {
+                    (true, true) => json!(at),
+                    (true, false) => row[field].clone(),
+                    (false, _) => Value::Null,
+                }
             }
         }
     } else {

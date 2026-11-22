@@ -31,8 +31,35 @@ fn at(path: &[&str]) -> String {
     path.iter().map(|key| format!("[{}]", json!(key))).collect()
 }
 
-/// The first issue in `value` against `schema`, at `path`.
-fn issue(schema: &Value, value: &Value, optional: bool, path: &[&str]) -> Option<String> {
+/// Fields whose range the reference checks with `isBetween`, which words both
+/// ends as one ("a value between 1 and 50"); other ranges are two checks, and
+/// the advertised schema cannot tell them apart.
+const BETWEEN: &[(&str, &str)] = &[("t3_thread_search", "limit")];
+
+/// A union member: its `kind`, and its required fields in order.
+type Member = (&'static str, &'static [&'static str]);
+
+/// Fields the reference declares as unions tagged by `kind`, each member's
+/// required fields in order: the advertised schema merges the members.
+const TAGGED: &[(&str, &str, &[Member])] = &[(
+    "t3_project_update",
+    "projectIcon",
+    &[
+        ("lucide", &["name", "color"]),
+        ("emoji", &["emoji"]),
+        ("monogram", &["text", "color"]),
+    ],
+)];
+
+/// The first issue in `tool`'s argument `value` against `schema`, at `path`.
+fn issue(
+    tool: &str,
+    schema: &Value,
+    value: &Value,
+    optional: bool,
+    path: &[&str],
+) -> Option<String> {
+    let between = matches!(path, [field] if BETWEEN.contains(&(tool, *field)));
     let expected = |what: String| Some(format!("Expected {what}\n  at {}", at(path)));
     if let Some(allowed) = schema["enum"].as_array() {
         if !allowed.contains(value) {
@@ -53,8 +80,11 @@ fn issue(schema: &Value, value: &Value, optional: bool, path: &[&str]) -> Option
         });
     }
     if let Some(n) = value.as_f64() {
-        // effect's `isBetween` words a range with both ends as one.
-        if let (Some(min), Some(max)) = (schema["minimum"].as_f64(), schema["maximum"].as_f64()) {
+        if let (Some(min), Some(max), true) = (
+            schema["minimum"].as_f64(),
+            schema["maximum"].as_f64(),
+            between,
+        ) {
             if n < min || n > max {
                 return expected(format!("a value between {min} and {max}"));
             }
@@ -94,7 +124,7 @@ fn issue(schema: &Value, value: &Value, optional: bool, path: &[&str]) -> Option
                 None => {}
                 Some(Value::Null) if !is_required => {}
                 Some(found) => {
-                    if let Some(problem) = issue(property, found, !is_required, &inner) {
+                    if let Some(problem) = issue(tool, property, found, !is_required, &inner) {
                         return Some(problem);
                     }
                 }
@@ -123,6 +153,7 @@ pub(super) fn check(
     for (field, expected) in union_fields {
         if let Some(value) = args.get(*field).filter(|v| !v.is_null()) {
             if issue(
+                name,
                 &tool["inputSchema"]["properties"][*field],
                 value,
                 true,
@@ -137,7 +168,21 @@ pub(super) fn check(
             }
         }
     }
-    match issue(&tool["inputSchema"], args, false, &[]) {
+    for (_, field, members) in TAGGED.iter().filter(|(tool, _, _)| *tool == name) {
+        let Some(object) = args.get(*field).and_then(Value::as_object) else {
+            continue;
+        };
+        let kind = object.get("kind").and_then(Value::as_str);
+        if let Some((_, required)) = members.iter().find(|(tag, _)| Some(*tag) == kind) {
+            if let Some(missing) = required.iter().find(|key| !object.contains_key(**key)) {
+                return Err(refusal(
+                    name,
+                    &format!("Missing key\n  at {}", at(&[field, missing])),
+                ));
+            }
+        }
+    }
+    match issue(name, &tool["inputSchema"], args, false, &[]) {
         Some(problem) => Err(refusal(name, &problem)),
         None => Ok(()),
     }
@@ -182,6 +227,17 @@ mod tests {
         assert_eq!(
             message("t3_thread_search", json!({"query": "x", "limit": 51})),
             "Invalid parameters for tool 't3_thread_search': Expected a value between 1 and 50\n  at [\"limit\"]"
+        );
+        assert_eq!(
+            message("t3_worktree_list", json!({"limit": 0})),
+            "Invalid parameters for tool 't3_worktree_list': Expected a value greater than or equal to 1\n  at [\"limit\"]"
+        );
+        assert_eq!(
+            message(
+                "t3_project_update",
+                json!({"projectId": "p", "projectIcon": {"kind": "monogram", "text": "ABC"}})
+            ),
+            "Invalid parameters for tool 't3_project_update': Missing key\n  at [\"projectIcon\"][\"color\"]"
         );
         assert_eq!(
             message("t3_queue", json!({"action": "list", "threadId": null})),

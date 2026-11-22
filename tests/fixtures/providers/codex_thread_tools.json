@@ -588,6 +588,240 @@
    }
   },
   {
+   "mcp": {
+    "tool": "t3_worktree_list",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_worktree_list",
+    "arguments": {
+     "refKind": "local",
+     "limit": 1
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_worktree_list",
+    "arguments": {
+     "threadId": "thread-missing"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_worktree_list",
+    "arguments": {
+     "limit": 0
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_environment_preferences_update",
+    "arguments": {
+     "newWorktreesStartFromOrigin": false
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_environment_preferences_update",
+    "arguments": {
+     "sourceControlWritingStyle": {
+      "mode": "custom",
+      "customInstructions": "Write short commits."
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_environment_preferences_update",
+    "arguments": {
+     "backgroundActivity": {
+      "profile": "battery-saver"
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_environment_preferences_update",
+    "arguments": {
+     "backgroundActivity": {
+      "profile": "turbo"
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_environment_read",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "projectId": "project:github",
+     "title": "Renamed project"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "projectId": "project:github",
+     "pinned": true
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "projectId": "project:github",
+     "pinned": true
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "projectId": "project:github",
+     "projectIcon": {
+      "kind": "monogram",
+      "text": "ABC"
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "projectId": "project:github",
+     "projectIcon": {
+      "kind": "monogram",
+      "text": "ABC",
+      "color": "red"
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "projectId": "project:github",
+     "projectIcon": {
+      "kind": "monogram",
+      "text": "AB",
+      "color": "red"
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "projectId": "project:github",
+     "scripts": [
+      {
+       "id": "Bad Id",
+       "name": "Test",
+       "command": "true",
+       "icon": "test",
+       "runOnWorktreeCreate": false
+      }
+     ]
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "projectId": "project:github",
+     "scripts": [
+      {
+       "id": "test",
+       "name": "Test",
+       "command": "true",
+       "icon": "test",
+       "runOnWorktreeCreate": false
+      }
+     ]
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "projectId": "project:github",
+     "workspaceRoot": "/nonexistent/t3-parity"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "projectId": "project-missing",
+     "title": "Missing"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_update",
+    "arguments": {
+     "title": "No id"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_delete",
+    "arguments": {
+     "projectId": "project-missing"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_delete",
+    "arguments": {
+     "projectId": "project:github"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_clone",
+    "arguments": {
+     "remoteUrl": "/nonexistent/t3-parity.git",
+     "destinationPath": "/nonexistent/t3-parity-clone"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_project_clone",
+    "arguments": {
+     "remoteUrl": "/nonexistent/t3-parity.git"
+    }
+   }
+  },
+  {
    "send": {
     "method": "item/started",
     "params": {

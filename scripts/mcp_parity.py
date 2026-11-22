@@ -59,6 +59,12 @@ def observations(url, cookie):
         ("t3_workflow_stop", dict(threadId="thread-missing", subagentId="workflow-missing")),
         ("t3_thread_search", dict(query="anything")),
         ("t3_thread_search", dict(query="anything", projectId="project-missing")),
+        ("t3_project_update", dict(projectId="project-missing", title="Renamed")),
+        ("t3_project_delete", dict(projectId="project-missing")),
+        ("t3_project_clone", dict(remoteUrl="/nonexistent/t3-parity.git", destinationPath="/nonexistent/clone")),
+        ("t3_environment_preferences_update", dict(newWorktreesStartFromOrigin=False)),
+        ("t3_worktree_list", {}),
+        ("t3_worktree_list", dict(threadId="thread-missing")),
     ]:
         call("tools/call", dict(name=name, arguments=arguments))
     call("tools/call",dict(name="missing-tool",arguments={}))

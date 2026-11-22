@@ -1378,6 +1378,83 @@ impl mcp_oauth::McpHost for AppState {
     fn spawn(&self, task: crate::runtime::Task) {
         crate::runtime::Runtime::spawn(&*self.runtime, task)
     }
+    fn project_mutation(
+        self: &Arc<Self>,
+        command: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, crate::mcp_oauth::ProjectRefusal>> {
+        let state = self.clone();
+        Box::pin(async move {
+            crate::projects::mutate_checked(&state, &command)
+                .await
+                .map_err(|(_, refusal)| refusal)
+        })
+    }
+    fn is_scratch_project(self: &Arc<Self>, project_id: &str) -> mcp_oauth::HostFuture<bool> {
+        let state = self.clone();
+        let project_id = project_id.to_owned();
+        Box::pin(async move {
+            let root = state.paths.base_dir.join("scratch");
+            let Some(path) = state
+                .store
+                .read()
+                .await
+                .projects
+                .get(&project_id)
+                .map(|p| std::path::PathBuf::from(&p.path))
+            else {
+                return false;
+            };
+            match (
+                state.workspace.canonicalize(&root).await,
+                state.workspace.canonicalize(&path).await,
+            ) {
+                (Ok(root), Ok(path)) => root == path,
+                _ => false,
+            }
+        })
+    }
+    fn update_settings(
+        self: &Arc<Self>,
+        patch: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<(), ()>> {
+        let state = self.clone();
+        Box::pin(async move {
+            state
+                .settings
+                .update(&serde_json::json!({ "patch": patch }), false)
+                .map(|_| ())
+                .map_err(|_| ())
+        })
+    }
+    fn list_refs(
+        self: &Arc<Self>,
+        input: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, ()>> {
+        let state = self.clone();
+        Box::pin(async move {
+            // Storage cleanup removes a worktree but keeps its path on the thread.
+            let mut input = input;
+            let worktree = input["worktreePath"].as_str().map(std::path::PathBuf::from);
+            let live = match &worktree {
+                Some(path) => state.workspace.is_dir(path).await,
+                None => false,
+            };
+            let cwd = if live {
+                input["worktreePath"].clone()
+            } else {
+                input["workspaceRoot"].clone()
+            };
+            if let Some(object) = input.as_object_mut() {
+                object.remove("worktreePath");
+                object.remove("workspaceRoot");
+                object.insert("cwd".into(), cwd);
+            }
+            match state.workspace.vcs("listRefs", &input, false).await {
+                Some(Ok(refs)) => Ok(refs),
+                _ => Err(()),
+            }
+        })
+    }
     fn search_threads(
         &self,
         query: String,
