@@ -50,6 +50,7 @@ The [client RPC parity suite](scripts/client_rpc_parity_xfail.json) has no expec
 - **Follow-up messages.** Rust starts a new Claude process and resumes the conversation for each turn. It also starts a Codex process per turn, while the original shares one across threads using the same provider instance.
 - **Steering.** You can redirect a running Codex turn with a text message. Claude queues the message for later. Changing the model or including an attachment in a steering message still behaves differently.
 - **Titles and workflows.** Codex and Claude can generate thread titles. Custom title generators and titles that draw on the source thread’s history after a fork are still missing. Claude workflow tasks are also unsupported.
+- **ACP Registry agents.** Rust searches the ACP Registry, installs its agents (downloaded binaries, and npm or uv packages) and removes managed binaries. It cannot run turns with ACP agents yet.
 - **Provider settings.** Rust checks all built-in providers. Online checks for newer CLI versions, Claude skill and plugin listings, and Claude reset credits are still missing. Periodic checks can continue when nobody is using the app.
 
 ## Install and switching
@@ -160,7 +161,7 @@ Some targets are still refused. Each has no setting that points it elsewhere, an
 - The reference's Codex, maintenance and Muse Code update checks: registry.npmjs.org and api.meta.ai.
 - Anything the host's `gh` and `az` CLIs try.
 
-Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `peer_forwarding_parity.py`, `link_request_parity.py`, `client_sessions_parity.py`, `source_control_clone_parity.py`, `source_control_lookup_parity.py`, `project_clone_parity.py`, `project_favicon_parity.py`, `bitbucket_pull_requests_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
+Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `peer_forwarding_parity.py`, `link_request_parity.py`, `client_sessions_parity.py`, `source_control_clone_parity.py`, `source_control_lookup_parity.py`, `project_clone_parity.py`, `project_favicon_parity.py`, `bitbucket_pull_requests_parity.py`, `acp_install_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
 
 Known gaps in `client_rpc_parity.py` and `client_thread_parity.py` are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json); both suites fail on any unlisted mismatch and on any listed case that starts passing.
 

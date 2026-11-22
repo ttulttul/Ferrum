@@ -724,15 +724,27 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         };
     }
     if method == "server.prepareAcpRegistryAgent" {
-        let agent = params["agentId"].as_str().unwrap_or_default();
-        return match crate::acp_registry::prepare(&state.paths.caches, agent).await {
+        let agent = params["agentId"].as_str().unwrap_or_default().trim();
+        let roots = crate::acp_install::Roots {
+            caches: state.paths.caches.clone(),
+            tools: state.paths.base_dir.join("tools"),
+        };
+        return match crate::acp_registry::prepare(&roots, agent).await {
             Ok(result) => Reply::Success(result),
             Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.operation_error()})),
         };
     }
     if method == "server.uninstallAcpRegistryManagedBinary" {
-        let agent = params["agentId"].as_str().unwrap_or_default();
-        return Reply::Success(json!({"agentId":agent,"removed":false}));
+        let agent = params["agentId"].as_str().unwrap_or_default().trim();
+        let roots = crate::acp_install::Roots {
+            caches: state.paths.caches.clone(),
+            tools: state.paths.base_dir.join("tools"),
+        };
+        let settings = state.settings.internal().map_err(|_| ());
+        return match crate::acp_install::uninstall(&roots, settings, agent).await {
+            Ok(result) => Reply::Success(result),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.operation_error()})),
+        };
     }
     if method == "server.acceptAcpRegistryUrlAuth" {
         return Reply::Success(json!({"accepted":false}));

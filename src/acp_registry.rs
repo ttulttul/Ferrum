@@ -30,12 +30,16 @@ pub(crate) struct AcpError {
 }
 
 impl AcpError {
-    fn new(reason: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(reason: &'static str, detail: impl Into<String>) -> Self {
         Self {
             reason,
             detail: detail.into(),
             cause: None,
         }
+    }
+
+    pub(crate) fn set_cause(&mut self, cause: Value) {
+        self.cause = Some(cause);
     }
 
     fn unavailable(detail: impl Into<String>) -> Self {
@@ -306,7 +310,7 @@ async fn recent(catalog: &mut Catalog, caches: &Path) -> Result<Index, AcpError>
 }
 
 /// `resolveAcpRegistryPlatformTarget` for this build.
-fn platform_target() -> Option<&'static str> {
+pub(crate) fn platform_target() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some("linux-x86_64"),
         ("linux", "aarch64") => Some("linux-aarch64"),
@@ -448,11 +452,13 @@ pub(crate) async fn search(caches: &Path, params: &Value) -> Result<Value, AcpEr
     Ok(json!({ "agents": agents }))
 }
 
-/// `server.prepareAcpRegistryAgent` as far as the registry: a fresh index (or the
-/// cached one), the agent, and a distribution for this platform. Installing agents is
-/// not supported here, so a found agent fails `install_failed`.
-pub(crate) async fn prepare(caches: &Path, agent_id: &str) -> Result<Value, AcpError> {
-    let index = refresh(&mut *CATALOG.lock().await, caches).await?;
+/// `server.prepareAcpRegistryAgent`: a fresh index (or the cached one), the agent, a
+/// distribution for this platform, and the agent installed (`acp_install`).
+pub(crate) async fn prepare(
+    roots: &crate::acp_install::Roots,
+    agent_id: &str,
+) -> Result<Value, AcpError> {
+    let index = refresh(&mut *CATALOG.lock().await, &roots.caches).await?;
     let id = agent_id.trim();
     let agent = index.agents.iter().find(|a| a["id"] == id).ok_or_else(|| {
         AcpError::new(
@@ -483,10 +489,9 @@ pub(crate) async fn prepare(caches: &Path, agent_id: &str) -> Result<Value, AcpE
             format!("ACP Registry agent {id} has no compatible distribution for {os}-{arch}."),
         ));
     }
-    Err(AcpError::new(
-        "install_failed",
-        format!("Could not install ACP Registry agent {id}."),
-    ))
+    let (kind, _) = distribution(agent).expect("checked above");
+    let binary = crate::acp_install::binary_target(agent).filter(|_| kind == "binary");
+    crate::acp_install::install(roots, agent, kind, binary).await
 }
 
 #[cfg(test)]
