@@ -262,15 +262,28 @@ def tool_turn(name, server, fixture, log, dispatch, cases):
             raise RuntimeError(f"{name} {tool}: expected {expected!r}, got {str(actual)[:500]!r}")
 
 
+def expect_viewport(viewer, width, height):
+    deadline = monotonic() + 30
+    while (remaining := deadline - monotonic()) > 0:
+        event = viewer.recv(timeout=remaining)
+        if isinstance(event, bytes):
+            viewer.send('{"type":"ack"}')
+            continue
+        if json.loads(event) == {"type": "viewport", "width": width, "height": height}:
+            return
+    raise RuntimeError(f"Viewer did not receive a {width} by {height} viewport")
+
+
 def automation(name, server, page_url, directory, fixture, log, scenario):
     """Drive the thread's MCP tools using its provider credential, on actual Chromium tabs."""
     url, cookie = server
     seed = seed_turn(url, cookie, directory / f"{name}-checkouts", scenario)
 
-    def open_tab(thread):
-        return rpc(url, cookie, "preview.open", dict(threadId=thread, url=page_url, runtime="server"))["tabId"]
+    def open_tab(thread, **settings):
+        return rpc(url, cookie, "preview.open", dict(threadId=thread, url=page_url, runtime="server", **settings))["tabId"]
 
     tab, human, foreign = open_tab(THREAD), open_tab(THREAD), open_tab("other-thread")
+    zoomed = open_tab(THREAD, zoomFactor=2)
     viewer_url = url.replace("http", "ws", 1) + "/api/preview-stream/ws?" + urlencode(dict(threadId=THREAD, tabId=human))
     icon = {"_tag": "website", "pageUrl": page_url}
     missing = f"Preview tab {foreign} was not found for evaluate. Omit tabId to use the current tab, or call preview_open."
@@ -293,6 +306,51 @@ def automation(name, server, page_url, directory, fixture, log, scenario):
         ("preview_set_appearance", {"colorScheme": "system"}, {"tabId": tab, "colorScheme": "system", "toolIcon": icon}),
         ("preview_evaluate", {"expression": "matchMedia('(prefers-color-scheme: dark)').matches"}, {"value": False, "toolIcon": icon}),
     ]
+    # Each successful resize must change the renderer as well as the session snapshot.
+    sizes = [
+        ({"mode": "freeform", "width": 701, "height": 393}, {"_tag": "freeform"}, 701, 393),
+        ({"mode": "preset", "preset": "iphone-se", "orientation": "landscape"},
+         {"_tag": "preset", "presetId": "iphone-se"}, 667, 375),
+        ({"mode": "preset", "preset": "nest-hub", "orientation": "portrait"},
+         {"_tag": "preset", "presetId": "nest-hub"}, 600, 1024),
+        ({"mode": "fill", "timeoutMs": 5000}, {"_tag": "fill"}, 1280, 800),
+    ]
+    cases.append(("preview_resize", {"mode": "fill", "tabId": human}, held))
+    missing_resize = f"Preview tab {foreign} was not found for resize. Omit tabId to use the current tab, or call preview_open."
+    cases.append(("preview_resize", {"mode": "fill", "tabId": foreign}, missing_resize))
+    for arguments, message in [
+        ({"mode": "freeform", "width": 400}, "Custom dimensions require both width and height."),
+        ({"mode": "fill", "orientation": "portrait"}, "Fill mode does not accept a preset, dimensions, or orientation."),
+        ({"mode": "preset"}, "Preset mode requires a preset and does not accept custom dimensions."),
+        ({"mode": "freeform"}, "Freeform mode requires width and height and does not accept a preset or orientation."),
+        ({"mode": "freeform", "width": 3000, "height": 3000}, "Custom viewport area must not exceed 8294400 pixels."),
+        ({"mode": "freeform", "width": 239, "height": 240}, 'Expected a value between 240 and 3840\n  at ["width"]'),
+        ({"mode": "freeform", "width": 400.5, "height": 240}, 'Expected an integer\n  at ["width"]'),
+        ({"mode": "fill", "timeoutMs": 0}, 'Expected a value greater than 0\n  at ["timeoutMs"]'),
+    ]:
+        cases.append(("preview_resize", arguments, f"Invalid parameters for tool 'preview_resize': {message}"))
+    for arguments, setting, width, height in sizes:
+        size = {"width": width, "height": height}
+        if setting["_tag"] != "fill":
+            setting = {**setting, **size}
+        cases.extend([
+            ("preview_resize", arguments, {"tabId": tab, "setting": setting, "viewport": size, "toolIcon": icon}),
+            ("preview_evaluate", {"expression": "[innerWidth, innerHeight, devicePixelRatio, screen.width, screen.height]"},
+             {"value": [width, height, 2, width, height], "toolIcon": icon}),
+        ])
+    cases.extend([
+        ("preview_evaluate", {"tabId": zoomed, "expression": "(window.parityScreen = [screen.width, screen.height], true)"},
+         {"value": True, "toolIcon": icon}),
+        ("preview_resize", {"mode": "freeform", "width": 701, "height": 397, "tabId": zoomed},
+         {"tabId": zoomed, "setting": {"_tag": "freeform", "width": 701, "height": 397},
+          "viewport": {"width": 701, "height": 397}, "toolIcon": icon}),
+        ("preview_evaluate", {"expression": "[innerWidth, innerHeight, devicePixelRatio, screen.width === parityScreen[0], screen.height === parityScreen[1]]"},
+         {"value": [351, 199, 4, True, True], "toolIcon": icon}),
+    ])
+    # Leave the tab at a fixed size so the session list and a passive viewer can confirm it.
+    fixed = {"_tag": "freeform", "width": 844, "height": 540}
+    cases.append(("preview_resize", {"tabId": tab, "mode": "freeform", "width": 844, "height": 540},
+                  {"tabId": tab, "setting": fixed, "viewport": {"width": 844, "height": 540}, "toolIcon": icon}))
     # The reference starts Chromium during the upgrade on a busy runner.
     with connect(viewer_url, additional_headers={"Cookie": cookie}, open_timeout=60,
                  proxy=None, compression=None) as viewer:
@@ -302,10 +360,27 @@ def automation(name, server, page_url, directory, fixture, log, scenario):
                 viewer.send('{"type":"ack"}')
             elif json.loads(event).get("controller") == "you":
                 break
-        tool_turn(name, server, fixture, log, seed["dispatch"], cases)
-    for thread, target in ((THREAD, human), (THREAD, tab), ("other-thread", foreign)):
+        # Resizing a fill-mode viewer records its preferred size. A fixed setting
+        # overrides it until the controller switches the tab back to fill.
+        viewer.send(json.dumps({"type": "resize", "width": 820, "height": 512}))
+        expect_viewport(viewer, 820, 512)
+        rpc(url, cookie, "preview.resize", {"threadId": THREAD, "tabId": human, "viewport": fixed})
+        expect_viewport(viewer, 844, 540)
+        viewer.send(json.dumps({"type": "resize", "width": 610, "height": 420}))
+        viewer.send(json.dumps({"type": "viewport", "setting": {"_tag": "fill"}}))
+        expect_viewport(viewer, 610, 420)
+        passive_url = url.replace("http", "ws", 1) + "/api/preview-stream/ws?" + urlencode(
+            {"threadId": THREAD, "tabId": tab, "interactive": "false"})
+        with connect(passive_url, additional_headers={"Cookie": cookie}, open_timeout=60,
+                     proxy=None, compression=None) as passive:
+            tool_turn(name, server, fixture, log, seed["dispatch"], cases)
+            expect_viewport(passive, 844, 540)
+        sessions = rpc(url, cookie, "preview.list", {"threadId": THREAD})["sessions"]
+        if next(item for item in sessions if item["tabId"] == tab)["viewport"] != fixed:
+            raise RuntimeError(f"{name}: preview.resize did not persist the viewport setting")
+    for thread, target in ((THREAD, human), (THREAD, tab), (THREAD, zoomed), ("other-thread", foreign)):
         rpc(url, cookie, "preview.close", dict(threadId=thread, tabId=target))
-    print(f"PASS {name} Chromium MCP evaluation and appearance ({len(cases)} calls)")
+    print(f"PASS {name} Chromium MCP evaluation, appearance and resize ({len(cases)} calls)")
 
 
 def disabled_automation(name, server, directory, fixture, log, scenario):
@@ -319,6 +394,7 @@ def disabled_automation(name, server, directory, fixture, log, scenario):
     tool_turn(name, server, fixture, log, seed["dispatch"], [
         ("preview_evaluate", {"expression": "1"}, denied),
         ("preview_set_appearance", {"colorScheme": "light"}, denied),
+        ("preview_resize", {"mode": "fill"}, denied),
     ])
     print(f"PASS {name} project browser access refusals")
 

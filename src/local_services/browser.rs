@@ -22,6 +22,8 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 
 mod automation;
+mod viewport;
+use viewport::Size;
 
 type Cdp = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[derive(Default)]
@@ -52,6 +54,7 @@ pub(super) struct Page {
     initial_url: Arc<tokio::sync::Mutex<Option<String>>>,
     automation: Arc<tokio::sync::Mutex<Option<automation::Session>>>,
     activity: Arc<Mutex<Activity>>,
+    layout: watch::Sender<Size>,
     dialog: Arc<std::sync::atomic::AtomicBool>,
     closed: watch::Sender<bool>,
     control: Arc<Mutex<Control>>,
@@ -66,6 +69,7 @@ struct Activity {
 }
 struct Control {
     owner: Option<Uuid>,
+    requested_size: Option<Size>,
     generation: u64,
     events: watch::Sender<u64>,
 }
@@ -74,6 +78,7 @@ impl Page {
         let mut c = self.control.lock().unwrap();
         if (take && c.owner.is_none()) || (!take && c.owner == Some(id)) {
             c.owner = take.then_some(id);
+            c.requested_size = None;
             c.generation += 1;
         }
         c.events.send_replace(c.generation);
@@ -284,6 +289,7 @@ impl Browsers {
                 snap["navStatus"]["url"].as_str().map(str::to_owned),
             )),
             automation: Default::default(),
+            layout: watch::channel(Size::DEFAULT).0,
             dialog: Default::default(),
             activity: Arc::new(Mutex::new(Activity {
                 viewers: 0,
@@ -296,6 +302,7 @@ impl Browsers {
             chooser_updates: watch::channel(None).0,
             control: Arc::new(Mutex::new(Control {
                 owner: None,
+                requested_size: None,
                 generation: 0,
                 events: watch::channel(0).0,
             })),
@@ -340,9 +347,6 @@ async fn command(cdp: &mut Cdp, i: &mut u64, method: &str, params: Value) -> Res
     .map_err(|_| ())?;
     Ok(*i)
 }
-fn bounded(v: &Value, default: u64, max: u64) -> u64 {
-    v.as_u64().filter(|n| *n > 0).unwrap_or(default).min(max)
-}
 fn user_command(m: &Value) -> Option<(&'static str, Value)> {
     match m["type"].as_str()? {
         "navigate" => Some((
@@ -382,10 +386,6 @@ fn user_command(m: &Value) -> Option<(&'static str, Value)> {
             Some(("Input.dispatchKeyEvent", p))
         }
         "text" | "paste" => Some(("Input.insertText", json!({"text":m["text"].as_str()?}))),
-        "resize" | "viewport" => Some((
-            "Emulation.setDeviceMetricsOverride",
-            json!({"width":bounded(&m["width"],1280,7680),"height":bounded(&m["height"],800,4320),"deviceScaleFactor":2,"mobile":false}),
-        )),
         "dialog" => Some((
             "Page.handleJavaScriptDialog",
             json!({"accept":m["accept"].as_bool()?,"promptText":m["promptText"].as_str().unwrap_or_default()}),
@@ -535,21 +535,11 @@ async fn stream(
     let quality = param("quality", 70, 100);
     let w = param("maxWidth", 1280, 7680);
     let h = param("maxHeight", 800, 4320);
-    let snap = state
-        .local
-        .previews
-        .tab(&page.thread, &page.tab)
-        .ok_or(())?;
-    let width = bounded(&snap["viewport"]["width"], 1280, 7680);
-    let height = bounded(&snap["viewport"]["height"], 800, 4320);
+    let mut layout = page
+        .viewer_layout(&state.local.previews)
+        .await
+        .map_err(|_| ())?;
     command(&mut cdp, &mut sequence, "Page.enable", json!({})).await?;
-    command(
-        &mut cdp,
-        &mut sequence,
-        "Emulation.setDeviceMetricsOverride",
-        json!({"width":width,"height":height,"mobile":false,"deviceScaleFactor":2}),
-    )
-    .await?;
     // Begin navigating when the target is ready, independently of Chromium's first paint.
     {
         let mut initial = page.initial_url.lock().await;
@@ -571,10 +561,9 @@ async fn stream(
         .send(Message::Text(page.status(viewer, can_operate).to_string()))
         .await
         .map_err(|_| ())?;
+    let initial_viewport = layout.borrow_and_update().event();
     socket
-        .send(Message::Text(
-            json!({"type":"viewport","width":width,"height":height}).to_string(),
-        ))
+        .send(Message::Text(initial_viewport))
         .await
         .map_err(|_| ())?;
     command(
@@ -599,6 +588,10 @@ async fn stream(
         }
         tokio::select! {
             _=gone.changed()=>{let _=socket.send(Message::Close(Some(CloseFrame{code:4404,reason:Cow::Borrowed("tab closed")}))).await;break;}
+            _=layout.changed()=>{
+                let event = layout.borrow_and_update().event();
+                socket.send(Message::Text(event)).await.map_err(|_| ())?;
+            }
             _=control.changed()=>{
                 let owns=page.control.lock().unwrap().owner==Some(viewer);
                 command(&mut cdp,&mut sequence,"Page.setInterceptFileChooserDialog",json!({"enabled":owns})).await?;
@@ -680,6 +673,9 @@ async fn stream(
                     Some("ack")=>frames.acknowledge(&mut socket).await?,
                     Some("takeControl") if can_operate=>{page.set_controller(viewer,true);drop(page.automation.lock().await);},
                     Some("releaseControl") if can_operate=>page.set_controller(viewer,false),
+                    Some("resize" | "viewport") if page.control.lock().unwrap().owner == Some(viewer) => {
+                        page.viewer_resize(&state.local.previews, viewer, &m).await.map_err(|_| ())?;
+                    }
                     _ if page.control.lock().unwrap().owner==Some(viewer)=>{if let Some((method,p))=user_command(&m){command(&mut cdp,&mut sequence,method,p).await?;}}
                     _=>{}
                 }

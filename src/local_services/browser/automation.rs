@@ -6,7 +6,6 @@ use futures_util::stream::SplitSink;
 use std::sync::atomic::Ordering;
 use tokio::{sync::mpsc, time::timeout};
 
-const LIMIT: Duration = Duration::from_secs(15);
 const CLOSED: &str = "This browser tab is closed. Call preview_open.";
 const HUMAN: &str = "A human controls this browser tab. Wait until they release control.";
 const DIALOG: &str =
@@ -17,6 +16,9 @@ pub(super) struct Session {
     replies: mpsc::Receiver<Value>,
     sequence: u64,
     scheme: String,
+    viewport: Size,
+    setting: Value,
+    zoom: f64,
 }
 
 impl Session {
@@ -56,37 +58,89 @@ impl Session {
             replies,
             sequence: 0,
             scheme: "system".into(),
+            viewport: Size::DEFAULT,
+            setting: Value::Null,
+            zoom: 1.0,
         };
         session.command("Page.enable", json!({})).await?;
-        let mut initial = page.initial_url.lock().await;
-        if page.activity.lock().unwrap().viewers == 0 {
-            let zoom = snap["zoomFactor"]
-                .as_f64()
-                .filter(|zoom| *zoom > 0.0)
-                .unwrap_or(1.0);
-            let size = |key: &str, default: u64, max: u64| {
-                (bounded(&snap["viewport"][key], default, max) as f64 / zoom)
-                    .round()
-                    .max(1.0) as u64
-            };
-            session
-                .command(
-                    "Emulation.setDeviceMetricsOverride",
-                    json!({
-                        "width":size("width",1280,7680), "height":size("height",800,4320),
-                        "deviceScaleFactor":2.0 * zoom, "mobile":false,
-                    }),
-                )
-                .await?;
-        }
+        session.apply_setting(page, snap).await?;
         session
             .appearance(snap["colorScheme"].as_str().unwrap_or("system"))
             .await?;
-        if let Some(url) = initial.as_ref() {
-            session.command("Page.navigate", json!({"url":url})).await?;
-            *initial = None;
-        }
         Ok(session)
+    }
+
+    async fn connected<'a>(
+        slot: &'a mut Option<Self>,
+        page: &Page,
+        snap: &Value,
+    ) -> Result<&'a mut Self, String> {
+        if slot.is_none() {
+            *slot = Some(Self::attach(page, snap).await?);
+        }
+        Ok(slot.as_mut().expect("attached Chromium session"))
+    }
+
+    async fn apply_size(&mut self, page: &Page, size: Size, zoom: f64) -> Result<(), String> {
+        let layout = size.layout(zoom);
+        let mut metrics = json!({
+            "width":layout.width, "height":layout.height, "deviceScaleFactor":2.0 * zoom, "mobile":false
+        });
+        // Playwright's setViewportSize resets the emulated screen to the viewport.
+        // The reference's subsequent CDP zoom override leaves the screen unspecified.
+        if zoom == 1.0 {
+            metrics["screenWidth"] = json!(size.width);
+            metrics["screenHeight"] = json!(size.height);
+        }
+        self.command("Emulation.setDeviceMetricsOverride", metrics)
+            .await?;
+        self.viewport = size;
+        self.zoom = zoom;
+        page.layout.send_replace(layout);
+        Ok(())
+    }
+
+    async fn apply_setting(&mut self, page: &Page, snap: &Value) -> Result<(), String> {
+        let size = Size::fixed(&snap["viewport"])
+            .or(page.control.lock().unwrap().requested_size)
+            .unwrap_or(Size::DEFAULT);
+        let zoom = Self::zoom(snap);
+        self.apply_size(page, size, zoom).await?;
+        self.setting = snap["viewport"].clone();
+        Ok(())
+    }
+
+    async fn sync_viewport(&mut self, page: &Page, snap: &Value) -> Result<(), String> {
+        if self.setting != snap["viewport"] {
+            return self.apply_setting(page, snap).await;
+        }
+        let zoom = Self::zoom(snap);
+        if self.zoom != zoom {
+            self.apply_size(page, self.viewport, zoom).await?;
+        }
+        Ok(())
+    }
+
+    fn zoom(snap: &Value) -> f64 {
+        snap["zoomFactor"]
+            .as_f64()
+            .filter(|z| *z > 0.0)
+            .unwrap_or(1.0)
+    }
+
+    async fn resize(
+        &mut self,
+        page: &Page,
+        previews: &PreviewService,
+        setting: Value,
+    ) -> Result<Value, String> {
+        let change = json!({"threadId":page.thread, "tabId":page.tab, "viewport":setting});
+        let snapshot = previews
+            .call("resize", &change)
+            .expect("resize")
+            .map_err(|_| CLOSED.to_owned())?;
+        self.apply_setting(page, &snapshot).await?;
+        Ok(json!({"tabId":page.tab,"setting":setting,"viewport":self.viewport.value()}))
     }
 
     async fn send(&mut self, method: &str, params: Value) -> Result<(), String> {
@@ -153,13 +207,62 @@ impl Session {
 }
 
 impl Page {
+    pub(super) async fn viewer_layout(
+        &self,
+        previews: &PreviewService,
+    ) -> Result<watch::Receiver<Size>, String> {
+        let mut guard = self.automation.lock().await;
+        let snap = previews.tab(&self.thread, &self.tab).ok_or(CLOSED)?;
+        Session::connected(&mut guard, self, &snap).await?;
+        Ok(self.layout.subscribe())
+    }
+
+    pub(super) async fn viewer_resize(
+        &self,
+        previews: &PreviewService,
+        viewer: Uuid,
+        message: &Value,
+    ) -> Result<(), String> {
+        let mut guard = self.automation.lock().await;
+        let Some(session) = guard.as_mut() else {
+            return Err(CLOSED.into());
+        };
+        if self.control.lock().unwrap().owner != Some(viewer) {
+            return Ok(());
+        }
+        if message["type"] == "viewport" {
+            if let Some(setting) = viewport::viewer_setting(&message["setting"]) {
+                session.resize(self, previews, setting).await?;
+            }
+        } else if let Some(size) = Size::requested(message) {
+            self.control.lock().unwrap().requested_size = Some(size);
+            if session.setting["_tag"] == "fill" && session.viewport != size {
+                session.apply_size(self, size, session.zoom).await?;
+            }
+        }
+        Ok(())
+    }
+
+    // Manager RPCs also change the size of an already running tab. Read the
+    // current snapshot inside its command queue so overlapping updates converge.
+    pub(in crate::local_services) async fn sync_viewport(&self, previews: &PreviewService) {
+        let mut guard = self.automation.lock().await;
+        if let (Some(session), Some(snap)) = (guard.as_mut(), previews.tab(&self.thread, &self.tab))
+        {
+            let _ = session.sync_viewport(self, &snap).await;
+        }
+    }
+
     pub(in crate::local_services) async fn automate(
         &self,
         previews: &PreviewService,
         operation: &str,
         args: &Value,
+        deadline: Instant,
+        timeout_ms: u64,
     ) -> Result<Value, String> {
-        let timed_out = || format!("Preview automation {operation} timed out after 15000ms.");
+        let timed_out =
+            || format!("Preview automation {operation} timed out after {timeout_ms}ms.");
         let generation = {
             let control = self.control.lock().unwrap();
             if control.owner.is_some() {
@@ -167,10 +270,12 @@ impl Page {
             }
             control.generation
         };
-        let deadline = Instant::now() + LIMIT;
         let mut guard = tokio::time::timeout_at(deadline, self.automation.lock())
             .await
             .map_err(|_| timed_out())?;
+        if Instant::now() >= deadline {
+            return Err(timed_out());
+        }
         if *self.closed.borrow() {
             return Err(CLOSED.into());
         }
@@ -183,21 +288,30 @@ impl Page {
             return Err(DIALOG.into());
         }
         let snap = previews.tab(&self.thread, &self.tab).ok_or(CLOSED)?;
-        if guard.is_none() {
-            *guard = Some(
-                tokio::time::timeout_at(deadline, Session::attach(self, &snap))
-                    .await
-                    .map_err(|_| timed_out())??,
-            );
-        }
-        let session = guard.as_mut().unwrap();
+        let session =
+            tokio::time::timeout_at(deadline, Session::connected(&mut guard, self, &snap))
+                .await
+                .map_err(|_| timed_out())??;
         let work = async {
+            session.sync_viewport(self, &snap).await?;
+            {
+                let mut initial = self.initial_url.lock().await;
+                if let Some(url) = initial.as_ref() {
+                    session.command("Page.navigate", json!({"url":url})).await?;
+                    *initial = None;
+                }
+            }
             match operation {
                 "evaluate" => {
                     session
                         .appearance(snap["colorScheme"].as_str().unwrap_or("system"))
                         .await?;
                     session.evaluate(args).await
+                }
+                "resize" => {
+                    let setting =
+                        viewport::resolve(args).ok_or("Invalid preview viewport setting")?;
+                    session.resize(self, previews, setting).await
                 }
                 "setColorScheme" => {
                     let scheme = args["colorScheme"].as_str().ok_or("Missing color scheme")?;

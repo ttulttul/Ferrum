@@ -98,11 +98,49 @@ fn base36(mut n: u64) -> String {
 }
 
 impl PreviewService {
-    pub(crate) async fn automate(&self, input: &Value, dir: &std::path::Path) -> Reply {
+    pub(crate) async fn automate(
+        self: std::sync::Arc<Self>,
+        input: Value,
+        dir: std::path::PathBuf,
+    ) -> Reply {
+        let operation = string(&input, "operation")?.to_owned();
+        let timeout_ms = if operation == "resize" {
+            input["arguments"]["timeoutMs"]
+                .as_f64()
+                .unwrap_or(15_000.0)
+                .clamp(1.0, 60_000.0) as u64
+        } else {
+            15_000
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let message = format!("Preview automation {operation} timed out after {timeout_ms}ms.");
+        // A disconnected caller must not abandon a half-created Chromium target or
+        // cancel the timer that terminates its renderer script.
+        let job = tokio::spawn(async move {
+            self.run_automation(&input, &dir, &operation, deadline, timeout_ms)
+                .await
+        });
+        // Like the broker, allow the renderer one more second to report its timeout.
+        tokio::time::timeout_at(deadline + std::time::Duration::from_secs(1), job)
+            .await
+            .map_err(|_| json!({"message":message}))?
+            .map_err(|_| json!({"message":"The browser session ended."}))?
+    }
+
+    async fn run_automation(
+        &self,
+        input: &Value,
+        dir: &std::path::Path,
+        operation: &str,
+        deadline: tokio::time::Instant,
+        timeout_ms: u64,
+    ) -> Reply {
         let thread = string(input, "threadId")?;
-        let operation = string(input, "operation")?;
         let target = input["tabId"].as_str();
-        let mut browsers = self.browsers.lock().await;
+        let timeout = |_| json!({"message":format!("Preview automation {operation} timed out after {timeout_ms}ms.")});
+        let mut browsers = tokio::time::timeout_at(deadline, self.browsers.lock())
+            .await
+            .map_err(timeout)?;
         let snap = self
             .state
             .lock()
@@ -124,9 +162,18 @@ impl PreviewService {
         let snap = snap.ok_or_else(missing)?;
         let page = browsers.open(dir, &snap).await.ok_or_else(missing)?;
         drop(browsers);
-        page.automate(self, operation, &input["arguments"])
+        page.automate(self, operation, &input["arguments"], deadline, timeout_ms)
             .await
             .map_err(|message| json!({"message":message}))
+    }
+
+    pub(crate) async fn sync_viewport(&self, input: &Value) {
+        if let (Some(thread), Some(tab)) = (input["threadId"].as_str(), input["tabId"].as_str()) {
+            let page = self.browsers.lock().await.page(thread.trim(), tab.trim());
+            if let Some(page) = page {
+                page.sync_viewport(self).await;
+            }
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {

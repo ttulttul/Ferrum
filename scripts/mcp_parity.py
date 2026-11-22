@@ -87,6 +87,7 @@ def observations(url, cookie, root):
     for name, arguments in [
         ("preview_evaluate", {"expression": "1"}),
         ("preview_set_appearance", {"colorScheme": "dark"}),
+        ("preview_resize", {"mode": "fill"}),
         ("t3_thread_configure", {}),
         ("t3_thread_configure", dict(threadId="thread-missing")),
         ("t3_queue", dict(action="list", threadId="thread-missing")),
