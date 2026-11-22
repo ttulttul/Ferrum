@@ -31,6 +31,9 @@ Scenarios:
 Besides the requests, connectors and secrets, it compares when the first connector starts:
 `immediate` (within a few seconds of the server answering HTTP) or `later`, for the
 scenarios where that does not depend on the reference's random 0-30 s registration jitter.
+
+Each scenario runs on each server with its own home and its own fake T3 Connect, so all of them
+run side by side (--jobs at a time): most of a run is the reference's registration jitter.
 """
 import argparse
 import importlib.machinery
@@ -61,6 +64,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from cryptography.x509.oid import NameOID
 
 from relay_client_parity import FAKE, alive, diff, normalize_start, read_jsonl, server, wait_for
+from parity_harness import run_concurrently
 
 ENVIRONMENT_ID = "00000000-0000-4000-8000-0000000e0001"
 CLOUD_USER_ID = "user_parity"
@@ -145,11 +149,12 @@ def spki_pem(public_key):
 class FakeConnect:
     """T3 Connect's environment API and Clerk's OAuth token endpoint, recording every request."""
 
-    def __init__(self, certificates):
+    def __init__(self, certificates, mint_key, relay_key):
         self.requests = []
         self.lock = threading.Lock()
-        self.mint_key = ed25519.Ed25519PrivateKey.generate()
-        self.relay_key = ed25519.Ed25519PrivateKey.generate()
+        # Every fake of a run signs with the same keys, so both servers store the same ones.
+        self.mint_key = mint_key
+        self.relay_key = relay_key
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -442,6 +447,7 @@ def main():
     parser.add_argument("--rust-command", required=True)
     parser.add_argument("--scenario", action="append", choices=SCENARIOS)
     parser.add_argument("--dump", help="write both results as JSON to this path")
+    parser.add_argument("--jobs", type=int, default=12, help="scenario runs at once (1 runs them one by one)")
     args = parser.parse_args()
     if not sys.platform.startswith("linux"):
         print("relay provisioning parity reads /proc and runs on Linux only")
@@ -456,26 +462,33 @@ def main():
     dump = {}
     with tempfile.TemporaryDirectory(prefix="relay-provisioning-tls-") as tls:
         certificates = make_certificates(Path(tls))
-        fake = FakeConnect(certificates)
-        try:
-            for name in args.scenario or SCENARIOS:
-                results = []
-                for label, command in (("original", args.original_command), ("rust", args.rust_command)):
-                    with tempfile.TemporaryDirectory(prefix=f"relayprov-{label}-") as temporary:
-                        results.append(run_scenario(name, shlex.split(command), Path(temporary), credentials, fake,
-                                                    certificates[0], key_pair, public_key))
-                dump[name] = {"original": results[0], "rust": results[1]}
-                differences = diff(*results)
-                if differences:
-                    failures += 1
-                    print(f"FAIL {name}")
-                    for line in differences:
-                        print(f"  {line}")
-                else:
-                    print(f"PASS {name} ({len(results[0]['startupRequests'])} startup requests, "
-                          f"{len(results[0]['shutdownRequests'])} on shutdown, {len(results[0]['starts'])} connector starts)")
-        finally:
-            fake.close()
+        keys = ed25519.Ed25519PrivateKey.generate(), ed25519.Ed25519PrivateKey.generate()
+
+        def run(name, label, command):
+            fake = FakeConnect(certificates, *keys)
+            try:
+                with tempfile.TemporaryDirectory(prefix=f"relayprov-{label}-") as temporary:
+                    return run_scenario(name, shlex.split(command), Path(temporary), credentials, fake,
+                                        certificates[0], key_pair, public_key)
+            finally:
+                fake.close()
+
+        names = args.scenario or SCENARIOS
+        runs = [(name, label, command) for name in names
+                for label, command in (("original", args.original_command), ("rust", args.rust_command))]
+        done = iter(run_concurrently([lambda run_args=run_args: run(*run_args) for run_args in runs], args.jobs))
+        for name in names:
+            results = [next(done), next(done)]
+            dump[name] = {"original": results[0], "rust": results[1]}
+            differences = diff(*results)
+            if differences:
+                failures += 1
+                print(f"FAIL {name}")
+                for line in differences:
+                    print(f"  {line}")
+            else:
+                print(f"PASS {name} ({len(results[0]['startupRequests'])} startup requests, "
+                      f"{len(results[0]['shutdownRequests'])} on shutdown, {len(results[0]['starts'])} connector starts)")
     if args.dump:
         Path(args.dump).write_text(json.dumps(dump, indent=2, sort_keys=True))
     print(f"{len(dump) - failures}/{len(dump)} relay provisioning scenarios matched")

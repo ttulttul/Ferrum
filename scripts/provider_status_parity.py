@@ -17,6 +17,10 @@ looks up the latest CLI version or the model manifest on the network, and
 the fakes never call a model. The fakes replay tests/fixtures/providers/
 status_*.json through fake_cli.py; `--version` is answered by the wrapper.
 
+Scenarios run side by side (--jobs at a time), and so do both servers within
+a scenario: each has its own home, port and fakes, and most of a scenario is
+waiting on the servers' own probe timeouts.
+
 Known differences are listed in provider_status_parity_xfail.json; an entry
 that starts matching fails the run until it is removed.
 """
@@ -35,7 +39,7 @@ import time
 from websockets.sync.client import connect
 
 from client_initial_sync_parity import rpc
-from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, managed_server, path_without
+from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, managed_server, path_without, run_concurrently
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/providers"
@@ -271,36 +275,44 @@ def main():
     parser.add_argument("--rust-command", required=True)
     parser.add_argument("--scenario", action="append", help="run only this scenario (repeatable)")
     parser.add_argument("--dump", type=Path, help="write each server's outcome here")
+    parser.add_argument("--jobs", type=int, default=4, help="scenarios to run at once (1 runs them one by one)")
     args = parser.parse_args()
     xfail = json.loads(XFAIL.read_text()) if XFAIL.exists() else {}
     failures, unexpected_passes = [], []
     selected = [s for s in SCENARIOS if not args.scenario or s["name"] in args.scenario]
-    for scenario in selected:
+    def outcomes_of(scenario):
         with tempfile.TemporaryDirectory(prefix="t3-status-") as directory:
             temporary = Path(directory)
-            outcomes = {}
-            for name, command in (("original", shlex.split(args.original_command)),
-                                  ("rust", shlex.split(args.rust_command))):
-                outcomes[name] = run_server(args, command, temporary / name, scenario, temporary)
-            if args.dump:
-                args.dump.mkdir(parents=True, exist_ok=True)
-                (args.dump / (scenario["name"].replace(" ", "-") + ".json")).write_text(
-                    json.dumps(outcomes, indent=1, sort_keys=True))
-            problems = compare(outcomes)
-            expected = xfail.get(scenario["name"], {})
-            for check, lines in problems.items():
-                if check in expected:
-                    print(f"XFAIL {scenario['name']}: {check}: {expected[check]}")
-                    continue
-                failures.append(scenario["name"])
-                print(f"FAIL {scenario['name']}: {check}")
-                for line in lines:
-                    print(f"  {line[:4000]}")
-            for check in expected:
-                if check not in problems:
-                    unexpected_passes.append(f"{scenario['name']}: {check}")
-            if not problems:
-                print(f"ok   {scenario['name']}")
+            commands = (("original", shlex.split(args.original_command)), ("rust", shlex.split(args.rust_command)))
+            results = run_concurrently(
+                [lambda name=name, command=command: run_server(args, command, temporary / name, scenario, temporary)
+                 for name, command in commands], 2 if args.jobs > 1 else 1)
+            return dict(zip((name for name, _ in commands), results))
+
+    # The scenarios that wait out a probe timeout start first, so none of them is left for last.
+    order = sorted(range(len(selected)), key=lambda index: -selected[index].get("wait", 20))
+    done = run_concurrently([lambda scenario=selected[index]: outcomes_of(scenario) for index in order], args.jobs)
+    every = [outcome for _, outcome in sorted(zip(order, done))]
+    for scenario, outcomes in zip(selected, every):
+        if args.dump:
+            args.dump.mkdir(parents=True, exist_ok=True)
+            (args.dump / (scenario["name"].replace(" ", "-") + ".json")).write_text(
+                json.dumps(outcomes, indent=1, sort_keys=True))
+        problems = compare(outcomes)
+        expected = xfail.get(scenario["name"], {})
+        for check, lines in problems.items():
+            if check in expected:
+                print(f"XFAIL {scenario['name']}: {check}: {expected[check]}")
+                continue
+            failures.append(scenario["name"])
+            print(f"FAIL {scenario['name']}: {check}")
+            for line in lines:
+                print(f"  {line[:4000]}")
+        for check in expected:
+            if check not in problems:
+                unexpected_passes.append(f"{scenario['name']}: {check}")
+        if not problems:
+            print(f"ok   {scenario['name']}")
     for entry in unexpected_passes:
         print(f"XPASS {entry} (remove it from {XFAIL.name})")
     if failures or unexpected_passes:
