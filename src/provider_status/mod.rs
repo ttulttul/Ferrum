@@ -1,7 +1,8 @@
 //! Provider status checks, as the reference's managed provider snapshots
 //! (`makeManagedServerProvider`) and provider registry run them.
 //!
-//! Each enabled Codex, Claude, fx, Kiro, Grok, Pi and Cursor instance is checked once the
+//! Each enabled Codex, Claude, fx, Kiro, Grok, Pi, Cursor and OpenCode instance
+//! is checked once the
 //! server is listening, again whenever its settings (or
 //! `enableProviderUpdateChecks`) change, when any settings change while it is
 //! signed out, on the background-activity interval (five minutes by default),
@@ -29,6 +30,11 @@
 //! - Cursor: no CLI; its HTTP API's account and model catalog (15s, once
 //!   more after a timeout) with the instance's API key or a stored browser
 //!   sign-in, then the plan's usage ([`cursor`]).
+//! - OpenCode: `opencode --version` (or a configured server's identity),
+//!   then a managed `opencode serve` or the configured server: its 1.x
+//!   inventory or its settled 2.x model catalog, and its usage
+//!   ([`opencode`]). OpenCode is rechecked on the interval only while it is
+//!   not ready.
 //!
 //! Grok's and Pi's version advisories come from how their CLI was installed
 //! ([`maintenance`]), as the reference's enrichment pass works it out.
@@ -46,6 +52,7 @@ mod fx;
 mod grok;
 mod kiro;
 mod maintenance;
+mod opencode;
 mod pi;
 
 use crate::server::AppState;
@@ -56,10 +63,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The drivers this server checks.
-const CHECKED_DRIVERS: [&str; 7] = ["codex", "claudeAgent", "fx", "kiro", "grok", "pi", "cursor"];
+const CHECKED_DRIVERS: [&str; 8] = [
+    "codex",
+    "claudeAgent",
+    "fx",
+    "kiro",
+    "grok",
+    "pi",
+    "cursor",
+    "opencode",
+];
 /// The drivers whose snapshot gets its version advisory from an enrichment
 /// pass after the probe, rather than from the probe itself.
-const ENRICHED_DRIVERS: [&str; 4] = ["codex", "claudeAgent", "grok", "pi"];
+const ENRICHED_DRIVERS: [&str; 5] = ["codex", "claudeAgent", "grok", "pi", "opencode"];
 /// `AUTH_PROBE_TIMEOUT_MS`.
 const AUTH_PROBE_TIMEOUT_MS: u64 = 10_000;
 /// `FAILED_CHECK_RECHECK_DELAY`: a periodic check that failed over a ready
@@ -124,6 +140,7 @@ pub(crate) struct ProviderStatus {
     caches: PathBuf,
     state_dir: PathBuf,
     secrets: PathBuf,
+    opencode: opencode::Owners,
     state: Mutex<State>,
     claude_caps: Mutex<HashMap<String, claude::CapabilitiesCache>>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -137,6 +154,7 @@ impl ProviderStatus {
             caches: paths.caches.clone(),
             state_dir: paths.state_dir.clone(),
             secrets: paths.secrets.clone(),
+            opencode: Default::default(),
             state: Mutex::default(),
             claude_caps: Mutex::default(),
             locks: Mutex::default(),
@@ -270,6 +288,21 @@ impl ProviderStatus {
             .is_some_and(|p| p.fingerprint == *fingerprint && !p.from_cache)
     }
 
+    /// Keep the row published under `from` for the instance's new settings
+    /// `to`; false when there is none to keep.
+    fn retag(&self, instance_id: &str, from: &Value, to: &Value) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.published.get_mut(instance_id) {
+            Some(published) if published.fingerprint == *from && !published.row.is_null() => {
+                published.fingerprint = to.clone();
+                drop(state);
+                let _ = self.changes.send(());
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn publish(&self, instance_id: &str, fingerprint: Value, row: Value) {
         write_cache(&self.caches.join(format!("{instance_id}.json")), &row);
         let changed = {
@@ -380,6 +413,9 @@ async fn check_instance(
         "fx" => fx::check(&instance.config, &env).await,
         "kiro" => kiro::check(&instance.config, &env).await,
         "grok" => grok::check(&instance.config, &env).await,
+        "opencode" => {
+            opencode::check(&service.opencode, &instance.id, &instance.config, &env).await
+        }
         "cursor" => {
             cursor::check(
                 &instance.config,
@@ -508,6 +544,21 @@ async fn futures_join_all(checks: Vec<impl std::future::Future<Output = ()> + Se
     }
 }
 
+/// The driver's `refreshOnInterval`: OpenCode only rechecks a row that is not
+/// ready yet (a failed or still-loading catalog); healthy instances need no
+/// recurring server starts.
+fn refresh_on_interval(driver: &str, row: Option<&Value>) -> bool {
+    match (driver, row) {
+        ("opencode", Some(row)) => {
+            row["enabled"] == true
+                && row["installed"] == true
+                && row["status"] != "ready"
+                && row["auth"]["status"] == "unknown"
+        }
+        _ => true,
+    }
+}
+
 /// `resolveServerBackgroundActivitySettings(...).providerHealthRefreshInterval`.
 fn refresh_interval_ms(settings: &Value) -> i64 {
     let activity = &settings["backgroundActivity"];
@@ -568,9 +619,25 @@ pub(crate) async fn run(state: Arc<AppState>) {
         let mut start = Vec::new();
         let current = instances(&state, &settings);
         for instance in &current {
-            let changed = seen.get(&instance.id) != Some(&instance.fingerprint);
+            let previous = seen.get(&instance.id).cloned();
+            let mut changed = previous.as_ref() != Some(&instance.fingerprint);
             if changed {
                 seen.insert(instance.id.clone(), instance.fingerprint.clone());
+            }
+            // OpenCode's driver does not recheck when only the snapshot
+            // settings (`enableProviderUpdateChecks`) change
+            // (`checkProviderOnSettingsChange: () => false`); its row stays.
+            if let Some(previous) = previous.as_ref().filter(|_| changed) {
+                let settings_only = previous["entry"] == instance.fingerprint["entry"]
+                    && previous["denied"] == instance.fingerprint["denied"];
+                if instance.driver == "opencode"
+                    && settings_only
+                    && state
+                        .provider_status
+                        .retag(&instance.id, previous, &instance.fingerprint)
+                {
+                    changed = false;
+                }
             }
             if !instance.enabled {
                 next_refresh.remove(&instance.id);
@@ -601,6 +668,13 @@ pub(crate) async fn run(state: Arc<AppState>) {
                     && state
                         .provider_status
                         .checked_in_process(&instance.id, &instance.fingerprint)
+                    && refresh_on_interval(
+                        &instance.driver,
+                        state
+                            .provider_status
+                            .published_row(&instance.id, &instance.fingerprint)
+                            .as_ref(),
+                    )
                 {
                     start.push((instance, Reason::Interval));
                 }
@@ -774,6 +848,14 @@ fn merge_snapshot(previous: &Value, mut next: Value) -> Value {
         merged
     };
     next["models"] = models.into();
+    // `shouldRetainMissingOpenCodeMetadata`: an empty list keeps the last one.
+    if next["driver"] == "opencode" && retain {
+        for key in ["slashCommands", "skills"] {
+            if next[key].as_array().is_some_and(Vec::is_empty) && previous.get(key).is_some() {
+                next[key] = previous[key].clone();
+            }
+        }
+    }
     next
 }
 
@@ -788,9 +870,14 @@ fn with_version_advisory(
         return row;
     }
     let manual = maintenance::manual(None, None);
+    // `installedVersion`, when the snapshot has one, is what an update replaces.
+    let current = match row.get("installedVersion") {
+        Some(installed) => installed.as_str().map(str::to_owned),
+        None => row["version"].as_str().map(str::to_owned),
+    };
     row["versionAdvisory"] = maintenance::version_advisory(
         capabilities.unwrap_or(&manual),
-        row["version"].as_str(),
+        current.as_deref(),
         None,
         row["checkedAt"].as_str().unwrap_or(""),
         maintenance::compare_semver,

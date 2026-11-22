@@ -190,6 +190,12 @@ pub(crate) fn list_with(
         row["checkedAt"] = json!(started_at);
         row["message"] = json!(denied.clone().unwrap_or_else(|| if enabled {
             format!("{label} provider status has not been checked in this session yet.")
+        } else if driver == "opencode"
+            && config["serverUrl"]
+                .as_str()
+                .is_some_and(|u| !u.trim().is_empty())
+        {
+            format!("{label} is disabled in T3 Code settings. A server URL is configured.")
         } else {
             format!("{label} is disabled in T3 Code settings.")
         }));
@@ -237,7 +243,7 @@ pub(crate) fn list_with(
         if driver == "antigravity" && options["workspaceSnapshotsOnDemand"] != true {
             row["workspaceSnapshots"] = json!([]);
         }
-        if driver == "opencode" {
+        if driver == "opencode" && row.get("usageLimits").is_none() {
             row["usageLimits"] =
                 json!({"checkedAt":started_at,"windows":[],"unavailable":{"reason":"unsupported"}});
         }
