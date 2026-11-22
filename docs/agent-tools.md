@@ -173,6 +173,14 @@ Gaps the thread tools surface that live in shared code, not in the tools:
   `claude title fallback` and `codex title failed` scenarios in
   `scripts/client_thread_parity.py` compare each CLI's arguments, prompt and schema, and the
   thread's title afterwards.
+- **Steering.** A `message.dispatch` with `steer_active` steers a running Codex turn as the
+  reference does (`src/orchestration/steer.rs`): the message joins the run as a `steer`
+  user message and Codex gets `turn/steer`; a run whose turn ended starts a new turn, and one
+  whose turn has not started queues it. Not ported: steering a Claude turn (the message
+  queues), a steer that changes the model selection or carries attachments (the reference
+  restarts the turn), and the follow-up turn the reference starts when the provider refuses
+  a steer. `t3_thread_send` still refuses `mode: "steer"`. Parity: `codex steer then stop`
+  in `scripts/client_thread_parity.py`.
 - **Claude workflows.** Rust's Claude sessions run no workflow tasks, so `t3_workflow_stop`
   can only answer "not running" or "no live provider task".
 - **Coverage.** The thread scenario works on the caller's own thread: a fork needs a stable

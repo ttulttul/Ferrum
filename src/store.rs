@@ -16,7 +16,7 @@ pub struct Project {
     pub path: String,
     pub created_at: u64,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ConversationMessage {
     pub id: String,
     pub role: String,
@@ -37,6 +37,11 @@ pub struct ConversationMessage {
     /// outcome, summary), for a message in the notification role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification: Option<serde_json::Value>,
+    /// A user's message that steered a running run: `{runId,
+    /// afterProviderItems, nodeId, providerThreadId, providerTurnId}`, with
+    /// the run's wire id and how many provider items it had then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer: Option<Box<serde_json::Value>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Run {

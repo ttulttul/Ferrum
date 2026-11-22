@@ -196,6 +196,19 @@ CROSS_SCENARIOS = [
     {"name": "claude agent mcp on the other server", "follow_up": "Run echo hi and write notes.txt",
      "scenario": {"instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_mcp.json",
                   "restart": {"after": "created"}}},
+    # A thread made on one server whose turn the other runs, steers (Codex `turn/steer`) and
+    # stops.
+    {"name": "codex steer then stop on the other server", "scenario": {
+        "instance": "codex", "model": "fixture", "scenario": "codex_steer.json",
+        "restart": {"after": "created", "liveTurn": True},
+        "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"},
+        "interrupt": "steer"}},
+    # A first title still being generated when its server stops: the other server takes the
+    # outbox's title request over and titles the thread.
+    {"name": "codex title request on the other server", "scenario": {
+        "instance": "codex", "model": "fixture", "scenario": "codex_title_slow.json",
+        "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "initial",
+        "restart": {"after": "titling"}}},
     {"name": "codex approval waiting", "scenario": {
         "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
         "runtimeMode": "approval-required", "restart": {"after": "waiting"}}},
@@ -228,6 +241,8 @@ def cross_turns(args, credentials):
     commands = {"reference": args.original_command, "rust": args.rust_command}
     failures = 0
     for entry in CROSS_SCENARIOS:
+        if args.cross and entry["name"] not in args.cross:
+            continue
         scenario = ({"name": entry["name"], **entry["scenario"]} if "scenario" in entry else
                     next(s for s in turns.PROVIDER_SCENARIOS if s["name"] == entry["name"]))
         outcomes = dict(zip(ORDERS, run_concurrently([
@@ -237,6 +252,12 @@ def cross_turns(args, credentials):
         if "agent mcp" in entry["name"]:
             # The comparison means something only if the CLI called the T3 MCP server.
             assert outcomes["reference -> reference"].get("mcp"), f"{entry['name']}: the CLI made no MCP call"
+        if "title request" in entry["name"]:
+            # Only a takeover means something: the first server's run was cut off, the
+            # second's titled the thread.
+            title = outcomes["reference -> reference"].get("title") or {}
+            assert len(title.get("runs", [])) == 2 and title["initial"]["title"] != "New thread" \
+                and not title["initial"]["pending"], f"{entry['name']}: no title takeover: {title}"
         label_base = entry["name"] + (" + follow-up" if entry.get("follow_up") and "scenario" not in entry else "")
         for order in ("reference -> rust", "rust -> reference"):
             label = f"{label_base} ({order})"
@@ -291,6 +312,7 @@ def main():
     parser.add_argument("--node", default="node")
     parser.add_argument("--reply-ms", type=int, default=8000)
     parser.add_argument("--skip-turns", action="store_true", help="skip the provider turns across a switch")
+    parser.add_argument("--cross", action="append", help="run only this provider turn across a switch")
     args = parser.parse_args()
     args.faketime_lib, args.real_time, args.dump = None, False, None
     reference, rust = args.original_command, args.rust_command
