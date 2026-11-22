@@ -81,7 +81,7 @@ pub(crate) async fn mutate_checked(
     {
         return Err(error("Invalid project mutation."));
     }
-    let _guard = state.project_mutation_lock.lock().await;
+    let guard = state.project_mutation_lock.lock().await;
     let store = state.store.read().await;
     if let Some((project_id, op)) = store.project_receipts.get(command) {
         if project_id != id || op != kind {
@@ -251,6 +251,11 @@ pub(crate) async fn mutate_checked(
         })
         .await
         .map_err(|_| error("Failed to mutate project."))?;
+    drop(guard);
+    // A deleted project's clone is no longer followed; an unfinished checkout is emptied.
+    if kind == "project.delete" {
+        state.project_clones.discard(id).await;
+    }
     Ok(row)
 }
 

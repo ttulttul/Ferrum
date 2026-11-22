@@ -123,6 +123,8 @@ mod peer_links;
 #[cfg(feature = "native")]
 mod peer_mcp;
 #[cfg(feature = "native")]
+mod project_clone;
+#[cfg(feature = "native")]
 mod server;
 #[cfg(feature = "native")]
 mod source_control_clone;

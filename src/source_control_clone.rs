@@ -351,7 +351,7 @@ fn format_duration(duration: Duration) -> String {
 }
 
 /// Where the clone goes, normalized (`normalizeDestinationPath`).
-fn normalize_destination(raw: &str, home: &Path) -> Result<PathBuf, Value> {
+pub(crate) fn normalize_destination(raw: &str, home: &Path) -> Result<PathBuf, Value> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(repository_error(
