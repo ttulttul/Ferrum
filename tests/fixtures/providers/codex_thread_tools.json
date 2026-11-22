@@ -249,6 +249,9 @@
    }
   },
   {
+   "sleep": 0.2
+  },
+  {
    "mcp": {
     "tool": "list_thread_pull_requests",
     "arguments": {}
