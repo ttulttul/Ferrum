@@ -76,6 +76,7 @@ jobs:
           - shard: integrations
             browser: true
           - shard: relay-provisioning
+          - shard: provider-status
     steps:
       - uses: actions/checkout@v4
         with:
