@@ -150,6 +150,12 @@ def main():
                  for cmd,home in zip((args.original_command,args.rust_command),homes)]
         await_manifest_refresh(homes)
         clients=[socket(stack,*s,True) for s in servers]
+        # The reference builds a provider row's models from the catalog as of that row's last
+        # check: its startup check can finish before the manifest fetch it races, leaving a
+        # disabled instance on the bundled catalog until the next check. Refresh both servers
+        # once both have the fetched manifest, so each row reflects the manifest it now holds.
+        for ws in clients:
+            frame(ws,"refresh-providers","server.refreshProviders",{})
         streams=[socket(stack,*s,True) for s in servers]
         unary=[frame(ws,"config","server.getConfig",{}) for ws in clients]
         samples=[["ServerConfig",snapshot_pair(unary,False)]]
