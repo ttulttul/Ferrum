@@ -1448,8 +1448,10 @@ fn sort_messages_by_turn_item_order(projection: &mut Value) {
             };
             ordinal(left)
                 .cmp(&ordinal(right))
+                // Rust stores message times at second precision. Keep the
+                // recorded order for equal timestamps, as the reference's
+                // millisecond timestamps do for messages created together.
                 .then_with(|| millis(&left["createdAt"]).cmp(&millis(&right["createdAt"])))
-                .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
         });
     }
 }
