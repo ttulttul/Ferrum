@@ -2684,14 +2684,7 @@ fn scheduled_task_next_run(enabled: bool, schedule: &Value, now: i64) -> Value {
     if !enabled {
         return Value::Null;
     }
-    match schedule["type"].as_str() {
-        Some("interval") => schedule["everyMs"]
-            .as_i64()
-            .map(|every| json!(crate::auth_service::iso(now.saturating_add(every))))
-            .unwrap_or(Value::Null),
-        Some("once") => schedule["runAt"].clone(),
-        _ => Value::Null,
-    }
+    crate::scheduled_tasks::next_run_at(schedule, now).map_or(Value::Null, Value::String)
 }
 
 fn random_webhook_token() -> String {
@@ -2854,8 +2847,7 @@ async fn scheduled_task_set_enabled(state: &Arc<AppState>, params: &Value) -> Re
 
 async fn scheduled_task_run_now(state: &Arc<AppState>, params: &Value) -> Reply {
     let id = params["id"].as_str().unwrap_or_default();
-    let mut tasks = state.scheduled_database.lock().await;
-    let mut task = match tasks.get(id) {
+    let task = match state.scheduled_database.lock().await.get(id) {
         Ok(Some(task)) => task,
         Ok(None) => return scheduled_task_error("Schedule task not found.", Some(id)),
         Err(_) => return scheduled_task_error("Could not read schedule task.", Some(id)),
@@ -2866,25 +2858,13 @@ async fn scheduled_task_run_now(state: &Arc<AppState>, params: &Value) -> Reply 
             Some(id),
         );
     }
-    let now = crate::auth_service::now();
-    task["lastRunAt"] = crate::auth_service::iso(now).into();
-    task["lastRunStatus"] = "failed".into();
-    task["lastRunError"] =
-        format!("Thread launch scheduled-task:{id}:{now}:manual failed during resolve-project.")
-            .into();
-    task["runCount"] = task["runCount"]
-        .as_i64()
-        .unwrap_or(0)
-        .saturating_add(1)
-        .into();
-    task["updatedAt"] = crate::auth_service::iso(now).into();
-    let public = scheduled_public_task(&task);
-    if tasks.save(&task).is_err() {
-        return scheduled_task_error("Could not save schedule task.", task["id"].as_str());
+    drop(task);
+    match crate::scheduled_tasks::run_now(state.clone(), id).await {
+        Ok(task) => Reply::Success(json!({"task": task})),
+        Err(error) => Reply::Failure(json!({"_tag":"Fail","error":{
+            "_tag":"ScheduledTaskError","message":error["message"].as_str().unwrap_or("Could not run scheduled task."),"taskId":id
+        }})),
     }
-    drop(tasks);
-    let _ = state.scheduled_task_events.send(());
-    Reply::Success(json!({"task":public}))
 }
 
 async fn scheduled_task_rotate_token(state: &Arc<AppState>, params: &Value) -> Reply {

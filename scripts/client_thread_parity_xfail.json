@@ -150,5 +150,11 @@
   },
   "claude create threads": {
     "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer."
+  },
+  "claude delegate followup": {
+    "live": "Rust sends the reference's domain events, worked out from what each commit changed in the projection, but groups and orders differently the records of a run's start and of a runtime request's answer.",
+    "agent mcp": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the follow-up and its result's delivery, to the CLI it already runs; the extra CLIs add launches, their approval flags and their own MCP sign-ins.",
+    "cli approvals": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the follow-up and its result's delivery, to the CLI it already runs; the extra CLIs add launches, their approval flags and their own MCP sign-ins.",
+    "cli launch": "Rust starts a Claude CLI for each turn, resuming its session (--resume), where the reference sends a later turn, here the follow-up and its result's delivery, to the CLI it already runs; the extra CLIs add launches, their approval flags and their own MCP sign-ins."
   }
 }

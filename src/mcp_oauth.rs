@@ -109,6 +109,14 @@ pub trait McpHost: AuthHost {
     /// Runs one orchestration command as `orchestration.dispatchCommand`
     /// does, returning the sequence it committed at or the failure.
     fn dispatch(self: &Arc<Self>, command: Value) -> HostFuture<Result<u64, Value>>;
+    /// Runs a scheduled task immediately. Native hosts dispatch it through
+    /// the scheduler; control-plane-only hosts leave it unavailable.
+    fn run_scheduled_task_now(
+        self: &Arc<Self>,
+        _task_id: String,
+    ) -> HostFuture<Result<Value, Value>> {
+        Box::pin(async { Err(json!({"message":"Scheduled task dispatch is unavailable."})) })
+    }
     /// `cancelDelegatedTask`: cancels `taskId` on `parentThreadId` with
     /// `stop`, the child's `thread.stop`, after stopping the child's own
     /// delegated tasks.

@@ -82,6 +82,8 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     // Chromium preview automation.
     ("preview_evaluate", &[]),
     ("preview_set_appearance", &[]),
+    // Chromium viewport sizing.
+    ("preview_resize", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -157,6 +159,8 @@ const SERVED: &[&str] = &[
     // Chromium preview automation.
     "preview_evaluate",
     "preview_set_appearance",
+    // Chromium viewport sizing.
+    "preview_resize",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -699,7 +703,7 @@ pub(super) async fn call<S: McpHost>(
         "list_scheduled_tasks" => list_scheduled_tasks(&**host, caller, args).await,
         "schedule_task" => schedule_task(host, caller, args).await,
         "delete_scheduled_task" => delete_scheduled_task(&**host, caller, args).await,
-        "run_scheduled_task_now" => run_scheduled_task_now(&**host, caller, args).await,
+        "run_scheduled_task_now" => run_scheduled_task_now(host, caller, args).await,
 
         "delegate_task" => delegation::delegate_task(host, caller, args).await,
         "task_status" => delegation::task_status(host, caller, args).await,
@@ -721,6 +725,7 @@ pub(super) async fn call<S: McpHost>(
         "t3_worktree_status" => agent_tools::worktree_status(host, caller).await,
         "t3_worktree_handoff" => agent_tools::worktree_handoff(host, caller, args).await,
         "preview_evaluate" => agent_tools::preview_automation(host, caller, "evaluate", args).await,
+        "preview_resize" => agent_tools::preview_automation(host, caller, "resize", args).await,
         "preview_set_appearance" => {
             agent_tools::preview_automation(host, caller, "setColorScheme", args).await
         }
@@ -773,6 +778,52 @@ fn scheduled_task_summary(task: &Value) -> Value {
     summary
 }
 
+fn scheduled_task_next_run(schedule: &Value, now_ms: i64) -> Option<String> {
+    match schedule["type"].as_str() {
+        Some("interval") => schedule["everyMs"]
+            .as_i64()
+            .map(|every| crate::auth_service::iso(now_ms.saturating_add(every.max(60_000)))),
+        Some("once") => schedule["runAt"].as_str().and_then(|run_at| {
+            time::OffsetDateTime::parse(run_at, &time::format_description::well_known::Rfc3339)
+                .ok()
+                .filter(|at| at.unix_timestamp_nanos() / 1_000_000 > now_ms as i128)
+                .map(|_| run_at.to_owned())
+        }),
+        Some("fixed_time") => {
+            let time = schedule["timeOfDay"].as_str()?.trim();
+            let (hour, minute) = time.split_once(':')?;
+            let hour: u8 = hour.parse().ok()?;
+            let minute: u8 = minute.parse().ok()?;
+            if hour > 23 || minute > 59 {
+                return None;
+            }
+            let now =
+                time::OffsetDateTime::from_unix_timestamp_nanos(now_ms as i128 * 1_000_000).ok()?;
+            let weekdays = schedule["weekdays"].as_array();
+            for offset in 0..=7 {
+                let date = now.date().checked_add(time::Duration::days(offset))?;
+                let candidate =
+                    time::PrimitiveDateTime::new(date, time::Time::from_hms(hour, minute, 0).ok()?)
+                        .assume_utc();
+                if candidate <= now {
+                    continue;
+                }
+                let weekday = candidate.weekday().number_days_from_sunday() as i64;
+                if weekdays
+                    .is_some_and(|days| !days.iter().any(|day| day.as_i64() == Some(weekday)))
+                {
+                    continue;
+                }
+                return Some(crate::auth_service::iso(
+                    candidate.unix_timestamp_nanos() as i64 / 1_000_000,
+                ));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 async fn schedule_task<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
     caller.refuse_read_only()?;
     let project = args["projectId"]
@@ -818,13 +869,7 @@ async fn schedule_task<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value)
         )
         .then(|| caller.thread.as_ref().map(|thread| thread.id.clone()))
         .flatten();
-    let next = match schedule["type"].as_str() {
-        Some("interval") => schedule["everyMs"]
-            .as_i64()
-            .map(|value| crate::auth_service::iso(now.saturating_add(value))),
-        Some("once") => schedule["runAt"].as_str().map(str::to_owned),
-        _ => None,
-    };
+    let next = scheduled_task_next_run(&schedule, now);
     let task = json!({"id":id,"title":title,"prompt":prompt,"enabled":enabled,"schedule":schedule,"projectId":project,"threadId":thread_id,
         "threadMode":if args["freshSession"] == true {"fresh_session"} else if thread_id.is_some() {"continue"} else {"new_thread"},
         "workspaceStrategy":{"type":"root"},"modelSelection":caller.thread.as_ref().map(|thread| json!({"instanceId":thread.provider_instance_id,"model":thread.model})).unwrap_or(json!({"instanceId":"codex","model":""})),
@@ -854,7 +899,11 @@ async fn delete_scheduled_task<S: McpHost>(host: &S, caller: &Caller, args: &Val
     Ok(json!({"scheduledTaskId":id,"deleted":true}))
 }
 
-async fn run_scheduled_task_now<S: McpHost>(host: &S, caller: &Caller, args: &Value) -> Outcome {
+async fn run_scheduled_task_now<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    args: &Value,
+) -> Outcome {
     caller.refuse_read_only()?;
     let id = args["taskId"].as_str().ok_or_else(invalid_arguments)?;
     let task = host
@@ -871,9 +920,28 @@ async fn run_scheduled_task_now<S: McpHost>(host: &S, caller: &Caller, args: &Va
             "Webhook tasks run when their URL receives a request.",
         ));
     }
-    Ok(
-        json!({"taskId":id,"threadId":task["threadId"],"lastRunStatus":task["lastRunStatus"],"lastRunError":task["lastRunError"],"runCount":task["runCount"],"nextRunAt":task["nextRunAt"]}),
-    )
+    let task = host
+        .run_scheduled_task_now(id.to_owned())
+        .await
+        .map_err(|error| failure("orchestration_error", dispatch_message(&error)))?;
+    let mut result = json!({
+        "taskId":id,
+        "threadId":task["threadId"],
+        "lastRunStatus":task["lastRunStatus"],
+        "lastRunError":task["lastRunError"],
+        "runCount":task["runCount"],
+        "nextRunAt":task["nextRunAt"]
+    });
+    if let Some(thread_id) = task["threadId"].as_str() {
+        result["link"] = thread_link(
+            &**host,
+            caller,
+            thread_id,
+            task["title"].as_str().unwrap_or("Scheduled task"),
+        )
+        .into();
+    }
+    Ok(result)
 }
 
 async fn project_list<S: McpHost>(host: &S, a: &Value) -> Outcome {
@@ -1619,18 +1687,20 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
             row["modelSelection"].clone(),
         )
     };
-    let key = arg_str(a, "clientRequestId")?;
-    let message_id = match key {
-        Some(key) => format!(
-            "mcp:send:{}",
-            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
-                json!([host.environment_id(), id, key])
-                    .to_string()
-                    .as_bytes()
-            ))
-        ),
-        None => format!("mcp:send:{}", crate::platform::uuid_v4().simple()),
+    // The reference's stable ids (`stableOperationMessageId`, `stableCommandId`).
+    let key = arg_str(a, "clientRequestId")?
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::platform::uuid_v4().to_string());
+    let part = crate::thread_projection::uri_component;
+    let stable = |prefix: &str| {
+        format!(
+            "{prefix}:mcp:{}:thread-send:{}",
+            part(&caller.request_namespace()),
+            part(&key)
+        )
     };
+    let message_id = stable("message");
+    let command_id = stable("command");
     let queued = busy;
     let already = {
         let store = host.control_state().store.read().await;
@@ -1642,7 +1712,7 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
     if !already {
         let mut dispatch = json!({
             "type": "message.dispatch",
-            "commandId": format!("{message_id}:command"),
+            "commandId": command_id,
             "threadId": id,
             "messageId": message_id,
             "text": text,
@@ -1651,6 +1721,10 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
             "createdBy": "agent",
             "creationSource": "mcp",
         });
+        // A thread's agent names itself as the sender.
+        if let Some(sender) = caller.granted.thread.as_ref() {
+            dispatch["senderThreadId"] = json!(sender.thread_id);
+        }
         if selection.is_object() {
             dispatch["modelSelection"] = selection;
         }
@@ -1672,14 +1746,32 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
                 format!("Unable to send to thread {id}."),
             )
         })?;
-    Ok(json!({
+    let mut answer = json!({
         "threadId": id,
         "link": thread_link(&**host, caller, &id, &title),
         "messageId": message_id,
         "runId": run["id"],
-        "status": run["status"],
+        // Rust records a run as running from its start; the reference's run is
+        // starting until its provider turn has an attempt.
+        "status": if run["status"] == "running" && run["activeAttemptId"].is_null() {
+            json!("starting")
+        } else {
+            run["status"].clone()
+        },
         "delivery": if queued { "queued" } else { "started" },
-    }))
+    });
+    // A send that started follow-up work names the task it became.
+    let task_id = thread.full_projection()["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| r["id"] == run["id"])
+        .map(|r| r["delegatedTaskId"].clone())
+        .filter(|t| !t.is_null());
+    if let Some(task_id) = task_id {
+        answer["taskId"] = task_id;
+    }
+    Ok(answer)
 }
 
 async fn thread_wait<S: McpHost>(host: &S, a: &Value) -> Outcome {
