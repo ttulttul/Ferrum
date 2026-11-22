@@ -14,8 +14,7 @@ reference to a 1Password vault whose `op` CLI is not on PATH, which cannot be re
 
 The fake answers `/user` and lists one pull request for the fixture credentials only. Requests
 are recorded by which fixture credential they carried, never the credential itself. All data is
-fake. Nothing may leave loopback: the harness's refusing proxy must have seen nothing but the
-reference's model-manifest refresh.
+fake. Nothing may leave loopback: every server runs behind the harness's loopback proxy, which forwards nothing (parity_harness.assert_nothing_escaped).
 """
 import argparse
 import base64
@@ -36,7 +35,6 @@ from websockets.sync.client import connect
 import parity_harness
 from parity_harness import encode, http, isolated_git_env, managed_server, path_without
 
-ALLOWED_REFUSALS = {"raw.githubusercontent.com"}
 TOKENS = {"settings-token": "fixture-settings-token", "env-token": "fixture-env-token",
           "rejected-token": "fixture-rejected-token"}
 EMAIL, API_TOKEN = "fixture@example.invalid", "fixture-api-token"
@@ -226,8 +224,8 @@ def main():
                 record["a secret reference that cannot be read"] = session.observe(seen)
         for name in answers["original"]:
             checks.append((f"side by side: {name}", answers["original"][name], answers["rust"].get(name)))
-    refused = {urlsplit(f"//{entry.split(' ', 1)[1]}").hostname for entry in parity_harness.REFUSED}
-    assert refused <= ALLOWED_REFUSALS, f"requests left loopback: {sorted(refused - ALLOWED_REFUSALS)}"
+    # Every server ran behind a loopback proxy that forwards nothing; what it refused never left.
+    parity_harness.assert_nothing_escaped()
     failures = 0
     for name, left, right in checks:
         same = left == right

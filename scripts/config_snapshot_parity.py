@@ -151,9 +151,14 @@ def main():
         samples.append(["ServerConfigStreamEvent",{"version":1,"type":"snapshot","config":snapshot_pair(initial,True)}])
         for ws in streams:
             ws.send(encode({"_tag":"Ack","requestId":"config-stream"}).decode())
-        for tag in ("work","personal"):
-            responses=[frame(ws,tag,"server.updateSettings",{"patch":{"hiddenThreadTags":[tag]}}) for ws in clients]
-            identical(tag+" RPC response",responses)
+        # Each server gets both patches back to back, so the time between its two saves is its own
+        # round trip only (not the other server's too), well inside the file watcher's debounce.
+        responses={tag:[] for tag in ("work","personal")}
+        for ws in clients:
+            for tag in responses:
+                responses[tag].append(frame(ws,tag,"server.updateSettings",{"patch":{"hiddenThreadTags":[tag]}}))
+        for tag,pair in responses.items():
+            identical(tag+" RPC response",pair)
         # Each RPC emits immediately. Both atomic saves also wake the debounced file watcher.
         for label in ("work","personal","personal"):
             packets=[receive(ws,"settingsUpdated") for ws in streams]

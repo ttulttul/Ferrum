@@ -259,6 +259,19 @@ def report_refused():
               file=sys.stderr)
 
 
+# Every server environment server_env built, and whether its HTTP(S) proxy was on loopback.
+OFFLINE_SERVERS = []
+
+
+def assert_nothing_escaped():
+    """Fails unless every server a suite started sent its HTTP(S) through a loopback proxy (the
+    harness's refusing proxy, or a suite's own recorder): nothing then reaches a real host. What
+    was refused is reported, not failed on, since a refused request never left the machine."""
+    assert OFFLINE_SERVERS, "no server was started through server_env"
+    off = [proxy for proxy in OFFLINE_SERVERS if urlsplit(proxy or "").hostname not in ("127.0.0.1", "localhost", "::1")]
+    assert not off, f"a server ran without a loopback proxy: {off}"
+
+
 def offline_env():
     """Variables that keep a server off the network: no telemetry to ingest.t3.codes (the
     reference's T3CODE_TELEMETRY_ENABLED; the Rust server sends none), none from the host CLIs a
@@ -307,6 +320,7 @@ def server_env(home, env=None):
     # reaches the network.
     child.update(offline_env())
     child.update(env)
+    OFFLINE_SERVERS.append(child.get("HTTPS_PROXY"))
     child["PATH"] = path_without(PROVIDER_CLIS, Path(home) / ".parity-path", path)
     child.setdefault("HOME", str(home))
     child.setdefault("T3CODE_HOME", str(home))
