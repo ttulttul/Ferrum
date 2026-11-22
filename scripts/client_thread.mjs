@@ -369,8 +369,9 @@ const program = Effect.gen(function* () {
       yield* record(
         "orchestration.subscribeThread (live turn)",
         liveTurn(client, seed).pipe(Effect.timeoutOption(seed.turnMs ?? 30000), Effect.map(Option.getOrNull)),
-        // A thread change waits out its turn's reaction, longer than a reply.
-        seed.change ? seed.turnMs ?? 30000 : waitMs,
+        // A thread change waits out its turn's reaction, and a steer its answer, longer than a
+        // reply.
+        seed.change || seed.steer ? seed.turnMs ?? 30000 : waitMs,
       );
       // A watcher of a turn its server stops (`seed.liveOnly`) has nothing more to read.
       if (seed.liveOnly) return;

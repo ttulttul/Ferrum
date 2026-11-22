@@ -374,6 +374,18 @@ impl Thread {
                     continue;
                 };
                 let at = iso(message.created_at);
+                // The CLI's account of the steer (`steer.updated`): pending until
+                // it takes it, as the reference shows it.
+                let status = steer["status"].as_str().unwrap_or("completed");
+                let changed = steer["statusAt"]
+                    .as_u64()
+                    .map(iso)
+                    .unwrap_or_else(|| at.clone());
+                let completed_at = if status == "pending" {
+                    Value::Null
+                } else {
+                    json!(changed)
+                };
                 let item = json!({
                     "id": format!("turn-item:message:{}", uri_component(&message.id)),
                     "threadId": self.id,
@@ -384,11 +396,11 @@ impl Thread {
                     "nativeItemRef": null,
                     "parentItemId": null,
                     "ordinal": 0,
-                    "status": "completed",
+                    "status": status,
                     "title": null,
                     "startedAt": at,
-                    "completedAt": at,
-                    "updatedAt": at,
+                    "completedAt": completed_at,
+                    "updatedAt": changed,
                     "type": "user_message",
                     "createdBy": "user",
                     "creationSource": message.creation_source.as_deref().unwrap_or("web"),

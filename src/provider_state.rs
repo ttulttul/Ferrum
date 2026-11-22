@@ -296,6 +296,8 @@ impl ProviderState {
                 }
             }
             ProviderEvent::TurnUsage { usage } => record.turn_usage = Some(usage.clone()),
+            // On the steer message, which the store updates.
+            ProviderEvent::SteerUpdated { .. } => {}
             ProviderEvent::PromptDelivered { bytes, pages } => {
                 record.prompt_delivered = true;
                 let (used_bytes, used_pages) = self.attachment_budget.unwrap_or_default();

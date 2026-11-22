@@ -126,6 +126,11 @@ struct Attempt<'a> {
     turn_started: bool,
     /// The turn's `result` message, once it came.
     result: Option<Value>,
+    /// Steers written to the CLI and not yet taken: their prompt uuid, and
+    /// the steer message's id.
+    steers: HashMap<String, String>,
+    /// A message steered the turn.
+    steered: bool,
 }
 
 /// One model call's usage as it streams (`message_start`, then deltas).
@@ -303,8 +308,13 @@ impl<'a> Attempt<'a> {
             root_models: Vec::new(),
             turn_started: false,
             result: None,
+            steers: HashMap::new(),
+            steered: false,
         };
         let outcome = attempt.drive(spec, cancel).await;
+        if let Outcome::Ended(end) = &outcome {
+            attempt.settle_steers(end.status);
+        }
         if let (Outcome::Ended(end), true) = (&outcome, attempt.turn_started) {
             attempt.sink.send(ProviderEvent::TurnUsage {
                 usage: turn_token_usage(attempt.result.as_ref(), end.status, &attempt.root_models),
@@ -472,6 +482,7 @@ impl<'a> Attempt<'a> {
         if kind != "control_response" {
             self.answered = true;
         }
+        self.accept_steers(&message);
         // Subagents' own messages stay inside their tool call.
         let nested = !message["parent_tool_use_id"].is_null();
         match kind {
@@ -500,6 +511,13 @@ impl<'a> Attempt<'a> {
             "user" if !nested => self.tool_results(&message),
             "control_request" => self.answer(&message).await,
             "control_cancel_request" => self.withdraw(&message["request_id"]),
+            // A steer ends the segment it cut off, not the turn.
+            "result"
+                if self.steered
+                    && matches!(
+                        message["terminal_reason"].as_str(),
+                        Some("aborted_streaming" | "aborted_tools")
+                    ) => {}
             "result" => return Some(self.result(&message)),
             _ => {}
         }
@@ -911,6 +929,9 @@ impl<'a> Attempt<'a> {
 
     /// Send the user's answer to a waiting `can_use_tool` request.
     async fn respond(&mut self, response: RuntimeResponse) {
+        if let Some(text) = &response.steer {
+            return self.steer(&response.id, text).await;
+        }
         let Some(pending) = self.pending.remove(&response.id) else {
             return;
         };
@@ -933,6 +954,91 @@ impl<'a> Attempt<'a> {
         let reply = json!({"type": "control_response", "response": {
             "subtype": "success", "request_id": pending.request_id, "response": result}});
         let _ = self.cli.write(&reply).await;
+    }
+
+    /// Write the steer message `message_id` to the CLI as the reference's
+    /// steerTurn does: a user message with priority `now` and a uuid Claude
+    /// echoes once it takes it. Until then the steer is pending.
+    async fn steer(&mut self, message_id: &str, text: &str) {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        self.steers.insert(uuid.clone(), message_id.to_owned());
+        self.steered = true;
+        self.sink.send(ProviderEvent::SteerUpdated {
+            message_id: message_id.to_owned(),
+            status: "pending".into(),
+        });
+        let message = json!({
+            "type": "user",
+            "message": {"role": "user", "content": text},
+            "parent_tool_use_id": null,
+            "priority": "now",
+            "uuid": uuid,
+        });
+        let written = self.cli.write(&message).await.is_ok();
+        if written {
+            // What the steer adds to the session's attachment budget, as a prompt.
+            self.sink.send(ProviderEvent::PromptDelivered {
+                bytes: json!(text).to_string().len() as u64,
+                pages: 0,
+            });
+        } else if let Some(message_id) = self.steers.remove(&uuid) {
+            // The reference settles a steer it could not offer.
+            self.sink.send(ProviderEvent::SteerUpdated {
+                message_id,
+                status: "completed".into(),
+            });
+        }
+    }
+
+    /// Steers `message` shows Claude took: those whose uuid it echoes
+    /// (`user_message_uuids`), or a prompt lifecycle that started one.
+    /// Completed alone does not count; Claude completes prompts it never
+    /// started.
+    fn accept_steers(&mut self, message: &Value) {
+        if self.steers.is_empty() {
+            return;
+        }
+        let accepted: Vec<String> = if message["type"] == "command_lifecycle" {
+            match (message["command_uuid"].as_str(), message["state"].as_str()) {
+                (Some(uuid), Some("started")) => vec![uuid.to_owned()],
+                _ => vec![],
+            }
+        } else if let Some(uuids) = message["user_message_uuids"].as_array() {
+            uuids
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        } else {
+            message["user_message_uuid"]
+                .as_str()
+                .map(|uuid| vec![uuid.to_owned()])
+                .unwrap_or_default()
+        };
+        for uuid in accepted {
+            if let Some(message_id) = self.steers.remove(&uuid) {
+                self.sink.send(ProviderEvent::SteerUpdated {
+                    message_id,
+                    status: "completed".into(),
+                });
+            }
+        }
+    }
+
+    /// The turn ended: steers still pending end with it, completed if the
+    /// turn did, otherwise cancelled.
+    fn settle_steers(&mut self, status: TurnStatus) {
+        let settled = if status == TurnStatus::Completed {
+            "completed"
+        } else {
+            "cancelled"
+        };
+        for (_, message_id) in self.steers.drain() {
+            self.sink.send(ProviderEvent::SteerUpdated {
+                message_id,
+                status: settled.into(),
+            });
+        }
     }
 
     /// Claude Code withdrew the control request `request_id`.

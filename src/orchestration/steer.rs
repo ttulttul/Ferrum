@@ -109,8 +109,11 @@ pub(super) async fn plan<H: CommandHost>(
             run.wire_id()
         )));
     }
-    // Rust steers Codex turns only; a Claude steer waits for the next turn.
-    if ids.driver != crate::workspace::provider::CODEX {
+    // Rust steers Codex and Claude turns; another driver's steer waits for
+    // the next turn.
+    if ids.driver != crate::workspace::provider::CODEX
+        && ids.driver != crate::workspace::provider::CLAUDE_AGENT
+    {
         return Ok(SteerPlan::Queue);
     }
     // The message it follows: Rust's message times are whole seconds, too
@@ -143,7 +146,7 @@ pub(super) async fn plan<H: CommandHost>(
 }
 
 /// Record the steer message on its run and hand it to the run's provider
-/// turn (Codex `turn/steer`).
+/// turn (Codex `turn/steer`; for Claude, a priority `now` user message).
 pub(super) async fn steer<H: CommandHost>(
     state: Arc<H>,
     receipt: &CommandReceipt,

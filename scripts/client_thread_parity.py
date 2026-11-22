@@ -137,6 +137,14 @@ PROVIDER_SCENARIOS = [
      "followUp": "Now append a line"},
     # A message steers the running turn (Codex `turn/steer`), which then answers it, and Stop
     # interrupts it.
+    # A message steers the running Claude turn: it goes to the CLI the turn runs (priority
+    # "now"), pending until Claude echoes its uuid, and the turn goes on to complete.
+    {"name": "claude steer", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_steer.json",
+     "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}},
+    # A steer Claude has not taken when the user stops the turn: it ends cancelled.
+    {"name": "claude steer then stop", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_steer_stop.json", "interrupt": "steer",
+     "steer": {"text": "Also print the date", "ack": "<no answer: Claude never takes it>"}},
     {"name": "codex steer then stop", "instance": "codex", "model": "fixture", "scenario": "codex_steer.json",
      "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}, "interrupt": "steer"},
     # A seeded first message titles the thread with the text generation model (Codex), and a
@@ -520,7 +528,7 @@ def seed_turn(url, cookie, root, scenario):
                 "enabled": False, "schedule": trigger, "threadMode": "fresh_session",
                 "workspaceStrategy": {"type": "root"}, "modelSelection": {"instanceId": "codex", "model": "fixture"},
                 "runtimeMode": "approval-required", "interactionMode": "default"})
-    return {"threadId": THREAD, "turnMs": 60000 if scenario.get("change") else 30000,
+    return {"threadId": THREAD, "turnMs": 60000 if scenario.get("change") or scenario.get("steer") else 30000,
             "interrupt": scenario.get("interrupt", False), "settleRuns": scenario.get("settleRuns", 1),
             "respond": scenario.get("respond"), "change": scenario.get("change"),
             "steer": scenario.get("steer"), "changeAfter": scenario.get("changeAfter"), "dispatch": {

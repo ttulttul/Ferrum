@@ -231,14 +231,18 @@ Gaps the thread tools surface that live in shared code, not in the tools:
   `claude title fallback` and `codex title failed` scenarios in
   `scripts/client_thread_parity.py` compare each CLI's arguments, prompt and schema, and the
   thread's title afterwards.
-- **Steering.** A `message.dispatch` with `steer_active` steers a running Codex turn as the
-  reference does (`src/orchestration/steer.rs`): the message joins the run as a `steer`
-  user message and Codex gets `turn/steer`; a run whose turn ended starts a new turn, and one
-  whose turn has not started queues it. Not ported: steering a Claude turn (the message
-  queues), a steer that changes the model selection or carries attachments (the reference
-  restarts the turn), and the follow-up turn the reference starts when the provider refuses
-  a steer. `t3_thread_send` still refuses `mode: "steer"`. Parity: `codex steer then stop`
-  in `scripts/client_thread_parity.py`.
+- **Steering.** A `message.dispatch` with `steer_active` steers a running Codex or Claude
+  turn as the reference does (`src/orchestration/steer.rs`): the message joins the run as a
+  `steer` user message; a run whose turn ended starts a new turn, and one whose turn has not
+  started queues it. Codex gets `turn/steer`. Claude's running CLI gets the message with
+  priority `now` and a uuid; the steer reads pending (`steer.updated`) until Claude echoes the
+  uuid, and one still pending when the turn ends is completed with a completed turn, otherwise
+  cancelled. Not ported: a steer that changes the model selection or carries attachments (the
+  reference restarts the turn), moving Claude's foreground subagents to the background before a
+  steer, the "Steer delivery not confirmed" notice, and the follow-up turn the reference starts
+  when the provider refuses a steer. `t3_thread_send` still refuses `mode: "steer"`. Parity:
+  `codex steer then stop`, `claude steer` and `claude steer then stop` in
+  `scripts/client_thread_parity.py`.
 - **Codex delegation parity.** Rust now runs an instance's Codex turns in one shared
   app-server, as the reference does (#152), so a delegated child's Codex turn comes into the
   parent's app-server. The delegation scenarios still compare Claude only; a Codex one is to

@@ -33,7 +33,7 @@ Steps:
                              first prompt or a later delivery
   {"send": {...}}            write a message; "$id" becomes the remembered
                              message's id ("$request_id" its control
-                             request_id), "$params.x" its params.x, and
+                             request_id, "$uuid" its uuid), "$params.x" its params.x, and
                              "$session" the Claude session the CLI was
                              started on
   {"sendTogether": [...]}    write several protocol lines together so a control callback
@@ -350,6 +350,8 @@ def fill(value):
             return claude_session()
         if value == "$request_id":
             return remembered.get("request_id")
+        if value == "$uuid":
+            return remembered.get("uuid")
         return value
     if isinstance(value, list):
         return [fill(v) for v in value]

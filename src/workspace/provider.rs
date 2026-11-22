@@ -180,6 +180,12 @@ pub enum ProviderEvent {
     /// against the session's attachment budget (Claude).
     #[serde(rename = "prompt.delivered")]
     PromptDelivered { bytes: u64, pages: u64 },
+    /// Where a message that steered the turn stands (the reference's
+    /// `steer.updated`): `pending` once it was written to the CLI, then
+    /// `completed` once the CLI took it, or `cancelled` with a turn that
+    /// ended first. `message_id` is the steer message's id.
+    #[serde(rename = "steer.updated", rename_all = "camelCase")]
+    SteerUpdated { message_id: String, status: String },
     /// Recorded by earlier builds, which approved every request themselves.
     /// Kept so their event logs still load; it changes nothing.
     #[serde(rename = "runtime_request.resolved", rename_all = "camelCase")]
