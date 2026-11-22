@@ -38,6 +38,7 @@ async fn setup() -> Setup {
             buffer_dir: dir.path().join("streams"),
             buffer_limit: 1 << 20,
             poll_interval: Duration::from_millis(50),
+            prepare_dir: None,
         },
     )
     .unwrap();

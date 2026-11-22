@@ -276,6 +276,7 @@ async fn agentd(dir: &std::path::Path, root: &std::path::Path) -> String {
             buffer_dir: dir.join("streams"),
             buffer_limit: 1 << 20,
             poll_interval: Duration::from_millis(50),
+            prepare_dir: None,
         },
     )
     .unwrap();

@@ -24,6 +24,7 @@ async fn start(dir: &Path, buffer_limit: u64) -> (SocketAddr, Arc<LocalWorkspace
             buffer_dir: dir.join("streams"),
             buffer_limit,
             poll_interval: Duration::from_millis(50),
+            prepare_dir: None,
         },
     )
     .unwrap();

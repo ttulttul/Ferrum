@@ -37,8 +37,11 @@ use tokio::{
 mod assets;
 mod buffer;
 mod confine;
+mod prepare;
 use buffer::DiskBuffer;
 pub use confine::Confinement;
+use prepare::DirPreparer;
+pub use prepare::{PrepareDirConfig, DEFAULT_PREPARE_DIR_TIMEOUT_SECS, PREPARE_DIR_ENV};
 
 /// The largest frame agentd accepts.
 const MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -58,12 +61,16 @@ pub struct Config {
     pub buffer_limit: u64,
     /// How often watches re-read polled state.
     pub poll_interval: Duration,
+    /// Optional hook run once per directory under `root` before agentd first
+    /// uses it as a working directory.
+    pub prepare_dir: Option<PrepareDirConfig>,
 }
 
 pub struct Agentd {
     workspace: Arc<dyn Workspace>,
     config: Config,
     confinement: Confinement,
+    preparer: Option<DirPreparer>,
     state: Mutex<SessionState>,
 }
 
@@ -141,10 +148,16 @@ impl Agentd {
         let confinement = Confinement::new(
             std::iter::once(config.root.clone()).chain(config.extra_roots.iter().cloned()),
         )?;
+        let preparer = config
+            .prepare_dir
+            .clone()
+            .filter(|cfg| !cfg.command.as_os_str().is_empty())
+            .map(DirPreparer::new);
         Ok(Arc::new(Self {
             workspace,
             config,
             confinement,
+            preparer,
             state: Mutex::new(SessionState {
                 max_epoch: 0,
                 current: None,
@@ -258,7 +271,10 @@ impl Agentd {
             id,
         };
         let result = match op.as_str() {
-            op::ASSET_OPEN => session.assets.open(id, &*self.workspace, &args).await,
+            op::ASSET_OPEN => match self.prepare_for(&op, &args).await {
+                Ok(()) => session.assets.open(id, &*self.workspace, &args).await,
+                Err(error) => Err(error),
+            },
             op::ASSET_READ => {
                 session.assets.read(id, &session.tx, &args);
                 return;
@@ -289,7 +305,18 @@ impl Agentd {
                 }
                 Ok(Value::Null)
             }),
-            op::TURN_START => self.start_turn(&opener, &args).await,
+            op::TURN_START => {
+                if self.preparer.is_some() {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = this.start_turn(&opener, &args).await {
+                            Self::reply(&opener.tx, opener.id, Err(error));
+                        }
+                    });
+                    return;
+                }
+                self.start_turn(&opener, &args).await
+            }
             op::TURN_RESPOND => match parse::<proto::TurnRespond>(&args) {
                 Ok(respond) => Ok(json!(
                     self.workspace
@@ -326,7 +353,10 @@ impl Agentd {
                 let this = self.clone();
                 let tx = session.tx.clone();
                 tokio::spawn(async move {
-                    let result = call(&*this.workspace, &op, &args).await;
+                    let result = match this.prepare_for(&op, &args).await {
+                        Ok(()) => call(&*this.workspace, &op, &args).await,
+                        Err(error) => Err(error),
+                    };
                     Self::reply(&tx, id, result);
                 });
                 return;
@@ -578,7 +608,29 @@ impl Agentd {
         self.emit(id, StreamBody::End(StreamEnd { reason, error }));
     }
 
+    /// Run the optional prepare-dir hook for any `cwd` under `--root` named by
+    /// `args`. Returns immediately with zero overhead when no hook is configured.
+    async fn prepare_for(&self, op: &str, args: &Value) -> Result<(), WireError> {
+        let Some(preparer) = &self.preparer else {
+            return Ok(());
+        };
+        let dirs = self.confinement.cwds_under_root(op, args);
+        let mut ran = false;
+        for dir in &dirs {
+            if preparer.prepare(dir).await {
+                ran = true;
+            }
+        }
+        if ran {
+            // Re-check confinement in case the hook created symlinks inside
+            // the prepared directory.
+            self.confinement.check(op, args)?;
+        }
+        Ok(())
+    }
+
     async fn start_turn(self: &Arc<Self>, opener: &Opener, args: &Value) -> OpResult {
+        self.prepare_for(op::TURN_START, args).await?;
         let start: TurnStart = parse(args)?;
         if start.command.is_empty() && start.provider.is_none() {
             return Err(bad_request("`command` is empty"));
@@ -661,6 +713,10 @@ impl Agentd {
         opener.opened(id);
         let this = self.clone();
         let task = tokio::spawn(async move {
+            if let Err(error) = this.prepare_for(op::GIT_STACKED_ACTION, &args).await {
+                this.end(id, EndReason::Error, Some(error));
+                return;
+            }
             let (progress, mut batches) = mpsc::channel(16);
             let action = this
                 .workspace
@@ -687,6 +743,10 @@ impl Agentd {
         let this = self.clone();
         let op = op.to_owned();
         let task = tokio::spawn(async move {
+            if let Err(error) = this.prepare_for(&op, &args).await {
+                this.end(id, EndReason::Error, Some(error));
+                return;
+            }
             let mut previous: Option<Polled> = None;
             loop {
                 let input = &args["input"];

@@ -21,6 +21,8 @@ T3_AGENTD_TOKEN=$(openssl rand -hex 32) \
 | `--root`, `T3_AGENTD_ROOT` | current directory | Where projects live; reported in `hello`. Operations may not reach outside it. |
 | `--state-dir`, `T3_AGENTD_STATE_DIR` | `~/.t3/agentd` | Settings, terminal logs, device state, stream buffers. |
 | `--buffer-limit`, `T3_AGENTD_BUFFER_LIMIT` | 64 MiB | Unacknowledged bytes one stream may hold. |
+| `--prepare-dir-command`, `T3_AGENTD_PREPARE_DIR_COMMAND` | unset | Program run once per directory under `--root` before it is first used as a working directory. |
+| `--prepare-dir-timeout-secs`, `T3_AGENTD_PREPARE_DIR_TIMEOUT_SECS` | `300` | Seconds to wait for `--prepare-dir-command` before killing it and continuing. |
 
 agentd refuses, with error code `outside_root`, any operation that names a
 path or working directory outside `--root` or the worktrees directory under
@@ -30,6 +32,19 @@ turns and every other op. Paths are resolved with symlinks followed, so
 not exist yet is judged by its nearest existing ancestor. This limits what
 requests can name; it does not sandbox the programs that turns and terminals
 start, which can reach whatever the agentd user can.
+
+When `--prepare-dir-command <PROGRAM>` is set, before agentd first uses a
+directory under `--root` as a working directory (for a provider turn,
+terminal, process, filesystem or VCS request), it runs
+`<PROGRAM> <absolute-directory>` with `T3_PREPARE_DIR` also set to
+`<absolute-directory>` and waits for it to finish. The directory does not
+need to exist yet, so the program can create or restore it on demand. Each
+directory is prepared at most once per agentd process, and concurrent
+requests for the same directory wait on the single running invocation. If the
+program fails to start, exits non-zero or exceeds
+`--prepare-dir-timeout-secs`, agentd logs a warning with the tail of its
+stderr and lets the request proceed as it would have without the hook. When
+`--prepare-dir-command` is not set, no hook runs.
 
 Settings that workspace services read (device support, tokens for device
 providers) come from `settings.json` in the state directory.
