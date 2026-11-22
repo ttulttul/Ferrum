@@ -96,6 +96,10 @@ PROVIDER_SCENARIOS = [
     {"name": "claude delegate stop", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate_stop.json", "awaitStatus": True,
      "change": {"type": "thread.stop"}, "changeAfter": "subagent"},
+    # Threads the agent creates: one started with its prompt, one left idle, each a card on the
+    # parent's timeline.
+    {"name": "claude create threads", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_create_threads.json", "awaitStatus": True},
     {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
     # Runtime requests: what each server asks the user, and what it answers the CLI.
     {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",

@@ -832,10 +832,32 @@ async fn apply_command<H: CommandHost>(
                 provider: Default::default(),
                 stored: None,
             };
-            return Ok(state
+            let sequence = state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
                 .await?
-                .id);
+                .id;
+            // The first message starts the thread's run in the same command, so
+            // no client sees it committed and idle (`threadCreateInitialMessage`).
+            if let Some(initial) = command.get("initialMessage").filter(|m| m.is_object()) {
+                let mut message = initial.clone();
+                let strategy = message
+                    .as_object_mut()
+                    .and_then(|m| m.remove("workspaceStrategy"));
+                message["type"] = json!("message.dispatch");
+                message["commandId"] = command["commandId"].clone();
+                message["threadId"] = command["threadId"].clone();
+                message["modelSelection"] = command["modelSelection"].clone();
+                message["dispatchMode"] = match strategy {
+                    Some(strategy) if !strategy.is_null() => {
+                        json!({"type": "defer_start", "workspaceStrategy": strategy})
+                    }
+                    _ => json!({"type": "start_immediately"}),
+                };
+                message["createdBy"] = command["createdBy"].clone();
+                message["creationSource"] = command["creationSource"].clone();
+                return Box::pin(apply_command(state.clone(), &message, receipt, None)).await;
+            }
+            return Ok(sequence);
         }
         "message.dispatch" => {
             let thread_id =
@@ -879,6 +901,17 @@ async fn apply_command<H: CommandHost>(
                     "createdBy": command["createdBy"],
                     "creationSource": command["creationSource"],
                     "delegatedCompletion": completion,
+                }));
+            }
+            // An agent's message names the thread that sent it.
+            if wire.is_none()
+                && command["createdBy"] == "agent"
+                && command["senderThreadId"].is_string()
+            {
+                wire = Some(json!({
+                    "createdBy": command["createdBy"],
+                    "creationSource": command["creationSource"],
+                    "senderThreadId": command["senderThreadId"],
                 }));
             }
             let queued = (command["dispatchMode"]["type"] == "queue_after_active" || queue_steer)
@@ -2671,6 +2704,7 @@ async fn apply_command<H: CommandHost>(
                 }
             }
             drop(store);
+            return delegation::record_created_thread(state, command, receipt).await;
         }
         // Every command discriminator has a registered wire contract. Commands
         // whose provider-specific state is not available locally still need a

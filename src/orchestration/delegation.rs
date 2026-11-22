@@ -802,6 +802,104 @@ pub(crate) async fn record_work_started_at<H: CommandHost>(
     Ok(())
 }
 
+/// `thread.created.record`: the parent's timeline card for a thread its
+/// agent created (`dispatchCreatedThreadRecord`), after the provider items its
+/// run had then.
+pub(crate) async fn record_created_thread<H: CommandHost>(
+    state: Arc<H>,
+    command: &Value,
+    receipt: &crate::store::CommandReceipt,
+) -> anyhow::Result<u64> {
+    let parent_id = command["parentThreadId"].as_str().unwrap_or_default();
+    let parent_run_id = command["parentRunId"].as_str().unwrap_or_default();
+    let target_id = command["targetThreadId"].as_str().unwrap_or_default();
+    let (row, item) = {
+        let store = state.store.read().await;
+        let parent = store.threads.get(parent_id).ok_or_else(|| {
+            anyhow::anyhow!("No orchestration projection exists for thread {parent_id}.")
+        })?;
+        let target = store.threads.get(target_id).ok_or_else(|| {
+            anyhow::anyhow!("No orchestration projection exists for thread {target_id}.")
+        })?;
+        let projection = parent.full_projection();
+        let run = records(&projection, "runs")
+            .into_iter()
+            .find(|run| run["id"] == parent_run_id)
+            .unwrap_or(Value::Null);
+        // `providerTurnForRun`: the run's latest provider turn for its attempt.
+        let provider_turn = records(&projection, "providerTurns")
+            .into_iter()
+            .filter(|turn| {
+                !run["activeAttemptId"].is_null() && turn["runAttemptId"] == run["activeAttemptId"]
+            })
+            .max_by_key(|turn| turn["ordinal"].as_u64().unwrap_or(0))
+            .map_or(Value::Null, |turn| turn["id"].clone());
+        let after_items = parent
+            .runs
+            .iter()
+            .position(|r| r.wire_id() == parent_run_id)
+            .map_or(0, |index| {
+                parent
+                    .provider_records()
+                    .items
+                    .iter()
+                    .filter(|(i, _)| *i == index)
+                    .count()
+            });
+        let selection = target.full_projection()["thread"]["modelSelection"].clone();
+        let at = crate::auth_service::iso(crate::auth_service::now());
+        let item = json!({
+            "id": join_id("turn-item", &["created-thread", command["commandId"].as_str().unwrap_or_default()]),
+            "threadId": parent_id,
+            "runId": parent_run_id,
+            "nodeId": command["parentNodeId"],
+            "providerThreadId": run["providerThreadId"],
+            "providerTurnId": provider_turn,
+            "nativeItemRef": null,
+            "parentItemId": null,
+            "status": "completed",
+            "title": target.title,
+            "startedAt": at,
+            "completedAt": at,
+            "updatedAt": at,
+            "type": "thread_created",
+            "targetThreadId": target_id,
+            "targetRunId": command["targetRunId"],
+            "targetProviderInstanceId": selection["instanceId"],
+            "targetModel": selection["model"],
+            (crate::thread_projection::LINK_CARD_POSITION): after_items,
+        });
+        (parent.stored_row(), item)
+    };
+    let mut items = records(&row, "appTurnItems");
+    // A replay of the same command writes the same card once.
+    if items.iter().any(|existing| existing["id"] == item["id"]) {
+        return Ok(state
+            .commit_receipted(
+                Event::CommandDispatched {
+                    command_id: receipt.command_id.clone(),
+                    command_type: "thread.created.record".into(),
+                    thread_id: Some(parent_id.to_owned()),
+                    payload: command.clone(),
+                },
+                Some(receipt.clone()),
+            )
+            .await?
+            .id);
+    }
+    items.push(item);
+    Ok(state
+        .commit_receipted(
+            Event::ThreadPatched {
+                thread_id: parent_id.to_owned(),
+                patch: json!({"row": {"appTurnItems": items}}),
+            },
+            Some(receipt.clone()),
+        )
+        .await?
+        .id)
+}
+
 /// What a blocking `delegate_task` wait gets when its child's run ends: it
 /// reads the task, drops `read`, and answers once `settled` closes.
 pub(crate) struct RunEnd {
