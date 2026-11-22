@@ -765,12 +765,33 @@ def compare_turn(original, rust):
     return problems
 
 
+def scenario_cost(scenario):
+    """Rough seconds a scenario takes on both servers in CI, for balancing shards."""
+    restart = scenario.get("restart")
+    if not restart:
+        return 10
+    return 150 if restart.get("restoreCli") else 30
+
+
+def shard_scenarios(index, count):
+    """The provider scenarios of shard `index` (from 1) of `count`, balanced by scenario_cost."""
+    loads = [[0, n, []] for n in range(count)]
+    for scenario in sorted(PROVIDER_SCENARIOS, key=scenario_cost, reverse=True):
+        lightest = min(loads)
+        lightest[0] += scenario_cost(scenario)
+        lightest[2].append(scenario["name"])
+    return set(loads[index - 1][2])
+
+
 def provider_turns(args, credentials):
     """Run each provider scenario on both servers; the number of unexpected results."""
     xfail = json.loads((ROOT / "scripts/client_thread_parity_xfail.json").read_text())
     failures = 0
+    shard = shard_scenarios(*args.shard) if args.shard else None
     for scenario in PROVIDER_SCENARIOS:
         if args.scenario and scenario["name"] not in args.scenario:
+            continue
+        if shard is not None and scenario["name"] not in shard:
             continue
         outcomes = {}
         with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
@@ -902,14 +923,18 @@ def main():
     parser.add_argument("--dump", type=Path, help="write each server's decoded results here")
     parser.add_argument("--scenario", action="append", help="run only this provider scenario (repeatable)")
     parser.add_argument("--skip-thread-checks", action="store_true", help="run only the provider scenarios")
+    parser.add_argument("--shard", type=lambda text: tuple(int(n) for n in text.split("/")), metavar="I/N",
+                        help="run shard I of N (from 1): the thread checks run on shard 1 only")
     args = parser.parse_args()
+    if args.shard and not 1 <= args.shard[0] <= args.shard[1]:
+        parser.error("--shard must be I/N with 1 <= I <= N")
     credentials = secrets.token_urlsafe(32), secrets.token_bytes(32)
     if args.dump:
         args.dump.mkdir(parents=True, exist_ok=True)
     failures = 0
     with tempfile.TemporaryDirectory() as temporary:
         GIT_ISOLATION.update(isolated_git_env(Path(temporary) / "git"))
-        if not args.skip_thread_checks:
+        if not args.skip_thread_checks and (not args.shard or args.shard[0] == 1):
             failures += thread_checks(args, credentials, Path(temporary) / "thread")
         failures += provider_turns(args, credentials)
     return int(failures != 0)

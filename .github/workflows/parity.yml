@@ -5,13 +5,17 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: parity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
 jobs:
-  parity:
+  rust:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,6 +34,61 @@ jobs:
           sudo apt-get install -y libfaketime
           npm install --global pnpm@12.14.0
           pnpm --dir reference --filter t3 --filter t3code-relay --filter @t3tools/client-runtime install --frozen-lockfile
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: parity-validate
+      - name: Check upstream inventory
+        run: |
+          python3 scripts/update_contract_inventory.py "$GITHUB_WORKSPACE/reference"
+          git diff --exit-code -- contracts
+      - name: Validate Rust
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked
+          node scripts/settings_schema_cases.mjs reference > "$RUNNER_TEMP/settings-schema-cases.jsonl"
+          T3_SETTINGS_SCHEMA_CASES="$RUNNER_TEMP/settings-schema-cases.jsonl" cargo test --locked upstream_schema_corpus -- --ignored
+      - name: Build and test t3-agentd
+        run: |
+          cargo clippy --locked -p t3-agentd --all-targets -- -D warnings
+          cargo test --locked -p t3-agentd
+          cargo build --locked -p t3-agentd
+
+  parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: thread-1-4
+          - shard: thread-2-4
+          - shard: thread-3-4
+          - shard: thread-4-4
+          - shard: core
+          - shard: integrations
+            browser: true
+          - shard: relay-provisioning
+    name: parity (${{ matrix.shard }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch the pinned public reference
+        run: |
+          git init --quiet reference
+          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git 052ca497cf1103b001327bcd964188a71dfec213
+          git -C reference checkout --quiet --detach FETCH_HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.13.1
+      - name: Prepare the reference environment
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libfaketime
+          npm install --global pnpm@12.14.0
+          pnpm --dir reference --filter t3 --filter t3code-relay --filter @t3tools/client-runtime install --frozen-lockfile
+          if [ "${{ matrix.browser }}" = true ]; then
           pnpm --dir reference --filter t3 exec playwright-core install --with-deps chromium
           # Permit the installed test browser to start its user-namespace sandbox on Ubuntu.
           shell_path=$(find "$HOME/.cache/ms-playwright" -type f -name chrome-headless-shell -print -quit)
@@ -42,48 +101,15 @@ jobs:
           PROFILE
           sudo install -m 644 "$RUNNER_TEMP/browser.apparmor" /etc/apparmor.d/t3-chrome-headless-shell
           sudo apparmor_parser -r /etc/apparmor.d/t3-chrome-headless-shell
+          fi
           python3 -m venv "$RUNNER_TEMP/parity-python"
           "$RUNNER_TEMP/parity-python/bin/pip" install websockets==16.0 cryptography pillow==12.1.1
           echo "$RUNNER_TEMP/parity-python/bin" >> "$GITHUB_PATH"
-      - name: Check upstream inventory
-        run: |
-          python3 scripts/update_contract_inventory.py "$GITHUB_WORKSPACE/reference"
-          git diff --exit-code -- contracts
-      - name: Validate Rust
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo test --locked
-          node scripts/settings_schema_cases.mjs reference > "$RUNNER_TEMP/settings-schema-cases.jsonl"
-          T3_SETTINGS_SCHEMA_CASES="$RUNNER_TEMP/settings-schema-cases.jsonl" cargo test --locked upstream_schema_corpus -- --ignored
-          cargo build --locked
-      - name: Build and test t3-agentd
-        run: |
-          cargo clippy --locked -p t3-agentd --all-targets -- -D warnings
-          cargo test --locked -p t3-agentd
-          cargo build --locked -p t3-agentd
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: parity-build
+          save-if: ${{ matrix.shard == 'core' }}
+      - name: Build the Rust server
+        run: cargo build --locked
       - name: Compare both servers
-        run: |
-          reference="node $GITHUB_WORKSPACE/reference/apps/server/src/bin.ts"
-          server="$GITHUB_WORKSPACE/target/debug/t3code-server"
-          python3 scripts/client_initial_sync_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
-          node scripts/codex_fixture_schemas.mjs "$GITHUB_WORKSPACE/reference"
-          python3 scripts/client_thread_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
-          python3 scripts/client_rpc_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
-          python3 scripts/parity_harness.py --managed --check-required-fields --original-command "$reference" --rust-command "$server"
-          python3 scripts/rpc_edge_parity.py --original-command "$reference" --rust-command "$server"
-          python3 scripts/orchestration_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
-          python3 scripts/config_parity.py --original-command "$reference" --rust-command "$server"
-          python3 scripts/config_snapshot_parity.py --original-command "$reference" --rust-command "$server" --reference-root "$GITHUB_WORKSPACE/reference"
-          python3 scripts/auth_parity.py --original-command "$reference" --rust-command "$server"
-          python3 scripts/cors_parity.py --original-command "$reference" --rust-command "$server"
-          python3 scripts/mcp_parity.py --original-command "$reference" --rust-command "$server"
-          python3 scripts/peer_link_parity.py --original-command "$reference" --rust-command "$server"
-          python3 scripts/github_provider_parity.py --original-command "$reference" --rust-command "$server" --faketime-lib /usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1
-          python3 scripts/linear_provider_parity.py --original-command "$reference" --rust-command "$server"
-          python3 scripts/source_control_hosts_parity.py --original-command "$reference" --rust-command "$server"
-          python3 scripts/git_workflow_parity.py --original-command "$reference" --rust-command "$server"
-          python3 scripts/preview_provider_parity.py --original-command "$reference" --rust-command "$server" --browser-cache "$HOME/.cache/ms-playwright"
-          python3 scripts/relay_parity.py --checkout "$GITHUB_WORKSPACE/reference" --rust "$server"
-          python3 scripts/relay_client_parity.py --original-command "$reference" --rust-command "$server"
-          python3 scripts/relay_provisioning_parity.py --original-command "$reference" --rust-command "$server"
+        run: scripts/ci_parity_shard.sh "${{ matrix.shard }}" "$GITHUB_WORKSPACE/reference" "$GITHUB_WORKSPACE/target/debug/t3code-server"
