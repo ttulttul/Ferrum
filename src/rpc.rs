@@ -2730,7 +2730,19 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             json!({"snapshotSequence":sequence,"threads":thread(&params["threadId"]).into_iter().map(|t|t.shell()).collect::<Vec<_>>()})
         }
         "orchestration.getWorktreeThreadIds" => {
-            json!({"threadIds":store.threads.values().filter(|t| Some(t.cwd.as_str()) == params["worktreePath"].as_str()).map(|t|&t.id).collect::<Vec<_>>()})
+            let mut rows: Vec<_> = store
+                .threads
+                .values()
+                .filter(|thread| {
+                    !thread.archived
+                        && thread.row["deletedAt"].is_null()
+                        && thread.row["worktreePath"].is_string()
+                        && thread.row["worktreePath"] == params["worktreePath"]
+                })
+                .map(|thread| (thread.row["updatedAt"].as_str().unwrap_or(""), &thread.id))
+                .collect();
+            rows.sort_unstable();
+            json!({"threadIds": rows.into_iter().map(|(_, id)| id).collect::<Vec<_>>()})
         }
         "orchestration.getArchivedShellSnapshot" => {
             let projects = store

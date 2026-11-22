@@ -153,6 +153,7 @@
     {"name": "vcs.worktreeDirectory.set", "rpc": "server.updateSettings", "input": {"patch": {"worktreesDirectory": "$HOME/custom-worktrees"}}, "compare": "signature"},
     {"name": "vcs.createWorktree", "rpc": "vcs.createWorktree", "input": {"cwd": "$REPO", "refName": "feature/client-rpc", "path": null}},
     {"name": "vcs.listRefs.inWorktree", "rpc": "vcs.listRefs", "input": {"cwd": "$step:vcs.createWorktree.worktree.path", "query": "feature/client-rpc"}},
+    {"name": "vcs.createThreadInWorktree", "rpc": "orchestration.dispatchCommand", "input": {"type": "thread.create", "commandId": "cmd-worktree-thread", "threadId": "thread:worktree-rpc", "projectId": "project:client-rpc", "title": "Worktree thread", "modelSelection": {"instanceId": "codex", "model": "fixture"}, "runtimeMode": "full-access", "interactionMode": "default", "branch": "feature/client-rpc", "worktreePath": "$step:vcs.createWorktree.worktree.path", "createdBy": "user", "creationSource": "web"}},
     {"name": "vcs.getWorktreeThreadIds", "rpc": "orchestration.getWorktreeThreadIds", "input": {"worktreePath": "$step:vcs.createWorktree.worktree.path"}},
     {"name": "vcs.removeWorktree", "rpc": "vcs.removeWorktree", "input": {"cwd": "$REPO", "path": "$step:vcs.createWorktree.worktree.path"}},
     {"name": "vcs.removeWorktree.again", "rpc": "vcs.removeWorktree", "input": {"cwd": "$REPO", "path": "$step:vcs.createWorktree.worktree.path"}},

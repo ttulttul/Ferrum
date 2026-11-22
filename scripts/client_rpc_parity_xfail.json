@@ -121,12 +121,6 @@
       "reason": "getStorageCleanupReport fails the client's decode",
       "issue": "startedAt must be a string; the storage settings page cannot show the report"
     },
-    "threads.getWorktreeThreadIds": {
-      "area": "threads",
-      "severity": "medium",
-      "reason": "getWorktreeThreadIds matches threads by project root",
-      "issue": "the reference returns only threads whose worktreePath is the given path; Rust also returns local threads of the project at that root"
-    },
     "threads.searchThread": {
       "area": "threads",
       "severity": "medium",
