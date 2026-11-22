@@ -438,8 +438,7 @@ SCENARIOS += [
     opencode("2.x signed in", "2.2.5", OC_V2_ROUTES),
     {"name": "opencode missing", "instance": "opencode", "settings": enabled("opencode"), "fakes": {}},
     opencode("version unreadable", "", serve={"routes": OC_V1_ROUTES}),
-    # The reference's enrichment probes the CLI again (another 10s) before it adds the advisory.
-    {**opencode("version times out"), "wait": 60, "stable": 15,
+    {**opencode("version times out"),
      "fakes": {"opencode": {"opencode": {"version": {"sleep": 60}}}}},
     opencode("disabled", settings={"providerInstances": {"opencode": {"driver": "opencode", "enabled": False}}},
              settled=True),
@@ -589,26 +588,44 @@ def pending(row):
     return "has not been checked" in message or (message.startswith("Checking ") and message.endswith("..."))
 
 
+# Drivers whose version advisory is added by an enrichment pass after the probe's row is
+# published: their row is final only once it carries the advisory.
+ENRICHED_DRIVERS = {"codex", "claudeAgent", "grok", "pi", "opencode"}
+# How long a server may take to finish an instance's first check on a loaded machine.
+CHECK_DEADLINE = 180
+
+
+def final(row):
+    """Whether `row` is a completed check in its final shape: past the placeholder, and with the
+    version advisory an enriched driver adds once its probe is published."""
+    if row is None or pending(row):
+        return False
+    return row.get("driver") not in ENRICHED_DRIVERS or row.get("enabled") is not True \
+        or "versionAdvisory" in row
+
+
 def wait_checked(url, cookie, instance, seconds, settled, root, stable=1.5):
-    """The instance's row once its first check has reported and the row has stopped changing
-    (the reference publishes the probe, then the row with its version advisory), or after a few
-    seconds for a scenario whose row is final from the start."""
+    """The instance's row once its first check has completed (`final`) and the row has stopped
+    changing for `stable` seconds, or after a few seconds for a scenario whose row is final from
+    the start. A server that has not finished the check within CHECK_DEADLINE (or the scenario's
+    longer `wait`) gives a timeout marker, so a pending row is never compared."""
     if settled:
         time.sleep(4)
         return row_of(rpc(url, cookie, "server.getConfig", {})["providers"], instance)
-    deadline = time.monotonic() + seconds
+    deadline = time.monotonic() + max(seconds, CHECK_DEADLINE)
     last, stable_since = None, None
     while True:
         row = row_of(rpc(url, cookie, "server.getConfig", {})["providers"], instance)
-        checked = row is not None and not pending(row)
-        if checked:
+        if final(row):
             if strip(row, root) == last:
                 if time.monotonic() - stable_since >= stable:
                     return row
             else:
                 last, stable_since = strip(row, root), time.monotonic()
+        else:
+            last, stable_since = None, None
         if time.monotonic() > deadline:
-            return row
+            return {"timedOut": f"no completed check within {max(seconds, CHECK_DEADLINE)}s", "row": row}
         time.sleep(0.25)
 
 
