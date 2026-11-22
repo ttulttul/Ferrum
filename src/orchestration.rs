@@ -131,9 +131,9 @@ async fn dispatch_command<H: CommandHost>(
                 json!({"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":msg}}),
             ));
         };
-        if thread.stored.is_some() {
+        if thread.stored.is_some() && runs_turns(kind) {
             return Err(dispatch_error(format!(
-                "Thread {id} was last changed by another T3 Code server on this home. This server shows it but cannot change or continue it yet."
+                "Thread {id} was last changed by another T3 Code server on this home. This server can rename, archive, settle, pin or delete it, but cannot run or continue its turns yet."
             )));
         }
         if kind == "thread.archive" && thread.archived {
@@ -252,10 +252,42 @@ async fn dispatch_command<H: CommandHost>(
     let receipt = CommandReceipt {
         command_id: command_id.to_string(),
         thread_id: id.to_string(),
+        command_type: kind.to_string(),
     };
     apply_command(state.clone(), &command, &receipt, continuation_of)
         .await
         .map_err(|e| dispatch_error(e.to_string()))
+}
+
+/// Commands that start, steer, stop or answer a thread's turns. A thread
+/// read from the shared database has no turn state here yet, so these are
+/// refused on it (docs/shared-store.md, pull request 3).
+fn runs_turns(kind: &str) -> bool {
+    matches!(
+        kind,
+        "message.dispatch"
+            | "thread.stop"
+            | "run.interrupt"
+            | "subagent.stop"
+            | "provider-session.detach"
+            | "queue.resume"
+            | "queued-message.promote-to-steer"
+            | "runtime-request.respond"
+            | "runtime-request.delivery.fail"
+            | "thread.user-input.dismiss"
+            | "thread.fork"
+            | "thread.merge_back"
+            | "thread.mark-unread"
+            | "thread.interrupt.unresponsive"
+            | "thread.background-work.settle"
+            | "secret_request.record"
+            | "link_request.record"
+            | "notification.delivery.accept"
+            | "checkpoint.rollback"
+            | "checkpoint.rollback.fail"
+    ) || ["prepared-run.", "queued-run.", "delegated_task."]
+        .iter()
+        .any(|prefix| kind.starts_with(prefix))
 }
 
 /// Drivers whose instances are off unless enabled, as the reference decodes
@@ -1513,6 +1545,7 @@ async fn apply_command<H: CommandHost>(
                         &CommandReceipt {
                             command_id: format!("{}:start", receipt.command_id),
                             thread_id: thread_id.to_owned(),
+                            command_type: receipt.command_type.clone(),
                         },
                         thread_id,
                         &run.id.to_string(),

@@ -296,9 +296,35 @@ Every kind of home keeps working:
      - that the reference opens Rust's database without migrating;
      - that a reference project and thread are identical on both servers;
      - that unsupported heads are refused, and the database is left unchanged.
-2. **Write path:** each commit writes its projection rows, events, receipts and metadata
-   in one transaction. Threads created on Rust become visible to the reference, and
-   threads read from the database become changeable.
+2. **Write path** (merged after 1):
+   - Every Rust commit is written to the database first, in one `BEGIN IMMEDIATE`
+     transaction (`src/shared_store.rs` plans it, `src/statev2/write.rs` writes it):
+     - one `orchestration_events` row per domain event, plus `thread.created` for a new
+       thread, `thread.deleted` for a deleted one, and the project events;
+     - each new or changed record into its projection table, with the reference's scalar
+       columns; vanished records are deleted;
+     - turn-item positions, provider session bindings, `projection_projects`, the command
+       receipt, and the metadata row's `last_sequence`.
+   - The first commit to a thread the database has no row for writes the whole thread.
+   - Event sequences are the ones Rust's subscribers see, continuing after the
+     database's highest sequence.
+   - A deleted thread keeps its records, with `deletedAt` set, as on the reference.
+   - At start-up, a thread or project the database changed after the journal's last
+     commit to it is read from the database, and a thread the database deleted is
+     deleted (2.2).
+   - Threads read from the database can now be renamed, archived, settled, pinned, tagged
+     or deleted. Rust changes their stored records field by field (`overlay`), so fields
+     only the reference writes are kept. Commands that run, steer, stop or answer turns
+     are still refused on them until pull request 3.
+   - Every shell row is now derived from the thread's projection, as the reference
+     derives it (`src/projection_shell.rs`). Before this, Rust left the run-derived
+     fields empty for its own threads.
+   - `scripts/shared_store_parity.py` checks that a project and thread made on Rust,
+     with a failed turn, read identically on the reference. It also checks that a rename
+     Rust made to a reference thread does, and that the reference opens the database
+     Rust wrote without migrating. `scripts/decode_v2_projection.mjs` decodes a
+     projection with the reference's schema, to find contract mismatches. It found that
+     `RunAttempt.nativeThreadId` must be absent rather than null.
 3. **Recovery and outbox:**
    - Restart recovery on the shared records.
    - Provider resume through `nativeThreadRef`.

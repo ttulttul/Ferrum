@@ -19,6 +19,9 @@ pub struct ControlState {
     pub store: RwLock<Store>,
     pub events: broadcast::Sender<ServerEvent>,
     pub log: Mutex<Box<dyn EventLog + Send>>,
+    /// The orchestration database shared with the reference, when this host
+    /// has one: each commit is written there first (docs/shared-store.md).
+    pub(crate) shared: Mutex<Option<Box<dyn crate::shared_store::SharedStore + Send>>>,
     pub(crate) next_event_id: Mutex<u64>,
     pub(crate) pull_request_linked_refresh: Mutex<u64>,
     pub(crate) pull_request_linked_events: broadcast::Sender<u64>,
@@ -57,6 +60,7 @@ impl ControlState {
             store: RwLock::new(store),
             events: broadcast::channel(512).0,
             log: Mutex::new(log),
+            shared: Mutex::new(None),
             next_event_id: Mutex::new(next_event_id),
             pull_request_linked_refresh: Mutex::new(0),
             pull_request_linked_events: broadcast::channel(64).0,
@@ -68,6 +72,18 @@ impl ControlState {
             scheduled_task_events: broadcast::channel(64).0,
             prompt_suggestion_events: broadcast::channel(64).0,
         })
+    }
+
+    /// Writes every later commit to `shared` first. `sequence` is the
+    /// database's latest event sequence; commits continue after it.
+    pub fn attach_shared_store(
+        &mut self,
+        shared: Box<dyn crate::shared_store::SharedStore + Send>,
+        sequence: u64,
+    ) {
+        *self.shared.get_mut() = Some(shared);
+        let next = self.next_event_id.get_mut();
+        *next = (*next).max(sequence);
     }
 
     pub(crate) async fn persist_scheduled_tasks(&self) -> anyhow::Result<()> {
@@ -118,7 +134,8 @@ impl ControlState {
         self.commit_receipted(event, None).await
     }
 
-    /// Appends one event to the log, applies it to the store and broadcasts it.
+    /// Writes one event to the shared database (when there is one), appends
+    /// it to the log, applies it to the store and broadcasts it.
     pub(crate) async fn commit_receipted(
         &self,
         event: Event,
@@ -126,6 +143,7 @@ impl ControlState {
     ) -> anyhow::Result<ServerEvent> {
         let mut store = self.store.write().await;
         let mut next_event_id = self.next_event_id.lock().await;
+        let mut shared = self.shared.lock().await;
         let mut record = ServerEvent {
             id: *next_event_id + 1,
             at: crate::now(),
@@ -133,12 +151,23 @@ impl ControlState {
             receipt,
             thread_events: None,
         };
+        // What the shared database gets: projection rows and one stored
+        // event per domain event, numbered from the next sequence.
+        let mut stored_after = Vec::new();
+        let mut commit = None;
+        if shared.is_some() {
+            let (planned_commit, stored) = shared_commit(&store, &record, *next_event_id);
+            stored_after = stored;
+            commit = Some(planned_commit);
+        }
+        let stored_events = commit.as_ref().map_or(0, |c| c.events.len()) as u64;
         // Live subscribers get what the commit changed in its thread as
         // domain events, one sequence number each.
+        let mut live_events = 0;
         if self.events.receiver_count() > 0 {
-            if let Some(mut events) = thread_events(&store, &record) {
-                let count = events.items.as_ref().map_or(0, Vec::len) as u64;
-                record.id = *next_event_id + count.max(1);
+            if let Some(mut events) = thread_events(&store, &record, &stored_after) {
+                live_events = events.items.as_ref().map_or(0, Vec::len) as u64;
+                record.id = *next_event_id + live_events.max(stored_events).max(1);
                 if let Some(items) = events.items.take() {
                     events.items = Some(crate::thread_events::sequence(
                         &events.thread_id,
@@ -149,9 +178,20 @@ impl ControlState {
                 record.thread_events = Some(Arc::new(events));
             }
         }
+        record.id = *next_event_id + live_events.max(stored_events).max(1);
+        if let (Some(writer), Some(mut commit)) = (shared.as_mut(), commit) {
+            commit.sequence = record.id;
+            writer.write(&commit)?;
+        }
+        drop(shared);
         self.log.lock().await.append(&record)?;
         *next_event_id = record.id;
         store.apply_record(&record);
+        for (thread_id, stored) in stored_after {
+            if let Some(thread) = store.threads.get_mut(&thread_id) {
+                thread.stored = Some(Box::new(stored));
+            }
+        }
         if let Event::ThreadPatched { ref patch, .. } = record.event {
             if patch["row"].get("pullRequests").is_some() || patch["row"].get("issues").is_some() {
                 let mut revision = self.pull_request_linked_refresh.lock().await;
@@ -164,12 +204,82 @@ impl ControlState {
     }
 }
 
+/// What `record` writes to the shared database, its events numbered after
+/// `last`, and the stored records each thread read from the database ends
+/// with.
+fn shared_commit(
+    store: &Store,
+    record: &ServerEvent,
+    last: u64,
+) -> (crate::shared_store::SharedCommit, Vec<(String, Value)>) {
+    use crate::shared_store::{project_event, thread_events, ProjectWrite, ReceiptWrite};
+    let occurred_at = crate::thread_projection::iso(record.at);
+    let planned = crate::shared_store::plan(store, record, &occurred_at);
+    let command_id = record.receipt.as_ref().map(|r| r.command_id.as_str());
+    let mut events = thread_events(&planned.events, command_id);
+    let mut projects = Vec::new();
+    let mut receipt = record.receipt.as_ref().map(|r| ReceiptWrite {
+        command_id: r.command_id.clone(),
+        aggregate: "thread",
+        aggregate_id: r.thread_id.clone(),
+        command_type: r.command_type.clone(),
+    });
+    let project_row = match &record.event {
+        Event::ProjectCreated(project) => Some((crate::wire_project(project), None)),
+        Event::ProjectCommitted {
+            row,
+            command_id,
+            command_type,
+            project,
+            ..
+        } => {
+            receipt = Some(ReceiptWrite {
+                command_id: command_id.clone(),
+                aggregate: "project",
+                aggregate_id: project.id.clone(),
+                command_type: command_type.clone(),
+            });
+            Some((row.clone(), Some(command_id.clone())))
+        }
+        _ => None,
+    };
+    if let Some((row, project_command)) = project_row {
+        let id = row["id"].as_str().unwrap_or_default().to_owned();
+        let previous = store.project_rows.get(&id);
+        if previous != Some(&row) {
+            events.push(project_event(
+                previous,
+                &row,
+                project_command.as_deref(),
+                &occurred_at,
+            ));
+            projects.push(ProjectWrite {
+                project_id: id,
+                row,
+            });
+        }
+    }
+    for (index, event) in events.iter_mut().enumerate() {
+        event.sequence = last + 1 + index as u64;
+    }
+    let commit = crate::shared_store::SharedCommit {
+        threads: planned.threads,
+        projects,
+        events,
+        receipt,
+        sequence: 0,
+        occurred_at,
+    };
+    (commit, planned.stored)
+}
+
 /// What `record` changes in its thread's projection, worked out on a copy of
 /// the thread so the store changes only once the record is logged. `None`
 /// when the record touches no thread that exists before and after it.
 fn thread_events(
     store: &Store,
     record: &ServerEvent,
+    stored_after: &[(String, Value)],
 ) -> Option<crate::thread_events::ThreadEvents> {
     let thread_id = record.event.thread_id()?.to_owned();
     let mut scratch = Store::default();
@@ -178,7 +288,11 @@ fn thread_events(
         thread.projection()
     })?;
     scratch.apply_record(record);
-    let after = scratch.threads.get(&thread_id)?.projection();
+    let thread = scratch.threads.get_mut(&thread_id)?;
+    if let Some((_, stored)) = stored_after.iter().find(|(id, _)| *id == thread_id) {
+        thread.stored = Some(Box::new(stored.clone()));
+    }
+    let after = thread.projection();
     // An unchanged projection still moves subscribers past the commit.
     let items = crate::thread_events::diff(
         &thread_id,

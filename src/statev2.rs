@@ -15,6 +15,7 @@
 //!   the reference imports that file only when `statev2.sqlite` is absent, so
 //!   creating one here would hide its threads from the reference.
 pub mod read;
+pub mod write;
 
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
@@ -308,17 +309,35 @@ pub fn open(state_dir: &Path) -> Result<Connection, OpenError> {
     Ok(conn)
 }
 
-/// What [`load_into`] added to the store.
+/// What [`load_into`] took from the database.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Loaded {
     pub projects: usize,
     pub threads: usize,
+    /// Threads this server's log held that the database changed since, or
+    /// deleted.
+    pub replaced: usize,
 }
 
-/// Adds the projects and threads the database holds that this server's own
-/// log does not, so a home switched from the reference shows its threads.
-/// Threads the log already has keep the log's state (docs/shared-store.md,
-/// 2.2); a thread the database marks deleted is not shown.
+fn project_from_row(id: &str, row: &serde_json::Value) -> crate::Project {
+    crate::Project {
+        id: id.to_owned(),
+        name: row["title"].as_str().unwrap_or_default().to_owned(),
+        path: row["workspaceRoot"].as_str().unwrap_or_default().to_owned(),
+        created_at: time::OffsetDateTime::parse(
+            row["createdAt"].as_str().unwrap_or_default(),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .map_or(0, |at| at.unix_timestamp().max(0) as u64),
+    }
+}
+
+/// Reconciles the store rebuilt from this server's log with the database
+/// (docs/shared-store.md, 2.2). A project or thread the log does not hold,
+/// or that the database changed after the log's last commit to it (the
+/// reference changed it while it owned the home), is taken from the
+/// database; a thread the database deleted is deleted. Everything else keeps
+/// the log's richer state.
 pub fn load_into(conn: &Connection, store: &mut crate::Store) -> rusqlite::Result<Loaded> {
     let mut loaded = Loaded::default();
     for row in read::projects(conn)? {
@@ -326,30 +345,39 @@ pub fn load_into(conn: &Connection, store: &mut crate::Store) -> rusqlite::Resul
             continue;
         };
         if store.project_rows.contains_key(&id) {
-            continue;
+            let logged = store.project_sequences.get(&id).copied().unwrap_or(0);
+            if read::project_sequence(conn, &id)? <= logged {
+                continue;
+            }
         }
         if row["deletedAt"].is_null() {
-            store.projects.insert(
-                id.clone(),
-                crate::Project {
-                    id: id.clone(),
-                    name: row["title"].as_str().unwrap_or_default().to_owned(),
-                    path: row["workspaceRoot"].as_str().unwrap_or_default().to_owned(),
-                    created_at: time::OffsetDateTime::parse(
-                        row["createdAt"].as_str().unwrap_or_default(),
-                        &time::format_description::well_known::Rfc3339,
-                    )
-                    .map_or(0, |at| at.unix_timestamp().max(0) as u64),
-                },
-            );
+            store
+                .projects
+                .insert(id.clone(), project_from_row(&id, &row));
             loaded.projects += 1;
+        } else {
+            store.projects.remove(&id);
         }
         store.stored_project_ids.insert(id.clone());
         store.project_rows.insert(id, row);
     }
+    for id in read::deleted_thread_ids(conn)? {
+        if store.threads.remove(&id).is_some() {
+            loaded.replaced += 1;
+        }
+        store.deleted_thread_ids.insert(id);
+    }
     for id in read::thread_ids(conn)? {
-        if store.threads.contains_key(&id) || store.deleted_thread_ids.contains(&id) {
+        if let Some(thread) = store.threads.get(&id) {
+            let logged = store.thread_sequences.get(&id).copied().unwrap_or(0);
+            if thread.stored.is_some() || read::thread_sequence(conn, &id)? <= logged {
+                continue;
+            }
+            loaded.replaced += 1;
+        } else if store.deleted_thread_ids.contains(&id) {
             continue;
+        } else {
+            loaded.threads += 1;
         }
         let Some(projection) = read::thread_projection(conn, &id)? else {
             continue;
@@ -360,7 +388,6 @@ pub fn load_into(conn: &Connection, store: &mut crate::Store) -> rusqlite::Resul
             .map(|project| project.path.clone());
         let thread = crate::Thread::from_stored(projection, root.as_deref());
         store.threads.insert(id, thread);
-        loaded.threads += 1;
     }
     Ok(loaded)
 }
@@ -484,7 +511,8 @@ mod tests {
             loaded,
             Loaded {
                 projects: 1,
-                threads: 0
+                threads: 0,
+                replaced: 0
             }
         );
         assert!(store.projects.contains_key("project:stored"));

@@ -76,6 +76,27 @@ pub fn latest_sequence(conn: &Connection) -> rusqlite::Result<u64> {
     .map(|sequence| sequence.max(0) as u64)
 }
 
+/// The latest sequence of any event.
+pub fn max_sequence(conn: &Connection) -> rusqlite::Result<u64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) FROM orchestration_events",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|sequence| sequence.max(0) as u64)
+}
+
+/// The latest event sequence of one project's stream.
+pub fn project_sequence(conn: &Connection, project_id: &str) -> rusqlite::Result<u64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) FROM orchestration_events
+         WHERE application_event_version = 2 AND aggregate_kind = 'project' AND stream_id = ?1",
+        [project_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|sequence| sequence.max(0) as u64)
+}
+
 /// The latest event sequence of one thread's stream.
 pub fn thread_sequence(conn: &Connection, thread_id: &str) -> rusqlite::Result<u64> {
     conn.query_row(
