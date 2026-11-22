@@ -300,11 +300,46 @@ impl AppState {
                 );
             }
             let sequence = crate::statev2::read::max_sequence(&shared_store).map_err(read_error)?;
+            let (threads, projects) = {
+                let store = control.store.read().await;
+                crate::statev2::missing_from_database(&shared_store, &store).map_err(read_error)?
+            };
             // Every later commit is written to the shared database first.
             control.attach_shared_store(
                 Box::new(crate::statev2::write::Writer::new(shared_store)),
                 sequence,
             );
+            // The one-time import of this server's own threads (events.jsonl
+            // stays as it is): one commit that writes them whole.
+            if !threads.is_empty() || !projects.is_empty() {
+                tracing::info!(
+                    threads = threads.len(),
+                    projects = projects.len(),
+                    "importing this server's threads into the shared orchestration database"
+                );
+                let all = Event::Imported {
+                    thread_ids: threads.clone(),
+                    project_ids: projects.clone(),
+                };
+                if let Err(error) = control.commit(all).await {
+                    // One at a time, so a thread the database refuses keeps
+                    // only that one in this server's log.
+                    tracing::warn!(%error, "importing one thread or project at a time");
+                    let one = |threads: Vec<String>, projects: Vec<String>| Event::Imported {
+                        thread_ids: threads,
+                        project_ids: projects,
+                    };
+                    for event in projects
+                        .into_iter()
+                        .map(|id| one(vec![], vec![id]))
+                        .chain(threads.into_iter().map(|id| one(vec![id], vec![])))
+                    {
+                        if let Err(error) = control.commit(event.clone()).await {
+                            tracing::error!(%error, ?event, "could not import into the shared orchestration database");
+                        }
+                    }
+                }
+            }
         }
         // Turns run as this process's children, so none survives a restart.
         let startup_recovery = reconcile_provider_runtime(&control, &settings, "startup").await;

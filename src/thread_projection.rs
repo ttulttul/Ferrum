@@ -191,6 +191,10 @@ impl Thread {
                     out["providerThreadId"] = json!(ids.provider_thread);
                     out["rootNodeId"] = json!(ids.root_node);
                     out["activeAttemptId"] = json!(ids.attempt);
+                } else if let Some(ids) = self.queued_run_ids(run) {
+                    out["providerThreadId"] = json!(ids.provider_thread);
+                    out["rootNodeId"] = json!(ids.root_node);
+                    out["activeAttemptId"] = json!(ids.attempt);
                 }
                 if let Some(source) = run.restart_continuation_of {
                     out["restartContinuationOfRunId"] = json!(source.to_string());
@@ -361,10 +365,24 @@ impl Thread {
             {
                 item["scheduledTaskId"] = json!(task);
             }
-            // A queued message waits out of the timeline, as the reference's
-            // queued input does.
-            if message.role == "user" && run.is_some_and(|(_, run)| queued(run)) {
-                continue;
+            // A queued message is pending input on its run, which snapshots
+            // leave out until the run starts (the reference's queued input).
+            if message.role == "user" {
+                if let Some((_, queued_run)) = run.filter(|(_, run)| queued(run)) {
+                    item["status"] = json!("pending");
+                    item["inputIntent"] = json!("queued_turn");
+                    item["startedAt"] = Value::Null;
+                    item["completedAt"] = Value::Null;
+                    if let Some(ids) = self
+                        .provider_run_ids(queued_run)
+                        .or_else(|| self.queued_run_ids(queued_run))
+                    {
+                        item["nodeId"] = json!(ids.root_node);
+                        item["providerThreadId"] = json!(ids.provider_thread);
+                    }
+                    items.push(item);
+                    continue;
+                }
             }
             items.push(item);
             let Some((_, run)) = run else { continue };
@@ -611,8 +629,13 @@ impl Thread {
         }
         let mut turn_items = self.turn_items_with(provider.items);
         if wire {
+            // As snapshots serve them: without input still waiting in the
+            // queue (the database keeps it).
             turn_items = turn_items
                 .iter()
+                .filter(|item| {
+                    !(item["type"] == "user_message" && item["inputIntent"] == "queued_turn")
+                })
                 .map(crate::wire_items::wire_item)
                 .collect();
         }

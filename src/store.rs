@@ -266,6 +266,14 @@ pub enum Event {
     /// A server restart's reconciliation of a thread's provider runtime: the
     /// running runs it cut off end cancelled, the queued ones wait to be
     /// sent, and the provider session stops.
+    /// The one-time import of this server's own threads and projects into
+    /// the shared database (docs/shared-store.md, 2.3): they are written
+    /// there whole. Nothing changes here but the commit they were last
+    /// written at.
+    Imported {
+        thread_ids: Vec<String>,
+        project_ids: Vec<String>,
+    },
     ProviderRuntimeReconciled {
         thread_id: String,
         cut: Vec<(Uuid, RestartCut)>,
@@ -385,6 +393,17 @@ impl Store {
             }
             Event::ThreadDeleted { thread_id } | Event::RunOutput { thread_id, .. } => {
                 self.thread_sequences.insert(thread_id.clone(), record.id);
+            }
+            Event::Imported {
+                thread_ids,
+                project_ids,
+            } => {
+                for id in thread_ids {
+                    self.thread_sequences.insert(id.clone(), record.id);
+                }
+                for id in project_ids {
+                    self.project_sequences.insert(id.clone(), record.id);
+                }
             }
             event => {
                 if let Some(id) = event.thread_id() {
@@ -611,6 +630,7 @@ impl Store {
                 self.threads.remove(thread_id);
                 self.deleted_thread_ids.insert(thread_id.clone());
             }
+            Event::Imported { .. } => {}
             Event::ProviderRuntimeReconciled {
                 thread_id,
                 cut,

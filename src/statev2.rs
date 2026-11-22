@@ -393,6 +393,38 @@ pub fn load_into(conn: &Connection, store: &mut crate::Store) -> rusqlite::Resul
     Ok(loaded)
 }
 
+/// This server's own threads and projects the database has no row for:
+/// what the one-time import of `events.jsonl` writes there (2.3). Deleted
+/// threads are not imported; a deleted project is, as the reference keeps
+/// it, marked deleted.
+pub fn missing_from_database(
+    conn: &Connection,
+    store: &crate::Store,
+) -> rusqlite::Result<(Vec<String>, Vec<String>)> {
+    let known_threads: std::collections::HashSet<String> = read::thread_ids(conn)?
+        .into_iter()
+        .chain(read::deleted_thread_ids(conn)?)
+        .collect();
+    let mut threads: Vec<String> = store
+        .threads
+        .iter()
+        .filter(|(id, thread)| thread.stored.is_none() && !known_threads.contains(*id))
+        .map(|(id, _)| id.clone())
+        .collect();
+    threads.sort();
+    let known_projects: std::collections::HashSet<String> = read::projects(conn)?
+        .into_iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+        .collect();
+    let projects = store
+        .project_rows
+        .keys()
+        .filter(|id| !known_projects.contains(*id))
+        .cloned()
+        .collect();
+    Ok((threads, projects))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

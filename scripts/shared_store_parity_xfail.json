@@ -1,14 +1,1 @@
-{
-  "codex restart queued (rust -> reference)": {
-    "attempts": "The reference gives a queued run a pending attempt and root node on the thread's provider thread; Rust gives a queued run none until it starts (as on one server: client_thread_parity_xfail.json)."
-  },
-  "codex restart unaccepted (rust -> reference)": {
-    "providerThreads": "Rust's queued run names no provider thread or attempt (see codex restart queued), so the reference's snapshot window, which reads the provider threads and sessions its runs name, shows none.",
-    "providerSessions": "Rust's queued run names no provider thread or attempt (see codex restart queued), so the reference's snapshot window, which reads the provider threads and sessions its runs name, shows none.",
-    "nativeMetadata": "Rust's queued run names no provider thread or attempt (see codex restart queued), so the reference's snapshot window, which reads the provider threads and sessions its runs name, shows none."
-  },
-  "claude approval waiting (rust -> reference)": {
-    "shape": "Rust's provider turn for a Claude turn cut off while it waited for an approval names its model; the reference's does not. The same on one server (Rust -> Rust).",
-    "usage": "Rust's provider turn for a Claude turn cut off while it waited for an approval names its model; the reference's does not. The same on one server (Rust -> Rust)."
-  }
-}
+{}

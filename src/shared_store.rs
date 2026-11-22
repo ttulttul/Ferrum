@@ -352,6 +352,7 @@ fn touched_threads(store: &Store, event: &Event) -> Vec<String> {
         Event::ProjectCommitted {
             removed_threads, ..
         } => ids.extend(removed_threads.iter().cloned()),
+        Event::Imported { thread_ids, .. } => ids.extend(thread_ids.iter().cloned()),
         // Output lines change a running run's turn items.
         Event::RunOutput { thread_id, .. } => ids.push(thread_id.clone()),
         _ => {}
@@ -386,7 +387,11 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
         if let Some(thread) = existing {
             scratch.threads.insert(thread_id.clone(), thread.clone());
         }
-        let before = existing.map(|thread| thread.full_projection());
+        // An imported thread is new to the database: written whole, with
+        // its thread.created.
+        let before = existing
+            .filter(|_| !matches!(record.event, Event::Imported { .. }))
+            .map(|thread| thread.full_projection());
         let computed_before = existing
             .filter(|thread| thread.stored.is_some())
             .map(|thread| thread.computed_full_projection());
