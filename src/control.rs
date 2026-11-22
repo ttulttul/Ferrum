@@ -3482,6 +3482,35 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
         assert_eq!(thread_runs(&plane)[0].status, "cancelled");
     }
 
+    #[test]
+    fn a_turn_stopped_before_it_starts_launches_nothing_and_ends_interrupted() {
+        let runtime = Arc::new(ManualRuntime::default());
+        let plane = ControlPlane::open(
+            config(),
+            Arc::new(MemoryStore::new()),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
+        let mut connection = owner(&plane);
+        seed(&plane, &mut connection);
+        dispatch_message(&plane, &mut connection, "hello");
+        // The stop lands before the run's launch task has run.
+        let stopped = send(
+            &plane,
+            &mut connection,
+            json!({"_tag":"Request","id":"x","tag":"orchestration.dispatchCommand","payload":{
+                "type":"thread.stop","commandId":"c4","threadId":"t1","createdBy":"user","creationSource":"web"
+            },"headers":[]}),
+        );
+        assert_eq!(stopped[0]["exit"]["_tag"], "Success", "{stopped:?}");
+        runtime.run();
+        let runs = thread_runs(&plane);
+        // No workspace is connected, so a launch would have failed the run.
+        assert_eq!(runs[0].status, "interrupted");
+        assert_eq!(runs[0].error, None);
+    }
+
     /// Storage that outlives a plane, and a plane over it.
     struct Restartable {
         documents: Arc<MemoryStore>,
