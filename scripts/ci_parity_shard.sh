@@ -55,7 +55,7 @@ case "$shard" in
     ;;
   status-relay)
     # Suites that run their servers side by side, so mostly wait on the servers' timers.
-    # provider_status: 23 scenarios, several of which wait out the providers' status timeouts.
+    # provider_status: one scenario per driver and case, several of which wait out the providers' status timeouts.
     run python3 scripts/provider_status_parity.py "${both[@]}"
     run python3 scripts/relay_provisioning_parity.py "${both[@]}"
     run python3 scripts/client_rpc_parity.py "${both[@]}" --reference-root "$checkout"

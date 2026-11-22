@@ -116,7 +116,7 @@ RELAY_TOOLS = {"cloudflared"}
 # Agent CLIs a server may probe or start. managed_server hides them, so a local run sees a host
 # without them, as CI does, and never starts a developer's real codex or claude.
 PROVIDER_CLIS = {"codex", "claude", "cursor-agent", "opencode", "gemini", "grok", "kiro-cli", "droid", "amp",
-                 "copilot", "qwen"}
+                 "copilot", "qwen", "fx", "muse", "pi", "agy"}
 
 
 def isolated_git_env(directory):
