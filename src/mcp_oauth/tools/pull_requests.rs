@@ -69,6 +69,68 @@ async fn change_link<S: McpHost>(
     }
 }
 
+/// The reference's pull-request sync reactor reads a newly linked request after
+/// the link command commits. Keep the read asynchronous so a batch of links is
+/// observed as one burst, as it is by the reactor, and leave unavailable hosts
+/// untouched.
+async fn sync_link<S: McpHost>(host: &Arc<S>, thread: &Value, target: &Value) {
+    let runtime = Arc::clone(host);
+    let mut query = fields(target, &["host", "repository", "number"]);
+    query["projectId"] = thread["projectId"].clone();
+    query["allowStale"] = json!(false);
+    let Some(Ok(summary)) = runtime
+        .provider_dispatch("pullRequests.summary".into(), query)
+        .await
+    else {
+        return;
+    };
+    let mut snapshot = fields(
+        &summary,
+        &[
+            "state",
+            "title",
+            "headBranch",
+            "baseBranch",
+            "isDraft",
+            "updatedAt",
+            "closedAt",
+            "mergedAt",
+            "author",
+            "additions",
+            "deletions",
+            "changedFiles",
+            "reviewDecision",
+            "checksState",
+            "mergeability",
+            "rebaseRequired",
+        ],
+    );
+    snapshot["syncedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+    let mut command = fields(target, &["host", "repository", "number"]);
+    command["snapshot"] = snapshot;
+    command["stack"] = summary.get("stack").cloned().unwrap_or(Value::Null);
+    let _ = dispatch(
+        &runtime,
+        thread,
+        "thread.pull-request-link.sync",
+        "server:pr-sync",
+        command,
+        "Could not sync the pull request.",
+    )
+    .await;
+}
+
+fn schedule_link_sync<S: McpHost + 'static>(host: &Arc<S>, thread: &Value, target: &Value) {
+    let host = Arc::clone(host);
+    let thread = thread.clone();
+    let target = target.clone();
+    let runtime = Arc::clone(&host);
+    runtime.spawn(Box::pin(async move {
+        host.sleep(std::time::Duration::from_millis(20)).await;
+        sync_link(&host, &thread, &target).await;
+    }));
+}
+
 async fn batch<S: McpHost>(host: &Arc<S>, thread: &Value, args: &Value, link: bool) -> Outcome {
     let existing = visible(thread);
     let mut changed = Vec::new();
@@ -89,6 +151,7 @@ async fn batch<S: McpHost>(host: &Arc<S>, thread: &Value, args: &Value, link: bo
         );
     }
     let mut present = Vec::new();
+    let mut linked_targets = Vec::new();
     let mut seen = Vec::new();
     let mut invalid = Vec::new();
     for url in rows(&args["urls"]).iter().filter_map(Value::as_str) {
@@ -103,9 +166,14 @@ async fn batch<S: McpHost>(host: &Arc<S>, thread: &Value, args: &Value, link: bo
             group(&mut present, &target, None);
         } else {
             change_link(host, thread, &target, true).await?;
+            schedule_link_sync(host, thread, &target);
+            linked_targets.push(target.clone());
             group(&mut changed, &target, None);
         }
         seen.push(target);
+    }
+    for target in linked_targets {
+        sync_link(host, thread, &target).await;
     }
     let mut result = json!({"linked":changed,"alreadyLinked":present,"linkedCount":seen.len()});
     if !invalid.is_empty() {
@@ -375,6 +443,9 @@ pub(super) async fn call<S: McpHost>(
     let link = name == "link_pull_request";
     if link != existed {
         change_link(host, &row, &t, link).await?;
+        if link {
+            schedule_link_sync(host, &row, &t);
+        }
     }
     if link {
         t["alreadyLinked"] = json!(existed);
