@@ -40,6 +40,9 @@ const SERVED: &[&str] = &[
     "t3_thread_send",
     "t3_thread_wait",
     "t3_thread_interrupt",
+    "t3_environment_links",
+    "t3_environment_link",
+    "t3_environment_unlink",
     "t3_thread_launch",
     "t3_project_list",
     "t3_project_read",
@@ -54,81 +57,88 @@ const SERVED: &[&str] = &[
     "t3_workflow_stop",
 ];
 
+/// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
+/// Their `environmentId` names a machine; it is never a target to act in.
+const LINKS_ONLY: &str = "hiddenWhileLinksOff";
+
 /// The reference's definitions of the tools served here, as `tools/list`
-/// returns them, in the reference's order.
-pub(super) static TOOLS: LazyLock<Value> = LazyLock::new(|| {
+/// returns them, in the reference's order, each with whom it is listed to.
+static SERVED_TOOLS: LazyLock<Vec<(Value, String)>> = LazyLock::new(|| {
     let reference: Value =
         serde_json::from_str(include_str!("tools.json")).expect("MCP tool definitions");
     let tools = reference["tools"]
         .as_array()
         .expect("MCP tool definitions")
         .iter()
-        .filter(|tool| tool["name"].as_str().is_some_and(|n| SERVED.contains(&n)))
-        .cloned()
+        .filter_map(|tool| {
+            let name = tool["name"].as_str().filter(|n| SERVED.contains(n))?;
+            let listed = reference["listedTo"][name].as_str().unwrap_or("everyone");
+            Some((tool.clone(), listed.to_owned()))
+        })
         .collect::<Vec<_>>();
     assert_eq!(tools.len(), SERVED.len(), "SERVED names an unknown tool");
-    Value::Array(tools)
-});
-/// The reference's tools that only serve links (`hiddenWhileLinksOff`), as it
-/// lists them: right after `t3_thread_interrupt`.
-static LINK_TOOLS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("link_tools.json")).expect("MCP link tool definitions")
+    tools
 });
 
-/// The tools `tools/list` offers: the link tools too while Linked
-/// environments is on.
-pub(super) fn listed<S: McpHost>(host: &S) -> Value {
-    let mut tools = TOOLS.as_array().cloned().unwrap_or_default();
-    if host.linked_environments_enabled() {
-        let at = tools
+/// The served tools every caller is listed.
+pub(super) static TOOLS: LazyLock<Value> = LazyLock::new(|| {
+    Value::Array(
+        SERVED_TOOLS
             .iter()
-            .position(|t| t["name"] == "t3_thread_interrupt")
-            .map_or(tools.len(), |i| i + 1);
-        for (offset, tool) in LINK_TOOLS.as_array().into_iter().flatten().enumerate() {
-            tools.insert(at + offset, tool.clone());
-        }
-    }
-    Value::Array(tools)
+            .filter(|(_, listed)| listed == "everyone")
+            .map(|(tool, _)| tool.clone())
+            .collect(),
+    )
+});
+
+/// The tools `tools/list` offers: the links-only ones too while Linked
+/// environments is on, as the reference lists them.
+pub(super) fn listed<S: McpHost>(host: &S) -> Value {
+    let links = host.linked_environments_enabled();
+    Value::Array(
+        SERVED_TOOLS
+            .iter()
+            .filter(|(_, listed)| listed == "everyone" || (links && listed == LINKS_ONLY))
+            .map(|(tool, _)| sendable(tool))
+            .collect(),
+    )
 }
 
 fn tool_definition(name: &str) -> Option<&'static Value> {
-    TOOLS
-        .as_array()
-        .into_iter()
-        .chain(LINK_TOOLS.as_array())
-        .flatten()
+    SERVED_TOOLS
+        .iter()
+        .map(|(tool, _)| tool)
         .find(|t| t["name"] == name)
 }
 
-/// The served tools as `tools/list` sends them: the MCP protocol layer the
+/// A served tool as `tools/list` sends it: the MCP protocol layer the
 /// reference uses (effect's `isToolOutputSchema`) leaves out an output schema
 /// whose root is not a plain object, such as a union of answers.
-pub(super) static LISTED: LazyLock<Value> = LazyLock::new(|| {
-    let listed = TOOLS
-        .as_array()
-        .expect("MCP tool definitions")
-        .iter()
-        .map(|tool| {
-            let mut tool = tool.clone();
-            let output = &tool["outputSchema"];
-            let sendable = output["type"] == "object"
-                && output.get("properties").is_none_or(|p| {
-                    p.as_object()
-                        .is_some_and(|p| p.values().all(Value::is_object))
-                })
-                && output
-                    .get("required")
-                    .is_none_or(|r| r.as_array().is_some_and(|r| r.iter().all(Value::is_string)));
-            if !sendable {
-                if let Some(object) = tool.as_object_mut() {
-                    object.remove("outputSchema");
-                }
-            }
-            tool
+/// `update_agent_tools.py` already leaves such schemas out of `tools.json`.
+fn sendable(tool: &Value) -> Value {
+    let mut tool = tool.clone();
+    let output = &tool["outputSchema"];
+    let keeps = output["type"] == "object"
+        && output.get("properties").is_none_or(|p| {
+            p.as_object()
+                .is_some_and(|p| p.values().all(Value::is_object))
         })
-        .collect();
-    Value::Array(listed)
-});
+        && output
+            .get("required")
+            .is_none_or(|r| r.as_array().is_some_and(|r| r.iter().all(Value::is_string)));
+    if !keeps {
+        if let Some(object) = tool.as_object_mut() {
+            object.remove("outputSchema");
+        }
+    }
+    tool
+}
+
+fn links_only(name: &str) -> bool {
+    SERVED_TOOLS
+        .iter()
+        .any(|(tool, listed)| tool["name"] == name && listed == LINKS_ONLY)
+}
 
 const RUNTIME_MODES: [&str; 4] = [
     "approval-required",
@@ -1426,10 +1436,7 @@ pub(super) fn linked_target<'a, S: McpHost>(
 ) -> Result<Option<&'a str>, Refusal> {
     // Only a tool whose `environmentId` is the environment to act in runs
     // there; the link tools name a machine for their own reasons.
-    if LINK_TOOLS
-        .as_array()
-        .is_some_and(|tools| tools.iter().any(|t| t["name"] == name))
-    {
+    if links_only(name) {
         return Ok(None);
     }
     match args.get("environmentId") {
@@ -2059,12 +2066,15 @@ mod sender_tests {
     #[test]
     fn lists_the_served_tools_with_the_reference_definitions() {
         let reference: Value = serde_json::from_str(include_str!("tools.json")).unwrap();
-        let listed = TOOLS.as_array().unwrap();
+        let listed: Vec<&Value> = SERVED_TOOLS.iter().map(|(tool, _)| tool).collect();
         assert_eq!(listed.len(), SERVED.len());
         for tool in listed {
             let name = tool["name"].as_str().unwrap();
-            assert_eq!(
-                reference["listedTo"][name], "everyone",
+            assert!(
+                matches!(
+                    reference["listedTo"][name].as_str(),
+                    Some("everyone" | LINKS_ONLY)
+                ),
                 "{name} needs listing by caller"
             );
             assert!(reference["tools"]

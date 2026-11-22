@@ -87,6 +87,16 @@ def main() -> int:
     dump = subprocess.run(["node", str(ROOT / "scripts/reference_agent_tools.mjs"), str(checkout)],
                           check=True, capture_output=True, text=True).stdout
     listing = json.loads(dump)
+    # tools/list sends an output schema only as effect's isToolOutputSchema allows: an object root
+    # whose properties are schemas and whose required names are strings. A success that is a
+    # union (`anyOf`) or anything but null (`not`) goes without one.
+    for tool in listing["tools"]:
+        output = tool.get("outputSchema")
+        if output is not None and not (
+                output.get("type") == "object"
+                and all(isinstance(p, dict) for p in output.get("properties", {}).values())
+                and all(isinstance(r, str) for r in output.get("required", []))):
+            del tool["outputSchema"]
     names = {tool["name"] for tool in listing["tools"]}
     rust = served()
     unknown = sorted(set(rust) - names)
