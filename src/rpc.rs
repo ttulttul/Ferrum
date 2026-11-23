@@ -1910,10 +1910,47 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         };
     }
     if method == "secrets.answerRequest" {
-        let thread_id = params["threadId"].as_str().unwrap_or_default();
-        return Reply::Failure(
-            json!({"_tag":"Fail","error":{"_tag":"SecretRequestError","reason":"load_failed","cause":{"name":"OrchestratorProjectionError","message":format!("Failed to load orchestration projection for thread {thread_id}."),"cause":{"name":"ProjectionStoreThreadNotFoundError","message":format!("No orchestration projection exists for thread {thread_id}.")}}}}),
-        );
+        if params["answer"]["type"] == "save"
+            && params["answer"]["secret"]
+                .as_str()
+                .is_some_and(|secret| secret.trim().is_empty())
+        {
+            return Reply::defect(
+                "Expected a non-blank string\n  at [\"answer\"][\"secret\"]".into(),
+            );
+        }
+        let store = crate::secret_requests::Store::new(state.paths.secrets.clone());
+        let read_reference = |reference: Value| async move {
+            let settings = state.settings.internal().unwrap_or_default();
+            // A failed read is not kept: a retry after unlocking reads again.
+            let value = state
+                .settings
+                .resolver
+                .resolve(
+                    &settings,
+                    &reference,
+                    crate::settings::secrets::ReadMode::Invalidate,
+                )
+                .await
+                .filter(|value| !value.trim().is_empty());
+            value.ok_or_else(|| {
+                crate::settings::secrets::provider_label(&settings, &reference).to_owned()
+            })
+        };
+        let dispatch =
+            |command: Value| crate::dispatch_orchestration_command(state.clone(), command);
+        return match crate::secret_requests::answer(
+            &state.control,
+            &store,
+            params,
+            read_reference,
+            dispatch,
+        )
+        .await
+        {
+            Ok(()) => Reply::Success(Value::Null),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.to_json()})),
+        };
     }
     if method == "scheduledTasks.listWebhookDeliveries" {
         let task_id = params["id"].as_str().unwrap_or_default();

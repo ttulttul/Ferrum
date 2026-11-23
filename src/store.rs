@@ -189,8 +189,9 @@ pub struct Thread {
     #[serde(default)]
     pub checkpoints: Vec<CheckpointRecord>,
     /// The cards in which the thread's agent asked the user to link another
-    /// machine (`link_request` turn items), as last recorded, in the order
-    /// they were first asked. Each holds every field but its ordinal.
+    /// machine or for a secret (`link_request` and `secret_request` turn
+    /// items), as last recorded, in the order they were first asked. Each
+    /// holds every field but its ordinal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_requests: Vec<serde_json::Value>,
     /// What provider turns left behind; rebuilt from the log.
@@ -215,8 +216,9 @@ pub enum Event {
         removed_threads: Vec<String>,
     },
     ThreadCreated(Thread),
-    /// A link card asked or answered (`link_request.record`): it replaces
-    /// the card with its id, or is added after the others.
+    /// A link or secret card asked or answered (`link_request.record`,
+    /// `secret_request.record`): it replaces the card with its id, or is
+    /// added after the others.
     LinkRequestRecorded {
         thread_id: String,
         card: serde_json::Value,

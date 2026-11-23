@@ -1273,6 +1273,9 @@ where
     }
     let cleanup = tokio::spawn(crate::storage_cleanup::automatic_runs(state.clone()));
     let scheduled_tasks = crate::scheduled_tasks::spawn(state.clone());
+    let secret_sweep = tokio::spawn(crate::secret_requests::sweep_hourly(
+        state.paths.secrets.clone(),
+    ));
     // Refresh the model manifest now and then on the provider-check cadence;
     // each refresh is TTL-gated, so most ticks read nothing.
     let manifest = state.model_manifest.clone();
@@ -1378,6 +1381,7 @@ where
     scheduled_tasks.abort();
     state.storage_cleanup.shutdown().await;
     manifest_refresh.abort();
+    secret_sweep.abort();
     if let Some(startup) = endpoint_startup {
         startup.abort();
     }
@@ -1422,6 +1426,9 @@ impl mcp_oauth::McpHost for AppState {
     }
     fn control_state(&self) -> &crate::control_state::ControlState {
         &self.control
+    }
+    fn secrets_dir(&self) -> Option<std::path::PathBuf> {
+        Some(self.paths.secrets.clone())
     }
     fn clone_repository(
         self: &Arc<Self>,

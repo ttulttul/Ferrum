@@ -94,6 +94,7 @@ pub mod repository_identity;
 mod rpc;
 #[cfg(feature = "native")]
 mod scheduled_tasks;
+mod secret_requests;
 #[cfg(feature = "native")]
 pub mod server_runtime;
 #[cfg(feature = "native")]

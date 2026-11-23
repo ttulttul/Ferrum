@@ -15,6 +15,7 @@ mod forge;
 mod issues;
 mod projects;
 mod pull_requests;
+mod secrets;
 mod session;
 mod theme;
 mod threads;
@@ -56,6 +57,7 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("task_status", &[]),
     ("task_cancel", &[]),
     ("create_threads", &[]),
+    ("request_secret", &[]),
     // Pull requests and issues (batch 7).
     ("link_pull_request", &[]),
     ("link_pull_requests", &[]),
@@ -138,6 +140,8 @@ const SERVED: &[&str] = &[
     "task_status",
     "task_cancel",
     "create_threads",
+    // Secrets the user gives the agent.
+    "request_secret",
     // Pull requests and issues (batch 7).
     "link_pull_request",
     "link_pull_requests",
@@ -735,6 +739,7 @@ pub(super) async fn call<S: McpHost>(
         "task_status" => delegation::task_status(host, caller, args).await,
         "task_cancel" => delegation::task_cancel(host, caller, args).await,
         "create_threads" => delegation::create_threads(host, caller, args).await,
+        "request_secret" => secrets::request_secret(host, caller, args).await,
         "link_pull_request"
         | "link_pull_requests"
         | "unlink_pull_request"
