@@ -9,7 +9,8 @@ requested host, signed by a CA made for this proxy, and the request is answered 
     {"GET registry.npmjs.org/@openai%2Fcodex/latest": {"status": 200, "body": {...}}}
 
 `body` is sent as JSON, or as given when it is a string. Unknown routes answer 404, so nothing
-reaches the network. Every request is recorded as "METHOD https://host/path".
+reaches the network. Every request is recorded as "METHOD https://host/path", followed by its JSON
+body when it has one (with a random `request_id` shown as "<request id>").
 """
 from http.server import BaseHTTPRequestHandler
 import json
@@ -104,10 +105,18 @@ class FakeHttpsProxy:
 
             def answer(self):
                 length = int(self.headers.get("Content-Length") or 0)
-                if length:
-                    self.rfile.read(length)
+                sent = self.rfile.read(length) if length else b""
                 path = self.path.split("?", 1)[0]
-                proxy.requests.append(f"{self.command} https://{host}{path}")
+                record = f"{self.command} https://{host}{path}"
+                if sent:
+                    try:
+                        payload = json.loads(sent)
+                    except ValueError:
+                        payload = sent.decode("latin-1")
+                    if isinstance(payload, dict) and "request_id" in payload:
+                        payload["request_id"] = "<request id>"
+                    record += " " + json.dumps(payload, sort_keys=True)
+                proxy.requests.append(record)
                 route = proxy.routes.get(f"{self.command} {host}{path}", {"status": 404, "body": {"error": "not found"}})
                 body = route.get("body", {})
                 data = body.encode() if isinstance(body, str) else json.dumps(body).encode()

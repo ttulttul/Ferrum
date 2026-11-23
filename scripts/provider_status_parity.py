@@ -859,6 +859,52 @@ SCENARIOS += [
 ]
 
 
+# Redeeming a banked reset credit (`provider.consumeResetCredit`): Claude claims a grant from its
+# claude.ai account through the test proxy, Codex asks its app-server; each then rechecks the row.
+CLAUDE_LOGIN = {".claude/.credentials.json": json.dumps({"claudeAiOauth": {"accessToken": "test-token"}}),
+                ".claude.json": json.dumps({"oauthAccount": {"organizationUuid": ORG, "accountUuid": ACCOUNT}})}
+CLAIM_ROUTE = f"POST api.anthropic.com/api/organizations/{ORG}/reset_rate_limits"
+
+
+def claude_redeem(name, claim=None, payload=None, files=None):
+    proxy = {USAGE_ROUTE: {"body": {"cedar_ember": CEDAR_EMBER}}}
+    if claim is not None:
+        proxy[CLAIM_ROUTE] = claim
+    return {"name": name, "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN, "wait": 30,
+            "files": CLAUDE_LOGIN if files is None else files, "proxy": proxy,
+            "redeem": {"instanceId": "claudeAgent", **(payload or {})}}
+
+
+CODEX_CHATGPT = {"version": "ok", "app": "ok", "fixture": "status_codex_chatgpt.json"}
+SCENARIOS += [
+    claude_redeem("claude redeem the next reset", {"body": {"result": "reset"}}),
+    claude_redeem("claude redeem a chosen reset", {"body": {"result": "reset"}}, {"creditId": "session_1"}),
+    claude_redeem("claude redeem a credit it does not list", {"body": {"result": "reset"}}, {"creditId": "paused_3"}),
+    claude_redeem("claude redeem when not limited", {"body": {"result": "not_limited"}}),
+    claude_redeem("claude redeem an already used credit", {"body": {"result": "already_used"}}),
+    claude_redeem("claude redeem while cooling down", {"body": {"result": "cooldown"}}),
+    claude_redeem("claude redeem unconfirmed", {"body": {"result": "unavailable"}}),
+    claude_redeem("claude redeem rate limited", {"status": 429, "body": {}}),
+    claude_redeem("claude redeem signed out of claude.ai", {"status": 401, "body": {}}),
+    claude_redeem("claude redeem fails", {"status": 500, "body": {}}),
+    claude_redeem("claude redeem without an account", {"body": {"result": "reset"}},
+                  files={".claude/.credentials.json": CLAUDE_LOGIN[".claude/.credentials.json"]}),
+    {"name": "codex redeem a reset", "instance": "codex", "wait": 30, "fakes": {"codex": CODEX_CHATGPT},
+     "redeem": {"instanceId": "codex"}},
+    {"name": "codex redeem with nothing to reset", "instance": "codex", "wait": 30,
+     "fakes": {"codex": {**CODEX_CHATGPT, "replies": {"account/rateLimitResetCredit/consume": {"outcome": "nothingToReset"}}}},
+     "redeem": {"instanceId": "codex", "creditId": "ignored"}},
+    {"name": "codex redeem fails", "instance": "codex", "wait": 30,
+     "fakes": {"codex": {**CODEX_CHATGPT, "replies": {"account/rateLimitResetCredit/consume": {"outcome": "maybe"}}}},
+     "redeem": {"instanceId": "codex"}},
+    {"name": "redeem on a disabled provider", "instance": "claudeAgent", "settled": True, "fakes": CLAUDE_SIGNED_IN,
+     "settings": {"providerInstances": {"claudeAgent": {"driver": "claudeAgent", "enabled": False}}},
+     "redeem": {"instanceId": "claudeAgent"}},
+    {"name": "redeem on a provider without reset credits", "instance": "grok", "settings": enabled("grok"),
+     "fakes": {"grok": GROK_FAKE}, "redeem": {"instanceId": "grok"}},
+]
+
+
 class FakeApi:
     """A provider's HTTP API for one server: answers each `METHOD /path` from `routes`
     ({"GET /v1/me": {"status": 200, "body": {...}, "sleep": seconds}}) and records the
@@ -1011,6 +1057,21 @@ def next_provider_event(ws, instance, seconds=15):
     return None
 
 
+def redeem(url, cookie, payload):
+    """`provider.consumeResetCredit`'s exit: its result, or its failure. Redemption rechecks the
+    provider, for a reset up to four times over several seconds."""
+    ws = connect(url.replace("http", "ws", 1) + "/ws?orchestrationProtocol=2",
+                 additional_headers={"Cookie": cookie}, proxy=None, compression=None, max_size=None)
+    with contextlib.closing(ws):
+        ws.send(encode({"_tag": "Request", "id": "redeem", "tag": "provider.consumeResetCredit",
+                        "payload": payload, "headers": []}).decode())
+        deadline = time.monotonic() + 120
+        while True:
+            frame = json.loads(ws.recv(timeout=max(1, deadline - time.monotonic())))
+            if frame.get("_tag") == "Exit" and frame.get("requestId") == "redeem":
+                return frame["exit"]
+
+
 def report_activity(url, cookie, report):
     """A socket that has reported `report` (`server.reportClientActivity`); the report lasts while it
     stays open."""
@@ -1075,7 +1136,10 @@ def run_server(args, command, root, scenario, temporary):
         else:
             target.write_text(claude_script(fake["version"]) if cli == "claude"
                               else codex_script(fake["version"], fake["app"]))
-            shutil.copyfile(FIXTURES / fake["fixture"], fixture)
+            played = json.loads((FIXTURES / fake["fixture"]).read_text())
+            # "replies" replaces the fixture's answers to those app-server methods.
+            played["replies"] = {**played.get("replies", {}), **fake.get("replies", {})}
+            fixture.write_text(json.dumps(played))
         target.chmod(0o755)
         if "link" in fake:
             # The CLI is found through a link elsewhere, as a package manager installs it.
@@ -1113,6 +1177,12 @@ def run_server(args, command, root, scenario, temporary):
         outcome["row"] = strip(wait_checked(url, cookie, scenario["instance"], scenario.get("wait", 20),
                                             scenario.get("settled", False), temporary,
                                             scenario.get("stable", 1.5)), temporary)
+        if "redeem" in scenario:
+            outcome["redeem"] = redeem(url, cookie, scenario["redeem"])
+            # The row once its recheck has settled (the reference publishes it before its
+            # version advisory is added back).
+            outcome["afterRedeem"] = strip(wait_checked(url, cookie, scenario["instance"], 20,
+                                                        scenario.get("settled", False), temporary), temporary)
         if "interval" in scenario:
             outcome["interval"] = interval_checks(url, cookie, log, scenario["interval"])
         if "refresh" in scenario:
@@ -1145,7 +1215,7 @@ def run_server(args, command, root, scenario, temporary):
 def compare(outcomes):
     problems = {}
     original, rust = outcomes["original"], outcomes["rust"]
-    for check in ("row", "refresh", "event", "interval"):
+    for check in ("row", "refresh", "event", "interval", "redeem", "afterRedeem"):
         if original.get(check) != rust.get(check):
             problems[check] = [f"original {json.dumps(original.get(check), sort_keys=True)}",
                                f"rust     {json.dumps(rust.get(check), sort_keys=True)}"]

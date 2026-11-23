@@ -70,6 +70,7 @@ mod maintenance;
 mod muse;
 mod opencode;
 mod pi;
+pub(crate) mod reset_credits;
 
 use crate::server::AppState;
 use serde_json::{json, Map, Value};
@@ -162,6 +163,7 @@ pub(crate) struct ProviderStatus {
     opencode: opencode::Owners,
     state: Mutex<State>,
     claude_caps: Mutex<HashMap<String, claude::CapabilitiesCache>>,
+    reset_credits: reset_credits::Coordinator,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     changes: tokio::sync::broadcast::Sender<()>,
     disabled: std::sync::atomic::AtomicBool,
@@ -177,6 +179,7 @@ impl ProviderStatus {
             opencode: Default::default(),
             state: Mutex::default(),
             claude_caps: Mutex::default(),
+            reset_credits: Default::default(),
             locks: Mutex::default(),
             changes: tokio::sync::broadcast::channel(16).0,
             // Off until the server binary turns them on, so a test that

@@ -958,7 +958,16 @@ async fn probe(
 }
 
 /// `checkCodexProviderStatus` for an enabled instance.
-pub(super) async fn check(config: &Value, env: &ProcessEnv, manifest: &Value) -> Draft {
+/// How T3 Code starts `codex app-server` for an instance
+/// (`codexProcessEnvironment` and `codexAppServerArgs`).
+struct Launch {
+    env: ProcessEnv,
+    binary_setting: String,
+    binary: String,
+    args: Vec<String>,
+}
+
+fn launch(config: &Value, env: &ProcessEnv) -> Launch {
     let mut env = probe_env(env);
     env.entry("CODEX_INTERNAL_ORIGINATOR_OVERRIDE".into())
         .or_insert_with(|| CLIENT_NAME.into());
@@ -970,9 +979,6 @@ pub(super) async fn check(config: &Value, env: &ProcessEnv, manifest: &Value) ->
     if let Some(home) = &home {
         env.insert("CODEX_HOME".into(), home.clone());
     }
-    let checked_at = now_iso();
-    let custom = &config["customModels"];
-    let empty_models = append_custom(vec![], custom);
     let binary_setting = config["binaryPath"]
         .as_str()
         .map(str::trim)
@@ -997,6 +1003,92 @@ pub(super) async fn check(config: &Value, env: &ProcessEnv, manifest: &Value) ->
         "thread_unload_delay_secs=0".into(),
     ];
     args.extend(crate::provider_state::split_args(&launch_args));
+    Launch {
+        env,
+        binary_setting,
+        binary,
+        args,
+    }
+}
+
+/// The directory holding the instance's `auth.json`, which redemptions are
+/// serialized on (`effectiveHomePath ?? sharedHomePath`).
+pub(super) fn account_key(config: &Value, env: &ProcessEnv) -> String {
+    let launch = launch(config, env);
+    launch
+        .env
+        .get("CODEX_HOME")
+        .map(|home| home.trim().to_owned())
+        .filter(|home| !home.is_empty())
+        .unwrap_or_else(|| super::home_dir().join(".codex").display().to_string())
+}
+
+/// `consumeResetCredit`: one `account/rateLimitResetCredit/consume` request on
+/// a fresh app-server, given 20 seconds. A failure carries the reference's
+/// cause when it is one this server can name (an outcome Codex's schema
+/// does not allow).
+pub(super) async fn consume_reset_credit(
+    config: &Value,
+    env: &ProcessEnv,
+    idempotency_key: &str,
+) -> Result<String, Option<Value>> {
+    let Launch {
+        env, binary, args, ..
+    } = launch(config, env);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    const METHOD: &str = "account/rateLimitResetCredit/consume";
+    let request = async {
+        let mut session = Session::start(&binary, &args, &env, &cwd).map_err(|_| None)?;
+        let outcome = async {
+            session
+                .request(
+                    "initialize",
+                    json!({"clientInfo": {"name": CLIENT_NAME, "title": CLIENT_NAME, "version": crate::server_runtime::SERVER_VERSION},
+                           "capabilities": {"experimentalApi": true}}),
+                )
+                .await
+                .map_err(|_| None)?;
+            session.notify("initialized").await;
+            let response = session
+                .request(METHOD, json!({"idempotencyKey": idempotency_key}))
+                .await
+                .map_err(|_| None)?;
+            match response["outcome"].as_str() {
+                Some(outcome @ ("reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed")) => {
+                    Ok(outcome.to_owned())
+                }
+                Some(_) => Err(Some(json!({
+                    "name": "CodexAppServerRequestError",
+                    "message": format!("Invalid payload for method '{METHOD}' during 'decode-payload'"),
+                    "cause": {"name": "SchemaError", "message": "Expected V2ConsumeAccountRateLimitResetCreditResponse__ConsumeAccountRateLimitResetCreditOutcome\n  at [\"outcome\"]"},
+                }))),
+                None => Err(None),
+            }
+        }
+        .await;
+        session.stop().await;
+        outcome
+    };
+    tokio::time::timeout(Duration::from_secs(20), request)
+        .await
+        .unwrap_or(Err(None))
+}
+
+pub(super) async fn check(config: &Value, env: &ProcessEnv, manifest: &Value) -> Draft {
+    let Launch {
+        env,
+        binary_setting,
+        binary,
+        args,
+    } = launch(config, env);
+    let home = config["homePath"]
+        .as_str()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(expand_home);
+    let checked_at = now_iso();
+    let custom = &config["customModels"];
+    let empty_models = append_custom(vec![], custom);
     let cwd = std::env::current_dir().unwrap_or_default();
     let timeout = probe_timeout("codex", PROBE_TIMEOUT_MS, &env);
     let result = tokio::time::timeout(timeout, probe(&binary, &args, &env, &cwd, timeout)).await;

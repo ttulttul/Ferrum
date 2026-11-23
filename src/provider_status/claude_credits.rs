@@ -242,6 +242,178 @@ pub(super) async fn read(config_dir: &Path, version: &str) -> Option<Value> {
     tokio::time::timeout(TIMEOUT, request).await.ok().flatten()
 }
 
+/// Why a claim failed (`ClaudeResetCreditError`), with the reference's message.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum ClaimError {
+    MalformedCredit,
+    LoginUnreadable,
+    AccountUnreadable,
+    SignedOut,
+    RateLimited,
+    CoolingDown,
+    Unconfirmed,
+    RequestFailed,
+}
+
+impl ClaimError {
+    pub(super) fn message(self) -> &'static str {
+        match self {
+            ClaimError::MalformedCredit => "Claude returned a malformed reset credit.",
+            ClaimError::LoginUnreadable => "Claude could not read its login.",
+            ClaimError::AccountUnreadable => "Claude could not read its account.",
+            ClaimError::SignedOut => "Sign in to Claude again to redeem resets.",
+            ClaimError::RateLimited => "Claude is rate limiting resets. Try again soon.",
+            ClaimError::CoolingDown => "Claude resets are cooling down. Try again later.",
+            ClaimError::Unconfirmed => {
+                "Claude could not confirm the reset. If you are still limited in a moment, try again."
+            }
+            ClaimError::RequestFailed => "Claude could not redeem the reset.",
+        }
+    }
+
+    /// `isSettledClaudeResetCreditFailure`: unanswered or unconfirmed claims are
+    /// retried with the same request id.
+    pub(super) fn settled(self) -> bool {
+        !matches!(self, ClaimError::RequestFailed | ClaimError::Unconfirmed)
+    }
+}
+
+/// `readJson`: a missing file reads as `{}`; anything else unreadable fails.
+fn read_json_object(path: &Path) -> Result<Map<String, Value>, ()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "{}".to_owned(),
+        Err(_) => return Err(()),
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(object)) => Ok(object),
+        _ => Err(()),
+    }
+}
+
+/// `readAccessToken` with its decode errors (`Credentials`).
+fn claim_token(config_dir: &Path) -> Result<Option<String>, ()> {
+    if cfg!(target_os = "macos") {
+        return Ok(None);
+    }
+    let credentials = read_json_object(&config_dir.join(".credentials.json"))?;
+    let oauth = match credentials.get("claudeAiOauth") {
+        None => return Ok(None),
+        Some(Value::Object(oauth)) => oauth,
+        Some(_) => return Err(()),
+    };
+    match oauth.get("accessToken") {
+        None => Ok(None),
+        Some(Value::String(token)) => Ok(Some(token.trim().to_owned()).filter(|t| !t.is_empty())),
+        Some(_) => Err(()),
+    }
+}
+
+/// The organization of the stored claude.ai account (`Config`).
+fn claim_organization(account_config_path: &Path) -> Result<Option<String>, ()> {
+    let config = read_json_object(account_config_path)?;
+    let account = match config.get("oauthAccount") {
+        None => return Ok(None),
+        Some(Value::Object(account)) => account,
+        Some(_) => return Err(()),
+    };
+    match account.get("organizationUuid") {
+        None => Ok(None),
+        Some(Value::String(id)) => Ok(Some(id.trim().to_owned()).filter(|id| !id.is_empty())),
+        Some(_) => Err(()),
+    }
+}
+
+/// `encodeURIComponent`.
+fn encode_component(value: &str) -> String {
+    const KEEP: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'!')
+        .remove(b'~')
+        .remove(b'*')
+        .remove(b'\'')
+        .remove(b'(')
+        .remove(b')');
+    percent_encoding::utf8_percent_encode(value, KEEP).to_string()
+}
+
+/// `consumeClaudeResetCredit`: claim `grant_id` for the stored login's
+/// organization; `request_id` is the claim's idempotency key.
+pub(super) async fn consume(
+    config_dir: &Path,
+    account_config_path: &Path,
+    version: &str,
+    grant_id: &str,
+    request_id: &str,
+) -> Result<&'static str, (ClaimError, Option<Value>)> {
+    static GRANT_ID: OnceLock<Regex> = OnceLock::new();
+    static REQUEST_ID: OnceLock<Regex> = OnceLock::new();
+    let grant_ok = GRANT_ID
+        .get_or_init(|| Regex::new(r"^[a-z0-9_-]{1,40}$").unwrap())
+        .is_match(grant_id);
+    let request_ok = REQUEST_ID
+        .get_or_init(|| Regex::new(r"^[A-Za-z0-9_-]{1,64}$").unwrap())
+        .is_match(request_id);
+    let fail = |error: ClaimError| Err((error, None));
+    if !grant_ok || !request_ok {
+        return fail(ClaimError::MalformedCredit);
+    }
+    let Ok(token) = claim_token(config_dir) else {
+        return fail(ClaimError::LoginUnreadable);
+    };
+    let Ok(organization) = claim_organization(account_config_path) else {
+        return fail(ClaimError::AccountUnreadable);
+    };
+    let (Some(token), Some(organization)) = (token, organization) else {
+        return fail(ClaimError::SignedOut);
+    };
+    let url = format!(
+        "{API_BASE}/api/organizations/{}/reset_rate_limits",
+        encode_component(&organization)
+    );
+    let send = super::http_client()
+        .post(&url)
+        .header("authorization", format!("Bearer {token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header(
+            "user-agent",
+            format!("claude-cli/{version} (external, cli)"),
+        )
+        .json(&json!({"program": "cedar_ember", "grant_id": grant_id, "request_id": request_id}))
+        .send();
+    let response = match tokio::time::timeout(Duration::from_secs(25), send).await {
+        Ok(Ok(response)) => response,
+        _ => return fail(ClaimError::RequestFailed),
+    };
+    match response.status().as_u16() {
+        429 => return fail(ClaimError::RateLimited),
+        401 | 403 => return fail(ClaimError::SignedOut),
+        status if !(200..300).contains(&status) => {
+            // `HttpClientResponse.filterStatusOk`'s error.
+            let cause = json!({"name": "HttpClientError",
+                "message": format!("StatusCode: non 2xx status code ({status} POST {url})")});
+            return Err((ClaimError::RequestFailed, Some(cause)));
+        }
+        _ => {}
+    }
+    let body = match tokio::time::timeout(Duration::from_secs(25), response.json::<Value>()).await {
+        Ok(Ok(body)) => body,
+        _ => return fail(ClaimError::RequestFailed),
+    };
+    match body.get("result").and_then(Value::as_str) {
+        Some("reset") => Ok("reset"),
+        Some("not_limited") => Ok("nothingToReset"),
+        Some("already_used") => Ok("alreadyRedeemed"),
+        Some("ineligible") => Ok("noCredit"),
+        Some("cooldown") => fail(ClaimError::CoolingDown),
+        // Unknown outcomes keep the request id so retries address the same claim.
+        Some("unavailable") => fail(ClaimError::Unconfirmed),
+        _ => fail(ClaimError::RequestFailed),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
