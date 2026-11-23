@@ -105,6 +105,12 @@ pub trait McpHost: AuthHost {
     fn descriptor(&self) -> Value;
     /// The effective settings.
     fn settings(&self) -> Value;
+    /// Whether a committed `thread.pull-request.link` already reads the new
+    /// link (the reference's pull-request sync reactor), so the toolkit must
+    /// not read it again.
+    fn syncs_linked_pull_requests(&self) -> bool {
+        false
+    }
     /// The provider instances, as `server.getConfig` lists them.
     fn providers(&self) -> Value;
     /// Runs one orchestration command as `orchestration.dispatchCommand`

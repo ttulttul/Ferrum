@@ -442,7 +442,6 @@ impl crate::orchestration::CommandHost for AppState {
         crate::runtime::Runtime::spawn(
             &*self.runtime,
             Box::pin(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 let mut query = serde_json::json!({
                     "host": target["host"],
                     "repository": target["repository"],
@@ -1428,6 +1427,9 @@ pub fn ensure_path(path: &str) -> anyhow::Result<()> {
 }
 
 impl mcp_oauth::McpHost for AppState {
+    fn syncs_linked_pull_requests(&self) -> bool {
+        true
+    }
     fn oauth(&self) -> &mcp_oauth::OAuth {
         &self.oauth
     }

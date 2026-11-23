@@ -74,6 +74,10 @@ async fn change_link<S: McpHost>(
 /// observed as one burst, as it is by the reactor, and leave unavailable hosts
 /// untouched.
 async fn sync_link<S: McpHost>(host: &Arc<S>, thread: &Value, target: &Value) {
+    // A host whose link command starts the read leaves it to that.
+    if host.syncs_linked_pull_requests() {
+        return;
+    }
     let runtime = Arc::clone(host);
     let mut query = fields(target, &["host", "repository", "number"]);
     query["projectId"] = thread["projectId"].clone();
