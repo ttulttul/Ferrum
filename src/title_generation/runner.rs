@@ -640,6 +640,46 @@ fn decode_title(text: &str) -> Option<Value> {
     decode_title_value(&value)
 }
 
+/// `extractJsonObject`: the first balanced `{...}` of a model's reply (strings
+/// and escapes respected), else the trimmed reply.
+pub(crate) fn extract_json_object(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let Some(start) = trimmed.find('{') else {
+        return trimmed;
+    };
+    let (mut depth, mut in_string, mut escaping) = (0i64, false, false);
+    for (index, ch) in trimmed[start..].char_indices() {
+        if in_string {
+            if escaping {
+                escaping = false;
+            } else if ch == '\\' {
+                escaping = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &trimmed[start..start + index + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    trimmed
+}
+
+/// `decodeJsonReply`: a provider's free-text reply decoded as the title output.
+fn decode_json_reply(provider: &str, text: &str) -> Result<Value, String> {
+    decode_title(extract_json_object(text))
+        .ok_or_else(|| format!("{provider} returned invalid structured output."))
+}
+
 fn decode_title_value(value: &Value) -> Option<Value> {
     value["title"].as_str()?;
     if !value["needsRefinement"].is_null() && !value["needsRefinement"].is_boolean() {
@@ -1005,6 +1045,32 @@ pub(crate) async fn generate_thread_title(
             run_codex(state, &instance, &models, &request, &selection).await?
         }
         "claudeAgent" => run_claude(state, &instance, &request, &selection).await?,
+        "grok" => {
+            let env = crate::provider_status::base_env(&instance_env(&instance));
+            let text = crate::provider_status::grok::generate_text(
+                &instance["config"],
+                &env,
+                std::path::Path::new(request.cwd),
+                request.prompt,
+                selection["model"].as_str().unwrap_or_default(),
+                option_string(&selection, "reasoningEffort").as_deref(),
+            )
+            .await?;
+            decode_json_reply("Grok Agent", &text)?
+        }
+        "pi" => {
+            let env = crate::provider_status::base_env(&instance_env(&instance));
+            let text = crate::provider_status::pi::generate_text(
+                &instance["config"],
+                &env,
+                std::path::Path::new(request.cwd),
+                request.prompt,
+                selection["model"].as_str().unwrap_or("default"),
+                option_string(&selection, "thinking").as_deref(),
+            )
+            .await?;
+            decode_json_reply("Pi", &text)?
+        }
         _ => {
             return Err(format!(
                 "No provider instance registered for id '{instance_id}'."
@@ -1025,6 +1091,27 @@ mod tests {
 
     fn args(text: &str) -> Vec<String> {
         crate::provider_state::split_args(text)
+    }
+
+    #[test]
+    fn a_reply_s_json_object_is_found_as_the_reference_finds_it() {
+        assert_eq!(
+            extract_json_object("Sure!\n```json\n{\"title\": \"A {b} \\\"c\\\"\"}\n``` done"),
+            "{\"title\": \"A {b} \\\"c\\\"\"}"
+        );
+        assert_eq!(extract_json_object("  no object "), "no object");
+        assert_eq!(
+            extract_json_object("{\"title\": \"open"),
+            "{\"title\": \"open"
+        );
+        assert_eq!(
+            decode_json_reply("Pi", "{\"title\": \"T\"} trailing").unwrap()["title"],
+            "T"
+        );
+        assert_eq!(
+            decode_json_reply("Pi", "not json").unwrap_err(),
+            "Pi returned invalid structured output."
+        );
     }
 
     #[test]

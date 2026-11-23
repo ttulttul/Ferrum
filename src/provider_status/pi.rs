@@ -269,7 +269,8 @@ enum RpcError {
     TimedOut,
 }
 
-type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, ()>>>>>;
+/// Each request's answer: its data, or the error text of `success: false`.
+type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, Option<String>>>>>>;
 
 /// `makePiRpcConnection`: JSON lines, requests matched to `response` records
 /// by their `t3-<n>` id.
@@ -279,6 +280,10 @@ struct Rpc {
     pending: Pending,
     closed: tokio::sync::watch::Receiver<bool>,
     next_id: u64,
+    /// The records that are not responses (Pi's events), in order.
+    events: tokio::sync::mpsc::UnboundedReceiver<Value>,
+    /// The error text of the last `success: false` answer.
+    last_error: Option<String>,
 }
 
 impl Rpc {
@@ -298,6 +303,7 @@ impl Rpc {
         let stdout = child.stdout.take().ok_or(RpcError::Spawn)?;
         let pending: Pending = Arc::default();
         let (closed_tx, closed) = tokio::sync::watch::channel(false);
+        let (events_tx, events) = tokio::sync::mpsc::unbounded_channel();
         let reader = pending.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).split(b'\n');
@@ -308,6 +314,7 @@ impl Rpc {
                     continue;
                 };
                 if record["type"] != "response" {
+                    let _ = events_tx.send(record);
                     continue;
                 }
                 let Some(id) = record["id"].as_str() else {
@@ -318,7 +325,7 @@ impl Rpc {
                     let _ = sender.send(if record["success"] == true {
                         Ok(record["data"].clone())
                     } else {
-                        Err(())
+                        Err(record["error"].as_str().map(str::to_owned))
                     });
                 }
             }
@@ -333,10 +340,22 @@ impl Rpc {
             pending,
             closed,
             next_id: 0,
+            events,
+            last_error: None,
         })
     }
 
     async fn request(&mut self, kind: &str, timeout: Duration) -> Result<Value, RpcError> {
+        self.send_request(json!({"type": kind}), timeout).await
+    }
+
+    /// Send `record` (a `type` and its fields) with the next id and wait for
+    /// its answer.
+    async fn send_request(
+        &mut self,
+        mut record: Value,
+        timeout: Duration,
+    ) -> Result<Value, RpcError> {
         let id = format!("t3-{}", self.next_id);
         self.next_id += 1;
         let (sender, receiver) = oneshot::channel();
@@ -347,7 +366,8 @@ impl Rpc {
         if *self.closed.borrow() {
             return Err(RpcError::Closed);
         }
-        let mut line = json!({"type": kind, "id": id}).to_string();
+        record["id"] = json!(id);
+        let mut line = record.to_string();
         line.push('\n');
         if self.stdin.write_all(line.as_bytes()).await.is_err() || self.stdin.flush().await.is_err()
         {
@@ -361,7 +381,10 @@ impl Rpc {
         }
         match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(Ok(data))) => Ok(data),
-            Ok(Ok(Err(()))) => Err(RpcError::Failed),
+            Ok(Ok(Err(error))) => {
+                self.last_error = error;
+                Err(RpcError::Failed)
+            }
             Ok(Err(_)) => Err(RpcError::Closed),
             Err(_) => Err(RpcError::TimedOut),
         }
@@ -903,9 +926,218 @@ pub(super) async fn check(config: &Value, env: &ProcessEnv, caches: &Path) -> Dr
     }
 }
 
+// ---------------------------------------------------------------------------
+// Text generation
+
+/// How long a text generation run may take (`PI_TIMEOUT_MS`).
+const TEXT_GENERATION_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long the version check before a thinking option may take.
+const TEXT_GENERATION_VERSION_TIMEOUT: Duration = Duration::from_secs(4);
+/// A request's own wait, as the reference's connection gives it.
+const TEXT_GENERATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `piTurnErrorDetail`: a provider failure on the assistant's `message_end`.
+fn turn_error_detail(message: Option<&str>) -> String {
+    let status = message.and_then(|message| {
+        let code = message.get(..3)?;
+        let first = code.chars().next()?;
+        (matches!(first, '4' | '5')
+            && code.chars().all(|c| c.is_ascii_digit())
+            && message[3..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_'))
+        .then(|| code.to_owned())
+    });
+    match status {
+        Some(status) => {
+            format!("Pi could not generate text: the model provider returned HTTP {status}.")
+        }
+        None => "Pi could not generate text: the model provider reported an error.".into(),
+    }
+}
+
+/// `findReportedPiModel` then `resolvePiModelSlug`: a `provider/model` slug
+/// as Pi names it.
+fn resolve_model_slug(slug: &str, reported: &Value) -> Option<(String, String)> {
+    if let Some(found) = reported.as_array().into_iter().flatten().find_map(|model| {
+        let provider = record_string(model, "provider")?;
+        let id = record_string(model, "id")?;
+        (format!("{provider}/{id}") == slug).then_some((provider, id))
+    }) {
+        return Some(found);
+    }
+    let separator = slug.find('/')?;
+    if separator == 0 || separator == slug.len() - 1 {
+        return None;
+    }
+    Some((
+        slug[..separator].to_owned(),
+        slug[separator + 1..].to_owned(),
+    ))
+}
+
+/// `makePiTextGeneration`'s run: Pi's reply to `prompt` (in RPC mode, with
+/// no session, extensions or tools), as text, or why there is none.
+pub(crate) async fn generate_text(
+    config: &Value,
+    env: &ProcessEnv,
+    cwd: &Path,
+    prompt: &str,
+    model: &str,
+    thinking: Option<&str>,
+) -> Result<String, String> {
+    match tokio::time::timeout(
+        TEXT_GENERATION_TIMEOUT,
+        run_text_generation(config, env, cwd, prompt, model, thinking),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err("Pi request timed out.".into()),
+    }
+}
+
+async fn run_text_generation(
+    config: &Value,
+    env: &ProcessEnv,
+    cwd: &Path,
+    prompt: &str,
+    model: &str,
+    thinking: Option<&str>,
+) -> Result<String, String> {
+    let failed = || "Pi text generation failed.".to_owned();
+    let binary = binary(config);
+    let thinking = thinking.filter(|level| THINKING_LEVELS.contains(level));
+    if thinking.is_some() {
+        let version = run_cli(
+            &binary,
+            &["--version"],
+            env,
+            TEXT_GENERATION_VERSION_TIMEOUT,
+        )
+        .await
+        .ok()
+        .filter(|output| output.code == 0)
+        .and_then(|output| super::cli_version(&output));
+        if version
+            .is_none_or(|version| maintenance::compare_semver(&version, MINIMUM_VERSION).is_lt())
+        {
+            return Err(format!(
+                "Pi {MINIMUM_VERSION} or newer is required for text generation thinking options. Update Pi and try again."
+            ));
+        }
+    }
+    let launch_args = resolve_launch_args(config["launchArgs"].as_str().unwrap_or("").trim())?;
+    let (args, env) = rpc_launch(&launch_args, env, true);
+    let mut rpc = Rpc::start(&binary, &args, &env, cwd).map_err(|_| failed())?;
+    if model != "default" {
+        // A slug Pi cannot use is refused, rather than quietly using its default.
+        let inventory = rpc
+            .request("get_available_models", TEXT_GENERATION_REQUEST_TIMEOUT)
+            .await
+            .unwrap_or(Value::Null);
+        let Some((provider, model_id)) =
+            resolve_model_slug(model, record_field(&inventory, "models"))
+        else {
+            return Err(format!(
+                "Pi model '{model}' must use provider/model format."
+            ));
+        };
+        match rpc
+            .send_request(
+                json!({"type": "set_model", "provider": provider, "modelId": model_id}),
+                TEXT_GENERATION_REQUEST_TIMEOUT,
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(RpcError::Failed) => {
+                let detail = rpc
+                    .last_error
+                    .take()
+                    .unwrap_or_else(|| "unknown error".into());
+                return Err(format!(
+                    "Pi rejected model '{model}': {detail}. If the model comes from a Pi extension or package, text generation cannot use it because it runs Pi with --no-extensions. Pick a built-in Pi model or one defined in Pi's models.json."
+                ));
+            }
+            Err(_) => return Err(failed()),
+        }
+    }
+    if let Some(level) = thinking {
+        // A level the model cannot take falls back to Pi's default.
+        let _ = rpc
+            .send_request(
+                json!({"type": "set_thinking_level", "level": level}),
+                TEXT_GENERATION_REQUEST_TIMEOUT,
+            )
+            .await;
+    }
+    rpc.send_request(
+        json!({"type": "prompt", "message": prompt}),
+        TEXT_GENERATION_REQUEST_TIMEOUT,
+    )
+    .await
+    .map_err(|_| failed())?;
+    // A provider failure arrives on the assistant's `message_end`; only the
+    // latest counts, as Pi can retry and still answer.
+    let mut turn_error = None;
+    loop {
+        let Some(event) = rpc.events.recv().await else {
+            return Err(failed());
+        };
+        if event["type"] == "agent_settled" {
+            break;
+        }
+        let message = &event["message"];
+        if event["type"] == "message_end"
+            && record_string(message, "role").as_deref() == Some("assistant")
+        {
+            turn_error = (record_string(message, "stopReason").as_deref() == Some("error"))
+                .then(|| turn_error_detail(record_string(message, "errorMessage").as_deref()));
+        }
+    }
+    let data = rpc
+        .request("get_last_assistant_text", TEXT_GENERATION_REQUEST_TIMEOUT)
+        .await
+        .map_err(|_| failed())?;
+    let text = data["text"].as_str().map(str::trim).unwrap_or_default();
+    if text.is_empty() {
+        return Err(turn_error.unwrap_or_else(|| "Pi returned empty output.".into()));
+    }
+    Ok(text.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_generation_names_models_and_failures_as_the_reference_does() {
+        let reported = json!([{"provider": "my/org", "id": "m"}]);
+        assert_eq!(
+            resolve_model_slug("my/org/m", &reported),
+            Some(("my/org".into(), "m".into()))
+        );
+        assert_eq!(
+            resolve_model_slug("openai/gpt-5.6", &json!(null)),
+            Some(("openai".into(), "gpt-5.6".into()))
+        );
+        assert_eq!(resolve_model_slug("bare", &json!(null)), None);
+        assert_eq!(resolve_model_slug("trailing/", &json!(null)), None);
+        assert_eq!(
+            turn_error_detail(Some("429 Too Many Requests")),
+            "Pi could not generate text: the model provider returned HTTP 429."
+        );
+        assert_eq!(
+            turn_error_detail(Some("4290 tokens")),
+            "Pi could not generate text: the model provider reported an error."
+        );
+        assert_eq!(
+            turn_error_detail(None),
+            "Pi could not generate text: the model provider reported an error."
+        );
+    }
 
     #[test]
     fn launch_args_like_the_reference() {

@@ -1,7 +1,9 @@
-//! A minimal Agent Client Protocol client for status checks: newline-delimited
-//! JSON-RPC 2.0 over a CLI's standard input and output, enough to initialize
-//! an agent and ask it a question without opening a session (the reference's
-//! `AcpSessionRuntime` `initialize` and `request`).
+//! A minimal Agent Client Protocol client: newline-delimited JSON-RPC 2.0 over
+//! a CLI's standard input and output (the reference's `AcpSessionRuntime`).
+//! Status checks initialize an agent and ask it a question; text generation
+//! opens a session, prompts it and reads its `session/update` notifications.
+//! The agent's own requests are refused: a permission is cancelled, as text
+//! generation grants none, and anything else is not found.
 use super::ProcessEnv;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -14,9 +16,12 @@ type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, Value>>>>>;
 
 pub(super) struct AcpSession {
     _child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
+    stdin: Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
     pending: Pending,
     next_id: i64,
+    /// The agent's notifications (method, params), in order, each before
+    /// the reply that followed it.
+    pub(super) notifications: tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
 }
 
 /// Why a request got no result.
@@ -24,7 +29,17 @@ pub(super) struct AcpSession {
 pub(super) enum AcpError {
     Spawn,
     Closed,
-    Error(#[allow(dead_code)] Value),
+    Error(Value),
+}
+
+impl AcpError {
+    /// The JSON-RPC error code of a refused request.
+    pub(super) fn code(&self) -> Option<i64> {
+        match self {
+            Self::Error(error) => error["code"].as_i64(),
+            _ => None,
+        }
+    }
 }
 
 impl AcpSession {
@@ -44,13 +59,35 @@ impl AcpSession {
         let stdout = child.stdout.take().ok_or(AcpError::Spawn)?;
         let pending: Pending = Arc::default();
         let reader = pending.clone();
+        let stdin = Arc::new(tokio::sync::Mutex::new(stdin));
+        let answers = stdin.clone();
+        let (notify, notifications) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(message) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
-                if message.get("method").is_some() {
+                if let Some(method) = message["method"].as_str() {
+                    match message.get("id").filter(|id| !id.is_null()) {
+                        Some(id) => {
+                            let reply = if method == "session/request_permission" {
+                                json!({"jsonrpc": "2.0", "id": id,
+                                    "result": {"outcome": {"outcome": "cancelled"}}})
+                            } else {
+                                json!({"jsonrpc": "2.0", "id": id,
+                                    "error": {"code": -32601, "message": "Method not found"}})
+                            };
+                            let mut line = reply.to_string();
+                            line.push('\n');
+                            let mut stdin = answers.lock().await;
+                            let _ = stdin.write_all(line.as_bytes()).await;
+                            let _ = stdin.flush().await;
+                        }
+                        None => {
+                            let _ = notify.send((method.to_owned(), message["params"].clone()));
+                        }
+                    }
                     continue;
                 }
                 let Some(id) = message["id"].as_i64() else {
@@ -73,6 +110,7 @@ impl AcpSession {
             stdin,
             pending,
             next_id: 0,
+            notifications,
         })
     }
 
@@ -87,9 +125,11 @@ impl AcpSession {
         let mut line =
             json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string();
         line.push('\n');
-        if self.stdin.write_all(line.as_bytes()).await.is_err() || self.stdin.flush().await.is_err()
         {
-            return Err(AcpError::Closed);
+            let mut stdin = self.stdin.lock().await;
+            if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
+                return Err(AcpError::Closed);
+            }
         }
         match receiver.await {
             Ok(Ok(result)) => Ok(result),
@@ -117,7 +157,9 @@ impl AcpSession {
                 "terminal": false,
                 "session": {"notices": {}, "compaction": {}},
             },
+            "capabilities": {},
             "clientInfo": {"name": client_name, "version": "0.0.0"},
+            "info": {"name": client_name, "version": "0.0.0"},
         });
         if let Some(meta) = meta {
             params["_meta"] = meta;
