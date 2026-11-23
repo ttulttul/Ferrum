@@ -2,11 +2,6 @@
   "claude restart cli restored": {
     "nativeMetadata": "The reference hands the failed continuation's items to its retry as a context handoff (delta_since_target_last_seen), which Rust does not build, and counts the handoff in the session's attachment budget."
   },
-  "claude delegate followup": {
-    "agent mcp": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories.",
-    "cli approvals": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories.",
-    "cli launch": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories."
-  },
   "codex thread tools": {
     "live": "Racy: the pull-request syncs the thread tools start race the agent's next tool call (seen both matching, 1 of 8, and not): Rust reads a newly linked request right after its link, the reference through its sync reactor's queued sweep, so Rust's thread.pull-request-link-updated usually lands one link earlier."
   }

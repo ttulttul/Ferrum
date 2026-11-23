@@ -522,7 +522,7 @@ async fn thread_has_active_run<H: CommandHost>(state: &Arc<H>, thread_id: &str) 
 
 /// Detach the thread's live provider session, as the reference does for a
 /// thread change: record it, then stop the turns it was running.
-async fn detach_session<H: CommandHost>(
+pub(crate) async fn detach_session<H: CommandHost>(
     state: &Arc<H>,
     thread_id: &str,
     reason: &str,
