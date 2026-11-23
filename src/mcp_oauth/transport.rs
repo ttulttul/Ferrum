@@ -132,6 +132,7 @@ pub(super) async fn handle<S: McpHost>(
                 .and_then(|v| v.to_str().ok());
             let scope = granted.thread.clone();
             let mut caller = super::tools::Caller::new(granted, limit);
+            caller.origin = Some(issuer.clone());
             if let Some(scope) = &scope {
                 caller.thread =
                     super::on_this_thread(super::tools::thread_caller(&*s, scope)).await;
