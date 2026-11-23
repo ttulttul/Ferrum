@@ -19,6 +19,7 @@
     "historyOrigin",
     "linkOrigin",
     "delegatedFrom",
+    "workflowRun",
     "lineage",
     "forkedFrom",
     "createdAt",
@@ -44,6 +45,7 @@
     "titleRenamed",
     "rollbackRequestId",
     "rollbackFailure",
+    "rollbackUnrestored",
     "deletedAt"
   ],
   "OrchestrationV2ThreadShell": [
@@ -68,6 +70,7 @@
     "historyOrigin",
     "linkOrigin",
     "delegatedFrom",
+    "workflowRun",
     "latestRunId",
     "latestRunRequestedAt",
     "latestRunStartedAt",

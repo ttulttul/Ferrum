@@ -103,7 +103,7 @@ pub fn descriptor(
     capability!("shellOlderSettled", true);
     capability!("linkedThreadRefreshes", true);
     capability!("issueLinkedThreads", true);
-    json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.10","orchestrationProtocolVersion":2,"databaseMigration":98,"capabilities":capabilities})
+    json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.11","orchestrationProtocolVersion":2,"databaseMigration":crate::statev2::supported_head(),"capabilities":capabilities})
 }
 
 pub(crate) fn project_shell(row: &Value) -> Value {

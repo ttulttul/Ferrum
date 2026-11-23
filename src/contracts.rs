@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn inventory_contains_upstream_surface() {
         assert!(HTTP_CONTRACTS.len() >= 78);
-        assert!(RPC_CONTRACTS.len() >= 235);
+        assert!(RPC_CONTRACTS.len() >= 257);
         assert!(rpc_known("orchestration.dispatchCommand"));
         assert!(rpc_known("orchestration.subscribePromptSuggestion"));
         assert!(http_known("GET", "/api/orchestration/shell"));

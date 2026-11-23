@@ -829,6 +829,11 @@
                 "id": "ultracode",
                 "label": "Ultracode",
                 "type": "boolean"
+              },
+              {
+                "id": "fastMode",
+                "label": "Fast Mode",
+                "type": "boolean"
               }
             ]
           }

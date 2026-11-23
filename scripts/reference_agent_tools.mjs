@@ -57,6 +57,9 @@ const mocked = [
   ["orchestration-v2/ThreadManagementService.ts", "ThreadManagementService"],
   ["orchestration-v2/ThreadSearch.ts", "ThreadSearch"],
   ["vcs/VcsStatusBroadcaster.ts", "VcsStatusBroadcaster"],
+  ["feedback/FeedbackStore.ts", "FeedbackStore"],
+  ["workspace/TaskFolders.ts", "TaskFolders"],
+  ["git/GitManager.ts", "GitManager"],
 ];
 const layers = [Layer.mock(McpProviderSessions)({})];
 for (const [path, name] of mocked) layers.push(Layer.mock((await load(path))[name])({}));

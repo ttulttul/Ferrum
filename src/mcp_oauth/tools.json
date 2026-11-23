@@ -3952,7 +3952,7 @@
         "type": "string"
        },
        "options": {
-        "description": "Options from `orchestrator_capabilities`, such as {effort:'max'}. Given values override inherited. [] or {} clears.",
+        "description": "Ids vary by provider; see `orchestrator_capabilities`. Given values override inherited. [] or {} clears.",
         "anyOf": [
          {
           "type": "array",
@@ -4774,7 +4774,7 @@
   },
   {
    "name": "t3_background_wait",
-   "description": "Keep this thread in Working while background work runs. Pass its task ID once started. Not for work left running (dev server, watcher). `waiting=false` clears. Doesn't stop tasks. Claude/OpenCode only.",
+   "description": "Keep this thread in Working while background work runs. Pass its task ID once started. Not for work left running (dev server, watcher). `waiting=false` clears. Doesn't stop tasks.",
    "inputSchema": {
     "type": "object",
     "properties": {
@@ -5892,7 +5892,7 @@
   },
   {
    "name": "request_secret",
-   "description": "Ask for one secret per single-line card; never combine values. Open it, don't offer it. Returns one-use `secretRef`, or `delivery: \"file\"` a file read only in its command, e.g. `adb pair <ip:port> \"$(cat <file>)\"`. Asked how: call now. Sign-in link: `url`. Pasted secret for child/script: `value`. Never from an old thread.",
+   "description": "Ask for secrets in a private card, one value per single-line input; never combine values in one. Open it, don't offer it. Returns one-use `secretRef`, or `delivery: \"file\"` a file read only in its command, e.g. `adb pair <ip:port> \"$(cat <file>)\"`. Asked how: call now. Sign-in link: `url`. Pasted secret for child/script: `value`. Never from an old thread.",
    "inputSchema": {
     "type": "object",
     "properties": {
@@ -5916,6 +5916,34 @@
        "file"
       ],
       "description": "secretRef (default) for a T3 tool; file for a command."
+     },
+     "fields": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "label": {
+         "type": "string"
+        },
+        "placeholder": {
+         "type": "string"
+        },
+        "secret": {
+         "type": "boolean",
+         "description": "false shows the typed value, e.g. an email."
+        }
+       },
+       "required": [
+        "name",
+        "label"
+       ]
+      },
+      "minItems": 1,
+      "maxItems": 8,
+      "description": "Values only the user has, in one card, e.g. email + password, with delivery \"file\". Returns `files` by name."
      },
      "value": {
       "type": "string",
@@ -5978,7 +6006,7 @@
            "type": "string"
           },
           "options": {
-           "description": "Options from `orchestrator_capabilities`, such as {effort:'max'}. Given values override inherited. [] or {} clears.",
+           "description": "Ids vary by provider; see `orchestrator_capabilities`. Given values override inherited. [] or {} clears.",
            "anyOf": [
             {
              "type": "array",
@@ -7774,6 +7802,10 @@
       "type": "boolean",
       "description": "Start a new provider session without the thread's earlier context, like /clear. Never steers."
      },
+     "outputSchema": {
+      "type": "object",
+      "description": "JSON Schema for a result the turn must return as data, read back as `output` from `t3_thread_wait`. Never steers."
+     },
      "clientRequestId": {
       "type": "string"
      }
@@ -7879,6 +7911,10 @@
      "untilDelegatedWorkSettled": {
       "type": "boolean",
       "description": "Also wait for its delegated and background tasks and their completions to settle. `resultRun` then names the run with its final answer."
+     },
+     "untilOutput": {
+      "type": "boolean",
+      "description": "Also wait for the `output` the run was asked for, which a later turn may submit."
      }
     },
     "required": [
@@ -7960,6 +7996,14 @@
         ],
         "additionalProperties": true
        },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "output": {
+      "anyOf": [
+       {},
        {
         "type": "null"
        }
@@ -8194,7 +8238,7 @@
   },
   {
    "name": "t3_environment_unlink",
-   "description": "Forget a linked environment. That machine's Connections list its session until revoked there.",
+   "description": "Forget a linked environment. Its session on that machine ends too when the machine answers.",
    "inputSchema": {
     "type": "object",
     "properties": {
@@ -8214,11 +8258,15 @@
      },
      "removed": {
       "type": "boolean"
+     },
+     "endedThere": {
+      "type": "boolean"
      }
     },
     "required": [
      "environmentId",
-     "removed"
+     "removed",
+     "endedThere"
     ],
     "additionalProperties": true
    },
@@ -8677,6 +8725,676 @@
    }
   },
   {
+   "name": "t3_submit_output",
+   "description": "Return this turn's result as data, when the message asked for one. `json`: JSON text matching the schema it gave. A rejection says what did not fit; fix it and call again.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "json": {
+      "type": "string",
+      "maxLength": 200000
+     }
+    },
+    "required": [
+     "json"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "runId": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "runId"
+    ],
+    "additionalProperties": true
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   }
+  },
+  {
+   "name": "t3_workflow",
+   "description": "Durable workflow runs on this server. start: `workflow`, `input`, `idempotencyKey` (same key, same run). list: runs, by `status`. read: one run and its steps. questions: what runs ask a person. hooks: the URL paths that start runs. store: what workflows keep, under keys starting with `key`; store_set a `key` to `value`; store_delete. signal: wake a wait with `value`, addressed by `runId` and `wait`, or by `workflow` and `channel`; answers a question as `{choice, reason?}`. resume: run a paused run's failed step again. cancel.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "action": {
+      "type": "string",
+      "enum": [
+       "list",
+       "read",
+       "questions",
+       "store",
+       "hooks",
+       "start",
+       "signal",
+       "resume",
+       "cancel",
+       "store_set",
+       "store_delete"
+      ]
+     },
+     "workflow": {
+      "type": "string"
+     },
+     "input": {},
+     "idempotencyKey": {
+      "type": "string"
+     },
+     "runId": {
+      "type": "string"
+     },
+     "status": {
+      "type": "string",
+      "enum": [
+       "running",
+       "waiting",
+       "paused",
+       "completed",
+       "stopped",
+       "skipped",
+       "cancelled"
+      ]
+     },
+     "wait": {
+      "type": "string"
+     },
+     "key": {
+      "type": "string"
+     },
+     "channel": {
+      "type": "string"
+     },
+     "value": {},
+     "signalId": {
+      "type": "string"
+     },
+     "reason": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "action"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "run": {
+      "anyOf": [
+       {
+        "type": "object",
+        "properties": {
+         "runId": {
+          "type": "string"
+         },
+         "workflow": {
+          "type": "string"
+         },
+         "version": {
+          "anyOf": [
+           {
+            "type": "number"
+           },
+           {
+            "type": "string",
+            "enum": [
+             "Infinity",
+             "-Infinity",
+             "NaN"
+            ]
+           }
+          ]
+         },
+         "title": {
+          "type": "string"
+         },
+         "status": {
+          "type": "string",
+          "enum": [
+           "running",
+           "waiting",
+           "paused",
+           "completed",
+           "stopped",
+           "skipped",
+           "cancelled"
+          ]
+         },
+         "detail": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "result": {
+          "anyOf": [
+           {},
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "pauses": {
+          "anyOf": [
+           {
+            "type": "number"
+           },
+           {
+            "type": "string",
+            "enum": [
+             "Infinity",
+             "-Infinity",
+             "NaN"
+            ]
+           }
+          ]
+         },
+         "retired": {
+          "type": "boolean"
+         },
+         "resumesAt": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "parentRunId": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "parentStep": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "startedAt": {
+          "type": "string"
+         },
+         "updatedAt": {
+          "type": "string"
+         },
+         "endedAt": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         }
+        },
+        "required": [
+         "runId",
+         "workflow",
+         "version",
+         "title",
+         "status",
+         "detail",
+         "result",
+         "pauses",
+         "retired",
+         "resumesAt",
+         "parentRunId",
+         "parentStep",
+         "startedAt",
+         "updatedAt",
+         "endedAt"
+        ],
+        "additionalProperties": true
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "steps": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "kind": {
+           "type": "string",
+           "enum": [
+            "step",
+            "wait",
+            "agent",
+            "ask",
+            "sleep"
+           ]
+          },
+          "status": {
+           "type": "string",
+           "enum": [
+            "running",
+            "completed",
+            "failed"
+           ]
+          },
+          "attempts": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "string",
+             "enum": [
+              "Infinity",
+              "-Infinity",
+              "NaN"
+             ]
+            }
+           ]
+          },
+          "detail": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "threadId": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "environmentId": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "result": {
+           "anyOf": [
+            {},
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "said": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "startedAt": {
+           "type": "string"
+          },
+          "endedAt": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "name",
+          "kind",
+          "status",
+          "attempts",
+          "detail",
+          "threadId",
+          "environmentId",
+          "result",
+          "said",
+          "startedAt",
+          "endedAt"
+         ],
+         "additionalProperties": true
+        }
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "runs": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "runId": {
+           "type": "string"
+          },
+          "workflow": {
+           "type": "string"
+          },
+          "version": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "string",
+             "enum": [
+              "Infinity",
+              "-Infinity",
+              "NaN"
+             ]
+            }
+           ]
+          },
+          "title": {
+           "type": "string"
+          },
+          "status": {
+           "type": "string",
+           "enum": [
+            "running",
+            "waiting",
+            "paused",
+            "completed",
+            "stopped",
+            "skipped",
+            "cancelled"
+           ]
+          },
+          "detail": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "result": {
+           "anyOf": [
+            {},
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "pauses": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "string",
+             "enum": [
+              "Infinity",
+              "-Infinity",
+              "NaN"
+             ]
+            }
+           ]
+          },
+          "retired": {
+           "type": "boolean"
+          },
+          "resumesAt": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "parentRunId": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "parentStep": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "startedAt": {
+           "type": "string"
+          },
+          "updatedAt": {
+           "type": "string"
+          },
+          "endedAt": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "runId",
+          "workflow",
+          "version",
+          "title",
+          "status",
+          "detail",
+          "result",
+          "pauses",
+          "retired",
+          "resumesAt",
+          "parentRunId",
+          "parentStep",
+          "startedAt",
+          "updatedAt",
+          "endedAt"
+         ],
+         "additionalProperties": true
+        }
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "questions": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "runId": {
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          },
+          "request": {},
+          "askedAt": {
+           "type": "string"
+          },
+          "thread": {
+           "anyOf": [
+            {
+             "type": "object",
+             "properties": {
+              "threadId": {
+               "type": "string"
+              },
+              "environmentId": {
+               "anyOf": [
+                {
+                 "type": "string"
+                },
+                {
+                 "type": "null"
+                }
+               ]
+              }
+             },
+             "required": [
+              "threadId",
+              "environmentId"
+             ],
+             "additionalProperties": true
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "runId",
+          "name",
+          "request",
+          "askedAt",
+          "thread"
+         ],
+         "additionalProperties": true
+        }
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "hooks": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "workflow": {
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          },
+          "path": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "workflow",
+          "name",
+          "path"
+         ],
+         "additionalProperties": true
+        }
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "entries": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "key": {
+           "type": "string"
+          },
+          "value": {}
+         },
+         "required": [
+          "key",
+          "value"
+         ],
+         "additionalProperties": true
+        }
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "delivery": {
+      "anyOf": [
+       {
+        "type": "string",
+        "enum": [
+         "delivered",
+         "buffered"
+        ]
+       },
+       {
+        "type": "null"
+       }
+      ]
+     }
+    },
+    "additionalProperties": true
+   },
+   "annotations": {
+    "title": "Workflow runs",
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "title": "Workflow runs"
+  },
+  {
    "name": "t3_attachment_prepare_upload",
    "description": "Get an upload URL. POST the file's exact bytes to `uploadUrl` (else this server's `relativeUrl`), then send via `t3_thread_send_attachments` with the returned `attachmentId`.",
    "inputSchema": {
@@ -8925,7 +9643,7 @@
   },
   {
    "name": "t3_thread_launch",
-   "description": "Create one new top-level thread, bound to its workspace before the agent starts. Task in `message`. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. After an error or lost reply, retry with the same `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. Mention it with its `link`.",
+   "description": "Create a top-level thread in its workspace before starting. Task in `message`. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`); modes cannot exceed yours. On error or lost reply, reuse `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. Mention it with its `link`.",
    "inputSchema": {
     "type": "object",
     "properties": {
@@ -8941,6 +9659,9 @@
      },
      "title": {
       "type": "string"
+     },
+     "generateTitle": {
+      "type": "boolean"
      },
      "modelSelection": {
       "type": "object",
@@ -8992,6 +9713,22 @@
        },
        "startFromOrigin": {
         "type": "boolean"
+       },
+       "repositories": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "path": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "path"
+         ]
+        },
+        "maxItems": 128,
+        "description": "Tracked Git folders to give a worktree. Default: all, or none above 8."
        }
       },
       "required": [
@@ -9064,6 +9801,10 @@
       },
       "maxItems": 8
      },
+     "outputSchema": {
+      "type": "object",
+      "description": "As in `t3_thread_send`. Needs `message`."
+     },
      "clientRequestId": {
       "type": "string"
      },
@@ -9084,6 +9825,29 @@
        "environmentId",
        "threadId",
        "title"
+      ]
+     },
+     "workflowRun": {
+      "type": "object",
+      "properties": {
+       "environmentId": {
+        "type": "string"
+       },
+       "runId": {
+        "type": "string"
+       },
+       "workflow": {
+        "type": "string"
+       },
+       "step": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "environmentId",
+       "runId",
+       "workflow",
+       "step"
       ]
      }
     },
@@ -9628,6 +10392,43 @@
           "additionalProperties": true
          }
         },
+        "trackedFolders": {
+         "anyOf": [
+          {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "path": {
+              "type": "string"
+             },
+             "name": {
+              "type": "string"
+             },
+             "discovered": {
+              "anyOf": [
+               {
+                "type": "boolean"
+               },
+               {
+                "type": "null"
+               }
+              ]
+             }
+            },
+            "required": [
+             "path",
+             "name"
+            ],
+            "additionalProperties": true
+           },
+           "maxItems": 128
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
         "pinnedAt": {
          "anyOf": [
           {
@@ -10138,6 +10939,43 @@
        "additionalProperties": true
       }
      },
+     "trackedFolders": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "path": {
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          },
+          "discovered": {
+           "anyOf": [
+            {
+             "type": "boolean"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "path",
+          "name"
+         ],
+         "additionalProperties": true
+        },
+        "maxItems": 128
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
      "pinnedAt": {
       "anyOf": [
        {
@@ -10282,6 +11120,25 @@
         "runOnWorktreeCreate"
        ]
       }
+     },
+     "trackedFolders": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "name": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path",
+        "name"
+       ]
+      },
+      "maxItems": 128
      }
     },
     "required": [
@@ -10699,6 +11556,43 @@
        "additionalProperties": true
       }
      },
+     "trackedFolders": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "path": {
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          },
+          "discovered": {
+           "anyOf": [
+            {
+             "type": "boolean"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "path",
+          "name"
+         ],
+         "additionalProperties": true
+        },
+        "maxItems": 128
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
      "pinnedAt": {
       "anyOf": [
        {
@@ -10914,6 +11808,26 @@
         "runOnWorktreeCreate"
        ]
       }
+     },
+     "trackedFolders": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "name": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path",
+        "name"
+       ]
+      },
+      "maxItems": 128,
+      "description": "Extra folders by absolute path. Replaces the whole list."
      },
      "pinned": {
       "type": "boolean"
@@ -11337,6 +12251,43 @@
        ],
        "additionalProperties": true
       }
+     },
+     "trackedFolders": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "path": {
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          },
+          "discovered": {
+           "anyOf": [
+            {
+             "type": "boolean"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "path",
+          "name"
+         ],
+         "additionalProperties": true
+        },
+        "maxItems": 128
+       },
+       {
+        "type": "null"
+       }
+      ]
      },
      "pinnedAt": {
       "anyOf": [
@@ -11831,6 +12782,43 @@
        "additionalProperties": true
       }
      },
+     "trackedFolders": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "path": {
+           "type": "string"
+          },
+          "name": {
+           "type": "string"
+          },
+          "discovered": {
+           "anyOf": [
+            {
+             "type": "boolean"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "path",
+          "name"
+         ],
+         "additionalProperties": true
+        },
+        "maxItems": 128
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
      "pinnedAt": {
       "anyOf": [
        {
@@ -11978,6 +12966,64 @@
    "annotations": {
     "readOnlyHint": false,
     "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true
+   }
+  },
+  {
+   "name": "t3_feedback",
+   "description": "Send feedback to the T3 team: a T3 tool or `t3` command that misbehaved, a confusing instruction, a missing capability, or anything about T3 Code the user asks you to send. Not the user's own code. Use your own words; never quote the user's messages, code, files, or names. A report the user asks for opens a card where they approve it and choose whether to include the conversation of the `turns` you set, so call this when asked without asking first, and never paste the conversation into it.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "kind": {
+      "type": "string",
+      "enum": [
+       "bug",
+       "confusing",
+       "missing_capability",
+       "wrong_docs",
+       "other"
+      ]
+     },
+     "subject": {
+      "type": "string",
+      "description": "T3 tool name, `t3` command, or `general`."
+     },
+     "expected": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "actual": {
+      "type": "string",
+      "maxLength": 300
+     },
+     "workaround": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "What you did instead, or empty."
+     },
+     "userRequested": {
+      "type": "boolean",
+      "description": "The user asked for this report."
+     },
+     "turns": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How many recent turns, counting this one, the problem spans."
+     }
+    },
+    "required": [
+     "kind",
+     "subject",
+     "expected",
+     "actual",
+     "workaround"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
     "idempotentHint": false,
     "openWorldHint": true
    }
@@ -14013,7 +15059,7 @@
   },
   {
    "name": "watch_pull_request",
-   "description": "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, or conflicts. Handle old comments first. Only later ones wake you. After this call, end your turn. The watch stays on after each wake, so do not call this again on a wake. A wake is not a merge decision. Check readiness yourself.",
+   "description": "Watch an open PR for this thread, linking it if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, conflicts, and once on merge or close unless you did it via CLI. Handle old comments first; only new ones wake you. After this call, end your turn. The watch stays on: do not call this again on a wake. A wake is not a merge decision. Check readiness yourself.",
    "inputSchema": {
     "type": "object",
     "properties": {
@@ -14036,6 +15082,14 @@
      },
      "host": {
       "type": "string"
+     },
+     "until": {
+      "type": "string",
+      "enum": [
+       "checks",
+       "merged"
+      ],
+      "description": "How long this thread stays working. Omit to keep the current value; a new watch starts at \"checks\". \"checks\": until checks finish, for a PR you hand to the user. \"merged\": until it merges, closes or is unwatched, when you act on it yourself, such as merging after approval."
      }
     }
    },
@@ -14061,6 +15115,46 @@
      },
      "wasWatching": {
       "type": "boolean"
+     },
+     "state": {
+      "anyOf": [
+       {
+        "type": "string",
+        "enum": [
+         "merged",
+         "closed"
+        ],
+        "description": "The PR already ended, so nothing was watched."
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "checksState": {
+      "anyOf": [
+       {
+        "type": "string",
+        "enum": [
+         "passing",
+         "failing",
+         "pending"
+        ]
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "next": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ]
      }
     },
     "required": [
@@ -14132,6 +15226,46 @@
      },
      "wasWatching": {
       "type": "boolean"
+     },
+     "state": {
+      "anyOf": [
+       {
+        "type": "string",
+        "enum": [
+         "merged",
+         "closed"
+        ],
+        "description": "The PR already ended, so nothing was watched."
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "checksState": {
+      "anyOf": [
+       {
+        "type": "string",
+        "enum": [
+         "passing",
+         "failing",
+         "pending"
+        ]
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "next": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ]
      }
     },
     "required": [
@@ -14598,6 +15732,1357 @@
     "openWorldHint": true
    },
    "title": "Read pull request guide"
+  },
+  {
+   "name": "pull_request_read",
+   "description": "Read a PR's state and check counts. `include` adds detail.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "environmentId": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default: the branch's PR."
+     },
+     "repository": {
+      "type": "string"
+     },
+     "include": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "enum": [
+        "body",
+        "checks",
+        "threads",
+        "comments",
+        "diff"
+       ]
+      },
+      "description": "threads: unresolved review threads."
+     },
+     "includeResolved": {
+      "type": "boolean"
+     },
+     "cursor": {
+      "type": "string"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "host": {
+      "type": "string"
+     },
+     "repository": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "url": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "state": {
+      "type": "string",
+      "enum": [
+       "open",
+       "closed",
+       "merged"
+      ]
+     },
+     "isDraft": {
+      "type": "boolean"
+     },
+     "visibility": {
+      "anyOf": [
+       {
+        "type": "string",
+        "enum": [
+         "public",
+         "private"
+        ]
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "description": "Only on a host with private PRs."
+     },
+     "author": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "headBranch": {
+      "type": "string"
+     },
+     "baseBranch": {
+      "type": "string"
+     },
+     "headSha": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "mergeability": {
+      "type": "string",
+      "enum": [
+       "mergeable",
+       "conflicting",
+       "unknown"
+      ]
+     },
+     "behindBy": {
+      "anyOf": [
+       {
+        "type": "integer",
+        "minimum": -9007199254740991,
+        "maximum": 9007199254740991
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "autoMergeEnabled": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "checks": {
+      "type": "object",
+      "properties": {
+       "passed": {
+        "type": "integer",
+        "minimum": -9007199254740991,
+        "maximum": 9007199254740991
+       },
+       "pending": {
+        "type": "integer",
+        "minimum": -9007199254740991,
+        "maximum": 9007199254740991
+       },
+       "failed": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       },
+       "incomplete": {
+        "anyOf": [
+         {
+          "type": "boolean",
+          "enum": [
+           true
+          ]
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "description": "The host could not list some checks; checkRuns says which."
+       }
+      },
+      "required": [
+       "passed",
+       "pending",
+       "failed"
+      ],
+      "additionalProperties": true
+     },
+     "unresolvedThreads": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "unresolvedThreadsTruncated": {
+      "anyOf": [
+       {
+        "type": "boolean",
+        "enum": [
+         true
+        ]
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "description": "unresolvedThreads is a lower bound."
+     },
+     "body": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "checkRuns": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "status": {
+           "type": "string",
+           "enum": [
+            "pending",
+            "action-required",
+            "success",
+            "failure",
+            "skipped",
+            "neutral",
+            "cancelled"
+           ]
+          },
+          "description": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "url": {
+           "anyOf": [
+            {
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "required": {
+           "anyOf": [
+            {
+             "type": "boolean"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          },
+          "placeholder": {
+           "anyOf": [
+            {
+             "type": "boolean"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "name",
+          "status",
+          "description",
+          "url"
+         ],
+         "additionalProperties": true
+        }
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "conversation": {
+      "anyOf": [
+       {
+        "type": "object",
+        "properties": {
+         "reviewThreads": {
+          "anyOf": [
+           {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "properties": {
+              "id": {
+               "type": "string"
+              },
+              "path": {
+               "type": "string"
+              },
+              "line": {
+               "anyOf": [
+                {
+                 "type": "integer",
+                 "minimum": -9007199254740991,
+                 "maximum": 9007199254740991
+                },
+                {
+                 "type": "null"
+                }
+               ]
+              },
+              "isResolved": {
+               "type": "boolean"
+              },
+              "isOutdated": {
+               "type": "boolean"
+              },
+              "comments": {
+               "type": "array",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "author": {
+                  "anyOf": [
+                   {
+                    "type": "string"
+                   },
+                   {
+                    "type": "null"
+                   }
+                  ]
+                 },
+                 "body": {
+                  "type": "string"
+                 },
+                 "createdAt": {
+                  "type": "string"
+                 }
+                },
+                "required": [
+                 "author",
+                 "body",
+                 "createdAt"
+                ],
+                "additionalProperties": true
+               }
+              },
+              "moreComments": {
+               "type": "boolean"
+              }
+             },
+             "required": [
+              "id",
+              "path",
+              "line",
+              "isResolved",
+              "isOutdated",
+              "comments",
+              "moreComments"
+             ],
+             "additionalProperties": true
+            }
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "comments": {
+          "anyOf": [
+           {
+            "type": "array",
+            "items": {
+             "type": "object",
+             "properties": {
+              "author": {
+               "anyOf": [
+                {
+                 "type": "string"
+                },
+                {
+                 "type": "null"
+                }
+               ]
+              },
+              "body": {
+               "type": "string"
+              },
+              "createdAt": {
+               "type": "string"
+              },
+              "id": {
+               "type": "string"
+              },
+              "kind": {
+               "type": "string",
+               "enum": [
+                "issue-comment",
+                "review-comment",
+                "review"
+               ]
+              },
+              "path": {
+               "anyOf": [
+                {
+                 "type": "string"
+                },
+                {
+                 "type": "null"
+                }
+               ]
+              },
+              "reviewState": {
+               "anyOf": [
+                {
+                 "type": "string"
+                },
+                {
+                 "type": "null"
+                }
+               ]
+              }
+             },
+             "required": [
+              "author",
+              "body",
+              "createdAt",
+              "id",
+              "kind",
+              "path",
+              "reviewState"
+             ],
+             "additionalProperties": true
+            }
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "truncated": {
+          "type": "boolean"
+         },
+         "nextCursor": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         }
+        },
+        "required": [
+         "truncated",
+         "nextCursor"
+        ],
+        "additionalProperties": true
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "diff": {
+      "anyOf": [
+       {
+        "type": "object",
+        "properties": {
+         "patch": {
+          "type": "string"
+         },
+         "truncated": {
+          "type": "boolean"
+         },
+         "nextCursor": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         }
+        },
+        "required": [
+         "patch",
+         "truncated",
+         "nextCursor"
+        ],
+        "additionalProperties": true
+       },
+       {
+        "type": "null"
+       }
+      ]
+     }
+    },
+    "required": [
+     "host",
+     "repository",
+     "number",
+     "url",
+     "title",
+     "state",
+     "isDraft",
+     "author",
+     "headBranch",
+     "baseBranch",
+     "headSha",
+     "mergeability",
+     "behindBy",
+     "autoMergeEnabled",
+     "checks",
+     "unresolvedThreads"
+    ],
+    "additionalProperties": true
+   },
+   "annotations": {
+    "title": "Read pull request",
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+   },
+   "title": "Read pull request"
+  },
+  {
+   "name": "pull_request_list",
+   "description": "List PRs in this thread's repository, recently updated first.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "environmentId": {
+      "type": "string"
+     },
+     "state": {
+      "type": "string",
+      "enum": [
+       "all",
+       "open",
+       "closed",
+       "merged"
+      ],
+      "description": "Default: open."
+     },
+     "involvement": {
+      "type": "string",
+      "enum": [
+       "all",
+       "reviewing",
+       "authored"
+      ]
+     },
+     "query": {
+      "type": "string"
+     },
+     "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+     },
+     "cursor": {
+      "type": "string"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "pullRequests": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "number": {
+         "type": "integer",
+         "minimum": -9007199254740991,
+         "maximum": 9007199254740991
+        },
+        "title": {
+         "type": "string"
+        },
+        "url": {
+         "type": "string"
+        },
+        "author": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "headBranch": {
+         "type": "string"
+        },
+        "baseBranch": {
+         "type": "string"
+        },
+        "state": {
+         "type": "string",
+         "enum": [
+          "open",
+          "closed",
+          "merged"
+         ]
+        },
+        "isDraft": {
+         "type": "boolean"
+        },
+        "reviewDecision": {
+         "anyOf": [
+          {
+           "type": "string",
+           "enum": [
+            "approved",
+            "changes-requested",
+            "review-required"
+           ]
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "checksState": {
+         "anyOf": [
+          {
+           "type": "string",
+           "enum": [
+            "passing",
+            "failing",
+            "pending"
+           ]
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "updatedAt": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "number",
+        "title",
+        "url",
+        "author",
+        "headBranch",
+        "baseBranch",
+        "state",
+        "isDraft",
+        "reviewDecision",
+        "checksState",
+        "updatedAt"
+       ],
+       "additionalProperties": true
+      }
+     },
+     "truncated": {
+      "type": "boolean"
+     },
+     "nextCursor": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     }
+    },
+    "required": [
+     "pullRequests",
+     "truncated",
+     "nextCursor"
+    ],
+    "additionalProperties": true
+   },
+   "annotations": {
+    "title": "List pull requests",
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+   },
+   "title": "List pull requests"
+  },
+  {
+   "name": "pull_request_create",
+   "description": "Push this thread's branch, then open its PR and link it, or return its open PR.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "environmentId": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "base": {
+      "type": "string"
+     },
+     "draft": {
+      "type": "boolean"
+     },
+     "private": {
+      "type": "boolean",
+      "description": "Visible to writers only; the branch never reaches origin. Fails on a host without private PRs."
+     }
+    },
+    "required": [
+     "title",
+     "body"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "host": {
+      "type": "string"
+     },
+     "repository": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "url": {
+      "type": "string"
+     },
+     "created": {
+      "type": "boolean",
+      "description": "False when the branch already had an open PR."
+     },
+     "next": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     }
+    },
+    "required": [
+     "host",
+     "repository",
+     "number",
+     "url",
+     "created"
+    ],
+    "additionalProperties": true
+   },
+   "annotations": {
+    "title": "Create pull request",
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+   },
+   "title": "Create pull request"
+  },
+  {
+   "name": "pull_request_update",
+   "description": "Edit a PR's title, body, labels, or reviewers, close or reopen it, or set ready (false: back to draft).",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "environmentId": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default: the branch's PR."
+     },
+     "repository": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "ready": {
+      "type": "boolean"
+     },
+     "state": {
+      "type": "string",
+      "enum": [
+       "open",
+       "closed"
+      ]
+     },
+     "addLabels": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "minItems": 1,
+      "maxItems": 25
+     },
+     "removeLabels": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "minItems": 1,
+      "maxItems": 25
+     },
+     "requestReviewers": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "minItems": 1,
+      "maxItems": 25,
+      "description": "Logins, or org/team for a team."
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "host": {
+      "type": "string"
+     },
+     "repository": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "url": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "host",
+     "repository",
+     "number",
+     "url"
+    ],
+    "additionalProperties": true
+   },
+   "annotations": {
+    "title": "Update pull request",
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+   },
+   "title": "Update pull request"
+  },
+  {
+   "name": "pull_request_respond",
+   "description": "Reply to, resolve, or reopen a review thread. Without reviewThreadId, comment on the PR.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "environmentId": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default: the branch's PR."
+     },
+     "repository": {
+      "type": "string"
+     },
+     "reviewThreadId": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "resolved": {
+      "type": "boolean"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "host": {
+      "type": "string"
+     },
+     "repository": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "url": {
+      "type": "string"
+     },
+     "replied": {
+      "type": "boolean"
+     },
+     "resolved": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     }
+    },
+    "required": [
+     "host",
+     "repository",
+     "number",
+     "url",
+     "replied",
+     "resolved"
+    ],
+    "additionalProperties": true
+   },
+   "annotations": {
+    "title": "Respond on pull request",
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "title": "Respond on pull request"
+  },
+  {
+   "name": "pull_request_review",
+   "description": "Submit a review: approve, request changes, or comment, with optional line comments.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "environmentId": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default: the branch's PR."
+     },
+     "repository": {
+      "type": "string"
+     },
+     "verdict": {
+      "type": "string",
+      "enum": [
+       "comment",
+       "approve",
+       "request-changes"
+      ]
+     },
+     "body": {
+      "type": "string"
+     },
+     "comments": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "line": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "startLine": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "side": {
+         "type": "string",
+         "enum": [
+          "new",
+          "old"
+         ],
+         "description": "Default new. old: line numbers in the base, for removed lines."
+        },
+        "body": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "path",
+        "line",
+        "body"
+       ]
+      },
+      "maxItems": 50
+     }
+    },
+    "required": [
+     "verdict"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "host": {
+      "type": "string"
+     },
+     "repository": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "url": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "host",
+     "repository",
+     "number",
+     "url"
+    ],
+    "additionalProperties": true
+   },
+   "annotations": {
+    "title": "Review pull request",
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "title": "Review pull request"
+  },
+  {
+   "name": "pull_request_merge",
+   "description": "Merge a PR. Refuses if the head moved from expectedHeadSha (headSha in pull_request_read).",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "environmentId": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default: the branch's PR."
+     },
+     "repository": {
+      "type": "string"
+     },
+     "expectedHeadSha": {
+      "type": "string"
+     },
+     "method": {
+      "type": "string",
+      "enum": [
+       "merge",
+       "squash",
+       "rebase",
+       "fast-forward"
+      ]
+     },
+     "auto": {
+      "type": "boolean",
+      "description": "Merge when required checks pass, including later pushes."
+     },
+     "stack": {
+      "type": "boolean",
+      "description": "Merge this PR and every open stack layer below it at once. Not with auto."
+     }
+    },
+    "required": [
+     "expectedHeadSha"
+    ]
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "host": {
+      "type": "string"
+     },
+     "repository": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "url": {
+      "type": "string"
+     },
+     "state": {
+      "type": "string",
+      "enum": [
+       "open",
+       "closed",
+       "merged"
+      ],
+      "description": "open while auto-merge or a merge queue waits for checks."
+     }
+    },
+    "required": [
+     "host",
+     "repository",
+     "number",
+     "url",
+     "state"
+    ],
+    "additionalProperties": true
+   },
+   "annotations": {
+    "title": "Merge pull request",
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "title": "Merge pull request"
+  },
+  {
+   "name": "ci_logs",
+   "description": "Read the tail of a PR's failing check logs, or one named check's.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "environmentId": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default: the branch's PR."
+     },
+     "repository": {
+      "type": "string"
+     },
+     "check": {
+      "type": "string"
+     },
+     "tailLines": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2000,
+      "description": "Default: 200."
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "host": {
+      "type": "string"
+     },
+     "repository": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "url": {
+      "type": "string"
+     },
+     "checks": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "url": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "log": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "truncated": {
+         "type": "boolean"
+        },
+        "detail": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        }
+       },
+       "required": [
+        "name",
+        "url",
+        "log",
+        "truncated",
+        "detail"
+       ],
+       "additionalProperties": true
+      }
+     }
+    },
+    "required": [
+     "host",
+     "repository",
+     "number",
+     "url",
+     "checks"
+    ],
+    "additionalProperties": true
+   },
+   "annotations": {
+    "title": "Read CI logs",
+    "readOnlyHint": true,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+   },
+   "title": "Read CI logs"
+  },
+  {
+   "name": "ci_rerun",
+   "description": "Re-run a PR's failing checks, or one named check.",
+   "inputSchema": {
+    "type": "object",
+    "properties": {
+     "environmentId": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default: the branch's PR."
+     },
+     "repository": {
+      "type": "string"
+     },
+     "check": {
+      "type": "string"
+     }
+    }
+   },
+   "outputSchema": {
+    "type": "object",
+    "properties": {
+     "host": {
+      "type": "string"
+     },
+     "repository": {
+      "type": "string"
+     },
+     "number": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "url": {
+      "type": "string"
+     },
+     "checks": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "name": {
+         "type": "string"
+        },
+        "rerun": {
+         "type": "boolean"
+        },
+        "detail": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        }
+       },
+       "required": [
+        "name",
+        "rerun",
+        "detail"
+       ],
+       "additionalProperties": true
+      }
+     }
+    },
+    "required": [
+     "host",
+     "repository",
+     "number",
+     "url",
+     "checks"
+    ],
+    "additionalProperties": true
+   },
+   "annotations": {
+    "title": "Re-run CI",
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "title": "Re-run CI"
   },
   {
    "name": "list_issues",
@@ -15093,6 +17578,9 @@
     "type": "object",
     "properties": {
      "projectId": {
+      "type": "string"
+     },
+     "scope": {
       "type": "string"
      },
      "title": {
@@ -16522,7 +19010,7 @@
   "task_status": "hiddenFromOutsideClients",
   "task_cancel": "hiddenFromOutsideClients",
   "t3_workflow_stop": "everyone",
-  "t3_background_wait": "hiddenFromOutsideClients",
+  "t3_background_wait": "hiddenWithoutBackgroundWait",
   "schedule_task": "everyone",
   "list_scheduled_tasks": "everyone",
   "delete_scheduled_task": "everyone",
@@ -16544,6 +19032,8 @@
   "t3_thread_organize": "everyone",
   "t3_pending_request": "everyone",
   "t3_queue": "everyone",
+  "t3_submit_output": "hiddenFromOutsideClients",
+  "t3_workflow": "hiddenFromThreads",
   "t3_attachment_prepare_upload": "everyone",
   "t3_attachment_discard": "everyone",
   "t3_thread_send_attachments": "everyone",
@@ -16554,6 +19044,7 @@
   "t3_project_update": "everyone",
   "t3_project_delete": "everyone",
   "t3_project_clone": "everyone",
+  "t3_feedback": "hiddenWhileFeedbackOff",
   "t3_environment_read": "everyone",
   "t3_environment_preferences_update": "everyone",
   "t3_theme_read": "everyone",
@@ -16572,6 +19063,15 @@
   "unwatch_pull_request": "hiddenFromSubagents",
   "write_pull_request_guides": "everyone",
   "read_pull_request_guide": "everyone",
+  "pull_request_read": "hiddenWithoutForge",
+  "pull_request_list": "hiddenWithoutForge",
+  "pull_request_create": "hiddenWithoutForge",
+  "pull_request_update": "hiddenWithoutForge",
+  "pull_request_respond": "hiddenWithoutForge",
+  "pull_request_review": "hiddenWithoutForge",
+  "pull_request_merge": "hiddenWithoutForge",
+  "ci_logs": "hiddenWithoutForge",
+  "ci_rerun": "hiddenWithoutForge",
   "list_issues": "everyone",
   "read_issue": "everyone",
   "create_issue": "everyone",

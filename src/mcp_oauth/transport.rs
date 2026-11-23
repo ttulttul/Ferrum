@@ -103,7 +103,7 @@ pub(super) async fn handle<S: McpHost>(
             return rpc_error(id, -32603, "The session could not be opened.");
         };
         let mut r = body(
-            json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"logging":{},"tools":{"listChanged":true},"completions":{}},"serverInfo":{"name":"T3 Code","version":"0.1.10"}}}),
+            json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"logging":{},"tools":{"listChanged":true},"completions":{}},"serverInfo":{"name":"T3 Code","version":"0.1.11"}}}),
         );
         r.headers_mut()
             .insert("mcp-session-id", HeaderValue::from_str(&sid).unwrap());

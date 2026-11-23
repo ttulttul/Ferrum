@@ -154,7 +154,7 @@ def run(args, directory):
             challenge=response["challenge"], environmentPublicKey=pem(host), scopes=["agent_activity_notifications"],
             endpoint=dict(httpBaseUrl="https://host.example",wsBaseUrl="wss://host.example",providerKind="manual"),
             origin=dict(localHttpHost="localhost",localHttpPort=3773),
-            descriptor=dict(environmentId="env",label="Server",platform=dict(os="linux",arch="x64"),serverVersion="0.1.10",capabilities={}))
+            descriptor=dict(environmentId="env",label="Server",platform=dict(os="linux",arch="x64"),serverVersion="0.1.11",capabilities={}))
         body = encode({**flags, "proof":token(host, dict(alg="EdDSA",typ="t3-env-link+jwt"),claims)})
         status, response = call("POST", "/v1/client/environment-links", user, body)
         assert status == 200, response

@@ -115,6 +115,43 @@
   },
   {
     "group": "general",
+    "name": "workspaceListFolders",
+    "tag": "workspace.listFolders",
+    "required": [
+      "projectId"
+    ],
+    "scope": "filesystem:read"
+  },
+  {
+    "group": "general",
+    "name": "workspaceScanFolders",
+    "tag": "workspace.scanFolders",
+    "required": [
+      "workspaceRoot"
+    ],
+    "scope": "filesystem:read"
+  },
+  {
+    "group": "general",
+    "name": "workspaceTaskFolder",
+    "tag": "workspace.taskFolder",
+    "required": [
+      "worktreePath"
+    ],
+    "scope": "filesystem:read"
+  },
+  {
+    "group": "general",
+    "name": "workspaceAddTaskFolderRepository",
+    "tag": "workspace.addTaskFolderRepository",
+    "required": [
+      "threadId",
+      "repositoryPath"
+    ],
+    "scope": "source-control:write"
+  },
+  {
+    "group": "general",
     "name": "filesystemGetMetadata",
     "tag": "filesystem.getMetadata",
     "required": [
@@ -226,6 +263,29 @@
       "threadId"
     ],
     "scope": "orchestration:operate"
+  },
+  {
+    "group": "general",
+    "name": "providerMcpSignInStart",
+    "tag": "provider.mcpSignIn.start",
+    "required": [
+      "threadId",
+      "providerThreadId",
+      "server"
+    ],
+    "scope": "providers:manage"
+  },
+  {
+    "group": "general",
+    "name": "providerMcpSignInComplete",
+    "tag": "provider.mcpSignIn.complete",
+    "required": [
+      "threadId",
+      "providerThreadId",
+      "server",
+      "callbackUrl"
+    ],
+    "scope": "providers:manage"
   },
   {
     "group": "general",
@@ -885,6 +945,13 @@
   },
   {
     "group": "general",
+    "name": "peerLinksNames",
+    "tag": "peerLinks.names",
+    "required": [],
+    "scope": "orchestration:read"
+  },
+  {
+    "group": "general",
     "name": "peerLinksLink",
     "tag": "peerLinks.link",
     "required": [
@@ -911,6 +978,57 @@
       "threadId",
       "turnItemId",
       "answer"
+    ],
+    "scope": "access:write"
+  },
+  {
+    "group": "general",
+    "name": "peerLinksSubscribeThread",
+    "tag": "peerLinks.subscribeThread",
+    "required": [
+      "environmentId",
+      "threadId"
+    ],
+    "scope": "orchestration:read"
+  },
+  {
+    "group": "general",
+    "name": "peerLinksThreadHistoryPage",
+    "tag": "peerLinks.threadHistoryPage",
+    "required": [
+      "environmentId",
+      "threadId",
+      "cursor"
+    ],
+    "scope": "orchestration:read"
+  },
+  {
+    "group": "general",
+    "name": "peerLinksThreadItem",
+    "tag": "peerLinks.threadItem",
+    "required": [
+      "environmentId",
+      "threadId",
+      "itemId"
+    ],
+    "scope": "orchestration:read"
+  },
+  {
+    "group": "general",
+    "name": "peerLinksPairClient",
+    "tag": "peerLinks.pairClient",
+    "required": [
+      "environmentId"
+    ],
+    "scope": "access:write"
+  },
+  {
+    "group": "general",
+    "name": "peerLinksPairLink",
+    "tag": "peerLinks.pairLink",
+    "required": [
+      "environmentId",
+      "access"
     ],
     "scope": "access:write"
   },
@@ -1180,6 +1298,84 @@
   },
   {
     "group": "general",
+    "name": "workflowsSubscribe",
+    "tag": "workflows.subscribe",
+    "required": [],
+    "scope": "orchestration:read"
+  },
+  {
+    "group": "general",
+    "name": "workflowsCounts",
+    "tag": "workflows.counts",
+    "required": [],
+    "scope": "orchestration:read"
+  },
+  {
+    "group": "general",
+    "name": "workflowsGet",
+    "tag": "workflows.get",
+    "required": [
+      "runId"
+    ],
+    "scope": "orchestration:read"
+  },
+  {
+    "group": "general",
+    "name": "workflowsAnswer",
+    "tag": "workflows.answer",
+    "required": [
+      "runId",
+      "name",
+      "choice"
+    ],
+    "scope": "orchestration:operate"
+  },
+  {
+    "group": "general",
+    "name": "workflowsResume",
+    "tag": "workflows.resume",
+    "required": [
+      "runId"
+    ],
+    "scope": "orchestration:operate"
+  },
+  {
+    "group": "general",
+    "name": "workflowsCancel",
+    "tag": "workflows.cancel",
+    "required": [
+      "runId"
+    ],
+    "scope": "orchestration:operate"
+  },
+  {
+    "group": "general",
+    "name": "workflowsGetDefinition",
+    "tag": "workflows.getDefinition",
+    "required": [],
+    "scope": "filesystem:read"
+  },
+  {
+    "group": "general",
+    "name": "workflowsSaveDefinition",
+    "tag": "workflows.saveDefinition",
+    "required": [
+      "name",
+      "source"
+    ],
+    "scope": "terminal:operate"
+  },
+  {
+    "group": "general",
+    "name": "workflowsDeleteDefinition",
+    "tag": "workflows.deleteDefinition",
+    "required": [
+      "name"
+    ],
+    "scope": "terminal:operate"
+  },
+  {
+    "group": "general",
     "name": "scheduledTasksSubscribe",
     "tag": "scheduledTasks.subscribe",
     "required": [],
@@ -1243,6 +1439,17 @@
     "group": "general",
     "name": "secretsAnswerRequest",
     "tag": "secrets.answerRequest",
+    "required": [
+      "threadId",
+      "turnItemId",
+      "answer"
+    ],
+    "scope": "orchestration:operate"
+  },
+  {
+    "group": "general",
+    "name": "agentFeedbackAnswerRequest",
+    "tag": "agentFeedback.answerRequest",
     "required": [
       "threadId",
       "turnItemId",

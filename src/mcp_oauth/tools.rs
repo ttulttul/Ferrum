@@ -257,6 +257,17 @@ fn visible_to<S: McpHost>(host: &S, granted: &McpAccess, listed: &str) -> bool {
     match listed {
         LINKS_ONLY => host.linked_environments_enabled(),
         "hiddenFromOutsideClients" => granted.thread.is_some(),
+        // `hiddenWithoutBackgroundWait`: a thread whose provider can hold for
+        // background work (the reference's `supportsBackgroundWait`). Of the
+        // providers this server runs turns for, that is Claude.
+        "hiddenWithoutBackgroundWait" => granted.thread.as_ref().is_some_and(|scope| {
+            let settings = host.settings();
+            let driver = settings["providerInstances"][&scope.provider_instance_id]["driver"]
+                .as_str()
+                .unwrap_or(&scope.provider_instance_id)
+                .to_owned();
+            driver == crate::workspace::provider::CLAUDE_AGENT
+        }),
         _ => true,
     }
 }
@@ -2777,7 +2788,8 @@ mod sender_tests {
                         "everyone"
                             | LINKS_ONLY
                             | "hiddenFromOutsideClients"
-                            | "hiddenFromSubagents",
+                            | "hiddenFromSubagents"
+                            | "hiddenWithoutBackgroundWait",
                     )
                 ),
                 "{name} needs listing by caller"
