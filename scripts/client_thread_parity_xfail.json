@@ -1,40 +1,4 @@
 {
-  "codex approval": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "codex approval for session": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "codex approval declined": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "codex approval-required": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "codex auto-accept-edits": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "codex user input": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "claude approval": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "claude approval declined": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "claude approval-required": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "claude auto-accept-edits": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "claude approval interrupted": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
-  "claude question": {
-    "live": "Rust sends a runtime request's records in a different order from the reference: as the request opens, and as it is answered, where the reference writes the request before its card."
-  },
   "claude restart cli restored": {
     "nativeMetadata": "The reference hands the failed continuation's items to its retry as a context handoff (delta_since_target_last_seen), which Rust does not build, and counts the handoff in the session's attachment budget."
   },
