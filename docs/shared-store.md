@@ -260,7 +260,7 @@ server gave them:
 
 **Typed state for a thread read from the database** (`Thread::from_stored`, pull
 request 3). This is what lets Rust queue, start, steer, stop, answer and continue turns
-on it (steering is the reference's active steering, for Codex turns only:
+on it (steering is the reference's active steering, for Codex and Claude turns:
 `src/orchestration/steer.rs`). Rust rebuilds:
 - its runs, with their statuses, messages and continuation links;
 - what was sent to the thread: users' messages, plus the notifications that continue a

@@ -700,3 +700,58 @@ async fn a_claude_thread_sends_its_next_turn_to_its_running_cli() {
         .count();
     assert_eq!(prompts, 2);
 }
+
+#[tokio::test]
+async fn a_steer_goes_to_the_running_claude_turn_and_is_pending_until_claude_takes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(CLAUDE_AGENT, "claude_steer.json", &log, None);
+    spec.turn_id = format!("steer-{}", uuid::Uuid::new_v4());
+    let turn_id = spec.turn_id.clone();
+    let (_cancel, cancelled) = oneshot::channel();
+    let mut events = start(spec, cancelled, TEST_SERVERS.clone()).unwrap();
+    // Once the turn runs a command, the user steers it.
+    loop {
+        match events.recv().await.expect("the turn runs") {
+            TurnEvent::Provider(ProviderEvent::TurnItem { item })
+                if item.kind == "command_execution" && item.status == "running" =>
+            {
+                break
+            }
+            TurnEvent::Exited(exit) => panic!("the turn ended first: {exit:?}"),
+            _ => {}
+        }
+    }
+    assert!(respond(
+        &turn_id,
+        crate::workspace::provider::RuntimeResponse {
+            id: "message:steer".into(),
+            steer: Some("Also print the date".into()),
+            ..Default::default()
+        }
+    ));
+    let (rest, exit) = collect(events).await;
+    assert!(exit.success, "{rest:#?}");
+    let statuses: Vec<&str> = rest
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::SteerUpdated { message_id, status } if message_id == "message:steer" => {
+                Some(status.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(statuses, ["pending", "completed"]);
+    // Written as the reference writes a steer: priority now, with the uuid
+    // Claude echoed.
+    let steer = received(&log)
+        .into_iter()
+        .find(|message| message["priority"] == "now")
+        .expect("the steer reached the CLI");
+    assert_eq!(steer["type"], "user");
+    assert_eq!(
+        steer["message"],
+        json!({"role": "user", "content": "Also print the date"})
+    );
+    assert!(steer["uuid"].as_str().is_some_and(|uuid| uuid.len() == 36));
+}

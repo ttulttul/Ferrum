@@ -568,6 +568,20 @@ impl Store {
                 }
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.provider.apply(*run_id, event, at);
+                    // A steer's status, on its message (its turn item).
+                    if let crate::workspace::ProviderEvent::SteerUpdated { message_id, status } =
+                        event
+                    {
+                        if let Some(steer) = thread
+                            .messages
+                            .iter_mut()
+                            .find(|message| &message.id == message_id)
+                            .and_then(|message| message.steer.as_mut())
+                        {
+                            steer["status"] = serde_json::json!(status);
+                            steer["statusAt"] = serde_json::json!(at);
+                        }
+                    }
                     if let crate::workspace::ProviderEvent::ProviderThread { driver, .. } = event {
                         // As the turn starts (its session opening), not
                         // when the CLI reports its session later on.
