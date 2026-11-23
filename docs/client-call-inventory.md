@@ -20,13 +20,13 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 
 | Kind | Calls | Used by the client | Mobile only | Server-only / unused | Existing parity | Client harness | Either |
 |---|---|---|---|---|---|---|---|
-| rpc | 224 | 221 | 0 | 3 | 135 | 78 | 159 |
+| rpc | 224 | 221 | 0 | 3 | 136 | 78 | 159 |
 | rpc-stream | 33 | 32 | 0 | 1 | 17 | 23 | 25 |
 | http | 55 | 40 | 1 | 14 | 39 | 14 | 40 |
 | http-raw | 7 | 7 | 0 | 0 | 7 | 3 | 7 |
-| **all** | 319 | 300 | 1 | 18 | 198 | 118 | 231 |
+| **all** | 319 | 300 | 1 | 18 | 199 | 118 | 231 |
 
-Newly covered by the client harness (no earlier parity script): 33. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 4.
+Newly covered by the client harness (no earlier parity script): 32. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 4.
 
 Calls the harness does not make need credentials or hardware it cannot have in CI (GitHub, Linear,
 model providers, T3 Connect relay, voice models, simulators, a browser), are destructive to the host
@@ -41,7 +41,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `agentSessions.scan` | user action | `apps/web/src/state/agentSessions.ts:11` | AgentSessionScanInput | AgentSessionScanResult | session (orchestration:read) | client | validation only | 1 case(s) |
 | `assets.createUrl` | user action | `packages/client-runtime/src/state/assets.ts:258` | AssetCreateUrlInput | AssetCreateUrlResult | session (orchestration:read) | client | project_favicon_parity.py, rpc_edge_parity.py | 10 case(s) |
 | `assets.persistChatAttachments` | user action | `packages/client-runtime/src/operations/commands.ts:391` | PersistChatAttachmentsInput | PersistChatAttachmentsResult | session (orchestration:operate) | client | rpc_edge_parity.py | — |
-| `attachments.createUploadUrl` | user action | `packages/client-runtime/src/state/attachments.ts:30` | AttachmentCreateUploadUrlInput | AttachmentCreateUploadUrlResult | session (orchestration:operate) | client | validation only | 8 case(s) |
+| `attachments.createUploadUrl` | user action | `packages/client-runtime/src/state/attachments.ts:30` | AttachmentCreateUploadUrlInput | AttachmentCreateUploadUrlResult | session (orchestration:operate) | client | client_thread_parity.py | 8 case(s) |
 | `attachments.delete` | user action | `packages/client-runtime/src/state/attachments.ts:34` | AttachmentDeleteInput | void | session (orchestration:operate) | client | rpc_edge_parity.py | 2 case(s) |
 | `cloud.getRelayClientStatus` | user action | `apps/web/src/cloud/linkEnvironment.ts:64` | Struct{} | RelayClientStatusSchema | session (relay:read) | client | relay_client_parity.py | 1 case(s) |
 | `device.action` | user action | `packages/client-runtime/src/state/device.ts:91` | DeviceActionInput | DeviceDetail | session (orchestration:operate) | client | parity-fixtures.json | — |

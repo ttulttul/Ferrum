@@ -135,8 +135,10 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "client_thread_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [
         "attachments.createUploadUrl",
         "attachments.createUploadUrl.tooLarge",
