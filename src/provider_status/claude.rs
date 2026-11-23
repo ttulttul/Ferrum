@@ -255,7 +255,14 @@ fn update_required(catalog: &[CatalogModel], version: Option<&str>) -> Vec<Value
         .collect()
 }
 
-fn upgrade_message(catalog: &[CatalogModel], version: Option<&str>) -> Option<String> {
+/// `formatClaudeVersionUpgradeMessage`. With the install's update `channel`
+/// (its newest version and update command), an update that channel cannot
+/// reach is not asked for (#39966).
+fn upgrade_message(
+    catalog: &[CatalogModel],
+    version: Option<&str>,
+    channel: Option<(&str, Option<&str>)>,
+) -> Option<String> {
     let mut unavailable: Vec<&CatalogModel> = catalog
         .iter()
         .filter(|entry| {
@@ -275,11 +282,52 @@ fn upgrade_message(catalog: &[CatalogModel], version: Option<&str>) -> Option<St
     let label = version
         .map(|v| format!("v{v}"))
         .unwrap_or_else(|| "the installed version".into());
+    let name = entry.model["name"].as_str().unwrap_or("");
+    let min = entry.min_version.as_deref().unwrap();
+    if let Some((latest, command)) = channel.filter(|(latest, _)| compare(latest, min).is_lt()) {
+        let too_old =
+            format!("Claude Code {label} is too old for {name}, which needs v{min} or newer");
+        // The two casks conflict, so moving to the faster channel means
+        // replacing the install.
+        if command == Some("brew upgrade --cask claude-code") {
+            return Some(format!("{too_old}, but the claude-code Homebrew cask only has v{latest}. Switch to the claude-code@latest cask: brew uninstall --cask claude-code && brew install --cask claude-code@latest"));
+        }
+        return Some(format!("{too_old}, but the newest version this install can update to is v{latest}. Install Claude Code another way or wait for a newer release."));
+    }
     Some(format!(
-        "Claude Code {label} is too old for {}. Upgrade to v{} or newer to access it.",
-        entry.model["name"].as_str().unwrap_or(""),
-        entry.min_version.as_deref().unwrap()
+        "Claude Code {label} is too old for {name}. Upgrade to v{min} or newer to access it."
     ))
+}
+
+/// `scopeClaudeUpgradeMessageToChannel`: the status check words the upgrade
+/// before the install channel reports its newest version.
+pub(super) fn scope_upgrade_message_to_channel(manifest: &Value, mut row: Value) -> Value {
+    let Some(latest) = row["versionAdvisory"]["latestVersion"]
+        .as_str()
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+    else {
+        return row;
+    };
+    let catalog = catalog(manifest);
+    let version = row["version"].as_str().map(str::to_owned);
+    let Some(message) = row["message"].as_str() else {
+        return row;
+    };
+    if upgrade_message(&catalog, version.as_deref(), None).as_deref() != Some(message) {
+        return row;
+    }
+    let command = row["versionAdvisory"]["updateCommand"]
+        .as_str()
+        .map(str::to_owned);
+    if let Some(scoped) = upgrade_message(
+        &catalog,
+        version.as_deref(),
+        Some((&latest, command.as_deref())),
+    ) {
+        row["message"] = json!(scoped);
+    }
+    row
 }
 
 fn strip_context_suffix(id: &str) -> String {
@@ -1158,7 +1206,7 @@ pub(super) async fn check(
     }
     let version = parse_generic_version(&format!("{}\n{}", output.stdout, output.stderr));
     let update_required_models = update_required(&catalog, version.as_deref());
-    let upgrade = upgrade_message(&catalog, version.as_deref());
+    let upgrade = upgrade_message(&catalog, version.as_deref(), None);
     let caps_timeout = probe_timeout("claude", CAPABILITIES_TIMEOUT_MS, &resolved);
     let key = json!({"config": config, "binary": binary});
     let probed = capabilities(
@@ -1335,10 +1383,26 @@ mod tests {
     #[test]
     fn version_gating_uses_the_catalog() {
         let catalog = catalog(&crate::model_manifest::BUNDLED);
-        let message = upgrade_message(&catalog, Some("2.1.200")).unwrap();
+        let message = upgrade_message(&catalog, Some("2.1.200"), None).unwrap();
         assert_eq!(
             message,
             "Claude Code v2.1.200 is too old for Claude Opus 5. Upgrade to v2.1.219 or newer to access it."
+        );
+        assert_eq!(
+            upgrade_message(&catalog, Some("2.1.200"), Some(("2.1.210", None))).unwrap(),
+            "Claude Code v2.1.200 is too old for Claude Opus 5, which needs v2.1.219 or newer, but the newest version this install can update to is v2.1.210. Install Claude Code another way or wait for a newer release."
+        );
+        assert!(upgrade_message(
+            &catalog,
+            Some("2.1.200"),
+            Some(("2.1.210", Some("brew upgrade --cask claude-code")))
+        )
+        .unwrap()
+        .ends_with("Switch to the claude-code@latest cask: brew uninstall --cask claude-code && brew install --cask claude-code@latest"));
+        // A channel that reaches it asks for the update as before.
+        assert_eq!(
+            upgrade_message(&catalog, Some("2.1.200"), Some(("2.1.300", None))),
+            Some(message.clone())
         );
         let required: Vec<_> = update_required(&catalog, Some("2.1.200"))
             .into_iter()

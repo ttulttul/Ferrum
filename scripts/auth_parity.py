@@ -168,15 +168,19 @@ def exercise(stack, url, owner_cookie, relay_key):
     origin = {"localHttpHost":"127.0.0.1","localHttpPort":urlsplit(url).port}
     endpoint = {"httpBaseUrl":"https://environment.example","wsBaseUrl":"wss://environment.example","providerKind":"manual"}
     proof_input = {"relayIssuer":relay,"challenge":"test","origin":origin,"endpoint":endpoint}
-    record("link origin port mismatch", post("/api/connect/link-proof", {
-        **proof_input, "origin": {**origin, "localHttpPort":443}}))
-    status, _, data = post("/api/connect/link-proof", proof_input)
-    assert status == 200, data
-
     def jwt_parts(token):
         header, body, signature = token.split(".")
         unb64 = lambda s: base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
         return json.loads(unb64(body)), (header + "." + body).encode(), unb64(signature)
+
+    # The caller's origin is not checked (upstream #38892): the proof names
+    # the server's own loopback origin whatever the request says.
+    status, _, body = post("/api/connect/link-proof", {**proof_input, "origin": {**origin, "localHttpPort": 443}})
+    claims = jwt_parts(json.loads(body))[0] if status == 200 else body
+    observations["link origin port mismatch"] = (status, status == 200 and claims["origin"] == origin,
+                                                 status == 200 and sorted(claims))
+    status, _, data = post("/api/connect/link-proof", proof_input)
+    assert status == 200, data
 
     link, message, signature = jwt_parts(json.loads(data))
     environment_key = serialization.load_pem_public_key(link["environmentPublicKey"].encode())

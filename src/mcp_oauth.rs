@@ -614,6 +614,19 @@ impl OAuth {
             })
             .or_else(|| self.reference_access(token))
     }
+    /// RFC 7009 (#41005): ends the MCP client session `token` holds, if it is
+    /// one; any other token is left alone.
+    pub fn revoke_client_token(&self, token: &str) {
+        let name = hashed(token);
+        if self.read::<Grant>("tokens", &name).is_some() {
+            self.remove("tokens", &name);
+            return;
+        }
+        #[cfg(feature = "native")]
+        if let Err(error) = self.reference.revoke(token, now_ms()) {
+            tracing::warn!(%error, "MCP client token revocation failed.");
+        }
+    }
     #[cfg(feature = "native")]
     fn reference_access(&self, token: &str) -> Option<McpAccess> {
         self.reference
@@ -766,6 +779,19 @@ pub fn routes<S: McpHost>() -> Router<Arc<S>> {
         .route("/oauth/mcp/approval", post(approval::<S>))
         .route("/oauth/mcp/decision", post(decision::<S>))
         .route("/oauth/mcp/token", post(token::<S>))
+        .route("/oauth/mcp/revoke", post(revoke::<S>))
+}
+
+/// RFC 7009 §2.2: an unknown or already revoked token gets the same 200 as a
+/// revoked one.
+async fn revoke<S: McpHost>(
+    State(s): State<Arc<S>>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Some(token) = form.get("token") {
+        s.oauth().revoke_client_token(token);
+    }
+    (StatusCode::OK, SECRET_HEADERS).into_response()
 }
 async fn resource(h: HeaderMap) -> Json<Value> {
     let i = origin(&h);
@@ -776,7 +802,7 @@ async fn resource(h: HeaderMap) -> Json<Value> {
 async fn metadata(h: HeaderMap) -> Json<Value> {
     let i = origin(&h);
     Json(
-        json!({"issuer":i,"authorization_endpoint":format!("{i}/oauth/mcp/authorize"),"token_endpoint":format!("{i}/oauth/mcp/token"),"registration_endpoint":format!("{i}/oauth/mcp/register"),"response_types_supported":["code"],"grant_types_supported":["authorization_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],"scopes_supported":SCOPES,"authorization_response_iss_parameter_supported":true}),
+        json!({"issuer":i,"authorization_endpoint":format!("{i}/oauth/mcp/authorize"),"token_endpoint":format!("{i}/oauth/mcp/token"),"registration_endpoint":format!("{i}/oauth/mcp/register"),"revocation_endpoint":format!("{i}/oauth/mcp/revoke"),"response_types_supported":["code"],"grant_types_supported":["authorization_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],"scopes_supported":SCOPES,"authorization_response_iss_parameter_supported":true}),
     )
 }
 fn error(code: &str, desc: &str) -> Response {

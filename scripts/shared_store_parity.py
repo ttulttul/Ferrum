@@ -429,7 +429,7 @@ def main():
 
         # 5. Migration heads the Rust server does not support.
         for name, statement, expected in [
-            ("newer", "INSERT INTO effect_sql_migrations (migration_id, name) VALUES (99, 'FixtureFuture')", "newer"),
+            ("newer", "INSERT INTO effect_sql_migrations (migration_id, name) VALUES (9999, 'FixtureFuture')", "newer"),
             ("older", "DELETE FROM effect_sql_migrations WHERE migration_id = (SELECT MAX(migration_id) FROM effect_sql_migrations)", "older"),
         ]:
             copy = root / f"unsupported-{name}"

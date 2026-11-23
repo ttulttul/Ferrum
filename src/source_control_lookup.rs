@@ -27,6 +27,9 @@ pub(crate) enum LookupFailure {
     Provider {
         detail: String,
         cause: Option<Value>,
+        /// The provider's `userFacingDetail` (#31239): the repository
+        /// error's own detail, when the provider knows why it failed.
+        user_facing: Option<String>,
     },
 }
 
@@ -35,14 +38,26 @@ impl LookupFailure {
         Self::Provider {
             detail: detail.into(),
             cause,
+            user_facing: None,
         }
+    }
+
+    fn user_facing(mut self, text: String) -> Self {
+        if let Self::Provider { user_facing, .. } = &mut self {
+            *user_facing = Some(text);
+        }
+        self
     }
 
     /// The `SourceControlRepositoryError` an RPC answers with, for `operation`.
     pub(crate) fn into_error(self, provider: &str, operation: &str) -> Value {
         match self {
             Self::Repository(error) => error,
-            Self::Provider { detail, cause } => {
+            Self::Provider {
+                detail,
+                cause,
+                user_facing,
+            } => {
                 let mut provider_error = json!({
                     "name": "SourceControlProviderError",
                     "message": format!("Source control provider {provider} failed in getRepositoryCloneUrls: {detail}"),
@@ -51,10 +66,20 @@ impl LookupFailure {
                     provider_error["cause"] = cause;
                 }
                 json!({"_tag": "SourceControlRepositoryError", "provider": provider, "operation": operation,
-                    "detail": LOOKUP_FAILED, "cause": provider_error})
+                    "detail": user_facing.as_deref().unwrap_or(LOOKUP_FAILED), "cause": provider_error})
             }
         }
     }
+}
+
+/// `repositoryNotFoundDetail` (#31239).
+fn repository_not_found(repository: &str) -> String {
+    let repository: String = repository
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(256)
+        .collect();
+    format!("Repository {repository} was not found. Check the owner and name and try again.")
 }
 
 fn info(provider: &str, name_with_owner: &str, url: &str, ssh_url: &str) -> Value {
@@ -248,10 +273,12 @@ async fn github(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
             (default_host.clone(), login, bare.to_owned())
         }
         None => {
+            let detail = "Repositories are named owner/name.";
             return Err(LookupFailure::provider(
-                "Repositories are named owner/name.",
-                None,
-            ))
+                detail,
+                Some(json!({"name": "GitHubRepositoryLookupError", "message": ""})),
+            )
+            .user_facing(detail.into()));
         }
     };
     let mut gh = crate::provider_rpc::Github::at_host(cli, cwd, &host);
@@ -266,7 +293,19 @@ async fn github(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
             None,
         )
         .await
-        .map_err(|f| github_failure(f, &host, REPOSITORY_NOT_FOUND))?;
+        .map_err(|f| match f {
+            crate::provider_rpc::Failure::NotFound => {
+                let detail = repository_not_found(&format!("{owner}/{name}"));
+                LookupFailure::provider(
+                    detail.clone(),
+                    Some(json!({"name": "GitHubRepositoryLookupError", "message": "",
+                        "cause": {"name": "GitHubApiNotFoundError",
+                            "message": "GitHub could not find the requested resource, or the credential cannot see it."}})),
+                )
+                .user_facing(detail)
+            }
+            f => github_failure(f, &host, REPOSITORY_NOT_FOUND),
+        })?;
     let raw: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     match (
         raw["full_name"].as_str(),
@@ -314,7 +353,7 @@ fn gitlab_lookup(repository: &str) -> (Option<String>, String) {
     (Some(host), path.to_owned())
 }
 
-fn gitlab_cli_failure(cwd: &str, output: &Output) -> LookupFailure {
+fn gitlab_cli_failure(cwd: &str, repository: &str, output: &Output) -> LookupFailure {
     // `classifyGlabFailure`: glab prints a missing project as a bare 404.
     let stderr = output.stderr.to_lowercase();
     let (kind, detail) = if stderr.contains("glab auth login") || stderr.contains("invalid_grant") {
@@ -337,12 +376,17 @@ fn gitlab_cli_failure(cwd: &str, output: &Output) -> LookupFailure {
             ),
         );
     }
-    LookupFailure::provider(
+    let failure = LookupFailure::provider(
         "GitLab CLI command failed.",
         Some(
             json!({"name": kind, "message": "GitLab CLI failed in execute: GitLab CLI command failed.", "cause": exit}),
         ),
-    )
+    );
+    if detail == "Merge request not found." {
+        failure.user_facing(repository_not_found(repository))
+    } else {
+        failure
+    }
 }
 
 async fn gitlab(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
@@ -358,7 +402,7 @@ async fn gitlab(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
         LookupFailure::provider(detail, Some(json!({"name": "GitLabCliUnavailableError", "message": format!("GitLab CLI failed in execute: {detail}")})))
     })?;
     if output.code != 0 {
-        return Err(gitlab_cli_failure(cwd, &output));
+        return Err(gitlab_cli_failure(cwd, repository, &output));
     }
     let raw: Value = serde_json::from_str(output.stdout.trim()).unwrap_or(Value::Null);
     let text = |k: &str| raw[k].as_str().map(str::trim).filter(|v| !v.is_empty());
@@ -434,9 +478,14 @@ async fn bitbucket(repository: &str) -> Result<Value, LookupFailure> {
     })?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        return Err(failed(format!(
+        let error = failed(format!(
             "Bitbucket API failed in getRepository: Bitbucket returned HTTP {status}."
-        )));
+        ));
+        return Err(if status == 404 {
+            error.user_facing(repository_not_found(&format!("{workspace}/{slug}")))
+        } else {
+            error
+        });
     }
     let raw: Value = response.json().await.unwrap_or(Value::Null);
     let Some(full) = raw["full_name"].as_str() else {
@@ -639,7 +688,8 @@ async fn forgejo(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
             return Err(LookupFailure::provider(
                 "Forgejo repository or pull request was not found.",
                 Some(json!({"name": "ForgejoCliError", "message": ""})),
-            ))
+            )
+            .user_facing(repository_not_found(&path)))
         }
         _ => {
             return Err(LookupFailure::provider(
@@ -760,10 +810,15 @@ async fn gitcafe(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
         } else {
             format!("GitCafe returned HTTP {status}.")
         };
-        return Err(api_failure(
+        let failure = api_failure(
             detail.clone(),
             json!({"name": "GitCafeResponseError", "message": detail}),
-        ));
+        );
+        return Err(if status == 404 {
+            failure.user_facing(repository_not_found(&path))
+        } else {
+            failure
+        });
     }
     // `cloneUrls(target)`: GitCafe's URLs follow from the host and the path.
     Ok(info(

@@ -5,7 +5,7 @@
 //! configured server URL its `/api/info` and `/global/health` (5s each). The
 //! major version picks the generation:
 //!
-//! - 1.x (at least 1.14.19): the inventory (`/provider`, `/agent`, `/skill`,
+//! - 1.x: the inventory (`/provider`, `/agent`, `/skill`,
 //!   `/command`) of a managed `opencode serve` or the configured server.
 //! - 2.x: the model catalog (`/api/model`, `/api/provider`) of a managed
 //!   `opencode serve` (with a generated `OPENCODE_PASSWORD`) or the
@@ -28,7 +28,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-const MINIMUM_VERSION: &str = "1.14.19";
 const VERSION_TIMEOUT_MS: u64 = 10_000;
 const SERVER_PROBE_TIMEOUT_MS: u64 = 5_000;
 const HEALTH_TIMEOUT_MS: u64 = 5_000;
@@ -550,7 +549,7 @@ async fn probe_binary(binary: &str, env: &ProcessEnv) -> Result<Probed, String> 
         }
     };
     probed(super::parse_generic_version(&output.stdout)).ok_or_else(|| {
-        format!("Unable to determine OpenCode version from `opencode --version` output. T3 Code requires OpenCode v{MINIMUM_VERSION} or newer.")
+        "Unable to determine OpenCode version from `opencode --version` output.".to_owned()
     })
 }
 
@@ -593,7 +592,7 @@ async fn probe_server(url: &str, password: &str, env: &ProcessEnv) -> Result<Pro
             return Ok(result);
         }
     }
-    Err(format!("The server did not identify itself as OpenCode. T3 Code requires OpenCode v{MINIMUM_VERSION} or newer."))
+    Err("The server did not identify itself as OpenCode.".into())
 }
 
 /// `formatOpenCodeProbeError`: (installed, message, signed out).
@@ -896,16 +895,11 @@ async fn verify_v1(server: &Server, directory: &str, env: &ProcessEnv) -> Result
         Ok(result) => result?,
     };
     if health["healthy"] != true || !health["version"].is_string() {
-        return Err(format!("OpenCode server returned an invalid health response. T3 Code requires OpenCode v{MINIMUM_VERSION} or newer."));
+        return Err("OpenCode server returned an invalid health response.".into());
     }
     let version = health["version"].as_str().unwrap().to_owned();
     if maintenance::parse_semver(&version).is_none() {
-        return Err(format!("OpenCode server returned an invalid version. T3 Code requires OpenCode v{MINIMUM_VERSION} or newer."));
-    }
-    if maintenance::compare_semver(&version, MINIMUM_VERSION).is_lt() {
-        return Err(format!(
-            "OpenCode v{version} is too old. Upgrade to v{MINIMUM_VERSION} or newer."
-        ));
+        return Err("OpenCode server returned an invalid version.".into());
     }
     Ok(version)
 }
@@ -1226,11 +1220,8 @@ async fn v2_usage(
     }
     let data = &body["data"];
     if data.is_null() {
-        return Ok(Some(unavailable_usage(
-            checked_at,
-            "unsupported",
-            Some("No OpenCode Console workspace is signed in."),
-        )));
+        // No Console workspace: usage is unsupported, without a message (#41415).
+        return Ok(Some(unavailable_usage(checked_at, "unsupported", None)));
     }
     let workspace = &data["workspace"];
     if !workspace["id"].is_string()
@@ -1525,6 +1516,7 @@ pub(super) async fn check(
     instance_id: &str,
     config: &Value,
     env: &ProcessEnv,
+    manifest: &Value,
 ) -> Draft {
     let settings = Settings::of(config);
     let checked_at = now_iso();
@@ -1580,6 +1572,7 @@ pub(super) async fn check(
         &probe_result,
         &cwd,
         &checked_at,
+        manifest,
     );
     let (provider, usage, installed_version, caps) =
         tokio::join!(provider, usage, installed_version, maintenance_probe);
@@ -1683,6 +1676,7 @@ where
 }
 
 /// `checkOpenCodeProviderStatus`.
+#[allow(clippy::too_many_arguments)]
 async fn provider(
     owners: &Owners,
     instance_id: &str,
@@ -1691,6 +1685,7 @@ async fn provider(
     probe: &Result<Probed, String>,
     cwd: &str,
     checked_at: &str,
+    manifest: &Value,
 ) -> Draft {
     let external = settings.external();
     let fallback = |detail: &str, version: Option<String>, inventory: bool| {
@@ -1723,20 +1718,22 @@ async fn provider(
         )
         .await;
     }
-    if maintenance::compare_semver(&probed.version, MINIMUM_VERSION).is_lt() {
-        return Draft {
+    // The manifest's policy decides which versions work (#39434).
+    let refuse_broken = |detected: &str| {
+        let advisory = super::provider_compatibility(manifest, "opencode", detected);
+        super::broken_version_detail("OpenCode", detected, advisory.as_ref()).map(|message| Draft {
             installed: true,
-            version: Some(probed.version.clone()),
+            version: Some(detected.to_owned()),
             status: "error",
             auth: json!({"status": "unknown"}),
             checked_at: checked_at.to_owned(),
-            message: Some(format!(
-                "OpenCode v{} is too old. Upgrade to v{MINIMUM_VERSION} or newer.",
-                probed.version
-            )),
+            message: Some(message),
             models: models_from_settings(vec![], &settings.custom, default_capabilities()),
             ..Default::default()
-        };
+        })
+    };
+    if let Some(refused) = refuse_broken(&probed.version) {
+        return refused;
     }
     let installed_version: Vec<(&'static str, Value)> = if external {
         vec![]
@@ -1790,6 +1787,13 @@ async fn provider(
             .await
     };
     let version = version.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    // The server that answered can differ from the CLI the probe ran.
+    if version != probed.version {
+        if let Some(mut refused) = refuse_broken(&version) {
+            refused.extra = installed_version;
+            return refused;
+        }
+    }
     let inventory = match inventory {
         Err(detail) => {
             let mut draft = fallback(&detail, Some(version), true);

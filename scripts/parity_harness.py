@@ -29,10 +29,10 @@ def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def http(base, method, path, body=None, headers=None):
+def http(base, method, path, body=None, headers=None, timeout=10):
     url = urlsplit(base)
     connection = (http_client.HTTPSConnection if url.scheme == "https" else http_client.HTTPConnection)(
-        url.hostname, url.port, timeout=10
+        url.hostname, url.port, timeout=timeout
     )
     try:
         connection.request(method, url.path.rstrip("/") + path, body, headers or {})
@@ -48,7 +48,8 @@ def ready(url, process=None):
         if process and process.poll() is not None:
             raise RuntimeError(f"server exited before readiness ({process.returncode})")
         try:
-            if http(url, "GET", "/ws")[0] == 426:
+            # A request the reference accepts before it serves is never answered; probe again.
+            if http(url, "GET", "/ws", timeout=0.5)[0] == 426:
                 return
         except (OSError, http_client.HTTPException):
             pass
@@ -285,7 +286,10 @@ def offline_env():
     env = {"T3CODE_TELEMETRY_ENABLED": "false", "NODE_USE_ENV_PROXY": "1",
            # Host CLIs a server may run (gh, az) have telemetry and update checks of their own.
            "GH_TELEMETRY": "false", "DO_NOT_TRACK": "1", "GH_NO_UPDATE_NOTIFIER": "1",
-           "AZURE_CORE_COLLECT_TELEMETRY": "false"}
+           "AZURE_CORE_COLLECT_TELEMETRY": "false",
+           # No session bus: gh would wait on a desktop keyring there (the reference turns the bus
+           # off only where none exists, #23824), so both servers see gh fail fast as in CI.
+           "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
         env[name] = env[name.lower()] = proxy
     env["NO_PROXY"] = env["no_proxy"] = loopback

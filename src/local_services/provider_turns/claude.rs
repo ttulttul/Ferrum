@@ -426,9 +426,18 @@ impl<'a> Attempt<'a> {
                         ));
                     }
                     self.interrupted = true;
-                    // A waiting request stays pending, as the reference
-                    // leaves it, unless Claude Code withdraws it.
                     self.interrupt().await;
+                    // The reference closes the query after its interrupt,
+                    // which aborts a waiting request's callback: it ends
+                    // cancelled.
+                    let mut waiting: Vec<String> = self.pending.drain().map(|(id, _)| id).collect();
+                    waiting.sort();
+                    for id in waiting {
+                        self.sink.send(ProviderEvent::RuntimeRequestClosed {
+                            id,
+                            status: "cancelled".into(),
+                        });
+                    }
                     deadline = Some(tokio::time::Instant::now() + INTERRUPT_GRACE);
                     continue;
                 }

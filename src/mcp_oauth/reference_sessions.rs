@@ -160,6 +160,30 @@ impl ReferenceSessions {
         }
     }
 
+    /// `EnvironmentAuth.revokeMcpClientToken` (#41005): ends the MCP client
+    /// session `token` authenticates; false for any other token.
+    pub(super) fn revoke(&self, token: &str, now_ms: i64) -> anyhow::Result<bool> {
+        if self.verify(token, now_ms)?.is_none() {
+            return Ok(false);
+        }
+        let Some(claims) = token
+            .split('.')
+            .next()
+            .and_then(|payload| B64.decode(payload).ok())
+            .and_then(|json| serde_json::from_slice::<Claims>(&json).ok())
+        else {
+            return Ok(false);
+        };
+        let Some(conn) = self.open()? else {
+            return Ok(false);
+        };
+        let at = crate::auth_service::iso(now_ms);
+        Ok(conn.execute(
+            "UPDATE auth_sessions SET revoked_at = ?1 WHERE session_id = ?2 AND revoked_at IS NULL",
+            rusqlite::params![at, claims.sid],
+        )? > 0)
+    }
+
     /// What `EnvironmentAuth.authenticateMcpClient` grants `token`, or `None`
     /// when it does not accept it. `Err` is a store that could not be read.
     pub(super) fn verify(&self, token: &str, now_ms: i64) -> anyhow::Result<Option<McpAccess>> {

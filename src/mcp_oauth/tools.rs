@@ -2572,7 +2572,9 @@ fn environment_unlink<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outco
     let removed = host
         .unlink_peer(&environment_id)
         .map_err(|message| failure("orchestration_error", message))?;
-    Ok(json!({"environmentId": environment_id, "removed": removed}))
+    // Rust forgets the link here only; it does not end the session at the
+    // peer, as the reference's unlink does (#41005).
+    Ok(json!({"environmentId": environment_id, "removed": removed, "endedThere": false}))
 }
 
 /// The card id a link request gets: turn item ids are global, so the key is

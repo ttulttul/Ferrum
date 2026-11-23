@@ -609,11 +609,17 @@ pub(crate) fn wake_detail(task_ids: &[Value], tasks: &[Value]) -> String {
                 .and_then(|t| t["title"].as_str())
                 .map(|t| format!(" ({t})"))
                 .unwrap_or_default();
+            // A follow-up gets a fresh task id; the child thread links it to
+            // the task delegate_task returned (#39297).
+            let thread = task
+                .and_then(|t| t["childThreadId"].as_str())
+                .map(|c| format!(" in child thread {c}"))
+                .unwrap_or_default();
             let state = match task {
                 None => " reached a terminal state".to_owned(),
                 Some(t) => format!(" [{}]", t["status"].as_str().unwrap_or_default()),
             };
-            let label = format!("Delegated task {id}{title}{state}");
+            let label = format!("Delegated task {id}{title}{thread}{state}");
             if let Some(result) = task.and_then(|t| t["result"].as_str()) {
                 let detail = format!("{label}:\n{result}");
                 if detail.len() <= remaining {
@@ -2590,11 +2596,17 @@ mod tests {
 
     #[test]
     fn a_wake_inlines_results_and_points_at_task_status_otherwise() {
-        let tasks =
-            vec![json!({"id": "t1", "title": "Greeter", "status": "completed", "result": "Hi."})];
+        let tasks = vec![
+            json!({"id": "t1", "title": "Greeter", "status": "completed", "result": "Hi."}),
+            json!({"id": "t3", "status": "failed", "childThreadId": "thread:child"}),
+        ];
         assert_eq!(
             wake_detail(&[json!("t1")], &tasks),
             "Delegated task t1 (Greeter) [completed]:\nHi."
+        );
+        assert_eq!(
+            wake_detail(&[json!("t3")], &tasks),
+            "Delegated task t3 in child thread thread:child [failed]. Use task_status with taskId t3 to read the result."
         );
         assert_eq!(
             wake_detail(&[json!("t2")], &tasks),

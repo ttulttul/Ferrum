@@ -688,39 +688,43 @@ def every(milliseconds, profile="balanced", **overrides):
 
 # Periodic checks run only while a client reports activity on provider status (BackgroundPolicy):
 # each scenario checks grok every 3 s and reports whether any periodic check ran in 12 s while a
-# client held its report (or none did).
+# client held its report (or none did). A ready grok is not rechecked at all (upstream #39623),
+# so these use a signed-out one.
 GROK_ON_INTERVAL = {**enabled("grok"), **every(3000)}
+GROK_INTERVAL_FAKE = {"spec": {"commands": [{"args": ["--version"], **ok("grok 1.0.52")},
+                                            {"args": ["models"], **ok("Not authenticated. Run `grok login`.")},
+                                            GROK_SKILLS, GROK_ACP]}}
 SCENARIOS += [
     {"name": "interval check skipped without a client", "instance": "grok", "settings": GROK_ON_INTERVAL,
-     "fakes": {"grok": GROK_FAKE}, "interval": {"report": None}},
+     "fakes": {"grok": GROK_INTERVAL_FAKE}, "interval": {"report": None}},
     {"name": "interval check runs for a focused client", "instance": "grok", "settings": GROK_ON_INTERVAL,
-     "fakes": {"grok": GROK_FAKE}, "interval": {"report": activity()}},
+     "fakes": {"grok": GROK_INTERVAL_FAKE}, "interval": {"report": activity()}},
     {"name": "interval check waits for a background client", "instance": "grok", "settings": GROK_ON_INTERVAL,
-     "fakes": {"grok": GROK_FAKE}, "interval": {"report": activity(focused=False)}},
+     "fakes": {"grok": GROK_INTERVAL_FAKE}, "interval": {"report": activity(focused=False)}},
     {"name": "interval check runs for a background client under performance", "instance": "grok",
      "settings": {**enabled("grok"), **every(3000, "performance")},
-     "fakes": {"grok": GROK_FAKE}, "interval": {"report": activity(focused=False)}},
+     "fakes": {"grok": GROK_INTERVAL_FAKE}, "interval": {"report": activity(focused=False)}},
     {"name": "interval check runs for a client watching the instance", "instance": "grok",
-     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_FAKE},
+     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_INTERVAL_FAKE},
      "interval": {"report": activity([{"type": "provider-status", "instanceId": "grok"}])}},
     {"name": "interval check skipped for a client watching another instance", "instance": "grok",
-     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_FAKE},
+     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_INTERVAL_FAKE},
      "interval": {"report": activity([{"type": "provider-status", "instanceId": "codex"}, {"type": "diagnostics"}])}},
     {"name": "interval check paused for a low-power client", "instance": "grok", "settings": GROK_ON_INTERVAL,
-     "fakes": {"grok": GROK_FAKE}, "interval": {"report": activity(lowPowerMode="true")}},
+     "fakes": {"grok": GROK_INTERVAL_FAKE}, "interval": {"report": activity(lowPowerMode="true")}},
     {"name": "interval check runs for a low-power client when allowed", "instance": "grok",
      "settings": {**enabled("grok"), **every(3000, pauseWhenClientLowPower=False)},
-     "fakes": {"grok": GROK_FAKE}, "interval": {"report": activity(lowPowerMode="true")}},
+     "fakes": {"grok": GROK_INTERVAL_FAKE}, "interval": {"report": activity(lowPowerMode="true")}},
     # A report outlives its socket until it expires, as the reference's leases do.
     {"name": "interval check continues after the client disconnects", "instance": "grok",
-     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_FAKE},
+     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_INTERVAL_FAKE},
      "interval": {"report": activity(), "disconnect": True}},
     # The same client reporting again from another socket replaces its earlier report.
     {"name": "interval check follows the latest report from the same client", "instance": "grok",
-     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_FAKE},
+     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_INTERVAL_FAKE},
      "interval": {"report": activity(), "disconnect": True, "then": activity(focused=False)}},
     {"name": "interval check skipped after the client report expires", "instance": "grok",
-     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_FAKE},
+     "settings": GROK_ON_INTERVAL, "fakes": {"grok": GROK_INTERVAL_FAKE},
      "interval": {"report": activity(ttlMs=1000), "settle": 2}},
 ]
 

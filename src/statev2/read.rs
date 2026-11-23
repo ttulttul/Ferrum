@@ -12,7 +12,7 @@ pub fn projects(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     let mut statement = conn.prepare(
         "SELECT project_id, title, has_custom_title, workspace_root, default_model_selection_json,
                 default_thread_env_mode, auto_pull, favicon_path, project_icon_json, scripts_json,
-                pinned_at, archived_at, created_at, updated_at, deleted_at
+                pinned_at, archived_at, created_at, updated_at, deleted_at, tracked_folders_json
          FROM projection_projects
          ORDER BY created_at ASC, project_id ASC",
     )?;
@@ -35,6 +35,8 @@ pub fn projects(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
             "defaultThreadEnvMode": row.get::<_, Option<String>>(5)?,
             "autoPull": row.get::<_, i64>(6)? != 0,
             "scripts": match json_column(9)? { Value::Null => json!([]), scripts => scripts },
+            // A project's nested repositories (#35925).
+            "trackedFolders": match json_column(15)? { folders @ Value::Array(_) => folders, _ => json!([]) },
             "pinnedAt": row.get::<_, Option<String>>(10)?,
             "archivedAt": row.get::<_, Option<String>>(11)?,
             "createdAt": row.get::<_, String>(12)?,

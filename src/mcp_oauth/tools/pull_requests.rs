@@ -204,6 +204,8 @@ async fn watch<S: McpHost>(
 ) -> Outcome {
     let existing = visible(row).into_iter().find(|l| same(l, &target));
     let was = existing.is_some_and(|l| l.get("watch").is_some());
+    // CI as the start read saw it (#40866).
+    let mut checks_state = Value::Null;
     if watching {
         if row["lineage"]["relationshipToParent"] == "subagent" {
             return Err(message("This thread is a subagent, so it cannot watch pull requests. Its parent thread owns the pull request: finish your task and report back instead."));
@@ -221,6 +223,7 @@ async fn watch<S: McpHost>(
                 .await
             {
                 Some(Ok(summary)) if summary["state"] == "merged" => return Err(merged()),
+                Some(Ok(summary)) => checks_state = summary["checksState"].clone(),
                 Some(Err(e)) if e["_tag"] != "PullRequestOperationError" => {
                     return Err(message(provider_message(&e)))
                 }
@@ -255,6 +258,13 @@ async fn watch<S: McpHost>(
         .iter()
         .any(|l| same(l, &target) && l.get("watch").is_some()));
     target["wasWatching"] = json!(was);
+    if checks_state.is_string() {
+        // Checks that already passed never wake the watch.
+        if checks_state == "passing" {
+            target["next"] = json!("Checks already pass on this head, so no wake will come for them. Act on that now; the watch still wakes you on later changes.");
+        }
+        target["checksState"] = checks_state;
+    }
     Ok(target)
 }
 

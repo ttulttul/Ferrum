@@ -473,16 +473,25 @@ impl Tracker {
         let claim = json!({"projectId": project_id, "cwd": destination,
             "remoteUrl": prepared.remote_url, "repository": prepared.repository,
             "provider": input.provider.as_deref().unwrap_or("unknown")});
+        let superseded: Vec<String>;
         {
             let mut clones = self.clones.lock().unwrap();
             clones.sequence += 1;
             let sequence = clones.sequence;
-            if clones
+            let overlapping: Vec<(String, bool)> = clones
                 .tracked
                 .iter()
-                .any(|(id, t)| *id == project_id || t.destination == destination)
-            {
+                .filter(|(id, t)| **id == project_id || t.destination == destination)
+                .map(|(id, t)| (id.clone(), t.snapshot["phase"] == "running"))
+                .collect();
+            // Only a running clone owns its destination; a failed or
+            // cancelled one no longer blocks it (#40739).
+            if overlapping.iter().any(|(_, running)| *running) {
                 return Err(already_in_progress(&claim));
+            }
+            superseded = overlapping.into_iter().map(|(id, _)| id).collect();
+            for stale in &superseded {
+                clones.tracked.shift_remove(stale);
             }
             let snapshot = json!({
                 "projectId": project_id, "remoteUrl": prepared.remote_url, "destinationPath": destination,
@@ -500,6 +509,10 @@ impl Tracker {
                     protocol: input.protocol.clone().unwrap_or_else(|| "auto".into()),
                 },
             );
+        }
+        // A superseded entry's pending removal would otherwise drop the new one.
+        for stale in &superseded {
+            self.clear_retention(stale);
         }
         self.expire_unlaunched(&project_id);
         Ok(claim)

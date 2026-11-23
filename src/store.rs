@@ -819,7 +819,7 @@ pub(crate) fn wire_project(p: &Project) -> serde_json::Value {
         time::OffsetDateTime::from_unix_timestamp(p.created_at as i64)
             .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
     );
-    serde_json::json!({"id":p.id,"title":p.name,"hasCustomTitle":false,"workspaceRoot":p.path,"repositoryIdentity":null,"faviconPath":null,"projectIcon":null,"defaultModelSelection":null,"defaultThreadEnvMode":null,"autoPull":false,"scripts":[],"pinnedAt":null,"archivedAt":null,"createdAt":at,"updatedAt":at,"deletedAt":null})
+    serde_json::json!({"id":p.id,"title":p.name,"hasCustomTitle":false,"workspaceRoot":p.path,"repositoryIdentity":null,"faviconPath":null,"projectIcon":null,"defaultModelSelection":null,"defaultThreadEnvMode":null,"autoPull":false,"scripts":[],"trackedFolders":[],"pinnedAt":null,"archivedAt":null,"createdAt":at,"updatedAt":at,"deletedAt":null})
 }
 
 /// `orchestration.getOlderSettledThreads`: settled threads older than

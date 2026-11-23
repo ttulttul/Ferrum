@@ -56,7 +56,7 @@ mod assets;
 
 /// The defect `assets.createUrl` answers for a resource it cannot decode,
 /// as the reference's schema words it.
-pub(crate) const ASSET_RESOURCE_DEFECT: &str = "Expected { readonly \"_tag\": \"workspace-file\", ... } | { readonly \"_tag\": \"media-file\", readonly \"disposition\"?: \"attachment\", readonly \"hostOnly\"?: true, ... } | { readonly \"_tag\": \"draft-workspace-file\", ... } | { readonly \"_tag\": \"attachment\", readonly \"renderIntent\"?: \"mcp-app\", ... } | { readonly \"_tag\": \"tool-output-image\", ... } | { readonly \"_tag\": \"project-favicon\", ... } | { readonly \"_tag\": \"native-app-icon\", ... } | { readonly \"_tag\": \"environment-theme-background\", ... } | { readonly \"_tag\": \"github-media\", ... }\n  at [\"resource\"]";
+pub(crate) const ASSET_RESOURCE_DEFECT: &str = "Expected { readonly \"_tag\": \"workspace-file\", ... } | { readonly \"_tag\": \"media-file\", readonly \"disposition\"?: \"attachment\", readonly \"hostOnly\"?: true, ... } | { readonly \"_tag\": \"draft-workspace-file\", readonly \"disposition\"?: \"attachment\", ... } | { readonly \"_tag\": \"attachment\", readonly \"renderIntent\"?: \"mcp-app\", ... } | { readonly \"_tag\": \"tool-output-image\", ... } | { readonly \"_tag\": \"project-favicon\", ... } | { readonly \"_tag\": \"native-app-icon\", ... } | { readonly \"_tag\": \"environment-theme-background\", ... } | { readonly \"_tag\": \"github-media\", ... }\n  at [\"resource\"]";
 
 /// Where the workspace lives on the `t3-agentd` side.
 pub const WORKSPACE_ROOT: &str = "/workspace";
@@ -1342,7 +1342,8 @@ impl ControlPlane {
             return Reply::defect("Missing key\n  at [\"environmentId\"]".into());
         };
         match self.peer_links.unlink(environment_id) {
-            Ok(removed) => Reply::Success(json!({"removed": removed})),
+            // Rust does not end the link's session at the peer (#41005).
+            Ok(removed) => Reply::Success(json!({"removed": removed, "endedThere": false})),
             Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.to_json()})),
         }
     }

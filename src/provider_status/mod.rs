@@ -464,7 +464,14 @@ async fn check_instance(
             muse::check(&instance.config, &env).await
         }
         "opencode" => {
-            opencode::check(&service.opencode, &instance.id, &instance.config, &env).await
+            opencode::check(
+                &service.opencode,
+                &instance.id,
+                &instance.config,
+                &env,
+                &manifest,
+            )
+            .await
         }
         "cursor" => {
             cursor::check(
@@ -476,7 +483,7 @@ async fn check_instance(
             )
             .await
         }
-        "pi" => pi::check(&instance.config, &env, &service.caches).await,
+        "pi" => pi::check(&instance.config, &env, &service.caches, &manifest).await,
         _ => return CheckOutcome::Skipped,
     };
     // The row it replaces: the last one shown for these settings, or the
@@ -520,6 +527,9 @@ async fn check_instance(
             settings["enableProviderUpdateChecks"] != false,
         )
         .await;
+        if instance.driver == "claudeAgent" {
+            row = claude::scope_upgrade_message_to_channel(&manifest, row);
+        }
     }
     row = apply_compatibility(row, &manifest);
     let unauthenticated = row["auth"]["status"] == "unauthenticated";
@@ -602,10 +612,11 @@ async fn futures_join_all(checks: Vec<impl std::future::Future<Output = ()> + Se
 }
 
 /// The driver's `refreshOnInterval`: OpenCode only rechecks a row that is not
-/// ready yet (a failed or still-loading catalog); healthy instances need no
-/// recurring server starts.
+/// ready yet (a failed or still-loading catalog), and Grok one that is not
+/// ready (#39623); healthy instances need no recurring checks.
 fn refresh_on_interval(driver: &str, row: Option<&Value>) -> bool {
     match (driver, row) {
+        ("grok", Some(row)) => row["status"] != "ready",
         ("opencode", Some(row)) => {
             row["enabled"] == true
                 && row["installed"] == true
@@ -1296,6 +1307,39 @@ fn resolve_compatibility(policies: &Value, driver: &str, version: Option<&str>) 
         "recommendedVersion": recommended_version,
         "recommendedRange": recommended_range,
     }))
+}
+
+/// `ModelManifest.providerCompatibility`: the advisory for `version`, from
+/// the manifest's policies or else the bundled manifest's.
+pub(crate) fn provider_compatibility(
+    manifest: &Value,
+    driver: &str,
+    version: &str,
+) -> Option<Value> {
+    resolve_compatibility(&manifest["compatibility"], driver, Some(version)).or_else(|| {
+        resolve_compatibility(
+            &crate::model_manifest::BUNDLED["compatibility"],
+            driver,
+            Some(version),
+        )
+    })
+}
+
+/// `brokenVersionDetail` (#39434): why a version the manifest marks broken
+/// is refused; none for any other.
+pub(crate) fn broken_version_detail(
+    name: &str,
+    version: &str,
+    advisory: Option<&Value>,
+) -> Option<String> {
+    let advisory = advisory.filter(|a| a["status"] == "broken")?;
+    let target = advisory["recommendedVersion"]
+        .as_str()
+        .or(advisory["recommendedRange"].as_str())
+        .unwrap_or("a newer version");
+    Some(format!(
+        "{name} {version} does not work with this T3 Code release. Update {name} to {target}, then retry."
+    ))
 }
 
 /// `applyProviderCompatibility` with the manifest's policies, falling back

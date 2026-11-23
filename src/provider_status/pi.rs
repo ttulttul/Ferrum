@@ -20,7 +20,6 @@ const VERSION_TIMEOUT_MS: u64 = 10_000;
 const RPC_DISCOVERY_TIMEOUT_MS: u64 = 30_000;
 const TEXT_GENERATION_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TIMEOUT_MS: u64 = 4_000;
-const MINIMUM_VERSION: &str = "0.84.3";
 const NPM_PACKAGE: &str = "@earendil-works/pi-coding-agent";
 
 const RESERVED: [&str; 17] = [
@@ -815,7 +814,12 @@ async fn maintenance(binary: &str, env: &ProcessEnv) -> maintenance::Capabilitie
     )
 }
 
-pub(super) async fn check(config: &Value, env: &ProcessEnv, caches: &Path) -> Draft {
+pub(super) async fn check(
+    config: &Value,
+    env: &ProcessEnv,
+    caches: &Path,
+    manifest: &Value,
+) -> Draft {
     let checked_at = now_iso();
     let probe = probe_env(env);
     let binary = binary(config);
@@ -858,16 +862,18 @@ pub(super) async fn check(config: &Value, env: &ProcessEnv, caches: &Path) -> Dr
         );
     }
     let Some(version) = version else {
-        return result("error", None, true, format!(
-            "T3 Code could not determine the Pi version. Pi {MINIMUM_VERSION} or newer is required."));
-    };
-    if maintenance::compare_semver(&version, MINIMUM_VERSION).is_lt() {
         return result(
             "error",
-            Some(version.clone()),
+            None,
             true,
-            format!("Pi {version} is unsupported. Update to Pi {MINIMUM_VERSION} or newer."),
+            "T3 Code could not determine the Pi version. Update Pi, then refresh its status."
+                .into(),
         );
+    };
+    // The manifest's policy decides which versions work (#39434).
+    let advisory = super::provider_compatibility(manifest, "pi", &version);
+    if let Some(broken) = super::broken_version_detail("Pi", &version, advisory.as_ref()) {
+        return result("error", Some(version.clone()), true, broken);
     }
     let launch_args = match resolve_launch_args(config["launchArgs"].as_str().unwrap_or("").trim())
     {
@@ -1020,12 +1026,20 @@ async fn run_text_generation(
         .ok()
         .filter(|output| output.code == 0)
         .and_then(|output| super::cli_version(&output));
-        if version
-            .is_none_or(|version| maintenance::compare_semver(&version, MINIMUM_VERSION).is_lt())
-        {
-            return Err(format!(
-                "Pi {MINIMUM_VERSION} or newer is required for text generation thinking options. Update Pi and try again."
-            ));
+        // The bundled manifest's policy decides which versions work (#39434).
+        let broken = match &version {
+            None => Some(
+                "T3 Code could not determine the Pi version. Update Pi and try again.".to_owned(),
+            ),
+            Some(version) => super::broken_version_detail(
+                "Pi",
+                version,
+                super::provider_compatibility(&crate::model_manifest::BUNDLED, "pi", version)
+                    .as_ref(),
+            ),
+        };
+        if let Some(broken) = broken {
+            return Err(broken);
         }
     }
     let launch_args = resolve_launch_args(config["launchArgs"].as_str().unwrap_or("").trim())?;

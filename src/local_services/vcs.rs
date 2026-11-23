@@ -41,7 +41,11 @@ async fn ref_snapshot(cwd: &str) -> Option<String> {
     if !matches!(head.status.code(), Some(0 | 1)) {
         return None;
     }
-    let common = read(cwd, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).await?;
+    let common = read(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .await?;
     let common = Path::new(common.trim());
     let shallow = std::fs::read_to_string(common.join("shallow")).unwrap_or_default();
     let stamp = worktree_stamp(common).await?;
@@ -74,12 +78,13 @@ async fn worktree_stamp(common: &Path) -> Option<String> {
     };
     let mut paths: BTreeMap<String, String> = BTreeMap::new();
     let (mut path, mut branch, mut prunable) = (None::<String>, None::<String>, false);
-    let mut flush = |path: &mut Option<String>, branch: &mut Option<String>, prunable: &mut bool| {
-        if let (Some(p), Some(b), false) = (path.take(), branch.take(), *prunable) {
-            paths.insert(b, p);
-        }
-        *prunable = false;
-    };
+    let mut flush =
+        |path: &mut Option<String>, branch: &mut Option<String>, prunable: &mut bool| {
+            if let (Some(p), Some(b), false) = (path.take(), branch.take(), *prunable) {
+                paths.insert(b, p);
+            }
+            *prunable = false;
+        };
     for field in stdout.split('\0') {
         if field.is_empty() {
             flush(&mut path, &mut branch, &mut prunable);

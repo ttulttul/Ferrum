@@ -124,6 +124,7 @@ pub(crate) fn project_shell(row: &Value) -> Value {
         "faviconPath",
         "projectIcon",
         "scripts",
+        "trackedFolders",
         "pinnedAt",
         "archivedAt",
         "createdAt",
@@ -131,6 +132,8 @@ pub(crate) fn project_shell(row: &Value) -> Value {
     ] {
         if let Some(v) = row.get(k) {
             out.insert(k.to_owned(), v.clone());
+        } else if k == "trackedFolders" {
+            out.insert(k.to_owned(), json!([]));
         }
     }
     Value::Object(out)
