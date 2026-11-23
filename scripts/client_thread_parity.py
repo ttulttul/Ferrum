@@ -56,6 +56,7 @@ pushes to main.
 """
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -153,8 +154,22 @@ PI_TITLE_SPEC = {"commands": [
     {"prefix": ["--mode", "rpc"], "pi": {"get_state": _PI_STATE, "get_available_models": _PI_MODELS,
                                          "get_commands": {"commands": []}}}]}
 
+# A 1x1 PNG and a text file a client uploads and sends with the turn's message.
+_ATTACHMENT_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c63f8cfc0f01f0005000201a5f5cc2a0000000049454e44ae426082")
+_UPLOADS = [
+    {"type": "image", "name": "pixel.png", "mimeType": "image/png", "content": _ATTACHMENT_PNG},
+    {"type": "file", "name": "notes.md", "mimeType": "text/markdown", "content": "# Notes\nFixture file.\n"},
+]
+
 PROVIDER_SCENARIOS = [
     {"name": "codex turn", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"},
+    # The message carries uploads: claimed for the thread, shown on it, and sent to the CLI.
+    {"name": "codex attachments", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
+     "uploads": _UPLOADS},
+    {"name": "claude attachments", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_turn.json", "uploads": _UPLOADS},
     # The turn calls T3's tools on the MCP server the server gave its CLI.
     {"name": "codex agent mcp", "instance": "codex", "model": "fixture", "scenario": "codex_mcp.json"},
     {"name": "claude agent mcp", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_mcp.json"},
@@ -602,7 +617,10 @@ def compare_thread(original, rust):
                 if path not in a or path not in b or (left_types and right_types and left_types != right_types):
                     problems.append(f"{name} {path}: original {sorted(a.get(path, []))} rust {sorted(b.get(path, []))}")
             for field in STABLE_FIELDS.get(name, []):
-                values = [[record.get(field) for record in side[name]] for side in (ours, theirs)]
+                # An attachment's id holds a generated uuid.
+                values = [[json.loads(UUID.sub("<uuid>", json.dumps(record.get(field))))
+                           if field == "attachments" else record.get(field)
+                           for record in side[name]] for side in (ours, theirs)]
                 if values[0] != values[1]:
                     problems.append(f"{name}.{field}: original {values[0]!r} rust {values[1]!r}")
         for name in sorted(set(ours) - set(theirs)):
@@ -677,9 +695,71 @@ def seed_turn(url, cookie, root, scenario):
             "respond": scenario.get("respond"), "change": scenario.get("change"),
             "steer": scenario.get("steer"), "changeAfter": scenario.get("changeAfter"), "dispatch": {
         "type": "message.dispatch", "commandId": "turn-message", "threadId": THREAD,
-        "messageId": "message:turn", "text": "Run echo hi and write notes.txt", "attachments": [],
+        "messageId": "message:turn", "text": "Run echo hi and write notes.txt",
+        "attachments": upload_attachments(url, cookie, scenario.get("uploads", [])),
         "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"},
         **scenario.get("dispatch", {})}}
+
+
+def upload_attachments(url, cookie, uploads):
+    """Each upload as a client sends it: an upload URL for its name, type and size, its exact bytes
+    posted there, then the pending attachment the message names."""
+    attachments = []
+    for upload in uploads:
+        content = upload["content"].encode() if isinstance(upload["content"], str) else upload["content"]
+        meta = {"type": upload["type"], "name": upload["name"], "mimeType": upload["mimeType"],
+                "sizeBytes": len(content)}
+        issued = rpc(url, cookie, "attachments.createUploadUrl", meta)
+        status, _, body = http(url, "POST", issued["relativeUrl"], content,
+                               {"Cookie": cookie, "Content-Type": "application/octet-stream"})
+        if status >= 300:
+            raise RuntimeError(f"upload of {upload['name']} failed on {url}: HTTP {status} {body[:200]!r}")
+        attachments.append({**meta, "id": issued["attachmentId"]})
+    return attachments
+
+
+def without_home(value, extra, paths):
+    """`value` with each Claude attachment budget less `extra` bytes for each of `paths` attachment
+    paths in the prompt, so a longer home path counts as a shorter one would."""
+    if isinstance(value, dict):
+        budget = value.get("claudeAttachmentBudget")
+        if isinstance(budget, dict) and isinstance(budget.get("bytesUsed"), int):
+            budget["bytesUsed"] -= extra * paths
+        for item in value.values():
+            without_home(item, extra, paths)
+    elif isinstance(value, list):
+        for item in value:
+            without_home(item, extra, paths)
+
+
+def turn_inputs(log, root):
+    """What the provider CLI was asked: each Codex turn/start input and each Claude user message,
+    with homes and ids masked and image data by its hash."""
+    def mask(value):
+        if isinstance(value, str):
+            value = re.sub(r"data:([^;]+);base64,([A-Za-z0-9+/=]+)",
+                           lambda m: f"data:{m[1]};sha256={hashlib.sha256(m[2].encode()).hexdigest()}", value)
+            for server in ("original", "rust"):
+                value = value.replace(f"{root}/{server}", "<home>/<server>")
+            return UUID.sub("<uuid>", value.replace(str(root), "<home>"))
+        if isinstance(value, list):
+            return [mask(item) for item in value]
+        if isinstance(value, dict):
+            if value.get("type") == "base64" and isinstance(value.get("data"), str):
+                value = {**value, "data": "sha256=" + hashlib.sha256(value["data"].encode()).hexdigest()}
+            return {key: mask(item) for key, item in value.items()}
+        return value
+    messages = Path(str(log) + ".messages")
+    out = []
+    for line in (messages.read_text().splitlines() if messages.exists() else []):
+        with contextlib.suppress(ValueError):
+            message = json.loads(json.loads(line)["line"])
+            if message.get("method") == "turn/start":
+                out.append(f"turn/start input {json.dumps(mask(message['params'].get('input')), sort_keys=True)}")
+            # A steer goes with a priority; the turn's own message without one.
+            elif message.get("type") == "user" and "priority" not in message:
+                out.append(f"claude user {json.dumps(mask(message.get('message')), sort_keys=True)}")
+    return out
 
 
 def rendered_turn(projection):
@@ -696,7 +776,11 @@ def rendered_turn(projection):
     return {
         "items": [item(record) for record in items],
         "messages": [f"{m.get('role')} {m.get('createdBy')}/{m.get('creationSource')}: {str(m.get('text'))[:80]}"
+                     + "".join(f" +{a.get('type')} {a.get('name')} {a.get('mimeType')} {a.get('sizeBytes')} "
+                               f"{UUID.sub('<uuid>', str(a.get('id')))}" for a in m.get("attachments") or [])
                      for m in projection.get("messages", [])],
+        "item attachments": [UUID.sub("<uuid>", json.dumps(record.get("attachments"), sort_keys=True))
+                             for record in items if record.get("attachments")],
         "runs": [run.get("status") for run in projection.get("runs", [])],
         # A stopped run owns the rollback point at its ordinal, even with other messages queued.
         "stopped checkpoints": [
@@ -1420,6 +1504,9 @@ def compare_turn(original, rust):
     launch = [original.get("launch", []), rust.get("launch", [])]
     if launch[0] != launch[1]:
         problems["cli launch"] = [f"original {line}" for line in launch[0]] + [f"rust     {line}" for line in launch[1]]
+    inputs = [original.get("inputs", []), rust.get("inputs", [])]
+    if inputs[0] != inputs[1]:
+        problems["turn input"] = [f"original {line}" for line in inputs[0]] + [f"rust     {line}" for line in inputs[1]]
     mcp = comparable_mcp(original.get("mcp", []), rust.get("mcp", []))
     if mcp[0] != mcp[1]:
         problems["agent mcp"] = mcp_diff_lines(mcp[0], mcp[1])
@@ -1670,6 +1757,11 @@ def provider_turns(args, credentials):
                     if scenario.get("titleAfterTurn"):
                         seeded["settledFile"] = str(log) + ".turn-settled"
                     outcomes[name] = run_client(args, url, cookie, seeded)
+                    if scenario.get("uploads"):
+                        # Claude's attachment budget counts the prompt's bytes, whose attachment
+                        # paths hold each server's home: count them as if both homes were "<home>".
+                        without_home(outcomes[name], len(str(root)) - len("<home>/<server>"),
+                                     len(scenario["uploads"]))
                     if scenario.get("followUp"):
                         outcomes[name]["steps"].update(follow_up_turn(args, url, cookie, scenario["followUp"]))
                     if scenario.get("title"):
@@ -1682,6 +1774,8 @@ def provider_turns(args, credentials):
                     outcomes[name]["allLaunches"] = launch_log.read_text().splitlines() if launch_log.exists() else []
                 outcomes[name]["cli"] = cli_approvals(log)
                 outcomes[name]["launch"] = cli_launch(log, temporary)
+                if scenario.get("uploads"):
+                    outcomes[name]["inputs"] = turn_inputs(log, temporary)
                 outcomes[name]["mcp"] = agent_mcp(log, temporary)
         if args.dump:
             for name, outcome in outcomes.items():

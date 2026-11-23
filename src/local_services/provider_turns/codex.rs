@@ -518,9 +518,38 @@ impl Session {
         });
 
         let (approval_policy, reviewer, sandbox_policy) = runtime_mode_policy(&self.runtime_mode);
+        // `toCodexInput`: the text naming each attachment's file, then each
+        // supported image as a data URL.
+        let mut input = vec![json!({"type": "text", "text": spec.prompt})];
+        if !provider.attachments.is_empty() {
+            use crate::workspace::attachment_prompt as prompt;
+            let text = prompt::text_with_paths(&spec.prompt, &provider.attachments);
+            input.clear();
+            if !text.is_empty() {
+                input.push(json!({"type": "text", "text": text}));
+            }
+            for attachment in provider
+                .attachments
+                .iter()
+                .filter(|a| prompt::is_native_image(a))
+            {
+                match prompt::image_base64(attachment) {
+                    Ok(data) => input.push(json!({
+                        "type": "image",
+                        "url": format!("data:{};base64,{data}", attachment["mimeType"].as_str().unwrap_or_default()),
+                    })),
+                    Err(message) => {
+                        return Ok(TurnEnd::failed(
+                            ProviderFailure::new("provider_error", message),
+                            ThreadDisposition::Reusable,
+                        ))
+                    }
+                }
+            }
+        }
         let mut turn_params = json!({
             "threadId": thread_id,
-            "input": [{"type": "text", "text": spec.prompt, "text_elements": []}],
+            "input": input,
             "cwd": spec.cwd,
             "approvalsReviewer": reviewer,
             "approvalPolicy": approval_policy,
@@ -651,7 +680,7 @@ impl Session {
             .cli
             .write(&json!({"id": id, "method": "turn/steer", "params": {
                 "expectedTurnId": turn_id,
-                "input": [{"type": "text", "text": text, "text_elements": []}],
+                "input": [{"type": "text", "text": text}],
                 "threadId": thread_id,
             }}))
             .await;

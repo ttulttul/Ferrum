@@ -75,6 +75,11 @@ pub struct ProviderTurn {
     /// The T3 MCP server the CLI is given, acting as the thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpServer>,
+    /// The turn's message attachments (`ChatAttachment`s), each with the
+    /// `path` of its saved file. Optional and omitted when empty, so an
+    /// agentd or control plane that predates it sees the same wire bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Value>,
 }
 
 /// Where a provider CLI reaches T3's tools for its thread
