@@ -768,11 +768,11 @@ pub(crate) async fn wake_work_started_at<H: CommandHost>(
         .find(Value::is_string)
 }
 
-/// Records `at` as the `workStartedAt` of the run `message_id` started.
+/// Records `at` as the `workStartedAt` of the run `thread_id` creates next,
+/// so the run carries it from its creation, as the reference's does.
 pub(crate) async fn record_work_started_at<H: CommandHost>(
     state: &H,
     thread_id: &str,
-    message_id: &Value,
     at: Value,
 ) -> anyhow::Result<()> {
     let (run_id, mut extras) = {
@@ -780,14 +780,10 @@ pub(crate) async fn record_work_started_at<H: CommandHost>(
         let Some(thread) = store.threads.get(thread_id) else {
             return Ok(());
         };
-        let Some(run) = thread
-            .runs
-            .iter()
-            .find(|run| run.user_message_id.as_deref() == message_id.as_str())
-        else {
-            return Ok(());
-        };
-        (run.wire_id(), thread.stored_row()["runExtras"].clone())
+        (
+            crate::Run::reference_id(thread_id, thread.runs.len() + 1),
+            thread.stored_row()["runExtras"].clone(),
+        )
     };
     if !extras.is_object() {
         extras = json!({});
@@ -1065,7 +1061,225 @@ pub(crate) async fn after_run<H: CommandHost>(state: Arc<H>, thread_id: &str) {
             offer_delivery(state.clone(), parent).await;
         }
     }
-    offer_delivery(state, thread_id).await;
+    if let Err(error) = finalize_delivery(&*state, thread_id).await {
+        tracing::warn!(%error, thread_id, "could not settle a delegated delivery");
+    }
+    offer_delivery(state.clone(), thread_id).await;
+    start_queued_wake(state, thread_id).await;
+}
+
+/// `finalizeDelegatedCompletionDelivery`, once a wake run has ended: the
+/// tasks it claimed are delivered (pending again if it was cancelled), and
+/// the cohort reserves the next wake for results that waited meanwhile.
+pub(crate) async fn finalize_delivery<H: CommandHost>(
+    state: &H,
+    thread_id: &str,
+) -> anyhow::Result<()> {
+    let (row, ended) = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(thread_id) else {
+            return Ok(());
+        };
+        let row = thread.stored_row();
+        let ended = thread.runs.iter().find_map(|run| {
+            terminal_status(&run.status)?;
+            let message = thread
+                .messages
+                .iter()
+                .find(|m| Some(&m.id) == run.user_message_id.as_ref())?;
+            let completion = message.wire.as_ref()?["delegatedCompletion"].clone();
+            let parent = completion["parentRunId"].as_str()?;
+            let delivery = &row["runExtras"][parent]["delegatedCompletion"]["delivery"];
+            (delivery["messageId"] == message.id.as_str()
+                && delivery["generation"] == completion["generation"])
+                .then(|| (parent.to_owned(), run.status == "cancelled"))
+        });
+        (row, ended)
+    };
+    let Some((parent, cancelled)) = ended else {
+        return Ok(());
+    };
+    let cohort = row["runExtras"][parent.as_str()]["delegatedCompletion"].clone();
+    let delivered = records(&cohort["delivery"], "taskIds");
+    let at = crate::auth_service::iso(crate::auth_service::now());
+    let mut tasks = records(&row, "subagents");
+    for task in tasks.iter_mut() {
+        if task["runId"] == parent.as_str()
+            && delivered.contains(&task["id"])
+            && task["completionDelivery"]["state"] == "claimed"
+        {
+            let state = if cancelled { "pending" } else { "delivered" };
+            task["completionDelivery"] = json!({"state": state, "observedByRunId": null});
+            task["updatedAt"] = json!(at);
+        }
+    }
+    let pending: Vec<Value> = tasks
+        .iter()
+        .filter(|task| {
+            task["runId"] == parent.as_str()
+                && task["completionDelivery"]["state"] == "pending"
+                && TERMINAL_RUN.contains(&task["status"].as_str().unwrap_or_default())
+        })
+        .map(|task| task["id"].clone())
+        .collect();
+    let mut next_cohort = cohort.clone();
+    next_cohort["delivery"] = Value::Null;
+    if cohort["disposition"] == "open" && !pending.is_empty() {
+        let generation = cohort["nextGeneration"].as_u64().unwrap_or(1);
+        let ordinal = {
+            let store = state.store.read().await;
+            store.threads.get(thread_id).map_or(0, |thread| {
+                thread.full_projection()["messages"]
+                    .as_array()
+                    .map_or(0, Vec::len)
+            }) + 1
+        };
+        next_cohort["nextGeneration"] = json!(generation + 1);
+        next_cohort["delivery"] = json!({
+            "generation": generation,
+            "messageId": format!(
+                "{}:{}",
+                join_id("message", &["thread", thread_id, "ordinal", &ordinal.to_string()]),
+                crate::platform::uuid_v4()
+            ),
+            "taskIds": pending,
+        });
+        for task in tasks.iter_mut() {
+            if pending.contains(&task["id"]) {
+                task["completionDelivery"] = json!({"state": "claimed", "observedByRunId": null});
+                task["updatedAt"] = json!(at);
+            }
+        }
+    }
+    let mut extras = row["runExtras"].clone();
+    extras[parent.as_str()]["delegatedCompletion"] = next_cohort;
+    state
+        .commit(Event::ThreadPatched {
+            thread_id: thread_id.to_owned(),
+            patch: json!({"row": {"subagents": tasks, "runExtras": extras}}),
+        })
+        .await?;
+    Ok(())
+}
+
+/// What resolving a task leaves its queued wake to do.
+pub(crate) enum WakeFollowUp {
+    None,
+    /// No task is left to deliver: the wake leaves the queue.
+    Cancel(String),
+    /// The wake carries the tasks left: `(message id, parent run, task ids)`.
+    Update(Value, String, Vec<Value>),
+}
+
+/// `dispatchDelegatedTaskCompletionDeliveryResolution`'s cohort update: an
+/// acknowledged or disposed task leaves the delivery that carried it, which
+/// is cleared once it carries none and was never sent or is still queued.
+/// `None` when no delivery carries the task.
+pub(crate) async fn resolve_delivery_task<H: CommandHost>(
+    state: &H,
+    thread_id: &str,
+    task_id: &Value,
+    task_run: &Value,
+) -> Option<(Value, WakeFollowUp)> {
+    let store = state.store.read().await;
+    let thread = store.threads.get(thread_id)?;
+    let row = thread.stored_row();
+    let parent = task_run.as_str()?;
+    let cohort = &row["runExtras"][parent]["delegatedCompletion"];
+    let delivery = &cohort["delivery"];
+    let ids = records(delivery, "taskIds");
+    if !delivery.is_object() || !ids.contains(task_id) {
+        return None;
+    }
+    let remaining: Vec<Value> = ids.into_iter().filter(|id| id != task_id).collect();
+    let wake = thread
+        .runs
+        .iter()
+        .find(|run| run.user_message_id.as_deref() == delivery["messageId"].as_str());
+    let queued = wake.is_some_and(|run| run.status == "queued");
+    let mut extras = row["runExtras"].clone();
+    extras[parent]["delegatedCompletion"]["delivery"] =
+        if remaining.is_empty() && (wake.is_none() || queued) {
+            Value::Null
+        } else {
+            let mut next = delivery.clone();
+            next["taskIds"] = json!(remaining);
+            next
+        };
+    let follow_up = match wake.filter(|_| queued) {
+        Some(run) if remaining.is_empty() => WakeFollowUp::Cancel(run.wire_id()),
+        Some(_) => {
+            WakeFollowUp::Update(delivery["messageId"].clone(), parent.to_owned(), remaining)
+        }
+        None => WakeFollowUp::None,
+    };
+    Some((extras, follow_up))
+}
+
+/// Carries out what resolving a task left its queued wake to do.
+pub(crate) async fn follow_up_delivery<H: CommandHost>(
+    state: &H,
+    thread_id: &str,
+    follow_up: WakeFollowUp,
+    tasks: &[Value],
+) -> anyhow::Result<()> {
+    match follow_up {
+        WakeFollowUp::None => Ok(()),
+        WakeFollowUp::Cancel(run_id) => {
+            state
+                .commit(Event::RunFinished {
+                    run_id: crate::Run::uuid_for(&run_id),
+                    thread_id: thread_id.to_owned(),
+                    status: "cancelled".into(),
+                    error: None,
+                })
+                .await?;
+            Ok(())
+        }
+        WakeFollowUp::Update(message_id, parent, ids) => {
+            update_queued_wake(state, thread_id, &parent, &message_id, &ids, tasks).await
+        }
+    }
+}
+
+/// Starts a queued wake once its thread has no live run, as the reference
+/// dispatches the next queued run when the active one ends. Other queued
+/// messages wait to be sent as before.
+async fn start_queued_wake<H: CommandHost>(state: Arc<H>, thread_id: &str) {
+    let next = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(thread_id) else {
+            return;
+        };
+        let live = thread.runs.iter().any(|run| {
+            matches!(
+                run.status.as_str(),
+                "running" | "preparing" | "waiting" | "starting"
+            )
+        });
+        let next = thread.runs.iter().find(|run| run.status == "queued");
+        next.filter(|run| !live && !run.queue_held)
+            .filter(|run| {
+                thread
+                    .messages
+                    .iter()
+                    .find(|m| Some(&m.id) == run.user_message_id.as_ref())
+                    .is_some_and(crate::thread_projection::delegated_delivery)
+            })
+            .map(|run| run.wire_id())
+    };
+    let Some(run_id) = next else {
+        return;
+    };
+    let command = json!({
+        "type": "queued-run.start",
+        "commandId": join_id("command:server:delegated-completion:start", &[&run_id]),
+        "threadId": thread_id,
+        "runId": run_id,
+    });
+    if let Err(error) = super::dispatch_orchestration_command(state, command).await {
+        tracing::warn!(?error, thread_id, "could not start a delegated wake");
+    }
 }
 
 /// `finalizeAppOwnedSubagent` for a child whose work is done.
@@ -1104,7 +1318,7 @@ async fn settle_next<H: CommandHost>(
     };
     let task_node = child["thread"]["forkedFrom"]["nodeId"].clone();
     let (work, progress_run) = progress(&child);
-    let mut tasks = records(&parent_row, "subagents");
+    let tasks = records(&parent_row, "subagents");
     let picked = tasks
         .iter()
         .filter(|t| {
@@ -1128,6 +1342,22 @@ async fn settle_next<H: CommandHost>(
     let Some((task, result_run, terminal)) = picked else {
         return Ok(false);
     };
+    // A follow-up's run passes through `waiting` as its turn ends, which
+    // the reference's run reactor syncs to the task before it settles.
+    if result_run["delegatedTaskId"] == task["id"]
+        && result_run["status"] == "completed"
+        && task["status"] == "running"
+    {
+        sync_task_status(&**state, parent_id, &parent_row, &task, "waiting").await?;
+    }
+    let parent_row = {
+        let store = state.store.read().await;
+        store
+            .threads
+            .get(parent_id)
+            .map_or(parent_row, |parent| parent.stored_row())
+    };
+    let mut tasks = records(&parent_row, "subagents");
     let mut source_point =
         context_source_point(&child, result_run["id"].as_str().unwrap_or_default());
     // The result describes the child at its terminal run update. A stopped
@@ -1168,6 +1398,7 @@ async fn settle_next<H: CommandHost>(
         updated["cancelledRunId"] = result_run["id"].clone();
         updated["completionDelivery"] = json!({"state": "disposed", "observedByRunId": null});
     }
+    let mut queued_wake = None;
     let delivery_state = updated["completionDelivery"]["state"]
         .as_str()
         .map(str::to_owned);
@@ -1198,18 +1429,33 @@ async fn settle_next<H: CommandHost>(
             // The blocking wait that spawned it delivers it.
         } else if let Some(run) = &parent_run {
             let delivery = &cohort["delivery"];
-            let next = if delivery.is_object() {
+            // The run the delivery's message started, if it was sent.
+            let delivery_run = records(&parent_projection, "runs")
+                .into_iter()
+                .find(|r| delivery.is_object() && r["userMessageId"] == delivery["messageId"]);
+            let next = if delivery_run
+                .as_ref()
+                .is_some_and(|r| r["status"] != "queued")
+            {
+                // A wake already running has this result wait; its end
+                // reserves the next wake (`finalize_delivery`).
+                None
+            } else if delivery.is_object() {
                 let mut ids = records(delivery, "taskIds");
                 if !ids.contains(&task["id"]) {
                     ids.push(task["id"].clone());
                 }
+                // A queued wake carries this result too.
+                if delivery_run.is_some() {
+                    queued_wake = Some((delivery["messageId"].clone(), ids.clone()));
+                }
                 let mut next = cohort.clone();
                 next["delivery"]["taskIds"] = Value::Array(ids);
-                next
+                Some(next)
             } else {
                 let generation = cohort["nextGeneration"].as_u64().unwrap_or(1);
                 let ordinal = records(&parent_projection, "messages").len() + 1;
-                json!({
+                Some(json!({
                     "disposition": "open",
                     "nextGeneration": generation + 1,
                     "delivery": {
@@ -1221,10 +1467,16 @@ async fn settle_next<H: CommandHost>(
                         ),
                         "taskIds": [task["id"]],
                     },
-                })
+                }))
             };
-            updated["completionDelivery"] = json!({"state": "claimed", "observedByRunId": null});
-            extras[run["id"].as_str().unwrap_or_default()]["delegatedCompletion"] = next;
+            if let Some(next) = next {
+                updated["completionDelivery"] =
+                    json!({"state": "claimed", "observedByRunId": null});
+                extras[run["id"].as_str().unwrap_or_default()]["delegatedCompletion"] = next;
+            } else {
+                updated["completionDelivery"] =
+                    json!({"state": "pending", "observedByRunId": null});
+            }
         }
     }
     replace_by_id(&mut tasks, &task["id"], |t| *t = updated.clone());
@@ -1297,13 +1549,94 @@ async fn settle_next<H: CommandHost>(
             }}),
         })
         .await?;
+    if let Some((message_id, ids)) = queued_wake {
+        if let Some(run_id) = task["runId"].as_str() {
+            update_queued_wake(&**state, parent_id, run_id, &message_id, &ids, &tasks).await?;
+        }
+    }
     Ok(true)
 }
 
-/// Delivers a thread's open delivery once it has no live run, as the
-/// reference's continuation service does: a queued message that wakes it with
-/// the finished tasks (`delegatedCompletion`). Accepting it marks the claimed
-/// tasks delivered and frees the cohort (`acceptDelegatedCompletionDelivery`).
+/// A delegated task's live status (`finalizeAppOwnedSubagentTask` with a
+/// `syncRunId`): the task, its node and turn item take `status`.
+async fn sync_task_status<H: CommandHost>(
+    state: &H,
+    parent_id: &str,
+    parent_row: &Value,
+    task: &Value,
+    status: &str,
+) -> anyhow::Result<()> {
+    let at = crate::auth_service::iso(crate::auth_service::now());
+    let mut tasks = records(parent_row, "subagents");
+    replace_by_id(&mut tasks, &task["id"], |t| {
+        t["status"] = json!(status);
+        t["completedAt"] = Value::Null;
+        t["updatedAt"] = json!(at);
+    });
+    let mut nodes = records(parent_row, "nodes");
+    replace_by_id(&mut nodes, &task["id"], |node| {
+        node["status"] = json!(status)
+    });
+    let mut items = records(parent_row, "appTurnItems");
+    if let Some(item) = items
+        .iter_mut()
+        .find(|i| i["type"] == "subagent" && i["subagentId"] == task["id"])
+    {
+        item["status"] = json!(status);
+        item["updatedAt"] = json!(at);
+    }
+    state
+        .commit(Event::ThreadPatched {
+            thread_id: parent_id.to_owned(),
+            patch: json!({"row": {"subagents": tasks, "nodes": nodes, "appTurnItems": items}}),
+        })
+        .await?;
+    Ok(())
+}
+
+/// A queued wake's message after the tasks it carries changed: its text,
+/// `delegatedCompletion` and card name `task_ids`, as the reference's
+/// `message.updated` does.
+async fn update_queued_wake<H: CommandHost>(
+    state: &H,
+    thread_id: &str,
+    parent_run: &str,
+    message_id: &Value,
+    task_ids: &[Value],
+    tasks: &[Value],
+) -> anyhow::Result<()> {
+    let Some(message_id) = message_id.as_str() else {
+        return Ok(());
+    };
+    let wire = {
+        let store = state.store.read().await;
+        store
+            .threads
+            .get(thread_id)
+            .and_then(|thread| thread.messages.iter().find(|m| m.id == message_id))
+            .and_then(|message| message.wire.as_deref().cloned())
+    };
+    let Some(mut wire) = wire else {
+        return Ok(());
+    };
+    wire["delegatedCompletion"]["taskIds"] = json!(task_ids);
+    state
+        .commit(Event::MessageEdited {
+            thread_id: thread_id.to_owned(),
+            message_id: message_id.to_owned(),
+            content: wake_detail(task_ids, tasks),
+            wire: Some(wire),
+            notification: Some(completion_notification(parent_run, task_ids, tasks)),
+        })
+        .await?;
+    Ok(())
+}
+
+/// Delivers a thread's open delivery as the reference's continuation
+/// service does: a message queued after the active run (or steered into it)
+/// that wakes the thread with the finished tasks (`delegatedCompletion`).
+/// A steer accepts it at once (`acceptDelegatedCompletionDelivery`); a wake
+/// run settles it when it ends (`finalize_delivery`).
 async fn offer_delivery<H: CommandHost>(state: Arc<H>, thread_id: &str) {
     let pending = {
         let store = state.store.read().await;
@@ -1329,10 +1662,12 @@ async fn offer_delivery<H: CommandHost>(state: Arc<H>, thread_id: &str) {
     };
     let delivery = &cohort["delivery"];
     let task_ids = records(delivery, "taskIds");
-    // While the thread runs, a delivery goes in only if it steers into the
-    // running turn; otherwise it waits for the run to end, which offers it
-    // again.
-    if busy {
+    if task_ids.is_empty() {
+        return;
+    }
+    // A host whose runs start no queued wakes as they end delivers to a
+    // busy thread only by steering into its running turn.
+    if busy && !state.hooks_run_ends() {
         let completion = json!({"parentRunId": run_id, "taskIds": task_ids});
         if super::delivery_steer_target(&state, thread_id, &completion)
             .await
@@ -1470,7 +1805,9 @@ pub(crate) async fn stop_cohorts<H: CommandHost>(
         state
             .commit(Event::ThreadPatched {
                 thread_id: thread_id.to_owned(),
-                patch: json!({"row": {"runExtras": extras, "subagents": tasks}}),
+                // `disposeDelegatedCompletionCohort` writes each run, then
+                // its tasks.
+                patch: json!({"row": {"runExtras": extras, "subagents": tasks}, "cohortStopped": true}),
             })
             .await?;
     }
@@ -1844,6 +2181,114 @@ fn work_active(status: &Value) -> bool {
 pub(crate) type StopFuture<'a> = futures_util::future::BoxFuture<'a, Result<(), Value>>;
 #[cfg(not(feature = "native"))]
 pub(crate) type StopFuture<'a> = futures_util::future::LocalBoxFuture<'a, Result<(), Value>>;
+
+/// The child stops a thread's stop leaves until its stopped runs end, by
+/// thread: the stop's command id and reason.
+type DeferredChildStops = std::collections::HashMap<String, (String, Option<String>)>;
+static DEFERRED_CHILD_STOPS: std::sync::LazyLock<std::sync::Mutex<DeferredChildStops>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Leaves the stop of `thread_id`'s delegated tasks until its stopped runs
+/// end, as the reference's `delegated-tasks.stop` effect waits for the
+/// interrupt effect before it.
+pub(crate) fn defer_child_stop(thread_id: &str, command_id: &str, reason: Option<String>) {
+    DEFERRED_CHILD_STOPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(thread_id.to_owned(), (command_id.to_owned(), reason));
+}
+
+/// Whether the stop `command_id` left its child stops for later.
+pub(crate) fn child_stop_deferred(thread_id: &str, command_id: &str) -> bool {
+    DEFERRED_CHILD_STOPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(thread_id)
+        .is_some_and(|(id, _)| id == command_id)
+}
+
+/// Once `run`, a run a stop interrupted, has ended its turn: its open task
+/// cards end interrupted (`thread.background-work.settle`), then the stop's
+/// delegated tasks stop and settle (`delegated-tasks.stop`).
+pub(crate) async fn stop_children_after_interrupt<H: CommandHost>(
+    state: Arc<H>,
+    thread_id: String,
+    run_id: String,
+) -> Result<(), Value> {
+    let (row, others_run) = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(&thread_id) else {
+            return Ok(());
+        };
+        let others = thread
+            .runs
+            .iter()
+            .any(|run| run.status == "running" && run.wire_id() != run_id);
+        (thread.stored_row(), others)
+    };
+    if others_run {
+        return Ok(());
+    }
+    let Some((command_id, reason)) = DEFERRED_CHILD_STOPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&thread_id)
+    else {
+        return Ok(());
+    };
+    let at = crate::auth_service::iso(crate::auth_service::now());
+    let mut items = records(&row, "appTurnItems");
+    let mut settled = false;
+    for item in items.iter_mut().filter(|item| {
+        item["type"] == "subagent"
+            && item["runId"] == run_id.as_str()
+            && matches!(
+                item["status"].as_str(),
+                Some("pending" | "running" | "waiting")
+            )
+    }) {
+        item["status"] = json!("interrupted");
+        item["completedAt"] = json!(at);
+        item["updatedAt"] = json!(at);
+        settled = true;
+    }
+    if settled {
+        state
+            .commit(Event::ThreadPatched {
+                thread_id: thread_id.clone(),
+                patch: json!({"row": {"appTurnItems": items}}),
+            })
+            .await
+            .map_err(|e| json!({"message": e.to_string()}))?;
+    }
+    // The children whose runs this stop ends settle before the parent's
+    // turn goes on to its checkpoint.
+    let ends: Vec<_> = {
+        let store = state.store.read().await;
+        records(&row, "subagents")
+            .iter()
+            .filter(|task| task["origin"] == "app_owned")
+            .filter_map(|task| task["childThreadId"].as_str())
+            .filter(|child| {
+                store
+                    .threads
+                    .get(*child)
+                    .is_some_and(|t| t.runs.iter().any(|run| run.status == "running"))
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .map(watch_run_end)
+            .collect()
+    };
+    let stopped = stop_delegated_tasks(state, thread_id, command_id, reason).await;
+    for end in ends {
+        if let Ok(end) = end.await {
+            drop(end.read);
+            let _ = end.settled.await;
+        }
+    }
+    stopped
+}
 
 /// `stopDelegatedTasks`: stops each app-owned child of `thread_id`, then its
 /// children, each once.

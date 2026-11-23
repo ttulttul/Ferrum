@@ -1406,7 +1406,7 @@ impl ControlPlane {
                         .as_str()
                         .and_then(|id| store.threads.get(id))
                     {
-                        Some(thread) => Reply::Success(thread.projection()),
+                        Some(thread) => Reply::Success(thread.snapshot_projection()),
                         None => Reply::Failure(json!({"_tag":"Fail",
                         "error":crate::subscription::thread_projection_error(&params["threadId"])})),
                     },

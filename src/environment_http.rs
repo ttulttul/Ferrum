@@ -128,5 +128,6 @@ pub(super) async fn thread_snapshot(
         out.as_object_mut().expect("snapshot").shift_remove("kind");
         return Json(out).into_response();
     }
-    Json(json!({"snapshotSequence":sequence,"projection":thread.projection()})).into_response()
+    Json(json!({"snapshotSequence":sequence,"projection":thread.snapshot_projection()}))
+        .into_response()
 }

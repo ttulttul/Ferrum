@@ -231,6 +231,13 @@ pub enum Event {
         thread_id: String,
         message_id: String,
         content: String,
+        /// The message's new wire fields, for a queued delegated wake whose
+        /// tasks changed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wire: Option<serde_json::Value>,
+        /// Its new notification card, likewise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notification: Option<serde_json::Value>,
     },
     RunReordered {
         thread_id: String,
@@ -500,10 +507,18 @@ impl Store {
                 thread_id,
                 message_id,
                 content,
+                wire,
+                notification,
             } => {
                 if let Some(t) = self.threads.get_mut(thread_id) {
                     if let Some(message) = t.messages.iter_mut().find(|m| m.id == *message_id) {
                         message.content = content.clone();
+                        if let Some(wire) = wire {
+                            message.wire = Some(Box::new(wire.clone()));
+                        }
+                        if let Some(notification) = notification {
+                            message.notification = Some(notification.clone());
+                        }
                     }
                 }
             }
