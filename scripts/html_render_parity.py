@@ -35,9 +35,11 @@ from time import monotonic, sleep
 from PIL import Image
 
 from client_thread_parity import FIXTURES, rpc, scenario_env, seed_turn
-from parity_harness import managed_server
+from parity_harness import REFUSED, assert_nothing_escaped, managed_server
 from preview_provider_parity import seed_reference_browser
 
+# What both servers fetch at start-up, which the harness's refusing proxy refuses (parity_harness).
+STARTUP_FETCHES = {"raw.githubusercontent.com:443", "registry.npmjs.org:443"}
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -199,6 +201,13 @@ def main():
                 results[name], calls = run(name, command, args, directory, work, loopback)
     finally:
         server.shutdown()
+    # Every server (and the browsers they launched) sent its HTTP(S) through the loopback refusing
+    # proxy; what it refused is only the servers' start-up fetches, never a page's request.
+    assert_nothing_escaped()
+    refused = sorted({entry.split(" ", 1)[1] for entry in REFUSED} - STARTUP_FETCHES)
+    if refused:
+        print(f"FAIL requests besides the servers' start-up fetches reached the refusing proxy: {refused}")
+        return 1
     if args.dump:
         args.dump.write_text(json.dumps(results, indent=1, sort_keys=True))
     failures = 0

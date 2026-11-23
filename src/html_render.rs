@@ -200,7 +200,7 @@ fn clamp_height(height: f64) -> i64 {
 }
 
 /// `toSafeThreadAttachmentSegment`.
-fn thread_segment(thread_id: &str) -> Option<String> {
+pub(crate) fn thread_segment(thread_id: &str) -> Option<String> {
     let mut segment = String::new();
     for c in thread_id.trim().to_lowercase().chars() {
         let keep = c.is_ascii_alphanumeric() || c == '_' || c == '-';

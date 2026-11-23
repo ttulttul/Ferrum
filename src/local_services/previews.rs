@@ -112,6 +112,9 @@ impl PreviewService {
                 .as_f64()
                 .unwrap_or(15_000.0)
                 .clamp(1.0, 60_000.0) as u64
+        } else if operation == "recordingStop" {
+            // `PREVIEW_RECORDING_STOP_TIMEOUT_MS`: encoding and handing over the video.
+            120_000
         } else {
             15_000
         };
@@ -194,12 +197,40 @@ impl PreviewService {
                 browsers.priority(thread, tab["tabId"].as_str().unwrap_or_default(), tab)
             })
             .cloned();
+        // A stop finds the tab that records: the one named, or the thread's
+        // only recording.
+        if operation == "recordingStop" {
+            let recording = browsers
+                .recording_tab(
+                    thread,
+                    target,
+                    snap.as_ref().and_then(|s| s["tabId"].as_str()),
+                )
+                .await;
+            let Some(page) = recording else {
+                return Err(
+                    json!({"message":"Preview automation recordingStop failed: No recording is active for this thread."}),
+                );
+            };
+            drop(browsers);
+            return page
+                .automate(self, operation, &input["arguments"], deadline, timeout_ms)
+                .await
+                .map_err(|message| json!({"message":message}));
+        }
         let missing = || {
             json!({"message": match target {
                 Some(id) => format!("Preview tab {id} was not found for {operation}. Omit tabId to use the current tab, or call preview_open."),
                 None => format!("No active preview tab was found for {operation}. Call preview_open first.")
             }})
         };
+        // With no tab to report, a status says so (`statusWithTitle` of none).
+        if snap.is_none() && operation == "status" {
+            return Ok(json!({
+                "available":false,"visible":false,"tabId":null,"url":null,"title":null,"loading":false,
+                "profiles":[{"id":"default","name":"Default"},{"id":"incognito","name":"Incognito","incognito":true}],
+            }));
+        }
         let snap = snap.ok_or_else(missing)?;
         let page = browsers.open(dir, &snap).await.ok_or_else(missing)?;
         drop(browsers);

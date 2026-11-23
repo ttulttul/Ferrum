@@ -94,6 +94,10 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("preview_snapshot", &[]),
     ("preview_act", &[]),
     ("preview_wait_for", &[]),
+    ("preview_status", &[]),
+    ("preview_dialog", &[]),
+    ("preview_recording_start", &[]),
+    ("preview_recording_stop", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -182,6 +186,11 @@ const SERVED: &[&str] = &[
     "preview_snapshot",
     "preview_act",
     "preview_wait_for",
+    // Chromium preview status and dialogs.
+    "preview_status",
+    "preview_dialog",
+    "preview_recording_start",
+    "preview_recording_stop",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -777,6 +786,12 @@ pub(super) async fn call<S: McpHost>(
         "preview_open" => agent_tools::preview_automation(host, caller, "open", args).await,
         "preview_navigate" => agent_tools::preview_automation(host, caller, "navigate", args).await,
         "preview_snapshot" => agent_tools::preview_automation(host, caller, "snapshot", args).await,
+        "preview_status" => agent_tools::preview_automation(host, caller, "status", args).await,
+        "preview_dialog" => agent_tools::preview_automation(host, caller, "dialog", args).await,
+        "preview_recording_start" => {
+            agent_tools::preview_automation(host, caller, "recordingStart", args).await
+        }
+        "preview_recording_stop" => agent_tools::preview_recording_stop(host, caller, args).await,
         "preview_act" => agent_tools::preview_automation(host, caller, "act", args).await,
         "preview_wait_for" => agent_tools::preview_automation(host, caller, "waitFor", args).await,
         "preview_set_appearance" => {
