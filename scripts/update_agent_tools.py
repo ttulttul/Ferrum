@@ -23,6 +23,8 @@ DOC = ROOT / "docs/agent-tools.md"
 THEMES = ROOT / "src/mcp_oauth/themes.json"
 # The reference's agent instructions its provider adapters send (scripts/reference_agent_instructions.mjs).
 INSTRUCTIONS = ROOT / "src/mcp_oauth/instructions.json"
+# The reference server browser's recording encoder, which Rust's preview recordings run as it is.
+RECORDING_ENCODER = ROOT / "src/local_services/browser/recording_encoder.js"
 HTML_RENDER = ROOT / "src/html_render/constants.json"
 START, END = "<!-- tools:start -->", "<!-- tools:end -->"
 
@@ -86,6 +88,19 @@ def checklist(listing: dict, checks: dict, rust: list[str]) -> str:
     return "\n".join(lines)
 
 
+def recording_encoder(checkout: pathlib.Path) -> str:
+    """`recordingEncoderScript`'s template, its two substitutions left for Rust to fill."""
+    source = (checkout / "apps/server/src/preview/ServerBrowserPage.ts").read_text()
+    head = "export const recordingEncoderScript = (frameRate: BrowserRecordingFrameRate) => `"
+    start = source.index(head) + len(head)
+    end = source.index("})()`;", start) + len("})()")
+    body = source[start:end]
+    holes = set(re.findall(r"\$\{[^}]*\}", body))
+    if "\\" in body or "`" in body or holes != {"${frameRate}", "${PROVIDER_SEND_TURN_MAX_FILE_BYTES}"}:
+        raise SystemExit("recordingEncoderScript is no longer a plain template; update update_agent_tools.py")
+    return body + "\n"
+
+
 def main() -> int:
     checkout = pathlib.Path(sys.argv[1]).resolve()
     check = "--check" in sys.argv[2:]
@@ -124,7 +139,7 @@ def main() -> int:
     html_render_text = subprocess.run(
         ["node", str(ROOT / "scripts/reference_html_render.mjs"), str(checkout)],
         check=True, capture_output=True, text=True).stdout
-    outputs = ((TOOLS, tools_text), (DOC, doc_text), (THEMES, themes_text),
+    outputs = ((RECORDING_ENCODER, recording_encoder(checkout)), (TOOLS, tools_text), (DOC, doc_text), (THEMES, themes_text),
                (INSTRUCTIONS, instructions_text), (HTML_RENDER, html_render_text))
     stale = [path for path, text in outputs if not path.exists() or path.read_text() != text]
     if check:

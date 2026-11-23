@@ -17,6 +17,59 @@ mod vcs_upstream;
 
 pub use devices::DeviceService;
 
+/// `claimPreviewRecording`: a stopped recording's pending attachment, checked
+/// against what the stop reported and moved to the thread's id. A retry finds
+/// the file already moved.
+pub(crate) fn claim_preview_recording(
+    attachments: &std::path::Path,
+    thread_id: &str,
+    artifact: &Value,
+) -> Result<Value, String> {
+    const FAILED: &str = "Preview recording could not be saved to the agent environment.";
+    let Some(uploaded) = artifact["uploadedAttachmentId"].as_str() else {
+        return Err(
+            "Update the desktop app to transfer recordings. The recording remains on the desktop."
+                .into(),
+        );
+    };
+    let size = artifact["sizeBytes"].as_u64().ok_or(FAILED)?;
+    let (uuid, extension) = uploaded
+        .strip_prefix("pending-")
+        .and_then(|rest| rest.rsplit_once('-'))
+        .filter(|(uuid, ext)| {
+            uuid::Uuid::parse_str(uuid).is_ok_and(|u| u.hyphenated().to_string() == *uuid)
+                && !ext.is_empty()
+                && ext.len() <= 10
+                && ext
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+        .ok_or(FAILED)?;
+    let segment = crate::html_render::thread_segment(thread_id).ok_or(FAILED)?;
+    let id = format!("{segment}-{uuid}-{extension}");
+    let current = attachments.join(format!("{uploaded}.{extension}"));
+    let fin = attachments.join(format!("{id}.{extension}"));
+    let valid = |path: &std::path::Path| {
+        std::fs::symlink_metadata(path)
+            .is_ok_and(|m| m.is_file() && m.len() == size && size > 0 && size <= 50 * 1024 * 1024)
+    };
+    if current.exists() {
+        if !valid(&current) {
+            return Err(FAILED.into());
+        }
+        std::fs::rename(&current, &fin).map_err(|_| FAILED.to_owned())?;
+    } else if !valid(&fin) {
+        return Err(FAILED.into());
+    }
+    let mut out = artifact.clone();
+    if let Some(fields) = out.as_object_mut() {
+        fields.remove("uploadedAttachmentId");
+    }
+    out["id"] = json!(id);
+    out["path"] = json!(fin.to_string_lossy());
+    Ok(out)
+}
+
 /// The headless Chromium this server launches, if one is installed.
 pub(crate) fn browser_executable() -> Option<std::path::PathBuf> {
     browser::executable()
@@ -365,6 +418,36 @@ mod tests {
         assert_eq!(
             fresh.local.devices.snapshot(&data.0)["onboardingCompleted"],
             true
+        );
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+
+    #[test]
+    fn a_pending_recording_is_claimed_once_for_its_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let uuid = "0b9c2c7e-6a2b-4b8f-9f1e-2f5b7c3a1d00";
+        let pending = format!("pending-{uuid}-webm");
+        std::fs::write(dir.path().join(format!("{pending}.webm")), b"video").unwrap();
+        let artifact = json!({"id": pending, "tabId": "t", "path": "x", "mimeType": "video/webm", "sizeBytes": 5, "createdAt": "now", "uploadedAttachmentId": pending});
+        let claimed = claim_preview_recording(dir.path(), "thread:One", &artifact).unwrap();
+        let id = format!("thread-one-{uuid}-webm");
+        assert_eq!(claimed["id"], json!(id));
+        assert!(claimed.get("uploadedAttachmentId").is_none());
+        assert!(dir.path().join(format!("{id}.webm")).is_file());
+        // A retry finds the file already moved.
+        assert!(claim_preview_recording(dir.path(), "thread:One", &artifact).is_ok());
+        let wrong = json!({"sizeBytes": 6, "uploadedAttachmentId": pending});
+        assert!(claim_preview_recording(dir.path(), "thread:One", &wrong).is_err());
+        let forged = json!({"sizeBytes": 5, "uploadedAttachmentId": "pending-../../x-webm"});
+        assert!(claim_preview_recording(dir.path(), "thread:One", &forged).is_err());
+        assert_eq!(
+            claim_preview_recording(dir.path(), "thread:One", &json!({"sizeBytes": 5}))
+                .unwrap_err(),
+            "Update the desktop app to transfer recordings. The recording remains on the desktop."
         );
     }
 }

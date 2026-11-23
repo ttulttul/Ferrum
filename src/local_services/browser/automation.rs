@@ -3,7 +3,6 @@
 use super::*;
 use crate::local_services::PreviewService;
 use futures_util::stream::SplitSink;
-use std::sync::atomic::Ordering;
 use tokio::{sync::mpsc, time::timeout};
 
 const CLOSED: &str = "This browser tab is closed. Call preview_open.";
@@ -46,11 +45,7 @@ impl Session {
                     }
                     continue;
                 }
-                match reply["method"].as_str() {
-                    Some("Page.javascriptDialogOpening") => dialog.store(true, Ordering::Release),
-                    Some("Page.javascriptDialogClosed") => dialog.store(false, Ordering::Release),
-                    _ => {}
-                }
+                dialog.observe(reply["method"].as_str(), &reply["params"]);
             }
         });
         let mut session = Self {
@@ -235,6 +230,93 @@ impl Session {
             false,
         )
         .await
+    }
+
+    /// The page's address as last recorded, for a page whose renderer a
+    /// dialog blocks: no title, as the reference reports none then.
+    fn frame_state(snap: &Value) -> Value {
+        json!({"url": snap["navStatus"]["url"], "title": null, "loading": false})
+    }
+
+    /// `resolveDialog`: accepts (with the prompt's text) or dismisses the
+    /// pending dialog, then reports the tab.
+    async fn answer_dialog(
+        &mut self,
+        page: &Page,
+        previews: &PreviewService,
+        args: &Value,
+    ) -> Result<Value, String> {
+        let accept = args["accept"].as_bool().unwrap_or(false);
+        let mut params = json!({"accept": accept});
+        if let Some(text) = args["promptText"].as_str().filter(|_| accept) {
+            params["promptText"] = json!(text);
+        }
+        self.command("Page.handleJavaScriptDialog", params).await?;
+        page.dialog.clear();
+        let state = self.page_state().await?;
+        status_result(previews, page, self, &state).await
+    }
+
+    /// `stopRecording`: the video left in the attachments directory as a
+    /// pending attachment for the thread to claim.
+    async fn stop_recording(&mut self, page: &Page) -> Result<Value, String> {
+        let recording = page
+            .recording
+            .lock()
+            .await
+            .take()
+            .ok_or("No recording is active for this thread.")?;
+        // A screencast can miss the last paint when the page goes idle.
+        let final_frame = if page.dialog.pending() {
+            None
+        } else {
+            match self
+                .raw_evaluate(super::recording::FINAL_FRAME_SETTLE, true)
+                .await
+            {
+                Ok(_) => self
+                    .command(
+                        "Page.captureScreenshot",
+                        json!({"format":"jpeg","quality":90}),
+                    )
+                    .await
+                    .ok()
+                    .and_then(|shot| shot["data"].as_str().map(str::to_owned)),
+                Err(_) => None,
+            }
+        };
+        let (mime, data) =
+            recording
+                .stop(page, final_frame)
+                .await
+                .map_err(|error| match error {
+                    super::recording::RecordingError::TooLarge => {
+                        "The recording is larger than the attachment limit.".to_owned()
+                    }
+                    super::recording::RecordingError::Failed(message) => message,
+                })?;
+        let extension = if mime.starts_with("video/mp4") {
+            "mp4"
+        } else {
+            "webm"
+        };
+        let id = format!("pending-{}-{extension}", Uuid::new_v4());
+        let path = page.attachments.join(format!("{id}.{extension}"));
+        tokio::fs::create_dir_all(&page.attachments)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::fs::write(&path, &data)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "id": id,
+            "tabId": page.tab,
+            "path": path.to_string_lossy(),
+            "mimeType": mime.split(';').next().unwrap_or_default(),
+            "sizeBytes": data.len(),
+            "createdAt": crate::auth_service::iso(crate::auth_service::now()),
+            "uploadedAttachmentId": id,
+        }))
     }
 
     async fn navigate(
@@ -641,7 +723,9 @@ impl Page {
                 "Browser control changed. Take a fresh snapshot before trying again.".into(),
             );
         }
-        if self.dialog.load(Ordering::Acquire) {
+        // Status and the dialog's answer are what a pending dialog leaves open.
+        let dialog_pending = self.dialog.pending();
+        if dialog_pending && !matches!(operation, "status" | "dialog") {
             return Err(DIALOG.into());
         }
         let snap = previews.tab(&self.thread, &self.tab).ok_or(CLOSED)?;
@@ -650,6 +734,15 @@ impl Page {
                 .await
                 .map_err(|_| timed_out())??;
         let work = async {
+            // A pending dialog blocks the page's script: answer from what the
+            // browser itself knows.
+            if dialog_pending {
+                if operation == "dialog" {
+                    return session.answer_dialog(self, previews, args).await;
+                }
+                let state = Session::frame_state(&snap);
+                return status_result(previews, self, session, &state).await;
+            }
             session.sync_viewport(self, &snap).await?;
             if operation != "open" {
                 let mut initial = self.initial_url.lock().await;
@@ -661,6 +754,8 @@ impl Page {
             match operation {
                 "open" => {
                     let state = if let Some(url) = navigation_url(args) {
+                        // This navigation replaces the one the tab was opened with.
+                        *self.initial_url.lock().await = None;
                         let state = session.navigate(&url, "load", deadline).await?;
                         previews.page_status(
                             &self.thread,
@@ -684,6 +779,27 @@ impl Page {
                     );
                     status_result(previews, self, session, &state).await
                 }
+                "status" => {
+                    let state = session.page_state().await?;
+                    status_result(previews, self, session, &state).await
+                }
+                "dialog" => Err("No dialog is pending.".into()),
+                "recordingStart" => {
+                    let mut slot = self.recording.lock().await;
+                    if slot.is_none() {
+                        let frame = session
+                            .command(
+                                "Page.captureScreenshot",
+                                json!({"format":"jpeg","quality":90}),
+                            )
+                            .await?;
+                        let frame = frame["data"].as_str().unwrap_or_default().to_owned();
+                        *slot = Some(super::recording::Recording::start(self, frame).await?);
+                    }
+                    let started = slot.as_ref().map(|r| r.started_at.clone());
+                    Ok(json!({"tabId":self.tab,"recording":true,"startedAt":started}))
+                }
+                "recordingStop" => session.stop_recording(self).await,
                 "snapshot" => session.snapshot(args, self).await,
                 "act" => session.act(args, deadline).await,
                 "waitFor" => session.wait_for(args, deadline).await,
@@ -739,7 +855,10 @@ impl Page {
                 "Preview automation evaluate produced a result larger than 64000 bytes.".into(),
             );
         }
-        if !matches!(operation, "open" | "navigate" | "snapshot") {
+        if !matches!(
+            operation,
+            "open" | "navigate" | "snapshot" | "status" | "dialog"
+        ) {
             if let Ok(Ok(tree)) = timeout(
                 Duration::from_millis(500),
                 session.command("Page.getFrameTree", json!({})),
@@ -821,9 +940,8 @@ async fn status_result(
         "url":url,
         "title":state["title"],
         "loading":state["loading"],
-        "loadError":null,
         "control":{"owner":"agent","ownedByCaller":true,"generation":0},
-        "dialog":null,
+        "dialog":page.dialog.status(),
         "fileChooser":null,
         "viewportSetting":session.setting,
         "viewport":session.viewport.value(),

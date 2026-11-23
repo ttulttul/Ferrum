@@ -22,6 +22,7 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 
 mod automation;
+mod recording;
 mod viewport;
 use viewport::Size;
 
@@ -55,7 +56,10 @@ pub(super) struct Page {
     automation: Arc<tokio::sync::Mutex<Option<automation::Session>>>,
     activity: Arc<Mutex<Activity>>,
     layout: watch::Sender<Size>,
-    dialog: Arc<std::sync::atomic::AtomicBool>,
+    dialog: Arc<Dialog>,
+    recording: Arc<tokio::sync::Mutex<Option<recording::Recording>>>,
+    /// Where a stopped recording is left for the thread to claim.
+    attachments: PathBuf,
     closed: watch::Sender<bool>,
     control: Arc<Mutex<Control>>,
     scratch: Arc<tempfile::TempDir>,
@@ -63,6 +67,49 @@ pub(super) struct Page {
     chooser: Arc<Mutex<Option<(Uuid, Uuid, u64)>>>,
     chooser_updates: watch::Sender<Option<Uuid>>,
 }
+/// The JavaScript dialog a tab shows, as the reference reports it
+/// (`dialogStatus`): its type, message and default prompt text.
+#[derive(Default)]
+pub(super) struct Dialog(Mutex<Option<Value>>);
+
+impl Dialog {
+    /// Records a `Page.javascriptDialogOpening` or `...Closed` event.
+    pub(super) fn observe(&self, method: Option<&str>, params: &Value) {
+        let clip = |v: &Value| {
+            let units: Vec<u16> = v
+                .as_str()
+                .unwrap_or_default()
+                .encode_utf16()
+                .take(4000)
+                .collect();
+            String::from_utf16_lossy(&units)
+        };
+        match method {
+            Some("Page.javascriptDialogOpening") => {
+                *self.0.lock().unwrap() = Some(json!({
+                    "type": params["type"],
+                    "message": clip(&params["message"]),
+                    "defaultValue": clip(&params["defaultPrompt"]),
+                }));
+            }
+            Some("Page.javascriptDialogClosed") => *self.0.lock().unwrap() = None,
+            _ => {}
+        }
+    }
+
+    pub(super) fn pending(&self) -> bool {
+        self.0.lock().unwrap().is_some()
+    }
+
+    pub(super) fn status(&self) -> Value {
+        self.0.lock().unwrap().clone().unwrap_or(Value::Null)
+    }
+
+    pub(super) fn clear(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+}
+
 struct Activity {
     viewers: usize,
     used: String,
@@ -139,7 +186,7 @@ impl Page {
     }
     fn status(&self, id: Uuid, operate: bool) -> Value {
         let c = self.control.lock().unwrap();
-        json!({"type":"control","canOperate":operate,"controller":match c.owner{None=>"unclaimed",Some(owner) if owner==id=>"you",_=>"another-viewer"},"generation":c.generation,"dialog":null})
+        json!({"type":"control","canOperate":operate,"controller":match c.owner{None=>"unclaimed",Some(owner) if owner==id=>"you",_=>"another-viewer"},"generation":c.generation,"dialog":self.dialog.status()})
     }
 }
 
@@ -190,6 +237,27 @@ pub(super) fn executable() -> Option<PathBuf> {
 impl Browsers {
     pub fn page(&self, thread: &str, tab: &str) -> Option<Page> {
         self.pages.get(tab).filter(|p| p.thread == thread).cloned()
+    }
+    /// The tab of `thread` that records: `explicit` if it does, else the
+    /// current tab if it does, else the thread's only recording tab.
+    pub(super) async fn recording_tab(
+        &self,
+        thread: &str,
+        explicit: Option<&str>,
+        current: Option<&str>,
+    ) -> Option<Page> {
+        let mut recording = Vec::new();
+        for page in self.pages.values().filter(|p| p.thread == thread) {
+            if page.recording.lock().await.is_some() {
+                recording.push(page.clone());
+            }
+        }
+        let wanted = explicit.or(current);
+        recording
+            .iter()
+            .find(|p| Some(p.tab.as_str()) == wanted)
+            .cloned()
+            .or_else(|| (explicit.is_none() && recording.len() == 1).then(|| recording[0].clone()))
     }
     pub async fn open(&mut self, dir: &Path, snap: &Value) -> Option<Page> {
         let id = snap["tabId"].as_str()?;
@@ -291,6 +359,8 @@ impl Browsers {
             automation: Default::default(),
             layout: watch::channel(Size::DEFAULT).0,
             dialog: Default::default(),
+            recording: Default::default(),
+            attachments: crate::config::ServerPaths::from_state_dir(dir).attachments,
             activity: Arc::new(Mutex::new(Activity {
                 viewers: 0,
                 used: super::timestamp(),
@@ -618,8 +688,7 @@ async fn stream(
                     }
                 }
                 match e["method"].as_str(){
-                    Some("Page.javascriptDialogOpening") => page.dialog.store(true, std::sync::atomic::Ordering::Release),
-                    Some("Page.javascriptDialogClosed") => page.dialog.store(false, std::sync::atomic::Ordering::Release),
+                    Some(method @ ("Page.javascriptDialogOpening" | "Page.javascriptDialogClosed")) => page.dialog.observe(Some(method), &e["params"]),
                     Some("Page.fileChooserOpened") if page.control.lock().unwrap().owner==Some(viewer)=>{
                         if let Some(node)=e["params"]["backendNodeId"].as_u64(){
                             let id=Uuid::new_v4();*page.chooser.lock().unwrap()=Some((id,viewer,node));

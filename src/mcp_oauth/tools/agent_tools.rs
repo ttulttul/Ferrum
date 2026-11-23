@@ -454,3 +454,27 @@ pub(super) async fn preview_automation<S: McpHost>(
     }
     Ok(result)
 }
+
+/// `preview_recording_stop`: the stopped recording, claimed for the calling
+/// thread from the pending attachment the browser left.
+pub(super) async fn preview_recording_stop<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    args: &Value,
+) -> Outcome {
+    let thread_id = thread_id(caller)?.to_owned();
+    let mut input = args.clone();
+    if !input.is_object() {
+        input = json!({});
+    }
+    input["transferToEnvironment"] = json!(true);
+    let mut response = preview_automation(host, caller, "recordingStop", &input).await?;
+    let icon = response.as_object_mut().and_then(|r| r.remove("toolIcon"));
+    let mut artifact = host
+        .claim_preview_recording(&thread_id, &response)
+        .map_err(Refusal::Text)?;
+    if let Some(icon) = icon {
+        artifact["toolIcon"] = icon;
+    }
+    Ok(artifact)
+}
