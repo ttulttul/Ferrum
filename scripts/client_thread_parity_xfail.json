@@ -2,18 +2,6 @@
   "claude restart cli restored": {
     "nativeMetadata": "The reference hands the failed continuation's items to its retry as a context handoff (delta_since_target_last_seen), which Rust does not build, and counts the handoff in the session's attachment budget."
   },
-  "claude model change mid-turn": {
-    "live": "Racy: the change sent mid-turn lands among the turn's items wherever each server has got to when it arrives, which differs by a step on some runs."
-  },
-  "claude runtime mode change mid-turn": {
-    "live": "Racy: the change sent mid-turn lands among the turn's items wherever each server has got to when it arrives, which differs by a step on some runs."
-  },
-  "codex title": {
-    "live": "Racy: Rust usually records the generated title later in the turn than the reference, which records it as the turn starts; when its title generation finishes first, both match."
-  },
-  "claude title fallback": {
-    "live": "Racy: Rust usually records the generated title later in the turn than the reference, which records it as the turn starts; when its title generation finishes first, both match."
-  },
   "claude delegate": {
     "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
   },
@@ -35,34 +23,13 @@
   "claude steer then stop": {
     "live": "Rust cancels the steered message's pending item before the stopped turn's last provider-turn update; the reference cancels it after."
   },
-  "pi title": {
-    "live": "Racy: the generated title lands at a different point in the turn on each server, as each one's title generation finishes; on some runs both match."
-  },
-  "grok title": {
-    "live": "Racy: the generated title lands at a different point in the turn on each server, as each one's title generation finishes; on some runs both match."
-  },
-  "claude archive mid-turn": {
-    "live": "Racy: the archive sent mid-turn lands among the turn's items wherever each server has got to when it arrives, which differs by a step on some runs."
-  },
-  "codex crash": {
-    "live": "Racy: the turn's last usage report and the Codex app-server's exit race; on some runs one server records the usage before the session's failure, on others after."
-  },
   "codex thread tools": {
-    "live": "Racy: the pull-request and issue link events the thread tools cause arrive in a different order or number on some runs, as their syncs race."
-  },
-  "codex runtime mode change mid-turn": {
-    "live": "Racy: the change sent mid-turn lands among the turn's items wherever each server has got to when it arrives, which differs by a step on some runs."
-  },
-  "opencode title": {
-    "live": "The generated title (thread.metadata-updated) lands later in Rust's turn than in the reference's, which records it right after the session attaches, as each server's title generation through the OpenCode server finishes; it did so in 6 of 6 runs pinned to 4 CPUs."
+    "live": "Racy: the pull-request syncs the thread tools start run concurrently, and on most runs one of Rust's also updates the link (an extra thread.pull-request-link-updated among the syncs) where the reference's does not; 1 of 8 pinned runs matched."
   },
   "claude delegate live": {
     "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
   },
   "codex delegate live": {
     "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
-  },
-  "antigravity title": {
-    "live": "The generated title (thread.metadata-updated) lands later in Rust's turn than in the reference's, as each server's title generation through the Antigravity runtime finishes; it did so in 5 of 5 runs pinned to 4 CPUs."
   }
 }

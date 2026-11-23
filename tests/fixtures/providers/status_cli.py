@@ -55,6 +55,16 @@ if log_path and spec.get("logEnv"):
                              sort_keys=True) + "\n")
 
 
+def wait_for_title_gate():
+    """With FAKE_TITLE_GATE set (a scenario's "titleAfterTurn"), answer a title only once that
+    file exists: the parity driver creates it when the turn settled, so the title lands after
+    the same events on both servers instead of racing the turn."""
+    gate = os.environ.get("FAKE_TITLE_GATE")
+    deadline = time.monotonic() + 60
+    while gate and not os.path.exists(gate) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 def matches(entry):
     if "args" in entry:
         return entry["args"] == args
@@ -87,6 +97,8 @@ if "pi" in entry:
             reply = {"type": "response", "id": record.get("id"), "command": kind, "success": False,
                      "error": "not available"}
         elif kind in entry["pi"]:
+            if kind == "prompt":
+                wait_for_title_gate()
             reply = {"type": "response", "id": record.get("id"), "command": kind, "success": True,
                      "data": entry["pi"][kind]}
         else:
@@ -130,6 +142,8 @@ for line in sys.stdin:
     method = message.get("method")
     if "id" not in message or method is None:
         continue
+    if method == "session/prompt":
+        wait_for_title_gate()
     # Notifications that go out before a method's reply ("notifyBefore"), as an agent streams a
     # prompt's updates before answering it.
     for notification in entry.get("notifyBefore", {}).get(method, []):

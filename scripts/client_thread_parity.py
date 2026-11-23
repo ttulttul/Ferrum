@@ -243,15 +243,15 @@ PROVIDER_SCENARIOS = [
     # A seeded first message titles the thread with the text generation model (Codex), and a
     # regenerate request titles it again from the whole conversation.
     {"name": "codex title", "instance": "codex", "model": "fixture", "scenario": "codex_title.json",
-     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate"},
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate", "titleAfterTurn": True},
     # Without Codex installed, the title falls back to Claude's text generation model.
     {"name": "claude title fallback", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_title.json", "dispatch": {"titleSeed": "Run echo hi and write notes.txt"},
-     "title": "initial"},
+     "title": "initial", "titleAfterTurn": True},
     # Titles from another provider's text generation model, which the thread's turns never run on:
     # Pi over its RPC mode.
     {"name": "pi title", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
-     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate", "titleAfterTurn": True,
      "textProvider": {"instance": "pi", "driver": "pi", "cli": "pi", "model": "openai/gpt-5.6",
                       # get_available_models is the status probe's too.
                       "launch": "--no-tools", "records": ["set_model", "set_thinking_level", "prompt",
@@ -259,20 +259,20 @@ PROVIDER_SCENARIOS = [
                       "spec": PI_TITLE_SPEC}},
     # Grok over ACP.
     {"name": "grok title", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
-     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate", "titleAfterTurn": True,
      "textProvider": {"instance": "grok", "driver": "grok", "cli": "grok", "model": "grok-4-fast",
                       "launch": "agent", "spec": GROK_TITLE_SPEC, "skip": "t3-code-provider-probe",
                       "records": ["initialize", "authenticate", "session/new", "session/set_model",
                                   "session/set_config_option", "session/prompt", "session/cancel"]}},
     # OpenCode 1.x through the server T3 starts for it.
     {"name": "opencode title", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
-     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate", "titleAfterTurn": True,
      "textProvider": {"instance": "opencode", "driver": "opencode", "cli": "opencode", "opencode": True,
                       "model": "anthropic/claude-opus-5-5", "options": [{"id": "variant", "value": "high"}],
                       "launch": "serve", "spec": OPENCODE_TITLE_SPEC}},
     # Antigravity's agy CLI over ACP.
     {"name": "antigravity title", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
-     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate", "titleAfterTurn": True,
      "textProvider": {"instance": "antigravity", "driver": "antigravity", "cli": "agy", "model": "antigravity-default",
                       "launch": "acp", "spec": AGY_TITLE_SPEC,
                       "records": ["initialize", "authenticate", "session/new", "session/set_mode", "session/set_model",
@@ -294,28 +294,28 @@ PROVIDER_SCENARIOS = [
     # A thread change sent over the WebSocket while the turn runs: what each server does to the
     # turn and its provider session (detach, interrupt, or refuse the change).
     {"name": "codex archive mid-turn", "instance": "codex", "model": "fixture",
-     "scenario": "codex_interrupt.json", "change": {"type": "thread.archive"}},
+     "scenario": "codex_interrupt.json", "change": {"type": "thread.archive"}, "changeAfter": "quiet"},
     {"name": "codex model change mid-turn", "instance": "codex", "model": "fixture",
      "scenario": "codex_interrupt.json", "change": {"type": "thread.model-selection.set",
-                                                    "modelSelection": {"instanceId": "codex", "model": "other"}}},
+                                                    "modelSelection": {"instanceId": "codex", "model": "other"}}, "changeAfter": "quiet"},
     {"name": "codex provider change mid-turn", "instance": "codex", "model": "fixture",
      "scenario": "codex_interrupt.json", "change": {"type": "thread.model-selection.set",
                                                     "modelSelection": {"instanceId": "claudeAgent",
-                                                                       "model": "claude-opus-5-5"}}},
+                                                                       "model": "claude-opus-5-5"}}, "changeAfter": "quiet"},
     {"name": "codex settle mid-turn", "instance": "codex", "model": "fixture",
-     "scenario": "codex_interrupt.json", "change": {"type": "thread.settle"}},
+     "scenario": "codex_interrupt.json", "change": {"type": "thread.settle"}, "changeAfter": "quiet"},
     {"name": "codex runtime mode change mid-turn", "instance": "codex", "model": "fixture",
      "scenario": "codex_interrupt.json", "change": {"type": "thread.runtime-mode.set",
-                                                    "runtimeMode": "approval-required"}},
+                                                    "runtimeMode": "approval-required"}, "changeAfter": "quiet"},
     {"name": "claude archive mid-turn", "instance": "claudeAgent", "model": "claude-opus-5-5",
-     "scenario": "claude_interrupt.json", "change": {"type": "thread.archive"}},
+     "scenario": "claude_interrupt.json", "change": {"type": "thread.archive"}, "changeAfter": "quiet"},
     {"name": "claude model change mid-turn", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_interrupt.json", "change": {"type": "thread.model-selection.set",
                                                      "modelSelection": {"instanceId": "claudeAgent",
-                                                                        "model": "claude-sonnet-5-5"}}},
+                                                                        "model": "claude-sonnet-5-5"}}, "changeAfter": "quiet"},
     {"name": "claude runtime mode change mid-turn", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_interrupt.json", "change": {"type": "thread.runtime-mode.set",
-                                                     "runtimeMode": "approval-required"}},
+                                                     "runtimeMode": "approval-required"}, "changeAfter": "quiet"},
     {"name": "claude approval", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_approval.json", "respond": {"decision": "accept"}},
     {"name": "claude approval declined", "instance": "claudeAgent", "model": "claude-opus-5-5",
@@ -1554,6 +1554,8 @@ def scenario_env(temporary, name, root, scenario, drivers):
     log = temporary / f"{name}-provider.log"
     env = {**GIT_ISOLATION, **HOST_FAKES, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
            "FAKE_PROVIDER_LOG": str(log), **login_shell,
+           # "titleAfterTurn": the title CLI answers once the driver saw the turn settle.
+           **({"FAKE_TITLE_GATE": str(log) + ".turn-settled"} if scenario.get("titleAfterTurn") else {}),
            "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}
     return env, fake_bin, log
 
@@ -1607,6 +1609,8 @@ def provider_turns(args, credentials):
                         # A delegated task's target must be a checked, installed provider.
                         provider_status(url, cookie, scenario["instance"], temporary)
                     seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
+                    if scenario.get("titleAfterTurn"):
+                        seeded["settledFile"] = str(log) + ".turn-settled"
                     outcomes[name] = run_client(args, url, cookie, seeded)
                     if scenario.get("followUp"):
                         outcomes[name]["steps"].update(follow_up_turn(args, url, cookie, scenario["followUp"]))

@@ -15,6 +15,7 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
+import NodeFs from "node:fs";
 
 const [reference, base] = process.argv.slice(2);
 if (!reference || !base) {
@@ -204,6 +205,9 @@ const requestsOf = (item, pending, withItems) => {
   for (const turnItem of turnItems) if (turnItem?.requestId) withItems.add(turnItem.requestId);
 };
 
+/** How long a turn's stream must stay quiet before a `changeAfter: "quiet"` change. */
+const QUIET_MS = 750;
+
 /**
  * subscribeThread's items from before a message is dispatched until its run settles. With
  * `seed.interrupt`, the run is interrupted once its provider turn is running; with
@@ -211,7 +215,9 @@ const requestsOf = (item, pending, withItems) => {
  * the interrupt's on both servers, however fast each takes the CLI's frames); with
  * `seed.interrupt === "request"`, once a runtime request is pending. With `seed.respond`
  * ({decision} or {answers}), the first pending runtime request is answered with it. With
- * `seed.change` (a command without its ids), that command is sent once the provider turn runs.
+ * `seed.change` (a command without its ids), that command is sent once the provider turn runs;
+ * with `seed.changeAfter === "quiet"`, once the turn's stream has then been quiet for
+ * QUIET_MS, where its CLI waits (so the change lands after the same items on both servers).
  * With `seed.steer` ({text, ack}), a message steers the run once a command it runs is running,
  * and `seed.interrupt === "steer"` interrupts it once an item carrying `ack` (what the provider
  * answered the steer with) arrived.
@@ -219,6 +225,7 @@ const requestsOf = (item, pending, withItems) => {
 const liveTurn = (client, seed) =>
   Effect.gen(function* () {
     const items = [];
+    let lastItemAt = Date.now();
     const synchronized = yield* Deferred.make();
     const settled = yield* Deferred.make();
     const turnRunning = yield* Deferred.make();
@@ -236,12 +243,17 @@ const liveTurn = (client, seed) =>
       Stream.runForEach((item) =>
         Effect.gen(function* () {
           items.push({ ...plain(item), dispatched });
+          lastItemAt = Date.now();
           if (item.kind === "synchronized") yield* Deferred.succeed(synchronized, undefined);
           // With `seed.settleRuns`, the turn settles once that many runs have ended (a
           // delegated task's delivery is a run of its own).
           if (dispatched) {
             for (const id of settledRunIds(item, awaitStoppedCheckpoint)) ended.add(id);
-            if (ended.size >= (seed.settleRuns ?? 1)) yield* Deferred.succeed(settled, undefined);
+            if (ended.size >= (seed.settleRuns ?? 1)) {
+              // A title held until the turn settled (`seed.settledFile`) may now come.
+              if (seed.settledFile) NodeFs.writeFileSync(seed.settledFile, "");
+              yield* Deferred.succeed(settled, undefined);
+            }
           }
           const run = runOf(item);
           if (dispatched && run.runId) runId = run.runId;
@@ -290,6 +302,9 @@ const liveTurn = (client, seed) =>
       // A thread change sent while the turn runs (archive, model, runtime mode, ...); with
       // `seed.changeAfter === "subagent"`, once the turn has delegated a task.
       yield* Deferred.await(seed.changeAfter === "subagent" ? subagentShown : turnRunning);
+      if (seed.changeAfter === "quiet") {
+        while (Date.now() - lastItemAt < QUIET_MS) yield* Effect.sleep(50);
+      }
       changeReply = yield* client["orchestration.dispatchCommand"]({
         commandId: "turn-change",
         threadId: seed.threadId,

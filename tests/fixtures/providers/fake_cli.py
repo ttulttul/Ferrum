@@ -76,6 +76,16 @@ args = sys.argv[1:]
 log_path = os.environ["FAKE_PROVIDER_LOG"]
 
 
+def wait_for_title_gate():
+    """With FAKE_TITLE_GATE set (a scenario's "titleAfterTurn"), answer a title only once that
+    file exists: the parity driver creates it when the turn settled, so the title lands after
+    the same events on both servers instead of racing the turn."""
+    gate = os.environ.get("FAKE_TITLE_GATE")
+    deadline = time.monotonic() + 60
+    while gate and not os.path.exists(gate) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 def title_generation():
     """Answer a one-shot text generation run (a thread title) and exit.
 
@@ -106,6 +116,7 @@ def title_generation():
         out.write(json.dumps({"argv": args, "prompt": prompt, "schema": schema, "env": env}) + "\n")
     if first and scenario.get("titleDelayFirst"):
         time.sleep(scenario["titleDelayFirst"])
+    wait_for_title_gate()
     output = scenario.get("title")
     if output is None:
         sys.stderr.write("fake provider: this scenario generates no title\n")
