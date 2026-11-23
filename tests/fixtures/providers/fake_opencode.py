@@ -16,7 +16,8 @@ otherwise) until it is stopped. A route with "sequence": [route, ...] answers
 its successive requests with each entry in turn, the last one repeating. Every launch appends its arguments to
 FAKE_PROVIDER_LOG.args (with the port replaced by PORT), and every request
 `METHOD /path` to one of OpenCode's routes (plus " basic" when it carries
-Basic credentials) to FAKE_PROVIDER_LOG.http.
+Basic credentials) to FAKE_PROVIDER_LOG.http, and every `/session` request as
+JSON with its query and body.
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -64,15 +65,25 @@ OPENCODE_PATH = re.compile(r"^/(?:api/|global/|provider$|agent$|skill$|command$)
 class Handler(BaseHTTPRequestHandler):
     def answer(self):
         length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
-        path = self.path.split("?", 1)[0]
+        raw = self.rfile.read(length) if length else b""
+        path, _, query = self.path.partition("?")
         basic = (self.headers.get("Authorization") or "").startswith("Basic ")
         # Only OpenCode's own routes are recorded: both servers pick the port by binding port 0,
         # so a T3 client of another scenario can briefly reach this one (`GET /ws`).
         if log and OPENCODE_PATH.match(path):
             with open(log + ".http", "a") as out:
                 out.write(f"{self.command} {path}{' basic' if basic else ''}\n")
+        # A session's requests (text generation) with their query and body, as JSON.
+        if log and path.startswith("/session"):
+            try:
+                body = json.loads(raw) if raw else None
+            except ValueError:
+                body = raw.decode(errors="replace")
+            with open(log + ".http", "a") as out:
+                headers = {name.lower(): value for name, value in self.headers.items()
+                           if name.lower().startswith("x-opencode") or name.lower() == "content-type"}
+                out.write(json.dumps({"method": self.command, "path": path, "query": query,
+                                      "basic": basic, "headers": headers, "body": body}, sort_keys=True) + "\n")
         key = f"{self.command} {path}"
         route = routes.get(key, {"status": 404, "body": {"error": "not found"}})
         if "sequence" in route:
@@ -90,7 +101,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    do_GET = do_POST = answer
+    do_GET = do_POST = do_DELETE = do_PATCH = answer
 
     def log_message(self, *_):
         pass

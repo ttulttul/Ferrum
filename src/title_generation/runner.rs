@@ -1058,6 +1058,22 @@ pub(crate) async fn generate_thread_title(
             .await?;
             decode_json_reply("Grok Agent", &text)?
         }
+        "opencode" => {
+            let env = crate::provider_status::base_env(&instance_env(&instance));
+            let text = crate::provider_status::opencode::generate_text(
+                state.provider_status.opencode(),
+                &instance_id,
+                &instance["config"],
+                &env,
+                request.cwd,
+                request.prompt,
+                selection["model"].as_str().unwrap_or_default(),
+                option_string(&selection, "agent").as_deref(),
+                option_string(&selection, "variant").as_deref(),
+            )
+            .await?;
+            decode_json_reply("OpenCode", &text)?
+        }
         "pi" => {
             let env = crate::provider_status::base_env(&instance_env(&instance));
             let text = crate::provider_status::pi::generate_text(

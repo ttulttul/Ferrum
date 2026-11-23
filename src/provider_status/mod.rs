@@ -68,7 +68,7 @@ pub(crate) mod grok;
 mod kiro;
 mod maintenance;
 mod muse;
-mod opencode;
+pub(crate) mod opencode;
 pub(crate) mod pi;
 pub(crate) mod reset_credits;
 
@@ -170,6 +170,11 @@ pub(crate) struct ProviderStatus {
 }
 
 impl ProviderStatus {
+    /// The managed OpenCode servers, which text generation borrows too.
+    pub(crate) fn opencode(&self) -> &opencode::Owners {
+        &self.opencode
+    }
+
     pub(crate) fn new(paths: &crate::config::ServerPaths) -> Self {
         Self {
             caches: paths.caches.clone(),
