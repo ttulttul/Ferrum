@@ -79,16 +79,18 @@
       "emitsToolOutput": true,
       "emitsToolStarted": true,
       "exposesToolItemIds": true,
+      "supportsBackgroundWait": true,
       "supportsDynamicToolCallbacks": true,
       "supportsMcpTools": true
     },
     "turns": {
-      "activeSteeringInterruptsTools": true,
+      "activeSteeringInterruptsTools": false,
       "emitsTurnCompleted": true,
       "emitsTurnStarted": true,
       "exposesNativeTurnId": false,
       "supportsActiveSteering": true,
       "supportsInterrupt": true,
+      "supportsNativeResume": true,
       "supportsQueuedMessages": true,
       "supportsSteeringByInterruptRestart": false,
       "terminalStatusQuality": "strong"
@@ -164,6 +166,7 @@
       "canForkFromSubagentThread": true,
       "canForkFromTurn": true,
       "canForkThread": true,
+      "canForkWhileSourceRunning": true,
       "canReadThreadSnapshot": true,
       "canRollbackThread": true,
       "exposesNativeThreadId": true
@@ -183,6 +186,7 @@
       "exposesNativeTurnId": true,
       "supportsActiveSteering": true,
       "supportsInterrupt": true,
+      "supportsNativeResume": true,
       "supportsQueuedMessages": true,
       "supportsSteeringByInterruptRestart": true,
       "terminalStatusQuality": "strong"

@@ -227,7 +227,7 @@ async fn handler(State(s): State<Arc<AppState>>, req: Request) -> Response {
         }
         "preferences" => preferences(&s, &input).await,
         "relay-config" => configure(&s, input).await,
-        "link-proof" => link_proof(&s, &input, owner, &parts.headers).await,
+        "link-proof" => link_proof(&s, &input).await,
         "health" | "mint-credential" => signed_request(&s, &input, kind == "health").await,
         _ => StatusCode::NOT_FOUND.into_response(),
     }
@@ -390,10 +390,19 @@ fn loopback(host: &str) -> bool {
         "127.0.0.1" | "localhost" | "::1"
     )
 }
-async fn link_proof(state: &Arc<AppState>, input: &Value, owner: bool, h: &HeaderMap) -> Response {
+/// The server's own loopback origin, which the tunnel must reach: as the
+/// reference's `serverLoopbackOrigin` (#38892), never the caller's.
+fn server_loopback_origin(state: &AppState) -> Option<Value> {
+    let (host, port) = match state.mcp_endpoint.get().map(|e| url::Url::parse(e)) {
+        Some(Ok(url)) => (url.host_str()?.to_owned(), url.port_or_known_default()?),
+        _ => ("127.0.0.1".to_owned(), state.auth.port()),
+    };
+    loopback(&host).then(|| json!({"localHttpHost": host, "localHttpPort": port}))
+}
+async fn link_proof(state: &Arc<AppState>, input: &Value) -> Response {
     let endpoint = &input["endpoint"];
     let origin = &input["origin"];
-    let (Some(challenge), Some(issuer), Some(kind), Some(host), Some(port)) = (
+    let (Some(challenge), Some(issuer), Some(kind), Some(_), Some(port)) = (
         input["challenge"].as_str(),
         input["relayIssuer"].as_str(),
         endpoint["providerKind"].as_str(),
@@ -410,21 +419,12 @@ async fn link_proof(state: &Arc<AppState>, input: &Value, owner: bool, h: &Heade
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let url = url::Url::parse(&format!(
-        "http://{}",
-        header(h, "host").unwrap_or("127.0.0.1")
-    ));
-    if port != u64::from(state.auth.port())
-        || kind == "t3_relay"
-        || forwarded(h)
-        || !loopback(host)
-        || !url.is_ok_and(|u| {
-            (owner || u.host_str().is_some_and(loopback))
-                && u.port_or_known_default().map(u64::from) == Some(port)
-        })
-    {
-        return err(StatusCode::BAD_REQUEST, "Invalid managed endpoint origin.");
-    }
+    // Since #38892 the caller's origin, host and forwarding are not checked:
+    // only the provider kind is, and the proof names this server's origin.
+    let origin = match server_loopback_origin(state) {
+        Some(origin) if kind != "t3_relay" => origin,
+        _ => return err(StatusCode::BAD_REQUEST, "Invalid managed endpoint origin."),
+    };
     let key = match state.connect.key() {
         Some(k) => k,
         None => return internal(),
@@ -455,7 +455,7 @@ async fn link_proof(state: &Arc<AppState>, input: &Value, owner: bool, h: &Heade
     let proof = sign(
         &key,
         "t3-env-link+jwt",
-        json!({"iss":format!("t3-env:{id}"),"aud":issuer.trim().trim_end_matches('/'),"sub":id,"jti":crate::platform::uuid_v4(),"iat":issued,"exp":issued+300,"challenge":challenge,"descriptor":descriptor,"environmentId":id,"environmentPublicKey":pem,"endpoint":endpoint,"origin":origin,"scopes":scopes}),
+        json!({"iss":format!("t3-env:{id}"),"aud":issuer.trim().trim_end_matches('/'),"sub":id,"jti":crate::platform::uuid_v4(),"iat":issued,"exp":issued+300,"challenge":challenge,"descriptor":descriptor,"environmentId":id,"environmentPublicKey":pem,"endpoint":endpoint,"origin":&origin,"scopes":scopes}),
     );
     (SECRET_HEADERS, Json(proof)).into_response()
 }

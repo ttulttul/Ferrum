@@ -1381,7 +1381,9 @@ impl ControlPlane {
     /// The methods this host answers itself.
     fn host_call(&self, method: &str, params: &Value, references: bool) -> Option<Call> {
         Some(match method {
-            "server.probe" => Call::Done(Reply::Success(json!({}))),
+            "server.probe" => Call::Done(Reply::Success(
+                json!({"serverTime": auth_service::iso(auth_service::now())}),
+            )),
             "subscribeServerConfig" => {
                 let snapshot = match self.config_snapshot(params, references) {
                     Ok(snapshot) => snapshot,
@@ -1726,6 +1728,7 @@ impl ControlPlane {
         ] {
             config[key] = true.into();
         }
+        config["featureFlags"] = crate::feature_flags::server_feature_flags();
         if let Some(policy) = self.settings.policy.summary() {
             config["managedPolicy"] = policy.clone();
         }

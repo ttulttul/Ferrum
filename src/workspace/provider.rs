@@ -125,6 +125,12 @@ const WORKSPACE_MISSING: &str =
     "This thread's workspace folder no longer exists or is not a directory: ";
 pub const CODEX_STREAM_CLOSED: &str = "The provider event stream closed unexpectedly. Retry the turn; if it keeps failing, check the provider and server logs.";
 
+/// Whether a failure is the reference's `ProviderAdapterEventStreamError`:
+/// the plain category text, or (since #39299) the one naming the exit.
+pub fn stream_closed(message: &str) -> bool {
+    message.starts_with("The provider event stream closed unexpectedly")
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ProviderEvent {

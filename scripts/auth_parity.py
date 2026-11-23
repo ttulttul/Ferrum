@@ -363,6 +363,7 @@ def main():
         failures = 0
         for name, original in outputs[0].items():
             rust = outputs[1][name]
+            original, rust = harness.volatile_masked(original), harness.volatile_masked(rust)
             if original == rust:
                 print("PASS", name)
             else:

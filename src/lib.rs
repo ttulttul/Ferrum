@@ -133,6 +133,7 @@ mod acp_install;
 mod acp_registry;
 #[cfg(feature = "native")]
 mod bitbucket_credential;
+mod feature_flags;
 #[cfg(feature = "native")]
 mod peer_link_requests;
 #[cfg(feature = "native")]

@@ -37,8 +37,24 @@ async fn probe(token: &str) -> Reply {
         .into_iter()
         .find_map(|k| viewer[k].as_str())
         .ok_or_else(invalid)?;
+    // The workspace's URL key, which its issue links name (upstream #38854).
+    let workspace = data["organization"]["urlKey"]
+        .as_str()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned);
     let scopes=data["teams"]["nodes"].as_array().ok_or_else(invalid)?.iter().map(|t|Ok(json!({"key":t["key"].as_str().ok_or_else(invalid)?,"name":t["name"].as_str().ok_or_else(invalid)?}))).collect::<Result<Vec<_>,Value>>()?;
-    Ok(status(true, json!(account), Value::Null, json!(scopes)))
+    let mut connected = status(true, json!(account), Value::Null, json!(scopes));
+    if let Some(workspace) = workspace {
+        // Before `scopes`, as the reference's connection lists it.
+        let scopes = connected["scopes"].take();
+        if let Some(fields) = connected.as_object_mut() {
+            fields.remove("scopes");
+            fields.insert("workspace".into(), json!(workspace));
+            fields.insert("scopes".into(), scopes);
+        }
+    }
+    Ok(connected)
 }
 pub(super) async fn read(path: &Path) -> Reply {
     let err = || {
@@ -128,7 +144,11 @@ async fn run(state: &AppState, method: &str, input: &Value) -> Reply {
             } else {
                 disconnected()
             };
-            Ok(json!({"trackers":[connection],"bindings":record["bindings"]}))
+            // One account per tracker: no added accounts, nor bindings to them
+            // (upstream #39179 connects more than one Linear account).
+            Ok(
+                json!({"trackers":[connection],"accounts":[],"bindings":record["bindings"],"accountBindings":{}}),
+            )
         }
         "issueTrackers.connect" => {
             record["token"] = input["token"].clone();

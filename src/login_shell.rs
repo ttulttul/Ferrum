@@ -30,7 +30,8 @@ use std::{
 /// What the reference reads from the login shell. `__MISE_DIFF` must travel
 /// with the shell's `PATH`, or `mise x` can rebuild `PATH` behind a same-named
 /// wrapper that then runs itself forever.
-pub const LOGIN_SHELL_ENV_NAMES: [&str; 3] = ["PATH", "__MISE_DIFF", "JAVA_HOME"];
+pub const LOGIN_SHELL_ENV_NAMES: [&str; 4] =
+    ["PATH", "__MISE_DIFF", "JAVA_HOME", "T3CODE_FEATURE_FLAGS"];
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 const SLOW_LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -44,6 +45,8 @@ pub struct LoginEnvironment {
     pub path: Option<OsString>,
     pub mise_diff: Option<OsString>,
     pub java_home: Option<OsString>,
+    /// `T3CODE_FEATURE_FLAGS`, which a profile may set for the server.
+    pub feature_flags: Option<OsString>,
 }
 
 impl LoginEnvironment {
@@ -53,6 +56,7 @@ impl LoginEnvironment {
             path: std::env::var_os("PATH"),
             mise_diff: std::env::var_os("__MISE_DIFF"),
             java_home: std::env::var_os("JAVA_HOME"),
+            feature_flags: std::env::var_os("T3CODE_FEATURE_FLAGS"),
         }
     }
 
@@ -85,6 +89,11 @@ impl LoginEnvironment {
                 next.java_home = Some(java_home.into());
             }
         }
+        if next.feature_flags.is_none() {
+            if let Some(flags) = value(shell_environment, "T3CODE_FEATURE_FLAGS") {
+                next.feature_flags = Some(flags.into());
+            }
+        }
         next
     }
 
@@ -94,6 +103,7 @@ impl LoginEnvironment {
             ("PATH", self.path.as_deref()),
             ("__MISE_DIFF", self.mise_diff.as_deref()),
             ("JAVA_HOME", self.java_home.as_deref()),
+            ("T3CODE_FEATURE_FLAGS", self.feature_flags.as_deref()),
         ]
         .into_iter()
         .filter_map(|(name, value)| value.map(|value| (name, value)))
@@ -289,6 +299,11 @@ fn apply_login_shell_environment(
         ("PATH", &current.path, &next.path),
         ("__MISE_DIFF", &current.mise_diff, &next.mise_diff),
         ("JAVA_HOME", &current.java_home, &next.java_home),
+        (
+            "T3CODE_FEATURE_FLAGS",
+            &current.feature_flags,
+            &next.feature_flags,
+        ),
     ] {
         if before != after {
             if let Some(after) = after {
@@ -821,6 +836,7 @@ mod tests {
             path: Some(path.into()),
             mise_diff: None,
             java_home: None,
+            feature_flags: None,
         }
     }
 
@@ -837,6 +853,7 @@ mod tests {
             path: Some("/usr/bin:/bin".into()),
             mise_diff: Some("old".into()),
             java_home: Some("/jdk/kept".into()),
+            feature_flags: None,
         };
         let after = before.merged_with(
             &pairs(&[
@@ -852,6 +869,7 @@ mod tests {
                 path: Some("/home/u/.local/bin:/usr/bin:/bin".into()),
                 mise_diff: Some("new".into()),
                 java_home: Some("/jdk/kept".into()),
+                feature_flags: None,
             }
         );
         // JAVA_HOME fills only a gap; __MISE_DIFF travels only with a PATH.

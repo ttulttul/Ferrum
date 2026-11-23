@@ -2149,7 +2149,9 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         };
     }
     if method == "server.probe" {
-        return Reply::Success(json!({}));
+        return Reply::Success(
+            json!({"serverTime": crate::auth_service::iso(crate::auth_service::now())}),
+        );
     }
     if method == "orchestration.dispatchCommand" {
         return match dispatch_orchestration_command(state.clone(), params.clone()).await {

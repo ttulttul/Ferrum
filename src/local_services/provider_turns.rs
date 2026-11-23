@@ -296,6 +296,8 @@ pub(crate) struct Cli {
     lines: Lines<BufReader<ChildStdout>>,
     /// The end of the CLI's standard error, for recognizing known refusals.
     stderr_tail: std::sync::Arc<std::sync::Mutex<String>>,
+    /// The task reading standard error, until it has read all of it.
+    stderr_reader: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// What a CLI is launched with.
@@ -343,20 +345,21 @@ impl Cli {
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr_tail = std::sync::Arc::default();
-        if let Some(stderr) = child.stderr.take() {
-            // The CLI's own diagnostics can hold private text, so they stay
-            // in this process's log rather than in turn events.
+        // The CLI's own diagnostics can hold private text, so they stay in
+        // this process's log rather than in turn events.
+        let stderr_reader = child.stderr.take().map(|stderr| {
             tokio::spawn(log_stderr(
                 launch.program.clone(),
                 stderr,
                 std::sync::Arc::clone(&stderr_tail),
-            ));
-        }
+            ))
+        });
         Ok(Self {
             child,
             stdin,
             lines: BufReader::new(stdout).lines(),
             stderr_tail,
+            stderr_reader,
         })
     }
 
@@ -429,12 +432,17 @@ impl Cli {
         self.stop().await;
     }
 
-    /// How the CLI exited, if it has.
+    /// How the CLI exited, if it has. Once it has, its standard error is
+    /// read to the end (briefly), so `stderr_contains` sees all of it.
     pub(crate) async fn exit_status(&mut self) -> Option<std::process::ExitStatus> {
-        tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait())
+        let status = tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait())
             .await
             .ok()
-            .and_then(Result::ok)
+            .and_then(Result::ok);
+        if let Some(reader) = self.stderr_reader.take().filter(|_| status.is_some()) {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), reader).await;
+        }
+        status
     }
 }
 
@@ -461,22 +469,75 @@ async fn log_stderr(
     }
 }
 
-/// The failure of a CLI that exited before the turn ended.
 /// The reference's failure when Codex's app-server closes mid-turn: its
-/// event stream ends, whatever the exit status.
+/// event stream ends, naming how the process exited (#39299).
 fn codex_crashed(status: Option<std::process::ExitStatus>) -> ProviderFailure {
     tracing::warn!(?status, "Codex app-server exited during a turn");
-    ProviderFailure::new("unknown", crate::workspace::provider::CODEX_STREAM_CLOSED)
+    ProviderFailure::new(
+        "unknown",
+        format!(
+            "The provider event stream closed unexpectedly: the provider process exited{}. {}",
+            process_exit_status(status),
+            "Check the server logs for the provider's output, then retry the turn."
+        ),
+    )
+}
+
+/// The reference's `processExitStatus`: the signal, else the code.
+fn process_exit_status(status: Option<std::process::ExitStatus>) -> String {
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.and_then(|s| s.signal()).and_then(|n| {
+            Some(match n {
+                1 => "SIGHUP",
+                2 => "SIGINT",
+                3 => "SIGQUIT",
+                4 => "SIGILL",
+                6 => "SIGABRT",
+                9 => "SIGKILL",
+                11 => "SIGSEGV",
+                13 => "SIGPIPE",
+                15 => "SIGTERM",
+                _ => return None,
+            })
+        })
+    };
+    #[cfg(not(unix))]
+    let signal: Option<&str> = None;
+    match (signal, status.and_then(|s| s.code())) {
+        (Some(signal), _) => format!(" after signal {signal}"),
+        (None, Some(code)) => format!(" with code {code}"),
+        _ => String::new(),
+    }
 }
 
 /// The Claude Agent SDK's failure when Claude Code exits mid-turn.
 fn claude_crashed(status: Option<std::process::ExitStatus>) -> ProviderFailure {
+    let mut failure = ProviderFailure::new("transport_error", format!("{}.", claude_exit(status)));
+    failure.code = Some("process_exited_nonzero".into());
+    failure
+}
+
+/// How Claude Code exited, as the SDK words it.
+fn claude_exit(status: Option<std::process::ExitStatus>) -> String {
+    match status.and_then(|s| s.code()) {
+        Some(code) => format!("Claude Code process exited with code {code}"),
+        None => "Claude Code process exited unexpectedly".into(),
+    }
+}
+
+/// `ClaudeCodeStartupExitError` (upstream #39299): Claude Code exited before it
+/// answered. `stderr` only picks the guidance (`providerProcessExitGuidance`).
+fn claude_startup_exit(status: Option<std::process::ExitStatus>, eperm: bool) -> ProviderFailure {
+    let guidance = if eperm {
+        "It was denied access to a file or folder (EPERM). On macOS, allow T3 Code under System Settings > Privacy & Security > Files and Folders, or move the project out of Desktop, Documents, or Downloads, then retry the turn."
+    } else {
+        "Check the server logs for the provider's output, then retry the turn."
+    };
     let mut failure = ProviderFailure::new(
         "transport_error",
-        match status.and_then(|s| s.code()) {
-            Some(code) => format!("Claude Code process exited with code {code}."),
-            None => "Claude Code process exited unexpectedly.".into(),
-        },
+        format!("{} before it started. {guidance}", claude_exit(status)),
     );
     failure.code = Some("process_exited_nonzero".into());
     failure

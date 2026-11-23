@@ -614,10 +614,10 @@ impl Thread {
             .iter()
             .rev()
             .find_map(|run| self.provider.terminals.get(&run.id));
-        let crashed = !claude
-            && last
-                .and_then(|t| t.failure.as_ref())
-                .is_some_and(|failure| failure.message == provider::CODEX_STREAM_CLOSED);
+        let crash = last
+            .and_then(|t| t.failure.as_ref())
+            .filter(|failure| !claude && provider::stream_closed(&failure.message));
+        let crashed = crash.is_some();
         // A restart stops a session that has not failed.
         let stopped = self.provider.session_stopped_at.filter(|_| !crashed);
         let capabilities: Value =
@@ -630,7 +630,7 @@ impl Thread {
             "driver": thread.driver,
             "extensionStatuses": [],
             "id": id,
-            "lastError": if crashed { json!(provider::CODEX_STREAM_CLOSED) } else { Value::Null },
+            "lastError": crash.map(|failure| json!(failure.message)).unwrap_or(Value::Null),
             // The model of the latest run sent on it.
             "model": self
                 .runs
@@ -750,7 +750,7 @@ impl Thread {
         let crashed = driver == provider::CODEX
             && terminal
                 .and_then(|terminal| terminal.failure.as_ref())
-                .is_some_and(|failure| failure.message == provider::CODEX_STREAM_CLOSED);
+                .is_some_and(|failure| provider::stream_closed(&failure.message));
         let mut turn = json!({
             "id": ids.provider_turn,
             "providerThreadId": ids.provider_thread,

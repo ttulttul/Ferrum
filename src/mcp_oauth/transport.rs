@@ -139,7 +139,10 @@ pub(super) async fn handle<S: McpHost>(
                 if caller.thread.is_none() {
                     s.oauth().revoke_thread_credential(&scope.thread_id);
                 }
-                if caller.thread.is_none() && super::tools::needs_caller(name) {
+                if caller.thread.is_none()
+                    && super::tools::needs_caller(name)
+                    && super::tools::callable(&*s, &caller, name).is_ok()
+                {
                     let super::tools::Refusal::Failure(code, msg) =
                         super::tools::calling_thread_missing()
                     else {
@@ -150,7 +153,7 @@ pub(super) async fn handle<S: McpHost>(
                     );
                 }
             }
-            let outcome = match super::tools::callable(&caller, name)
+            let outcome = match super::tools::callable(&*s, &caller, name)
                 .and_then(|()| super::tools::unknown_arguments(name, a))
                 .and_then(|()| super::tools::linked_target(&*s, name, a))
             {

@@ -283,12 +283,12 @@ impl<'a> Attempt<'a> {
         let cli = match cli {
             Ok(cli) => cli,
             Err(_) => {
-                // What the reference reports when the SDK cannot start
-                // Claude Code (its own error names the missing binary).
+                // The reference's SDK starts Claude Code through a shell, which
+                // reports a missing one as exit 127 (upstream #39299).
                 tracing::warn!(%binary, "Claude Code could not be started");
                 let failure = ProviderFailure::new(
-                    "provider_error",
-                    "The provider could not start this turn. Retry the turn; if it keeps failing, check the provider setup and server logs.",
+                    "transport_error",
+                    "Claude Code process exited with code 127 before it started. Check the server logs for the provider's output, then retry the turn.",
                 );
                 return Outcome::Ended(TurnEnd::failed(failure, ThreadDisposition::Reusable));
             }
@@ -505,10 +505,14 @@ impl<'a> Attempt<'a> {
         {
             return Outcome::ConversationMissing;
         }
-        Outcome::Ended(TurnEnd::failed(
-            claude_crashed(status),
-            ThreadDisposition::Reusable,
-        ))
+        let failure = if self.answered {
+            claude_crashed(status)
+        } else {
+            let eperm = self.cli.stderr_contains("EPERM")
+                || self.cli.stderr_contains("Operation not permitted");
+            super::claude_startup_exit(status, eperm)
+        };
+        Outcome::Ended(TurnEnd::failed(failure, ThreadDisposition::Reusable))
     }
 
     async fn interrupt(&mut self) {

@@ -7,6 +7,7 @@ import http.client as http_client
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shlex
 import signal
@@ -17,6 +18,8 @@ import tempfile
 import threading
 import time
 from urllib.parse import urlsplit
+
+from parity_gaps import Gaps
 
 ROOT = Path(__file__).resolve().parents[1]
 TRACE = "00-0123456789abcdef0123456789abcdef-1234567890abcdef-01"
@@ -377,6 +380,25 @@ def managed_server(stack, prefix, root, secret, signing_key, env=None, stderr_pa
         return url, cookie
 
 
+_VOLATILE = [
+    # A server's clock (server.probe, getConfig), read a few milliseconds apart on each server.
+    (re.compile(r'("serverTime"\s*:\s*")[^"]*(")'), r"\1<time>\2"),
+    # The terminal manager's random id, new each process.
+    (re.compile(r'("managerId"\s*:\s*")[0-9a-f-]{36}(")'), r"\1<uuid>\2"),
+]
+
+
+def volatile_masked(value):
+    """`value` (text, bytes or anything repr-able as JSON text) with per-process values masked."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    if not isinstance(value, str):
+        return value
+    for pattern, replacement in _VOLATILE:
+        value = pattern.sub(replacement, value)
+    return value
+
+
 def check(fixture, servers, sockets):
     if "frame" in fixture:
         if "setupFrame" in fixture:
@@ -389,7 +411,7 @@ def check(fixture, servers, sockets):
         frame = encode(fixture["frame"]).decode()
         for ws in sockets:
             ws.send(frame)
-        values = [ws.recv(timeout=10) for ws in sockets]
+        values = [volatile_masked(ws.recv(timeout=10)) for ws in sockets]
         return values[0] == values[1], [repr(v)[:1600] for v in values]
     responses = []
     for url, cookie in servers:
@@ -468,15 +490,17 @@ def main():
                     parser.error("RPC fixtures require managed servers or both parity bootstrap environment variables")
                 sockets.append(stack.enter_context(connect(url.replace("http", "ws", 1) + "/ws?orchestrationProtocol=2",
                                 additional_headers={"Cookie": cookie}, proxy=None, compression=None)))
-        failures = 0
+        failures = differing = 0
+        gaps = Gaps("parity_harness")
         for fixture in fixtures:
             passed, values = check(fixture, servers, sockets)
             if not passed:
-                failures += 1
-                print(f"FAIL {fixture['name']}\n  original {values[0]}\n  rust     {values[1]}")
+                differing += 1
+                failures += gaps.differs(fixture["name"], [f"original {values[0]}", f"rust     {values[1]}"])
             else:
                 print(f"PASS {fixture['name']}")
-        print(f"{len(fixtures) - failures}/{len(fixtures)} fixtures matched")
+        failures += gaps.finish(ran={fixture["name"] for fixture in fixtures})
+        print(f"{len(fixtures) - differing}/{len(fixtures)} fixtures matched")
         return int(failures != 0)
 
 

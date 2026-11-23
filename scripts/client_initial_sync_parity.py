@@ -25,7 +25,7 @@ import tempfile
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, http, managed_server
+from parity_harness import encode, http, managed_server, volatile_masked
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "project:initial-sync"
@@ -191,6 +191,7 @@ def main():
 
         frames = {name: protocol_frames(url, cookie) for name, (url, cookie) in servers.items()}
         for index, (original, rust) in enumerate(zip(frames["original"], frames["rust"])):
+            original, rust = volatile_masked(original), volatile_masked(rust)
             total += 1
             if original == rust:
                 print(f"PASS protocol frame {index}: {rust[:160]}")

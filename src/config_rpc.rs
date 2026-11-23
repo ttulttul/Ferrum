@@ -152,6 +152,7 @@ pub(crate) async fn snapshot(
     ] {
         config[key] = true.into();
     }
+    config["featureFlags"] = crate::feature_flags::server_feature_flags();
     if !inside_git_work_tree(&state.paths.base_dir) {
         config["scratchWorkspaceRoot"] = json!(state.paths.base_dir.join("scratch"));
     }

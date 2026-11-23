@@ -299,13 +299,19 @@ pub(super) fn listed<S: McpHost>(host: &S, granted: &McpAccess, deferred: bool) 
 }
 
 /// Refuses a tool a client from outside a thread is not offered, as if it did
-/// not exist: the reference registers a thread-only tool for threads alone.
-pub(super) fn callable(caller: &Caller, name: &str) -> Result<(), Refusal> {
+/// not exist: the reference registers a thread-only tool for threads alone,
+/// and `t3_background_wait` for threads whose provider can wait.
+pub(super) fn callable<S: McpHost>(host: &S, caller: &Caller, name: &str) -> Result<(), Refusal> {
     let thread_only = name == "tool_search"
         || SERVED_TOOLS
             .iter()
             .any(|(tool, listed)| tool["name"] == name && listed == "hiddenFromOutsideClients");
-    if thread_only && caller.granted.thread.is_none() {
+    let hidden = SERVED_TOOLS.iter().any(|(tool, listed)| {
+        tool["name"] == name
+            && listed == "hiddenWithoutBackgroundWait"
+            && !visible_to(host, &caller.granted, listed)
+    });
+    if (thread_only && caller.granted.thread.is_none()) || hidden {
         return Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found")));
     }
     Ok(())

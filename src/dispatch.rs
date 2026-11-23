@@ -697,6 +697,10 @@ pub(crate) async fn polled_stream(
     let mut local = serde_json::json!({});
     let mut remote = Value::Null;
     for (key, value) in status.as_object()? {
+        // Only a `vcs.refreshStatus` reply carries the refs digest.
+        if key == "refsDigest" {
+            continue;
+        }
         if matches!(
             key.as_str(),
             "hasUpstream" | "aheadCount" | "behindCount" | "aheadOfDefaultCount" | "pr"

@@ -213,12 +213,15 @@ fn peer_origin(raw: &str) -> Result<String> {
         .ok()
         .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
         .ok_or_else(|| {
-            PeerLinkError::unreachable(format!("{raw} is not an http or https address."))
+            PeerLinkError::unreachable("That address is not an http or https address.".to_owned())
         })?;
     let host = parsed.host_str().unwrap_or_default();
     if parsed.scheme() == "http" && !is_loopback_host(host) && !is_tailnet_host(host) {
+        // The origin, never the address as given: it may hold a username,
+        // password or query.
         return Err(PeerLinkError::unreachable(format!(
-            "{raw} is plain http, which would send the link's credentials unencrypted. Use its https address, or its Tailscale address."
+            "{} is plain http, which would send the link's credentials unencrypted. Use its https address, or its Tailscale address.",
+            parsed.origin().ascii_serialization()
         )));
     }
     Ok(parsed.origin().ascii_serialization())
@@ -1211,7 +1214,7 @@ mod tests {
         );
         assert_eq!(
             peer_origin("ftp://example.com").unwrap_err().message,
-            "ftp://example.com is not an http or https address."
+            "That address is not an http or https address."
         );
         assert!(
             is_loopback_host("[::1]")

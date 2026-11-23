@@ -298,8 +298,16 @@ async fn feature(cwd: &str, suggestion: &str) -> Result<String, Value> {
     .await?;
     Ok(resolved)
 }
-async fn commit(g: &mut Progress<'_>, paths: &[String], subject: &str, body: &str) -> Reply {
-    g.start("commit", "Committing...").await;
+async fn commit(
+    g: &mut Progress<'_>,
+    paths: &[String],
+    subject: &str,
+    body: &str,
+    announced: bool,
+) -> Reply {
+    if !announced {
+        g.start("commit", "Committing...").await;
+    }
     let cwd = g.cwd;
     let mut add = vec!["add", "-A"];
     let mut keep_conflicts = false;
@@ -618,6 +626,14 @@ async fn action(tools: &GitTools, input: &Value, paths: &[String], g: &mut Progr
         g.phase = Some(phase);
         started.push(json!({"kind":"phase_started","phase":phase,"label":label}));
     }
+    // A typed-message commit announces itself at once (upstream #40282); with
+    // nothing else to check first, in the same chunk as the start.
+    let typed = input["commitMessage"].is_string();
+    let announced_at_start = action == "commit" && typed && !wants_feature;
+    if announced_at_start {
+        g.phase = Some("commit");
+        started.push(json!({"kind":"phase_started","phase":"commit","label":"Committing..."}));
+    }
     g.emit(started).await;
     if !wants_feature && branch_name.is_none() && (wants_push || wants_pr) {
         return Err(manager(
@@ -672,6 +688,12 @@ async fn action(tools: &GitTools, input: &Value, paths: &[String], g: &mut Progr
         if !wants_feature && custom.is_none() {
             g.start("commit", "Generating commit message...").await;
         }
+        // A typed message is committed straight away; finding nothing to
+        // stage then skips the commit (upstream #40282).
+        let announced = !wants_feature && custom.is_some();
+        if announced && !announced_at_start {
+            g.start("commit", "Committing...").await;
+        }
         if let Some(context) = context(cwd, paths, custom.is_none()).await? {
             let (subject, body, suggestion) = if let Some(message) = custom {
                 let (subject, body) = message.split_once('\n').unwrap_or((&message, ""));
@@ -706,7 +728,7 @@ async fn action(tools: &GitTools, input: &Value, paths: &[String], g: &mut Progr
                 branch_step = json!({"status":"created","name":name});
                 branch_name = Some(name);
             }
-            commit_step = commit(g, paths, &subject, &body).await?;
+            commit_step = commit(g, paths, &subject, &body, announced).await?;
         } else if wants_feature {
             return Err(manager(
                 cwd,

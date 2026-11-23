@@ -97,6 +97,8 @@ jobs:
           python3 scripts/update_statev2_schema.py "$GITHUB_WORKSPACE/reference" --check
           # Rust's agent tool definitions and docs/agent-tools.md must be the pinned reference's.
           python3 scripts/update_agent_tools.py "$GITHUB_WORKSPACE/reference" --check
+          # The providers' capabilities must be the pinned reference adapters'.
+          python3 scripts/update_provider_capabilities.py "$GITHUB_WORKSPACE/reference" --check
       - name: Validate Rust
         run: |
           cargo fmt --all -- --check
