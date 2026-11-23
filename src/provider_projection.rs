@@ -343,7 +343,11 @@ impl Thread {
                 continue;
             };
             first_ordinal.get_or_insert(index + 1);
-            last_ordinal = last_ordinal.max(index + 1);
+            // A queued run joins the provider thread when it leaves the
+            // queue, as the reference's queued dispatch records it then.
+            if run.status != "queued" {
+                last_ordinal = last_ordinal.max(index + 1);
+            }
             out.attempts.push(json!({
                 "id": ids.attempt,
                 "runId": ids.run,

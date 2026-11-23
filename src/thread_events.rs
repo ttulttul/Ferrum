@@ -202,8 +202,11 @@ pub enum Order {
     Answer,
     /// A delegated task's subagent record changed. Starting, the reference
     /// writes its node, the subagent, then its turn item; ending, the
-    /// subagent, its node and turn item, then the context transfer.
+    /// subagent, its parent run (the delivery it claimed), its node and turn
+    /// item, then the context transfer.
     Subagent,
+    /// A stop closed delegated task cohorts: each run, then its tasks.
+    CohortStop,
 }
 
 impl Order {
@@ -224,6 +227,23 @@ impl Order {
         Step::Collection("plans"),
         Step::Collection("checkpoints"),
         Step::Collection("contextHandoffs"),
+    ];
+    const DRAIN: &'static [Step] = &[
+        Step::Collection("providerThreads"),
+        Step::Items(Phase::All),
+        Step::Collection("runs"),
+        Step::Collection("attempts"),
+        Step::LooseNodes,
+        Step::Collection("checkpointScopes"),
+        Step::LooseMessages,
+        Step::Collection("providerSessions"),
+        Step::Collection("providerTurns"),
+        Step::Collection("runtimeRequests"),
+        Step::Collection("subagents"),
+        Step::Collection("plans"),
+        Step::Collection("checkpoints"),
+        Step::Collection("contextHandoffs"),
+        Step::Collection("contextTransfers"),
     ];
     const CLAUDE_REQUEST_OPEN: &'static [Step] = &[
         Step::ItemNodes,
@@ -273,6 +293,9 @@ impl Order {
             | crate::Event::RunFinished { .. } => Order::End,
             crate::Event::CheckpointCaptured { .. } => Order::Checkpoint,
             crate::Event::RunStarted(_) | crate::Event::RunQueued { .. } => Order::Dispatch,
+            crate::Event::ThreadPatched { patch, .. } if patch["cohortStopped"] == true => {
+                Order::CohortStop
+            }
             crate::Event::ThreadPatched { patch, .. }
                 if patch["row"].get("subagents").is_some() =>
             {
@@ -406,13 +429,30 @@ impl Order {
                 Collection("contextHandoffs"),
                 Collection("contextTransfers"),
             ],
+            Order::CohortStop => &[
+                Collection("runs"),
+                Collection("subagents"),
+                Collection("attempts"),
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Items(Phase::All),
+                Collection("providerSessions"),
+                Collection("providerThreads"),
+                Collection("providerTurns"),
+                Collection("runtimeRequests"),
+                Collection("plans"),
+                Collection("checkpoints"),
+                Collection("contextHandoffs"),
+                Collection("contextTransfers"),
+            ],
             // Its ending order; a subagent starting takes `SUBAGENT_START`.
             Order::Subagent => &[
                 Collection("subagents"),
+                Collection("runs"),
                 ItemNodes,
                 Items(Phase::All),
                 Collection("contextTransfers"),
-                Collection("runs"),
                 Collection("attempts"),
                 LooseNodes,
                 Collection("checkpointScopes"),
@@ -699,12 +739,29 @@ fn diff_with_command(
                 .collect(),
         )
     };
-    let collections: HashMap<&str, Vec<(bool, Value)>> = COLLECTIONS
+    let mut collections: HashMap<&str, Vec<(bool, Value)>> = COLLECTIONS
         .iter()
         .map(|(name, _, _)| *name)
         .chain(["nodes", "messages", "turnItems"])
         .map(|name| changed(name).map(|records| (name, records)))
         .collect::<Option<_>>()?;
+    // A turn starting on a session already open reports that session again
+    // with its running transition, as the reference's turn start does.
+    if order == Order::Start && collections["providerSessions"].is_empty() {
+        let sessions = by_id(after, "providerSessions");
+        let threads = by_id(after, "providerThreads");
+        let started = collections["runs"]
+            .iter()
+            .filter(|(_, run)| run["status"] == "running")
+            .filter_map(|(_, run)| threads.get(run["providerThreadId"].as_str()?))
+            .filter_map(|thread| sessions.get(thread["providerSessionId"].as_str()?))
+            .map(|session| (false, session.clone()))
+            .next();
+        collections
+            .get_mut("providerSessions")
+            .unwrap()
+            .extend(started);
+    }
     let push_collection = |out: &mut Vec<Value>, name: &str| {
         let (_, created, updated) = COLLECTIONS
             .iter()
@@ -771,8 +828,23 @@ fn diff_with_command(
         });
     let subagent_start =
         order == Order::Subagent && collections["subagents"].iter().any(|(created, _)| *created);
+    // A queued run leaving the queue: its provider thread, the input it
+    // carries, then the run, as the reference's queued dispatch writes them.
+    let drain = order == Order::Dispatch && {
+        let old = by_id(before, "runs");
+        !collections["runs"].is_empty()
+            && collections["runs"].iter().all(|(created, run)| {
+                !created
+                    && run["id"]
+                        .as_str()
+                        .and_then(|id| old.get(id))
+                        .is_some_and(|old| old["status"] == "queued")
+            })
+    };
     let steps = if session_failed {
         Order::SESSION_OPEN_FAILURE
+    } else if drain {
+        Order::DRAIN
     } else if subagent_start {
         Order::SUBAGENT_START
     } else if claude_request {

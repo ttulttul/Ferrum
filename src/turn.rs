@@ -42,6 +42,14 @@ pub(crate) trait TurnHost:
     fn turn_recorded(&self, _run: &Run, _position: Option<StreamPosition>) {}
     /// The run has ended and its end is recorded.
     fn turn_finished(&self, _run: &Run) {}
+    /// A stopped run's turn has ended, before its checkpoint: what its stop
+    /// left for then (its delegated tasks' stop), if anything.
+    fn turn_stopped(
+        self: Arc<Self>,
+        _run: &Run,
+    ) -> Option<crate::orchestration::delegation::StopFuture<'static>> {
+        None
+    }
     /// The server is stopping: it has recorded how its turns were cut off,
     /// so what they report from now on is not recorded.
     fn stopping(&self) -> bool {
@@ -80,7 +88,7 @@ pub(crate) async fn launch<H: TurnHost>(
             if let Some(stream) = turn.stream() {
                 host.turn_started(&run, &cwd, stream);
             }
-            record(&*host, &run, cwd, turn).await
+            record(&host, &run, cwd, turn).await
         }
         Err(error) => Err(error),
     };
@@ -92,7 +100,7 @@ pub(crate) async fn launch<H: TurnHost>(
 /// Record a turn started before a restart, picked up again with
 /// [`crate::workspace::RemoteWorkspace::resume_turn`].
 pub(crate) async fn resume<H: TurnHost>(host: Arc<H>, run: Run, cwd: String, turn: TurnItems) {
-    if let Err(error) = record(&*host, &run, cwd, turn).await {
+    if let Err(error) = record(&host, &run, cwd, turn).await {
         fail(&*host, &run, error).await;
     }
 }
@@ -324,11 +332,12 @@ impl StreamedText {
 /// event log, so a workspace that keeps unacknowledged events redelivers
 /// the rest after a reconnect or a restart.
 async fn record<H: TurnHost>(
-    host: &H,
+    owner: &Arc<H>,
     run: &Run,
     cwd: String,
     mut turn: TurnItems,
 ) -> anyhow::Result<()> {
+    let host: &H = owner;
     let done = |position: Option<StreamPosition>| {
         host.turn_recorded(run, position);
         if let Some(position) = position {
@@ -441,6 +450,16 @@ async fn record<H: TurnHost>(
         None if ok => ("completed", None),
         None => ("failed", Some(format!("provider exited with {status}"))),
     };
+    // A stop's delegated tasks stop and settle once its turn has ended, as
+    // the reference's stop effect follows its interrupt; a hung child gives
+    // up after the reference's 30 s.
+    if matches!(run_status, "interrupted" | "cancelled") {
+        if let Some(stop) = owner.clone().turn_stopped(run) {
+            let wait = host.turn_wait(Duration::from_secs(30));
+            futures_util::pin_mut!(wait);
+            let _ = futures_util::future::select(stop, wait).await;
+        }
+    }
     // Stopped turns also leave a rollback point. A stopped provider run is
     // already terminal in the projection; only a completed one waits for capture.
     if matches!(run_status, "completed" | "interrupted" | "cancelled") {

@@ -66,6 +66,40 @@ fn run_status(status: &str) -> &'static str {
     }
 }
 
+/// Drops from `projection` each delegated wake's message whose run has
+/// ended, as the reference's snapshot window reads only the messages its
+/// turn items name and those of live runs.
+fn window_messages(projection: &mut Value) {
+    let live: std::collections::HashSet<String> = projection["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|run| {
+            matches!(
+                run["status"].as_str(),
+                Some("queued" | "preparing" | "starting" | "running" | "waiting")
+            )
+        })
+        .filter_map(|run| run["id"].as_str().map(str::to_owned))
+        .collect();
+    if let Some(messages) = projection["messages"].as_array_mut() {
+        messages.retain(|message| {
+            !message["delegatedCompletion"].is_object()
+                || message["runId"]
+                    .as_str()
+                    .is_some_and(|run| live.contains(run))
+        });
+    }
+}
+
+/// Whether `message` delivers delegated tasks' results to their parent.
+pub(crate) fn delegated_delivery(message: &crate::ConversationMessage) -> bool {
+    message
+        .wire
+        .as_ref()
+        .is_some_and(|wire| wire["delegatedCompletion"].is_object())
+}
+
 fn message_role(role: &str) -> &'static str {
     match role {
         "assistant" => "assistant",
@@ -244,6 +278,9 @@ impl Thread {
                     .as_object()
                     .into_iter()
                     .flatten()
+                    // A queued wake takes its work's start when it leaves
+                    // the queue, as the reference's dispatch sets it then.
+                    .filter(|(key, _)| !(key.as_str() == "workStartedAt" && status == "queued"))
                 {
                     out[key] = value.clone();
                 }
@@ -314,8 +351,10 @@ impl Thread {
     fn message_rows(&self) -> Vec<Value> {
         self.messages
             .iter()
-            // A notification shows as its turn item only.
-            .filter(|message| message.role != NOTIFICATION_ROLE)
+            // A notification shows as its turn item only, except a delegated
+            // task's delivery, which the reference also records as the
+            // agent's user message carrying `delegatedCompletion`.
+            .filter(|message| message.role != NOTIFICATION_ROLE || delegated_delivery(message))
             .map(|message| {
                 let at = iso(message.created_at);
                 let pending_ids = self
@@ -343,6 +382,15 @@ impl Thread {
                 }
                 if message.follows_thread_selection {
                     row["followsThreadSelection"] = json!(true);
+                }
+                // A delegated wake's message stays on its run's root node.
+                if pending_ids.is_none() && delegated_delivery(message) {
+                    if let Some(ids) = self.run_of(&message.id).and_then(|(_, run)| {
+                        self.provider_run_ids(run)
+                            .or_else(|| self.starting_run_ids(run))
+                    }) {
+                        row["nodeId"] = json!(ids.root_node);
+                    }
                 }
                 // A steer belongs to the run it joined.
                 if let Some(steer) = &message.steer {
@@ -507,7 +555,25 @@ impl Thread {
                 }),
                 // The prompt that continues a run a restart cut off.
                 NOTIFICATION_ROLE => {
-                    if let Some(ids) = run.and_then(|(_, run)| self.provider_run_ids(run)) {
+                    let delivery = delegated_delivery(message);
+                    // A delegated delivery's card waits with its queued run,
+                    // as the reference writes it when the run leaves the queue.
+                    if delivery && run.is_some_and(|(_, run)| queued(run)) {
+                        continue;
+                    }
+                    let ids = run.and_then(|(_, run)| {
+                        self.provider_run_ids(run).or_else(|| {
+                            // The reference's card names its run's node and
+                            // provider thread from the start.
+                            delivery
+                                .then(|| {
+                                    self.queued_run_ids(run)
+                                        .or_else(|| self.starting_run_ids(run))
+                                })
+                                .flatten()
+                        })
+                    });
+                    if let Some(ids) = ids {
                         item["nodeId"] = json!(ids.root_node);
                         item["providerThreadId"] = json!(ids.provider_thread);
                     }
@@ -703,6 +769,15 @@ impl Thread {
         self.projection_with(true)
     }
 
+    /// The projection a snapshot gives (`getThreadSnapshotWindow`): a
+    /// delegated wake's message shows only while its run is live, since no
+    /// turn item names it (its card is a notification).
+    pub(crate) fn snapshot_projection(&self) -> Value {
+        let mut projection = self.projection();
+        window_messages(&mut projection);
+        projection
+    }
+
     /// A turn item with everything it holds, bounded for transport, as
     /// `orchestration.getTurnItem` returns it.
     pub(crate) fn turn_item_detail(&self, item_id: &str) -> Option<Value> {
@@ -766,20 +841,32 @@ impl Thread {
         let first_run = self.runs.first().filter(|run| {
             run.driver.is_some() && !matches!(run.status.as_str(), "queued" | "preparing")
         });
+        // Each later run the thread dispatches prepares the scope again
+        // (`prepareRootRunScope`), so it belongs to the latest one, queued
+        // or not, but not to one still waiting for its workspace.
+        let scope_turn = first_run.map_or(1, |_| {
+            self.runs
+                .iter()
+                .rposition(|run| run.driver.is_some() && run.status != "preparing")
+                .map_or(1, |index| index as u64 + 1)
+        });
         let scope_from = self
             .checkpoints
             .first()
             .map(|checkpoint| (checkpoint.cwd.clone(), checkpoint.captured_at))
             .or_else(|| first_run.map(|_| (self.cwd.clone(), 0)))
-            .map(|(cwd, at)| (cwd, first_run.map_or(at, |run| run.started_at)));
+            .map(|(cwd, at)| {
+                let scope_run = first_run.and(self.runs.get(scope_turn as usize - 1));
+                (cwd, scope_run.map_or(at, |run| run.started_at))
+            });
         let checkpoint_scopes = scope_from
             .map(|(cwd, created_at)| {
-                let first = run_ids(1);
+                let first = run_ids(scope_turn);
                 vec![json!({
                     "id":scope_id,
                     "threadId":self.id,
                     "runId":first.as_ref().map(|(id, _)| id.clone()),
-                    "nodeId":node_of(1),
+                    "nodeId":node_of(scope_turn),
                     "parentScopeId":null,
                     "providerThreadId":first.and_then(|(_, ids)| ids.map(|ids| ids.provider_thread)),
                     "kind":"root_run",
@@ -931,7 +1018,7 @@ impl Thread {
     /// client sent as the reference's ThreadStream shapes it. The whole timeline always fits
     /// one window, so a bounded snapshot has no earlier history.
     pub(crate) fn stream_snapshot(&self, sequence: u64, options: &Value) -> Value {
-        let mut projection = self.projection();
+        let mut projection = self.snapshot_projection();
         if options["acceptBoundedSnapshot"] != true {
             return json!({"kind":"snapshot","snapshotSequence":sequence,"projection":projection});
         }

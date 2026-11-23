@@ -431,6 +431,9 @@ impl AppState {
 }
 
 impl crate::orchestration::CommandHost for AppState {
+    fn hooks_run_ends(&self) -> bool {
+        true
+    }
     fn generate_title(self: Arc<Self>, effect: crate::title_generation::TitleEffect) {
         tokio::spawn(crate::title_generation::execute(self, effect));
     }
@@ -629,6 +632,18 @@ impl crate::turn::TurnHost for AppState {
     }
     fn stopping(&self) -> bool {
         self.stopping.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn turn_stopped(
+        self: Arc<Self>,
+        run: &Run,
+    ) -> Option<crate::orchestration::delegation::StopFuture<'static>> {
+        Some(Box::pin(
+            crate::orchestration::delegation::stop_children_after_interrupt(
+                self,
+                run.thread_id.clone(),
+                run.wire_id(),
+            ),
+        ))
     }
 }
 

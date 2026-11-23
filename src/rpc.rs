@@ -2262,7 +2262,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                     json!({"_tag":"Fail","error":thread_projection_error(&params["threadId"])}),
                 );
             };
-            thread.projection()
+            thread.snapshot_projection()
         }
         "orchestration.getTurnDiff" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default();

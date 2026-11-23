@@ -51,6 +51,15 @@ pub(crate) trait CommandHost:
     /// Refresh a newly linked pull request after its link command commits.
     /// Hosts without a provider service leave the link unsynchronized.
     fn sync_pull_request_link(self: Arc<Self>, _thread_id: String, _target: Value) {}
+    /// Whether the host's runs call [`after_run`] and
+    /// [`crate::turn::TurnHost::turn_stopped`] as they end, so work may wait
+    /// for a run's end as the reference's reactors do: a wake queued behind
+    /// a busy parent, a delivery settled when its wake ends, a stop's
+    /// delegated tasks stopped once its turn ended. Without them a delivery
+    /// waits for an idle parent and is accepted with its message.
+    fn hooks_run_ends(&self) -> bool {
+        false
+    }
     fn close_guest_thread(&self, thread_id: &str) -> Result<(), String>;
     fn resolve_guest_message(
         &self,
@@ -402,7 +411,10 @@ async fn dispatch_command<H: CommandHost>(
     drop(guard);
     // A thread's stop then stops its delegated tasks, as the reference's
     // effect after the interrupt does (`delegatedTasksStopEffect`).
-    if kind == "thread.stop" && command["stopDelegatedTasks"] != false {
+    if kind == "thread.stop"
+        && command["stopDelegatedTasks"] != false
+        && !delegation::child_stop_deferred(id, command_id)
+    {
         let _ = delegation::stop_delegated_tasks(
             state.clone(),
             id.to_owned(),
@@ -609,7 +621,7 @@ pub(crate) fn provider_instance_enabled(settings: &Value, project: &str, instanc
     })
 }
 
-mod delegation;
+pub(crate) mod delegation;
 pub(crate) use delegation::{
     after_run, cancel_task, delegated_task_awaits_work, delegated_task_result_run,
     delegated_task_runs, recover as recover_delegated_tasks, subagent_result, task_node_id,
@@ -670,6 +682,11 @@ async fn start_run<H: CommandHost>(
         .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
     let driver = cli_driver(&*state, &row);
     let baseline = needs_baseline.then(|| cwd.clone());
+    // A delegated wake queued behind the active run starts when that run
+    // ends; other queued messages wait to be sent.
+    let wake = wire
+        .as_ref()
+        .is_some_and(|wire| wire["delegatedCompletion"].is_object());
     let run = Run {
         id: wire_id
             .as_deref()
@@ -688,7 +705,7 @@ async fn start_run<H: CommandHost>(
         finished_at: None,
         error: None,
         user_message_id: Some(message_id.as_str().unwrap_or_default().to_owned()),
-        queue_held: queued,
+        queue_held: queued && !wake,
         restart_cut: None,
         restart_continuation_of: continues,
         requeued_at: None,
@@ -992,8 +1009,6 @@ async fn apply_command<H: CommandHost>(
                     .cloned()
                     .unwrap_or_default();
                 text = delegation::wake_detail(&ids, &tasks);
-                // The delivery is accepted with its message (`acceptDelegatedCompletionDelivery`).
-                delegation::accept_delivery(&state, thread_id, completion).await?;
                 if let Some(target) = delivery_steer {
                     let delivery = steer::Delivery {
                         text: text.clone(),
@@ -1004,7 +1019,7 @@ async fn apply_command<H: CommandHost>(
                             "delegatedCompletion": completion,
                         }),
                     };
-                    return steer::steer_with(
+                    let sequence = steer::steer_with(
                         state.clone(),
                         receipt,
                         thread_id,
@@ -1012,7 +1027,17 @@ async fn apply_command<H: CommandHost>(
                         target,
                         Some(delivery),
                     )
-                    .await;
+                    .await?;
+                    // The steered message accepts its delivery once sent
+                    // (`notification.delivery.accept`); a wake run's settles
+                    // when the run ends (`finalize_delivery`).
+                    delegation::accept_delivery(&state, thread_id, completion).await?;
+                    return Ok(sequence);
+                }
+                // A host whose runs settle no deliveries as they end accepts
+                // one with its message.
+                if !state.hooks_run_ends() {
+                    delegation::accept_delivery(&state, thread_id, completion).await?;
                 }
                 wake_started = delegation::wake_work_started_at(&*state, thread_id).await;
                 wire = Some(json!({
@@ -1071,6 +1096,9 @@ async fn apply_command<H: CommandHost>(
                     })
                     .await?;
             }
+            if let Some(at) = wake_started {
+                delegation::record_work_started_at(&*state, thread_id, at).await?;
+            }
             let sequence = start_run(
                 state.clone(),
                 receipt,
@@ -1096,10 +1124,6 @@ async fn apply_command<H: CommandHost>(
                 command["dispatchMode"]["type"] == "defer_start",
             )
             .await?;
-            if let Some(at) = wake_started {
-                delegation::record_work_started_at(&*state, thread_id, &command["messageId"], at)
-                    .await?;
-            }
             // A message to a delegated child whose task finished starts a follow-up task.
             delegation::record_followup(&state, thread_id, command).await?;
             // Its effect runs once the message it titles is recorded.
@@ -1130,14 +1154,6 @@ async fn apply_command<H: CommandHost>(
                         )
                     })
                     .unwrap_or_default();
-                // The stopped runs' delegated results wake nobody.
-                delegation::stop_cohorts(
-                    &state,
-                    thread_id,
-                    &wire_ids,
-                    command_type == "thread.stop",
-                )
-                .await?;
                 let requested: Vec<String> = run_ids.iter().map(Uuid::to_string).collect();
                 // The request is recorded before the runs are told to stop, so
                 // its card comes before what the stop ends, as the
@@ -1152,6 +1168,27 @@ async fn apply_command<H: CommandHost>(
                     )
                     .await?
                     .id;
+                // The stopped runs' delegated results wake nobody.
+                delegation::stop_cohorts(
+                    &state,
+                    thread_id,
+                    &wire_ids,
+                    command_type == "thread.stop",
+                )
+                .await?;
+                // A stop's delegated tasks stop once its runs have ended,
+                // where the host can wait for that.
+                if command_type == "thread.stop"
+                    && command["stopDelegatedTasks"] != false
+                    && !run_ids.is_empty()
+                    && state.hooks_run_ends()
+                {
+                    delegation::defer_child_stop(
+                        thread_id,
+                        &receipt.command_id,
+                        command["reason"].as_str().map(str::to_owned),
+                    );
+                }
                 let mut cancellations = state.cancellations().lock().await;
                 for run_id in run_ids {
                     if let Some(cancel) = cancellations.remove(&run_id) {
@@ -1988,6 +2025,8 @@ async fn apply_command<H: CommandHost>(
                         thread_id,
                         message_id,
                         content: command["text"].as_str().unwrap_or_default().to_owned(),
+                        wire: None,
+                        notification: None,
                     },
                     Some(receipt.clone()),
                 )
@@ -2435,6 +2474,35 @@ async fn apply_command<H: CommandHost>(
                     "state": delivery_state,
                     "observedByRunId": command.get("observedByRunId").cloned().unwrap_or(Value::Null)
                 });
+                // A resolved task leaves the delivery that carried it.
+                let (task_id, task_run) = (task["id"].clone(), task["runId"].clone());
+                let resolved = delegation::resolve_delivery_task(
+                    &*state,
+                    parent_thread_id,
+                    &task_id,
+                    &task_run,
+                )
+                .await;
+                if let Some((extras, follow_up)) = resolved {
+                    let sequence = state
+                        .commit_receipted(
+                            Event::ThreadPatched {
+                                thread_id: parent_thread_id.to_owned(),
+                                patch: json!({"row":{"subagents":subagents,"runExtras":extras}}),
+                            },
+                            Some(receipt.clone()),
+                        )
+                        .await?
+                        .id;
+                    delegation::follow_up_delivery(
+                        &*state,
+                        parent_thread_id,
+                        follow_up,
+                        &subagents,
+                    )
+                    .await?;
+                    return Ok(sequence);
+                }
             }
             return Ok(state
                 .commit_receipted(
