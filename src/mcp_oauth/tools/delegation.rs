@@ -963,6 +963,41 @@ fn status_for_run(run: Option<&Value>) -> &'static str {
     }
 }
 
+/// Waits, briefly, until `run_id` of `thread_id` has recorded its start
+/// (no longer `preparing` or `starting`) and, for a Claude run, the CLI's
+/// receipt of its prompt: a tool call can reach this server before the
+/// provider events that precede it are recorded, while the reference
+/// records them before its provider gets the prompt.
+async fn await_run_start<S: McpHost>(host: &Arc<S>, thread_id: &str, run_id: &str) {
+    for _ in 0..100 {
+        let pending = {
+            let store = host.control_state().store.read().await;
+            store.threads.get(thread_id).is_some_and(|thread| {
+                let starting = records(&thread.full_projection(), "runs")
+                    .iter()
+                    .any(|run| {
+                        run["id"] == run_id
+                            && matches!(run["status"].as_str(), Some("preparing" | "starting"))
+                    });
+                let undelivered = thread.runs.iter().any(|run| {
+                    run.wire_id() == run_id
+                        && run.driver.as_deref() == Some(crate::workspace::provider::CLAUDE_AGENT)
+                        && !thread
+                            .provider
+                            .runs
+                            .get(&run.id)
+                            .is_some_and(|record| record.prompt_delivered)
+                });
+                starting || undelivered
+            })
+        };
+        if !pending {
+            return;
+        }
+        host.sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 /// `readTask`: the task as the parent's agent sees it.
 async fn read_task<S: McpHost>(
     host: &Arc<S>,
@@ -1258,6 +1293,11 @@ async fn read_task<S: McpHost>(
             .max_by_key(|r| r["ordinal"].as_u64().unwrap_or(0))
             .map(|r| r["id"].clone())
             .unwrap_or(Value::Null);
+        // The reference records a run's start before its provider gets the
+        // prompt, so whatever the run observes comes after that start.
+        if let Some(run_id) = observing.as_str() {
+            await_run_start(host, &scope.thread_id, run_id).await;
+        }
         host.dispatch(json!({
             "type": "delegated_task.completion-delivery.acknowledge",
             "commandId": stable_command_id(caller, "task-status-acknowledge", &crate::platform::uuid_v4().to_string()),
