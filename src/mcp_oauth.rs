@@ -241,6 +241,22 @@ pub trait McpHost: AuthHost {
     ) -> HostFuture<Result<Vec<Value>, ()>> {
         Box::pin(async { Err(()) })
     }
+    /// The HTML toolkit's page work (`HtmlRender`): `"preview"` renders a page
+    /// in a headless browser, `"publish"` stores it for its thread to show.
+    /// `Err` holds the failure's code and message; hosts without a browser
+    /// leave it unavailable.
+    fn html_page(
+        self: &Arc<Self>,
+        _operation: &'static str,
+        _input: Value,
+    ) -> HostFuture<Result<Value, (&'static str, String)>> {
+        Box::pin(async {
+            Err((
+                "orchestration_error",
+                "HTML pages are not available on this server.".to_owned(),
+            ))
+        })
+    }
     /// The server's secrets directory, where the secrets the user gives an
     /// agent (`request_secret`) are kept; `None` where it keeps none.
     fn secrets_dir(&self) -> Option<std::path::PathBuf> {

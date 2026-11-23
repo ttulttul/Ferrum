@@ -198,6 +198,67 @@ fn bounded_id(value: &Value) -> Option<String> {
     (text.chars().count() <= MAX_ID_LENGTH && !text.trim().is_empty()).then(|| text.to_owned())
 }
 
+const HTML_RENDER_MIN_HEIGHT: f64 = 80.0;
+const HTML_RENDER_MAX_HEIGHT: f64 = 2000.0;
+const HTML_RENDER_MAX_TITLE_LENGTH: usize = 200;
+
+/// `clampHtmlRenderHeight`.
+fn clamp_html_height(height: f64) -> i64 {
+    // JavaScript's Math.round rounds halves up.
+    (height + 0.5)
+        .floor()
+        .clamp(HTML_RENDER_MIN_HEIGHT, HTML_RENDER_MAX_HEIGHT) as i64
+}
+
+/// `readHtmlRenderReference`: a page an `html_render` showed, as a client
+/// reads it from the tool's output.
+fn html_render_reference(value: &Value) -> Option<Value> {
+    let id = value["attachmentId"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.encode_utf16().count() <= 256)?;
+    let title = value["title"].as_str()?;
+    let height = value["height"].as_f64().filter(|h| h.is_finite())?;
+    let mut units = 0;
+    let title: String = title
+        .trim()
+        .chars()
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= HTML_RENDER_MAX_TITLE_LENGTH
+        })
+        .collect();
+    let mut out = json!({
+        "attachmentId": id,
+        "title": if title.is_empty() { "HTML" } else { title.as_str() },
+        "height": clamp_html_height(height),
+    });
+    // `readMeasuredHeights`: 1 to 24 whole widths, each with a finite height.
+    if let Some(entries) = value["heights"]
+        .as_array()
+        .filter(|e| !e.is_empty() && e.len() <= 24)
+    {
+        let mut heights: Vec<(i64, i64)> = entries
+            .iter()
+            .filter_map(|entry| {
+                let pair = entry.as_array().filter(|p| p.len() == 2)?;
+                let width = pair[0]
+                    .as_f64()
+                    .filter(|w| w.fract() == 0.0 && (1.0..=10_000.0).contains(w))?;
+                let height = pair[1].as_f64().filter(|h| h.is_finite())?;
+                Some((width as i64, clamp_html_height(height)))
+            })
+            .collect();
+        if heights.len() == entries.len() {
+            heights.sort_by_key(|(width, _)| *width);
+            out["heights"] = json!(heights
+                .iter()
+                .map(|(w, h)| json!([w, h]))
+                .collect::<Vec<_>>());
+        }
+    }
+    Some(out)
+}
+
 /// The reference's compactDynamicToolOutput: what a client needs from a
 /// tool's output without the output itself (failure, created ids, counts).
 fn compact_output(value: &Value) -> Option<Value> {
@@ -231,6 +292,9 @@ fn compact_output(value: &Value) -> Option<Value> {
             {
                 out.insert("sentMessage".into(), json!(message));
             }
+        }
+        if let Some(render) = data.get("htmlRender").and_then(html_render_reference) {
+            out.insert("htmlRender".into(), render);
         }
         if let Some(id) = data.get("thread").and_then(|t| bounded_id(&t["threadId"])) {
             out.insert("thread".into(), json!({"threadId": id}));
@@ -385,6 +449,27 @@ pub(crate) fn detail_item(item: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_html_render_reference_survives_compaction_as_a_client_reads_it() {
+        let output = json!({"structuredContent": {"htmlRender": {
+            "attachmentId": "thread-x-00000000-0000-4000-8000-000000000000-html",
+            "title": "  Chart  ",
+            "height": 4000.4,
+            "heights": [[728, 300.5], [320, 10]],
+        }, "message": "Shown."}});
+        let compact = compact_output(&output).expect("compact output");
+        assert_eq!(
+            compact["htmlRender"],
+            json!({"attachmentId": "thread-x-00000000-0000-4000-8000-000000000000-html", "title": "Chart", "height": 2000, "heights": [[320, 80], [728, 301]]})
+        );
+        // Heights that are not all valid are left out, the reference stays.
+        let bad = json!({"structuredContent": {"htmlRender": {"attachmentId": "a", "title": "", "height": 100, "heights": [[0, 5]]}}});
+        assert_eq!(
+            compact_output(&bad).unwrap()["htmlRender"],
+            json!({"attachmentId": "a", "title": "HTML", "height": 100})
+        );
+    }
 
     #[test]
     fn output_stays_out_of_the_wire_and_comes_back_in_detail() {

@@ -1430,6 +1430,52 @@ impl mcp_oauth::McpHost for AppState {
     fn secrets_dir(&self) -> Option<std::path::PathBuf> {
         Some(self.paths.secrets.clone())
     }
+    fn html_page(
+        self: &Arc<Self>,
+        operation: &'static str,
+        input: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, (&'static str, String)>> {
+        let state = self.clone();
+        Box::pin(async move {
+            let paths = crate::html_render::Paths {
+                state_dir: state.paths.state_dir.clone(),
+                secrets: state.paths.secrets.clone(),
+                attachments: state.paths.attachments.clone(),
+            };
+            let source = match input["path"].as_str() {
+                Some(path) => crate::html_render::Source::Path(path.to_owned()),
+                None => crate::html_render::Source::Html(
+                    input["html"].as_str().unwrap_or_default().to_owned(),
+                ),
+            };
+            let result = if operation == "publish" {
+                crate::html_render::publish(
+                    &paths,
+                    source,
+                    input["threadId"].as_str().unwrap_or_default(),
+                    input["title"].as_str().unwrap_or_default(),
+                    input["height"].as_f64().unwrap_or_default(),
+                )
+                .await
+            } else {
+                crate::html_render::preview(
+                    &paths,
+                    source,
+                    input["width"].as_f64(),
+                    input["appearance"].as_str(),
+                )
+                .await
+            };
+            result.map_err(|error| {
+                let code = if error.invalid_page() {
+                    "invalid_request"
+                } else {
+                    "orchestration_error"
+                };
+                (code, error.message())
+            })
+        })
+    }
     fn clone_repository(
         self: &Arc<Self>,
         input: serde_json::Value,

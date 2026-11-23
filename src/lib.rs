@@ -38,6 +38,8 @@ pub mod guest_service;
 #[cfg(feature = "native")]
 pub mod host_rpc;
 #[cfg(feature = "native")]
+mod html_render;
+#[cfg(feature = "native")]
 pub mod issues;
 #[cfg(feature = "native")]
 pub mod local_services;

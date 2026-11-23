@@ -172,6 +172,10 @@ pub(super) async fn handle<S: McpHost>(
                         json!({"jsonrpc":"2.0","id":id,"result":result}),
                     ]);
                 }
+                // A tool whose answer carries image content gives its whole result.
+                Ok(mut v) if v.get(super::tools::html::RAW_RESULT).is_some() => {
+                    v[super::tools::html::RAW_RESULT].take()
+                }
                 Ok(v) => {
                     json!({"content":[{"type":"text","text":v.to_string()}],"structuredContent":v,"isError":false})
                 }
