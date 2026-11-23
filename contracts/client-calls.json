@@ -3660,7 +3660,12 @@
         "vcs.stacked.file",
         "vcs.stacked.reviewCommit"
       ],
-      "knownGaps": []
+      "knownGaps": [
+        "vcs.review.getDiffPreview",
+        "vcs.stacked.diff",
+        "vcs.stacked.metadata",
+        "vcs.stacked.file"
+      ]
     },
     {
       "kind": "rpc",
@@ -5211,7 +5216,9 @@
       "clientHarness": [
         "connect.subscribeServerLifecycle"
       ],
-      "knownGaps": []
+      "knownGaps": [
+        "connect.subscribeServerLifecycle"
+      ]
     },
     {
       "kind": "rpc-stream",
@@ -6070,7 +6077,9 @@
       "clientHarness": [
         "auth.sessionState"
       ],
-      "knownGaps": []
+      "knownGaps": [
+        "auth.sessionState"
+      ]
     },
     {
       "kind": "http",
@@ -6123,7 +6132,9 @@
       "clientHarness": [
         "auth.bootstrapBearerSession"
       ],
-      "knownGaps": []
+      "knownGaps": [
+        "auth.bootstrapBearerSession"
+      ]
     },
     {
       "kind": "http",
