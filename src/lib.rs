@@ -8,6 +8,8 @@
 //! server; `workers` builds the platform-neutral control plane for wasm32.
 
 pub mod access_http;
+#[cfg(feature = "native")]
+mod agent_instructions;
 pub mod asset_grant;
 #[cfg(feature = "native")]
 pub mod asset_http;

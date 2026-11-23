@@ -178,6 +178,21 @@ const SERVED: &[&str] = &[
 /// Their `environmentId` names a machine; it is never a target to act in.
 const LINKS_ONLY: &str = "hiddenWhileLinksOff";
 
+/// The reference's agent tools this server does not serve yet, which
+/// instructions sent to an agent leave out (`crate::agent_instructions`).
+pub(crate) fn unserved_tool_names() -> Vec<String> {
+    let reference: Value =
+        serde_json::from_str(include_str!("tools.json")).expect("MCP tool definitions");
+    reference["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str())
+        .filter(|name| !SERVED.contains(name))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The reference's definitions of the tools served here, as `tools/list`
 /// returns them, in the reference's order, each with whom it is listed to.
 static SERVED_TOOLS: LazyLock<Vec<(Value, String)>> = LazyLock::new(|| {
@@ -680,7 +695,7 @@ pub(super) async fn call<S: McpHost>(
         "t3_project_read" => project_read(&**host, args).await,
         "t3_project_create" => project_create(host, caller, args).await,
         "t3_environment_read" => Ok(environment_read(&**host)),
-        "orchestrator_capabilities" => Ok(capabilities(&**host, caller)),
+        "orchestrator_capabilities" => Ok(capabilities(&**host, caller, args)),
         "t3_thread_list" => thread_list(&**host, caller, args).await,
         "t3_thread_read" => thread_read(&**host, caller, args).await,
         "t3_thread_launch" => thread_launch(host, caller, args).await,
@@ -1078,48 +1093,222 @@ fn environment_read<S: McpHost>(host: &S) -> Value {
 }
 
 /// Providers as `orchestrator_capabilities` lists them.
-fn provider_entries<S: McpHost>(host: &S) -> Vec<Value> {
+/// How many of a provider's current models a catalogue lists (`LISTED_MODEL_LIMIT`).
+const LISTED_MODEL_LIMIT: usize = 8;
+/// Drivers whose whole current catalogue is listed (`FULL_CATALOG_DRIVERS`).
+const FULL_CATALOG_DRIVERS: [&str; 4] = ["codex", "claudeAgent", "muse", "grok"];
+
+/// `listCapabilityModels`: the models a provider's catalogue entry lists, and
+/// how many it leaves out.
+fn capability_models(
+    provider: &Value,
+    preferences: &Value,
+    search_terms: &[String],
+    pinned: impl Fn(&Value) -> bool,
+) -> (Vec<Value>, usize) {
+    let order: Vec<&str> = preferences["modelOrder"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let hidden: Vec<&str> = preferences["hiddenModels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let rank = |model: &Value| {
+        let slug = model["slug"].as_str().unwrap_or_default();
+        order.iter().position(|s| *s == slug).unwrap_or(order.len())
+    };
+    let mut visible: Vec<Value> = provider["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| {
+            m["isCustom"] == true || !hidden.contains(&m["slug"].as_str().unwrap_or_default())
+        })
+        .cloned()
+        .collect();
+    visible.sort_by_key(|m| rank(m));
+    let provider_text = format!(
+        "{} {} {}",
+        provider["instanceId"].as_str().unwrap_or_default(),
+        provider["driver"].as_str().unwrap_or_default(),
+        provider["displayName"].as_str().unwrap_or_default()
+    )
+    .to_lowercase();
+    // Whole ids like "codex-work" and their parts both name the provider.
+    let provider_words: Vec<&str> = provider_text
+        .split_whitespace()
+        .chain(provider_text.split(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let model_text = |m: &Value| {
+        format!(
+            "{} {} {}",
+            m["slug"].as_str().unwrap_or_default(),
+            m["name"].as_str().unwrap_or_default(),
+            m["subProvider"].as_str().unwrap_or_default()
+        )
+        .to_lowercase()
+    };
+    // Part of a provider word names the provider unless a model matches it.
+    let model_terms: Vec<&String> = search_terms
+        .iter()
+        .filter(|term| {
+            !provider_words.contains(&term.as_str())
+                && (!provider_text.contains(term.as_str())
+                    || visible
+                        .iter()
+                        .any(|m| model_text(m).contains(term.as_str())))
+        })
+        .collect();
+    if !model_terms.is_empty() {
+        let matches: Vec<Value> = visible
+            .iter()
+            .filter(|m| {
+                let text = model_text(m);
+                model_terms.iter().all(|term| text.contains(term.as_str()))
+            })
+            .cloned()
+            .collect();
+        let listed: Vec<Value> = matches.iter().take(LISTED_MODEL_LIMIT).cloned().collect();
+        let omitted = matches.len() - listed.len();
+        return (listed, omitted);
+    }
+    let current: Vec<&Value> = visible.iter().filter(|m| m["isLegacy"] != true).collect();
+    let full = FULL_CATALOG_DRIVERS.contains(&provider["driver"].as_str().unwrap_or_default());
+    let shown: Vec<&Value> = if full {
+        current
+    } else {
+        current.into_iter().take(LISTED_MODEL_LIMIT).collect()
+    };
+    let listed: Vec<Value> = visible
+        .iter()
+        .filter(|m| pinned(m) || shown.iter().any(|s| s["slug"] == m["slug"]))
+        .cloned()
+        .collect();
+    let omitted = visible.len() - listed.len();
+    (listed, omitted)
+}
+
+/// `capabilityModelOption`: an option a model takes, its values and default.
+fn capability_option(descriptor: &Value) -> Value {
+    let boolean = descriptor["type"] == "boolean";
+    let values = if boolean {
+        json!([false, true])
+    } else {
+        json!(descriptor["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|o| o["id"].clone())
+            .collect::<Vec<_>>())
+    };
+    let mut option = json!({"id": descriptor["id"], "values": values});
+    // `getProviderOptionCurrentValue` with no selection: a boolean's current
+    // value, else a non-empty current value, else the default choice.
+    let current = &descriptor["currentValue"];
+    let default = if boolean || current.as_str().is_some_and(|v| !v.is_empty()) {
+        current.clone()
+    } else {
+        descriptor["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|o| o["isDefault"] == true)
+            .map_or(Value::Null, |o| o["id"].clone())
+    };
+    if !default.is_null() {
+        option["default"] = default;
+    }
+    option
+}
+
+/// `orchestrator_capabilities`' provider catalogue: every provider instance,
+/// what it can run and why not, its models and runtime modes.
+fn provider_entries<S: McpHost>(
+    host: &S,
+    inherited: Option<(&str, &str)>,
+    search: Option<&str>,
+) -> Vec<Value> {
+    let settings = host.settings();
+    let search_terms: Vec<String> = search
+        .unwrap_or_default()
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
     host.providers()
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|p| p["enabled"] != false)
-        .filter_map(|p| {
-            let id = p["instanceId"].as_str().or(p["provider"].as_str())?;
-            let driver = p["driver"]
-                .as_str()
-                .or(p["provider"].as_str())
-                .unwrap_or(id);
-            let models = p["models"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|m| {
-                    let slug = m["slug"].as_str().or(m["id"].as_str())?;
-                    let mut model = json!({"id": slug});
-                    if let Some(label) = m["name"].as_str().or(m["label"].as_str()) {
-                        model["label"] = json!(label);
+        .filter_map(|provider| {
+            let id = provider["instanceId"].as_str()?;
+            let constraints = delegation::provider_constraints(provider);
+            let pinned = |model: &Value| {
+                let slug = model["slug"].as_str().unwrap_or_default();
+                model["isCustom"] == true
+                    || inherited.is_some_and(|(instance, model)| instance == id && model == slug)
+                    || settings["favorites"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|f| f["provider"] == id && f["model"] == slug)
+            };
+            let (listed, omitted) = capability_models(
+                provider,
+                &settings["providerModelPreferences"][id],
+                &search_terms,
+                pinned,
+            );
+            let models: Vec<Value> = listed
+                .iter()
+                .map(|model| {
+                    let slug = model["slug"].as_str().unwrap_or_default();
+                    let mut entry = json!({"id": slug});
+                    let name = model["name"].as_str().unwrap_or(slug);
+                    if name.to_lowercase() != slug.to_lowercase() {
+                        entry["label"] = json!(name);
                     }
-                    Some(model)
+                    let options: Vec<Value> = model["capabilities"]["optionDescriptors"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(capability_option)
+                        .collect();
+                    if !options.is_empty() {
+                        entry["options"] = json!(options);
+                    }
+                    entry
                 })
-                .collect::<Vec<_>>();
-            let available =
-                p["status"].as_str().is_none_or(|s| s != "error") && p["installed"] != false;
-            Some(json!({
+                .collect();
+            let mut entry = json!({
                 "providerInstanceId": id,
-                "driverKind": driver,
-                "displayName": p["displayName"].as_str().or(p["name"].as_str()),
+                "driverKind": provider["driver"],
+                "displayName": provider["displayName"],
                 "models": models,
-                "runtimeModes": RUNTIME_MODES,
-                "canRunChildTask": available,
-                "canRunCrossProviderChildTask": available,
-                "constraints": []
-            }))
+                "canRunChildTask": constraints.is_empty(),
+                "canRunCrossProviderChildTask": constraints.is_empty(),
+                "constraints": constraints,
+            });
+            if omitted > 0 {
+                entry["omittedModels"] = json!(omitted);
+            }
+            if provider["supportedRuntimeModes"]
+                .as_array()
+                .is_some_and(|modes| !modes.is_empty())
+            {
+                entry["runtimeModes"] = provider["supportedRuntimeModes"].clone();
+            }
+            Some(entry)
         })
         .collect()
 }
 
-fn capabilities<S: McpHost>(host: &S, caller: &Caller) -> Value {
+fn capabilities<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Value {
     json!({
         "parentThreadId": caller.thread.as_ref().map(|t| t.id.clone()),
         "inheritedProviderInstanceId": caller.thread.as_ref().map(|t| t.provider_instance_id.clone()),
@@ -1128,7 +1317,14 @@ fn capabilities<S: McpHost>(host: &S, caller: &Caller) -> Value {
         "inheritedOptions": caller.thread.as_ref().map_or_else(|| json!([]), |t| t.model_options.clone()),
         "runtimeMode": caller.ceiling().unwrap_or("approval-required"),
         "interactionMode": caller.interaction(),
-        "providers": provider_entries(host),
+        "providers": provider_entries(
+            host,
+            caller
+                .thread
+                .as_ref()
+                .map(|t| (t.provider_instance_id.as_str(), t.model.as_str())),
+            a["search"].as_str(),
+        ),
         "features": {
             "appOwnedSubagents": true,
             "asyncPolling": true,
@@ -1428,7 +1624,7 @@ fn default_selection<S: McpHost>(host: &S, project: &Value) -> Option<Value> {
             return Some(candidate.clone());
         }
     }
-    provider_entries(host)
+    provider_entries(host, None, None)
         .into_iter()
         .filter(|p| p["canRunChildTask"] == true)
         .find_map(|p| {
@@ -2566,5 +2762,45 @@ mod sender_tests {
         );
         let header = sender_thread("e", "t", &"é".repeat(250));
         assert_eq!(header.len(), "e/t/".len() + 1200);
+    }
+}
+
+#[cfg(test)]
+mod catalogue_tests {
+    use super::*;
+
+    #[test]
+    fn a_catalogue_lists_current_and_pinned_models_and_counts_the_rest() {
+        let models: Vec<Value> = (0..12)
+            .map(|i| json!({"slug": format!("m{i}"), "name": format!("M{i}"), "isLegacy": i >= 10}))
+            .collect();
+        let provider = json!({"instanceId": "cursor", "driver": "cursor", "displayName": "Cursor", "models": models});
+        let (listed, omitted) =
+            capability_models(&provider, &Value::Null, &[], |m| m["slug"] == "m11");
+        // The first eight current models, and the pinned legacy one.
+        let slugs: Vec<&str> = listed.iter().filter_map(|m| m["slug"].as_str()).collect();
+        assert_eq!(
+            slugs,
+            ["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m11"]
+        );
+        assert_eq!(omitted, 3);
+        // A full-catalogue driver lists every current model.
+        let codex = json!({"instanceId": "codex", "driver": "codex", "models": provider["models"]});
+        assert_eq!(capability_models(&codex, &Value::Null, &[], |_| false).1, 2);
+        // A term that names the provider lists as usual; one that names models filters.
+        let terms = vec!["cursor".to_owned()];
+        assert_eq!(
+            capability_models(&provider, &Value::Null, &terms, |_| false).1,
+            4
+        );
+        let terms = vec!["m1".to_owned()];
+        let (found, rest) = capability_models(&provider, &Value::Null, &terms, |_| false);
+        assert_eq!(found.len(), 3);
+        assert_eq!(rest, 0);
+        // Hidden models drop out; the preferred order comes first.
+        let prefs = json!({"hiddenModels": ["m0"], "modelOrder": ["m5"]});
+        let (ordered, _) = capability_models(&provider, &prefs, &[], |_| false);
+        assert_eq!(ordered[0]["slug"], "m5");
+        assert!(ordered.iter().all(|m| m["slug"] != "m0"));
     }
 }

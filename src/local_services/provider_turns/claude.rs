@@ -351,6 +351,19 @@ impl<'a> Attempt<'a> {
         spec: &TurnSpec,
         cancel: &mut Option<oneshot::Receiver<()>>,
     ) -> Outcome {
+        // T3's instructions for the agent, appended to Claude Code's system
+        // prompt as the reference's query initializes it, once per CLI.
+        if !self.reused {
+            let has_mcp = spec.provider.as_ref().is_some_and(|p| p.mcp.is_some());
+            let request_id = format!("t3-initialize-{}", self.next_control);
+            self.next_control += 1;
+            let request = json!({"type": "control_request", "request_id": request_id,
+                "request": {"subtype": "initialize",
+                    "appendSystemPrompt": crate::agent_instructions::claude_append(has_mcp)}});
+            if self.cli.write(&request).await.is_err() {
+                return self.closed().await;
+            }
+        }
         // T3's MCP server, acting as the thread, as the reference's query
         // sets it (`setMcpServers`) before the prompt, once per CLI.
         if let Some(mcp) = spec

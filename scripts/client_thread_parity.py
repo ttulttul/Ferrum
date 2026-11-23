@@ -780,12 +780,6 @@ BEARER = re.compile(r"Bearer [A-Za-z0-9_\-.]+")
 MCP_URL = re.compile(r"http://127\.0\.0\.1:\d+/mcp")
 
 
-# Of `orchestrator_capabilities`, what the calling thread decides. Its provider catalogue and
-# feature flags describe what each server implements, which is compared elsewhere.
-CALLER_CAPABILITIES = ("parentThreadId", "inheritedProviderInstanceId", "inheritedModel", "inheritedOptions",
-                       "runtimeMode", "interactionMode")
-
-
 def comparable_mcp(original, rust):
     """Both servers' agent MCP records, comparable: Rust serves some of the reference's agent
     tools, so each `tools/list` must hold only tools the reference lists in its own answer to that
@@ -812,9 +806,6 @@ def comparable_mcp(original, rust):
                 tools = {t["name"]: t for t in (answer.get("result") or {}).get("tools", [])}
                 names = next(listing, None)
                 record["answer"] = {name: tools.get(name, "<not listed>") for name in sorted(names or tools)}
-            elif request.get("tool") == "orchestrator_capabilities" and isinstance(answer, dict) \
-                    and isinstance(answer.get("content"), dict) and not answer.get("isError"):
-                answer["content"] = {k: answer["content"].get(k) for k in CALLER_CAPABILITIES}
             elif request.get("tool") == "tool_search" and isinstance(answer, dict) \
                     and isinstance(answer.get("content"), dict) and not answer.get("isError"):
                 answer["content"]["tools"] = [t for t in answer["content"].get("tools", [])
@@ -865,12 +856,67 @@ def agent_mcp(log, root):
     return out
 
 
+def unserved_agent_tools():
+    """The reference's agent tools Rust does not serve yet: tools.json less SERVED in tools.rs."""
+    names = [tool["name"] for tool in json.loads((ROOT / "src/mcp_oauth/tools.json").read_text())["tools"]]
+    rust = (ROOT / "src/mcp_oauth/tools.rs").read_text()
+    block = rust[rust.index("const SERVED: &[&str] = &["):]
+    served = set(re.findall(r'^\s*"([a-z0-9_]+)",', block[:block.index("];")], re.M))
+    return [name for name in names if name not in served]
+
+
+def without_unserved(text, unserved):
+    """The reference's agent instructions as Rust sends them (src/agent_instructions.rs): less each
+    line that names a tool Rust does not serve, and each heading left with nothing under it."""
+    word = re.compile(r"[A-Za-z0-9_]")
+    def names(line):
+        for tool in unserved:
+            for match in re.finditer(re.escape(tool), line):
+                before = line[match.start() - 1] if match.start() else ""
+                after = line[match.end()] if match.end() < len(line) else ""
+                if not word.match(before or " ") and not word.match(after or " "):
+                    return True
+        for match in re.finditer(r"([A-Za-z0-9_]+)\*", line):
+            if any(tool.startswith(match.group(1)) for tool in unserved):
+                return True
+        return False
+    lines = text.split("\n")
+    keep = [not names(line) for line in lines]
+    if all(keep):
+        return text
+    index = 0
+    while index < len(lines):
+        if not lines[index].startswith("#"):
+            index += 1
+            continue
+        end = next((i for i in range(index + 1, len(lines)) if lines[i].startswith("#")), len(lines))
+        span = range(index + 1, end)
+        if all(not keep[i] or not lines[i].strip() for i in span) and any(not keep[i] for i in span):
+            for i in range(index, end):
+                keep[i] = False
+        index = end
+    return "\n".join(line for line, kept in zip(lines, keep) if kept)
+
+
+def agent_context(context, unserved):
+    """Codex's turn context of agent instructions, as Rust sends it: each entry's text less what
+    names an unserved tool, and an entry with nothing left left out."""
+    out = {}
+    for key, entry in (context or {}).items():
+        value = without_unserved(entry.get("value", ""), unserved) if isinstance(entry, dict) else entry
+        if not isinstance(entry, dict) or value.strip():
+            out[key] = {**entry, "value": value} if isinstance(entry, dict) else entry
+    return out
+
+
 def cli_launch(log, root):
     """How a server launched the fake CLI for the turn: its arguments, the environment it set,
     and the Codex initialize, thread and turn parameters, then the initialize parameters of its
     other app-servers, with generated ids, the server's temporary home, the agent MCP server's
-    port and its bearer token masked. The orchestration context that describes the reference's
-    agent tools is left out: Rust serves only some of them."""
+    port and its bearer token masked. The agent instructions (Codex's turn context, Claude Code's
+    system prompt append) are compared as Rust sends them: without what names a tool Rust does not
+    serve yet."""
+    unserved = unserved_agent_tools()
     def mask(value):
         if isinstance(value, str):
             for server in ("original", "rust"):
@@ -899,7 +945,7 @@ def cli_launch(log, root):
         launches[entry.get("pid")] = f"launch {json.dumps(mask(argv))} env {json.dumps(mask(env), sort_keys=True)}"
         order.append(entry.get("pid"))
     messages = Path(str(log) + ".messages")
-    initializes, sessions, calls = {}, [], []
+    initializes, sessions, calls, claude_initializes = {}, [], [], {}
     for line in (messages.read_text().splitlines() if messages.exists() else []):
         entry = json.loads(line)
         try:
@@ -909,16 +955,24 @@ def cli_launch(log, root):
         method = message.get("method")
         if method == "initialize":
             initializes[entry["pid"]] = message.get("params")
+        # Claude Code's initialize: Rust sends only the system prompt append of the reference's.
+        request = message.get("request") or {}
+        if message.get("type") == "control_request" and request.get("subtype") == "initialize":
+            claude_initializes[entry["pid"]] = without_unserved(request.get("appendSystemPrompt", ""), unserved)
         if method in ("thread/start", "thread/resume"):
             sessions.append(entry["pid"])
         if method in ("thread/start", "thread/resume", "turn/start"):
             params = dict(message.get("params") or {})
             params.pop("input", None)
-            params.pop("additionalContext", None)
+            if "additionalContext" in params:
+                params["additionalContext"] = agent_context(params["additionalContext"], unserved)
             calls.append(f"{method} {json.dumps(mask(params), sort_keys=True)}")
     session = sessions[-1] if sessions else None
     # Claude Code has no thread/start: its turn is the last CLI launched.
-    out = [launches[session if session in launches else order[-1]]] if order else []
+    turn_pid = session if session in launches else (order[-1] if order else None)
+    out = [launches[turn_pid]] if order else []
+    if turn_pid in claude_initializes:
+        out.append(f"claude initialize appendSystemPrompt {json.dumps(mask(claude_initializes[turn_pid]))}")
     if session in initializes:
         out.append(f"initialize {json.dumps(mask(initializes[session]), sort_keys=True)}")
     out.extend(calls)
@@ -1284,6 +1338,10 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
                  and sum(r.get("status") not in ACTIVE_RUN for r in p.get("runs", [])) >= settled_runs
                  and not effects_due(root, offset()), 40)
         if follow_up is not None:
+            if scenario.get("awaitStatus"):
+                # The restarted server's provider check settles first: its snapshot (the
+                # models it lists, say) is what the turn's agent reads.
+                provider_status(url, cookie, scenario["instance"], root)
             runs = len(thread_projection(url, cookie).get("runs", []))
             rpc(url, cookie, "orchestration.dispatchCommand", {
                 "type": "message.dispatch", "commandId": "follow-up-message", "threadId": THREAD,

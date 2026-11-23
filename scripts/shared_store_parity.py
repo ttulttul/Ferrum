@@ -189,13 +189,14 @@ CROSS_SCENARIOS = [
     {"name": "codex restart continuation off", "follow_up": "Now append a line"},
     {"name": "claude restart continuation off", "follow_up": "Now append a line"},
     # A thread made on one server whose first turn runs on the other, calling T3's MCP
-    # tools with the thread credential that server gives the CLI.
+    # tools with the thread credential that server gives the CLI. Each server's provider check
+    # settles before the turn, so orchestrator_capabilities reads a settled catalogue.
     {"name": "codex agent mcp on the other server", "follow_up": "Run echo hi and write notes.txt",
      "scenario": {"instance": "codex", "model": "fixture", "scenario": "codex_mcp.json",
-                  "restart": {"after": "created"}}},
+                  "awaitStatus": True, "restart": {"after": "created"}}},
     {"name": "claude agent mcp on the other server", "follow_up": "Run echo hi and write notes.txt",
      "scenario": {"instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_mcp.json",
-                  "restart": {"after": "created"}}},
+                  "awaitStatus": True, "restart": {"after": "created"}}},
     # A thread made on one server whose turn the other runs, steers (Codex `turn/steer`) and
     # stops.
     {"name": "codex steer then stop on the other server", "scenario": {

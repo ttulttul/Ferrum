@@ -78,23 +78,29 @@ The "Caller check" column is the tool's declaration in the reference's
 
 ## Prompt context and capabilities
 
-Not yet in Rust, and each needs its own PR:
+- **Agent instructions** (`src/agent_instructions.rs`). Rust sends the reference's text as its
+  adapters do, generated into `src/mcp_oauth/instructions.json` by
+  `scripts/update_agent_tools.py` (`scripts/reference_agent_instructions.mjs`):
+  - Claude Code gets an `initialize` control request, once per CLI and before
+    `mcp_set_servers`, whose `appendSystemPrompt` is the reference's: the runtime and pull
+    request linking text (`buildRuntimeInstructions`), then, for a thread with T3's MCP server,
+    the orchestration text and Claude's own background-wait and `send_to_user` text;
+  - each Codex `turn/start` of such a thread carries `additionalContext`: the orchestration
+    sections as `t3_code_orchestration_01..`, `t3_code_runtime` with the model and effort, and
+    `t3_code_tools` with the browser text (`buildCodexAdditionalContext`).
 
-- **Orchestration instructions.** The reference gives every provider CLI the text in
-  `packages/provider-core/src/server/orchestrationInstructions.ts`: Codex gets
-  `T3_CODE_ORCHESTRATION_SECTIONS` as `additionalContext` entries `t3_code_orchestration_01..03`
-  plus `t3_code_runtime` and, with browser or device tools, `t3_code_tools`
-  (`apps/server/src/provider/CodexDeveloperInstructions.ts`); Claude Code gets
-  `T3_CODE_ORCHESTRATION_INSTRUCTIONS` appended to its system prompt (`ClaudeAdapterV2.ts`), with
-  the ToolSearch variant of the device text. Cursor, OpenCode and Pi have their own variants.
-  Rust sends none of it, and `cli_launch` in `scripts/client_thread_parity.py` leaves it out of
-  the comparison. It goes in after delegation is served, since it tells the model to use
-  `delegate_task`, `task_status` and `task_cancel`.
-- **`orchestrator_capabilities`.** Rust's `features` now say what the reference's do:
-  `appOwnedSubagents` came with `task_cancel`, `batchThreadCreation` and `maxBatchThreads: 20`
-  with `create_threads`, and `scheduledTasks` with the scheduled task tools. The `providers`
-  list is compared separately from the caller's fields in `comparable_mcp`; making it the
-  reference's (model listing, pinned models, `omittedModels`, constraints) is its own item.
+  Each line that names a tool Rust does not serve yet is left out, with a heading left with
+  nothing under it, so an agent is never pointed at a tool it cannot call; once those tools are
+  served the text is the reference's, unchanged. Today that leaves out the `request_secret`
+  line, the visuals and preview section and the browser text. `cli_launch` in
+  `scripts/client_thread_parity.py` compares both servers' text, filtered the same way. Not
+  sent yet: the rest of Claude's `initialize` (hooks, title, prompt suggestions, dialog kinds),
+  device text (Rust serves no device tools), and the Cursor, OpenCode, Pi and ACP variants.
+- **`orchestrator_capabilities`** answers as the reference's: every provider instance, with
+  its constraints (`providerConstraints`; a Rust instance whose driver it cannot run children
+  on says so), its models as `listCapabilityModels` lists them (pinned, favourite, preferred
+  order, hidden models, `search`, `omittedModels`), their options and defaults, and its
+  runtime modes; and the reference's feature flags. Its whole answer is compared.
 
 ## Batches
 
@@ -205,7 +211,7 @@ schemas.
    them, records the delivery's run when the turn ends, so only the final state matches.
 4c. **Attachments and secrets** (pending): `t3_attachment_prepare_upload`,
    `t3_attachment_discard`, `t3_thread_send_attachments`, `request_secret`.
-5. **Prompt context and capabilities**, as above.
+5. **Prompt context and capabilities** (served), as above.
 6. **Scheduled tasks**: `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task` and
    `run_scheduled_task_now` share the reference's `scheduled_tasks` table. Thread callers
    default to their project; an outside client can list all projects. Webhook summaries include

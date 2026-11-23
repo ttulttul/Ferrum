@@ -540,6 +540,14 @@ impl Session {
         }
         turn_params["collaborationMode"] =
             json!({"mode": provider.interaction_mode(), "settings": settings});
+        // T3's instructions for the agent, as the reference's turns carry
+        // them (`buildCodexAdditionalContext`).
+        if provider.mcp.is_some() {
+            turn_params["additionalContext"] = crate::agent_instructions::codex_additional_context(
+                &provider.model,
+                provider.reasoning_effort.as_deref(),
+            );
+        }
         let started = self.request("turn/start", turn_params).await?;
         if let Some(id) = started["turn"]["id"].as_str() {
             self.turn_started(id);
