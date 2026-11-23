@@ -66,6 +66,45 @@ pub(crate) async fn dispatch_orchestration_command<H: CommandHost>(
     dispatch_command(state, command, None).await
 }
 
+/// Where a delegated delivery (`completion`) on `thread_id` steers: into the
+/// running turn, when every task it carries wakes the parent always and that
+/// turn's steering does not interrupt its tools, as the reference's
+/// `dispatchMessage` decides. Claude's steering interrupts its tools
+/// (`activeSteeringInterruptsTools`), so a delivery steers only a Codex turn
+/// and otherwise waits for the run to end.
+pub(crate) async fn delivery_steer_target<H: CommandHost>(
+    state: &Arc<H>,
+    thread_id: &str,
+    completion: &Value,
+) -> Option<steer::Target> {
+    let running = {
+        let store = state.store.read().await;
+        let thread = store.threads.get(thread_id)?;
+        let tasks = thread.stored_row()["subagents"].clone();
+        let always = completion["taskIds"].as_array().is_some_and(|ids| {
+            ids.iter().all(|id| {
+                tasks
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|task| task["id"] == *id && task["completionWake"] == "always")
+            })
+        });
+        if !always {
+            return None;
+        }
+        let run = thread.runs.iter().find(|run| run.status == "running")?;
+        let ids = thread.provider_run_ids(run)?;
+        (ids.driver == crate::workspace::provider::CODEX).then(|| run.wire_id())?
+    };
+    let mut steering = json!({"dispatchMode": {"type": "steer_active", "targetRunId": running}});
+    steering["threadId"] = json!(thread_id);
+    match steer::plan(state, thread_id, &steering).await {
+        Ok(steer::SteerPlan::Steer(target)) => Some(target),
+        _ => None,
+    }
+}
+
 /// Dispatch the server's own `message.dispatch` that continues `source`, a
 /// run a restart cut off, with the checks a client's message gets.
 pub(crate) async fn dispatch_restart_continuation<H: CommandHost>(
@@ -926,6 +965,13 @@ async fn apply_command<H: CommandHost>(
                     }
                 }
             }
+            // A delivery whose tasks all wake the parent steers into its
+            // running turn when it can (see `delivery_steer_target`).
+            let delivery_steer = match command.get("delegatedCompletion").filter(|c| c.is_object())
+            {
+                Some(completion) => delivery_steer_target(&state, thread_id, completion).await,
+                None => None,
+            };
             // A delegated task delivery says what each task found.
             let mut wire = None;
             let mut wake_started = None;
@@ -946,6 +992,26 @@ async fn apply_command<H: CommandHost>(
                 text = delegation::wake_detail(&ids, &tasks);
                 // The delivery is accepted with its message (`acceptDelegatedCompletionDelivery`).
                 delegation::accept_delivery(&state, thread_id, completion).await?;
+                if let Some(target) = delivery_steer {
+                    let delivery = steer::Delivery {
+                        text: text.clone(),
+                        notification: command["notification"].clone(),
+                        wire: json!({
+                            "createdBy": command["createdBy"],
+                            "creationSource": command["creationSource"],
+                            "delegatedCompletion": completion,
+                        }),
+                    };
+                    return steer::steer_with(
+                        state.clone(),
+                        receipt,
+                        thread_id,
+                        command,
+                        target,
+                        Some(delivery),
+                    )
+                    .await;
+                }
                 wake_started = delegation::wake_work_started_at(&*state, thread_id).await;
                 wire = Some(json!({
                     "createdBy": command["createdBy"],

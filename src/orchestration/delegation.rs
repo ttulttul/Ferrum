@@ -987,10 +987,10 @@ pub(crate) async fn recover<H: CommandHost>(
         if let Err(error) = finalize_child(state.clone(), &child, &parent).await {
             tracing::warn!(%error, child, "could not recover a delegated task");
         }
-        deliver_if_idle(state.clone(), &parent).await;
+        offer_delivery(state.clone(), &parent).await;
     }
     for thread_id in cohorts {
-        deliver_if_idle(state.clone(), &thread_id).await;
+        offer_delivery(state.clone(), &thread_id).await;
     }
 }
 
@@ -1062,10 +1062,10 @@ pub(crate) async fn after_run<H: CommandHost>(state: Arc<H>, thread_id: &str) {
                 tracing::warn!(%error, thread_id, "could not settle a delegated task");
             }
             drop(releases);
-            deliver_if_idle(state.clone(), parent).await;
+            offer_delivery(state.clone(), parent).await;
         }
     }
-    deliver_if_idle(state, thread_id).await;
+    offer_delivery(state, thread_id).await;
 }
 
 /// `finalizeAppOwnedSubagent` for a child whose work is done.
@@ -1304,19 +1304,16 @@ async fn settle_next<H: CommandHost>(
 /// reference's continuation service does: a queued message that wakes it with
 /// the finished tasks (`delegatedCompletion`). Accepting it marks the claimed
 /// tasks delivered and frees the cohort (`acceptDelegatedCompletionDelivery`).
-async fn deliver_if_idle<H: CommandHost>(state: Arc<H>, thread_id: &str) {
+async fn offer_delivery<H: CommandHost>(state: Arc<H>, thread_id: &str) {
     let pending = {
         let store = state.store.read().await;
         let Some(thread) = store.threads.get(thread_id) else {
             return;
         };
-        if thread
+        let busy = thread
             .runs
             .iter()
-            .any(|run| matches!(run.status.as_str(), "running" | "queued" | "preparing"))
-        {
-            return;
-        }
+            .any(|run| matches!(run.status.as_str(), "running" | "queued" | "preparing"));
         let row = thread.stored_row();
         let found = row["runExtras"].as_object().and_then(|extras| {
             extras.iter().find_map(|(run_id, extra)| {
@@ -1325,13 +1322,25 @@ async fn deliver_if_idle<H: CommandHost>(state: Arc<H>, thread_id: &str) {
                     .then(|| (run_id.clone(), cohort.clone()))
             })
         });
-        found.map(|(run_id, cohort)| (run_id, cohort, row))
+        found.map(|(run_id, cohort)| (run_id, cohort, row, busy))
     };
-    let Some((run_id, cohort, row)) = pending else {
+    let Some((run_id, cohort, row, busy)) = pending else {
         return;
     };
     let delivery = &cohort["delivery"];
     let task_ids = records(delivery, "taskIds");
+    // While the thread runs, a delivery goes in only if it steers into the
+    // running turn; otherwise it waits for the run to end, which offers it
+    // again.
+    if busy {
+        let completion = json!({"parentRunId": run_id, "taskIds": task_ids});
+        if super::delivery_steer_target(&state, thread_id, &completion)
+            .await
+            .is_none()
+        {
+            return;
+        }
+    }
     let tasks = records(&row, "subagents");
     // The delivery message records the acceptance in its own command, so an
     // offer made again (after a restart, say) finds it sent and stops here.
@@ -1962,7 +1971,7 @@ pub(crate) async fn cancel_task<H: CommandHost>(
     if let Err(error) = finalize_child(state.clone(), &child_id, parent_id).await {
         tracing::warn!(%error, child_id, "could not settle a cancelled task");
     }
-    deliver_if_idle(state, parent_id).await;
+    offer_delivery(state, parent_id).await;
     Ok(())
 }
 

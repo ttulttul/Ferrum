@@ -181,7 +181,13 @@ schemas.
      settled (a child whose cut run still awaits its continuation waits for it) and offers
      again each delivery a cohort still holds. A delivery is accepted with its message
      (`acceptDelegatedCompletionDelivery`), and offered under a command id derived from its
-     cohort and generation, so a delivery claimed but not sent before a stop is sent once.
+     cohort and generation, so a delivery claimed but not sent before a stop is sent once;
+   - delivery into a running parent turn: a delivery whose tasks all wake the parent always
+     steers into the parent's running turn when that turn's steering does not interrupt its
+     tools (`dispatchMessage`'s `steer_active`), joining the run as its notification card. A
+     Codex turn is steered (`turn/steer`); a Claude turn is not
+     (`activeSteeringInterruptsTools`), so its delivery runs once the turn ends. A delegated
+     child's Codex thread starts with `threadSource: "subagent"`, as the reference starts it.
 
    Parity: the scenarios `claude delegate` (a wait), `claude delegate async` (a delivery run
    on an idle parent), `claude delegate cancel` (cancelled while its child runs),
@@ -189,11 +195,14 @@ schemas.
    started with its prompt, one left idle) and `claude delegate followup` (the parent sends its
    finished child more work, whose result wakes it) in `scripts/client_thread_parity.py`, with
    fake CLIs for the parent and the child, and `claude delegate restart` (the server restarts
-   while a child runs). Still pending, each its own PR: delivery into a parent's running turn
-   (the reference steers it), worktree isolation (`isolation: "worktree"` is refused), tasks in
-   a linked environment (refused), a cancelled child's pull request watches, a stop's queued
-   delivery runs (the reference cancels a cohort's queued delivery), and recovery on the
-   control plane (only the server recovers delegated tasks after a restart).
+   while a child runs), `claude delegate live` and `codex delegate live` (a child that
+   finishes while its parent's turn runs). Still pending, each its own PR: worktree isolation
+   (`isolation: "worktree"` is refused), tasks in a linked environment (refused), a cancelled
+   child's pull request watches, a stop's queued delivery runs (the reference cancels a
+   cohort's queued delivery), and recovery on the control plane (only the server recovers
+   delegated tasks after a restart). While a Claude turn runs, the reference shows its
+   delivery as a queued run at once; Rust, which holds queued runs until a client starts
+   them, records the delivery's run when the turn ends, so only the final state matches.
 4c. **Attachments and secrets** (pending): `t3_attachment_prepare_upload`,
    `t3_attachment_discard`, `t3_thread_send_attachments`, `request_secret`.
 5. **Prompt context and capabilities**, as above.
