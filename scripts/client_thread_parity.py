@@ -73,6 +73,44 @@ from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, http, isolated_gi
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/providers"
 # Each scenario: the thread's provider instance and model, and the recorded session its CLI replays.
+# A signed-in Grok (as provider_status_parity.py has it) whose ACP sessions answer a prompt with a title.
+_GROK_INITIALIZE = {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}, "authMethods": [], "_meta": {
+    "modelState": {"currentModelId": "grok-build", "availableModels": [
+        {"modelId": "grok-build", "name": "Grok Build"}, {"modelId": "grok-4-fast", "name": "Grok 4 Fast"}]}}}
+_GROK_ACP = {"rpc": {
+    "initialize": _GROK_INITIALIZE,
+    "session/new": {"sessionId": "grok-session-1", "models": {
+        "currentModelId": "grok-build",
+        "availableModels": [{"modelId": "grok-build", "name": "Grok Build"},
+                            {"modelId": "grok-4-fast", "name": "Grok 4 Fast"}]}},
+    "session/set_model": {}, "session/set_config_option": {}, "session/prompt": {"stopReason": "end_turn"},
+    "session/cancel": {}},
+    "notifyBefore": {"session/prompt": [{"method": "session/update", "params": {
+        "sessionId": "grok-session-1", "update": {"sessionUpdate": "agent_message_chunk", "content": {
+            "type": "text", "text": '{"title": "Echo Greeting via Grok", "needsRefinement": false}'}}}}]}}
+GROK_TITLE_SPEC = {"commands": [
+    {"args": ["--version"], "stdout": "grok 1.0.52", "stderr": "", "exit": 0},
+    # A text generation run asks for approvals (approval-required).
+    {"prefix": ["--permission-mode", "default", "agent", "stdio"], **_GROK_ACP},
+    {"args": ["models"], "stdout": "You are logged in as dev@example.com.\n\nModels:\n  * grok-build (default)\n  * grok-4-fast\n",
+     "stderr": "", "exit": 0},
+    {"args": ["inspect", "--json"], "stdout": '{"skills": []}', "stderr": "", "exit": 0},
+    {"prefix": ["agent", "stdio"], **_GROK_ACP}]}
+
+# A signed-in Pi (as provider_status_parity.py has it) whose text generation runs answer with a title.
+_PI_STATE = {"model": {"provider": "openai", "id": "gpt-5.6"}, "thinkingLevel": "minimal"}
+_PI_MODELS = {"models": [{"provider": "openai", "id": "gpt-5.6", "reasoning": False}]}
+PI_TITLE_SPEC = {"commands": [
+    {"args": ["--version"], "stdout": "pi 0.85.0", "stderr": "", "exit": 0},
+    {"prefix": ["--mode", "rpc", "--no-session", "--offline", "--no-extensions"],
+     "pi": {"get_available_models": _PI_MODELS, "set_model": {}, "set_thinking_level": {}, "prompt": {},
+            "get_last_assistant_text": {"text": '{"title": "Echo Greeting via Pi", "needsRefinement": false}'}},
+     "piEvents": {"prompt": [
+         {"type": "message_end", "message": {"role": "assistant", "stopReason": "stop"}},
+         {"type": "agent_settled"}]}},
+    {"prefix": ["--mode", "rpc"], "pi": {"get_state": _PI_STATE, "get_available_models": _PI_MODELS,
+                                         "get_commands": {"commands": []}}}]}
+
 PROVIDER_SCENARIOS = [
     {"name": "codex turn", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"},
     # The turn calls T3's tools on the MCP server the server gave its CLI.
@@ -160,6 +198,22 @@ PROVIDER_SCENARIOS = [
     {"name": "claude title fallback", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_title.json", "dispatch": {"titleSeed": "Run echo hi and write notes.txt"},
      "title": "initial"},
+    # Titles from another provider's text generation model, which the thread's turns never run on:
+    # Pi over its RPC mode.
+    {"name": "pi title", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate",
+     "textProvider": {"instance": "pi", "driver": "pi", "cli": "pi", "model": "openai/gpt-5.6",
+                      # get_available_models is the status probe's too.
+                      "launch": "--no-tools", "records": ["set_model", "set_thinking_level", "prompt",
+                                                          "get_last_assistant_text"],
+                      "spec": PI_TITLE_SPEC}},
+    # Grok over ACP.
+    {"name": "grok title", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate",
+     "textProvider": {"instance": "grok", "driver": "grok", "cli": "grok", "model": "grok-4-fast",
+                      "launch": "agent", "spec": GROK_TITLE_SPEC, "skip": "t3-code-provider-probe",
+                      "records": ["initialize", "authenticate", "session/new", "session/set_model",
+                                  "session/set_config_option", "session/prompt", "session/cancel"]}},
     # A title the provider cannot generate leaves the seed, and a regenerate reports why.
     {"name": "codex title failed", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
      "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate"},
@@ -502,6 +556,20 @@ def write_fake_clis(directory, drivers):
             (directory / name).chmod(0o755)
 
 
+def write_text_provider(directory, provider):
+    """The fake CLI of a scenario's text generation provider (`textProvider`): `status_cli.py`
+    (or `fake_opencode.py` with "opencode") answering from its spec, logging to the provider log's
+    `.text` files."""
+    directory.mkdir(parents=True, exist_ok=True)
+    spec = directory / f"{provider['cli']}.spec.json"
+    spec.write_text(json.dumps(provider["spec"]))
+    fake = FIXTURES / ("fake_opencode.py" if provider.get("opencode") else "status_cli.py")
+    target = directory / provider["cli"]
+    target.write_text(f'#!/bin/sh\nFAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 '
+                      f'{shlex.quote(str(fake))} {shlex.quote(str(spec))} "$@"\n')
+    target.chmod(0o755)
+
+
 def seed_turn(url, cookie, root, scenario):
     """A project on a git checkout and a thread on the scenario's provider, with the message to send."""
     checkout = root / "checkout"
@@ -512,6 +580,13 @@ def seed_turn(url, cookie, root, scenario):
         {"Cookie": cookie, "Content-Type": "application/json"})
     if status != 200:
         raise RuntimeError(f"project.create failed on {url}: HTTP {status} {body[:400]!r}")
+    if scenario.get("textProvider"):
+        # Titles come from another provider's instance, which the turn's provider never runs.
+        provider = scenario["textProvider"]
+        rpc(url, cookie, "server.updateSettings", {"patch": {
+            "providerInstances": {provider["instance"]: {"driver": provider["driver"], "enabled": True,
+                                                         **({"config": provider["config"]} if provider.get("config") else {})}},
+            "textGenerationModelSelection": {"instanceId": provider["instance"], "model": provider["model"]}}})
     rpc(url, cookie, "orchestration.dispatchCommand", {
         "type": "thread.create", "commandId": "seed-thread", "threadId": THREAD, "projectId": "project:github",
         "title": "New thread" if scenario.get("title") else "Thread",
@@ -851,7 +926,45 @@ def title_outcome(url, cookie, scenario, log, root):
         out["regenerated"] = title_state(wait_for(url, cookie, lambda p: settled(p) and (
             (p.get("thread") or {}).get("lastTitleRegeneration") or {}).get("requestId") == "regenerate-title", 60))
     out["runs"] = title_runs(log, root)
+    if scenario.get("textProvider"):
+        out["textRuns"] = text_provider_runs(log, root, scenario["textProvider"])
     return out
+
+
+def text_provider_runs(log, root, provider):
+    """What the text generation provider's fake CLI was launched with and sent for a title: its
+    distinct launches whose arguments carry `provider["launch"]`, and the records of
+    `provider["records"]` types (or HTTP requests), with temporary paths and request ids masked."""
+    def mask(value):
+        if isinstance(value, str):
+            for server in ("original", "rust"):
+                value = value.replace(f"{root}/{server}", "<home>/<server>")
+            return value.replace(str(root), "<home>")
+        if isinstance(value, list):
+            return [mask(item) for item in value]
+        if isinstance(value, dict):
+            # The reference's RPC client adds its trace to each request.
+            return {key: ("<id>" if key == "id" else mask(item)) for key, item in value.items()
+                    if key not in ("sampled", "spanId", "traceId")}
+        return value
+    def lines(suffix):
+        path = Path(str(log) + ".text" + suffix)
+        return path.read_text().splitlines() if path.exists() else []
+    # The status probe launches the same way, as often as its timing makes it: each distinct launch.
+    launches = sorted({mask(line) for line in lines(".args") if provider["launch"] in line})
+    records = []
+    for line in lines(""):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        kind = record.get("type") or record.get("method")
+        # The status probe's own requests, as many as its timing makes.
+        if provider.get("skip") and provider["skip"] in line:
+            continue
+        if kind in provider.get("records", []):
+            records.append(mask(record))
+    return {"launches": launches, "records": records, "http": [mask(line) for line in lines(".http")]}
 
 
 def follow_up_turn(args, url, cookie, text):
@@ -1361,6 +1474,8 @@ def scenario_env(temporary, name, root, scenario, drivers):
         # Each server has its own fake CLIs, which a restart scenario may remove.
         fake_bin = temporary / f"{name}-fake-bin"
         write_fake_clis(fake_bin, drivers)
+        if scenario.get("textProvider"):
+            write_text_provider(fake_bin, scenario["textProvider"])
         path = os.pathsep.join([str(fake_bin), hidden])
     log = temporary / f"{name}-provider.log"
     env = {**GIT_ISOLATION, **HOST_FAKES, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),

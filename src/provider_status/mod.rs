@@ -64,12 +64,12 @@ mod claude_skills;
 mod codex;
 mod cursor;
 mod fx;
-mod grok;
+pub(crate) mod grok;
 mod kiro;
 mod maintenance;
 mod muse;
 mod opencode;
-mod pi;
+pub(crate) mod pi;
 pub(crate) mod reset_credits;
 
 use crate::server::AppState;
@@ -1378,7 +1378,7 @@ pub(crate) fn now_iso() -> String {
 /// The server's environment, with the login shell's `PATH`, `__MISE_DIFF`
 /// and `JAVA_HOME` as of now (a runtime refresh replaces them), and the
 /// instance's own variables over it (`mergeProviderInstanceEnvironment`).
-fn base_env(instance: &[(String, String)]) -> ProcessEnv {
+pub(crate) fn base_env(instance: &[(String, String)]) -> ProcessEnv {
     let mut env: ProcessEnv = std::env::vars().collect();
     for (name, value) in crate::login_shell::current().variables() {
         env.insert(name.to_owned(), value.to_string_lossy().into_owned());

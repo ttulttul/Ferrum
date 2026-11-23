@@ -790,6 +790,162 @@ pub(super) async fn check(config: &Value, env: &ProcessEnv) -> Draft {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Text generation
+
+/// How long a text generation run may take (`GROK_TIMEOUT_MS`).
+const TEXT_GENERATION_TIMEOUT: Duration = Duration::from_secs(180);
+/// The reference's xAI prompt completion runtime names its first prompt so.
+const TEXT_GENERATION_PROMPT_ID: &str = "t3-xai-prompt-1";
+/// The ACP error code an agent refuses an unauthenticated session with.
+const AUTH_REQUIRED: i64 = -32000;
+
+/// `normalizeGrokReasoningEffort`.
+fn normalize_effort(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|effort| valid_effort_token(effort))
+        .map(str::to_owned)
+}
+
+/// `makeGrokTextGeneration`'s run: Grok's reply to `prompt`, from an ACP
+/// session that asks for approvals and is granted none, as text.
+pub(crate) async fn generate_text(
+    config: &Value,
+    env: &ProcessEnv,
+    cwd: &Path,
+    prompt: &str,
+    model: &str,
+    reasoning_effort: Option<&str>,
+) -> Result<String, String> {
+    match tokio::time::timeout(
+        TEXT_GENERATION_TIMEOUT,
+        run_text_generation(config, env, cwd, prompt, model, reasoning_effort),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err("Grok ACP request timed out.".into()),
+    }
+}
+
+async fn run_text_generation(
+    config: &Value,
+    env: &ProcessEnv,
+    cwd: &Path,
+    prompt: &str,
+    model: &str,
+    reasoning_effort: Option<&str>,
+) -> Result<String, String> {
+    let failed = || "Grok ACP request failed.".to_owned();
+    let mut env = env.clone();
+    env.insert("GROK_OAUTH2_REFERRER".into(), "t3code".into());
+    let auth_method = if env
+        .get(API_KEY_ENV)
+        .is_some_and(|key| !key.trim().is_empty())
+    {
+        "xai.api_key"
+    } else {
+        "cached_token"
+    };
+    // Approval-required: Grok's config cannot make it always approve.
+    let args: Vec<String> = ["--permission-mode", "default", "agent", "stdio"]
+        .map(String::from)
+        .into();
+    let mut session = AcpSession::start(&binary(config), &args, &env, cwd)
+        .map_err(|_| "Grok ACP text generation failed.".to_owned())?;
+    let initialized = session
+        .initialize_with_meta("t3-code-git-text", Some(json!({"clientType": "extension"})))
+        .await
+        .map_err(|_| failed())?;
+    let new_session = json!({"cwd": cwd, "mcpServers": []});
+    let setup = match session.request("session/new", new_session.clone()).await {
+        Ok(setup) => setup,
+        // An agent that needs signing in first is authenticated with the
+        // method it lists (else the configured one), then asked again.
+        Err(error) if error.code() == Some(AUTH_REQUIRED) => {
+            let methods = initialized["authMethods"].as_array();
+            if methods.is_some()
+                && !methods
+                    .into_iter()
+                    .flatten()
+                    .any(|method| method["id"] == auth_method)
+            {
+                return Err(failed());
+            }
+            session
+                .request("authenticate", json!({"methodId": auth_method}))
+                .await
+                .map_err(|_| failed())?;
+            session
+                .request("session/new", new_session)
+                .await
+                .map_err(|_| failed())?
+        }
+        Err(_) => return Err(failed()),
+    };
+    let session_id = setup["sessionId"].as_str().unwrap_or_default().to_owned();
+    // `applyGrokAcpModelSelection`: change the session's model (and effort)
+    // only when asked for something it does not already have.
+    let current_model = non_empty_string(&setup["models"]["currentModelId"]);
+    let current_effort = current_model.as_ref().and_then(|current| {
+        setup["models"]["availableModels"]
+            .as_array()?
+            .iter()
+            .find(|model| model["modelId"].as_str().map(str::trim) == Some(current.as_str()))
+            .and_then(|model| normalize_effort(model["_meta"]["reasoningEffort"].as_str()))
+    });
+    let requested = Some(base_model_id(model)).filter(|model| model != DEFAULT_MODEL_SLUG);
+    let model_changed = requested.is_some() && requested != current_model;
+    let effort = reasoning_effort.and_then(|effort| normalize_effort(Some(effort)));
+    let effort_changed = reasoning_effort.is_some() && effort != current_effort;
+    if let Some(target) = requested
+        .clone()
+        .or(current_model.clone())
+        .filter(|_| model_changed || effort_changed)
+    {
+        let mut params = json!({"sessionId": session_id, "modelId": target});
+        if let Some(effort) = &effort {
+            params["_meta"] = json!({"reasoningEffort": effort});
+        }
+        session
+            .request("session/set_model", params)
+            .await
+            .map_err(|_| "Grok ACP request failed.".to_owned())?;
+    }
+    let reply = session
+        .request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": prompt}],
+                "_meta": {"promptId": TEXT_GENERATION_PROMPT_ID, "requestId": TEXT_GENERATION_PROMPT_ID},
+            }),
+        )
+        .await
+        .map_err(|_| failed())?;
+    // The agent's message, streamed before its reply.
+    let mut text = String::new();
+    while let Ok((method, params)) = session.notifications.try_recv() {
+        let update = &params["update"];
+        if method == "session/update"
+            && update["sessionUpdate"] == "agent_message_chunk"
+            && update["content"]["type"] == "text"
+        {
+            text.push_str(update["content"]["text"].as_str().unwrap_or_default());
+        }
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(if reply["stopReason"] == "cancelled" {
+            "Grok ACP request was cancelled.".into()
+        } else {
+            "Grok Agent returned empty output.".into()
+        });
+    }
+    Ok(text.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

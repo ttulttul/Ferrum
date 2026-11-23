@@ -19,11 +19,13 @@ exits with "exit". An entry with "rpc" instead speaks newline-delimited
 JSON-RPC 2.0 on stdin and stdout: each request is answered with the result
 named by its method (or the error in "rpcErrors"), a request with neither is
 left unanswered, and the CLI exits when its input closes. "notify" lists
-notifications sent after a method's reply: {"initialize": [{...}]}. An entry
+notifications sent after a method's reply: {"initialize": [{...}]}, and
+"notifyBefore" those sent before it. An entry
 with "pi" speaks Pi's RPC mode instead: each {"type": ..., "id": ...} record
 is answered with {"type": "response", "id", "command", "success": true,
 "data"} from "pi" by type, or "success": false for a type in "piErrors"; a
-type in neither is left unanswered. "exitAfter": n exits after n records.
+type in neither is left unanswered. "piEvents" lists the events Pi writes after
+answering a record of a type: {"prompt": [{"type": "agent_settled"}]}. "exitAfter": n exits after n records.
 "closeOutputAfter": n closes standard output after n records and exits a
 few seconds later, so a client sees the closed output, not a failed write;
 "closeInputAfter": n closes standard input before the nth reply instead,
@@ -87,6 +89,9 @@ if "pi" in entry:
             # Closed before the reply goes out, so no request written after it can land.
             os.close(0)
         write(sys.stdout, json.dumps(reply))
+        # Events Pi emits after answering a record of this type ("piEvents").
+        for event in entry.get("piEvents", {}).get(kind, []):
+            write(sys.stdout, json.dumps(event))
         if entry.get("exitAfter") == answered:
             sys.exit(1)
         if entry.get("closeOutputAfter") == answered:
@@ -118,6 +123,10 @@ for line in sys.stdin:
     method = message.get("method")
     if "id" not in message or method is None:
         continue
+    # Notifications that go out before a method's reply ("notifyBefore"), as an agent streams a
+    # prompt's updates before answering it.
+    for notification in entry.get("notifyBefore", {}).get(method, []):
+        write(sys.stdout, json.dumps({"jsonrpc": "2.0", **notification}))
     if method in errors:
         reply = {"jsonrpc": "2.0", "id": message["id"], "error": errors[method]}
     elif method in results:
