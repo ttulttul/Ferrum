@@ -91,5 +91,11 @@
   },
   "opencode title": {
     "live": "Racy: the generated title (thread.metadata-updated) lands later in Rust's turn than in the reference's, which records it right after the session attaches, as each server's title generation through the OpenCode server finishes; it did so in 6 of 6 runs pinned to 4 CPUs, and a run whose title finishes first on both would match."
+  },
+  "claude delegate live": {
+    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
+  },
+  "codex delegate live": {
+    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
   }
 }

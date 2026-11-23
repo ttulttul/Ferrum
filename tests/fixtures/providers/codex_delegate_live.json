@@ -1,0 +1,708 @@
+{
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "codexHome": "/tmp/codex-home",
+     "platformFamily": "unix",
+     "platformOs": "linux",
+     "userAgent": "codex_cli_rs/0.170.0"
+    }
+   }
+  },
+  {
+   "expect": "thread/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     },
+     "model": "gpt-6.1-sol",
+     "cwd": "/workspace",
+     "approvalPolicy": "never",
+     "sandbox": {
+      "type": "dangerFullAccess"
+     },
+     "approvalsReviewer": "user",
+     "modelProvider": "openai"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "thread/started",
+    "params": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     }
+    }
+   }
+  },
+  {
+   "expect": "turn/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": null,
+      "durationMs": null
+     }
+    },
+    "emittedAtMs": 1795225881428
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "01a1fbcd-0c79-7d90-b0b3-d0a56a423ddc",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "Run the shell command `echo hi` and then create a file named notes.txt containing the word hello. Then reply with one short sentence.",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225881722,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225881722
+    },
+    "emittedAtMs": 1795225881722
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "01a1fbcd-0c79-7d90-b0b3-d0a56a423ddc",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "Run the shell command `echo hi` and then create a file named notes.txt containing the word hello. Then reply with one short sentence.",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225881722,
+      "completedAtMs": 1795225881722
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225881722
+    },
+    "emittedAtMs": 1795225881725
+   }
+  },
+  {
+   "mcp": {
+    "tool": "delegate_task",
+    "as": "task",
+    "background": true,
+    "arguments": {
+     "task": "Count to ten.",
+     "title": "Counter"
+    }
+   }
+  },
+  {
+   "expect": "thread/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-1111-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-1111-7073-bab3-5d40dfc2f65d"
+     },
+     "model": "gpt-6.1-sol",
+     "cwd": "/workspace",
+     "approvalPolicy": "never",
+     "sandbox": {
+      "type": "dangerFullAccess"
+     },
+     "approvalsReviewer": "user",
+     "modelProvider": "openai"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "thread/started",
+    "params": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-1111-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-1111-7073-bab3-5d40dfc2f65d"
+     }
+    }
+   }
+  },
+  {
+   "expect": "turn/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "turn": {
+      "id": "01a1fbcd-2222-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-2222-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "01a1fbcd-1111-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-2222-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-2222-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": null,
+      "durationMs": null
+     }
+    },
+    "emittedAtMs": 1795225881428
+   }
+  },
+  {
+   "await": "task"
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "child-user-1",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "Count to ten.",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225881722,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-1111-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-2222-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225881722
+    },
+    "emittedAtMs": 1795225881722
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "child-user-1",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "Count to ten.",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225881722,
+      "completedAtMs": 1795225881722
+     },
+     "threadId": "01a1fbcd-1111-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-2222-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225881722
+    },
+    "emittedAtMs": 1795225881725
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_child_reply",
+      "text": "",
+      "phase": "commentary",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225886191,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-1111-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-2222-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225886191
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_child_reply",
+      "text": "Counted to ten.",
+      "phase": "final_answer",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225886191,
+      "completedAtMs": 1795225886446
+     },
+     "threadId": "01a1fbcd-1111-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-2222-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": 13,
+     "completedAtMs": 1795225886446
+    },
+    "emittedAtMs": 1795225886447
+   }
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-1111-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-2222-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-2222-71e2-94e9-1eb8e07ab835",
+      "items": [
+       {
+        "type": "agentMessage",
+        "moderation": null,
+        "id": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+        "text": "Ran `echo hi` and created `notes.txt` containing `hello`.",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null,
+        "startedAtMs": 1795225889320,
+        "completedAtMs": 1795225889708
+       }
+      ],
+      "itemsView": "summary",
+      "status": "completed",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": 1795225889,
+      "durationMs": 8490
+     }
+    },
+    "emittedAtMs": 1795225889755
+   }
+  },
+  {
+   "expect": "turn/steer"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "01a1fbcd-4444-7000-8000-000000005001",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "$params.input.0.text",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225965124,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225965124
+    },
+    "emittedAtMs": 1795225965124
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "01a1fbcd-4444-7000-8000-000000005001",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "$params.input.0.text",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225965124,
+      "completedAtMs": 1795225965124
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225965124
+    },
+    "emittedAtMs": 1795225965126
+   }
+  },
+  {
+   "mcp": {
+    "tool": "task_status",
+    "arguments": {
+     "taskId": "$mcp.task.taskId"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+      "text": "",
+      "phase": "commentary",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225886191,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225886191
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": "I"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": "’ll"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " run"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " the"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " requested"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " command"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " and"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " create"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " the"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " file"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": " now"
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "itemId": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+     "delta": "."
+    },
+    "emittedAtMs": 1795225886191
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_01060d5b32fa64b6016b00f91e1d6887d2b44f2a81cfc3f7a8",
+      "text": "I’ll run the requested command and create the file now.",
+      "phase": "commentary",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225886191,
+      "completedAtMs": 1795225886446
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": 13,
+     "completedAtMs": 1795225886446
+    },
+    "emittedAtMs": 1795225886447
+   }
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [
+       {
+        "type": "agentMessage",
+        "moderation": null,
+        "id": "msg_01060d5b32fa64b6016b00f921406087d28756ca403e0a342a",
+        "text": "Ran `echo hi` and created `notes.txt` containing `hello`.",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null,
+        "startedAtMs": 1795225889320,
+        "completedAtMs": 1795225889708
+       }
+      ],
+      "itemsView": "summary",
+      "status": "completed",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": 1795225889,
+      "durationMs": 8490
+     }
+    },
+    "emittedAtMs": 1795225889755
+   }
+  }
+ ]
+}

@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 /// What a steer message does.
-pub(super) enum SteerPlan {
+pub(crate) enum SteerPlan {
     /// Starts its own run: the target is gone or its turn has ended.
     Start,
     /// Waits behind the target, as a queued message: the target has no
@@ -19,7 +19,7 @@ pub(super) enum SteerPlan {
     Steer(Target),
 }
 
-pub(super) struct Target {
+pub(crate) struct Target {
     run: uuid::Uuid,
     wire_id: String,
     steer: Value,
@@ -30,7 +30,7 @@ fn error(message: String) -> anyhow::Error {
 }
 
 /// Decide what the steer message `command` does on `thread_id`.
-pub(super) async fn plan<H: CommandHost>(
+pub(crate) async fn plan<H: CommandHost>(
     state: &Arc<H>,
     thread_id: &str,
     command: &Value,
@@ -154,17 +154,48 @@ pub(super) async fn steer<H: CommandHost>(
     command: &Value,
     target: Target,
 ) -> anyhow::Result<u64> {
+    steer_with(state, receipt, thread_id, command, target, None).await
+}
+
+/// What a steered delegated delivery records beyond a user's steer: its
+/// text (the tasks' results), its notification and its own wire fields.
+pub(super) struct Delivery {
+    pub text: String,
+    pub notification: Value,
+    pub wire: Value,
+}
+
+/// [`steer`], for a delegated task's delivery when `delivery` is given: it
+/// joins the running turn as its notification (`dispatchSteerIntoRun` with
+/// `delegatedCompletion`).
+pub(super) async fn steer_with<H: CommandHost>(
+    state: Arc<H>,
+    receipt: &CommandReceipt,
+    thread_id: &str,
+    command: &Value,
+    target: Target,
+    delivery: Option<Delivery>,
+) -> anyhow::Result<u64> {
     let message_id = command["messageId"].as_str().unwrap_or_default().to_owned();
-    let text = command["text"].as_str().unwrap_or_default().to_owned();
+    let text = delivery.as_ref().map_or_else(
+        || command["text"].as_str().unwrap_or_default().to_owned(),
+        |d| d.text.clone(),
+    );
     let message = ConversationMessage {
         id: message_id.clone(),
-        role: "user".into(),
+        role: if delivery.is_some() {
+            crate::thread_projection::NOTIFICATION_ROLE.into()
+        } else {
+            "user".into()
+        },
         content: text.clone(),
         created_at: crate::now(),
         creation_source: command["creationSource"]
             .as_str()
             .filter(|source| *source != "web")
             .map(str::to_owned),
+        notification: delivery.as_ref().map(|d| d.notification.clone()),
+        wire: delivery.map(|d| Box::new(d.wire)),
         steer: Some(Box::new(target.steer)),
         ..Default::default()
     };

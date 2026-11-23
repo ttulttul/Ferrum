@@ -165,6 +165,14 @@ PROVIDER_SCENARIOS = [
      "scenario": "claude_delegate_followup.json", "awaitStatus": True, "settleRuns": 2},
     # A restart while a delegated task's child runs: the child's work continues after the
     # restart, and its result reaches the parent.
+    # A delegated task that finishes while its parent's Claude turn still runs: its result waits
+    # behind that turn (steering a Claude turn would interrupt its tools) and runs next.
+    {"name": "claude delegate live", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_live.json", "awaitStatus": True, "settleRuns": 2},
+    # A delegated task that finishes while its parent's Codex turn still runs: its result steers
+    # into that turn (turn/steer), which reads it.
+    {"name": "codex delegate live", "instance": "codex", "model": "fixture",
+     "scenario": "codex_delegate_live.json", "awaitStatus": True},
     {"name": "claude delegate restart", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate_restart.json", "awaitStatus": True, "settleRuns": 2,
      "restart": {"after": "settled"}},

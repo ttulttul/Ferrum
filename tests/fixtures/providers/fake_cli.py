@@ -345,7 +345,16 @@ def fill(value):
         if value == "$id":
             return remembered.get("id")
         if value.startswith("$params."):
-            return remembered.get("params", {}).get(value[len("$params."):])
+            # A dotted path, with list indices: "$params.input.0.text".
+            found = remembered.get("params", {})
+            for key in value[len("$params."):].split("."):
+                if isinstance(found, list) and key.isdigit() and int(key) < len(found):
+                    found = found[int(key)]
+                elif isinstance(found, dict):
+                    found = found.get(key)
+                else:
+                    found = None
+            return found
         if value == "$session":
             return claude_session()
         if value == "$request_id":

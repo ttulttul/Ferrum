@@ -413,6 +413,30 @@ impl Thread {
                     "text": message.content,
                     "attachments": []
                 });
+                // A steered notification, such as a delegated task's delivery,
+                // shows as its card (`notificationTurnItem`).
+                let mut item = item;
+                if message.role == NOTIFICATION_ROLE {
+                    if let (Some(fields), Some(notification)) =
+                        (item.as_object_mut(), message.notification.as_ref())
+                    {
+                        for key in [
+                            "type",
+                            "messageId",
+                            "inputIntent",
+                            "text",
+                            "attachments",
+                            "createdBy",
+                            "creationSource",
+                        ] {
+                            fields.remove(key);
+                        }
+                        fields.insert("type".into(), json!("notification"));
+                        for (key, value) in notification.as_object().into_iter().flatten() {
+                            fields.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
                 let after = steer[LINK_CARD_POSITION].as_u64().unwrap_or(0);
                 steers.push((index, after, item));
                 continue;

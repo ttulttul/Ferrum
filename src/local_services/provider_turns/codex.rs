@@ -487,7 +487,15 @@ impl Session {
         }
         let thread = match thread {
             Some(thread) => thread,
-            None => self.request("thread/start", thread_params).await?,
+            None => {
+                // Codex tags a delegated child's MCP calls with thread_source
+                // "subagent", as the reference starts it (`isDelegatedTaskThread`).
+                let mut params = thread_params;
+                if provider.app_thread_id.starts_with("thread:delegated-task:") {
+                    params["threadSource"] = json!("subagent");
+                }
+                self.request("thread/start", params).await?
+            }
         };
         let Some(thread_id) = thread["thread"]["id"].as_str().map(str::to_owned) else {
             return Ok(TurnEnd::failed(
