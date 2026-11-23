@@ -8,17 +8,30 @@
 //! without one mark it stalled. Cancel stops git and empties the destination;
 //! retry empties it and starts again; a finished clone is forgotten after
 //! thirty seconds.
+//!
+//! The tracker itself only runs git; where the project comes from is the
+//! host's. The native server creates it in-process ([`Tracker::start`]); a
+//! workspace served by `t3-agentd` answers `clone.call` with
+//! [`Tracker::call`] and the control plane creates the project between the
+//! `claim` and the `launch`.
 use crate::source_control_clone::{self as clone, CloneInput, CloneOptions, Progress};
 use crate::AppState;
 use indexmap::IndexMap;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, oneshot, Notify};
 
 const DONE_RETENTION: Duration = Duration::from_secs(30);
+// A claim whose host never launched it (the host stopped in between) stops
+// holding its destination after this long.
+#[cfg(not(test))]
+const CLAIM_EXPIRY: Duration = Duration::from_secs(120);
+#[cfg(test)]
+const CLAIM_EXPIRY: Duration = Duration::from_millis(100);
 // Git prints nothing while a transfer waits on the network, and the kernel can
 // take many minutes to give up on a dead connection.
 const STALL_AFTER: Duration = Duration::from_secs(20);
@@ -50,7 +63,7 @@ struct Clones {
 /// Every tracked clone, and the changes subscribers follow.
 pub(crate) struct Tracker {
     clones: Mutex<Clones>,
-    changes: broadcast::Sender<Vec<Value>>,
+    changes: broadcast::Sender<Value>,
     /// Serializes start, cancel, retry and discard on the shared entries and folders.
     actions: tokio::sync::Mutex<()>,
 }
@@ -150,7 +163,7 @@ impl Tracker {
     }
 
     fn publish(&self, clones: &Clones) {
-        let _ = self.changes.send(Self::list(clones));
+        let _ = self.changes.send(Value::Array(Self::list(clones)));
     }
 
     /// Every snapshot, oldest clone first.
@@ -168,8 +181,8 @@ impl Tracker {
             .map(|t| t.snapshot.clone())
     }
 
-    /// The snapshots after each change.
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<Vec<Value>> {
+    /// The snapshot list after each change.
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<Value> {
         self.changes.subscribe()
     }
 
@@ -217,6 +230,32 @@ impl Tracker {
             .insert(project_id.to_owned(), task.abort_handle());
     }
 
+    /// Forgets `project_id`'s claim unless it is launched within [`CLAIM_EXPIRY`].
+    fn expire_unlaunched(self: &Arc<Self>, project_id: &str) {
+        self.clear_retention(project_id);
+        let tracker = self.clone();
+        let id = project_id.to_owned();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(CLAIM_EXPIRY).await;
+            let unlaunched = {
+                let mut clones = tracker.clones.lock().unwrap();
+                clones.retention.remove(&id);
+                clones
+                    .tracked
+                    .get(&id)
+                    .is_some_and(|t| t.running.is_none() && t.snapshot["phase"] == "running")
+            };
+            if unlaunched {
+                tracker.remove(&id);
+            }
+        });
+        self.clones
+            .lock()
+            .unwrap()
+            .retention
+            .insert(project_id.to_owned(), task.abort_handle());
+    }
+
     fn progress(&self, project_id: &str, update: Progress) {
         self.modify(project_id, |t| {
             t.snapshot["stage"] = json!(update.stage);
@@ -247,9 +286,14 @@ impl Tracker {
     }
 
     /// Runs `project_id`'s clone in the background. The outcome is recorded
-    /// even when cancelled; a done clone is marked before the post-clone
-    /// refresh so a late cancel cannot remove it.
-    fn launch(self: &Arc<Self>, state: &Arc<AppState>, project_id: &str) {
+    /// even when cancelled; a done clone is marked before `on_done` (the
+    /// host's post-clone refresh) so a late cancel cannot remove it.
+    fn launch<F, Fut>(self: &Arc<Self>, project_id: &str, on_done: F)
+    where
+        F: FnOnce(String) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.clear_retention(project_id);
         let (cancel, cancel_rx) = oneshot::channel();
         let (stopped_tx, stopped) = oneshot::channel();
         let (clone_url, destination, protocol) = {
@@ -265,7 +309,6 @@ impl Tracker {
             )
         };
         let tracker = self.clone();
-        let state = state.clone();
         let id = project_id.to_owned();
         tokio::spawn(async move {
             let pulses = Arc::new(Notify::new());
@@ -317,7 +360,7 @@ impl Tracker {
             match outcome {
                 Ok(_) => {
                     tracker.finish(&id, "done", None);
-                    on_cloned(&state, &id).await;
+                    on_done(id.clone()).await;
                 }
                 Err(error) if error["_tag"] == "Cancelled" => {
                     tracker.finish(&id, "cancelled", None)
@@ -353,58 +396,14 @@ impl Tracker {
         params: &Value,
     ) -> Result<Value, Value> {
         let _action = self.actions.lock().await;
-        let input = CloneInput::from_json(params).map_err(|e| json!({"defect": e}))?;
-        let project_id = params["projectId"].as_str().unwrap_or_default().to_owned();
+        let claim = self.claim(params).await?;
+        let project_id = claim["projectId"].as_str().unwrap_or_default().to_owned();
+        let destination = claim["cwd"].as_str().unwrap_or_default().to_owned();
         let title = params["title"]
             .as_str()
             .unwrap_or_default()
             .trim()
             .to_owned();
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        let provider = input.provider.clone().unwrap_or_default();
-        let repository = input.repository.clone().unwrap_or_default();
-        let lookup = async |cwd: &str| {
-            crate::source_control_lookup::lookup(&provider, &repository, cwd).await
-        };
-        let prepared = clone::prepare_clone(&input, &home, lookup).await?;
-        let destination = prepared.destination.display().to_string();
-        let started_at = now_iso();
-        let already_in_progress = repository_error(
-            input.provider.as_deref().unwrap_or("unknown"),
-            "cloneRepository",
-            "A clone into this destination is already in progress.",
-        );
-        {
-            let mut clones = self.clones.lock().unwrap();
-            clones.sequence += 1;
-            let sequence = clones.sequence;
-            if clones
-                .tracked
-                .iter()
-                .any(|(id, t)| *id == project_id || t.destination == destination)
-            {
-                return Err(already_in_progress);
-            }
-            let snapshot = json!({
-                "projectId": project_id, "remoteUrl": prepared.remote_url, "destinationPath": destination,
-                "repository": prepared.repository, "phase": "running", "stage": "connecting",
-                "percent": null, "detail": null, "stalled": false, "error": null,
-                "startedAt": started_at, "endedAt": null, "sequence": sequence,
-            });
-            clones.tracked.insert(
-                project_id.clone(),
-                Tracked {
-                    snapshot,
-                    running: None,
-                    clone_url: prepared.clone_url.clone(),
-                    destination: destination.clone(),
-                    protocol: input.protocol.clone().unwrap_or_else(|| "auto".into()),
-                },
-            );
-        }
-        self.clear_retention(&project_id);
         // The project is registered before git runs, so racing thread creates
         // and project deletes see the clone.
         let created = crate::projects::mutate_checked(
@@ -435,26 +434,153 @@ impl Tracker {
                     Some(to) => to,
                     None => {
                         self.remove(&project_id);
-                        return Err(already_in_progress);
+                        return Err(already_in_progress(&claim));
                     }
                 }
             }
             Err((error, _)) => {
                 self.remove(&project_id);
-                return Err(json!({"_tag": "OrchestrationDispatchCommandError",
-                    "message": "Failed to create clone project.",
-                    "cause": {"name": "ProjectOperationError", "message": error["message"]}}));
+                return Err(project_create_failed(&error["message"]));
             }
         };
         {
             let clones = self.clones.lock().unwrap();
             self.publish(&clones);
         }
-        self.launch(state, &owner);
-        Ok(
-            json!({"projectId": owner, "cwd": destination, "remoteUrl": prepared.remote_url,
-            "repository": prepared.repository}),
-        )
+        let host = state.clone();
+        self.launch(&owner, move |id| async move { on_cloned(&host, &id).await });
+        Ok(with_project(claim, &owner))
+    }
+
+    /// Claims a clone's destination: checks the input and the destination,
+    /// and tracks the clone as running, not yet started. Answers
+    /// `{projectId, cwd, remoteUrl, repository}`; `cwd` is where the
+    /// project goes. A malformed input is `{"defect": message}`.
+    async fn claim(self: &Arc<Self>, params: &Value) -> Result<Value, Value> {
+        let input = CloneInput::from_json(params).map_err(|e| json!({"defect": e}))?;
+        let project_id = params["projectId"].as_str().unwrap_or_default().to_owned();
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let provider = input.provider.clone().unwrap_or_default();
+        let repository = input.repository.clone().unwrap_or_default();
+        let lookup = async |cwd: &str| {
+            crate::source_control_lookup::lookup(&provider, &repository, cwd).await
+        };
+        let prepared = clone::prepare_clone(&input, &home, lookup).await?;
+        let destination = prepared.destination.display().to_string();
+        let started_at = now_iso();
+        let claim = json!({"projectId": project_id, "cwd": destination,
+            "remoteUrl": prepared.remote_url, "repository": prepared.repository,
+            "provider": input.provider.as_deref().unwrap_or("unknown")});
+        {
+            let mut clones = self.clones.lock().unwrap();
+            clones.sequence += 1;
+            let sequence = clones.sequence;
+            if clones
+                .tracked
+                .iter()
+                .any(|(id, t)| *id == project_id || t.destination == destination)
+            {
+                return Err(already_in_progress(&claim));
+            }
+            let snapshot = json!({
+                "projectId": project_id, "remoteUrl": prepared.remote_url, "destinationPath": destination,
+                "repository": prepared.repository, "phase": "running", "stage": "connecting",
+                "percent": null, "detail": null, "stalled": false, "error": null,
+                "startedAt": started_at, "endedAt": null, "sequence": sequence,
+            });
+            clones.tracked.insert(
+                project_id.clone(),
+                Tracked {
+                    snapshot,
+                    running: None,
+                    clone_url: prepared.clone_url.clone(),
+                    destination: destination.clone(),
+                    protocol: input.protocol.clone().unwrap_or_else(|| "auto".into()),
+                },
+            );
+        }
+        self.expire_unlaunched(&project_id);
+        Ok(claim)
+    }
+
+    /// `clone.call` for a workspace served by `t3-agentd`: the host creates
+    /// the project between `claim` and `launch`, and follows the clone with
+    /// [`Self::subscribe`]. Each call takes its turn with the others.
+    pub(crate) async fn call(
+        self: &Arc<Self>,
+        method: &str,
+        input: &Value,
+    ) -> Option<Result<Value, Value>> {
+        let project_id = input["projectId"].as_str().unwrap_or_default();
+        Some(match method {
+            "claim" => {
+                let _action = self.actions.lock().await;
+                self.claim(input).await.map(|mut claim| {
+                    if let Some(claim) = claim.as_object_mut() {
+                        claim.remove("provider");
+                    }
+                    claim
+                })
+            }
+            "adopt" => {
+                let _action = self.actions.lock().await;
+                let (from, to) = (
+                    input["from"].as_str().unwrap_or_default(),
+                    input["to"].as_str().unwrap_or_default(),
+                );
+                let moved = self.move_claim(from, to);
+                if moved {
+                    self.clear_retention(from);
+                    self.expire_unlaunched(to);
+                }
+                Ok(json!(moved))
+            }
+            "release" => {
+                let _action = self.actions.lock().await;
+                // Only a claim that never started.
+                let unstarted = self
+                    .clones
+                    .lock()
+                    .unwrap()
+                    .tracked
+                    .get(project_id)
+                    .is_some_and(|t| t.running.is_none() && t.snapshot["phase"] == "running");
+                if unstarted {
+                    self.remove(project_id);
+                }
+                Ok(json!(unstarted))
+            }
+            "launch" => {
+                let _action = self.actions.lock().await;
+                let unstarted = self
+                    .clones
+                    .lock()
+                    .unwrap()
+                    .tracked
+                    .get(project_id)
+                    .is_some_and(|t| t.running.is_none() && t.snapshot["phase"] == "running");
+                if unstarted {
+                    {
+                        let clones = self.clones.lock().unwrap();
+                        self.publish(&clones);
+                    }
+                    self.launch(project_id, |_| async {});
+                }
+                Ok(json!(unstarted))
+            }
+            "cancel" => Ok(json!(self.cancel(project_id).await)),
+            "retry" => self
+                .retry_with(project_id, |_| async {})
+                .await
+                .map(|applied| json!(applied)),
+            "discard" => {
+                self.discard(project_id).await;
+                Ok(Value::Null)
+            }
+            _ => return None,
+        })
     }
 
     fn move_claim(&self, from: &str, to: &str) -> bool {
@@ -497,6 +623,23 @@ impl Tracker {
         state: &Arc<AppState>,
         project_id: &str,
     ) -> Result<bool, Value> {
+        let host = state.clone();
+        self.retry_with(
+            project_id,
+            move |id| async move { on_cloned(&host, &id).await },
+        )
+        .await
+    }
+
+    async fn retry_with<F, Fut>(
+        self: &Arc<Self>,
+        project_id: &str,
+        on_done: F,
+    ) -> Result<bool, Value>
+    where
+        F: FnOnce(String) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let _action = self.actions.lock().await;
         let destination = match self.clones.lock().unwrap().tracked.get(project_id) {
             Some(t) if matches!(t.snapshot["phase"].as_str(), Some("failed" | "cancelled")) => {
@@ -520,7 +663,7 @@ impl Tracker {
                 t.snapshot[key] = value;
             }
         });
-        self.launch(state, project_id);
+        self.launch(project_id, on_done);
         Ok(true)
     }
 
@@ -558,6 +701,27 @@ impl Tracker {
     }
 }
 
+fn already_in_progress(claim: &Value) -> Value {
+    repository_error(
+        claim["provider"].as_str().unwrap_or("unknown"),
+        "cloneRepository",
+        "A clone into this destination is already in progress.",
+    )
+}
+
+/// The error `projectClone.start` reports when the clone's project cannot be created.
+pub(crate) fn project_create_failed(message: &Value) -> Value {
+    json!({"_tag": "OrchestrationDispatchCommandError",
+        "message": "Failed to create clone project.",
+        "cause": {"name": "ProjectOperationError", "message": message}})
+}
+
+/// `projectClone.start`'s answer for a claim, for the project that owns it.
+fn with_project(claim: Value, owner: &str) -> Value {
+    json!({"projectId": owner, "cwd": claim["cwd"], "remoteUrl": claim["remoteUrl"],
+        "repository": claim["repository"]})
+}
+
 /// After a clone: the project is updated so clients see it as a repository.
 async fn on_cloned(state: &Arc<AppState>, project_id: &str) {
     let _ = crate::projects::mutate_checked(
@@ -577,6 +741,24 @@ mod tests {
         assert_eq!(clamp_text("short", 10), "short");
         assert_eq!(clamp_text("abcdefghijkl", 5), "abcd…");
         assert_eq!(clamp_text(&"x".repeat(200), 200).len(), 200);
+    }
+
+    #[tokio::test]
+    async fn a_claim_that_is_never_launched_lets_go_of_its_destination() {
+        let root = std::env::temp_dir().join(format!("t3-claim-{}", std::process::id()));
+        let tracker = Arc::new(Tracker::default());
+        let claim = |id: &str| {
+            json!({"projectId": id, "title": "x", "remoteUrl": "/nowhere",
+                "destinationPath": root.join("dest").to_string_lossy()})
+        };
+        let first = tracker.call("claim", &claim("p1")).await.unwrap();
+        assert!(first.is_ok(), "{first:?}");
+        // Held: a second claim of the folder is refused.
+        assert!(tracker.call("claim", &claim("p2")).await.unwrap().is_err());
+        tokio::time::sleep(CLAIM_EXPIRY * 3).await;
+        assert!(tracker.snapshots().is_empty());
+        assert!(tracker.call("claim", &claim("p2")).await.unwrap().is_ok());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

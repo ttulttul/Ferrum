@@ -6,7 +6,7 @@ use crate::local_services::{
     VcsService,
 };
 use futures_util::FutureExt;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -24,6 +24,9 @@ pub struct LocalWorkspace {
     pub(crate) devices: DeviceService,
     /// The provider processes kept across turns.
     providers: std::sync::Arc<crate::local_services::provider_turns::ProviderProcesses>,
+    /// Clones that become projects (`clone.*`), for a server that reaches
+    /// this workspace through `t3-agentd`.
+    clones: std::sync::Arc<crate::project_clone::Tracker>,
 }
 
 impl LocalWorkspace {
@@ -43,6 +46,7 @@ impl LocalWorkspace {
             previews: std::sync::Arc::new(previews),
             devices,
             providers: Default::default(),
+            clones: Default::default(),
         }
     }
 }
@@ -305,6 +309,29 @@ impl Workspace for LocalWorkspace {
         name: &'a str,
     ) -> WorkspaceFuture<'a, std::io::Result<super::NamedProject>> {
         crate::local_services::named_project::create(root, name).boxed()
+    }
+    fn clone_call<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+    ) -> WorkspaceFuture<'a, Option<Reply>> {
+        async move {
+            let reply = self.clones.call(method, input).await?;
+            // A malformed input is the defect the reference's schema reports.
+            Some(
+                reply.map_err(|error| match error.get("defect").and_then(Value::as_str) {
+                    Some(defect) => json!({"_tag": "Die", "defect": defect}),
+                    None => error,
+                }),
+            )
+        }
+        .boxed()
+    }
+    fn clone_snapshots(&self) -> Value {
+        Value::Array(self.clones.snapshots())
+    }
+    fn clone_events(&self) -> broadcast::Receiver<Value> {
+        self.clones.subscribe()
     }
     fn is_dir<'a>(&'a self, path: &'a Path) -> WorkspaceFuture<'a, bool> {
         async move { path.is_dir() }.boxed()

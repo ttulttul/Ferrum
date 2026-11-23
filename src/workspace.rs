@@ -391,4 +391,24 @@ pub trait Workspace: MaybeSendSync {
             ))
         })
     }
+
+    // clone.*: clones that become projects, tracked where git runs.
+    /// A clone action (`claim`, `adopt`, `release`, `launch`, `cancel`,
+    /// `retry`, `discard`; see [`crate::workspace_protocol::op::CLONE_CALL`]),
+    /// or `None` where this workspace does not track clones.
+    fn clone_call<'a>(
+        &'a self,
+        _method: &'a str,
+        _input: &'a Value,
+    ) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed_future(async { None })
+    }
+    /// Every tracked clone's snapshot, oldest first (a JSON list).
+    fn clone_snapshots(&self) -> Value {
+        Value::Array(Vec::new())
+    }
+    /// The snapshot list after each change.
+    fn clone_events(&self) -> broadcast::Receiver<Value> {
+        broadcast::channel(1).1
+    }
 }

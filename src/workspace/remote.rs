@@ -44,11 +44,12 @@ pub trait Transport: super::MaybeSendSync {
 const WATCH_IDLE_MS: u64 = 10_000;
 
 /// The event streams that stay open for as long as a connection does.
-const BUS_OPS: [&str; 4] = [
+const BUS_OPS: [&str; 5] = [
     op::TERM_EVENTS,
     op::TERM_METADATA,
     op::PREVIEW_EVENTS,
     op::DEVICE_EVENTS,
+    op::CLONE_EVENTS,
 ];
 
 /// A workspace served by `t3-agentd`. Clones share one connection.
@@ -68,6 +69,7 @@ struct Inner {
     metadata_events: broadcast::Sender<Value>,
     preview_events: broadcast::Sender<Value>,
     device_events: broadcast::Sender<Value>,
+    clone_events: broadcast::Sender<Value>,
     bus_frames: broadcast::Sender<BusFrame>,
 }
 
@@ -103,6 +105,8 @@ struct State {
     /// The terminals as `term.metadata` last described them.
     terminals: Vec<Value>,
     device_state: Value,
+    /// The clones as `clone.events` last listed them.
+    clones: Vec<Value>,
     watches: HashMap<String, Watch>,
     /// Turn cancellations `maintain` forwards (no spawned task can wait on
     /// them in every build).
@@ -182,6 +186,9 @@ enum Bus {
     Closed,
     Opening,
     Open(u64),
+    /// agentd does not know the op (an older build): not asked again on
+    /// this connection.
+    Unsupported,
 }
 
 struct Watch {
@@ -284,6 +291,7 @@ impl RemoteWorkspace {
                 metadata_events: broadcast::channel(128).0,
                 preview_events: broadcast::channel(512).0,
                 device_events: broadcast::channel(128).0,
+                clone_events: broadcast::channel(128).0,
                 bus_frames: broadcast::channel(1024).0,
             }),
         }
@@ -375,7 +383,7 @@ impl RemoteWorkspace {
         state.pending.clear();
         state.acks.clear();
         for bus in state.buses.values_mut() {
-            if *bus == Bus::Opening {
+            if matches!(*bus, Bus::Opening | Bus::Unsupported) {
                 *bus = Bus::Closed;
             }
         }
@@ -514,9 +522,10 @@ impl RemoteWorkspace {
             let mut state = self.lock();
             let bus = state.buses.entry(op).or_default();
             if *bus == Bus::Opening {
-                *bus = match opened.ok().as_ref().and_then(stream_id) {
-                    Some(id) => Bus::Open(id),
-                    None => Bus::Closed,
+                *bus = match &opened {
+                    Ok(value) => stream_id(value).map_or(Bus::Closed, Bus::Open),
+                    Err(error) if error.code == ErrorCode::UnknownOp => Bus::Unsupported,
+                    Err(_) => Bus::Closed,
                 };
             }
         }
@@ -849,6 +858,14 @@ fn deliver_bus(inner: &Inner, state: &mut State, op: &'static str, event: Value)
             state.device_state = event.clone();
             let _ = inner.device_events.send(event);
         }
+        op::CLONE_EVENTS => {
+            if let Some(clones) = event.as_array() {
+                if state.clones != *clones {
+                    state.clones = clones.clone();
+                    let _ = inner.clone_events.send(event);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -1036,6 +1053,19 @@ impl Workspace for RemoteWorkspace {
     }
     fn terminal_metadata(&self) -> Value {
         json!({"type": "snapshot", "terminals": self.lock().terminals})
+    }
+    fn clone_call<'a>(
+        &'a self,
+        method: &'a str,
+        input: &'a Value,
+    ) -> WorkspaceFuture<'a, Option<Reply>> {
+        boxed(self.method(op::CLONE_CALL, method, input, "projectClone"))
+    }
+    fn clone_snapshots(&self) -> Value {
+        Value::Array(self.lock().clones.clone())
+    }
+    fn clone_events(&self) -> broadcast::Receiver<Value> {
+        self.inner.clone_events.subscribe()
     }
     fn terminal_metadata_events(&self) -> broadcast::Receiver<Value> {
         self.inner.metadata_events.subscribe()
@@ -1338,7 +1368,7 @@ mod tests {
         answer(&workspace, resume[0].id, json!({"missing": []}));
         tokio::task::yield_now().await;
         // The event streams open once the handshake is done.
-        for (i, stream) in (10..14).enumerate() {
+        for (i, stream) in (10..15).enumerate() {
             let opens = settle(&queue).await;
             assert_eq!(opens.len(), 1);
             assert_eq!(opens[0].op, BUS_OPS[i]);
@@ -1393,7 +1423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_a_sent_cancellation_stops_a_turn() {
+    async fn an_agentd_without_clone_events_is_not_asked_again() {
         let workspace = RemoteWorkspace::new(1, None);
         let queue = Arc::new(Queue(Default::default()));
         let handshake = {
@@ -1410,6 +1440,43 @@ mod tests {
         let resume = settle(&queue).await;
         answer(&workspace, resume[0].id, json!({"missing": []}));
         for stream in 10..14 {
+            let opens = settle(&queue).await;
+            answer(&workspace, opens[0].id, json!({"stream": stream}));
+        }
+        // An agentd older than projectClone does not know the op.
+        let opens = settle(&queue).await;
+        assert_eq!(opens[0].op, op::CLONE_EVENTS);
+        workspace.receive(proto::inbound_frame(&Inbound::Response(proto::Response {
+            id: opens[0].id.unwrap(),
+            result: Err(WireError::new(
+                ErrorCode::UnknownOp,
+                "unknown op: clone.events",
+            )),
+        })));
+        handshake.await.unwrap().unwrap();
+        workspace.maintain().await;
+        assert!(take(&queue).is_empty(), "the op is not asked for again");
+        assert_eq!(workspace.clone_snapshots(), json!([]));
+    }
+
+    #[tokio::test]
+    async fn only_a_sent_cancellation_stops_a_turn() {
+        let workspace = RemoteWorkspace::new(1, None);
+        let queue = Arc::new(Queue(Default::default()));
+        let handshake = {
+            let workspace = workspace.clone();
+            let queue = queue.clone();
+            tokio::spawn(async move { workspace.connected(queue).await })
+        };
+        let hello = settle(&queue).await;
+        answer(
+            &workspace,
+            hello[0].id,
+            json!({"version": proto::VERSION, "epoch": 1, "root": "/", "streams": []}),
+        );
+        let resume = settle(&queue).await;
+        answer(&workspace, resume[0].id, json!({"missing": []}));
+        for stream in 10..15 {
             let opens = settle(&queue).await;
             answer(&workspace, opens[0].id, json!({"stream": stream}));
         }

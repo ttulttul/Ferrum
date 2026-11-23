@@ -132,6 +132,9 @@ pub struct ControlPlane {
     signals: Mutex<Signals>,
     /// Held while an orchestration command checks and commits.
     mutation_lock: tokio::sync::Mutex<()>,
+    /// Serializes `projectClone.*`: a start's claim, project and launch are
+    /// separate workspace calls.
+    clone_lock: tokio::sync::Mutex<()>,
     cancellations: tokio::sync::Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>>,
     host: Host,
     /// Whether changes are waiting for the host's next alarm to deliver.
@@ -536,6 +539,7 @@ impl ControlPlane {
             signals,
             asset_key: Default::default(),
             mutation_lock: Default::default(),
+            clone_lock: Default::default(),
             cancellations: Default::default(),
             host,
             wake: Default::default(),
@@ -1243,6 +1247,23 @@ impl ControlPlane {
         if method == "assets.createUrl" {
             return Call::Done(self.create_asset_url(params).await);
         }
+        if method == "projectClone.start" {
+            return Call::Done(self.start_project_clone(params).await);
+        }
+        if method == "projectClone.cancel" || method == "projectClone.retry" {
+            let name = method.trim_start_matches("projectClone.");
+            let _guard = self.clone_lock.lock().await;
+            let input = json!({"projectId": params["projectId"]});
+            return Call::Done(match self.host.workspace.clone_call(name, &input).await {
+                Some(Ok(applied)) => Reply::Success(json!({ "applied": applied == true })),
+                // As native, cancel has no error to report: nothing was applied.
+                Some(Err(_)) | None if name == "cancel" => {
+                    Reply::Success(json!({ "applied": false }))
+                }
+                Some(Err(error)) => clone_failure(error),
+                None => clone_failure(Value::Null),
+            });
+        }
         #[cfg(feature = "native")]
         if method == "peerLinks.list" {
             return Call::Done(self.peer_links_list().await);
@@ -1385,7 +1406,6 @@ impl ControlPlane {
                     {"version":1,"sequence":2,"type":"ready","payload":{"at":self.started_at,"environment":environment}}
                 ])])
             }
-            "subscribeProjectClones" => Call::Stream(vec![json!([[]])]),
             // As native before any refresh: the stream stays open and silent.
             "pullRequests.subscribeRefreshes" => Call::Stream(Vec::new()),
             "server.getSettings" => Call::result(self.settings.client(references)),
@@ -1414,6 +1434,94 @@ impl ControlPlane {
             }
             _ => return None,
         })
+    }
+
+    /// `projectClone.start`, as the native server runs it, with git in the
+    /// workspace: the workspace claims the destination, the plane creates
+    /// the project on it, and the workspace starts the clone. Progress
+    /// reaches clients through `subscribeProjectClones`.
+    async fn start_project_clone(&self, params: &Value) -> Reply {
+        let workspace = &self.host.workspace;
+        if !workspace.is_ready() {
+            return clone_failure(json!({"_tag": "Die", "defect":
+                "The environment's workspace is still starting. Try again in a few seconds."}));
+        }
+        let _guard = self.clone_lock.lock().await;
+        let claim = match workspace.clone_call("claim", params).await {
+            Some(Ok(claim)) => claim,
+            Some(Err(error)) => return clone_failure(error),
+            None => return clone_failure(Value::Null),
+        };
+        let project_id = claim["projectId"].as_str().unwrap_or_default().to_owned();
+        let cwd = claim["cwd"].as_str().unwrap_or_default().to_owned();
+        let release = || async {
+            let _ = workspace
+                .clone_call("release", &json!({"projectId": project_id}))
+                .await;
+        };
+        // The project is registered before git runs, so racing thread
+        // creates and project deletes see the clone.
+        let created = self
+            .create_project(&json!({"type": "project.create",
+                "commandId": format!("project-clone-create:{project_id}"),
+                "projectId": project_id, "title": params["title"], "workspaceRoot": cwd,
+                "createWorkspaceRootIfMissing": true}))
+            .await;
+        let owner = match created {
+            Reply::Success(_) => project_id.clone(),
+            refused => {
+                // A failed clone's project still owns its empty folder after
+                // a restart forgets the clone; clone for that project instead.
+                let canonical = workspace
+                    .canonicalize(std::path::Path::new(&cwd))
+                    .await
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| cwd.clone());
+                let conflicting = self
+                    .store_now()
+                    .projects
+                    .values()
+                    .find(|p| p.id != project_id && p.path == canonical)
+                    .map(|p| p.id.clone());
+                let adopted = match &conflicting {
+                    Some(to) => workspace
+                        .clone_call("adopt", &json!({"from": project_id, "to": to}))
+                        .await
+                        .is_some_and(|r| r == Ok(json!(true))),
+                    None => false,
+                };
+                match conflicting {
+                    Some(to) if adopted => to,
+                    Some(_) => {
+                        release().await;
+                        return Reply::Failure(json!({"_tag": "Fail", "error": {
+                            "_tag": "SourceControlRepositoryError", "provider": "unknown",
+                            "operation": "cloneRepository",
+                            "detail": "A clone into this destination is already in progress."}}));
+                    }
+                    None => {
+                        release().await;
+                        let message = match &refused {
+                            Reply::Failure(f) => f["error"]["message"].clone(),
+                            _ => Value::Null,
+                        };
+                        return Reply::Failure(json!({"_tag": "Fail", "error": {
+                            "_tag": "OrchestrationDispatchCommandError",
+                            "message": "Failed to create clone project.",
+                            "cause": {"name": "ProjectOperationError", "message": message}}}));
+                    }
+                }
+            }
+        };
+        match workspace
+            .clone_call("launch", &json!({"projectId": owner}))
+            .await
+        {
+            Some(Ok(_)) => Reply::Success(json!({"projectId": owner, "cwd": cwd,
+                "remoteUrl": claim["remoteUrl"], "repository": claim["repository"]})),
+            Some(Err(error)) => clone_failure(error),
+            None => clone_failure(Value::Null),
+        }
     }
 
     /// `projects.mutate` with `project.create` only. As the native server,
@@ -1817,6 +1925,40 @@ async fn unavailable(uri: Uri) -> Response {
         })),
     )
         .into_response()
+}
+
+/// A `projectClone.*` failure clients can show: the workspace's typed errors
+/// as they are, and anything else (a transport failure, a refused path, a
+/// workspace too old to clone) as a `SourceControlRepositoryError` whose
+/// detail says what happened. T3 Code shows a defect only as "An error
+/// occurred.", so none is sent. `Null` means the workspace cannot clone.
+fn clone_failure(error: Value) -> Reply {
+    if matches!(
+        error["_tag"].as_str(),
+        Some("SourceControlRepositoryError" | "OrchestrationDispatchCommandError")
+    ) {
+        return Reply::Failure(json!({"_tag": "Fail", "error": error}));
+    }
+    let text = error["defect"]
+        .as_str()
+        .or(error["message"].as_str())
+        .unwrap_or_default();
+    let detail = if error.is_null() || text.contains("unknown op: clone.call") {
+        "This environment's workspace cannot clone projects yet: its t3-agentd is older than \
+         projectClone. Restart the environment on a newer image."
+            .to_owned()
+    } else if text.is_empty() {
+        "The repository could not be cloned.".to_owned()
+    } else {
+        // "The workspace could not run <method>: <why>" says only <why> to a user.
+        text.strip_prefix("The workspace could not run ")
+            .and_then(|rest| rest.split_once(": "))
+            .map_or(text, |(_, why)| why)
+            .to_owned()
+    };
+    Reply::Failure(json!({"_tag": "Fail", "error": {
+        "_tag": "SourceControlRepositoryError", "provider": "unknown",
+        "operation": "cloneRepository", "detail": detail}}))
 }
 
 #[cfg(test)]
@@ -3801,6 +3943,136 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
         agentd.emit_bus(op::DEVICE_EVENTS, json!({"revision": 2}));
         let sent = alarm(&host.plane, &connection);
         assert_eq!(values_for(&sent, "d"), vec![json!({"revision": 2})]);
+    }
+
+    fn clone_start(id: &str, project: &str, destination: &str) -> Value {
+        json!({"_tag":"Request","id":id,"tag":"projectClone.start","payload":{
+            "projectId": project, "title": "visibility-grinding-driver",
+            "createdAt": "2026-11-23T00:00:00.000Z",
+            "remoteUrl": "git@ssh.bitbucket.org:mailchannels/visibility-grinding-driver.git",
+            "destinationPath": destination},"headers":[]})
+    }
+
+    #[test]
+    fn project_clones_start_in_the_workspace_and_stream_their_progress() {
+        let agentd = agentd_with_project_folder();
+        let host = Restartable::new(&agentd);
+        let mut connection = owner(&host.plane);
+        let first = subscribe(
+            &host.plane,
+            &mut connection,
+            "c",
+            "subscribeProjectClones",
+            json!({}),
+        );
+        assert_eq!(first, vec![json!([])]);
+        host.plane.take_signals();
+
+        let reply = send(
+            &host.plane,
+            &mut connection,
+            clone_start("s", "p-clone", "/workspace/projects/vgd"),
+        );
+        let exit = &reply[0]["exit"];
+        assert_eq!(exit["_tag"], "Success", "{reply:?}");
+        assert_eq!(exit["value"]["projectId"], "p-clone");
+        assert_eq!(exit["value"]["cwd"], "/workspace/projects/vgd");
+        let methods: Vec<String> = agentd.clone_calls().into_iter().map(|(m, _)| m).collect();
+        assert_eq!(methods, ["claim", "launch"]);
+        // The project exists, on the clone's folder, before git runs.
+        let store = host.plane.store_now();
+        assert_eq!(
+            store.project_rows["p-clone"]["workspaceRoot"],
+            "/workspace/projects/vgd"
+        );
+
+        let running = json!([{"projectId": "p-clone", "phase": "running", "stage": "receiving"}]);
+        agentd.emit_bus(op::CLONE_EVENTS, running.clone());
+        let sent = alarm(&host.plane, &connection);
+        assert_eq!(values_for(&sent, "c"), vec![running.clone()]);
+        agentd.emit_bus(op::CLONE_EVENTS, running);
+        assert!(
+            values_for(&alarm(&host.plane, &connection), "c").is_empty(),
+            "nothing twice"
+        );
+
+        let cancel = send(
+            &host.plane,
+            &mut connection,
+            json!({"_tag":"Request","id":"x","tag":"projectClone.cancel","payload":{"projectId":"p-clone"},"headers":[]}),
+        );
+        assert_eq!(
+            cancel[0]["exit"]["value"],
+            json!({"applied": true}),
+            "{cancel:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_project_clone_says_why_and_creates_no_project() {
+        let agentd = agentd_with_project_folder();
+        agentd.fail_clone_call(
+            "claim",
+            json!({"_tag": "Die", "defect": "The workspace could not run projectClone.claim: /home/agent/vgd is outside the directories this workspace serves"}),
+        );
+        let host = Restartable::new(&agentd);
+        let mut connection = owner(&host.plane);
+        let reply = send(
+            &host.plane,
+            &mut connection,
+            clone_start("s", "p-clone", "~/vgd"),
+        );
+        let cause = &reply[0]["exit"]["cause"][0];
+        // A typed error T3 Code shows, never a bare defect.
+        assert_eq!(cause["_tag"], "Fail", "{reply:?}");
+        assert_eq!(cause["error"]["_tag"], "SourceControlRepositoryError");
+        assert_eq!(
+            cause["error"]["detail"],
+            "/home/agent/vgd is outside the directories this workspace serves"
+        );
+        assert!(host.plane.store_now().project_rows.is_empty());
+    }
+
+    #[test]
+    fn a_project_clone_into_a_registered_empty_folder_clones_for_that_project() {
+        let agentd = agentd_with_project_folder();
+        let host = Restartable::new(&agentd);
+        let mut connection = owner(&host.plane);
+        let created = send(
+            &host.plane,
+            &mut connection,
+            json!({"_tag":"Request","id":"m","tag":"projects.mutate","payload":{"type":"project.create","commandId":"c1","projectId":"p-old","title":"Old","workspaceRoot":"/workspace/one"},"headers":[]}),
+        );
+        assert_eq!(created[0]["exit"]["_tag"], "Success", "{created:?}");
+        let reply = send(
+            &host.plane,
+            &mut connection,
+            clone_start("s", "p-new", "/workspace/one"),
+        );
+        assert_eq!(reply[0]["exit"]["value"]["projectId"], "p-old", "{reply:?}");
+        let calls = agentd.clone_calls();
+        let methods: Vec<&str> = calls.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(methods, ["claim", "adopt", "launch"]);
+        assert_eq!(calls[1].1, json!({"from": "p-new", "to": "p-old"}));
+        assert_eq!(calls[2].1, json!({"projectId": "p-old"}));
+    }
+
+    #[test]
+    fn clone_failures_are_errors_clients_can_show() {
+        let detail = |reply: Reply| match reply {
+            Reply::Failure(f) => f["error"]["detail"].as_str().unwrap_or_default().to_owned(),
+            other => panic!("{other:?}"),
+        };
+        assert!(detail(clone_failure(Value::Null)).contains("older than projectClone"));
+        assert!(detail(clone_failure(json!({"_tag": "Die",
+            "defect": "The workspace could not run projectClone.claim: unknown op: clone.call"})))
+        .contains("older than projectClone"));
+        let typed = json!({"_tag": "SourceControlRepositoryError", "provider": "unknown",
+            "operation": "cloneRepository", "detail": "Destination path is not empty."});
+        assert_eq!(
+            detail(clone_failure(typed.clone())),
+            "Destination path is not empty."
+        );
     }
 
     #[test]

@@ -98,7 +98,7 @@ In short:
   `{id, err: {code, message, detail?}}`. `rpc` errors carry the exact RPC
   error value `LocalWorkspace` returns.
 - Streams (`turn.start`, `term.events`, `term.metadata`, `preview.events`,
-  `device.events`, `git.stackedAction`, `watch.vcsStatus`,
+  `device.events`, `clone.events`, `git.stackedAction`, `watch.vcsStatus`,
   `watch.vcsBranch`, `watch.localServers`) answer `{stream}` and push
   `{stream, seq, event}`, ending with `{stream, seq, end: {reason}}`.
 - agentd keeps unacknowledged frames per stream on disk. After a reconnect
@@ -107,6 +107,16 @@ In short:
   running while no server is connected. A full buffer ends the stream with
   reason `gap`; a turn then stops and reports an interrupted exit.
 - Watches poll every 2 s inside agentd and push only changes.
-- `idle.state` reports running turns, terminals and processes, open
+- Clones that become projects (`projectClone.*`) run in agentd, which
+  tracks them: `clone.call` claims a destination, then launches, cancels,
+  retries or discards a clone, and `clone.events` sends every clone's
+  snapshot after each change. The server creates the project between the
+  claim and the launch. A `~` in a clone's destination is read as agentd's
+  `$HOME` before the path is checked against the roots. A server keeps
+  working with an agentd that predates these ops: it stops asking for
+  `clone.events`, and `projectClone.start` reports that the workspace
+  cannot clone yet.
+- `idle.state` reports running turns, terminals and processes (running
+  clones count as processes), open
   streams and unacknowledged frames, for a supervisor deciding when the
   workspace is idle.

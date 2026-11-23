@@ -343,6 +343,11 @@ impl Agentd {
                 let initial = self.workspace.device_state();
                 self.open_bus(&opener, &op, Some(initial), events)
             }
+            op::CLONE_EVENTS => {
+                let events = self.workspace.clone_events();
+                let initial = self.workspace.clone_snapshots();
+                self.open_bus(&opener, &op, Some(initial), events)
+            }
             op::GIT_STACKED_ACTION => self.open_stacked_action(&opener, args),
             op::WATCH_VCS_STATUS | op::WATCH_VCS_BRANCH | op::WATCH_LOCAL_SERVERS => {
                 self.open_watch(&opener, &op, args)
@@ -491,12 +496,20 @@ impl Agentd {
             .map_or(0, |items| {
                 items.iter().filter(|t| t["status"] == "running").count() as u64
             });
+        // A clone's git is a process the workspace must not stop under.
+        let clones = self
+            .workspace
+            .clone_snapshots()
+            .as_array()
+            .map_or(0, |items| {
+                items.iter().filter(|c| c["phase"] == "running").count() as u64
+            });
         let state = self.lock();
         let turns = state.streams.values().filter(|s| s.turn_running).count() as u64;
         let idle = IdleState {
             running_turns: turns,
             running_terminals: terminals,
-            running_processes: turns + terminals,
+            running_processes: turns + terminals + clones,
             open_streams: state.streams.values().filter(|s| !s.ended).count() as u64,
             unacked_frames: state.streams.values().map(|s| s.buffer.held()).sum(),
             connected: state.current.is_some(),
@@ -805,6 +818,7 @@ fn is_stream_op(op: &str) -> bool {
             | op::WATCH_VCS_BRANCH
             | op::WATCH_LOCAL_SERVERS
             | op::GIT_STACKED_ACTION
+            | op::CLONE_EVENTS
     )
 }
 
@@ -909,6 +923,7 @@ async fn call(workspace: &dyn Workspace, op: &str, args: &Value) -> OpResult {
             Ok(Value::Null)
         }
         op::DEVICE_CALL => proto::encode_routed(workspace.device(method()?, input).await),
+        op::CLONE_CALL => proto::encode_routed(workspace.clone_call(method()?, input).await),
         _ => Err(WireError::new(
             ErrorCode::UnknownOp,
             format!("unknown op: {op}"),

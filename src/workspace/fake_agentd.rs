@@ -33,6 +33,10 @@ struct State {
     readings: BTreeMap<String, Value>,
     /// The folders the workspace has, besides its root.
     dirs: BTreeSet<String>,
+    /// `clone.call` requests, in order, as `(method, input)`.
+    clone_calls: Vec<(String, Value)>,
+    /// `clone.call` methods that fail, with the RPC error each reports.
+    clone_failures: BTreeMap<String, Value>,
 }
 
 #[derive(Default)]
@@ -161,6 +165,16 @@ impl FakeAgentd {
         }
     }
 
+    /// The `clone.call` requests so far, as `(method, input)`.
+    pub(crate) fn clone_calls(&self) -> Vec<(String, Value)> {
+        self.lock().clone_calls.clone()
+    }
+
+    /// `clone.call` `method` fails with the RPC error `error`.
+    pub(crate) fn fail_clone_call(&self, method: &str, error: Value) {
+        self.lock().clone_failures.insert(method.into(), error);
+    }
+
     /// Add a folder to the workspace.
     pub(crate) fn add_dir(&self, path: &str) {
         self.lock().dirs.insert(path.to_owned());
@@ -241,7 +255,11 @@ impl FakeAgentd {
                 );
                 return;
             }
-            op::TERM_EVENTS | op::TERM_METADATA | op::PREVIEW_EVENTS | op::DEVICE_EVENTS => {
+            op::TERM_EVENTS
+            | op::TERM_METADATA
+            | op::PREVIEW_EVENTS
+            | op::DEVICE_EVENTS
+            | op::CLONE_EVENTS => {
                 let stream = self.open(false);
                 self.lock().buses.insert(request.op.clone(), stream);
                 Ok(json!({ "stream": stream }))
@@ -266,6 +284,30 @@ impl FakeAgentd {
                 Ok(json!({ "stream": stream }))
             }
             op::STREAM_CLOSE => Ok(Value::Null),
+            // Clones: recorded, and answered as a tracker that accepts them.
+            op::CLONE_CALL => {
+                let method = request.args["method"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let input = request.args["input"].clone();
+                let mut state = self.lock();
+                state.clone_calls.push((method.clone(), input.clone()));
+                match state.clone_failures.get(&method) {
+                    Some(error) => Err(WireError::rpc(error.clone())),
+                    None if method == "claim" => {
+                        let raw = input["destinationPath"].as_str().unwrap_or_default();
+                        let cwd = match raw.strip_prefix("~/") {
+                            Some(rest) => format!("/home/agent/{rest}"),
+                            None => raw.to_owned(),
+                        };
+                        Ok(json!({"projectId": input["projectId"], "cwd": cwd,
+                            "remoteUrl": input["remoteUrl"], "repository": null}))
+                    }
+                    None if method == "discard" => Ok(Value::Null),
+                    None => Ok(json!(true)),
+                }
+            }
             op::FS_CREATE_DIR_ALL => {
                 let path = request.args["path"].as_str().unwrap_or_default();
                 let mut state = self.lock();

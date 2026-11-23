@@ -105,6 +105,19 @@ pub mod op {
     /// `{"progress": batch}` events and a last `{"reply": Polled}` event.
     pub const GIT_STACKED_ACTION: &str = "git.stackedAction";
 
+    // clone.*: clones that become projects (`projectClone.*`), tracked
+    // where git runs. The server creates each clone's project between
+    // `claim` and `launch`.
+    /// `{method, input}`: `claim` (a `projectClone.start` input; answers
+    /// `{projectId, cwd, remoteUrl, repository}`), `adopt` (`{from, to}`:
+    /// move a claim to an existing project; answers a boolean), `release`,
+    /// `launch`, `cancel`, `retry` and `discard` (`{projectId}`; `cancel` and
+    /// `retry` answer a boolean).
+    pub const CLONE_CALL: &str = "clone.call";
+    /// Stream: every tracked clone's snapshot (a list), then the list after
+    /// each change.
+    pub const CLONE_EVENTS: &str = "clone.events";
+
     // term.*
     /// `{method, input}`: a `terminal.*` method.
     pub const TERM_CALL: &str = "term.call";
