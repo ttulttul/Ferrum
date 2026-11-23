@@ -20,9 +20,6 @@
     "cli approvals": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories.",
     "cli launch": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories."
   },
-  "claude steer then stop": {
-    "live": "Rust cancels the steered message's pending item before the stopped turn's last provider-turn update; the reference cancels it after."
-  },
   "codex thread tools": {
     "live": "Racy: the pull-request syncs the thread tools start run concurrently, and on most runs one of Rust's also updates the link (an extra thread.pull-request-link-updated among the syncs) where the reference's does not; 1 of 8 pinned runs matched."
   },
