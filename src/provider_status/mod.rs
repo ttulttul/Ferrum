@@ -58,6 +58,7 @@
 //! listed here are not checked yet: their rows keep the placeholder.
 mod acp;
 mod antigravity;
+pub(crate) mod antigravity_text;
 pub(crate) mod claude;
 mod claude_credits;
 mod claude_skills;
@@ -173,6 +174,12 @@ impl ProviderStatus {
     /// The managed OpenCode servers, which text generation borrows too.
     pub(crate) fn opencode(&self) -> &opencode::Owners {
         &self.opencode
+    }
+
+    /// The server's home (managed runtimes) and state directories, which
+    /// text generation shares with the status checks.
+    pub(crate) fn directories(&self) -> (&Path, &Path) {
+        (&self.base_dir, &self.state_dir)
     }
 
     pub(crate) fn new(paths: &crate::config::ServerPaths) -> Self {

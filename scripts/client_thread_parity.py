@@ -117,6 +117,27 @@ OPENCODE_TITLE_SPEC = {"version": {"stdout": "1.15.0"}, "serve": {"routes": {
     "POST /session/ses_title/message": {"body": {"info": {"id": "msg_title", "role": "assistant", "sessionID": "ses_title"},
         "parts": [{"type": "text", "text": '{"title": "Echo Greeting via OpenCode", "needsRefinement": false}'}]}},
     "DELETE /session/ses_title": {"body": True}, "POST /session/ses_title/abort": {"body": True}}}}
+# An Antigravity agy CLI on PATH (as provider_status_parity.py has it) serving ACP, whose session
+# answers a prompt with a title.
+_AGY_SESSION = "0b6a3c1e-5d2f-4a8b-9c7d-1e2f3a4b5c6d"
+_AGY_ACP = {"rpc": {
+    "initialize": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True},
+                   "authMethods": [{"id": "oauth-personal", "name": "Google"}]},
+    "authenticate": {},
+    "session/new": {"sessionId": _AGY_SESSION,
+                    "modes": {"currentModeId": "default", "availableModes": [{"id": "default", "name": "Default"}]},
+                    "models": {"currentModelId": "antigravity-default",
+                               "availableModels": [{"modelId": "antigravity-default", "name": "Default"}]}},
+    "session/set_mode": {}, "session/set_model": {}, "session/set_config_option": {"configOptions": []},
+    "session/prompt": {"stopReason": "end_turn"}, "session/cancel": {}},
+    "notifyBefore": {"session/prompt": [{"method": "session/update", "params": {
+        "sessionId": _AGY_SESSION, "update": {"sessionUpdate": "agent_message_chunk", "content": {
+            "type": "text", "text": '{"title": "Echo Greeting via Antigravity", "needsRefinement": false}'}}}}]}}
+AGY_TITLE_SPEC = {"logEnv": ["GEMINI_HOME", "AGY_ACP_FORCE_FILE_STORAGE", "BROWSER", "PYTHONUNBUFFERED",
+                              "ELECTRON_RUN_AS_NODE", "TMPDIR", "SSL_CERT_FILE", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+                              "ANTIGRAVITY_HARNESS_PATH", "GOOGLE_CLOUD_PROJECT"], "commands": [
+    {"args": ["--version"], "stdout": "agy 1.6.2", "stderr": "", "exit": 0},
+    {"prefix": ["acp"], **_AGY_ACP}]}
 
 # A signed-in Pi (as provider_status_parity.py has it) whose text generation runs answer with a title.
 _PI_STATE = {"model": {"provider": "openai", "id": "gpt-5.6"}, "thinkingLevel": "minimal"}
@@ -249,6 +270,13 @@ PROVIDER_SCENARIOS = [
      "textProvider": {"instance": "opencode", "driver": "opencode", "cli": "opencode", "opencode": True,
                       "model": "anthropic/claude-opus-5-5", "options": [{"id": "variant", "value": "high"}],
                       "launch": "serve", "spec": OPENCODE_TITLE_SPEC}},
+    # Antigravity's agy CLI over ACP.
+    {"name": "antigravity title", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate",
+     "textProvider": {"instance": "antigravity", "driver": "antigravity", "cli": "agy", "model": "antigravity-default",
+                      "launch": "acp", "spec": AGY_TITLE_SPEC,
+                      "records": ["initialize", "authenticate", "session/new", "session/set_mode", "session/set_model",
+                                  "session/set_config_option", "session/prompt", "session/cancel"]}},
     # A title the provider cannot generate leaves the seed, and a regenerate reports why.
     {"name": "codex title failed", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
      "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate"},
@@ -977,6 +1005,8 @@ def text_provider_runs(log, root, provider):
                 value = value.replace(f"{root}/{server}", "<home>/<server>")
                 # OpenCode's directory header carries the path URL-encoded.
                 value = value.replace(urllib.parse.quote(f"{root}/{server}", safe=""), "<home>/<server>")
+            # Temporary directories with random suffixes (Antigravity's session and runtime).
+            value = re.sub(r"(t3-antigravity-text-|/run-)[A-Za-z0-9]{6}", r"\1<random>", value)
             return value.replace(str(root), "<home>").replace(urllib.parse.quote(str(root), safe=""), "<home>")
         if isinstance(value, list):
             return [mask(item) for item in value]
@@ -1002,9 +1032,13 @@ def text_provider_runs(log, root, provider):
             continue
         if kind in provider.get("records", []):
             records.append(mask(record))
+    # The launch environment the spec asked to see ("logEnv"), for each distinct launch.
+    environments = sorted({json.dumps(mask(json.loads(line)), sort_keys=True) for line in lines(".launch")
+                           if provider["launch"] in " ".join(json.loads(line)["args"])})
     # A session's requests (JSON); the status probe's GETs interleave as their timing makes them.
     return {"launches": launches, "records": records,
-            "http": [mask(line) for line in lines(".http") if line.startswith("{")]}
+            "http": [mask(line) for line in lines(".http") if line.startswith("{")],
+            **({"environments": environments} if environments else {})}
 
 
 def follow_up_turn(args, url, cookie, text):

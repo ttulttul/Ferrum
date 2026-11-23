@@ -1074,6 +1074,22 @@ pub(crate) async fn generate_thread_title(
             .await?;
             decode_json_reply("OpenCode", &text)?
         }
+        "antigravity" => {
+            let env = crate::provider_status::base_env(&instance_env(&instance));
+            let (base_dir, state_dir) = state.provider_status.directories();
+            let text = crate::provider_status::antigravity_text::generate_text(
+                base_dir,
+                state_dir,
+                &state.model_manifest.current(),
+                &instance_id,
+                &instance["config"],
+                &env,
+                request.prompt,
+                selection["model"].as_str().unwrap_or_default(),
+            )
+            .await?;
+            decode_json_reply("Antigravity", &text)?
+        }
         "pi" => {
             let env = crate::provider_status::base_env(&instance_env(&instance));
             let text = crate::provider_status::pi::generate_text(

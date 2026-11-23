@@ -97,5 +97,8 @@
   },
   "codex delegate live": {
     "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
+  },
+  "antigravity title": {
+    "live": "Racy: the generated title (thread.metadata-updated) lands later in Rust's turn than in the reference's, as each server's title generation through the Antigravity runtime finishes; it did so in 5 of 5 runs pinned to 4 CPUs, and a run whose title finishes first on both would match."
   }
 }
