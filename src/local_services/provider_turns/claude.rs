@@ -134,6 +134,9 @@ struct Attempt<'a> {
     /// What the prompt added to the session's attachment budget, reported
     /// once the turn starts.
     delivered: Option<(u64, u64)>,
+    /// The turn's whole usage was reported (with its result, ahead of the
+    /// outstanding tool calls it fails).
+    usage_reported: bool,
 }
 
 /// One model call's usage as it streams (`message_start`, then deltas).
@@ -314,6 +317,7 @@ impl<'a> Attempt<'a> {
             steers: HashMap::new(),
             steered: false,
             delivered: None,
+            usage_reported: false,
         };
         let outcome = attempt.drive(spec, cancel).await;
         // A prompt the CLI took without starting a turn still counts.
@@ -321,7 +325,9 @@ impl<'a> Attempt<'a> {
         if let Outcome::Ended(end) = &outcome {
             attempt.settle_steers(end.status);
         }
-        if let (Outcome::Ended(end), true) = (&outcome, attempt.turn_started) {
+        if let (Outcome::Ended(end), true, false) =
+            (&outcome, attempt.turn_started, attempt.usage_reported)
+        {
             attempt.sink.send(ProviderEvent::TurnUsage {
                 usage: turn_token_usage(attempt.result.as_ref(), end.status, &attempt.root_models),
             });
@@ -433,6 +439,17 @@ impl<'a> Attempt<'a> {
             match message["type"].as_str() {
                 Some("stream_event" | "assistant") => queued.push(message),
                 Some("control_request" | "control_cancel_request") => {
+                    // The reference's adapter has taken the new model call's
+                    // start (and its usage) off the queue by the time the
+                    // SDK fires the callback; the call's blocks wait.
+                    if queued.first().is_some_and(|first: &Value| {
+                        first["type"] == "stream_event" && first["event"]["type"] == "message_start"
+                    }) {
+                        let start = queued.remove(0);
+                        if let Some(end) = self.handle(start).await {
+                            return Some(end);
+                        }
+                    }
                     self.handle(message).await;
                     break None;
                 }
@@ -1096,7 +1113,18 @@ impl<'a> Attempt<'a> {
         }
         if message["subtype"] == "success" && message["is_error"] != true {
             // A successful turn cannot supply any more tool results. The SDK
-            // fails its outstanding calls in start order before ending the turn.
+            // fails its outstanding calls in start order before ending the turn,
+            // after the reference has reported the turn's usage with its result.
+            if !self.tools.is_empty() && self.turn_started {
+                self.sink.send(ProviderEvent::TurnUsage {
+                    usage: turn_token_usage(
+                        Some(message),
+                        TurnStatus::Completed,
+                        &self.root_models,
+                    ),
+                });
+                self.usage_reported = true;
+            }
             for (_, mut item) in self.tools.drain(..) {
                 item.status = "failed".into();
                 self.sink.send(ProviderEvent::TurnItem { item });

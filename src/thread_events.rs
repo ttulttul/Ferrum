@@ -191,9 +191,37 @@ pub enum Order {
     /// session, the provider thread, then the run, its attempt and root
     /// node, running.
     Start,
+    /// A runtime request opening. Codex's adapter writes the card's node
+    /// and card, then the request; Claude's permission callback writes the
+    /// card's node, the request, then the card, and its adapter then
+    /// reports the tool call the request is about again (see
+    /// [`Step::RequestedToolCall`]).
+    RequestOpen,
+    /// A runtime request answered, withdrawn or closed: the request, then
+    /// its card and the card's node.
+    Answer,
 }
 
 impl Order {
+    const CLAUDE_REQUEST_OPEN: &'static [Step] = &[
+        Step::ItemNodes,
+        Step::Collection("runtimeRequests"),
+        Step::Items(Phase::All),
+        Step::RequestedToolCall,
+        Step::Collection("runs"),
+        Step::Collection("attempts"),
+        Step::LooseNodes,
+        Step::Collection("checkpointScopes"),
+        Step::LooseMessages,
+        Step::Collection("providerSessions"),
+        Step::Collection("providerThreads"),
+        Step::Collection("providerTurns"),
+        Step::Collection("subagents"),
+        Step::Collection("plans"),
+        Step::Collection("checkpoints"),
+        Step::Collection("contextHandoffs"),
+        Step::Collection("contextTransfers"),
+    ];
     const SESSION_OPEN_FAILURE: &'static [Step] = &[
         Step::Items(Phase::All),
         Step::Collection("runs"),
@@ -223,6 +251,18 @@ impl Order {
             | crate::Event::RunFinished { .. } => Order::End,
             crate::Event::CheckpointCaptured { .. } => Order::Checkpoint,
             crate::Event::RunStarted(_) | crate::Event::RunQueued { .. } => Order::Dispatch,
+            crate::Event::RunProvider {
+                event: ProviderEvent::RuntimeRequestOpened { .. },
+                ..
+            } => Order::RequestOpen,
+            crate::Event::RunProvider {
+                event:
+                    ProviderEvent::RuntimeRequestAnswered { .. }
+                    | ProviderEvent::RuntimeRequest { .. }
+                    | ProviderEvent::RuntimeRequestClosed { .. }
+                    | ProviderEvent::RuntimeRequestDeliveryFailed { .. },
+                ..
+            } => Order::Answer,
             crate::Event::RunProvider {
                 event: ProviderEvent::ProviderThread { .. },
                 ..
@@ -304,6 +344,41 @@ impl Order {
                 Collection("contextHandoffs"),
                 Collection("contextTransfers"),
             ],
+            // Codex's order; a Claude request's is `CLAUDE_REQUEST_OPEN`.
+            Order::RequestOpen => &[
+                Collection("runs"),
+                Collection("attempts"),
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Items(Phase::All),
+                Collection("runtimeRequests"),
+                Collection("providerSessions"),
+                Collection("providerThreads"),
+                Collection("providerTurns"),
+                Collection("subagents"),
+                Collection("plans"),
+                Collection("checkpoints"),
+                Collection("contextHandoffs"),
+                Collection("contextTransfers"),
+            ],
+            Order::Answer => &[
+                Collection("runtimeRequests"),
+                Items(Phase::All),
+                Collection("runs"),
+                Collection("attempts"),
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Collection("providerSessions"),
+                Collection("providerThreads"),
+                Collection("providerTurns"),
+                Collection("subagents"),
+                Collection("plans"),
+                Collection("checkpoints"),
+                Collection("contextHandoffs"),
+                Collection("contextTransfers"),
+            ],
             Order::Checkpoint => &[
                 Collection("checkpoints"),
                 Items(Phase::All),
@@ -338,6 +413,12 @@ enum Step {
     /// reports it with the turn's end, before the run's finalization writes
     /// it again.
     ReportedProviderThread,
+    /// The nodes of the changed turn items, ahead of the items.
+    ItemNodes,
+    /// The tool call a Claude runtime request is about, as the reference's
+    /// adapter reports it again once the stream it held back while the
+    /// permission callback ran comes through, changed or not.
+    RequestedToolCall,
 }
 
 /// Which of a commit's changed turn items a step takes.
@@ -636,8 +717,16 @@ fn diff_with_command(
                 .as_str()
                 .is_some_and(|id| id.ends_with(":signal:provider-session-open-failure"))
         });
+    let claude_request = order == Order::RequestOpen
+        && collections["runtimeRequests"].iter().any(|(_, request)| {
+            request["id"]
+                .as_str()
+                .is_some_and(|id| id.contains(":provider:claudeAgent:"))
+        });
     let steps = if session_failed {
         Order::SESSION_OPEN_FAILURE
+    } else if claude_request {
+        Order::CLAUDE_REQUEST_OPEN
     } else {
         order.steps()
     };
@@ -659,6 +748,45 @@ fn diff_with_command(
                                 occurred_at,
                             ));
                         }
+                    }
+                }
+            }
+            Step::ItemNodes => {
+                for item in &items {
+                    if let Some(index) = nodes.iter().position(|node| {
+                        node["id"] == item["nodeId"] && node["kind"] != "root_turn"
+                    }) {
+                        out.push(event(
+                            thread_id,
+                            "node.updated",
+                            nodes.remove(index),
+                            occurred_at,
+                        ));
+                    }
+                }
+            }
+            Step::RequestedToolCall => {
+                // A question's tool call is held for its echo, not reported
+                // again.
+                for (_, request) in collections["runtimeRequests"]
+                    .iter()
+                    .filter(|(_, request)| request["kind"] != "user_input")
+                {
+                    let native = &request["nativeRequestRef"]["nativeId"];
+                    let tool = after["turnItems"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|item| {
+                            !native.is_null()
+                                && item["nativeItemRef"]["nativeId"] == *native
+                                && !matches!(
+                                    item["type"].as_str(),
+                                    Some("approval_request" | "user_input_request")
+                                )
+                        });
+                    if let Some(tool) = tool {
+                        out.push(event(thread_id, "turn-item.updated", tool, occurred_at));
                     }
                 }
             }
@@ -1024,6 +1152,87 @@ mod tests {
                 "run.updated",
                 "run-attempt.updated",
                 "node.updated"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_runtime_request_opens_and_is_answered_as_the_reference_writes_it() {
+        let tool = json!({"id": "turn-item:tool", "type": "command_execution", "status": "running",
+            "nodeId": "n:tool", "ordinal": 2, "nativeItemRef": {"nativeId": "toolu_1"}});
+        let before = json!({
+            "thread": {"id": "t"}, "runs": [], "attempts": [], "messages": [],
+            "nodes": [{"id": "n:tool", "kind": "tool_call", "status": "running"}],
+            "turnItems": [tool], "runtimeRequests": []
+        });
+        let opened = |driver: &str, kind: &str| {
+            let mut after = before.clone();
+            after["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "n:card", "kind": "approval_request", "status": "waiting"}));
+            after["turnItems"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": "turn-item:card",
+                "type": "approval_request", "status": "waiting", "nodeId": "n:card", "ordinal": 3,
+                "nativeItemRef": {"nativeId": "toolu_1"}}));
+            after["runtimeRequests"] = json!([{"id": format!("runtime-request:provider:{driver}:x"),
+                "status": "pending", "kind": kind, "nativeRequestRef": {"nativeId": "toolu_1"}}]);
+            after
+        };
+        // Codex: the card's node and card, then the request.
+        let codex = diff(
+            "t",
+            &before,
+            &opened("codex", "command"),
+            "x",
+            Order::RequestOpen,
+        )
+        .unwrap();
+        assert_eq!(
+            types(&codex),
+            [
+                "node.updated",
+                "turn-item.updated approval_request",
+                "runtime-request.updated"
+            ]
+        );
+        // Claude: the card's node, the request, the card, then the tool call
+        // the request is about, reported again.
+        let claude_after = opened("claudeAgent", "command");
+        let claude = diff("t", &before, &claude_after, "x", Order::RequestOpen).unwrap();
+        assert_eq!(
+            types(&claude),
+            [
+                "node.updated",
+                "runtime-request.updated",
+                "turn-item.updated approval_request",
+                "turn-item.updated command_execution"
+            ]
+        );
+        // A Claude question's tool call is not reported again.
+        let question = diff(
+            "t",
+            &before,
+            &opened("claudeAgent", "user_input"),
+            "x",
+            Order::RequestOpen,
+        )
+        .unwrap();
+        assert_eq!(types(&question).len(), 3);
+        // The answer: the request, then its card's node and card.
+        let mut answered = claude_after.clone();
+        answered["runtimeRequests"][0]["status"] = json!("resolved");
+        answered["nodes"][1]["status"] = json!("completed");
+        answered["turnItems"][1]["status"] = json!("completed");
+        let answer = diff("t", &claude_after, &answered, "x", Order::Answer).unwrap();
+        assert_eq!(
+            types(&answer),
+            [
+                "runtime-request.updated",
+                "node.updated",
+                "turn-item.updated approval_request"
             ]
         );
     }

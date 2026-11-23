@@ -62,6 +62,16 @@ served = {}
 OPENCODE_PATH = re.compile(r"^/(?:api/|global/|provider$|agent$|skill$|command$)")
 
 
+def wait_for_title_gate():
+    """With FAKE_TITLE_GATE set (a scenario's "titleAfterTurn"), answer a title prompt only once
+    that file exists: the parity driver creates it when the turn settled, so the title lands
+    after the same events on both servers instead of racing the turn."""
+    gate = os.environ.get("FAKE_TITLE_GATE")
+    deadline = time.monotonic() + 60
+    while gate and not os.path.exists(gate) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 class Handler(BaseHTTPRequestHandler):
     def answer(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -85,6 +95,9 @@ class Handler(BaseHTTPRequestHandler):
                 out.write(json.dumps({"method": self.command, "path": path, "query": query,
                                       "basic": basic, "headers": headers, "body": body}, sort_keys=True) + "\n")
         key = f"{self.command} {path}"
+        # A session's prompt is a title being generated.
+        if self.command == "POST" and re.match(r"^/session/[^/]+/message$", path):
+            wait_for_title_gate()
         route = routes.get(key, {"status": 404, "body": {"error": "not found"}})
         if "sequence" in route:
             count = served.get(key, 0)
