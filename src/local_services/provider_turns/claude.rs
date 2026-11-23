@@ -322,8 +322,13 @@ impl<'a> Attempt<'a> {
         let outcome = attempt.drive(spec, cancel).await;
         // A prompt the CLI took without starting a turn still counts.
         attempt.report_delivery();
-        if let Outcome::Ended(end) = &outcome {
-            attempt.settle_steers(end.status);
+        // Steers a completed turn took settle before its usage; ones a
+        // stopped turn never took are cancelled after it, as the reference
+        // reports them.
+        let completed =
+            matches!(&outcome, Outcome::Ended(end) if end.status == TurnStatus::Completed);
+        if completed {
+            attempt.settle_steers(TurnStatus::Completed);
         }
         if let (Outcome::Ended(end), true, false) =
             (&outcome, attempt.turn_started, attempt.usage_reported)
@@ -331,6 +336,11 @@ impl<'a> Attempt<'a> {
             attempt.sink.send(ProviderEvent::TurnUsage {
                 usage: turn_token_usage(attempt.result.as_ref(), end.status, &attempt.root_models),
             });
+        }
+        if let Outcome::Ended(end) = &outcome {
+            if !completed {
+                attempt.settle_steers(end.status);
+            }
         }
         // A turn that ended on its own leaves its CLI running for the
         // thread's next turn; Stop closes it, as the reference's interrupt
