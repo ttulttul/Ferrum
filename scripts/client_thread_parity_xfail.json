@@ -2,31 +2,25 @@
   "claude restart cli restored": {
     "nativeMetadata": "The reference hands the failed continuation's items to its retry as a context handoff (delta_since_target_last_seen), which Rust does not build, and counts the handoff in the session's attachment budget."
   },
-  "claude delegate": {
-    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
-  },
   "claude delegate async": {
-    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
-  },
-  "claude delegate cancel": {
-    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
+    "live": "The reference records a delegated result inside the parent's running turn (the parent run's update comes before the subagent's completion records) and wakes the parent with a turn that opens with a checkpoint scope and the notification's message; Rust's delegation delivery records the completion first and starts the wake run without them."
   },
   "claude delegate stop": {
-    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
+    "live": "Stopping the parent, the reference writes the interrupt request before the parent run's update and settles the stopped subagent after the turn ends; Rust's delegation writes the subagent and run updates first and settles the subagent before the turn's end."
   },
   "claude delegate followup": {
-    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference.",
+    "live": "The reference records a delegated result inside the parent's running turn (the parent run's update comes before the subagent's completion records) and wakes the parent with a turn that opens with a checkpoint scope and the notification's message; Rust's delegation delivery records the completion first and starts the wake run without them.",
     "agent mcp": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories.",
     "cli approvals": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories.",
     "cli launch": "The reference issues the delegated child a new MCP credential for its follow-up turn (prepareMcpSession replaces a credential whose subagent lineage or access capabilities no longer match), and the new token changes its Claude query policy key, so it starts a CLI that resumes the child's session with its own mcp_set_servers. Rust keeps the child's credential and sends the follow-up to the CLI the child already runs. The reference does not replace the credential every run (it depends on timing), but does with CI's temporary directories."
   },
   "codex thread tools": {
-    "live": "Racy: the pull-request syncs the thread tools start run concurrently, and on most runs one of Rust's also updates the link (an extra thread.pull-request-link-updated among the syncs) where the reference's does not; 1 of 8 pinned runs matched."
+    "live": "Racy: the pull-request syncs the thread tools start race the agent's next tool call (seen both matching, 1 of 8, and not): Rust reads a newly linked request right after its link, the reference through its sync reactor's queued sweep, so Rust's thread.pull-request-link-updated usually lands one link earlier."
   },
   "claude delegate live": {
-    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
+    "live": "The reference delivers the delegated result into the parent's running turn and starts the parent's follow-up run within the same stream; Rust's delegation delivery starts no follow-up run there."
   },
   "codex delegate live": {
-    "live": "Rust sends a delegated subagent's records (subagent.updated, its turn item and context transfer) in a different order from the reference."
+    "live": "The reference delivers the delegated result into the parent's running turn, writing the parent run's update before the subagent's completion and the notification item before the run's next update; Rust's delegation delivery writes them the other way round."
   }
 }

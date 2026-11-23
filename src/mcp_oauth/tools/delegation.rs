@@ -863,7 +863,10 @@ async fn await_task<S: McpHost>(
     // once `after_run` has settled it.
     let mut ended: Option<crate::orchestration::RunEnd> = None;
     let waited = loop {
-        let read = read_task(host, caller, task_id, false, true).await;
+        // A read at a run end, before the task settles, does not acknowledge
+        // the result: the reference acknowledges once the task's completion
+        // is recorded.
+        let read = read_task(host, caller, task_id, false, ended.is_none()).await;
         if let Some(crate::orchestration::RunEnd {
             read: done,
             settled,
@@ -871,6 +874,7 @@ async fn await_task<S: McpHost>(
         {
             drop(done);
             let _ = settled.await;
+            let _ = read_task(host, caller, task_id, false, true).await;
         }
         let read = read?;
         let terminal = TERMINAL_TASK.contains(&read["status"].as_str().unwrap_or_default());

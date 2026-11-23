@@ -200,9 +200,31 @@ pub enum Order {
     /// A runtime request answered, withdrawn or closed: the request, then
     /// its card and the card's node.
     Answer,
+    /// A delegated task's subagent record changed. Starting, the reference
+    /// writes its node, the subagent, then its turn item; ending, the
+    /// subagent, its node and turn item, then the context transfer.
+    Subagent,
 }
 
 impl Order {
+    const SUBAGENT_START: &'static [Step] = &[
+        Step::ItemNodes,
+        Step::Collection("subagents"),
+        Step::Items(Phase::All),
+        Step::Collection("contextTransfers"),
+        Step::Collection("runs"),
+        Step::Collection("attempts"),
+        Step::LooseNodes,
+        Step::Collection("checkpointScopes"),
+        Step::LooseMessages,
+        Step::Collection("providerSessions"),
+        Step::Collection("providerThreads"),
+        Step::Collection("providerTurns"),
+        Step::Collection("runtimeRequests"),
+        Step::Collection("plans"),
+        Step::Collection("checkpoints"),
+        Step::Collection("contextHandoffs"),
+    ];
     const CLAUDE_REQUEST_OPEN: &'static [Step] = &[
         Step::ItemNodes,
         Step::Collection("runtimeRequests"),
@@ -251,6 +273,11 @@ impl Order {
             | crate::Event::RunFinished { .. } => Order::End,
             crate::Event::CheckpointCaptured { .. } => Order::Checkpoint,
             crate::Event::RunStarted(_) | crate::Event::RunQueued { .. } => Order::Dispatch,
+            crate::Event::ThreadPatched { patch, .. }
+                if patch["row"].get("subagents").is_some() =>
+            {
+                Order::Subagent
+            }
             crate::Event::RunProvider {
                 event: ProviderEvent::RuntimeRequestOpened { .. },
                 ..
@@ -378,6 +405,25 @@ impl Order {
                 Collection("checkpoints"),
                 Collection("contextHandoffs"),
                 Collection("contextTransfers"),
+            ],
+            // Its ending order; a subagent starting takes `SUBAGENT_START`.
+            Order::Subagent => &[
+                Collection("subagents"),
+                ItemNodes,
+                Items(Phase::All),
+                Collection("contextTransfers"),
+                Collection("runs"),
+                Collection("attempts"),
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Collection("providerSessions"),
+                Collection("providerThreads"),
+                Collection("providerTurns"),
+                Collection("runtimeRequests"),
+                Collection("plans"),
+                Collection("checkpoints"),
+                Collection("contextHandoffs"),
             ],
             Order::Checkpoint => &[
                 Collection("checkpoints"),
@@ -723,8 +769,12 @@ fn diff_with_command(
                 .as_str()
                 .is_some_and(|id| id.contains(":provider:claudeAgent:"))
         });
+    let subagent_start =
+        order == Order::Subagent && collections["subagents"].iter().any(|(created, _)| *created);
     let steps = if session_failed {
         Order::SESSION_OPEN_FAILURE
+    } else if subagent_start {
+        Order::SUBAGENT_START
     } else if claude_request {
         Order::CLAUDE_REQUEST_OPEN
     } else {
@@ -1233,6 +1283,41 @@ mod tests {
                 "runtime-request.updated",
                 "node.updated",
                 "turn-item.updated approval_request"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_subagent_starts_and_ends_as_the_reference_writes_it() {
+        let before = json!({"thread": {"id": "t"}, "nodes": [], "turnItems": [], "subagents": [],
+            "contextTransfers": []});
+        let mut started = before.clone();
+        started["nodes"] = json!([{"id": "n:task", "kind": "subagent", "status": "running"}]);
+        started["subagents"] = json!([{"id": "n:task", "status": "running"}]);
+        started["turnItems"] =
+            json!([{"id": "i:task", "type": "subagent", "nodeId": "n:task", "ordinal": 2}]);
+        let events = diff("t", &before, &started, "x", Order::Subagent).unwrap();
+        assert_eq!(
+            types(&events),
+            [
+                "node.updated",
+                "subagent.updated",
+                "turn-item.updated subagent"
+            ]
+        );
+        let mut ended = started.clone();
+        ended["nodes"][0]["status"] = json!("completed");
+        ended["subagents"][0]["status"] = json!("completed");
+        ended["turnItems"][0]["status"] = json!("completed");
+        ended["contextTransfers"] = json!([{"id": "ct", "status": "consumed"}]);
+        let events = diff("t", &started, &ended, "x", Order::Subagent).unwrap();
+        assert_eq!(
+            types(&events),
+            [
+                "subagent.updated",
+                "node.updated",
+                "turn-item.updated subagent",
+                "context-transfer.created"
             ]
         );
     }
