@@ -1202,6 +1202,15 @@ impl ControlPlane {
                 },
             );
         }
+        if method == "orchestration.launchThread" {
+            if params["workspaceStrategy"]["type"] == "worktree" {
+                return Call::Done(crate::thread_launch::failure(
+                    params,
+                    json!("Creating a new git worktree during launch is unavailable on this host."),
+                ));
+            }
+            return Call::Done(crate::thread_launch::launch(self, params).await);
+        }
         if method == "projects.mutate" {
             return Call::Done(self.create_project(params).await);
         }

@@ -17,6 +17,8 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 pub struct ControlState {
     pub auth: AuthService,
     pub store: RwLock<Store>,
+    /// Serializes desktop launches while they provision a folder and record its thread.
+    pub(crate) thread_launch: Mutex<()>,
     #[cfg(feature = "native")]
     pub(crate) thread_deleted: tokio::sync::Notify,
     pub events: broadcast::Sender<ServerEvent>,
@@ -61,6 +63,7 @@ impl ControlState {
         Ok(Self {
             auth,
             store: RwLock::new(store),
+            thread_launch: Mutex::new(()),
             #[cfg(feature = "native")]
             thread_deleted: Default::default(),
             events: broadcast::channel(512).0,
