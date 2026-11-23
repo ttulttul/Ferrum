@@ -231,17 +231,20 @@ Gaps the thread tools surface that live in shared code, not in the tools:
   it (`src/title_generation.rs`): the reference's prompt and thread context, the text
   generation model with the reference's fallback when its instance cannot run, `codex exec` or
   `claude -p` with the title schema, then `thread.title.regeneration.complete`. Either server
-  takes over effects the other left pending. A Pi or Grok text generation model titles a
-  thread too: Pi in its RPC mode with no session, extensions or tools
+  takes over effects the other left pending. A Pi, Grok or OpenCode text generation model
+  titles a thread too: Pi in its RPC mode with no session, extensions or tools
   (`provider_status::pi::generate_text`), Grok in an ACP session that asks for approvals and is
-  granted none (`provider_status::grok::generate_text`), each reply decoded as the reference
-  decodes it (`extractJsonObject`). Not ported: titles on Cursor and Muse (the reference runs
-  their SDKs in process), OpenCode (through its shared or configured server) and Antigravity
-  (its managed runtime and profile), custom text generators, the source control lookup of
-  linked PRs and issues, and the source thread's history in a fork's title. The `codex title`,
-  `claude title fallback`, `codex title failed`, `pi title` and `grok title` scenarios in
-  `scripts/client_thread_parity.py` compare each CLI's arguments, prompt and schema (for Pi and
-  Grok, the launch and every request of the title runs), and the thread's title afterwards.
+  granted none (`provider_status::grok::generate_text`), and OpenCode 1.x in a read-only session
+  on the configured server or the managed `opencode serve` its status checks share
+  (`provider_status::opencode::generate_text`), each reply decoded as the reference decodes it
+  (`extractJsonObject`). Not ported: titles on Cursor and Muse (the reference runs their SDKs in
+  process), OpenCode 2 (`OpenCode2TextGeneration`) and Antigravity (its managed runtime and
+  profile), image attachments in an OpenCode title prompt, custom text generators, the source
+  control lookup of linked PRs and issues, and the source thread's history in a fork's title.
+  The `codex title`, `claude title fallback`, `codex title failed`, `pi title`, `grok title` and
+  `opencode title` scenarios in `scripts/client_thread_parity.py` compare each CLI's arguments,
+  prompt and schema (for Pi, Grok and OpenCode, the launch and every request of the title runs),
+  and the thread's title afterwards.
 - **Steering.** A `message.dispatch` with `steer_active` steers a running Codex or Claude
   turn as the reference does (`src/orchestration/steer.rs`): the message joins the run as a
   `steer` user message; a run whose turn ended starts a new turn, and one whose turn has not

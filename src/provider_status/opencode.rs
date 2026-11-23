@@ -1962,9 +1962,350 @@ async fn check_v2(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Text generation
+
+/// How long a text generation run may take (`GENERATION_TIMEOUT`).
+const TEXT_GENERATION_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// `getOpenCodePromptFailure` then `openCodePromptResponseErrorDetail`: what a
+/// prompt's `info.error` says, if it is a failure.
+fn prompt_failure_detail(error: &Value) -> Option<String> {
+    if !error.is_object() {
+        return None;
+    }
+    let name = error["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let status = error["data"]["statusCode"].as_i64();
+    let has_message = error["data"]["message"]
+        .as_str()
+        .is_some_and(|m| !m.trim().is_empty());
+    if name.is_none() && status.is_none() && !has_message {
+        return None;
+    }
+    Some(
+        if name == Some("ProviderAuthError") || matches!(status, Some(401 | 403)) {
+            "The model provider rejected the credentials. Check the provider's sign-in or API key in OpenCode.".into()
+        } else if status == Some(429) {
+            "The model provider's usage or rate limit was reached. Try again later.".into()
+        } else if name == Some("ContextOverflowError") {
+            "The prompt is too long for the selected model's context window.".into()
+        } else if name == Some("MessageAbortedError") {
+            "OpenCode stopped the generation.".into()
+        } else if let Some(status) = status {
+            format!("The model provider failed the request (HTTP {status}).")
+        } else {
+            "OpenCode could not generate the text.".into()
+        },
+    )
+}
+
+/// A request of the reference's text generation SDK client: JSON, the
+/// directory in `x-opencode-directory`, Basic credentials with a password.
+async fn text_request(
+    server: &Server,
+    method: reqwest::Method,
+    path: &str,
+    directory: &str,
+    body: Option<&Value>,
+    timeout: Duration,
+) -> Result<(u16, Value), ()> {
+    let url = format!("{}{path}", server.url.trim_end_matches('/'));
+    let mut request = client().request(method, url).timeout(timeout).header(
+        "x-opencode-directory",
+        crate::thread_projection::uri_component(directory),
+    );
+    if let Some(password) = &server.password {
+        request = request.header("authorization", basic(password));
+    }
+    if let Some(body) = body {
+        request = request
+            .header("content-type", "application/json")
+            .body(body.to_string());
+    }
+    let response = request.send().await.map_err(|_| ())?;
+    let status = response.status().as_u16();
+    let text = response.text().await.map_err(|_| ())?;
+    Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+}
+
+/// `runAgainstServer`: a session that may only read, the prompt, its text
+/// parts; the session is deleted afterwards.
+async fn generate_on(
+    server: &Server,
+    directory: &str,
+    prompt: &str,
+    (provider_id, model_id): (&str, &str),
+    agent: Option<&str>,
+    variant: Option<&str>,
+) -> Result<String, String> {
+    let created = text_request(
+        server,
+        reqwest::Method::POST,
+        "/session",
+        directory,
+        Some(&json!({
+            "title": "T3 Code generateThreadTitle",
+            // OpenCode Zen refuses free-model requests without tools; read stays.
+            "permission": [
+                {"permission": "*", "pattern": "*", "action": "deny"},
+                {"permission": "read", "pattern": "*", "action": "allow"},
+            ],
+        })),
+        TEXT_GENERATION_TIMEOUT,
+    )
+    .await;
+    let session = match created {
+        Ok((status, body)) if (200..300).contains(&status) => body,
+        _ => return Err("OpenCode session.create request failed.".into()),
+    };
+    let Some(session_id) = session["id"].as_str().map(str::to_owned) else {
+        return Err("OpenCode session.create returned no session payload.".into());
+    };
+    let result = prompt_session(
+        server,
+        directory,
+        &session_id,
+        prompt,
+        (provider_id, model_id),
+        agent,
+        variant,
+    )
+    .await;
+    let _ = text_request(
+        server,
+        reqwest::Method::DELETE,
+        &format!(
+            "/session/{}",
+            crate::thread_projection::uri_component(&session_id)
+        ),
+        directory,
+        None,
+        Duration::from_secs(5),
+    )
+    .await;
+    result
+}
+
+async fn prompt_session(
+    server: &Server,
+    directory: &str,
+    session_id: &str,
+    prompt: &str,
+    (provider_id, model_id): (&str, &str),
+    agent: Option<&str>,
+    variant: Option<&str>,
+) -> Result<String, String> {
+    // `resolveOpenCodeVariant`: only a catalog that lacks it drops a variant.
+    let variant = match variant {
+        Some(variant) => {
+            let catalog = text_request(
+                server,
+                reqwest::Method::GET,
+                "/provider",
+                directory,
+                None,
+                Duration::from_secs(10),
+            )
+            .await
+            .ok()
+            .filter(|(status, _)| (200..300).contains(status))
+            .map(|(_, body)| body);
+            let entry = catalog.as_ref().and_then(|catalog| {
+                catalog["all"]
+                    .as_array()?
+                    .iter()
+                    .find(|provider| provider["id"] == provider_id)
+                    .and_then(|provider| provider["models"].get(model_id))
+            });
+            match entry {
+                Some(model) if model["variants"].get(variant).is_none() => None,
+                _ => Some(variant),
+            }
+        }
+        None => None,
+    };
+    let mut body = json!({
+        "model": {"providerID": provider_id, "modelID": model_id},
+        "parts": [{"type": "text", "text": prompt}],
+    });
+    if let Some(agent) = agent {
+        body["agent"] = json!(agent);
+    }
+    if let Some(variant) = variant {
+        body["variant"] = json!(variant);
+    }
+    let (status, result) = text_request(
+        server,
+        reqwest::Method::POST,
+        &format!(
+            "/session/{}/message",
+            crate::thread_projection::uri_component(session_id)
+        ),
+        directory,
+        Some(&body),
+        TEXT_GENERATION_TIMEOUT,
+    )
+    .await
+    .map_err(|_| "OpenCode session.prompt request failed.".to_owned())?;
+    if !(200..300).contains(&status) {
+        return Err("OpenCode session.prompt request failed.".into());
+    }
+    if let Some(detail) = prompt_failure_detail(&result["info"]["error"]) {
+        return Err(detail);
+    }
+    let text: String = result["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|part| part["type"] == "text")
+        .filter_map(|part| part["text"].as_str())
+        .collect();
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("OpenCode returned empty output.".into());
+    }
+    Ok(text.to_owned())
+}
+
+/// `makeOpenCodeTextGeneration`'s run (OpenCode 1.x): the reply to `prompt`
+/// from a session on the configured server, or on the managed one the
+/// instance shares with its status checks.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn generate_text(
+    owners: &Owners,
+    instance_id: &str,
+    config: &Value,
+    env: &ProcessEnv,
+    directory: &str,
+    prompt: &str,
+    model: &str,
+    agent: Option<&str>,
+    variant: Option<&str>,
+) -> Result<String, String> {
+    // `parseOpenCodeModelSlug`.
+    let trimmed = model.trim();
+    let Some((provider_id, model_id)) = trimmed
+        .find('/')
+        .filter(|&at| at > 0 && at < trimmed.len() - 1)
+        .map(|at| (&trimmed[..at], &trimmed[at + 1..]))
+    else {
+        return Err("OpenCode model selection must use the 'provider/model' format.".into());
+    };
+    let settings = Settings::of(config);
+    let cwd = std::env::current_dir()
+        .unwrap_or_default()
+        .display()
+        .to_string();
+    let run = async {
+        if settings.external() {
+            let server = Server {
+                url: settings.server_url.trim().to_owned(),
+                password: (!settings.password.is_empty()).then(|| settings.password.clone()),
+                version: String::new(),
+            };
+            let probe =
+                probe_server(&settings.server_url, &settings.password, &probe_env(env)).await?;
+            if probe.generation == Generation::V2 {
+                return Err(V2_TEXT_GENERATION.to_owned());
+            }
+            verify_v1(&server, directory, env).await?;
+            return generate_on(
+                &server,
+                directory,
+                prompt,
+                (provider_id, model_id),
+                agent,
+                variant,
+            )
+            .await;
+        }
+        let probe = owners
+            .probes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(instance_id)
+            .cloned();
+        let generation = match probe {
+            Some(probe) => probe.generation,
+            None => {
+                probe_binary(&settings.binary, &probe_env(env))
+                    .await?
+                    .generation
+            }
+        };
+        if generation == Generation::V2 {
+            return Err(V2_TEXT_GENERATION.to_owned());
+        }
+        let password = (!settings.password.is_empty())
+            .then(|| settings.password.clone())
+            .or_else(|| env.get("OPENCODE_SERVER_PASSWORD").cloned());
+        let mut server_env = env.clone();
+        if let Some(password) = &password {
+            server_env.insert("OPENCODE_SERVER_PASSWORD".into(), password.clone());
+        }
+        server_env.insert("OPENCODE_CONFIG_CONTENT".into(), config_content(env));
+        let timeout = probe_timeout("opencode", SERVER_START_TIMEOUT_MS, env);
+        let start = start_server_retrying(
+            &settings.binary,
+            server_env,
+            password,
+            timeout,
+            Generation::V1,
+            &cwd,
+        );
+        owners
+            .with_server(&format!("{instance_id}\0v1"), start, |server| async move {
+                generate_on(
+                    &server,
+                    directory,
+                    prompt,
+                    (provider_id, model_id),
+                    agent,
+                    variant,
+                )
+                .await
+            })
+            .await
+    };
+    match tokio::time::timeout(TEXT_GENERATION_TIMEOUT, run).await {
+        Ok(result) => result,
+        Err(_) => Err("OpenCode did not finish generating in time.".into()),
+    }
+}
+
+/// OpenCode 2's text generation (`OpenCode2TextGeneration`) is not ported.
+const V2_TEXT_GENERATION: &str =
+    "Text generation with OpenCode 2 is not supported by this server yet. Select another text generation model.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prompt_failure_is_worded_as_the_reference_words_it() {
+        let detail = |error: Value| prompt_failure_detail(&error);
+        assert_eq!(detail(json!(null)), None);
+        assert_eq!(detail(json!({})), None);
+        assert_eq!(
+            detail(json!({"name": "ProviderAuthError"})).unwrap(),
+            "The model provider rejected the credentials. Check the provider's sign-in or API key in OpenCode."
+        );
+        assert_eq!(
+            detail(json!({"name": "APIError", "data": {"statusCode": 429}})).unwrap(),
+            "The model provider's usage or rate limit was reached. Try again later."
+        );
+        assert_eq!(
+            detail(json!({"name": "APIError", "data": {"statusCode": 502}})).unwrap(),
+            "The model provider failed the request (HTTP 502)."
+        );
+        assert_eq!(
+            detail(json!({"data": {"message": "boom"}})).unwrap(),
+            "OpenCode could not generate the text."
+        );
+    }
 
     #[test]
     fn local_server_urls() {

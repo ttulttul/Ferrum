@@ -62,6 +62,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import urllib.parse
 import sqlite3
 import subprocess
 import tempfile
@@ -100,6 +101,22 @@ GROK_TITLE_SPEC = {"commands": [
      "stderr": "", "exit": 0},
     {"args": ["inspect", "--json"], "stdout": '{"skills": []}', "stderr": "", "exit": 0},
     {"prefix": ["agent", "stdio"], **_GROK_ACP}]}
+
+# A signed-in OpenCode 1.x (as provider_status_parity.py has it) whose server answers a title session.
+_OC_PROVIDERS = {"all": [{"id": "anthropic", "name": "Anthropic", "models": {
+    "claude-opus-5-5": {"id": "claude-opus-5-5", "name": "Claude Opus 5.5", "release_date": "2026-09-01",
+                        "status": "active", "variants": {"low": {}, "high": {}}}}}],
+    "default": {"anthropic": "claude-opus-5-5"}, "connected": ["anthropic"]}
+OPENCODE_TITLE_SPEC = {"version": {"stdout": "1.15.0"}, "serve": {"routes": {
+    "GET /global/health": {"body": {"healthy": True, "version": "1.15.0"}},
+    "GET /provider": {"body": _OC_PROVIDERS},
+    "GET /agent": {"body": [{"name": "build", "mode": "primary"}]},
+    "GET /skill": {"body": []}, "GET /command": {"body": []},
+    "POST /session": {"body": {"id": "ses_title", "title": "T3 Code generateThreadTitle", "version": "1.15.0",
+                               "time": {"created": 1767225600000, "updated": 1767225600000}}},
+    "POST /session/ses_title/message": {"body": {"info": {"id": "msg_title", "role": "assistant", "sessionID": "ses_title"},
+        "parts": [{"type": "text", "text": '{"title": "Echo Greeting via OpenCode", "needsRefinement": false}'}]}},
+    "DELETE /session/ses_title": {"body": True}, "POST /session/ses_title/abort": {"body": True}}}}
 
 # A signed-in Pi (as provider_status_parity.py has it) whose text generation runs answer with a title.
 _PI_STATE = {"model": {"provider": "openai", "id": "gpt-5.6"}, "thinkingLevel": "minimal"}
@@ -218,6 +235,12 @@ PROVIDER_SCENARIOS = [
                       "launch": "agent", "spec": GROK_TITLE_SPEC, "skip": "t3-code-provider-probe",
                       "records": ["initialize", "authenticate", "session/new", "session/set_model",
                                   "session/set_config_option", "session/prompt", "session/cancel"]}},
+    # OpenCode 1.x through the server T3 starts for it.
+    {"name": "opencode title", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate",
+     "textProvider": {"instance": "opencode", "driver": "opencode", "cli": "opencode", "opencode": True,
+                      "model": "anthropic/claude-opus-5-5", "options": [{"id": "variant", "value": "high"}],
+                      "launch": "serve", "spec": OPENCODE_TITLE_SPEC}},
     # A title the provider cannot generate leaves the seed, and a regenerate reports why.
     {"name": "codex title failed", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
      "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate"},
@@ -590,7 +613,8 @@ def seed_turn(url, cookie, root, scenario):
         rpc(url, cookie, "server.updateSettings", {"patch": {
             "providerInstances": {provider["instance"]: {"driver": provider["driver"], "enabled": True,
                                                          **({"config": provider["config"]} if provider.get("config") else {})}},
-            "textGenerationModelSelection": {"instanceId": provider["instance"], "model": provider["model"]}}})
+            "textGenerationModelSelection": {"instanceId": provider["instance"], "model": provider["model"],
+                                             **({"options": provider["options"]} if provider.get("options") else {})}}})
     rpc(url, cookie, "orchestration.dispatchCommand", {
         "type": "thread.create", "commandId": "seed-thread", "threadId": THREAD, "projectId": "project:github",
         "title": "New thread" if scenario.get("title") else "Thread",
@@ -943,7 +967,9 @@ def text_provider_runs(log, root, provider):
         if isinstance(value, str):
             for server in ("original", "rust"):
                 value = value.replace(f"{root}/{server}", "<home>/<server>")
-            return value.replace(str(root), "<home>")
+                # OpenCode's directory header carries the path URL-encoded.
+                value = value.replace(urllib.parse.quote(f"{root}/{server}", safe=""), "<home>/<server>")
+            return value.replace(str(root), "<home>").replace(urllib.parse.quote(str(root), safe=""), "<home>")
         if isinstance(value, list):
             return [mask(item) for item in value]
         if isinstance(value, dict):
@@ -968,7 +994,9 @@ def text_provider_runs(log, root, provider):
             continue
         if kind in provider.get("records", []):
             records.append(mask(record))
-    return {"launches": launches, "records": records, "http": [mask(line) for line in lines(".http")]}
+    # A session's requests (JSON); the status probe's GETs interleave as their timing makes them.
+    return {"launches": launches, "records": records,
+            "http": [mask(line) for line in lines(".http") if line.startswith("{")]}
 
 
 def follow_up_turn(args, url, cookie, text):
