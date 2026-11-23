@@ -9,49 +9,69 @@
 
 ## Overview
 
-`t3code-rust` reimplements the TypeScript T3 Code environment server and standalone relay in Rust. Compatibility work targets [upstream commit `052ca497`](https://github.com/pingdotgg/t3code/tree/052ca497cf1103b001327bcd964188a71dfec213), which declares 235 WebSocket RPC methods, 86 typed HTTP operations (including 30 relay operations), and 58 orchestration dispatch command types.
+`t3code-rust` reimplements the TypeScript T3 Code environment server and standalone relay in Rust. Compatibility work targets one pinned upstream commit, named under [Parity status](#parity-status). At that commit the server declares 235 WebSocket RPC methods, 86 typed HTTP operations (including 30 relay operations), and 58 orchestration dispatch command types.
 
 ## What works now
 
 Based on `main` and the parity test suites:
 
-- **Codex and Claude Code agent turns:** Launching Codex and Claude Code sessions, streaming responses, tool calls, approvals (allow, allow for session, decline, `approval-required`, `auto-accept-edits`), and user-input / question requests.
+- **Codex and Claude Code agent turns:** Launching Codex and Claude Code sessions, streaming responses, tool calls, approvals (allow, allow for session, decline, `approval-required`, `auto-accept-edits`), and user-input / question requests. Each thread keeps its Claude CLI running across turns, and an instance's Codex turns share one app-server, as in the original. You can steer a running Codex or Claude turn with a text message.
+- **Delegated tasks:** An agent can start a child task, wait for it or get its result delivered later, check its progress, cancel it, send a finished child a follow-up, and create new threads. Tasks recover after a restart, and a result can be delivered into the parent's running turn.
+- **Thread titles:** Codex, Claude, Pi, Grok, OpenCode 1.x and Antigravity text generation models can title threads.
+- **Scheduled tasks:** Agents can manage schedules, and due tasks start on their own.
 - **Checkpoints, interrupts, and token usage:** Reference-compatible checkpoint naming, turn interrupts (including stopping spawned child processes), token usage reporting, model reporting, and usage-limit reset times.
 - **Restart recovery:** Resuming and continuing interrupted turns, retries, rewinds, and background work after a server restart.
 - **T3 Connect relay tunnel:** Provisioning, running, and releasing the T3 Connect managed tunnel, plus handing off an active tunnel cleanly across Rust/TypeScript switches.
 - **Environment links (incoming):** Accepting environment links and pairing tokens issued by the TypeScript server on the same home directory, plus pairing-link administration. Sessions the TypeScript server signed in on the same home are listed under Connections and can be revoked there.
 - **Environment links (outgoing):** Linking to another machine, listing and forgetting links (shared with the TypeScript server on the same home), forwarding MCP tool calls to a linked machine, and agents asking you to link one from inside a conversation (`t3_environment_link`), answered in a card.
-- **MCP server:** Serving MCP sign-in and thread/project tools over `/mcp`.
+- **MCP server and agent tools:** Serving MCP sign-in and the agent tools over `/mcp`, with the original's agent instructions and capabilities. 75 of the original's 82 agent tools are served, including pull requests and issues, worktrees, previews, HTML pages and secret requests. The [agent tool checklist](docs/agent-tools.md#checklist) tracks each tool.
 - **Login-shell `PATH` discovery:** Reading the login shell's `PATH` at startup and again before source-control discovery, so provider CLIs and tools installed later are found; listing Codex models from its CLI.
-- **Provider status checks:** Every built-in provider (Claude Code, Codex, Cursor, OpenCode, Grok, Pi, fx, Kiro, Antigravity and Muse Code) has its status (installed version, sign-in state, usage and models) checked at startup, on settings changes, every 5 minutes and on refresh, and pushed to clients.
+- **Provider status checks:** Every built-in provider (Claude Code, Codex, Cursor, OpenCode, Grok, Pi, fx, Kiro, Antigravity and Muse Code) has its status (installed version, sign-in state, usage and models) checked at startup, on settings changes, every 5 minutes while a client is watching, and on refresh, and pushed to clients. The checks include newer CLI releases and Claude's skills, and Rust can redeem the reset credits a Claude or Codex subscription banks.
 - **Configuration, auth, and desktop adoption:** Shared `userdata/` layout (`settings.json`, secrets, managed policy, `server-owner.sqlite` exclusive lock, `server-runtime.json`), browser session cookies, WebSocket tickets with DPoP checks, CORS, and desktop SSH launcher adoption.
-- **Git, GitHub, and workspace operations:** File operations, terminals (PTY), git workflows, GitHub/Linear provider RPCs, Bitbucket pull requests with the credential from Settings or the `T3CODE_BITBUCKET_*` environment variables (listing them; opening one with its checks, activity and reviewers; merging, declining, editing, commenting, reviewing and resolving; its diff over HTTP. Marking a Bitbucket pull request's files viewed isn't ported yet), and Chromium preview support.
+- **Git, GitHub, and workspace operations:** File operations, terminals (PTY), git workflows, GitHub/Linear provider RPCs, Bitbucket pull requests with the credential from Settings or the `T3CODE_BITBUCKET_*` environment variables (listing them; opening one with its checks, activity and reviewers; merging, declining, editing, commenting, reviewing and resolving; its diff over HTTP), and Chromium preview support.
 - **Split control/workspace architecture:** Out-of-process workspace execution via `t3-agentd` and an embeddable, `wasm32-unknown-unknown`-compatible control plane (`workers/`). Remote Codex and Claude turns can call the host's MCP endpoint as their thread. See [host configuration](docs/embedding.md#settings-and-provider-turns).
 - **Parity test suites:** Automated suites comparing HTTP, WebSocket RPC, client initial sync, live provider turns, settings, auth, MCP, git/GitHub, previews, and relay behavior directly against the pinned TypeScript reference.
 
 ## What's still missing compared with the original
 
-The [client RPC parity suite](scripts/client_rpc_parity_xfail.json) has no expected failures. Differences still show up during live conversations and in the tools agents can use.
+The client RPC and server-switch parity suites have no expected failures. The remaining gaps are mostly in agent tools, a few provider features, and features that need the desktop app.
 
 ### Threads and history
 
-- **Live updates.** Rust can show the start of a turn or the answer to an approval request in a different order. Interrupting Codex while it waits for approval can leave the turn without a checkpoint. A Claude question can appear after a command that the original shows after the question.
-- **Restarts and server switches.** A queued Codex message can appear earlier in the history after a restart. If a resumed Claude turn fails, its retry can be missing context from the failed attempt. Steering and then stopping a Codex turn after switching servers can also change the order of live updates. See the [live-turn cases](scripts/client_thread_parity_xfail.json) and [server-switch cases](scripts/shared_store_parity_xfail.json).
+- **Restarted Claude turns.** If a resumed Claude turn fails, its retry can be missing context from the failed attempt. This is the one expected failure in the [live-turn cases](scripts/client_thread_parity_xfail.json).
 - **Older databases.** Both servers can use the same current database. If a home has only the older TypeScript database, start the matching TypeScript server once to upgrade it. See the [shared database notes](docs/shared-store.md).
 
 ### Agents and tools
 
-- **Delegated tasks.** An agent can start a child, check its progress and receive its result. Cancelling the task, sending a follow-up to a finished child, and running a child in a separate worktree or on a linked machine are still missing.
-- **Other agent tools.** Agents still lack tools for requesting secrets, sending attachments, working with pull requests and issues, and controlling browser previews and devices. They also lack the instructions the original gives agents about when to use T3 tools. The [agent tool checklist](docs/agent-tools.md#checklist) tracks each tool.
-- **Scheduled runs.** Agents can manage schedules and run a task on demand. Rust does not yet start a task automatically when it comes due.
+- **Attachments and devices.** Agents can't yet attach files to a thread (`t3_attachment_prepare_upload`, `t3_attachment_discard`, `t3_thread_send_attachments`) or use simulators and emulators (the `device_*` tools).
+- **Delegated tasks.** A child can't run in its own worktree or on a linked machine yet. The delegation tests cover Claude only so far.
+- **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing. So are browser setup hints and installing a browser when none is found.
+- **Secrets in schedules.** A scheduled task can't use a secret yet, and the embeddable control plane stores no secrets.
+- **Claude workflows.** Rust's Claude sessions run no workflow tasks.
 
 ### AI providers
 
-- **Follow-up messages.** Rust starts a new Claude process and resumes the conversation for each turn. It also starts a Codex process per turn, while the original shares one across threads using the same provider instance.
-- **Steering.** You can redirect a running Codex turn with a text message. Claude queues the message for later. Changing the model or including an attachment in a steering message still behaves differently.
-- **Titles and workflows.** Codex and Claude can generate thread titles. Custom title generators and titles that draw on the source thread’s history after a fork are still missing. Claude workflow tasks are also unsupported.
-- **ACP Registry agents.** Rust searches the ACP Registry, installs its agents (downloaded binaries, and npm or uv packages) and removes managed binaries. It cannot run turns with ACP agents yet.
-- **Provider settings.** Rust checks all built-in providers, including whether a newer CLI release is out. It lists Claude's skills, including plugin skills, and redeems the reset credits a Claude or Codex subscription banks. Periodic checks run only while a client reports that it is watching provider status, as in the original. Rust does not receive the desktop app's host power reports (battery, screen lock, heat), so it never pauses for them.
+- **Steering extras.** A steering message that changes the model or carries attachments still behaves differently. Rust also lacks the original's "delivery not confirmed" notice, its handling of Claude's foreground subagents during a steer, and its follow-up turn when a provider refuses a steer.
+- **Titles.** Cursor, Muse Code and OpenCode 2 can't title threads yet. Custom title generators, images in an OpenCode title prompt, and titles that draw on a forked thread's history are missing. Antigravity titles don't yet clean up old temporary folders or wait out a sign-in.
+- **ACP Registry agents.** Rust searches the ACP Registry, installs its agents and removes managed binaries. It can't run turns with ACP agents yet.
+- **Desktop power reports.** Rust doesn't receive the desktop app's power reports (battery, screen lock, heat), so it never pauses provider checks for them.
+
+### Source control
+
+- **Bitbucket viewed files.** You can't mark a Bitbucket pull request's files as viewed yet.
+
+## Parity status
+
+Parity is tested by running the original TypeScript server and the Rust server side by side and comparing what they answer. Each gets a fresh home directory, and both get the same fake provider CLIs that replay recorded Codex and Claude sessions, and local stand-ins for every outside service. No test reaches the network or a real model.
+
+- **Pinned reference:** [upstream commit `052ca497`](https://github.com/pingdotgg/t3code/tree/052ca497cf1103b001327bcd964188a71dfec213) (`052ca497cf1103b001327bcd964188a71dfec213`). This is the only place the README names it.
+- **Suites:** 39 parity suites run in CI across 7 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
+- **Client calls:** the [client RPC suite](scripts/client_rpc_cases.json) drives 242 recorded client steps through the original client. None is expected to fail.
+- **Live turns:** the client thread suite runs 77 provider scenarios. One check is expected to fail ([list](scripts/client_thread_parity_xfail.json)).
+- **Shared home:** the server-switch suite has no expected failures ([list](scripts/shared_store_parity_xfail.json)).
+- **Agent tools:** 75 of 82 served ([checklist](docs/agent-tools.md#checklist)).
+
+A suite fails on any difference it doesn't list, and on any listed case that starts to match.
 
 ## Install and switching
 
@@ -127,7 +147,7 @@ Prerequisites: Git, GitHub CLI (`gh`), Node 26.13.1, pnpm 12.14.0, Python 3 with
 
 ```bash
 git clone https://github.com/pingdotgg/t3code /tmp/t3code-reference
-git -C /tmp/t3code-reference checkout 052ca497cf1103b001327bcd964188a71dfec213
+git -C /tmp/t3code-reference checkout <pinned commit>  # see Parity status
 pnpm --dir /tmp/t3code-reference --filter t3 --filter t3code-relay --filter @t3tools/client-runtime install --frozen-lockfile
 cargo build --locked
 
