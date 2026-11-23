@@ -900,6 +900,100 @@ pub(crate) async fn record_created_thread<H: CommandHost>(
         .id)
 }
 
+/// `acceptDelegatedCompletionDelivery`: the delivery message for `completion`
+/// (`{parentRunId, generation, taskIds}`) marks the tasks it claimed as
+/// delivered and frees its cohort for the next delivery. Recorded with the
+/// message, so a delivery is never accepted without being sent.
+pub(crate) async fn accept_delivery<H: CommandHost>(
+    state: &Arc<H>,
+    thread_id: &str,
+    completion: &Value,
+) -> anyhow::Result<()> {
+    let row = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(thread_id) else {
+            return Ok(());
+        };
+        thread.stored_row()
+    };
+    let Some(run_id) = completion["parentRunId"].as_str() else {
+        return Ok(());
+    };
+    let delivery = &row["runExtras"][run_id]["delegatedCompletion"]["delivery"];
+    if !delivery.is_object() || delivery["generation"] != completion["generation"] {
+        return Ok(());
+    }
+    let task_ids = records(delivery, "taskIds");
+    let at = crate::auth_service::iso(crate::auth_service::now());
+    let mut tasks = records(&row, "subagents");
+    for task in tasks.iter_mut() {
+        if task_ids.contains(&task["id"]) && task["completionDelivery"]["state"] == "claimed" {
+            task["completionDelivery"] = json!({"state": "delivered", "observedByRunId": null});
+            task["updatedAt"] = json!(at);
+        }
+    }
+    let mut extras = row["runExtras"].clone();
+    extras[run_id]["delegatedCompletion"]["delivery"] = Value::Null;
+    state
+        .commit(Event::ThreadPatched {
+            thread_id: thread_id.to_owned(),
+            patch: json!({"row": {"subagents": tasks, "runExtras": extras}}),
+        })
+        .await?;
+    Ok(())
+}
+
+/// `recoverDelegatedTasks`, once a restarted server is up: settles the tasks
+/// of delegated children whose work ended without them being settled, and
+/// offers again each delivery a cohort still holds. A child whose cut run
+/// still awaits its restart continuation (`awaiting`, wire run ids) waits
+/// for it, as the reference's `childAwaitsRestartContinuation` does.
+pub(crate) async fn recover<H: CommandHost>(
+    state: Arc<H>,
+    awaiting: &std::collections::HashSet<String>,
+) {
+    let (children, cohorts) = {
+        let store = state.store.read().await;
+        let mut children = Vec::new();
+        let mut cohorts = Vec::new();
+        for thread in store.threads.values() {
+            let row = thread.stored_row();
+            if row["lineage"]["relationshipToParent"] == "subagent"
+                && row["forkedFrom"]["type"] == "node"
+            {
+                if let Some(parent) = row["lineage"]["parentThreadId"].as_str() {
+                    let waits = thread
+                        .runs
+                        .iter()
+                        .any(|run| awaiting.contains(&run.wire_id()));
+                    if !waits {
+                        children.push((thread.id.clone(), parent.to_owned()));
+                    }
+                }
+            }
+            let holds = row["runExtras"].as_object().is_some_and(|extras| {
+                extras.values().any(|extra| {
+                    extra["delegatedCompletion"]["disposition"] == "open"
+                        && extra["delegatedCompletion"]["delivery"].is_object()
+                })
+            });
+            if holds {
+                cohorts.push(thread.id.clone());
+            }
+        }
+        (children, cohorts)
+    };
+    for (child, parent) in children {
+        if let Err(error) = finalize_child(state.clone(), &child, &parent).await {
+            tracing::warn!(%error, child, "could not recover a delegated task");
+        }
+        deliver_if_idle(state.clone(), &parent).await;
+    }
+    for thread_id in cohorts {
+        deliver_if_idle(state.clone(), &thread_id).await;
+    }
+}
+
 /// What a blocking `delegate_task` wait gets when its child's run ends: it
 /// reads the task, drops `read`, and answers once `settled` closes.
 pub(crate) struct RunEnd {
@@ -1239,29 +1333,27 @@ async fn deliver_if_idle<H: CommandHost>(state: Arc<H>, thread_id: &str) {
     let delivery = &cohort["delivery"];
     let task_ids = records(delivery, "taskIds");
     let tasks = records(&row, "subagents");
-    // Accepted: claimed tasks are delivered, and the cohort holds no delivery.
-    let mut accepted = tasks.clone();
-    for task in accepted.iter_mut() {
-        if task_ids.contains(&task["id"]) && task["completionDelivery"]["state"] == "claimed" {
-            task["completionDelivery"] = json!({"state": "delivered", "observedByRunId": null});
-            task["updatedAt"] = json!(crate::auth_service::iso(crate::auth_service::now()));
+    // The delivery message records the acceptance in its own command, so an
+    // offer made again (after a restart, say) finds it sent and stops here.
+    {
+        let store = state.store.read().await;
+        let sent = store.threads.get(thread_id).is_some_and(|thread| {
+            thread
+                .messages
+                .iter()
+                .any(|m| Some(m.id.as_str()) == delivery["messageId"].as_str())
+        });
+        if sent {
+            return;
         }
     }
-    let mut extras = row["runExtras"].clone();
-    extras[&run_id]["delegatedCompletion"]["delivery"] = Value::Null;
-    if state
-        .commit(Event::ThreadPatched {
-            thread_id: thread_id.to_owned(),
-            patch: json!({"row": {"subagents": accepted, "runExtras": extras}}),
-        })
-        .await
-        .is_err()
-    {
-        return;
-    }
+    let accepted = tasks;
     let command = json!({
         "type": "message.dispatch",
-        "commandId": format!("command:server:delegated-completion:dispatch:{}", crate::platform::uuid_v4()),
+        "commandId": join_id(
+            "command:server:delegated-completion:dispatch",
+            &[&run_id, &delivery["generation"].to_string()]
+        ),
         "threadId": thread_id,
         "messageId": delivery["messageId"],
         "text": completion_text(&task_ids),

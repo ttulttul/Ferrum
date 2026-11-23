@@ -104,6 +104,11 @@ PROVIDER_SCENARIOS = [
     # task whose result wakes the parent.
     {"name": "claude delegate followup", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate_followup.json", "awaitStatus": True, "settleRuns": 2},
+    # A restart while a delegated task's child runs: the child's work continues after the
+    # restart, and its result reaches the parent.
+    {"name": "claude delegate restart", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_restart.json", "awaitStatus": True, "settleRuns": 2,
+     "restart": {"after": "settled"}},
     {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
     # Runtime requests: what each server asks the user, and what it answers the CLI.
     {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
@@ -1000,6 +1005,9 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
     watched = {}
     with contextlib.ExitStack() as first:
         url, cookie = managed_server(first, command, root, *credentials, env=env)
+        if scenario.get("awaitStatus"):
+            # A delegated task's target must be a checked, installed provider.
+            provider_status(url, cookie, scenario["instance"], root)
         seeded = seed_turn(url, cookie, checkouts, scenario)
         if restart["after"] == "created":
             # Only the thread: its first turn runs on the restarted server (follow_up).
@@ -1081,8 +1089,12 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
         # The server says its recovery has finished; let what it continued settle.
         started = time.monotonic()
         floor = 8 if args.real_time else 0
+        # With `settleRuns`, also until that many runs have ended: work the restart continues
+        # (a delegated child's result, say) can start the thread's next run a moment later.
+        settled_runs = scenario.get("settleRuns", 0)
         wait_for(url, cookie, lambda p: time.monotonic() - started >= floor and startup_recorded(root, url)
                  and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", []))
+                 and sum(r.get("status") not in ACTIVE_RUN for r in p.get("runs", [])) >= settled_runs
                  and not effects_due(root, offset()), 40)
         if follow_up is not None:
             runs = len(thread_projection(url, cookie).get("runs", []))

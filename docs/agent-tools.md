@@ -175,19 +175,25 @@ schemas.
      with it (`delegatedTaskId`); a wake continues the open follow-up instead. Each of the
      child's tasks settles from its own runs (`delegatedTaskRuns`, `delegatedTaskResultRun`),
      and `task_status` reads a follow-up from them. `t3_thread_send` now uses the reference's
-     stable ids, names the sending thread and returns the follow-up's `taskId`.
+     stable ids, names the sending thread and returns the follow-up's `taskId`;
+   - restart recovery (`recoverDelegatedTasks`): once a restarted server has dispatched its
+     restart continuations, it settles the tasks of children whose work ended without being
+     settled (a child whose cut run still awaits its continuation waits for it) and offers
+     again each delivery a cohort still holds. A delivery is accepted with its message
+     (`acceptDelegatedCompletionDelivery`), and offered under a command id derived from its
+     cohort and generation, so a delivery claimed but not sent before a stop is sent once.
 
    Parity: the scenarios `claude delegate` (a wait), `claude delegate async` (a delivery run
    on an idle parent), `claude delegate cancel` (cancelled while its child runs),
    `claude delegate stop` (the user stops the parent) and `claude create threads` (one thread
    started with its prompt, one left idle) and `claude delegate followup` (the parent sends its
    finished child more work, whose result wakes it) in `scripts/client_thread_parity.py`, with
-   fake CLIs for the parent and the child. Still pending, each its own PR: restart recovery of
-   delegated tasks, delivery into a
-   parent's running turn (the reference steers it), worktree isolation (`isolation:
-   "worktree"` is refused), tasks in a linked environment (refused), a cancelled child's pull
-   request watches, and a stop's queued delivery runs (the reference cancels a cohort's queued
-   delivery).
+   fake CLIs for the parent and the child, and `claude delegate restart` (the server restarts
+   while a child runs). Still pending, each its own PR: delivery into a parent's running turn
+   (the reference steers it), worktree isolation (`isolation: "worktree"` is refused), tasks in
+   a linked environment (refused), a cancelled child's pull request watches, a stop's queued
+   delivery runs (the reference cancels a cohort's queued delivery), and recovery on the
+   control plane (only the server recovers delegated tasks after a restart).
 4c. **Attachments and secrets** (pending): `t3_attachment_prepare_upload`,
    `t3_attachment_discard`, `t3_thread_send_attachments`, `request_secret`.
 5. **Prompt context and capabilities**, as above.

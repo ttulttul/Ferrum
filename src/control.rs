@@ -3511,6 +3511,69 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
         assert_eq!(runs[0].error, None);
     }
 
+    #[test]
+    fn a_restart_offers_a_delegated_delivery_once_and_accepts_it_with_its_message() {
+        let runtime = Arc::new(ManualRuntime::default());
+        let plane = ControlPlane::open(
+            config(),
+            Arc::new(MemoryStore::new()),
+            Box::new(MemoryLog::default()),
+            host(&runtime),
+        )
+        .unwrap();
+        let mut connection = owner(&plane);
+        seed(&plane, &mut connection);
+        dispatch_message(&plane, &mut connection, "hello");
+        runtime.run();
+        let run_id = thread_runs(&plane)[0].wire_id();
+        // A finished task whose delivery was claimed but never sent, as a
+        // stop between the claim and its message leaves it.
+        let host = Arc::new(PlaneCommands {
+            plane: plane.clone(),
+        });
+        let mut extras = json!({});
+        extras[run_id.as_str()]["delegatedCompletion"] = json!({
+            "disposition": "open", "nextGeneration": 2,
+            "delivery": {"generation": 1, "messageId": "message:delivery", "taskIds": ["node:task"]},
+        });
+        now(host.commit(Event::ThreadPatched {
+            thread_id: "t1".into(),
+            patch: json!({"row": {
+                "subagents": [{"id": "node:task", "origin": "app_owned", "threadId": "t1", "runId": run_id,
+                    "childThreadId": "t2", "title": "Greeter", "status": "completed", "result": "Done.",
+                    "completionDelivery": {"state": "claimed", "observedByRunId": null}}],
+                "runExtras": extras,
+            }}),
+        }))
+        .unwrap();
+        let delivered = |plane: &ControlPlane| {
+            plane.store_now().threads["t1"]
+                .messages
+                .iter()
+                .filter(|m| m.id == "message:delivery")
+                .count()
+        };
+        now(crate::orchestration::recover_delegated_tasks(
+            host.clone(),
+            &Default::default(),
+        ));
+        runtime.run();
+        assert_eq!(delivered(&plane), 1, "the delivery is sent");
+        let row = plane.store_now().threads["t1"].stored_row();
+        assert_eq!(
+            row["subagents"][0]["completionDelivery"]["state"],
+            "delivered"
+        );
+        assert!(row["runExtras"][run_id.as_str()]["delegatedCompletion"]["delivery"].is_null());
+        // Recovering again finds nothing owed.
+        now(crate::orchestration::recover_delegated_tasks(
+            host,
+            &Default::default(),
+        ));
+        runtime.run();
+        assert_eq!(delivered(&plane), 1, "the delivery is sent once");
+    }
+
     /// Storage that outlives a plane, and a plane over it.
     struct Restartable {
         documents: Arc<MemoryStore>,
