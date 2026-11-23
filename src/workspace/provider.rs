@@ -157,7 +157,17 @@ pub enum ProviderEvent {
     /// Text appended to a streaming item (`assistant_message`, `reasoning`).
     /// The item's next [`ProviderEvent::TurnItem`] carries the full text.
     #[serde(rename = "turn_item.delta", rename_all = "camelCase")]
-    TurnItemDelta { item_id: String, delta: String },
+    TurnItemDelta {
+        item_id: String,
+        delta: String,
+        /// Text recorded while it is still held (see `turn::StreamedText`):
+        /// it shows with the item's next shown update, or not at all if the
+        /// item's end (which carries its whole text) comes first, as the
+        /// reference's adapters send held text only when its window or its
+        /// item ends.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        held: bool,
+    },
     /// Output a running command printed. Not needed for the projection: the
     /// command item's final update carries all of it.
     #[serde(rename = "command_output.delta", rename_all = "camelCase")]

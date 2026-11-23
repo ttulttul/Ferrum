@@ -3994,10 +3994,12 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             item: ProviderItem::new("msg_1", "assistant_message", "running").with("text", ""),
         });
         emit(ProviderEvent::TurnItemDelta {
+            held: false,
             item_id: "msg_1".into(),
             delta: "Hel".into(),
         });
         emit(ProviderEvent::TurnItemDelta {
+            held: false,
             item_id: "msg_1".into(),
             delta: "lo".into(),
         });

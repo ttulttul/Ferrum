@@ -147,6 +147,9 @@ pub struct ItemRecord {
     pub item: ProviderItem,
     pub first_at: u64,
     pub updated_at: u64,
+    /// Streamed text recorded while still held, not shown until the item's
+    /// next shown update.
+    pub held_text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -254,27 +257,41 @@ impl ProviderState {
                     Some(known) => {
                         known.item = item.clone();
                         known.updated_at = at;
+                        // An item's end carries all its text.
+                        if item.status != "running" {
+                            known.held_text.clear();
+                        }
                     }
                     None => record.items.push(ItemRecord {
                         item: item.clone(),
                         first_at: at,
                         updated_at: at,
+                        held_text: String::new(),
                     }),
                 }
             }
-            ProviderEvent::TurnItemDelta { item_id, delta } => {
+            ProviderEvent::TurnItemDelta {
+                item_id,
+                delta,
+                held,
+            } => {
+                // Streamed text after an item's end changes nothing.
                 if let Some(known) = record
                     .items
                     .iter_mut()
-                    .find(|known| &known.item.id == item_id)
+                    .find(|known| &known.item.id == item_id && known.item.status == "running")
                 {
+                    if *held {
+                        known.held_text.push_str(delta);
+                        return;
+                    }
                     let text = known
                         .item
                         .fields
                         .get("text")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    let text = format!("{text}{delta}");
+                    let text = format!("{text}{}{delta}", std::mem::take(&mut known.held_text));
                     known.item.fields.insert("text".into(), text.into());
                     known.item.fields.insert("streaming".into(), true.into());
                     known.updated_at = at;
@@ -366,6 +383,7 @@ impl ProviderState {
                     item: ProviderItem::new(format!("request:{}", request.id), kind, "waiting"),
                     first_at: at,
                     updated_at: at,
+                    held_text: String::new(),
                 });
             }
             ProviderEvent::RuntimeRequestAnswered {
@@ -401,6 +419,7 @@ impl ProviderState {
                         ),
                         first_at: at,
                         updated_at: at,
+                        held_text: String::new(),
                     });
                 }
             }

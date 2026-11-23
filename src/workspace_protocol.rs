@@ -965,6 +965,7 @@ mod tests {
             TurnEvent::Stdout("a\n".into()),
             TurnEvent::Stderr("b\n".into()),
             TurnEvent::Provider(crate::workspace::ProviderEvent::TurnItemDelta {
+                held: false,
                 item_id: "msg_1".into(),
                 delta: "Hel".into(),
             }),

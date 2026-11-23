@@ -808,6 +808,8 @@ mod tests {
             resend_owed: false,
             resends: 0,
             wire_id: None,
+            driver: None,
+            model_selection: None,
         }
     }
 

@@ -22,6 +22,35 @@ use serde_json::{json, Map, Value};
 /// which still takes its slot (see [`ProviderRecords::items`]).
 pub(crate) const HIDDEN_ITEM: &str = "\u{0}hidden";
 
+/// The id of the provider session a thread's provider thread names before
+/// its session opens: a Codex instance's shared session, or the thread's own
+/// Claude session, named after the run that opens it.
+fn pending_session_id(driver: &str, instance: &str, thread_id: &str, run_id: &str) -> String {
+    if driver == provider::CLAUDE_AGENT {
+        format!(
+            "provider-session:provider-instance:{}:thread:{}:{}",
+            uri_component(instance),
+            uri_component(thread_id),
+            run_id
+        )
+    } else {
+        format!(
+            "provider-session:provider-instance:{}:shared",
+            uri_component(instance)
+        )
+    }
+}
+
+/// The id the reference gives a new provider thread's record: named after
+/// the run that opens it (`pending:<run id>`).
+fn pending_thread_id(driver: &str, run_id: &str) -> String {
+    format!(
+        "provider-thread:provider:{}:native-thread:{}",
+        uri_component(driver),
+        uri_component(&format!("pending:{run_id}"))
+    )
+}
+
 fn join(prefix: &str, parts: &[&str]) -> String {
     let mut id = prefix.to_owned();
     for part in parts {
@@ -173,21 +202,45 @@ impl Thread {
     /// The provider thread record's id, named after the run that first used
     /// it (`pending:<run id>`), as the reference names a new thread's record.
     pub(crate) fn provider_thread_id(&self) -> Option<String> {
-        let (driver, run_id) = if let Some(thread) = self.provider.thread.as_ref() {
-            let run = self.runs.iter().find(|run| run.id == thread.first_run)?;
-            (thread.driver.clone(), run.wire_id())
-        } else {
-            let run = self
-                .runs
-                .iter()
-                .find(|run| matches!(run.status.as_str(), "queued" | "preparing"))?;
-            (self.instance_id(), run.wire_id())
+        let Some(thread) = self.provider.thread.as_ref() else {
+            // A run waiting to start (queued, preparing, or sent and not yet
+            // reported) opens one.
+            let run = self.runs.iter().find(|run| {
+                self.starting(run) || matches!(run.status.as_str(), "queued" | "preparing")
+            })?;
+            let driver = run.driver.clone().unwrap_or_else(|| self.instance_id());
+            return Some(pending_thread_id(&driver, &run.wire_id()));
         };
-        Some(format!(
-            "provider-thread:provider:{}:native-thread:{}",
-            uri_component(&driver),
-            uri_component(&format!("pending:{run_id}"))
-        ))
+        let run = self.runs.iter().find(|run| run.id == thread.first_run)?;
+        Some(pending_thread_id(&thread.driver, &run.wire_id()))
+    }
+
+    /// Whether `run` was sent to a CLI that has not reported its thread
+    /// yet: the reference's run is `starting` then, with a pending attempt
+    /// and root node.
+    pub(crate) fn starting(&self, run: &Run) -> bool {
+        run.driver.is_some()
+            && run.status == "running"
+            && run.restart_cut.is_none()
+            && !run.resend_owed
+            && !self.provider.runs.contains_key(&run.id)
+    }
+
+    /// The ids of a [`Self::starting`] run's pending records.
+    pub(crate) fn starting_run_ids(&self, run: &Run) -> Option<RunIds> {
+        if !self.starting(run) {
+            return None;
+        }
+        let run_id = run.wire_id();
+        let attempt = join("run-attempt:run", &[&run_id]) + ":attempt:1";
+        Some(RunIds {
+            root_node: join("node:run", &[&run_id]) + ":root",
+            provider_thread: self.provider_thread_id()?,
+            provider_turn: String::new(),
+            driver: run.driver.clone()?,
+            run: run_id,
+            attempt,
+        })
     }
 
     /// The ids a run still waiting in the queue has on the thread's provider
@@ -279,18 +332,18 @@ impl Thread {
             }
         }
         // A run waiting in the queue or workspace preparation already has its
-        // pending attempt and root node on the thread's provider thread.
-        for run in &self.runs {
-            let Some(ids) = self.queued_run_ids(run) else {
+        // pending attempt and root node on the thread's provider thread, as
+        // the reference gives it them; so does a run sent and not yet
+        // started.
+        for (index, run) in self.runs.iter().enumerate() {
+            let Some(ids) = self
+                .queued_run_ids(run)
+                .or_else(|| self.starting_run_ids(run))
+            else {
                 continue;
             };
-            let run_index = self
-                .runs
-                .iter()
-                .position(|candidate| candidate.id == run.id)
-                .unwrap_or_default();
-            first_ordinal.get_or_insert(run_index + 1);
-            last_ordinal = run_index + 1;
+            first_ordinal.get_or_insert(index + 1);
+            last_ordinal = last_ordinal.max(index + 1);
             out.attempts.push(json!({
                 "id": ids.attempt,
                 "runId": ids.run,
@@ -330,7 +383,7 @@ impl Thread {
                     .unwrap_or_else(|| iso(run.started_at));
                 let native = format!("workspace-preparation:{}", ids.run);
                 out.items.push((
-                    run_index,
+                    index,
                     json!({
                         "id": item_id("turn-item", &ids.driver, &native),
                         "threadId": self.id,
@@ -362,45 +415,58 @@ impl Thread {
         out.attempts.sort_by_key(position);
         out.provider_sessions.extend(session);
         if let Some(id) = self.provider_thread_id() {
-            let pending = self.provider.thread.is_none();
-            let driver = self
-                .provider
-                .thread
-                .as_ref()
-                .map(|thread| thread.driver.clone())
-                .unwrap_or_else(|| instance.clone());
-            let (native_thread_ref, status, created_at, updated_at, metadata) = self
-                .provider
-                .thread
-                .as_ref()
-                .map(|thread| {
-                    (
-                        thread.native_id.as_deref().map_or(Value::Null, |native| {
-                            native_ref(&thread.driver, native, "strong")
-                        }),
-                        thread.status,
-                        iso(thread.created_at),
-                        iso(thread.updated_at),
-                        self.claude_native_metadata(&thread.driver),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    let at = self
-                        .runs
-                        .iter()
-                        .find(|run| matches!(run.status.as_str(), "queued" | "preparing"))
-                        .map(|run| iso(run.started_at))
-                        .unwrap_or_else(|| iso(crate::store::now()));
-                    (Value::Null, "not_loaded", at.clone(), at, Value::Null)
-                });
-            let provider_session_id = if pending {
-                json!(format!(
-                    "provider-session:provider-instance:{}:shared",
-                    uri_component(&instance)
-                ))
-            } else {
-                session_id.clone()
-            };
+            let (driver, native_thread_ref, status, created_at, updated_at, provider_session_id) =
+                match &self.provider.thread {
+                    Some(thread) => {
+                        // A thread whose session never opened keeps what it
+                        // had when its first run was sent.
+                        let first = self.runs.iter().find(|run| run.id == thread.first_run);
+                        let unopened = thread.native_id.is_none() && thread.status == "not_loaded";
+                        let (created_at, updated_at) = match first.filter(|_| unopened) {
+                            Some(run) => (run.started_at, run.started_at),
+                            None => (thread.created_at, thread.updated_at),
+                        };
+                        let session = match (&session_id, first) {
+                            (Value::Null, Some(run)) => json!(pending_session_id(
+                                &thread.driver,
+                                &instance,
+                                &self.id,
+                                &run.wire_id()
+                            )),
+                            _ => session_id.clone(),
+                        };
+                        (
+                            thread.driver.clone(),
+                            thread.native_id.as_deref().map_or(Value::Null, |native| {
+                                native_ref(&thread.driver, native, "strong")
+                            }),
+                            thread.status,
+                            created_at,
+                            updated_at,
+                            session,
+                        )
+                    }
+                    // A run waiting to start has its provider thread, not
+                    // loaded until the CLI reports it.
+                    None => {
+                        let run = self.runs.iter().find(|run| {
+                            self.starting(run)
+                                || matches!(run.status.as_str(), "queued" | "preparing")
+                        });
+                        let driver = run
+                            .and_then(|run| run.driver.clone())
+                            .unwrap_or_else(|| instance.clone());
+                        let at = run.map_or_else(crate::store::now, |run| run.started_at);
+                        let session = json!(pending_session_id(
+                            &driver,
+                            &instance,
+                            &self.id,
+                            &run.map(Run::wire_id).unwrap_or_default()
+                        ));
+                        (driver, Value::Null, "not_loaded", at, at, session)
+                    }
+                };
+            let metadata = self.claude_native_metadata(&driver);
             out.provider_threads.push(json!({
                 "id": id,
                 "driver": driver,
@@ -419,8 +485,8 @@ impl Thread {
                 "contextUsage": self.context_usage(),
                 "nativeMetadata": metadata,
                 "goal": null,
-                "createdAt": created_at,
-                "updatedAt": updated_at
+                "createdAt": iso(created_at),
+                "updatedAt": iso(updated_at)
             }));
         }
         out.messages
@@ -561,7 +627,14 @@ impl Thread {
             "extensionStatuses": [],
             "id": id,
             "lastError": if crashed { json!(provider::CODEX_STREAM_CLOSED) } else { Value::Null },
-            "model": row["modelSelection"]["model"],
+            // The model of the latest run sent on it.
+            "model": self
+                .runs
+                .iter()
+                .rev()
+                .find(|run| self.provider.runs.contains_key(&run.id) || self.starting(run))
+                .and_then(|run| run.model_selection.as_deref())
+                .map_or(&row["modelSelection"]["model"], |selection| &selection["model"]),
             "providerInstanceId": instance,
             "status": if crashed { "error" } else if stopped.is_some() { "stopped" } else { "ready" },
             "updatedAt": iso(if crashed { thread.updated_at } else { stopped.unwrap_or(thread.created_at) })
@@ -1409,6 +1482,8 @@ mod tests {
             resend_owed: false,
             resends: 0,
             wire_id: None,
+            driver: None,
+            model_selection: None,
         };
         let mut live = thread(run.clone());
         for event in [
@@ -1539,6 +1614,7 @@ mod tests {
         assert!(live.projection()["messages"].as_array().unwrap().is_empty());
         for event in [
             ProviderEvent::TurnItemDelta {
+                held: false,
                 item_id: "msg".into(),
                 delta: "Hi".into(),
             },
@@ -1683,5 +1759,81 @@ mod tests {
         );
         assert_eq!(live.projection()["runs"][0]["status"], "interrupted");
         assert!(live.projection()["runs"][0]["completedAt"].is_string());
+    }
+
+    #[test]
+    fn a_sent_run_has_its_pending_records_until_its_cli_reports() {
+        let run_id = Uuid::new_v4();
+        let mut live = thread(
+            serde_json::from_value(json!({
+                "id": run_id, "thread_id": "t1", "provider": "default", "status": "running",
+                "started_at": 1, "finished_at": null, "error": null, "user_message_id": null,
+                "driver": "codex", "model_selection": {"instanceId": "codex", "model": "m"}
+            }))
+            .unwrap(),
+        );
+        let projection = live.projection();
+        assert_eq!(projection["runs"][0]["status"], "starting");
+        assert_eq!(projection["runs"][0]["startedAt"], Value::Null);
+        assert_eq!(projection["attempts"][0]["status"], "pending");
+        assert_eq!(projection["nodes"][0]["status"], "pending");
+        let pending = &projection["providerThreads"][0];
+        assert_eq!(pending["status"], "not_loaded");
+        assert_eq!(
+            pending["providerSessionId"],
+            "provider-session:provider-instance:codex:shared"
+        );
+        assert_eq!(
+            projection["thread"]["activeProviderThreadId"],
+            pending["id"]
+        );
+        assert_eq!(projection["runs"][0]["providerThreadId"], pending["id"]);
+        assert_eq!(
+            projection["checkpointScopes"][0]["providerThreadId"],
+            pending["id"]
+        );
+        // The CLI reports its thread: the same records, running.
+        live.provider.apply(
+            run_id,
+            &ProviderEvent::ProviderThread {
+                driver: "codex".into(),
+                native_thread_id: "thr".into(),
+                resumed: false,
+                model: None,
+            },
+            2,
+        );
+        let started = live.projection();
+        assert_eq!(started["runs"][0]["status"], "running");
+        assert_eq!(started["attempts"][0]["status"], "running");
+        assert_eq!(started["providerThreads"][0]["id"], pending["id"]);
+        assert_eq!(started["providerThreads"][0]["status"], "active");
+        // The thread's model changes during the run; the run keeps its own.
+        live.row["modelSelection"] = json!({"instanceId": "codex", "model": "other"});
+        assert_eq!(live.projection()["runs"][0]["modelSelection"]["model"], "m");
+    }
+
+    #[test]
+    fn a_queued_run_has_no_checkpoint_scope_until_it_is_sent() {
+        let run_id = Uuid::new_v4();
+        let mut live = thread(
+            serde_json::from_value(json!({
+                "id": run_id, "thread_id": "t1", "provider": "default", "status": "queued",
+                "started_at": 1, "finished_at": null, "error": null, "user_message_id": null,
+                "driver": "codex"
+            }))
+            .unwrap(),
+        );
+        // A deferred message's run waits in the queue: the reference has no
+        // scope yet.
+        assert_eq!(live.projection()["checkpointScopes"], json!([]));
+        live.runs[0].status = "running".into();
+        assert_eq!(
+            live.projection()["checkpointScopes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

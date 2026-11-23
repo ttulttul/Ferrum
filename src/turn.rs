@@ -204,13 +204,33 @@ const TEXT_FLUSH: Duration = Duration::from_millis(50);
 /// update of a flush carries the stream position of the newest delta in it,
 /// so a restart resumes after the text recorded and before the text that
 /// was still held, which the workspace then delivers again.
+///
+/// Text recorded before another event, rather than because its window
+/// ended, is recorded as `held` and shows only when the window ends, or not
+/// at all if its item ends first: live subscribers see streamed text when
+/// the reference's adapters send it, whatever else the turn reports
+/// meanwhile.
 #[derive(Default)]
 struct StreamedText {
     /// Text held per item, in the order the items first streamed.
     held: Vec<(String, String)>,
     /// The stream position of the newest held delta.
     position: Option<StreamPosition>,
+    /// Items whose text was recorded while held, to show when the window
+    /// ends unless their end comes first.
+    hidden: Vec<String>,
     flush_at: Option<crate::runtime::Wait>,
+}
+
+/// Why held text is recorded.
+enum Flush<'a> {
+    /// Its window ended, or the turn did: the text shows.
+    Window,
+    /// Another event of the turn is recorded next, here the end of the
+    /// item named, if any: the text is recorded first, in the stream's
+    /// order, but shows only when its window ends (or not at all, if its
+    /// item's end comes first), as the reference's adapters send it.
+    Before(Option<&'a str>),
 }
 
 impl StreamedText {
@@ -221,7 +241,7 @@ impl StreamedText {
         event: TurnEvent,
         position: Option<StreamPosition>,
     ) -> Option<TurnEvent> {
-        let TurnEvent::Provider(ProviderEvent::TurnItemDelta { item_id, delta }) = event else {
+        let TurnEvent::Provider(ProviderEvent::TurnItemDelta { item_id, delta, .. }) = event else {
             return Some(event);
         };
         if !delta.is_empty() {
@@ -240,10 +260,33 @@ impl StreamedText {
     }
 
     /// Record the held text, one update per item, and acknowledge the
-    /// deltas it was made of.
-    async fn flush<H: TurnHost>(&mut self, host: &H, run: &Run) {
-        self.flush_at = None;
-        let held = std::mem::take(&mut self.held);
+    /// deltas it was made of: shown when its window ends, else recorded as
+    /// `held` (see [`Flush`]).
+    async fn flush<H: TurnHost>(&mut self, host: &H, run: &Run, why: Flush<'_>) {
+        let mut held = std::mem::take(&mut self.held);
+        let shown = matches!(why, Flush::Window);
+        match why {
+            Flush::Window => {
+                self.flush_at = None;
+                // Text recorded while held shows now, with what came since.
+                for item in std::mem::take(&mut self.hidden) {
+                    if !held.iter().any(|(id, _)| *id == item) {
+                        held.push((item, String::new()));
+                    }
+                }
+            }
+            Flush::Before(ending) => {
+                for (item, _) in &held {
+                    if !self.hidden.contains(item) {
+                        self.hidden.push(item.clone());
+                    }
+                }
+                self.hidden.retain(|item| Some(item.as_str()) != ending);
+                if self.hidden.is_empty() {
+                    self.flush_at = None;
+                }
+            }
+        }
         let position = self.position.take();
         let count = held.len();
         for (index, (item_id, delta)) in held.into_iter().enumerate() {
@@ -254,7 +297,11 @@ impl StreamedText {
             let event = Event::RunProvider {
                 run_id: run.id,
                 thread_id: run.thread_id.clone(),
-                event: ProviderEvent::TurnItemDelta { item_id, delta },
+                event: ProviderEvent::TurnItemDelta {
+                    item_id,
+                    delta,
+                    held: !shown,
+                },
                 position: if last { position } else { None },
             };
             if let Err(error) = host.commit(event).await {
@@ -298,7 +345,7 @@ async fn record<H: TurnHost>(
                 match futures_util::future::select(receive, flush).await {
                     futures_util::future::Either::Left((next, _)) => next,
                     futures_util::future::Either::Right(_) => {
-                        text.flush(host, run).await;
+                        text.flush(host, run, Flush::Window).await;
                         continue;
                     }
                 }
@@ -306,7 +353,7 @@ async fn record<H: TurnHost>(
         };
         let Some(TurnItem { event, position }) = next else {
             // Events that stop without the turn's end still report what is held.
-            text.flush(host, run).await;
+            text.flush(host, run, Flush::Window).await;
             break;
         };
         if host.stopping() {
@@ -324,7 +371,17 @@ async fn record<H: TurnHost>(
         };
         // Held text is recorded before any later event: an item's end
         // carries its whole text, but its deltas come first, in order.
-        text.flush(host, run).await;
+        match &event {
+            // The turn's end shows what is held, as the reference flushes
+            // a turn's text when it ends.
+            TurnEvent::Exited(_) | TurnEvent::Provider(ProviderEvent::TurnTerminal { .. }) => {
+                text.flush(host, run, Flush::Window).await
+            }
+            TurnEvent::Provider(ProviderEvent::TurnItem { item }) if item.status != "running" => {
+                text.flush(host, run, Flush::Before(Some(&item.id))).await
+            }
+            _ => text.flush(host, run, Flush::Before(None)).await,
+        }
         match recorded(run, event, position) {
             Recorded::Event(event) => {
                 // An event that could not be recorded is not acknowledged,

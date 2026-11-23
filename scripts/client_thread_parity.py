@@ -40,7 +40,8 @@ notice and the continuation run, the provider session, each turn launch of the
 CLI (`cli launches`: a new session or a resumed one), and how soon after the
 server listened it sent the continuation (`continuation timing`). Known differences are listed
 in client_thread_parity_xfail.json; an entry that starts matching fails the
-suite until it is removed.
+suite until it is removed, unless its reason starts with "Racy:" (a race
+either server can win, so the check matches on some runs only).
 
 A restarted server has settled once it says its recovery has finished: its
 `server.startup` span in userdata/logs/server.trace.ndjson, which both servers
@@ -71,6 +72,9 @@ from client_initial_sync_parity import rpc
 from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, http, isolated_git_env, managed_server, path_without
 
 ROOT = Path(__file__).resolve().parents[1]
+# The start of an expected failure's reason that marks it a race: the check
+# matches on some runs and not on others, so matching does not fail the suite.
+RACY = "Racy:"
 FIXTURES = ROOT / "tests/fixtures/providers"
 # Each scenario: the thread's provider instance and model, and the recorded session its CLI replays.
 # A signed-in Grok (as provider_status_parity.py has it) whose ACP sessions answer a prompt with a title.
@@ -1564,6 +1568,9 @@ def provider_turns(args, credentials):
                 print(f"FAIL {label}")
                 for problem in problems[check][:40]:
                     print(f"  {problem}")
+            elif xfail[scenario["name"]][check].startswith(RACY):
+                # A race either server can win: matching is no news.
+                print(f"RACY {label}: matched this time")
             else:
                 failures += 1
                 print(f"XPASS {label}: remove it from client_thread_parity_xfail.json")
