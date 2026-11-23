@@ -1,8 +1,5 @@
 {
   "claude restart cli restored": {
     "nativeMetadata": "The reference hands the failed continuation's items to its retry as a context handoff (delta_since_target_last_seen), which Rust does not build, and counts the handoff in the session's attachment budget."
-  },
-  "codex thread tools": {
-    "live": "Racy: the pull-request syncs the thread tools start race the agent's next tool call (seen both matching, 1 of 8, and not): Rust reads a newly linked request right after its link, the reference through its sync reactor's queued sweep, so Rust's thread.pull-request-link-updated usually lands one link earlier."
   }
 }
