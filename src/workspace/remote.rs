@@ -1298,10 +1298,9 @@ mod tests {
             )
             .await
             .is_err());
-        assert_eq!(
-            workspace.terminal_metadata(),
-            json!({"type":"snapshot","terminals":[]})
-        );
+        let metadata = workspace.terminal_metadata();
+        assert_eq!(metadata["terminals"], json!([]));
+        assert!(metadata["managerId"].is_string());
     }
 
     /// A transport whose frames the test reads and answers by hand, as a
