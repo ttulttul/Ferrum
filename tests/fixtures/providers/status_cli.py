@@ -31,8 +31,9 @@ few seconds later, so a client sees the closed output, not a failed write;
 "closeInputAfter": n closes standard input before the nth reply instead,
 so every later write fails while the output is still open.
 
-Every launch appends its arguments to FAKE_PROVIDER_LOG.args; requests are
-appended to FAKE_PROVIDER_LOG.
+Every launch appends its arguments to FAKE_PROVIDER_LOG.args (and, with the
+variables a spec lists in "logEnv", both as JSON to FAKE_PROVIDER_LOG.launch);
+requests are appended to FAKE_PROVIDER_LOG.
 """
 import json
 import os
@@ -46,6 +47,12 @@ if log_path:
         out.write(" ".join(args) + "\n")
 with open(spec_path) as source:
     spec = json.load(source)
+# The environment variables a spec names in "logEnv", with the arguments, as JSON lines in
+# FAKE_PROVIDER_LOG.launch (unset ones as null).
+if log_path and spec.get("logEnv"):
+    with open(log_path + ".launch", "a") as out:
+        out.write(json.dumps({"args": args, "env": {name: os.environ.get(name) for name in spec["logEnv"]}},
+                             sort_keys=True) + "\n")
 
 
 def matches(entry):

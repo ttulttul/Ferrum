@@ -24,6 +24,16 @@ pub(super) struct AcpSession {
     pub(super) notifications: tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
 }
 
+/// How the agent's own requests are answered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Requests {
+    /// A permission is cancelled, anything else is not found.
+    Cancel,
+    /// Text generation's refusals: a permission cancelled, an elicitation
+    /// declined, a tool (file, terminal, extension) refused; each reported.
+    RefuseTools,
+}
+
 /// Why a request got no result.
 #[derive(Debug)]
 pub(super) enum AcpError {
@@ -49,11 +59,29 @@ impl AcpSession {
         env: &ProcessEnv,
         cwd: &Path,
     ) -> Result<Self, AcpError> {
+        Self::start_with(binary, args, env, cwd, Requests::Cancel)
+    }
+
+    /// `start`, answering the agent's own requests by `requests`. With
+    /// [`Requests::RefuseTools`] every request also arrives as a
+    /// `"$request"` notification, and lines of output that are not JSON as
+    /// `"$output"` ones.
+    pub(super) fn start_with(
+        binary: &str,
+        args: &[String],
+        env: &ProcessEnv,
+        cwd: &Path,
+        requests: Requests,
+    ) -> Result<Self, AcpError> {
         let mut command = super::command(binary, args, env, cwd);
         command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            .stderr(if requests == Requests::RefuseTools {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            });
         let mut child = command.spawn().map_err(|_| AcpError::Spawn)?;
         let stdin = child.stdin.take().ok_or(AcpError::Spawn)?;
         let stdout = child.stdout.take().ok_or(AcpError::Spawn)?;
@@ -62,18 +90,39 @@ impl AcpSession {
         let stdin = Arc::new(tokio::sync::Mutex::new(stdin));
         let answers = stdin.clone();
         let (notify, notifications) = tokio::sync::mpsc::unbounded_channel();
+        let refuse = requests == Requests::RefuseTools;
+        if let Some(stderr) = child.stderr.take() {
+            let notify = notify.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = notify.send(("$output".to_owned(), json!(line)));
+                }
+            });
+        }
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                    if refuse {
+                        let _ = notify.send(("$output".to_owned(), json!(line)));
+                    }
                     continue;
                 };
                 if let Some(method) = message["method"].as_str() {
                     match message.get("id").filter(|id| !id.is_null()) {
                         Some(id) => {
+                            if refuse {
+                                let _ = notify.send(("$request".to_owned(), json!(method)));
+                            }
                             let reply = if method == "session/request_permission" {
                                 json!({"jsonrpc": "2.0", "id": id,
                                     "result": {"outcome": {"outcome": "cancelled"}}})
+                            } else if refuse && method.contains("elicitation") {
+                                json!({"jsonrpc": "2.0", "id": id, "result": {"action": "decline"}})
+                            } else if refuse {
+                                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601,
+                                    "message": "Tools and user input are disabled for text generation."}})
                             } else {
                                 json!({"jsonrpc": "2.0", "id": id,
                                     "error": {"code": -32601, "message": "Method not found"}})

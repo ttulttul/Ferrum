@@ -20,15 +20,15 @@ const DAILY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 const PROD_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 
 /// The instance's sign-in settings (`AntigravityAuthConfig`).
-struct Auth {
-    method: String,
-    api_key: String,
-    gcp_project: String,
-    gcp_location: String,
+pub(super) struct Auth {
+    pub(super) method: String,
+    pub(super) api_key: String,
+    pub(super) gcp_project: String,
+    pub(super) gcp_location: String,
 }
 
 impl Auth {
-    fn of(config: &Value) -> Self {
+    pub(super) fn of(config: &Value) -> Self {
         let text = |key: &str| config[key].as_str().unwrap_or("").to_owned();
         Self {
             method: config["authMethod"]
@@ -53,7 +53,7 @@ impl Auth {
     }
 
     /// `antigravityAuthConfigIssue`.
-    fn config_issue(&self) -> Option<&'static str> {
+    pub(super) fn config_issue(&self) -> Option<&'static str> {
         let gcp = !self.gcp_project.is_empty() && !self.gcp_location.is_empty();
         match self.method.as_str() {
             "oauth-business" if !gcp => Some(
@@ -89,9 +89,12 @@ fn target() -> (&'static str, &'static str) {
     (platform, arch)
 }
 
-/// A resolved runtime (`AntigravityExecutable`): its version, when known.
-struct Executable {
-    version: Option<String>,
+/// A resolved runtime (`AntigravityExecutable`): what to run, the harness
+/// beside an ACP server (none for the agy CLI), and its version, when known.
+pub(super) struct Executable {
+    pub(super) version: Option<String>,
+    pub(super) path: PathBuf,
+    pub(super) harness: Option<PathBuf>,
 }
 
 fn is_executable_file(path: &Path, bytes: Option<u64>) -> bool {
@@ -172,6 +175,10 @@ fn completed_release(versions: &Path, release: &str) -> Result<Executable, Strin
     }
     Ok(Executable {
         version: record["version"].as_str().map(str::to_owned),
+        path: directory.join(executable_name),
+        harness: record["harness"]["name"]
+            .as_str()
+            .map(|name| directory.join(name)),
     })
 }
 
@@ -203,15 +210,26 @@ fn from_external(candidate: &Path, versions: &Path) -> Result<Option<Executable>
             return completed_release(&real_versions, &name).map(Some);
         }
     }
+    // The candidate as found, not its real path, so version-manager shims work.
     if is_cli(&[candidate, &real]) {
-        return Ok(Some(Executable { version: None }));
+        return Ok(Some(Executable {
+            version: None,
+            path: candidate.to_path_buf(),
+            harness: None,
+        }));
     }
     let harness = if target().0 == "win32" {
         "localharness_external.exe"
     } else {
         "localharness_external"
     };
-    Ok(is_executable_file(&directory.join(harness), None).then_some(Executable { version: None }))
+    Ok(
+        is_executable_file(&directory.join(harness), None).then(|| Executable {
+            version: None,
+            path: candidate.to_path_buf(),
+            harness: Some(directory.join(harness)),
+        }),
+    )
 }
 
 /// `commandCandidates`: a path as given, else each PATH entry's match.
@@ -237,7 +255,7 @@ fn candidates(command: &str, env: &ProcessEnv) -> Vec<PathBuf> {
 }
 
 /// `AntigravityInstallation.resolve`.
-fn resolve(
+pub(super) fn resolve_executable(
     base: &Path,
     binary_path: &str,
     env: &ProcessEnv,
@@ -312,7 +330,7 @@ fn profile_directory(state_dir: &Path, instance_id: &str) -> PathBuf {
 
 /// `isAntigravityTextGenerationAvailable`: no global hooks or MCP servers
 /// in the profile that could act before a helper denies a tool.
-fn text_generation_available(profile: &Path) -> bool {
+pub(super) fn text_generation_available(profile: &Path) -> bool {
     for name in ["hooks.json", "mcp_config.json"] {
         let path = profile.join("config").join(name);
         if !path.exists() {
@@ -695,7 +713,7 @@ pub(super) async fn check(
     let profile = profile_directory(state_dir, instance_id);
     let probe = match auth.config_issue() {
         Some(issue) => Err((issue.to_owned(), false)),
-        None => resolve(
+        None => resolve_executable(
             base,
             config["binaryPath"].as_str().unwrap_or(""),
             env,
