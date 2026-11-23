@@ -1554,7 +1554,38 @@ async fn settle_next<H: CommandHost>(
             update_queued_wake(&**state, parent_id, run_id, &message_id, &ids, &tasks).await?;
         }
     }
+    if work == "result_available" {
+        release_finished_delegate(state, child_id, &child).await?;
+    }
     Ok(true)
+}
+
+/// `releaseFinishedDelegateSessions`: a child whose work is done gives up
+/// its own provider process (a session that serves one thread, as
+/// Claude's), so it does not linger until the idle timeout; a follow-up
+/// resumes the session in a new one. Unawaited background work keeps it.
+async fn release_finished_delegate<H: CommandHost>(
+    state: &Arc<H>,
+    child_id: &str,
+    child: &Value,
+) -> anyhow::Result<()> {
+    let capabilities: Value =
+        serde_json::from_str(include_str!("../provider_capabilities.json")).unwrap_or_default();
+    let background = records(child, "providerThreads").iter().any(|thread| {
+        thread["pendingBackgroundTasks"]
+            .as_array()
+            .is_some_and(|tasks| !tasks.is_empty())
+    });
+    let per_thread = records(child, "providerSessions").iter().any(|session| {
+        !matches!(session["status"].as_str(), Some("stopped" | "error"))
+            && capabilities[session["providerInstanceId"].as_str().unwrap_or_default()]["sessions"]
+                ["supportsMultipleProviderThreadsPerSession"]
+                == false
+    });
+    if background || !per_thread {
+        return Ok(());
+    }
+    super::detach_session(state, child_id, "Delegated task finished.").await
 }
 
 /// A delegated task's live status (`finalizeAppOwnedSubagentTask` with a
