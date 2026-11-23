@@ -2152,7 +2152,43 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         return Reply::Success(json!({}));
     }
     if method == "orchestration.dispatchCommand" {
-        return match dispatch_orchestration_command(state.clone(), params.clone()).await {
+        // `ThreadMessageIntake.dispatchCommand`: a message's pending uploads
+        // become the thread's own attachments before it is dispatched, and
+        // the copies go again if the dispatch is refused.
+        let mut command = params.clone();
+        let mut claimed = Vec::new();
+        if command["type"] == "message.dispatch" {
+            let attachments = command["attachments"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
+            match crate::attachment_claims::claim(
+                &state.paths.attachments,
+                &thread_id,
+                &attachments,
+            ) {
+                Ok(done) => {
+                    if !attachments.is_empty() {
+                        command["attachments"] = json!(done.attachments);
+                    }
+                    claimed = done.paths;
+                }
+                Err(detail) => {
+                    return Reply::Failure(json!({"_tag":"Fail","error":{
+                        "_tag":"OrchestrationV2DispatchCommandError",
+                        "commandId":command["commandId"],"commandType":command["type"],
+                        "message":detail,"detail":detail,
+                        "cause":{"_tag":"AttachmentClaimError","message":detail},
+                    }}));
+                }
+            }
+        }
+        let dispatched = dispatch_orchestration_command(state.clone(), command).await;
+        if dispatched.is_err() {
+            crate::attachment_claims::release(&claimed);
+        }
+        return match dispatched {
             Ok(sequence) => Reply::Success(json!({"sequence":sequence})),
             Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
         };

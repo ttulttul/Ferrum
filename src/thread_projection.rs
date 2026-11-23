@@ -13,6 +13,17 @@ fn ordered(fields: &[&str], row: &Value) -> Value {
     )
 }
 
+/// The attachments a message carries, as its wire fields keep them.
+pub(crate) fn message_attachments(message: &crate::ConversationMessage) -> Value {
+    message
+        .wire
+        .as_ref()
+        .and_then(|wire| wire.get("attachments"))
+        .filter(|attachments| attachments.is_array())
+        .cloned()
+        .unwrap_or_else(|| json!([]))
+}
+
 pub(crate) fn iso(seconds: u64) -> String {
     auth_service::iso((seconds as i64).saturating_mul(1000))
 }
@@ -459,7 +470,7 @@ impl Thread {
                     "messageId": message.id,
                     "inputIntent": "steer",
                     "text": message.content,
-                    "attachments": []
+                    "attachments": message_attachments(message)
                 });
                 // A steered notification, such as a delegated task's delivery,
                 // shows as its card (`notificationTurnItem`).
@@ -545,7 +556,7 @@ impl Thread {
                     "messageId": message.id,
                     "inputIntent": "turn_start",
                     "text": message.content,
-                    "attachments": []
+                    "attachments": message_attachments(message)
                 }),
                 "assistant" => json!({
                     "type": "assistant_message",

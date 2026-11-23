@@ -13,6 +13,8 @@ mod agent_instructions;
 pub mod asset_grant;
 #[cfg(feature = "native")]
 pub mod asset_http;
+#[cfg(feature = "native")]
+mod attachment_claims;
 pub mod auth_service;
 #[cfg(feature = "native")]
 pub mod cloud_link;

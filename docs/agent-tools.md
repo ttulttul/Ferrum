@@ -210,7 +210,15 @@ schemas.
    delivery as a queued run at once; Rust, which holds queued runs until a client starts
    them, records the delivery's run when the turn ends, so only the final state matches.
 4c. **Attachments** (pending): `t3_attachment_prepare_upload`, `t3_attachment_discard`,
-   `t3_thread_send_attachments`.
+   `t3_thread_send_attachments`. What they build on is served: a `message.dispatch` claims its
+   pending uploads for the thread (`ThreadMessageIntake`, `src/attachment_claims.rs`), the
+   message and its turn item keep them, and the run's provider turn carries them in the
+   optional `ProviderTurn.attachments` (omitted when empty, so the agentd wire is unchanged
+   without attachments). Codex gets the text naming each file and each supported image as a
+   data URL; Claude gets each image as a base64 block, then that text. Not yet: attachments on
+   steers, queued-run edits, runtime-request answers and thread launches, Claude's PDF document
+   blocks and its image budget cap, captured-window context, document text extraction, and a
+   remote agentd reading the server's attachment files.
 4d. **Secrets** (served): `request_secret` shows a card in the caller's running turn
    (`secret_request.record`, placed among its run's items as the reference places it) and
    waits for `secrets.answerRequest`, up to its timeout or the run's end, which close the card.
