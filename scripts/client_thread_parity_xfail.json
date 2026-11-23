@@ -11,6 +11,9 @@
   "claude approval declined": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   },
+  "claude approval interrupted": {
+    "live": "Racy: #39502 (ProviderCommitBatch) combines an item's queued snapshots when they queue together; whether the command item's update and its approval land in one batch is timing, so the reference sometimes sends one fewer command_execution update than Rust (seen both matching and differing)."
+  },
   "claude approval-required": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   },
@@ -60,7 +63,8 @@
   },
   "codex thread tools": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated).",
-    "turn app-servers": "#39247: orchestrator_capabilities rescans the project's Codex skills (refreshWorkspaceSnapshot), starting a skills-helper Codex app-server that Rust does not start."
+    "turn app-servers": "#39247: orchestrator_capabilities rescans the project's Codex skills (refreshWorkspaceSnapshot), starting a skills-helper Codex app-server that Rust does not start.",
+    "agent mcp": "Racy: since #197 Rust reads a newly linked pull request right after the link commits, apart from the tool call, so the agent's next list_thread_pull_requests can come before that read and show the link without its branches and draft state (seen both matching and differing)."
   },
   "codex title": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
