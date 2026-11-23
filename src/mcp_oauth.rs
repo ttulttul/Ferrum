@@ -241,6 +241,11 @@ pub trait McpHost: AuthHost {
     ) -> HostFuture<Result<Vec<Value>, ()>> {
         Box::pin(async { Err(()) })
     }
+    /// The server's secrets directory, where the secrets the user gives an
+    /// agent (`request_secret`) are kept; `None` where it keeps none.
+    fn secrets_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     /// The stored link to `environment_id`, if this server keeps links.
     fn peer_link(&self, _environment_id: &str) -> Option<PeerLinkInfo> {
         None

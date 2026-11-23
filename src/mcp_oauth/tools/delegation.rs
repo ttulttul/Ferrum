@@ -19,7 +19,7 @@ fn records(value: &Value, key: &str) -> Vec<Value> {
     value[key].as_array().cloned().unwrap_or_default()
 }
 
-fn thread_scope<'a>(
+pub(super) fn thread_scope<'a>(
     caller: &'a Caller,
     operation: &str,
 ) -> Result<&'a super::super::ThreadScope, Refusal> {
@@ -32,7 +32,7 @@ fn thread_scope<'a>(
 }
 
 /// `stableCommandId`.
-fn stable_command_id(caller: &Caller, operation: &str, key: &str) -> String {
+pub(super) fn stable_command_id(caller: &Caller, operation: &str, key: &str) -> String {
     let part = crate::thread_projection::uri_component;
     [
         "command".to_owned(),

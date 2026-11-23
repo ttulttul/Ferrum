@@ -9,6 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
+mod secret_request;
 mod steer;
 
 /// What command dispatch needs from the server beyond the control state.
@@ -872,6 +873,7 @@ async fn apply_command<H: CommandHost>(
     let thread_id = command.get("threadId").and_then(serde_json::Value::as_str);
     match command_type {
         "link_request.record" => return record_link_request(state, command, receipt).await,
+        "secret_request.record" => return secret_request::record(state, command, receipt).await,
         "thread.create" => {
             let project_id = command
                 .get("projectId")
@@ -2596,119 +2598,6 @@ async fn apply_command<H: CommandHost>(
         "thread.background-work.settle" => {
             let id = thread_id.unwrap_or_default();
             return Ok(state.commit_receipted(Event::ThreadPatched {thread_id:id.to_owned(),patch:json!({"row":{"backgroundWorkSettled":true,"backgroundWorkSettleReason":command.get("reason").cloned().unwrap_or(Value::Null)}})},Some(receipt.clone())).await?.id);
-        }
-        "secret_request.record" => {
-            let id = thread_id.unwrap_or_default();
-            let mut row = state
-                .store
-                .read()
-                .await
-                .threads
-                .get(id)
-                .map(|t| t.stored_row())
-                .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
-            let now = crate::auth_service::iso(crate::auth_service::now());
-            let mut items = row["turnItems"].as_array().cloned().unwrap_or_default();
-            let turn_item_id = command["turnItemId"].as_str().unwrap_or_default();
-            let existing = items
-                .iter()
-                .find(|item| item["id"].as_str() == Some(turn_item_id))
-                .cloned();
-            let unchanged = existing.as_ref().is_some_and(|item| {
-                (command_type == "secret_request.record"
-                    && item["secretStatus"] != "pending"
-                    && command["secretStatus"] != "pending")
-                    || (command_type == "link_request.record"
-                        && item["linkStatus"] != "pending"
-                        && command["linkStatus"] != "pending")
-            });
-            let item = if unchanged {
-                existing.unwrap()
-            } else if command_type == "secret_request.record" {
-                let pending = command["secretStatus"] == "pending";
-                json!({
-                    "id":turn_item_id,
-                    "threadId":id,
-                    "runId":command["runId"],
-                    "nodeId":command["nodeId"],
-                    "providerThreadId":Value::Null,
-                    "providerTurnId":Value::Null,
-                    "nativeItemRef":Value::Null,
-                    "parentItemId":Value::Null,
-                    "ordinal":existing.as_ref().and_then(|item| item["ordinal"].as_u64()).unwrap_or(items.len() as u64),
-                    "status":if pending {"waiting"} else if command["secretStatus"] == "saved" {"completed"} else {"cancelled"},
-                    "title":command["label"],
-                    "startedAt":existing.as_ref().and_then(|item| item["startedAt"].as_str()).unwrap_or(&now),
-                    "completedAt":if pending {Value::Null} else {json!(now)},
-                    "updatedAt":now,
-                    "type":"secret_request",
-                    "label":command["label"],
-                    "reason":command["reason"],
-                    "url":command.get("url").cloned().unwrap_or(Value::Null),
-                    "placeholder":command.get("placeholder").cloned().unwrap_or(Value::Null),
-                    "delivery":command.get("delivery").cloned().unwrap_or(Value::Null),
-                    "secretStatus":command["secretStatus"]
-                })
-            } else {
-                let pending = command["linkStatus"] == "pending";
-                let status = if pending {
-                    "waiting"
-                } else if command["linkStatus"] == "linked" {
-                    "completed"
-                } else if command["linkStatus"] == "failed" {
-                    "failed"
-                } else {
-                    "cancelled"
-                };
-                let mut item = json!({
-                    "id":turn_item_id,
-                    "threadId":id,
-                    "runId":command["runId"],
-                    "nodeId":command["nodeId"],
-                    "providerThreadId":Value::Null,
-                    "providerTurnId":Value::Null,
-                    "nativeItemRef":Value::Null,
-                    "parentItemId":Value::Null,
-                    "ordinal":existing.as_ref().and_then(|item| item["ordinal"].as_u64()).unwrap_or(items.len() as u64),
-                    "status":status,
-                    "title":command.get("label").cloned().unwrap_or_else(|| command.get("url").cloned().unwrap_or(json!("Link an environment"))),
-                    "startedAt":existing.as_ref().and_then(|item| item["startedAt"].as_str()).unwrap_or(&now),
-                    "completedAt":if pending {Value::Null} else {json!(now)},
-                    "updatedAt":now,
-                    "type":"link_request",
-                    "url":command.get("url").cloned().unwrap_or(Value::Null),
-                    "reason":command["reason"],
-                    "linkStatus":command["linkStatus"]
-                });
-                for key in [
-                    "environmentId",
-                    "label",
-                    "hint",
-                    "requestedAccess",
-                    "linkedEnvironmentId",
-                    "linkedLabel",
-                    "linkedAccess",
-                    "failure",
-                ] {
-                    if let Some(value) = command.get(key) {
-                        item[key] = value.clone();
-                    }
-                }
-                item
-            };
-            items.retain(|candidate| candidate["id"] != turn_item_id);
-            items.push(item);
-            row["turnItems"] = json!(items);
-            return Ok(state
-                .commit_receipted(
-                    Event::ThreadPatched {
-                        thread_id: id.to_owned(),
-                        patch: json!({"row":row}),
-                    },
-                    Some(receipt.clone()),
-                )
-                .await?
-                .id);
         }
         "notification.delivery.accept" => {
             let thread_id = thread_id.unwrap_or_default();
