@@ -30,6 +30,20 @@ const PATH_KEYS: &[&str] = &[
     "newPath",
 ];
 
+/// `raw` with a leading `~` replaced by `$HOME`, as a clone's destination
+/// is read (`source_control_clone::normalize_destination`).
+fn expand_home(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let home = std::env::var("HOME").unwrap_or_default();
+    if trimmed == "~" {
+        home
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        format!("{}/{rest}", home.trim_end_matches('/'))
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 /// How many symlinks one path may pass through before it is refused.
 const MAX_LINKS: usize = 40;
 
@@ -159,6 +173,15 @@ impl Confinement {
         }
         if op_name == op::FS_BROWSE {
             self.check_browse(args)?;
+        }
+        if op_name == op::CLONE_CALL {
+            // The tracker expands `~` in a clone's destination, so judge the
+            // folder the clone would really use.
+            if let Some(raw) = args["input"]["destinationPath"].as_str() {
+                let mut args = args.clone();
+                args["input"]["destinationPath"] = Value::String(expand_home(raw));
+                return self.walk(&args, None);
+            }
         }
         self.walk(args, None)
     }

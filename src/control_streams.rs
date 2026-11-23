@@ -30,6 +30,7 @@ pub(crate) const METHODS: &[&str] = &[
     "subscribeVcsStatus",
     "subscribeVcsBranch",
     "subscribeDiscoveredLocalServers",
+    "subscribeProjectClones",
 ];
 
 pub(crate) fn serves(method: &str) -> bool {
@@ -43,6 +44,7 @@ fn bus(method: &str) -> Option<&'static str> {
         "subscribeTerminalMetadata" => op::TERM_METADATA,
         "subscribePreviewEvents" => op::PREVIEW_EVENTS,
         "subscribeDeviceState" => op::DEVICE_EVENTS,
+        "subscribeProjectClones" => op::CLONE_EVENTS,
         _ => return None,
     })
 }
@@ -94,6 +96,13 @@ pub(crate) async fn open(
             vec![json!([snapshot])]
         }
         "subscribePreviewEvents" => Vec::new(),
+        "subscribeProjectClones" => {
+            // Every clone's snapshot, then the list after each change, as
+            // the native server streams them.
+            let clones = workspace.clone_snapshots();
+            subscription.cursor["clones"] = clones.clone();
+            vec![json!([clones])]
+        }
         "subscribeDeviceState" => {
             let mut state = workspace.device_state();
             if state.is_null() {
@@ -228,6 +237,18 @@ async fn bus_event(
             vec![json!([event])]
         }
         "subscribePreviewEvents" => vec![json!([event])],
+        "subscribeProjectClones" => {
+            let clones = if catch_up || !event.is_array() {
+                workspace.clone_snapshots()
+            } else {
+                event.clone()
+            };
+            if cursor["clones"] == clones {
+                return Vec::new();
+            }
+            cursor["clones"] = clones.clone();
+            vec![json!([clones])]
+        }
         "subscribeDeviceState" => {
             if cursor["state"] == *event {
                 return Vec::new();

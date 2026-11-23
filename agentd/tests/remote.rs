@@ -640,3 +640,61 @@ async fn cancelling_a_remote_provider_turn_interrupts_it() {
     let sent = std::fs::read_to_string(&log).unwrap();
     assert!(sent.contains("\"turn/interrupt\""), "{sent}");
 }
+
+#[tokio::test]
+async fn project_clones_run_in_agentd_and_report_progress_to_the_server() {
+    let s = setup().await;
+    // A repository to clone, outside the served root, by path.
+    let origin = s._dir.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    std::fs::write(origin.join("README.md"), "# origin\n").unwrap();
+    git(&origin, &["add", "."]);
+    git(&origin, &["commit", "-q", "-m", "first"]);
+    let destination = s.root.join("projects/cloned");
+    let start = json!({"projectId": "p1", "title": "cloned",
+        "remoteUrl": origin.to_string_lossy(), "destinationPath": destination.to_string_lossy()});
+
+    let claim = s.remote.clone_call("claim", &start).await.unwrap().unwrap();
+    assert_eq!(claim["projectId"], "p1");
+    assert_eq!(claim["cwd"], json!(destination.to_string_lossy()));
+    // A second claim of the same folder is refused while the first is held.
+    let again = s
+        .remote
+        .clone_call(
+            "claim",
+            &json!({"projectId": "p2", "title": "x",
+        "remoteUrl": origin.to_string_lossy(), "destinationPath": destination.to_string_lossy()}),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(again["_tag"], "SourceControlRepositoryError", "{again}");
+
+    let launched = s
+        .remote
+        .clone_call("launch", &json!({"projectId": "p1"}))
+        .await;
+    assert_eq!(launched, Some(Ok(json!(true))));
+    // The server hears of the clone through `clone.events`, up to its end.
+    wait_until(|| s.remote.clone_snapshots()[0]["phase"] == "done").await;
+    assert!(destination.join("README.md").is_file());
+    assert_eq!(s.local.clone_snapshots(), s.remote.clone_snapshots());
+
+    // A destination outside the served root, `~` included, is refused with
+    // agentd's reason.
+    // `setup` gave this process a temporary HOME, outside the served root.
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let outside = s
+        .remote
+        .clone_call(
+            "claim",
+            &json!({"projectId": "p3", "title": "x",
+        "remoteUrl": origin.to_string_lossy(), "destinationPath": "~/elsewhere"}),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(outside.to_string().contains("outside"), "{outside}");
+    assert!(!home.join("elsewhere").exists());
+}
