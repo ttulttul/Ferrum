@@ -17,6 +17,7 @@ pub(crate) mod themes;
 mod thread_credentials;
 mod tools;
 pub use thread_credentials::ThreadScope;
+pub(crate) use tools::unserved_tool_names;
 pub(crate) use tools::{answer_matches, card_command};
 mod transport;
 use axum::{

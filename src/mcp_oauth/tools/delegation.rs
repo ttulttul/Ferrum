@@ -94,10 +94,12 @@ fn created_thread_title(
 }
 
 /// `providerConstraints`: why an instance cannot run a child task.
-fn provider_constraints(provider: &Value) -> Vec<String> {
+pub(super) fn provider_constraints(provider: &Value) -> Vec<String> {
     let mut out = Vec::new();
     let driver = provider["driver"].as_str().unwrap_or_default();
-    if !matches!(driver, "codex" | "claudeAgent") {
+    // Rust runs children on Codex and Claude only. A disabled instance says
+    // so first, as every instance the reference lists runs its children.
+    if !matches!(driver, "codex" | "claudeAgent") && provider["enabled"] != false {
         out.push("No V2 provider adapter is registered.".into());
     }
     if provider["available"] == false {

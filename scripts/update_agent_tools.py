@@ -21,6 +21,8 @@ SOURCE = ROOT / "src/mcp_oauth/tools.rs"
 DOC = ROOT / "docs/agent-tools.md"
 # The reference's theme constants the t3_theme_* tools use (scripts/reference_theme_constants.mjs).
 THEMES = ROOT / "src/mcp_oauth/themes.json"
+# The reference's agent instructions its provider adapters send (scripts/reference_agent_instructions.mjs).
+INSTRUCTIONS = ROOT / "src/mcp_oauth/instructions.json"
 START, END = "<!-- tools:start -->", "<!-- tools:end -->"
 
 LISTED_TO = {
@@ -115,7 +117,11 @@ def main() -> int:
     themes_text = subprocess.run(
         ["node", str(ROOT / "scripts/reference_theme_constants.mjs"), str(checkout)],
         check=True, capture_output=True, text=True).stdout
-    outputs = ((TOOLS, tools_text), (DOC, doc_text), (THEMES, themes_text))
+    instructions_text = subprocess.run(
+        ["node", str(ROOT / "scripts/reference_agent_instructions.mjs"), str(checkout)],
+        check=True, capture_output=True, text=True).stdout
+    outputs = ((TOOLS, tools_text), (DOC, doc_text), (THEMES, themes_text),
+               (INSTRUCTIONS, instructions_text))
     stale = [path for path, text in outputs if not path.exists() or path.read_text() != text]
     if check:
         for path in stale:
