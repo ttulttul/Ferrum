@@ -1122,7 +1122,6 @@ const NOT_YET_IN_THE_CONTROL_PLANE: &[&str] = &[
     "orchestration.stopWorkflow",
     "orchestration.forceStopThread",
     "orchestration.getTurnItem",
-    "orchestration.launchThread",
     "orchestration.subscribeCommandOutput",
 ];
 
@@ -1237,6 +1236,74 @@ fn exit(replies: &[String]) -> Value {
     let reply: Value = serde_json::from_str(replies.last().expect("a reply")).unwrap();
     assert_eq!(reply["_tag"], "Exit", "{reply}");
     reply["exit"].clone()
+}
+
+#[tokio::test]
+async fn desktop_first_send_creates_a_scratch_folder_and_dispatches_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let url = agentd(dir.path(), &root).await;
+    let documents = Arc::new(MemoryStore::new());
+    write_settings(
+        &documents,
+        &fake_cli_settings(&fixture("codex_turn.json"), &dir.path().join("cli.jsonl")),
+    );
+    let log = SharedLog::default();
+    let server = Server::start(1, &url, &documents, &log, Vec::new()).await;
+    let scratch = exit(&request(&server, "projects.ensureScratch", json!({})).await);
+    assert_eq!(scratch["_tag"], "Success", "{scratch}");
+    let launch = json!({
+        "commandId":"desktop-first-send","projectId":scratch["value"]["projectId"],
+        "title":"Scratch check","modelSelection":{"instanceId":"codex","model":"fixture"},
+        "runtimeMode":"full-access","interactionMode":"default","workspaceStrategy":{"type":"root"},
+        "initialMessage":{"text":"Inspect this workspace","messageId":"msg-1","attachments":[]}
+    });
+    let (first, replay) = tokio::join!(
+        request(&server, "orchestration.launchThread", launch.clone()),
+        request(&server, "orchestration.launchThread", launch),
+    );
+    let first = exit(&first);
+    let replay = exit(&replay);
+    let (first, replay) = if first["value"]["resumed"] == true {
+        (replay, first)
+    } else {
+        (first, replay)
+    };
+    assert_eq!(first["_tag"], "Success", "{first}");
+    let result = &first["value"];
+    let folder = result["projection"]["thread"]["worktreePath"]
+        .as_str()
+        .unwrap();
+    assert!(std::path::Path::new(folder).is_dir(), "{folder}");
+    assert!(folder.contains("/scratch/"), "{folder}");
+    assert_eq!(result["resumed"], false);
+    assert_eq!(replay["_tag"], "Success", "{replay}");
+    let replay = &replay["value"];
+    assert_eq!(replay["resumed"], true);
+    assert_eq!(replay["threadId"], result["threadId"]);
+    assert_eq!(replay["projection"]["thread"]["worktreePath"], folder);
+    assert_eq!(replay["projection"]["runs"].as_array().unwrap().len(), 1);
+    wait_until(|| log.run_status().is_some()).await;
+    let projection = exit(
+        &request(
+            &server,
+            "orchestration.getThreadProjection",
+            json!({"threadId":result["threadId"]}),
+        )
+        .await,
+    );
+    assert_eq!(
+        projection["value"]["runs"][0]["status"], "completed",
+        "{projection}"
+    );
+    assert!(projection["value"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |m| m["role"] == "assistant" && m["text"].as_str().is_some_and(|text| !text.is_empty())
+        ));
 }
 
 #[tokio::test]
