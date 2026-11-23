@@ -250,7 +250,10 @@ fn html_render_reference(value: &Value) -> Option<Value> {
             .collect();
         if heights.len() == entries.len() {
             heights.sort_by_key(|(width, _)| *width);
-            out["heights"] = json!(heights.iter().map(|(w, h)| json!([w, h])).collect::<Vec<_>>());
+            out["heights"] = json!(heights
+                .iter()
+                .map(|(w, h)| json!([w, h]))
+                .collect::<Vec<_>>());
         }
     }
     Some(out)
@@ -446,6 +449,27 @@ pub(crate) fn detail_item(item: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_html_render_reference_survives_compaction_as_a_client_reads_it() {
+        let output = json!({"structuredContent": {"htmlRender": {
+            "attachmentId": "thread-x-00000000-0000-4000-8000-000000000000-html",
+            "title": "  Chart  ",
+            "height": 4000.4,
+            "heights": [[728, 300.5], [320, 10]],
+        }, "message": "Shown."}});
+        let compact = compact_output(&output).expect("compact output");
+        assert_eq!(
+            compact["htmlRender"],
+            json!({"attachmentId": "thread-x-00000000-0000-4000-8000-000000000000-html", "title": "Chart", "height": 2000, "heights": [[320, 80], [728, 301]]})
+        );
+        // Heights that are not all valid are left out, the reference stays.
+        let bad = json!({"structuredContent": {"htmlRender": {"attachmentId": "a", "title": "", "height": 100, "heights": [[0, 5]]}}});
+        assert_eq!(
+            compact_output(&bad).unwrap()["htmlRender"],
+            json!({"attachmentId": "a", "title": "HTML", "height": 100})
+        );
+    }
 
     #[test]
     fn output_stays_out_of_the_wire_and_comes_back_in_detail() {

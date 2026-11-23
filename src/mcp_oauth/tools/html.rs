@@ -58,7 +58,9 @@ pub(super) async fn preview<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Valu
     }
     let source = match page_source(caller, a) {
         Ok(source) => source,
-        Err(Refusal::Failure(_, message)) => return Ok(image_failure("OrchestratorMcpFailure", message)),
+        Err(Refusal::Failure(_, message)) => {
+            return Ok(image_failure("OrchestratorMcpFailure", message))
+        }
         Err(other) => return Err(other),
     };
     let mut input = source;
