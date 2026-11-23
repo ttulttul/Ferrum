@@ -1338,6 +1338,10 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
                  and sum(r.get("status") not in ACTIVE_RUN for r in p.get("runs", [])) >= settled_runs
                  and not effects_due(root, offset()), 40)
         if follow_up is not None:
+            if scenario.get("awaitStatus"):
+                # The restarted server's provider check settles first: its snapshot (the
+                # models it lists, say) is what the turn's agent reads.
+                provider_status(url, cookie, scenario["instance"], root)
             runs = len(thread_projection(url, cookie).get("runs", []))
             rpc(url, cookie, "orchestration.dispatchCommand", {
                 "type": "message.dispatch", "commandId": "follow-up-message", "threadId": THREAD,
