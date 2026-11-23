@@ -143,7 +143,7 @@ impl Page {
     }
 }
 
-fn executable() -> Option<PathBuf> {
+pub(super) fn executable() -> Option<PathBuf> {
     if let Some(p) = env::var_os("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
         .map(PathBuf::from)
         .filter(|p| p.is_file())

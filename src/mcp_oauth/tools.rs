@@ -12,6 +12,7 @@ mod agent_tools;
 mod arguments;
 mod delegation;
 mod forge;
+pub(crate) mod html;
 mod issues;
 mod projects;
 mod pull_requests;
@@ -58,6 +59,8 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("task_cancel", &[]),
     ("create_threads", &[]),
     ("request_secret", &[]),
+    ("html_preview", &[]),
+    ("html_render", &[]),
     // Pull requests and issues (batch 7).
     ("link_pull_request", &[]),
     ("link_pull_requests", &[]),
@@ -142,6 +145,9 @@ const SERVED: &[&str] = &[
     "create_threads",
     // Secrets the user gives the agent.
     "request_secret",
+    // Pages an agent checks and shows.
+    "html_preview",
+    "html_render",
     // Pull requests and issues (batch 7).
     "link_pull_request",
     "link_pull_requests",
@@ -692,7 +698,16 @@ pub(super) async fn call<S: McpHost>(
         return Err(invalid_arguments());
     }
     if let Some((_, unions)) = CHECKED.iter().find(|(tool, _)| *tool == name) {
-        arguments::check(name, args, unions)?;
+        match arguments::check(name, args, unions) {
+            // An image tool answers a parameter failure as its own failure.
+            Err(Refusal::Rpc(_, message)) if name == "html_preview" => {
+                return Ok(html::image_failure(
+                    "AiError",
+                    format!("Toolkit.html_preview.handle: {message}"),
+                ))
+            }
+            other => other?,
+        }
     }
     match name {
         "t3_project_list" => project_list(&**host, args).await,
@@ -740,6 +755,8 @@ pub(super) async fn call<S: McpHost>(
         "task_cancel" => delegation::task_cancel(host, caller, args).await,
         "create_threads" => delegation::create_threads(host, caller, args).await,
         "request_secret" => secrets::request_secret(host, caller, args).await,
+        "html_preview" => html::preview(host, caller, args).await,
+        "html_render" => html::render(host, caller, args).await,
         "link_pull_request"
         | "link_pull_requests"
         | "unlink_pull_request"
