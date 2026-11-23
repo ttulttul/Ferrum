@@ -1057,6 +1057,15 @@ async fn apply_command<H: CommandHost>(
                     "senderThreadId": command["senderThreadId"],
                 }));
             }
+            // The message keeps its attachments, already claimed for this
+            // thread (`ThreadMessageIntake`), on its row and turn item.
+            if let Some(attachments) = command["attachments"]
+                .as_array()
+                .filter(|attachments| !attachments.is_empty())
+            {
+                let fields = wire.get_or_insert_with(|| json!({}));
+                fields["attachments"] = json!(attachments);
+            }
             let queued = (command["dispatchMode"]["type"] == "queue_after_active" || queue_steer)
                 && state
                     .store

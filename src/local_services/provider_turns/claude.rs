@@ -396,8 +396,47 @@ impl<'a> Attempt<'a> {
             }
         }
         // A plain prompt goes as a string, as the reference's
-        // makeClaudeUserMessage builds it.
-        let content = json!(spec.prompt);
+        // makeClaudeUserMessage builds it. With attachments
+        // (`makeClaudeUserMessageWithAttachments`), each image goes as a
+        // base64 block, then the text naming every attachment's file.
+        let attachments = spec
+            .provider
+            .as_ref()
+            .map(|p| p.attachments.as_slice())
+            .unwrap_or_default();
+        let mut image_bytes = 0u64;
+        let content = if attachments.is_empty() {
+            json!(spec.prompt)
+        } else {
+            use crate::workspace::attachment_prompt as prompt;
+            let text = prompt::text_with_paths(&spec.prompt, attachments);
+            let mut blocks = Vec::new();
+            for attachment in attachments.iter().filter(|a| a["type"] == "image") {
+                let mime = attachment["mimeType"].as_str().unwrap_or_default();
+                let failure = |detail: String| {
+                    Outcome::Ended(TurnEnd::failed(
+                        ProviderFailure::new("provider_error", detail),
+                        ThreadDisposition::Reusable,
+                    ))
+                };
+                if !matches!(
+                    mime,
+                    "image/gif" | "image/jpeg" | "image/png" | "image/webp"
+                ) {
+                    return failure(format!("Unsupported Claude image attachment type '{mime}'"));
+                }
+                let data = match prompt::image_base64(attachment) {
+                    Ok(data) => data,
+                    Err(detail) => return failure(detail.trim_end_matches('.').to_owned()),
+                };
+                image_bytes += data.len() as u64 + 128;
+                blocks.push(json!({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}}));
+            }
+            if !text.is_empty() {
+                blocks.push(json!({"type": "text", "text": text}));
+            }
+            json!(blocks)
+        };
         let prompt = json!({
             "type": "user",
             "session_id": "",
@@ -409,7 +448,20 @@ impl<'a> Attempt<'a> {
         }
         // What the prompt adds to the session's attachment budget, which
         // the reference reports once the turn starts.
-        self.delivered = Some((content.to_string().len() as u64, 0));
+        // With attachments it counts the text block and each image's base64.
+        let delivered = if attachments.is_empty() {
+            content.to_string().len() as u64
+        } else {
+            let text = content
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|block| block["type"] == "text")
+                .cloned()
+                .collect::<Vec<_>>();
+            json!(text).to_string().len() as u64 + image_bytes
+        };
+        self.delivered = Some((delivered, 0));
         let mut deadline = None;
         loop {
             let line = tokio::select! {

@@ -21,6 +21,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 mod local;
 #[cfg(feature = "native")]
 pub use local::LocalWorkspace;
+pub mod attachment_prompt;
 #[cfg(test)]
 pub(crate) mod fake_agentd;
 pub mod provider;

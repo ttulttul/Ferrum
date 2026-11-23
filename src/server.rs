@@ -571,6 +571,15 @@ impl crate::orchestration::CommandHost for AppState {
                         // Claude may read the thread's attachments, as the
                         // reference lets it.
                         provider.extra_dirs = vec![self.paths.attachments.display().to_string()];
+                        // The run's message attachments, with their saved files.
+                        provider.attachments = {
+                            let store = self.store.read().await;
+                            crate::attachment_claims::turn_attachments(
+                                &self.paths.attachments,
+                                &store,
+                                &run,
+                            )
+                        };
                         spec.provider = Some(provider);
                         spec.env = env;
                     }
