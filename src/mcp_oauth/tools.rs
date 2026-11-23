@@ -690,15 +690,43 @@ fn no_longer_available<S: McpHost>(host: &S, caller: &Caller, id: &str) -> Refus
 }
 
 /// A project as the project tools return it: the reference leaves
-/// `hasCustomTitle` out until a title is chosen.
+/// `hasCustomTitle` out until a title is chosen, and shows the actions saved
+/// in Settings (#39676).
 fn project_out<S: McpHost>(host: &S, row: &Value) -> Value {
     let mut out = host.project_row(row);
+    if out.is_object() {
+        out["scripts"] = project_scripts(&host.settings(), &out);
+    }
     if out["hasCustomTitle"] == false {
         if let Some(object) = out.as_object_mut() {
             object.remove("hasCustomTitle");
         }
     }
     out
+}
+
+/// `resolveProjectScripts`: the actions new threads of `project` use.
+fn project_scripts(settings: &Value, project: &Value) -> Value {
+    let id = project["id"].as_str().unwrap_or_default();
+    let defaults = || match &settings["defaultProjectScripts"] {
+        scripts @ Value::Array(_) => scripts.clone(),
+        _ => json!([]),
+    };
+    let overridden = &settings["projectSettingsOverrides"][id]["defaultProjectScripts"];
+    if overridden.is_array() {
+        return overridden.clone();
+    }
+    if settings["projectSettingsFolded"] == true {
+        return defaults();
+    }
+    match settings["projectScriptOverrides"].get(id) {
+        Some(Value::Null) => defaults(),
+        Some(legacy @ Value::Array(_)) => legacy.clone(),
+        _ if project["scripts"].as_array().is_some_and(|s| !s.is_empty()) => {
+            project["scripts"].clone()
+        }
+        _ => defaults(),
+    }
 }
 
 fn thread_not_found() -> Refusal {
@@ -2533,6 +2561,20 @@ fn writes_environment(caller: &Caller, refused: Option<&str>) -> Result<(), Refu
         assert_not_linked(caller, what)?;
     }
     if caller.limits() != ("full-access", "default") {
+        // A client a link holds below full access is refused naming that
+        // link (`assertFullAccessNamingLink`, #30471).
+        if caller.thread.is_none()
+            && caller.granted.peer_link
+            && caller.granted.access != "full-access"
+        {
+            return Err(failure(
+                "capability_denied",
+                format!(
+                    "This work was started from {} through a linked environment, so it has that link's {} access, which is below the full access needed to change projects or environment settings. A link paired with full access is not limited this way.",
+                    caller.granted.label, caller.granted.access
+                ),
+            ));
+        }
         return Err(failure("capability_denied", FULL_ACCESS_REQUIRED));
     }
     Ok(())

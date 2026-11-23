@@ -78,9 +78,11 @@ pub(crate) async fn dispatch_orchestration_command<H: CommandHost>(
 
 /// Where a delegated delivery (`completion`) on `thread_id` steers: into the
 /// running turn, when every task it carries wakes the parent always and that
-/// turn's steering does not interrupt its tools
-/// (`activeSteeringInterruptsTools`), as the reference's `dispatchMessage`
-/// decides; otherwise it waits for the run to end.
+/// turn's steering does not interrupt its tools, as the reference's
+/// `dispatchMessage` decides. Since #39528 that includes Claude turns, but
+/// Rust does not yet send a steer the ended turn never took again as its own
+/// run (the reference's EffectWorker does), so a delivery steers only a Codex
+/// turn and otherwise waits for the run to end.
 pub(crate) async fn delivery_steer_target<H: CommandHost>(
     state: &Arc<H>,
     thread_id: &str,
@@ -104,11 +106,7 @@ pub(crate) async fn delivery_steer_target<H: CommandHost>(
         }
         let run = thread.runs.iter().find(|run| run.status == "running")?;
         let ids = thread.provider_run_ids(run)?;
-        let capabilities: Value =
-            serde_json::from_str(include_str!("provider_capabilities.json")).unwrap_or_default();
-        let turns = &capabilities[ids.driver.as_str()]["turns"];
-        (turns["supportsActiveSteering"] == true && turns["activeSteeringInterruptsTools"] != true)
-            .then(|| run.wire_id())?
+        (ids.driver == crate::workspace::provider::CODEX).then(|| run.wire_id())?
     };
     let mut steering = json!({"dispatchMode": {"type": "steer_active", "targetRunId": running}});
     steering["threadId"] = json!(thread_id);

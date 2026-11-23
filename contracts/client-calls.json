@@ -1029,6 +1029,7 @@
         "orchestration_parity.py",
         "parity-fixtures.json",
         "preview_provider_parity.py",
+        "preview_session_parity.py",
         "secret_request_parity.py",
         "shared_store_parity.py",
         "storage_cleanup_parity.py",

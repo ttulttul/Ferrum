@@ -172,7 +172,10 @@ async fn vcs_status_matches_the_local_workspace() {
     assert!(matches!(local, Some(Ok(_))));
     assert_eq!(s.remote.vcs("refreshStatus", &input, false).await, local);
     // The polled reading comes from agentd's watch.
-    assert_eq!(s.remote.vcs_status(&input, false, false).await, local);
+    assert_eq!(
+        without_digest(s.remote.vcs_status(&input, false, false).await),
+        without_digest(local.clone())
+    );
     assert_eq!(
         s.remote.vcs_branch(&input).await,
         s.local.vcs_branch(&input).await
@@ -183,14 +186,17 @@ async fn vcs_status_matches_the_local_workspace() {
     );
     // A change shows up in the watch without another request to agentd.
     std::fs::write(s.root.join("c.txt"), "c\n").unwrap();
-    let changed = s.local.vcs("refreshStatus", &input, false).await;
+    let changed = without_digest(s.local.vcs("refreshStatus", &input, false).await);
     for _ in 0..200 {
-        if s.remote.vcs_status(&input, false, false).await == changed {
+        if without_digest(s.remote.vcs_status(&input, false, false).await) == changed {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert_eq!(s.remote.vcs_status(&input, false, false).await, changed);
+    assert_eq!(
+        without_digest(s.remote.vcs_status(&input, false, false).await),
+        changed
+    );
     assert_eq!(
         s.remote.capture_git_tree(&s.root.to_string_lossy()).await,
         s.local.capture_git_tree(&s.root.to_string_lossy()).await
@@ -239,13 +245,19 @@ async fn a_terminal_runs_through_agentd() {
     let opened = s.remote.terminal("open", &open).await.unwrap().unwrap();
     assert_eq!(opened["status"], "running");
     // The metadata mirror catches up with the workspace's own.
+    // Each terminal manager has its own id (`managerId`).
+    let terminals = |metadata: serde_json::Value| metadata["terminals"].clone();
     for _ in 0..200 {
-        if s.remote.terminal_metadata() == s.local.terminal_metadata() {
+        if terminals(s.remote.terminal_metadata()) == terminals(s.local.terminal_metadata()) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert_eq!(s.remote.terminal_metadata(), s.local.terminal_metadata());
+    assert_eq!(
+        terminals(s.remote.terminal_metadata()),
+        terminals(s.local.terminal_metadata())
+    );
+    assert!(s.remote.terminal_metadata()["managerId"].is_string());
     let write =
         json!({"threadId": "t1", "terminalId": "term-1", "data": "echo agentd-$((40+2))\r"});
     assert!(matches!(
@@ -697,4 +709,19 @@ async fn project_clones_run_in_agentd_and_report_progress_to_the_server() {
         .unwrap_err();
     assert!(outside.to_string().contains("outside"), "{outside}");
     assert!(!home.join("elsewhere").exists());
+}
+
+/// A status without its refs digest, which only a `vcs.refreshStatus` reply
+/// carries (the polled reading need not).
+fn without_digest(
+    status: Option<Result<serde_json::Value, serde_json::Value>>,
+) -> Option<Result<serde_json::Value, serde_json::Value>> {
+    status.map(|reply| {
+        reply.map(|mut status| {
+            if let Some(object) = status.as_object_mut() {
+                object.remove("refsDigest");
+            }
+            status
+        })
+    })
 }

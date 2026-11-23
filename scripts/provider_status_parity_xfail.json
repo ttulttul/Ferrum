@@ -1,0 +1,32 @@
+{
+  "fx custom binaryPath": {
+    "row": "Upstream #29388 lists fx models per backend (gateway:/codex:/grok: slugs with subProvider, a subProviders field, no default aliases) and #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate/updateCommand); Rust has neither yet."
+  },
+  "fx login unknown": {
+    "row": "Upstream #29388 lists fx models per backend (gateway:/codex:/grok: slugs with subProvider, a subProviders field, no default aliases) and #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate/updateCommand); Rust has neither yet."
+  },
+  "fx model listing fails": {
+    "row": "Upstream #29388 lists fx models per backend (gateway:/codex:/grok: slugs with subProvider, a subProviders field, no default aliases) and #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate/updateCommand); Rust has neither yet."
+  },
+  "fx sign-in picked up by a refresh": {
+    "row": "Upstream #29388 lists fx models per backend (gateway:/codex:/grok: slugs with subProvider, a subProviders field, no default aliases) and #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate/updateCommand); Rust has neither yet.",
+    "refresh": "Upstream #29388 lists fx models per backend (gateway:/codex:/grok: slugs with subProvider, a subProviders field, no default aliases) and #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate/updateCommand); Rust has neither yet.",
+    "event": "Upstream #29388 lists fx models per backend (gateway:/codex:/grok: slugs with subProvider, a subProviders field, no default aliases) and #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate/updateCommand); Rust has neither yet."
+  },
+  "fx signed in": {
+    "row": "Upstream #29388 lists fx models per backend (gateway:/codex:/grok: slugs with subProvider, a subProviders field, no default aliases) and #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate/updateCommand); Rust has neither yet."
+  },
+  "fx signed out": {
+    "row": "Upstream #29388 lists fx models per backend (gateway:/codex:/grok: slugs with subProvider, a subProviders field, no default aliases) and #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate/updateCommand); Rust has neither yet.",
+    "cli launches": "Upstream #29388 skips `fx models --json` while fx is signed out; Rust still runs it."
+  },
+  "fx status times out": {
+    "row": "Upstream #29388 lists fx models per backend (gateway:/codex:/grok: slugs with subProvider, a subProviders field, no default aliases) and #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate/updateCommand); Rust has neither yet."
+  },
+  "fx version fails": {
+    "row": "Upstream #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate: true, updateCommand '<binary> upgrade'); Rust does not."
+  },
+  "fx version times out": {
+    "row": "Upstream #29399 gives fx an `fx upgrade` update command (versionAdvisory canUpdate: true, updateCommand '<binary> upgrade'); Rust does not."
+  }
+}

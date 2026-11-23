@@ -620,13 +620,18 @@ impl OAuth {
         let name = hashed(token);
         if self.read::<Grant>("tokens", &name).is_some() {
             self.remove("tokens", &name);
-            return;
+        } else {
+            self.revoke_reference_session(token);
         }
-        #[cfg(feature = "native")]
+    }
+    #[cfg(feature = "native")]
+    fn revoke_reference_session(&self, token: &str) {
         if let Err(error) = self.reference.revoke(token, now_ms()) {
             tracing::warn!(%error, "MCP client token revocation failed.");
         }
     }
+    #[cfg(not(feature = "native"))]
+    fn revoke_reference_session(&self, _token: &str) {}
     #[cfg(feature = "native")]
     fn reference_access(&self, token: &str) -> Option<McpAccess> {
         self.reference

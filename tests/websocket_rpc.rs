@@ -204,10 +204,11 @@ async fn numbered_requests_complete_the_clients_initial_sync() {
         json!({"_tag":"Request","id":1,"tag":"server.probe","payload":{},"headers":[]}),
     )
     .await;
-    assert_eq!(
-        recv(&mut socket).await,
-        json!({"_tag":"Exit","requestId":1,"exit":{"_tag":"Success","value":{}}})
-    );
+    // The probe answers the server's time (#41037).
+    let probe = recv(&mut socket).await;
+    assert_eq!(probe["requestId"], 1);
+    assert_eq!(probe["exit"]["_tag"], "Success");
+    assert!(probe["exit"]["value"]["serverTime"].is_string());
 
     // Closing the session interrupts the subscription by its numeric id.
     send(&mut socket, json!({"_tag":"Interrupt","requestId":0})).await;

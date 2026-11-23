@@ -2423,10 +2423,12 @@ mod tests {
             &mut connection,
             json!({"_tag":"Request","id":0,"tag":"server.probe","payload":{},"headers":[]}),
         );
-        assert_eq!(
-            probe,
-            vec![json!({"_tag":"Exit","requestId":0,"exit":{"_tag":"Success","value":{}}})]
-        );
+        // The probe answers the server's time (#41037).
+        assert_eq!(probe.len(), 1);
+        assert_eq!(probe[0]["exit"]["_tag"], "Success");
+        assert!(probe[0]["exit"]["value"]["serverTime"]
+            .as_str()
+            .is_some_and(|time| time.ends_with('Z')));
         let shell = send(
             &plane,
             &mut connection,
