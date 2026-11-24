@@ -206,6 +206,7 @@ fn encode_document(raw: &Value) -> Value {
                 ("webhookTasks", same),
                 ("telemetry", same),
                 ("browserCookieImport", same),
+                ("previewTunnel", same),
                 ("providers", providers),
                 ("updates", updates),
             ],
@@ -368,6 +369,7 @@ impl Policy {
                     "webhookTasks",
                     "telemetry",
                     "browserCookieImport",
+                    "previewTunnel",
                     "providers",
                     "updates",
                 ],
@@ -401,6 +403,7 @@ impl Policy {
                 "webhookTasks",
                 "telemetry",
                 "browserCookieImport",
+                "previewTunnel",
             ] {
                 if let Some(flag) = limits.get(key) {
                     ensure!(flag.is_boolean(), "invalid {key}");
@@ -459,6 +462,11 @@ impl Policy {
     pub(crate) fn allows_connect(&self) -> bool {
         self.summary()
             .is_none_or(|v| v["limits"]["connect"] != false)
+    }
+    /// `limits.previewTunnel`: only an explicit `false` switches the tunnel off.
+    pub(crate) fn allows_preview_tunnel(&self) -> bool {
+        self.summary()
+            .is_none_or(|v| v["limits"]["previewTunnel"] != false)
     }
     pub(crate) fn allows_client(&self, kind: &str) -> bool {
         self.summary()

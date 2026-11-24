@@ -1,5 +1,1 @@
-{
-  "peer_link_parity": {
-    "descriptor capabilities added upstream": "The reference's descriptor reports previewTunnelSetting (#39415); Rust has no preview tunnel yet, so it omits it."
-  }
-}
+{}

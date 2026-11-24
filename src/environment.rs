@@ -89,6 +89,11 @@ pub fn descriptor_with_link_routes(
     capability!("serverResolvedCommandContext", true);
     capability!("threadStop", true);
     capability!("localServerStop", true);
+    // The native server's `/api/preview/tunnel` honours `enablePreviewTunnel`
+    // (#39415); the control plane has no tunnel.
+    if link_routes {
+        capability!("previewTunnelSetting", true);
+    }
     capability!("threadPullRequests", true);
     capability!("threadPullRequestWatch", true);
     capability!("pullRequestStackActions", true);
