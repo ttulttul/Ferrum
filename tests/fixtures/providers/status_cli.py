@@ -13,7 +13,8 @@ The spec lists how the CLI answers each command line:
    ]}
 
 The first entry whose "args" equal the arguments, or whose "prefix" starts
-them, answers; an unmatched command line exits 0 with no output. An entry
+them (and whose "env", if any, the environment matches: {"FX_PROVIDER": "codex"},
+null for unset), answers; an unmatched command line exits 0 with no output. An entry
 writes "stdout" and "stderr" (a newline is added), sleeps "sleep" seconds and
 exits with "exit". An entry with "rpc" instead speaks newline-delimited
 JSON-RPC 2.0 on stdin and stdout: each request is answered with the result
@@ -66,6 +67,9 @@ def wait_for_title_gate():
 
 
 def matches(entry):
+    # "env" also requires these variables to have these values (null: unset).
+    if any(os.environ.get(name) != value for name, value in entry.get("env", {}).items()):
+        return False
     if "args" in entry:
         return entry["args"] == args
     if "prefix" in entry:

@@ -91,6 +91,9 @@ pub(crate) enum Lookup {
     ClaudeNative { url: String },
     /// Codex's standalone release channel (`tag_name` `rust-vX.Y.Z`).
     CodexNative,
+    /// fx's release channel (`fetchLatestFxVersion`): `<url>` answers a bare
+    /// `vX.Y.Z` or `X.Y.Z`.
+    FxRelease { url: String },
 }
 
 /// `ProviderMaintenanceResolutionContext`.
@@ -783,7 +786,7 @@ async fn follow_vite_plus_shim(context: Context) -> Context {
 
 /// `resolveMacPortsOwner`: the port that installed the executable, `""` for
 /// an unusable name, `None` when MacPorts does not own it.
-async fn resolve_macports_owner(context: &Context) -> Option<String> {
+pub(crate) async fn resolve_macports_owner(context: &Context) -> Option<String> {
     let sibling = Path::new(&parent(&context.resolved_command_path)).join("port");
     let port = if exists(&sibling) {
         sibling.display().to_string()
@@ -1521,6 +1524,25 @@ fn run_lookup(
                     Regex::new(r"^rust-v(\d+\.\d+\.\d+)$")
                         .unwrap()
                         .captures(tag)
+                        .map(|c| c[1].to_owned())
+                };
+                tokio::time::timeout(Duration::from_secs(4), read)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            Lookup::FxRelease { url } => {
+                let read = async {
+                    let response = super::http_client().get(url).send().await.ok()?;
+                    // A failed status reads as an empty body.
+                    let body = if response.status().is_success() {
+                        response.text().await.ok()?
+                    } else {
+                        String::new()
+                    };
+                    Regex::new(r"^v?(\d+\.\d+\.\d+)$")
+                        .unwrap()
+                        .captures(body.trim())
                         .map(|c| c[1].to_owned())
                 };
                 tokio::time::timeout(Duration::from_secs(4), read)
