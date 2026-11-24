@@ -94,7 +94,7 @@ def descriptor(url):
 
 # Descriptor capabilities for features Rust does not have yet (each a known
 # difference in parity_gaps.json): they are compared apart from the rest.
-ADDED_CAPABILITIES = ("previewTunnelSetting", "issueTrackerAccounts")
+ADDED_CAPABILITIES = ("previewTunnelSetting",)
 
 
 def main():

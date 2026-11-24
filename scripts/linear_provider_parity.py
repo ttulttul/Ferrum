@@ -10,17 +10,24 @@ import re
 import secrets
 import shlex
 import tempfile
+import time
 from threading import Thread
 
 from websockets.sync.client import connect
 import parity_harness as harness
 
 TOKEN = "synthetic-linear-key"
+# A second Linear account (#39179): its own viewer and team.
+TOKEN2 = "synthetic-linear-key-2"
 STAMP = "2026-10-02T12:00:00.000Z"
 USER = {"id":"U1","displayName":"sam","name":"Sam T.","email":"sam@example.test","avatarUrl":None}
+USER2 = {"id":"U2","displayName":"ops-bot","name":"Ops","email":"ops@example.test","avatarUrl":None}
 LABEL = {"id":"L1","name":"bug","color":"#abcdef","description":"A regression"}
 OPEN = {"id":"S1","name":"Todo","type":"unstarted","position":0}
 DONE = {"id":"S2","name":"Done","type":"completed","position":1}
+
+
+ACCOUNT = "<account>"
 
 
 def page(rows):
@@ -41,7 +48,10 @@ class Provider(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.server.requests.append(f"POST {self.path}")
-        if self.path != "/graphql" or self.headers.get("authorization")!=TOKEN:
+        second = self.headers.get("authorization") == TOKEN2
+        if second:
+            self.server.second.append(self.path)
+        if self.path != "/graphql" or self.headers.get("authorization") not in (TOKEN, TOKEN2):
             self.answer({"errors":[{"message":"Invalid token"}]},401)
             return
         request=json.loads(self.rfile.read(int(self.headers["content-length"])))
@@ -50,7 +60,11 @@ class Provider(BaseHTTPRequestHandler):
         team=self.server.team
         issue=self.server.issue
         if name=="T3Viewer":
-            data={"viewer":USER,"organization":{"urlKey":"workspace"},"teams":page([team])}
+            data=({"viewer":USER2,"organization":{"urlKey":"ops-workspace"},"teams":page([self.server.ops])} if second
+                  else {"viewer":USER,"organization":{"urlKey":"workspace"},"teams":page([team])})
+        elif name=="T3Issues" and second:
+            self.server.filters2.append(v)
+            data={"issues":page([])}
         elif name=="T3Team":
             data={"teams":page([team] if v["key"]=="ENG" else []),"issueLabels":page([])}
         elif name=="T3IssueCreate":
@@ -138,7 +152,9 @@ def linear_fixture(stack):
     host.team={"id":"T1","key":"ENG","name":"Engineering","states":page([DONE,OPEN]),"members":page([USER]),
                "labels":page([LABEL]),"templates":page([{"id":"TEMPLATE","name":"Bug","description":"File a bug",
                "content":"How to reproduce","type":"issue","hasFormFields":False,"templateData":{"title":"Bug", "labelIds":["L1"]}}])}
-    host.issue,host.writes,host.filters,host.requests={},[],[],[]
+    host.ops={"id":"T2","key":"OPS","name":"Operations","states":page([DONE,OPEN]),"members":page([USER2]),
+              "labels":page([]),"templates":page([])}
+    host.issue,host.writes,host.filters,host.requests,host.second,host.filters2={},[],[],[],[],[]
     thread=Thread(target=host.serve_forever,daemon=True)
     thread.start()
     stack.callback(thread.join)
@@ -155,6 +171,8 @@ def main():
         root=Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="t3-linear-parity-")))
         checkout=root/"project"
         checkout.mkdir()
+        ops_checkout=root/"ops"
+        ops_checkout.mkdir()
         providers=[]
         sockets=[]
         secret=secrets.token_urlsafe(32)
@@ -164,10 +182,14 @@ def main():
             providers.append(host)
             prefix=["env",f"T3CODE_LINEAR_API_URL=http://127.0.0.1:{host.server_port}/graphql"]
             url,cookie=harness.managed_server(stack,prefix+shlex.split(command),root/who,secret,signing)
-            cmd={"type":"project.create","commandId":"add","projectId":"test-project","title":"Work","workspaceRoot":str(checkout)}
-            code,_,body=harness.http(url,"POST","/api/projects/mutate",harness.encode(cmd),{"Cookie":cookie,"Content-Type":"application/json"})
-            if code!=200:
-                raise RuntimeError(f"registering project failed: {code} {body!r}")
+            for project_id,title,folder in (("test-project","Work",checkout),("ops-project","Ops",ops_checkout)):
+                # A second apart: Rust orders projects created in the same second by id.
+                if project_id=="ops-project":
+                    time.sleep(1.1)
+                cmd={"type":"project.create","commandId":f"add-{project_id}","projectId":project_id,"title":title,"workspaceRoot":str(folder)}
+                code,_,body=harness.http(url,"POST","/api/projects/mutate",harness.encode(cmd),{"Cookie":cookie,"Content-Type":"application/json"})
+                if code!=200:
+                    raise RuntimeError(f"registering project failed: {code} {body!r}")
             sockets.append(stack.enter_context(connect(url.replace("http","ws",1)+"/ws?orchestrationProtocol=2",
                 additional_headers={"Cookie":cookie},proxy=None,compression=None)))
         proj={"projectId":"test-project"}
@@ -179,6 +201,22 @@ def main():
             ("issueTrackers.connect",{"tracker":"linear","token":TOKEN},True),
             ("issueTrackers.connect",{"tracker":"linear","token":"rejected-fixture-key"},False),
             ("issueTrackers.bindProject",{**proj,"binding":{"tracker":"linear","scope":"ENG"}},True),
+            ("issueTrackers.list",{},True),
+            # A second Linear account (#39179). `ACCOUNT` stands for each server's own new id.
+            ("issueTrackers.connect",{"tracker":"linear","token":TOKEN2,"addAccount":True},True),
+            ("issueTrackers.connect",{"tracker":"linear","token":TOKEN,"addAccount":True},False),
+            ("issueTrackers.connect",{"tracker":"linear","token":None,"addAccount":True},False),
+            ("issueTrackers.connect",{"tracker":"linear","token":TOKEN2,"accountId":"not-saved"},False),
+            ("issueTrackers.bindProject",{"projectId":"ops-project","binding":{"tracker":"linear","scope":"OPS","accountId":"not-saved"}},False),
+            ("issueTrackers.bindProject",{"projectId":"ops-project","binding":{"tracker":"linear","scope":"OPS","accountId":ACCOUNT}},True),
+            ("issueTrackers.list",{},True),
+            ("issues.list",{"projectId":"ops-project","state":"open","involvement":"assigned"},True),
+            ("issues.list",{"state":"open"},True),
+            # An unbind that does not name the binding's account leaves it alone.
+            ("issueTrackers.bindProject",{"projectId":"ops-project","binding":None},True),
+            ("issueTrackers.list",{},True),
+            ("issueTrackers.connect",{"tracker":"linear","token":TOKEN2,"accountId":ACCOUNT},True),
+            ("issueTrackers.connect",{"tracker":"linear","token":None,"accountId":ACCOUNT},True),
             ("issueTrackers.list",{},True),
             ("issues.candidates",scope,True),("issues.templates",scope,True),
             ("issues.create",{**scope,**body},True),("issues.detail",ref,True),
@@ -201,11 +239,21 @@ def main():
             ("issues.detail",ref,False),
         ]
         failures=0
+        accounts=[None,None]
+        def own(payload,n):
+            """The payload with ACCOUNT replaced by server n's own account id."""
+            return json.loads(json.dumps(payload).replace(json.dumps(ACCOUNT),json.dumps(accounts[n] or ACCOUNT)))
+        def masked(frame,n):
+            return frame if accounts[n] is None else frame.replace(accounts[n],ACCOUNT)
         for i,(method,payload,success) in enumerate(scenarios):
-            data=harness.encode({"_tag":"Request","tag":method,"id":str(i),"headers":[],"payload":payload}).decode()
-            for ws in sockets:
-                ws.send(data)
+            for n,ws in enumerate(sockets):
+                ws.send(harness.encode({"_tag":"Request","tag":method,"id":str(i),"headers":[],"payload":own(payload,n)}).decode())
             results=[harness.recv_frame(ws, timeout=20) for ws in sockets]
+            for n,frame in enumerate(results):
+                value=json.loads(frame)["exit"].get("value")
+                if method=="issueTrackers.connect" and payload.get("addAccount") and isinstance(value,dict) and accounts[n] is None:
+                    accounts[n]=value.get("accountId")
+            results=[masked(frame,n) for n,frame in enumerate(results)]
             ok=results[0]==results[1] and json.loads(results[0])["exit"]["_tag"]==("Success" if success else "Failure")
             print(("PASS" if ok else "FAIL"),method,i)
             if not ok:
@@ -222,6 +270,10 @@ def main():
             if provider.writes!=expected:
                 failures+=1
                 print("FAIL provider mutation log",provider.writes)
+        # The second account's reads used its own credential, on both servers.
+        if not providers[0].second or providers[0].second!=providers[1].second or providers[0].filters2!=providers[1].filters2:
+            failures+=1
+            print("FAIL second account requests",*((p.second,p.filters2) for p in providers))
         if not providers[0].filters or providers[0].filters!=providers[1].filters:
             failures+=1
             print("FAIL list filters",*(p.filters for p in providers))

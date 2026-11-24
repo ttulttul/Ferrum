@@ -306,7 +306,7 @@ pub(super) async fn run(state: &AppState, p: &Project, op: &str, input: &Value) 
             json!({"_tag":"IssueOperationError","operation":op,"detail":"This issue belongs to a repository outside the selected project and cannot be changed from here.","reason":"read-only"}),
         );
     }
-    let api = Linear::new(op, cfg["token"].as_str())?;
+    let api = Linear::new(op, super::trackers::binding_token(&cfg, binding))?;
     let key = input["key"].as_str().unwrap_or("");
     match op {
         "detail" => {
@@ -505,6 +505,14 @@ pub(super) async fn run(state: &AppState, p: &Project, op: &str, input: &Value) 
     }
 }
 
+/// `viewerKey`: an added account reads its own viewer.
+pub(super) fn viewer_key(binding: &Value) -> String {
+    match binding["accountId"].as_str() {
+        None => "linear.app".to_owned(),
+        Some(id) => format!("linear.app {id}"),
+    }
+}
+
 pub(super) async fn page(
     cfg: &Value,
     project: &Project,
@@ -513,12 +521,14 @@ pub(super) async fn page(
     cursor: &Value,
     viewers: &mut Value,
 ) -> Reply {
-    let api = Linear::new("list", cfg["token"].as_str())?;
+    let binding = &cfg["bindings"][&project.id];
+    let api = Linear::new("list", super::trackers::binding_token(cfg, binding))?;
+    let viewer = viewer_key(binding);
     let mut filter = json!({"team":{"key":{"eq":scope.trim().to_uppercase()}}});
     if let Some(mode @ ("assigned" | "authored" | "mentioned")) = input["involvement"].as_str() {
-        if viewers["linear.app"].is_null() {
+        if viewers[&viewer].is_null() {
             let data = api.call("viewer", "T3Viewer", json!({})).await?;
-            viewers["linear.app"] = json!(trimmed(&data["viewer"]["displayName"])
+            viewers[&viewer] = json!(trimmed(&data["viewer"]["displayName"])
                 .or_else(|| trimmed(&data["viewer"]["id"]))
                 .ok_or_else(|| fail(
                     "list",
@@ -527,7 +537,7 @@ pub(super) async fn page(
                     "Linear returned an unexpected body."
                 ))?);
         }
-        let handle = json!({"displayName":{"eq":viewers["linear.app"]}});
+        let handle = json!({"displayName":{"eq":viewers[&viewer]}});
         match mode {
             "assigned" => filter["assignee"] = handle,
             "authored" => filter["creator"] = handle,
