@@ -2106,6 +2106,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         if params.get("reference").is_none() && params["filesViewedOnly"] != true {
             crate::pull_requests::bitbucket::forget_viewers();
         }
+        // What was read of viewed files is read again.
+        crate::pull_requests::viewed_files::forget(None);
         let mut revision = state.pull_request_refresh.lock().await;
         *revision = revision.saturating_add(1);
         return Reply::Success(Value::Null);

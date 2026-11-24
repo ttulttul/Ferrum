@@ -316,6 +316,8 @@ pub(super) struct Repository<'a> {
     pub repository: &'a str,
     pub host: &'a str,
     pub project: &'a Project,
+    /// Where the shared database is, for the viewed files kept here.
+    pub state_dir: &'a std::path::Path,
 }
 
 impl Repository<'_> {
@@ -1049,8 +1051,69 @@ pub(super) async fn run(
         // Bitbucket reports no per-file statistics (`getFileStats`).
         "changeBreakdown" => Ok(Value::Null),
         "setReaction" => Err(refusal("setReaction", "This host has no reactions.")),
+        "filesViewed" | "setFilesViewed" => viewed_files(&repo, op, input, number).await,
         "runAction" => run_action(&repo, input, number).await,
         _ => Err(json!({"_tag": "PullRequestUnavailableError", "reason": "provider-unsupported"})),
+    }
+}
+
+/// Bitbucket keeps no viewed files, so this environment does
+/// (`viewedFiles: "environment"`): per reader (the viewer's name), in the
+/// shared database, against the pull request's diff for the versions ticked.
+async fn viewed_files(
+    repo: &Repository<'_>,
+    op: &str,
+    input: &Value,
+    number: u64,
+) -> Result<Value, Value> {
+    use super::viewed_files as viewed;
+    let presses = if op == "setFilesViewed" {
+        Some(viewed::presses(input).ok_or_else(|| refusal(op, "Invalid viewed file."))?)
+    } else {
+        None
+    };
+    // A failed viewer lookup is refused: an unnamed reader would hide the
+    // marks and orphan later ones (`requiredViewerOf`).
+    let viewer = match viewer_for(repo.host).await {
+        Viewer::Known(name) => name,
+        Viewer::Unauthenticated => {
+            return Err(refusal(op, super::bitbucket::UNAUTHENTICATED));
+        }
+        Viewer::Failed { detail, .. } => return Err(refusal(op, &detail)),
+    };
+    let key = (
+        repo.project.id.clone(),
+        repo.repository.to_lowercase(),
+        number,
+    );
+    // Marks are kept under the repository's key (`host/owner/name`), as the
+    // reference names the project's remote.
+    let remote = crate::repository_identity::repository_key_from_remote(&format!(
+        "https://{}/{}",
+        repo.host, repo.repository
+    ));
+    let scope = viewed::Scope {
+        provider: "bitbucket",
+        host: repo.host,
+        repository: &remote,
+        number,
+        viewer: &viewer,
+    };
+    let read_patch = || async {
+        let failed = |e: ApiError| e.to_error(op, "getFileRevisions");
+        let (path, _) = repo.path().map_err(failed)?;
+        get_capped(
+            &format!("{path}/pullrequests/{number}/diff"),
+            DIFF_MAX_BYTES,
+        )
+        .await
+        .map_err(failed)
+    };
+    match presses {
+        Some(presses) => {
+            viewed::set_files_viewed(repo.state_dir, &key, &scope, presses, read_patch).await
+        }
+        None => viewed::files_viewed(repo.state_dir, &key, &scope, read_patch).await,
     }
 }
 
