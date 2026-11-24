@@ -1,0 +1,830 @@
+{
+ "schema": 1,
+ "meta": {
+  "commit": "ec02f4069944b70ff52c77fa90309872e47add98",
+  "reference": "fd0331ca9b1596ed7018c80f52b7e6730014f593",
+  "date": "2026-11-24T20:30:59Z",
+  "host": {
+   "cpu": "AMD EPYC 9V45 96-Core Processor",
+   "cpus": 4,
+   "os": "Linux 7.0.0-1017-azure",
+   "python": "3.12.3"
+  },
+  "config": {
+   "startup_runs": 5,
+   "latency_runs": 3,
+   "turn_runs": 3,
+   "samples": 200,
+   "warmup": 20,
+   "lanes": 8,
+   "turns": 5,
+   "settle": 3.0,
+   "idle": 10.0
+  },
+  "node": "v26.13.1"
+ },
+ "size": {
+  "rust": {
+   "binary": 70973016,
+   "total": 70973016,
+   "comparable": 70973016
+  },
+  "original": {
+   "node": 150348872,
+   "bundle": 23685105,
+   "external_packages": 152301220,
+   "external_package_count": 23,
+   "total": 326335197,
+   "without_rust_counterpart": 110933443,
+   "comparable": 215401754
+  }
+ },
+ "startup": {
+  "original": {
+   "listen_ms": [
+    1946.5380249999953,
+    1986.1862740000333,
+    1999.4295100000272,
+    1972.0995970000104,
+    2027.3526439999614
+   ],
+   "first_rpc_ms": [
+    2044.0432259999852,
+    2123.1465120000053,
+    2111.9022299999983,
+    2068.242435000002,
+    2155.750057999967
+   ],
+   "idle_rss_kb": [
+    460964,
+    461984,
+    462020,
+    461708,
+    461904
+   ],
+   "idle_cpu_ms": [
+    240.00000000000023,
+    229.99999999999997,
+    229.99999999999997,
+    229.99999999999997,
+    240.00000000000023
+   ]
+  },
+  "rust": {
+   "listen_ms": [
+    47.98768799997788,
+    42.1739290000005,
+    37.46381100000917,
+    38.17136499992557,
+    37.01534399999673
+   ],
+   "first_rpc_ms": [
+    84.31915199997775,
+    71.49711799996794,
+    67.80779700000039,
+    65.17760700000963,
+    61.88503199996376
+   ],
+   "idle_rss_kb": [
+    40160,
+    40792,
+    41332,
+    40876,
+    40980
+   ],
+   "idle_cpu_ms": [
+    80.00000000000007,
+    80.00000000000001,
+    100.00000000000003,
+    90.00000000000003,
+    90.00000000000003
+   ]
+  }
+ },
+ "latency": {
+  "original": {
+   "server.getConfig": {
+    "p50_ms": [
+     2.650044999995771,
+     2.6457844999754343,
+     3.039019000027565
+    ],
+    "p95_ms": [
+     3.3254930000737213,
+     3.766400849934827,
+     4.327622050004722
+    ]
+   },
+   "server.getSettings": {
+    "p50_ms": [
+     0.3956434999849989,
+     0.420431500003815,
+     0.40040150003051167
+    ],
+    "p95_ms": [
+     0.5300251500159447,
+     0.5960600500031888,
+     0.5627190499694736
+    ]
+   },
+   "orchestration.subscribeShell": {
+    "p50_ms": [
+     2.360484500002258,
+     2.473891999954958,
+     2.512997499991343
+    ],
+    "p95_ms": [
+     4.540701800050329,
+     4.069112749959913,
+     3.982326200087982
+    ]
+   },
+   "orchestration.subscribeThread": {
+    "p50_ms": [
+     10.145724500034703,
+     10.861671499924341,
+     10.694673999978477
+    ],
+    "p95_ms": [
+     12.869269950022046,
+     13.485920199968868,
+     13.212276499973541
+    ]
+   },
+   "orchestration.getThreadProjection": {
+    "p50_ms": [
+     8.7589000000321,
+     9.330294499989122,
+     8.349797000050785
+    ],
+    "p95_ms": [
+     10.149018350045935,
+     10.8549508500289,
+     9.942719049928428
+    ]
+   },
+   "orchestration.getTurnDiff": {
+    "p50_ms": [
+     52.061983000044165,
+     57.913828999971884,
+     53.702213000008214
+    ],
+    "p95_ms": [
+     61.310941650054936,
+     64.79025985001954,
+     62.369065049961144
+    ]
+   }
+  },
+  "rust": {
+   "server.getConfig": {
+    "p50_ms": [
+     10.166900499996245,
+     9.787657499998659,
+     10.557043500000418
+    ],
+    "p95_ms": [
+     11.363149949903573,
+     10.68708750000269,
+     11.71583110005372
+    ]
+   },
+   "server.getSettings": {
+    "p50_ms": [
+     0.270712000030926,
+     0.29591449998633834,
+     0.2838104999796087
+    ],
+    "p95_ms": [
+     0.29557799998656265,
+     0.3164194999328629,
+     0.33583999996267266
+    ]
+   },
+   "orchestration.subscribeShell": {
+    "p50_ms": [
+     0.9008934999883422,
+     0.8707825000442426,
+     0.889560500013431
+    ],
+    "p95_ms": [
+     0.9369850500320354,
+     0.9104897500378684,
+     0.9522029499692056
+    ]
+   },
+   "orchestration.subscribeThread": {
+    "p50_ms": [
+     2.9999569999290543,
+     3.0105210000215266,
+     3.168361999996705
+    ],
+    "p95_ms": [
+     3.1566652499861902,
+     4.2715292499281095,
+     4.51298954998265
+    ]
+   },
+   "orchestration.getThreadProjection": {
+    "p50_ms": [
+     1.3598980000324445,
+     1.3483000000178436,
+     1.409956999964379
+    ],
+    "p95_ms": [
+     1.4573021499131755,
+     1.454372600028364,
+     2.321757800086744
+    ]
+   },
+   "orchestration.getTurnDiff": {
+    "p50_ms": [
+     2.49795250005036,
+     2.573910000023716,
+     2.509449499996208
+    ],
+    "p95_ms": [
+     2.585340000047154,
+     2.6365314500196746,
+     3.0562318999784566
+    ]
+   }
+  }
+ },
+ "turns": {
+  "codex": {
+   "original": {
+    "turns_per_s": [
+     2.12937204230818,
+     2.0868076855340743,
+     2.1676742816870713
+    ],
+    "turn_p50_ms": [
+     3392.179457999987,
+     3468.7471720000076,
+     3309.6407350000163
+    ],
+    "cpu_s": [
+     26.36,
+     26.92,
+     25.75
+    ],
+    "cpu_per_turn_ms": [
+     659.0,
+     673.0,
+     643.75
+    ],
+    "peak_rss_kb": [
+     702292,
+     656224,
+     670704
+    ],
+    "peak_tree_rss_kb": [
+     773352,
+     725520,
+     747432
+    ]
+   },
+   "rust": {
+    "turns_per_s": [
+     6.88001746924506,
+     6.910624177255833,
+     6.697202431674672
+    ],
+    "turn_p50_ms": [
+     1175.1980474999755,
+     1162.6496160000102,
+     1193.433696999989
+    ],
+    "cpu_s": [
+     6.98,
+     7.09,
+     7.37
+    ],
+    "cpu_per_turn_ms": [
+     174.50000000000003,
+     177.25,
+     184.25
+    ],
+    "peak_rss_kb": [
+     61040,
+     60480,
+     60952
+    ],
+    "peak_tree_rss_kb": [
+     61432,
+     60808,
+     61484
+    ]
+   }
+  },
+  "claude": {
+   "original": {
+    "turns_per_s": [
+     1.821172797236215,
+     1.9228095490137156,
+     2.047179260167883
+    ],
+    "turn_p50_ms": [
+     4013.4962320000227,
+     3844.8060245000306,
+     3574.589308000043
+    ],
+    "cpu_s": [
+     31.880000000000003,
+     30.26,
+     28.43
+    ],
+    "cpu_per_turn_ms": [
+     797.0,
+     756.5000000000001,
+     710.75
+    ],
+    "peak_rss_kb": [
+     673236,
+     677512,
+     675728
+    ],
+    "peak_tree_rss_kb": [
+     736776,
+     739396,
+     751280
+    ]
+   },
+   "rust": {
+    "turns_per_s": [
+     5.958284271479942,
+     5.761650314662045,
+     5.772407607374609
+    ],
+    "turn_p50_ms": [
+     1408.3235575000117,
+     1440.9657949999541,
+     1454.8740204999149
+    ],
+    "cpu_s": [
+     9.379999999999999,
+     9.82,
+     9.75
+    ],
+    "cpu_per_turn_ms": [
+     234.5,
+     245.5,
+     243.75
+    ],
+    "peak_rss_kb": [
+     59572,
+     59848,
+     60164
+    ],
+    "peak_tree_rss_kb": [
+     59572,
+     60216,
+     60384
+    ]
+   }
+  }
+ },
+ "summary": [
+  {
+   "section": "size",
+   "metric": "comparable",
+   "label": "Installed size",
+   "unit": "MiB",
+   "lower_is_better": true,
+   "original": {
+    "median": 205.42312049865723,
+    "min": 205.42312049865723,
+    "max": 205.42312049865723,
+    "n": 1
+   },
+   "rust": {
+    "median": 67.68514251708984,
+    "min": 67.68514251708984,
+    "max": 67.68514251708984,
+    "n": 1
+   },
+   "ratio": 3.0349809848858613
+  },
+  {
+   "section": "startup",
+   "metric": "first_rpc_ms",
+   "label": "Start to first RPC",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 2111.9022299999983,
+    "min": 2044.0432259999852,
+    "max": 2155.750057999967,
+    "n": 5
+   },
+   "rust": {
+    "median": 67.80779700000039,
+    "min": 61.88503199996376,
+    "max": 84.31915199997775,
+    "n": 5
+   },
+   "ratio": 31.145418719324947
+  },
+  {
+   "section": "startup",
+   "metric": "idle_rss_kb",
+   "label": "Memory at idle (RSS)",
+   "unit": "MiB",
+   "lower_is_better": true,
+   "original": {
+    "median": 451.078125,
+    "min": 450.16015625,
+    "max": 451.19140625,
+    "n": 5
+   },
+   "rust": {
+    "median": 39.91796875,
+    "min": 39.21875,
+    "max": 40.36328125,
+    "n": 5
+   },
+   "ratio": 11.300127214013113
+  },
+  {
+   "section": "startup",
+   "metric": "idle_cpu_ms",
+   "label": "CPU while idle (per 10 s)",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 229.99999999999997,
+    "min": 229.99999999999997,
+    "max": 240.00000000000023,
+    "n": 5
+   },
+   "rust": {
+    "median": 90.00000000000003,
+    "min": 80.00000000000001,
+    "max": 100.00000000000003,
+    "n": 5
+   },
+   "ratio": 2.5555555555555545
+  },
+  {
+   "section": "turns:codex",
+   "metric": "peak_rss_kb",
+   "label": "Peak memory, Codex turns",
+   "unit": "MiB",
+   "lower_is_better": true,
+   "original": {
+    "median": 654.984375,
+    "min": 640.84375,
+    "max": 685.83203125,
+    "n": 3
+   },
+   "rust": {
+    "median": 59.5234375,
+    "min": 59.0625,
+    "max": 59.609375,
+    "n": 3
+   },
+   "ratio": 11.00380627378921
+  },
+  {
+   "section": "turns:claude",
+   "metric": "peak_rss_kb",
+   "label": "Peak memory, Claude turns",
+   "unit": "MiB",
+   "lower_is_better": true,
+   "original": {
+    "median": 659.890625,
+    "min": 657.45703125,
+    "max": 661.6328125,
+    "n": 3
+   },
+   "rust": {
+    "median": 58.4453125,
+    "min": 58.17578125,
+    "max": 58.75390625,
+    "n": 3
+   },
+   "ratio": 11.290736532549124
+  },
+  {
+   "section": "turns:codex",
+   "metric": "turns_per_s",
+   "label": "Codex turns per second",
+   "unit": "/s",
+   "lower_is_better": false,
+   "original": {
+    "median": 2.12937204230818,
+    "min": 2.0868076855340743,
+    "max": 2.1676742816870713,
+    "n": 3
+   },
+   "rust": {
+    "median": 6.88001746924506,
+    "min": 6.697202431674672,
+    "max": 6.910624177255833,
+    "n": 3
+   },
+   "ratio": 3.2310077020581676
+  },
+  {
+   "section": "turns:claude",
+   "metric": "turns_per_s",
+   "label": "Claude turns per second",
+   "unit": "/s",
+   "lower_is_better": false,
+   "original": {
+    "median": 1.9228095490137156,
+    "min": 1.821172797236215,
+    "max": 2.047179260167883,
+    "n": 3
+   },
+   "rust": {
+    "median": 5.772407607374609,
+    "min": 5.761650314662045,
+    "max": 5.958284271479942,
+    "n": 3
+   },
+   "ratio": 3.002069347084064
+  },
+  {
+   "section": "turns:codex",
+   "metric": "cpu_per_turn_ms",
+   "label": "CPU per Codex turn",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 659.0,
+    "min": 643.75,
+    "max": 673.0,
+    "n": 3
+   },
+   "rust": {
+    "median": 177.25,
+    "min": 174.50000000000003,
+    "max": 184.25,
+    "n": 3
+   },
+   "ratio": 3.7179125528913963
+  },
+  {
+   "section": "turns:claude",
+   "metric": "cpu_per_turn_ms",
+   "label": "CPU per Claude turn",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 756.5000000000001,
+    "min": 710.75,
+    "max": 797.0,
+    "n": 3
+   },
+   "rust": {
+    "median": 243.75,
+    "min": 234.5,
+    "max": 245.5,
+    "n": 3
+   },
+   "ratio": 3.103589743589744
+  },
+  {
+   "section": "latency",
+   "metric": "server.getConfig/p50_ms",
+   "label": "server.getConfig p50",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 2.650044999995771,
+    "min": 2.6457844999754343,
+    "max": 3.039019000027565,
+    "n": 3
+   },
+   "rust": {
+    "median": 10.166900499996245,
+    "min": 9.787657499998659,
+    "max": 10.557043500000418,
+    "n": 3
+   },
+   "ratio": 0.26065416888822207
+  },
+  {
+   "section": "latency",
+   "metric": "server.getConfig/p95_ms",
+   "label": "server.getConfig p95",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 3.766400849934827,
+    "min": 3.3254930000737213,
+    "max": 4.327622050004722,
+    "n": 3
+   },
+   "rust": {
+    "median": 11.363149949903573,
+    "min": 10.68708750000269,
+    "max": 11.71583110005372,
+    "n": 3
+   },
+   "ratio": 0.331457462634891
+  },
+  {
+   "section": "latency",
+   "metric": "server.getSettings/p50_ms",
+   "label": "server.getSettings p50",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 0.40040150003051167,
+    "min": 0.3956434999849989,
+    "max": 0.420431500003815,
+    "n": 3
+   },
+   "rust": {
+    "median": 0.2838104999796087,
+    "min": 0.270712000030926,
+    "max": 0.29591449998633834,
+    "n": 3
+   },
+   "ratio": 1.4108058019674388
+  },
+  {
+   "section": "latency",
+   "metric": "server.getSettings/p95_ms",
+   "label": "server.getSettings p95",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 0.5627190499694736,
+    "min": 0.5300251500159447,
+    "max": 0.5960600500031888,
+    "n": 3
+   },
+   "rust": {
+    "median": 0.3164194999328629,
+    "min": 0.29557799998656265,
+    "max": 0.33583999996267266,
+    "n": 3
+   },
+   "ratio": 1.7783956111708348
+  },
+  {
+   "section": "latency",
+   "metric": "orchestration.subscribeShell/p50_ms",
+   "label": "orchestration.subscribeShell p50",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 2.473891999954958,
+    "min": 2.360484500002258,
+    "max": 2.512997499991343,
+    "n": 3
+   },
+   "rust": {
+    "median": 0.889560500013431,
+    "min": 0.8707825000442426,
+    "max": 0.9008934999883422,
+    "n": 3
+   },
+   "ratio": 2.7810272599981745
+  },
+  {
+   "section": "latency",
+   "metric": "orchestration.subscribeShell/p95_ms",
+   "label": "orchestration.subscribeShell p95",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 4.069112749959913,
+    "min": 3.982326200087982,
+    "max": 4.540701800050329,
+    "n": 3
+   },
+   "rust": {
+    "median": 0.9369850500320354,
+    "min": 0.9104897500378684,
+    "max": 0.9522029499692056,
+    "n": 3
+   },
+   "ratio": 4.342772331128219
+  },
+  {
+   "section": "latency",
+   "metric": "orchestration.subscribeThread/p50_ms",
+   "label": "orchestration.subscribeThread p50",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 10.694673999978477,
+    "min": 10.145724500034703,
+    "max": 10.861671499924341,
+    "n": 3
+   },
+   "rust": {
+    "median": 3.0105210000215266,
+    "min": 2.9999569999290543,
+    "max": 3.168361999996705,
+    "n": 3
+   },
+   "ratio": 3.5524329509417156
+  },
+  {
+   "section": "latency",
+   "metric": "orchestration.subscribeThread/p95_ms",
+   "label": "orchestration.subscribeThread p95",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 13.212276499973541,
+    "min": 12.869269950022046,
+    "max": 13.485920199968868,
+    "n": 3
+   },
+   "rust": {
+    "median": 4.2715292499281095,
+    "min": 3.1566652499861902,
+    "max": 4.51298954998265,
+    "n": 3
+   },
+   "ratio": 3.093102195237433
+  },
+  {
+   "section": "latency",
+   "metric": "orchestration.getThreadProjection/p50_ms",
+   "label": "orchestration.getThreadProjection p50",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 8.7589000000321,
+    "min": 8.349797000050785,
+    "max": 9.330294499989122,
+    "n": 3
+   },
+   "rust": {
+    "median": 1.3598980000324445,
+    "min": 1.3483000000178436,
+    "max": 1.409956999964379,
+    "n": 3
+   },
+   "ratio": 6.440850710732076
+  },
+  {
+   "section": "latency",
+   "metric": "orchestration.getThreadProjection/p95_ms",
+   "label": "orchestration.getThreadProjection p95",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 10.149018350045935,
+    "min": 9.942719049928428,
+    "max": 10.8549508500289,
+    "n": 3
+   },
+   "rust": {
+    "median": 1.4573021499131755,
+    "min": 1.454372600028364,
+    "max": 2.321757800086744,
+    "n": 3
+   },
+   "ratio": 6.9642512711935565
+  },
+  {
+   "section": "latency",
+   "metric": "orchestration.getTurnDiff/p50_ms",
+   "label": "orchestration.getTurnDiff p50",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 53.702213000008214,
+    "min": 52.061983000044165,
+    "max": 57.913828999971884,
+    "n": 3
+   },
+   "rust": {
+    "median": 2.509449499996208,
+    "min": 2.49795250005036,
+    "max": 2.573910000023716,
+    "n": 3
+   },
+   "ratio": 21.39999748952484
+  },
+  {
+   "section": "latency",
+   "metric": "orchestration.getTurnDiff/p95_ms",
+   "label": "orchestration.getTurnDiff p95",
+   "unit": "ms",
+   "lower_is_better": true,
+   "original": {
+    "median": 62.369065049961144,
+    "min": 61.310941650054936,
+    "max": 64.79025985001954,
+    "n": 3
+   },
+   "rust": {
+    "median": 2.6365314500196746,
+    "min": 2.585340000047154,
+    "max": 3.0562318999784566,
+    "n": 3
+   },
+   "ratio": 23.655725801979614
+  }
+ ]
+}
