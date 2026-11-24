@@ -12,6 +12,7 @@ mod agent_tools;
 mod arguments;
 mod attachments;
 mod delegation;
+pub(crate) use delegation::resume_remote_followers;
 mod devices;
 #[allow(unused_imports)]
 pub(crate) use devices::format_device_error;
@@ -2671,17 +2672,6 @@ pub(super) async fn forward<S: McpHost>(
             "A launch in a linked environment cannot carry attachments yet.",
         ));
     }
-    // Retry keys are scoped to their caller before they leave: two callers
-    // here reusing a key never collide there.
-    if let Some(key) = args.get("clientRequestId").and_then(Value::as_str) {
-        let digest = <sha2::Sha256 as sha2::Digest>::digest(
-            format!("{}\n{key}", caller.request_namespace()).as_bytes(),
-        );
-        args.insert(
-            "clientRequestId".into(),
-            json!(format!("fwd:{}", hex::encode(digest))),
-        );
-    }
     if name == "t3_thread_wait" {
         let asked = args
             .get("timeoutMs")
@@ -2696,12 +2686,43 @@ pub(super) async fn forward<S: McpHost>(
     let sender = caller
         .thread
         .as_ref()
-        .map(|thread| sender_thread(host.environment_id(), &thread.id, &thread.title));
+        .map(|thread| (thread.id.as_str(), thread.title.as_str()));
+    forward_as(
+        host,
+        target,
+        name,
+        Value::Object(args),
+        &caller.request_namespace(),
+        &format!("{runtime}/{interaction}"),
+        sender,
+    )
+    .await
+}
+
+/// Sends `name` to the linked environment `target` as `namespace` (whose retry keys are scoped
+/// before they leave: two callers here reusing a key never collide there), limited to `limit`
+/// and sent for the thread `sender` (its id and title) when a thread asks.
+pub(super) async fn forward_as<S: McpHost>(
+    host: &Arc<S>,
+    target: &str,
+    name: &str,
+    args: Value,
+    namespace: &str,
+    limit: &str,
+    sender: Option<(&str, &str)>,
+) -> Outcome {
+    let mut args = args;
+    if let Some(key) = args.get("clientRequestId").and_then(Value::as_str) {
+        let digest =
+            <sha2::Sha256 as sha2::Digest>::digest(format!("{namespace}\n{key}").as_bytes());
+        args["clientRequestId"] = json!(format!("fwd:{}", hex::encode(digest)));
+    }
+    let sender = sender.map(|(id, title)| sender_thread(host.environment_id(), id, title));
     let Some(call) = host.forward_tool(
         target.to_owned(),
         name.to_owned(),
-        Value::Object(args),
-        format!("{runtime}/{interaction}"),
+        args,
+        limit.to_owned(),
         sender,
     ) else {
         return Err(failure(

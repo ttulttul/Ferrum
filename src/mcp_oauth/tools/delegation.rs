@@ -3,6 +3,13 @@
 //! reads how it went.
 use super::*;
 
+mod remote;
+
+/// Follows each open task in a linked environment again, after a restart.
+pub(crate) async fn resume_remote_followers<S: McpHost>(host: &Arc<S>) {
+    remote::resume_followers(host).await;
+}
+
 const RUNNING_TASK_NEXT: &str = "Completion wakes this thread. Do not wait on it or poll it. Continue other work, and end your turn when none is left.";
 const TERMINAL_TASK: [&str; 4] = ["completed", "failed", "cancelled", "interrupted"];
 const TERMINAL_RUN: [&str; 5] = [
@@ -309,14 +316,20 @@ pub(super) async fn delegate_task<S: McpHost>(
     threads::writing_caller(&**host, caller).await?;
     required(a, "task")?;
     let target = a.get("target").cloned().unwrap_or(Value::Null);
-    if target["environmentId"]
+    if let Some(environment) = target["environmentId"]
         .as_str()
-        .is_some_and(|env| env != host.environment_id())
+        .filter(|env| *env != host.environment_id())
     {
-        return Err(failure(
-            "invalid_request",
-            "A task in a linked environment is not available on this server yet.",
-        ));
+        // The task's child runs as an ordinary thread there; this thread keeps the task.
+        let (task_id, run_end) = remote::delegate(host, caller, a, environment).await?;
+        if let Some(run_end) = run_end {
+            let timeout = a["timeoutMs"]
+                .as_f64()
+                .map_or(WAIT_DEFAULT_MS, |ms| ms.max(1.0) as u64)
+                .min(WAIT_MAX_MS);
+            return await_task(host, caller, &task_id, &task_id, Some(run_end), timeout).await;
+        }
+        return read_task(host, caller, &task_id, false, true).await;
     }
     let scope = thread_scope(caller, "delegate_task")?;
     let (parent, parent_runs) = {
@@ -520,6 +533,33 @@ pub(super) async fn task_cancel<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &
     let reason = arg_str(a, "reason")?.map(str::to_owned);
     let scope = thread_scope(caller, "task_cancel")?;
     let current = read_task(host, caller, &task_id, false, false).await?;
+    if current["childThreadId"].is_null() {
+        // The task runs in a linked environment: its thread there is stopped through the link.
+        let remote_task = {
+            let store = host.control_state().store.read().await;
+            records(
+                &find_thread(&store, &scope.thread_id)?.stored_row(),
+                "subagents",
+            )
+            .into_iter()
+            .find(|t| {
+                t["id"] == task_id.as_str()
+                    && t["origin"] == "app_owned"
+                    && t["remoteChild"].is_object()
+            })
+        };
+        let Some(remote_task) = remote_task else {
+            return Err(task_not_found(&task_id, &scope.thread_id, &[]));
+        };
+        return remote::cancel(
+            host,
+            caller,
+            &remote_task,
+            reason.as_deref(),
+            arg_str(a, "clientRequestId")?,
+        )
+        .await;
+    }
     let child_id = current["childThreadId"]
         .as_str()
         .unwrap_or_default()
@@ -965,7 +1005,12 @@ async fn await_task<S: McpHost>(
         let read = read?;
         let terminal = TERMINAL_TASK.contains(&read["status"].as_str().unwrap_or_default());
         // A settled task has its result transfer; its run end has passed.
-        if terminal && ended.is_none() && read["resultContextTransferId"].is_null() {
+        // A remote task's result is recorded with its end, so it has settled.
+        if terminal
+            && ended.is_none()
+            && read["resultContextTransferId"].is_null()
+            && !read["childThreadId"].is_null()
+        {
             // A poll that sees the run end before `after_run` does reads again
             // on its signal, as the reference reads on the run's event.
             if let Some(rx) = run_end.take() {
@@ -986,15 +1031,22 @@ async fn await_task<S: McpHost>(
             break Some(read);
         }
         if run_end.is_none() {
-            if let Some(child) = read["childThreadId"].as_str() {
-                run_end = Some(crate::orchestration::watch_run_end(child));
-            }
+            // A remote task's end is announced under its own id.
+            let watched = read["childThreadId"].as_str().unwrap_or(task_id);
+            run_end = Some(crate::orchestration::watch_run_end(watched));
         }
         let left = deadline - crate::platform::now_ms();
         if left <= 0 {
             break None;
         }
-        let pause = host.sleep(std::time::Duration::from_millis(left.min(250) as u64));
+        // A remote task's reads ask the linked environment, so its wait reads again only when
+        // its end is announced (or the wait times out), as the reference's event stream does.
+        let poll = if read["childThreadId"].is_null() {
+            left
+        } else {
+            left.min(250)
+        };
+        let pause = host.sleep(std::time::Duration::from_millis(poll as u64));
         match run_end.as_mut() {
             Some(rx) => {
                 tokio::select! {
@@ -1111,6 +1163,20 @@ async fn read_task<S: McpHost>(
             .map(|t| t.full_projection());
         (task, child, records(&parent_projection, "runs"), open)
     };
+    if let Some(task) = task
+        .as_ref()
+        .filter(|t| t["childThreadId"].is_null() && t["remoteChild"].is_object())
+    {
+        return remote::read(
+            host,
+            caller,
+            task,
+            &parent_runs,
+            wait_timed_out,
+            acknowledge,
+        )
+        .await;
+    }
     let (Some(task), Some(child)) = (task, child) else {
         return Err(task_not_found(task_id, &scope.thread_id, &open));
     };
@@ -1361,42 +1427,55 @@ async fn read_task<S: McpHost>(
         && TERMINAL_TASK.contains(&status)
         && !matches!(delivery, Some("acknowledged" | "disposed"))
     {
-        let observing = parent_runs
-            .iter()
-            .filter(|r| {
-                r["providerInstanceId"] == scope.provider_instance_id.as_str()
-                    && matches!(
-                        r["status"].as_str(),
-                        Some("preparing" | "starting" | "running" | "waiting")
-                    )
-            })
-            .max_by_key(|r| r["ordinal"].as_u64().unwrap_or(0))
-            .map(|r| r["id"].clone())
-            .unwrap_or(Value::Null);
-        // The reference records a run's start before its provider gets the
-        // prompt, so whatever the run observes comes after that start.
-        if let Some(run_id) = observing.as_str() {
-            await_run_start(host, &scope.thread_id, run_id).await;
-        }
-        host.dispatch(json!({
-            "type": "delegated_task.completion-delivery.acknowledge",
-            "commandId": stable_command_id(caller, "task-status-acknowledge", &crate::platform::uuid_v4().to_string()),
-            "parentThreadId": scope.thread_id,
-            "taskId": task_id,
-            "observedByRunId": observing,
-        }))
-        .await
-        .map_err(|error| {
-            failure(
-                "orchestration_error",
-                format!(
-                    "Unable to acknowledge delegated task {task_id}: {}",
-                    error["detail"].as_str().unwrap_or_default()
-                ),
-            )
-        })?;
+        acknowledge_result(host, caller, &parent_runs, task_id).await?;
     }
     Ok(result)
+}
+
+/// Records that the calling run has read `task_id`'s result
+/// (`delegated_task.completion-delivery.acknowledge`).
+async fn acknowledge_result<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    parent_runs: &[Value],
+    task_id: &str,
+) -> Result<(), Refusal> {
+    let scope = thread_scope(caller, "task_status")?;
+    let observing = parent_runs
+        .iter()
+        .filter(|r| {
+            r["providerInstanceId"] == scope.provider_instance_id.as_str()
+                && matches!(
+                    r["status"].as_str(),
+                    Some("preparing" | "starting" | "running" | "waiting")
+                )
+        })
+        .max_by_key(|r| r["ordinal"].as_u64().unwrap_or(0))
+        .map(|r| r["id"].clone())
+        .unwrap_or(Value::Null);
+    // The reference records a run's start before its provider gets the
+    // prompt, so whatever the run observes comes after that start.
+    if let Some(run_id) = observing.as_str() {
+        await_run_start(host, &scope.thread_id, run_id).await;
+    }
+    host.dispatch(json!({
+        "type": "delegated_task.completion-delivery.acknowledge",
+        "commandId": stable_command_id(caller, "task-status-acknowledge", &crate::platform::uuid_v4().to_string()),
+        "parentThreadId": scope.thread_id,
+        "taskId": task_id,
+        "observedByRunId": observing,
+    }))
+    .await
+    .map_err(|error| {
+        failure(
+            "orchestration_error",
+            format!(
+                "Unable to acknowledge delegated task {task_id}: {}",
+                error["detail"].as_str().unwrap_or_default()
+            ),
+        )
+    })?;
+    Ok(())
 }
 
 /// The delegated tasks a thread still has open, as the reference's

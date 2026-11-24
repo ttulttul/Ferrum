@@ -213,6 +213,8 @@ impl AppState {
         }
         if only.is_none() {
             crate::orchestration::recover_delegated_tasks(self.clone(), &awaiting).await;
+            // Tasks in linked environments are followed again.
+            crate::mcp_oauth::resume_remote_followers(&self).await;
         }
     }
 
@@ -1817,6 +1819,16 @@ impl mcp_oauth::McpHost for AppState {
                     }
                 });
             futures_util::future::join_all(scans).await;
+        })
+    }
+    fn remote_task_settled(
+        self: &Arc<Self>,
+        parent_thread_id: String,
+        task_id: String,
+    ) -> mcp_oauth::HostFuture<()> {
+        let state = self.clone();
+        Box::pin(async move {
+            crate::orchestration::after_remote_complete(state, &parent_thread_id, &task_id).await
         })
     }
     fn provider_dispatch(

@@ -20,7 +20,7 @@ pub use thread_credentials::ThreadScope;
 #[allow(unused_imports)]
 pub(crate) use tools::format_device_error;
 pub(crate) use tools::unserved_tool_names;
-pub(crate) use tools::{answer_matches, card_command};
+pub(crate) use tools::{answer_matches, card_command, resume_remote_followers};
 mod transport;
 use axum::{
     extract::{rejection::JsonRejection, OriginalUri, Query, State},
@@ -142,6 +142,16 @@ pub trait McpHost: AuthHost {
     /// missing or stale (`refreshWorkspaceSnapshot`), publishing what it finds.
     /// Hosts without provider status checks leave it a no-op.
     fn scan_workspace(self: &Arc<Self>, _cwd: String) -> HostFuture<()> {
+        Box::pin(async {})
+    }
+    /// After a remote task's result is recorded (`delegated_task.remote.complete`): a wait on
+    /// it reads the result and the parent gets its delivery. Hosts that cannot reach linked
+    /// environments record no remote results.
+    fn remote_task_settled(
+        self: &Arc<Self>,
+        _parent_thread_id: String,
+        _task_id: String,
+    ) -> HostFuture<()> {
         Box::pin(async {})
     }
     /// Runs a provider RPC used by the MCP issue and pull-request toolkits.

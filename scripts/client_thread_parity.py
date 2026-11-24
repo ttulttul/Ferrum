@@ -71,6 +71,7 @@ import threading
 import time
 
 from client_initial_sync_parity import rpc
+from remote_task_peer import RemoteTaskPeer
 from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, http, isolated_git_env, managed_server, path_without
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -226,6 +227,15 @@ PROVIDER_SCENARIOS = [
     # generated name, then runs in that checkout.
     {"name": "claude delegate worktree", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate_worktree.json", "awaitStatus": True},
+    # A delegated task in a linked environment (`target.environmentId`): the task's thread is
+    # launched there through the link, followed until its run ends, and its reply becomes the
+    # task's result here.
+    {"name": "claude delegate remote", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_remote.json", "awaitStatus": True, "peer": {"finish_after": 1}},
+    # A task in a linked environment cancelled while its thread there runs: the thread there is
+    # stopped through the link, and cancelling it again stops it there again.
+    {"name": "claude delegate remote cancel", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_remote_cancel.json", "awaitStatus": True, "peer": {"finish_after": None}},
     # A delegated task that runs on after the parent's turn: its result wakes the idle parent
     # with a delivery turn, which reads it with task_status.
     {"name": "claude delegate async", "instance": "claudeAgent", "model": "claude-opus-5-5",
@@ -842,6 +852,27 @@ def seed_turn(url, cookie, root, scenario, remote=None):
         "attachments": upload_attachments(url, cookie, scenario.get("uploads", [])),
         "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"},
         **scenario.get("dispatch", {})}}
+
+
+def peer_calls(peer, url):
+    """What a server asked its linked environment (sorted: calls made at once arrive in either order),
+    with its own environment id and the
+    retry keys it scoped to its caller (`fwd:<digest>`) masked."""
+    status, _, body = http(url, "GET", "/.well-known/t3/environment")
+    here = json.loads(body)["environmentId"] if status == 200 else None
+
+    def mask(value):
+        if isinstance(value, str):
+            if here:
+                value = value.replace(here, "<here>")
+            return re.sub(r"fwd:[0-9a-f]{64}", "fwd:<key>", value)
+        if isinstance(value, list):
+            return [mask(item) for item in value]
+        if isinstance(value, dict):
+            return {key: mask(item) for key, item in value.items()}
+        return value
+    # A task's follower and a tool reading its status call at once, in either order on either server.
+    return sorted((mask(call) for call in peer.calls()), key=lambda call: json.dumps(call, sort_keys=True))
 
 
 def upload_attachments(url, cookie, uploads):
@@ -1707,6 +1738,10 @@ def compare_turn(original, rust):
     servers = [original.get("appServers"), rust.get("appServers")]
     if servers[0] != servers[1]:
         problems["turn app-servers"] = [f"original {servers[0]}", f"rust     {servers[1]}"]
+    peer = [original.get("peer"), rust.get("peer")]
+    if peer[0] != peer[1]:
+        problems["peer calls"] = [f"original {json.dumps(peer[0], sort_keys=True)[:4000]}",
+                                  f"rust     {json.dumps(peer[1], sort_keys=True)[:4000]}"]
     launches = [original.get("launches", []), rust.get("launches", [])]
     if launches[0] != launches[1]:
         problems["cli launches"] = [f"original {launches[0]}", f"rust     {launches[1]}"]
@@ -1930,6 +1965,14 @@ def provider_turns(args, credentials):
                     if scenario.get("awaitStatus"):
                         # A delegated task's target must be a checked, installed provider.
                         provider_status(url, cookie, scenario["instance"], temporary)
+                    peer = None
+                    if "peer" in scenario:
+                        # A linked environment the turn delegates to, linked with full access.
+                        peer = RemoteTaskPeer(**scenario["peer"])
+                        stack.callback(peer.close)
+                        rpc(url, cookie, "server.updateSettings", {"patch": {"linkedEnvironmentsEnabled": True}})
+                        rpc(url, cookie, "peerLinks.link", {"url": peer.url, "pairingCode": "fixture-code",
+                                                            "access": "full-access"})
                     seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
                     if scenario.get("titleAfterTurn"):
                         seeded["settledFile"] = str(log) + ".turn-settled"
@@ -1945,6 +1988,8 @@ def provider_turns(args, credentials):
                         outcomes[name]["title"] = title_outcome(url, cookie, scenario, log, temporary)
                     if scenario.get("status"):
                         outcomes[name]["status"] = provider_status(url, cookie, scenario["instance"], temporary)
+                    if peer is not None:
+                        outcomes[name]["peer"] = peer_calls(peer, url)
                 outcomes[name]["appServers"] = turn_app_servers(log)
                 if args.dump:
                     launch_log = Path(str(log) + ".launch")
