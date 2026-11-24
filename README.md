@@ -66,7 +66,6 @@ Most suites match the original exactly; the few expected differences are listed 
 
 ### Source control
 
-- **Bitbucket viewed files.** You can't mark a Bitbucket pull request's files as viewed yet.
 - **More than one Linear account.** Rust connects one Linear account; the original connects several (upstream #39179).
 
 ## Parity status
