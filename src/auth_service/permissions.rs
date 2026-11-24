@@ -53,7 +53,7 @@ fn settings_scopes(p: &Value) -> Vec<&'static str> {
     let mut access = false;
     for key in patch.as_object().into_iter().flat_map(|m| m.keys()) {
         match key.as_str() {
-            "requireConnectDeviceApproval" => access = true,
+            "requireConnectDeviceApproval" | "enablePreviewTunnel" => access = true,
             "providers" | "providerInstances" | "usageLimitSources" | "textGenerators"
             | "secretProviders" => providers = true,
             _ => settings = true,

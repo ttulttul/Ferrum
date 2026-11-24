@@ -29,7 +29,7 @@ Based on `main` and the parity test suites:
 - **Login-shell `PATH` discovery:** Reading the login shell's `PATH` at startup and again before source-control discovery, so provider CLIs and tools installed later are found; listing Codex models from its CLI.
 - **Provider status checks:** Every built-in provider (Claude Code, Codex, Cursor, OpenCode, Grok, Pi, fx, Kiro, Antigravity and Muse Code) has its status (installed version, sign-in state, usage and models) checked at startup, on settings changes, every 5 minutes while a client is watching, and on refresh, and pushed to clients. The checks include newer CLI releases and Claude's skills, and Rust can redeem the reset credits a Claude or Codex subscription banks.
 - **Configuration, auth, and desktop adoption:** Shared `userdata/` layout (`settings.json`, secrets, managed policy, `server-owner.sqlite` exclusive lock, `server-runtime.json`), browser session cookies, WebSocket tickets with DPoP checks, CORS, and desktop SSH launcher adoption.
-- **Git, GitHub, and workspace operations:** File operations, terminals (PTY), git workflows, GitHub/Linear provider RPCs, Bitbucket pull requests with the credential from Settings or the `T3CODE_BITBUCKET_*` environment variables (listing them; opening one with its checks, activity and reviewers; merging, declining, editing, commenting, reviewing and resolving; its diff over HTTP), and Chromium preview support.
+- **Git, GitHub, and workspace operations:** File operations, terminals (PTY), git workflows, GitHub/Linear provider RPCs, Bitbucket pull requests with the credential from Settings or the `T3CODE_BITBUCKET_*` environment variables (listing them; opening one with its checks, activity and reviewers; merging, declining, editing, commenting, reviewing and resolving; its diff over HTTP), Chromium preview support, and the preview tunnel that carries other devices' preview traffic to this machine's local servers (with its setting and managed policy switch).
 - **Split control/workspace architecture:** Out-of-process workspace execution via `t3-agentd` and an embeddable, `wasm32-unknown-unknown`-compatible control plane (`workers/`). Remote Codex and Claude turns can call the host's MCP endpoint as their thread. See [host configuration](docs/embedding.md#settings-and-provider-turns).
 - **Parity test suites:** Automated suites comparing HTTP, WebSocket RPC, client initial sync, live provider turns, settings, auth, MCP, git/GitHub, previews, and relay behavior directly against the pinned TypeScript reference.
 
@@ -61,26 +61,17 @@ Most suites match the original exactly; the few expected differences are listed 
 - **Titles.** Cursor and Muse Code can't title threads yet. Custom title generators, images in an OpenCode title prompt, and titles that draw on a forked thread's history are missing. Antigravity titles don't yet clean up old temporary folders or wait out a sign-in.
 - **Desktop power reports.** Rust doesn't receive the desktop app's power reports (battery, screen lock, heat), so it never pauses provider checks for them.
 
-### Settings and environment
-
-- **Preview tunnel switch.** The setting and managed policy that turn off the preview tunnel are missing (upstream #39415).
-- **Agent feedback switch.** Agents' feedback tools are served, but the environment doesn't yet tell clients it supports them, so the feedback setting stays hidden in Settings → Labs (upstream #35871).
-
-### Source control
-
-- **More than one Linear account.** Rust connects one Linear account; the original connects several (upstream #39179).
-
 ## Parity status
 
 Parity is tested by running the original TypeScript server and the Rust server side by side and comparing what they answer. Each gets a fresh home directory, and both get the same fake provider CLIs that replay recorded Codex and Claude sessions and scripted Grok ACP sessions, and local stand-ins for every outside service. No test reaches the network or a real model.
 
 - **Pinned reference:** [upstream commit `fd0331ca`](https://github.com/pingdotgg/t3code/tree/fd0331ca9b1596ed7018c80f52b7e6730014f593) (`fd0331ca9b1596ed7018c80f52b7e6730014f593`). This is the only place the README names it.
-- **Suites:** 53 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
-- **Client calls:** the [client RPC suite](scripts/client_rpc_cases.json) drives 242 recorded client steps through the original client. 1 check is expected to fail ([list](scripts/client_rpc_parity_xfail.json)).
+- **Suites:** 54 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
+- **Client calls:** the [client RPC suite](scripts/client_rpc_cases.json) drives 242 recorded client steps through the original client. None is expected to fail.
 - **Live turns:** the client thread suite runs 107 provider scenarios. 61 checks are expected to fail, 11 of them races ([list](scripts/client_thread_parity_xfail.json)).
 - **Shared home:** the server-switch suite has 1 expected failure ([list](scripts/shared_store_parity_xfail.json)).
 - **Provider status:** the [provider status suite](scripts/provider_status_parity.py) has no expected failures.
-- **Other suites:** 1 known difference in the peer link suites ([list](scripts/parity_gaps.json)).
+- **Other suites:** none has a known difference.
 - **Agent tools:** 88 of 94 served ([checklist](docs/agent-tools.md#checklist)).
 
 A suite fails on any difference it doesn't list, and on any listed case that starts to match.

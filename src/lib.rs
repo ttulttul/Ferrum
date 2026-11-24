@@ -86,6 +86,8 @@ use orchestration::dispatch_orchestration_command;
 #[cfg(feature = "native")]
 mod background_policy;
 #[cfg(feature = "native")]
+mod preview_tunnel;
+#[cfg(feature = "native")]
 pub mod provider_http;
 #[cfg(feature = "native")]
 pub mod provider_rpc;

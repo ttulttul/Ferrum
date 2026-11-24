@@ -746,6 +746,7 @@ impl std::ops::Deref for AppState {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(provider_http::routes())
+        .route("/api/preview/tunnel", get(crate::preview_tunnel::handler))
         .route("/api/projects", get(projects::snapshot))
         .route("/api/projects/mutate", post(projects::mutate_http))
         .route("/api/observability/v1/traces", post(otlp_traces_proxy))
