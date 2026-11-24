@@ -2,7 +2,7 @@
 //! Claude Code stream-json transcripts (`tests/fixtures/providers`).
 use super::*;
 use crate::workspace::provider::{
-    ProviderTurn, TurnStatus, ACP_REGISTRY, CLAUDE_AGENT, GROK, OPENCODE, PI,
+    ProviderTurn, TurnStatus, ACP_REGISTRY, ANTIGRAVITY, CLAUDE_AGENT, GROK, OPENCODE, PI,
 };
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -1511,4 +1511,62 @@ async fn opencode_stop_aborts_the_session_and_waits_for_idle() {
     assert!(opencode_requests(&log)
         .iter()
         .any(|r| r["method"] == "POST" && r["path"] == "/session/ses_1/abort"));
+}
+
+#[tokio::test]
+async fn antigravity_turn_signs_in_eagerly_and_reads_agys_command_shapes() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(ANTIGRAVITY, "agy_turn.json", &log, None);
+    if let Some(provider) = spec.provider.as_mut() {
+        provider.launch_args = vec!["acp".into()];
+        provider.antigravity = Some(crate::workspace::provider::AntigravityLaunch {
+            version: "1.6.2".into(),
+            run_temp_parent: dir.path().join("tmp").display().to_string(),
+            launch_error: String::new(),
+        });
+    }
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    let sent: Vec<Value> = received(&log);
+    let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
+    // Signed in right after initialize, before any session request.
+    assert_eq!(&methods[..3], ["initialize", "authenticate", "session/new"]);
+    let initialize = &sent[0]["params"];
+    assert_eq!(initialize["clientCapabilities"]["fs"]["readTextFile"], true);
+    assert_eq!(initialize["clientInfo"]["name"], "t3-code");
+    // agy's command line and combined output.
+    let command = items(&events, "command_execution");
+    let done = command.last().expect("the command");
+    assert_eq!(
+        (
+            done.status.as_str(),
+            &done.fields["input"],
+            &done.fields["output"]
+        ),
+        ("completed", &json!("echo hi"), &json!("hi\n"))
+    );
+}
+
+#[tokio::test]
+async fn antigravity_launch_error_fails_the_session_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(ANTIGRAVITY, "agy_turn.json", &log, None);
+    if let Some(provider) = spec.provider.as_mut() {
+        provider.antigravity = Some(crate::workspace::provider::AntigravityLaunch {
+            launch_error: "Antigravity ACP runtime is not installed.".into(),
+            ..Default::default()
+        });
+    }
+    let (events, exit) = run(spec).await;
+    assert!(!exit.success);
+    let (status, failure) = terminal(&events);
+    assert_eq!(status, TurnStatus::Failed);
+    assert_eq!(
+        failure.map(|f| f.message),
+        Some("Antigravity ACP runtime is not installed.".into())
+    );
+    assert!(received(&log).is_empty(), "nothing was launched");
 }

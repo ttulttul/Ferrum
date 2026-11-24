@@ -21,7 +21,7 @@ const AUTH_URL_LINE: &str = "Open the following link to authenticate the ACP ser
 const BROWSER_PREFLIGHT_URL: &str = "https://example.invalid/t3-antigravity-browser-preflight";
 const PREAMBLE: &str = "Use only the input below. Do not use tools, read or write files, run commands, or ask questions.\nReturn only the requested JSON object.\n\n";
 /// Keys the runtime must not inherit (`removedEnvironmentKeys`).
-const REMOVED_ENV: [&str; 13] = [
+pub(crate) const REMOVED_ENV: [&str; 18] = [
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "GOOGLE_APPLICATION_CREDENTIALS",
@@ -35,6 +35,11 @@ const REMOVED_ENV: [&str; 13] = [
     "AGY_ACP_ENABLE_OAUTH",
     "GEMINI_HOME",
     "AGY_ACP_FORCE_FILE_STORAGE",
+    "AGY_CLI_DISABLE_AUTO_UPDATE",
+    "BROWSER",
+    "PYTHONUNBUFFERED",
+    "ELECTRON_RUN_AS_NODE",
+    "CHROME_CRASHPAD_PIPE_NAME",
 ];
 
 /// Why a run failed: a message for the user, or a sign-in the runtime asked
@@ -122,11 +127,22 @@ fn environment(profile: &Profile, base: &ProcessEnv, auth: &Auth, temp: &Path) -
             env.insert("SSL_CERT_FILE".into(), bundle.clone());
         }
     }
+    // A personal Google sign-in is stored in files when agy sees a remote
+    // session.
+    if auth.method == "oauth-personal" {
+        let ssh = base
+            .get("SSH_CONNECTION")
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1 0 127.0.0.1 0".into());
+        env.insert("SSH_CONNECTION".into(), ssh);
+    }
     env.insert(
         "GEMINI_HOME".into(),
         profile.gemini_home.display().to_string(),
     );
     env.insert("AGY_ACP_FORCE_FILE_STORAGE".into(), "1".into());
+    env.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "1".into());
     env.insert("BROWSER".into(), profile.browser_command.clone());
     env.insert("PYTHONUNBUFFERED".into(), "1".into());
     env.insert("ELECTRON_RUN_AS_NODE".into(), "1".into());
@@ -447,6 +463,65 @@ async fn set_default_mode(
             .await
     };
     result.map(|_| ()).map_err(|_| Failure::Other)
+}
+
+/// How a thread's Antigravity turns launch `agy acp` (`buildAntigravityAcpSpawnInput`):
+/// the resolved executable, its arguments, the prepared profile's environment
+/// (without `TMPDIR`: each process gets a `run-XXXXXX` folder of its own
+/// under `run_temp_parent`), the keys it must not inherit, the installed
+/// version and the sign-in method.
+pub(crate) struct TurnLaunch {
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) env: ProcessEnv,
+    pub(crate) run_temp_parent: PathBuf,
+    pub(crate) version: Option<String>,
+    pub(crate) auth_method: String,
+}
+
+/// Prepare a turn's launch: the instance's sign-in settings checked, the
+/// executable resolved and the profile prepared, as the driver does before
+/// it spawns the runtime.
+pub(crate) async fn turn_launch(
+    base_dir: &Path,
+    state_dir: &Path,
+    manifest: &Value,
+    instance_id: &str,
+    config: &Value,
+    env: &ProcessEnv,
+) -> Result<TurnLaunch, String> {
+    let auth = Auth::of(config);
+    if let Some(issue) = auth.config_issue() {
+        return Err(issue.to_owned());
+    }
+    let key = hex::encode(Sha256::digest(instance_id.as_bytes()));
+    let gemini_home = state_dir.join("providers").join("antigravity").join(&key);
+    let executable = resolve_executable(
+        base_dir,
+        config["binaryPath"].as_str().unwrap_or(""),
+        env,
+        manifest,
+    )?;
+    let runtime_temp = state_dir.join("antigravity-tmp").join(&key[..12]);
+    let profile = prepare_profile(&gemini_home, &runtime_temp, env, &auth)
+        .await
+        .map_err(Failure::message)?;
+    let mut spawn_env = environment(&profile, env, &auth, &runtime_temp);
+    spawn_env.remove("TMPDIR");
+    Ok(TurnLaunch {
+        program: executable.path.display().to_string(),
+        args: vec![
+            "acp".into(),
+            "--gemini-dir".into(),
+            profile.gemini_home.display().to_string(),
+            "--app-data-dir".into(),
+            "antigravity-acp".into(),
+        ],
+        env: spawn_env,
+        run_temp_parent: runtime_temp,
+        version: executable.version,
+        auth_method: auth.method,
+    })
 }
 
 /// `makeAntigravityTextGeneration`'s run: Antigravity's reply to `prompt`.

@@ -622,6 +622,61 @@ impl crate::orchestration::CommandHost for AppState {
                         }
                     }
                 }
+                // An Antigravity turn runs `agy acp` as the driver launches
+                // it: the instance's sign-in settings checked, the executable
+                // resolved, the private profile prepared, and the runtime's
+                // whole environment (less the keys it must not inherit).
+                let mut env_remove = env_remove;
+                if let Ok(Some((turn, env))) = provider.as_mut() {
+                    if turn.driver == crate::workspace::provider::ANTIGRAVITY {
+                        let settings = self.settings.internal().unwrap_or_default();
+                        let config = settings["providerInstances"][turn.instance_id.as_str()]
+                            ["config"]
+                            .clone();
+                        let (base_dir, state_dir) = self.provider_status.directories();
+                        let base = crate::provider_status::base_env(env);
+                        let launched = crate::provider_status::antigravity_text::turn_launch(
+                            base_dir,
+                            state_dir,
+                            &self.model_manifest.current(),
+                            &turn.instance_id,
+                            &config,
+                            &base,
+                        )
+                        .await;
+                        match launched {
+                            Ok(launch) => {
+                                turn.binary_path = launch.program;
+                                turn.launch_args = launch.args;
+                                turn.auth_method = launch.auth_method;
+                                turn.antigravity =
+                                    Some(crate::workspace::provider::AntigravityLaunch {
+                                        version: launch.version.unwrap_or_default(),
+                                        run_temp_parent: launch
+                                            .run_temp_parent
+                                            .display()
+                                            .to_string(),
+                                        launch_error: String::new(),
+                                    });
+                                *env = launch.env.into_iter().collect();
+                                env_remove.extend(
+                                    crate::provider_status::antigravity_text::REMOVED_ENV
+                                        .iter()
+                                        .map(|key| (*key).to_owned()),
+                                );
+                            }
+                            // The session fails to open with it, as the
+                            // driver's does.
+                            Err(detail) => {
+                                turn.antigravity =
+                                    Some(crate::workspace::provider::AntigravityLaunch {
+                                        launch_error: detail,
+                                        ..Default::default()
+                                    });
+                            }
+                        }
+                    }
+                }
                 let mut spec = crate::workspace::TurnSpec {
                     prompt: text,
                     cwd,

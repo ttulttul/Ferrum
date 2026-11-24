@@ -19,7 +19,7 @@ use super::{cancelled, next_response, program, requests, Cli, Launch, Sink, Turn
 use crate::thread_projection::uri_component;
 use crate::workspace::provider::{
     ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition, TurnStatus,
-    ACP_REGISTRY, GROK,
+    ACP_REGISTRY, ANTIGRAVITY, GROK,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Value};
@@ -45,6 +45,12 @@ const METHOD_NOT_FOUND: i64 = -32601;
 /// The error an agent answers a session request with until it is signed in.
 const AUTH_REQUIRED: i64 = -32000;
 
+/// agy's request for a browser sign-in, and what a turn says of it.
+const AGY_SIGN_IN_LINE: &str = "Open the following link to authenticate the ACP server: ";
+const AGY_SIGN_IN: &str = "Sign in to Antigravity in Settings before you continue.";
+/// The largest file agy may read through T3 (8 MiB).
+const AGY_READ_LIMIT: u64 = 8 * 1024 * 1024;
+
 /// How long a Stop waits for an agent to answer its cancelled prompt.
 const STOP_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -56,20 +62,25 @@ enum Flavor {
     /// An ACP Registry agent (`provider-acp-registry`), in the generic
     /// flavor: launched as resolved, cancelled with `session/cancel`.
     Registry,
+    /// Antigravity's `agy acp` (`AntigravityAdapterV2`): the generic flavor
+    /// with eager sign-in, client file reads, `session/resume`, its tool
+    /// shapes, its approval labels and questions.
+    Antigravity,
 }
 
 impl Flavor {
     fn of(provider: &ProviderTurn) -> Self {
-        if provider.driver == ACP_REGISTRY {
-            Self::Registry
-        } else {
-            Self::Grok
+        match provider.driver.as_str() {
+            ACP_REGISTRY => Self::Registry,
+            ANTIGRAVITY => Self::Antigravity,
+            _ => Self::Grok,
         }
     }
     fn driver(self) -> &'static str {
         match self {
             Self::Grok => GROK,
             Self::Registry => ACP_REGISTRY,
+            Self::Antigravity => ANTIGRAVITY,
         }
     }
     /// The harness the runtime notes name (`runtimeHarness ?? driver`).
@@ -77,6 +88,7 @@ impl Flavor {
         match self {
             Self::Grok => "Grok",
             Self::Registry => ACP_REGISTRY,
+            Self::Antigravity => "Antigravity",
         }
     }
     /// The agent's command line.
@@ -87,7 +99,7 @@ impl Flavor {
                 args.extend(provider.launch_args.iter().cloned());
                 args
             }
-            Self::Registry => provider.launch_args.clone(),
+            Self::Registry | Self::Antigravity => provider.launch_args.clone(),
         }
     }
 }
@@ -241,6 +253,21 @@ struct Agent {
     instructions: Option<InstructionState>,
     /// The runtime notes the session has.
     notes: Option<String>,
+    /// The session's mode (`modes.currentModeId`) and its modes' ids.
+    current_mode: Option<String>,
+    modes: Vec<String>,
+    /// Antigravity: the process's own temporary folder (`run-XXXXXX`),
+    /// removed with the agent.
+    _run_temp: Option<tempfile::TempDir>,
+    /// The installed CLI's version, which names the client to it.
+    installed_version: Option<String>,
+    /// The version the agent reports (`agentInfo.version`).
+    agent_version: Option<String>,
+    /// The agent takes T3's pull request instructions in the session's
+    /// system prompt (`_meta.antigravity.systemPrompt.append`).
+    system_prompt_append: bool,
+    /// The agent reaches MCP servers over HTTP (`mcpCapabilities.http`).
+    mcp_http: bool,
 }
 
 impl Agent {
@@ -258,9 +285,29 @@ impl Agent {
             ),
             // The generic flavor gives the agent its thread and T3's MCP
             // endpoint (`processEnvironment`), for the terminal fallback.
-            Flavor::Registry => ("", "", process_environment(provider)),
+            Flavor::Registry | Flavor::Antigravity => ("", "", process_environment(provider)),
         };
-        if flavor == Flavor::Registry && provider.binary_path.trim().is_empty() {
+        let mut extra_env = extra_env;
+        // Each Antigravity process gets a temporary folder of its own.
+        let run_temp = match provider.antigravity.as_ref() {
+            Some(launch) if flavor == Flavor::Antigravity => {
+                let parent = std::path::Path::new(&launch.run_temp_parent);
+                std::fs::create_dir_all(parent)?;
+                let temp = tempfile::Builder::new()
+                    .prefix("run-")
+                    .rand_bytes(6)
+                    .tempdir_in(parent)
+                    .map_err(|_| {
+                        std::io::Error::other(
+                            "Could not create an Antigravity runtime temp directory.",
+                        )
+                    })?;
+                extra_env.push(("TMPDIR".into(), temp.path().display().to_string()));
+                Some(temp)
+            }
+            _ => None,
+        };
+        if flavor != Flavor::Grok && provider.binary_path.trim().is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Local ACP provider requires an executable.",
@@ -297,6 +344,17 @@ impl Agent {
             prompts: 0,
             instructions: None,
             notes: None,
+            current_mode: None,
+            modes: Vec::new(),
+            _run_temp: run_temp,
+            installed_version: provider
+                .antigravity
+                .as_ref()
+                .map(|launch| launch.version.clone())
+                .filter(|version| !version.is_empty()),
+            agent_version: None,
+            system_prompt_append: false,
+            mcp_http: false,
         })
     }
 
@@ -394,7 +452,7 @@ impl Agent {
     async fn initialize(&mut self) -> Result<(), AcpError> {
         // A registry agent may also ask the user to sign in at a URL.
         let elicitation = match self.flavor {
-            Flavor::Grok => json!({"form": {}}),
+            Flavor::Grok | Flavor::Antigravity => json!({"form": {}}),
             Flavor::Registry => json!({"form": {}, "url": {}}),
         };
         let mut params = json!({
@@ -413,7 +471,28 @@ impl Agent {
             // Grok then asks about auto-mode refusals instead of denying them.
             params["_meta"] = json!({"clientType": "extension"});
         }
+        if self.flavor == Flavor::Antigravity {
+            // agy reads files through T3 (`clientFileReads`), and from 1.5.1
+            // on is told it runs in T3 Code (`antigravityClientInfo`).
+            params["clientCapabilities"]["fs"]["readTextFile"] = json!(true);
+            let client = if version_at_least(self.installed_version.as_deref(), (1, 5, 1)) {
+                json!({"name": "t3-code", "title": "T3 Code",
+                    "version": crate::server_runtime::SERVER_VERSION})
+            } else {
+                json!({"name": "zed", "version": "0.0.0"})
+            };
+            params["clientInfo"] = client.clone();
+            params["info"] = client;
+        }
         let result = self.request("initialize", params, false).await?;
+        let capabilities = &result["agentCapabilities"];
+        self.agent_version = result["agentInfo"]["version"]
+            .as_str()
+            .filter(|version| !version.is_empty())
+            .map(str::to_owned);
+        self.system_prompt_append =
+            capabilities["_meta"]["antigravity"]["systemPrompt"]["append"] == true;
+        self.mcp_http = capabilities["mcpCapabilities"]["http"] == true;
         self.can_close = !result["agentCapabilities"]["sessionCapabilities"]["close"].is_null();
         self.auth_methods = result["authMethods"]
             .as_array()
@@ -446,8 +525,12 @@ impl Agent {
                     Flavor::Grok if xai_key => "xai.api_key".to_owned(),
                     Flavor::Grok => "cached_token".to_owned(),
                     // The instance's method, else the agent's first.
-                    Flavor::Registry if !self.auth_method.is_empty() => self.auth_method.clone(),
-                    Flavor::Registry => self.auth_methods.first().cloned().unwrap_or_default(),
+                    Flavor::Registry | Flavor::Antigravity if !self.auth_method.is_empty() => {
+                        self.auth_method.clone()
+                    }
+                    Flavor::Registry | Flavor::Antigravity => {
+                        self.auth_methods.first().cloned().unwrap_or_default()
+                    }
                 };
                 let method_id = method_id.as_str();
                 if !self.auth_methods.iter().any(|id| id == method_id) {
@@ -468,6 +551,9 @@ impl Agent {
     async fn configure(&mut self, provider: &ProviderTurn) -> Result<(), AcpError> {
         if self.flavor == Flavor::Registry {
             return self.configure_generic(provider).await;
+        }
+        if self.flavor == Flavor::Antigravity {
+            return self.configure_antigravity(provider).await;
         }
         let requested = match provider.model.trim() {
             "" => "grok-build",
@@ -575,6 +661,88 @@ impl Agent {
         Ok(())
     }
 
+    /// Antigravity's model and mode (`applyModelSelection`,
+    /// `antigravitySessionMode`): `antigravity-default` keeps the session's
+    /// model, another is set as the model option; the mode stays `default`
+    /// (agy refuses its own full-access modes, so T3 answers its requests),
+    /// or `auto` when the thread is in auto and the session offers it.
+    async fn configure_antigravity(&mut self, provider: &ProviderTurn) -> Result<(), AcpError> {
+        let requested = match provider.model.trim() {
+            "" | "antigravity-default" => None,
+            model => Some(model.to_owned()),
+        };
+        let model_option = self
+            .config_options
+            .iter()
+            .find(|option| option["category"] == "model" && option["type"] == "select")
+            .cloned();
+        if let Some(model) = requested {
+            let current = model_option
+                .as_ref()
+                .and_then(|option| option["currentValue"].as_str().map(str::to_owned))
+                .or_else(|| self.current_model.clone());
+            if current.as_deref() != Some(model.as_str())
+                && self.configured.as_ref().map(|c| &c.0) != Some(&model)
+            {
+                let config = model_option
+                    .as_ref()
+                    .and_then(|option| option["id"].as_str())
+                    .unwrap_or("model")
+                    .to_owned();
+                let params = json!({"sessionId": self.session, "configId": config, "value": model});
+                self.request("session/set_config_option", params, false)
+                    .await
+                    .map_err(|error| match error {
+                        AcpError::Rpc { code: -32602, .. } => AcpError::Startup(format!(
+                            "Antigravity model '{model}' is unavailable for this Google account. Select an available model."
+                        )),
+                        other => other,
+                    })?;
+                self.current_model = Some(model.clone());
+            }
+            self.configured = Some((model, None));
+        }
+        let mode_option = self
+            .config_options
+            .iter()
+            .find(|option| option["category"] == "mode" && option["type"] == "select")
+            .cloned();
+        let offers_auto = mode_option.as_ref().is_some_and(|option| {
+            option["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|choice| choice["value"] == "auto")
+        }) || self.modes.iter().any(|mode| mode == "auto");
+        let wanted = if provider.runtime_mode() == "auto" && offers_auto {
+            "auto"
+        } else {
+            "default"
+        };
+        let current = mode_option
+            .as_ref()
+            .and_then(|option| option["currentValue"].as_str().map(str::to_owned))
+            .or_else(|| self.current_mode.clone());
+        if current.as_deref() == Some(wanted) {
+            return Ok(());
+        }
+        let result = match &mode_option {
+            Some(option) => {
+                let params = json!({"sessionId": self.session, "configId": option["id"],
+                    "value": wanted});
+                self.request("session/set_config_option", params, false)
+                    .await
+            }
+            None => {
+                let params = json!({"sessionId": self.session, "modeId": wanted});
+                self.request("session/set_mode", params, false).await
+            }
+        };
+        result?;
+        self.current_mode = Some(wanted.to_owned());
+        Ok(())
+    }
+
     /// Note a session's setup result: its models and config options.
     fn note_setup(&mut self, setup: &Value) {
         if let Some(model) = current_model(setup) {
@@ -588,6 +756,15 @@ impl Agent {
         }
         if let Some(options) = setup["configOptions"].as_array() {
             self.config_options = options.clone();
+        }
+        if let Some(mode) = setup["modes"]["currentModeId"].as_str() {
+            self.current_mode = Some(mode.to_owned());
+        }
+        if let Some(modes) = setup["modes"]["availableModes"].as_array() {
+            self.modes = modes
+                .iter()
+                .filter_map(|mode| mode["id"].as_str().map(str::to_owned))
+                .collect();
         }
     }
 
@@ -787,6 +964,14 @@ async fn open(
         .stopped()
         .remove(thread)
         .filter(|stopped| resume == Some(stopped.session.as_str()));
+    if let Some(error) = provider
+        .antigravity
+        .as_ref()
+        .map(|launch| launch.launch_error.as_str())
+        .filter(|error| !error.is_empty())
+    {
+        return Err(AcpError::Startup(error.to_owned()));
+    }
     let mut agent = Agent::spawn(spec, provider, launch)
         .await
         .map_err(|error| AcpError::Startup(error.to_string()))?;
@@ -808,10 +993,40 @@ async fn start(
     resume: Option<&str>,
 ) -> Result<bool, AcpError> {
     agent.initialize().await?;
-    let mcp = mcp_servers(provider);
+    let mut mcp = mcp_servers(provider);
+    // The session's setup carries T3's pull request instructions for an
+    // agent that takes them in its system prompt (`antigravitySessionMeta`).
+    let mut meta = None;
+    if agent.flavor == Flavor::Antigravity {
+        // Eagerly, with the configured method: agy takes ones it does not list.
+        let method = if agent.auth_method.is_empty() {
+            "oauth-personal".to_owned()
+        } else {
+            agent.auth_method.clone()
+        };
+        agent
+            .request("authenticate", json!({"methodId": method}), false)
+            .await?;
+        if agent.system_prompt_append {
+            meta = Some(json!({"antigravity": {"systemPrompt": {
+                "append": crate::agent_instructions::pull_request_linking()}}}));
+        }
+        if agent.mcp_http {
+            if let Some(server) = &provider.mcp {
+                mcp = json!([{"type": "http", "name": "t3-code", "url": server.url,
+                    "headers": [{"name": "Authorization", "value": server.authorization}]}]);
+            }
+        }
+    }
+    let with_meta = |mut params: Value| {
+        if let Some(meta) = &meta {
+            params["_meta"] = meta.clone();
+        }
+        params
+    };
     let new_session = |agent: &Agent| {
         let _ = agent;
-        json!({"cwd": spec.cwd, "mcpServers": mcp})
+        with_meta(json!({"cwd": spec.cwd, "mcpServers": mcp}))
     };
     let resumed = match (stopped, resume) {
         // After a Stop, the restarted runtime starts a session of its own,
@@ -827,7 +1042,9 @@ async fn start(
                 .session_request(
                     spec,
                     "session/load",
-                    json!({"sessionId": stopped.session, "cwd": spec.cwd, "mcpServers": mcp}),
+                    with_meta(
+                        json!({"sessionId": stopped.session, "cwd": spec.cwd, "mcpServers": mcp}),
+                    ),
                 )
                 .await?;
             agent.note_setup(&loaded);
@@ -838,11 +1055,17 @@ async fn start(
         (None, Some(session)) => {
             agent.session = session.to_owned();
             agent.scoped = false;
+            // agy resumes without replaying its history (`resumeMethod`).
+            let method = if agent.flavor == Flavor::Antigravity {
+                "session/resume"
+            } else {
+                "session/load"
+            };
             let loaded = agent
                 .session_request(
                     spec,
-                    "session/load",
-                    json!({"sessionId": session, "cwd": spec.cwd, "mcpServers": mcp}),
+                    method,
+                    with_meta(json!({"sessionId": session, "cwd": spec.cwd, "mcpServers": mcp})),
                 )
                 .await?;
             agent.note_setup(&loaded);
@@ -864,6 +1087,95 @@ async fn start(
     };
     agent.configure(provider).await?;
     Ok(resumed)
+}
+
+/// Whether `version` (`1.5.1`, `1.6.2-beta`) is at least `at`.
+fn version_at_least(version: Option<&str>, at: (u64, u64, u64)) -> bool {
+    let Some(version) = version else {
+        return false;
+    };
+    let parts: Vec<u64> = version
+        .trim()
+        .trim_start_matches('v')
+        .split('.')
+        .take(3)
+        .filter_map(|part| {
+            part.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .collect();
+    parts.len() == 3 && (parts[0], parts[1], parts[2]) >= at
+}
+
+/// A failed Antigravity prompt (no `promptFailure` of its own): the
+/// curated sign-in text, else the generic one.
+fn antigravity_prompt_failure(error: &AcpError) -> ProviderFailure {
+    match error {
+        AcpError::Rpc {
+            code: AUTH_REQUIRED,
+            ..
+        } => ProviderFailure::new(
+            "provider_error",
+            "The provider needs you to sign in. Sign in from its provider settings or with its own CLI or app, then retry the turn.",
+        ),
+        _ => ProviderFailure::new("provider_error", "Provider turn failed."),
+    }
+}
+
+/// `path` with every link resolved: its real path, or for a missing path
+/// its deepest existing ancestor's real path with the rest appended.
+fn resolve_existing(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut missing = Vec::new();
+    let mut at = path.to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&at) {
+            return Some(
+                missing
+                    .into_iter()
+                    .rev()
+                    .fold(real, |path, part| path.join(part)),
+            );
+        }
+        let name = at.file_name()?.to_owned();
+        missing.push(name);
+        at = at.parent()?.to_path_buf();
+    }
+}
+
+/// agy's tool shapes (`normalizeAntigravityToolCall`): its command line,
+/// working folder, combined output and exit code become the generic ones,
+/// and a call naming a command is a command.
+fn normalize_antigravity(tool: &mut Tool) {
+    let text = |value: &Value, keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| value[*key].as_str().filter(|v| !v.trim().is_empty()))
+            .map(str::to_owned)
+    };
+    let command = text(
+        &tool.raw_input,
+        &["CommandLine", "command_line", "commandLine", "command"],
+    )
+    .or_else(|| text(&tool.raw_output, &["commandLine", "command_line"]));
+    if let Some(command) = command {
+        if tool.raw_input.is_null() {
+            tool.raw_input = json!({});
+        }
+        if tool.raw_input.is_object() {
+            tool.raw_input["command"] = json!(command.trim());
+        }
+        if tool.kind.is_none() {
+            tool.kind = Some("execute".into());
+        }
+    }
+    if let Some(output) = text(&tool.raw_output, &["combinedOutput", "combined_output"]) {
+        tool.raw_output["output"] = json!(output);
+    }
 }
 
 fn current_model(setup: &Value) -> Option<String> {
@@ -954,6 +1266,18 @@ struct Turn<'a> {
     delivered: bool,
     /// The user stopped the turn (the generic flavor's `session/cancel`).
     interrupting: bool,
+    /// Antigravity: where the agent may read files through T3 (the turn's
+    /// folder and the attachments folder).
+    read_roots: Vec<std::path::PathBuf>,
+    /// Antigravity: its pull request instructions ride in the session.
+    system_prompt_append: bool,
+    /// Antigravity from 1.5.0 on steers with another `session/prompt`.
+    prompt_steering: bool,
+    /// The prompts' usage (`PromptResponse.usage`), summed.
+    prompt_usage: Option<Value>,
+    /// Questions agy asked (`interaction_*`), by request id: the RPC id and
+    /// the options.
+    questions: HashMap<String, (Value, Vec<Value>)>,
 }
 
 impl<'a> Turn<'a> {
@@ -993,6 +1317,15 @@ impl<'a> Turn<'a> {
             session: agent.session.clone(),
             delivered: false,
             interrupting: false,
+            read_roots: std::iter::once(spec.cwd.clone())
+                .chain(provider.extra_dirs.iter().cloned())
+                .map(std::path::PathBuf::from)
+                .collect(),
+            system_prompt_append: agent.system_prompt_append,
+            prompt_steering: agent.flavor == Flavor::Antigravity
+                && version_at_least(agent.agent_version.as_deref(), (1, 5, 0)),
+            prompt_usage: None,
+            questions: HashMap::new(),
         }
     }
 
@@ -1051,7 +1384,7 @@ impl<'a> Turn<'a> {
                     if super::take_detached(&self.sink.turn_id) {
                         break Ended::Detached;
                     }
-                    if self.flavor == Flavor::Registry {
+                    if self.flavor != Flavor::Grok {
                         break self.cancel_prompt(agent).await;
                     }
                     self.finalize(TurnStatus::Interrupted);
@@ -1073,6 +1406,12 @@ impl<'a> Turn<'a> {
                 break Ended::Crashed(super::acp_crashed(status));
             };
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                // agy asks for a browser sign-in on its output.
+                if self.flavor == Flavor::Antigravity && line.starts_with(AGY_SIGN_IN_LINE) {
+                    self.cancel_pending(agent).await;
+                    self.close_streams();
+                    break Ended::Crashed(ProviderFailure::new("provider_error", AGY_SIGN_IN));
+                }
                 continue;
             };
             if let Some(end) = self.handle(agent, message).await {
@@ -1147,6 +1486,15 @@ impl<'a> Turn<'a> {
                 self.has_device_tools,
             )
         };
+        // Antigravity's prompt (`buildAttachmentPrompt`): its text trimmed,
+        // with each attachment's path, and only the images it takes.
+        let text = if self.flavor == Flavor::Antigravity {
+            crate::workspace::attachment_prompt::text_with_paths(&text, &self.attachments)
+                .trim()
+                .to_owned()
+        } else {
+            text
+        };
         let mut blocks = vec![json!({"type": "text", "text": text})];
         for attachment in &self.attachments {
             let mime = attachment["mimeType"].as_str().unwrap_or_default();
@@ -1154,6 +1502,14 @@ impl<'a> Turn<'a> {
                 continue;
             };
             if !mime.starts_with("image/") {
+                continue;
+            }
+            if self.flavor == Flavor::Antigravity
+                && !matches!(
+                    mime,
+                    "image/bmp" | "image/jpeg" | "image/png" | "image/webp"
+                )
+            {
                 continue;
             }
             if let Ok(bytes) = std::fs::read(path) {
@@ -1166,10 +1522,16 @@ impl<'a> Turn<'a> {
         // The selection's model ("default", the agent's own, says none).
         let model = match (self.model.as_str(), self.flavor) {
             ("", Flavor::Grok) => Some("grok-build"),
-            ("", Flavor::Registry) => None,
+            ("", Flavor::Registry | Flavor::Antigravity) => None,
             (model, _) => Some(model),
         };
-        let notes = crate::agent_instructions::runtime(self.flavor.harness(), model, None);
+        // An agent whose session took the pull request text has notes
+        // without it.
+        let notes = if self.system_prompt_append {
+            crate::agent_instructions::runtime_info(self.flavor.harness(), model, None)
+        } else {
+            crate::agent_instructions::runtime(self.flavor.harness(), model, None)
+        };
         if !slash && agent.notes.as_deref() != Some(notes.as_str()) {
             blocks.push(json!({"type": "text", "text": notes}));
         }
@@ -1182,6 +1544,14 @@ impl<'a> Turn<'a> {
         match (method.as_deref(), message.get("id")) {
             (Some("session/request_permission"), Some(_)) => {
                 self.permission(agent, &message).await;
+                None
+            }
+            (Some("fs/read_text_file"), Some(id)) if self.flavor == Flavor::Antigravity => {
+                let id = id.clone();
+                match self.read_text_file(&message["params"]) {
+                    Ok(content) => agent.reply(&id, json!({"content": content})).await,
+                    Err((code, text)) => agent.reply_error(&id, code, &text).await,
+                }
                 None
             }
             (Some(_), Some(_)) => {
@@ -1205,12 +1575,20 @@ impl<'a> Turn<'a> {
                         message: error["message"].as_str().unwrap_or_default().to_owned(),
                         data: error.get("data").cloned().unwrap_or(Value::Null),
                     };
-                    return Some(self.failed(error.failure(), true));
+                    let failure = if self.flavor == Flavor::Antigravity {
+                        antigravity_prompt_failure(&error)
+                    } else {
+                        error.failure()
+                    };
+                    return Some(self.failed(failure, true));
                 }
                 let stop = message["result"]["stopReason"]
                     .as_str()
                     .unwrap_or("end_turn")
                     .to_owned();
+                if self.flavor == Flavor::Antigravity {
+                    self.add_usage(&message["result"]["usage"]);
+                }
                 Some(self.stopped(&stop))
             }
             _ => None,
@@ -1352,10 +1730,88 @@ impl<'a> Turn<'a> {
             }
         }
         self.close_streams();
-        self.sink.send(ProviderEvent::TurnUsage {
-            usage: json!({"usageScope": "main_agent", "usageStatus": "unavailable",
+        let usage = match &self.prompt_usage {
+            // Gemini's input counts its cached reads apart (`geminiPromptUsage`).
+            Some(usage) => {
+                let n = |key: &str| usage[key].as_u64().unwrap_or(0);
+                let input = n("inputTokens") + n("cachedReadTokens");
+                let output = n("outputTokens");
+                json!({
+                    "usageScope": "main_agent",
+                    "usageStatus": if status == TurnStatus::Completed { "complete" } else { "partial" },
+                    "hasSubagents": false,
+                    "inputTokens": input,
+                    "outputTokens": output,
+                    "cachedInputTokens": n("cachedReadTokens").min(input),
+                    "cacheCreationTokens": n("cachedWriteTokens"),
+                    "reasoningTokens": n("thoughtTokens").min(output),
+                })
+            }
+            None => json!({"usageScope": "main_agent", "usageStatus": "unavailable",
                 "hasSubagents": false}),
-        });
+        };
+        self.sink.send(ProviderEvent::TurnUsage { usage });
+    }
+
+    /// A prompt's usage, added to the turn's (`addAcpUsage`).
+    fn add_usage(&mut self, usage: &Value) {
+        let Some(usage) = usage.as_object() else {
+            return;
+        };
+        let total = self.prompt_usage.get_or_insert_with(|| json!({}));
+        for (key, value) in usage {
+            if let Some(n) = value.as_u64() {
+                total[key] = json!(total[key].as_u64().unwrap_or(0) + n);
+            }
+        }
+    }
+
+    /// `fs/read_text_file` (`AntigravityClientFiles`): a text file in the
+    /// turn's folder or the attachments folder, sliced by `line` (1-based)
+    /// and `limit` (lines); or the JSON-RPC error the reference answers.
+    fn read_text_file(&self, params: &Value) -> Result<String, (i64, String)> {
+        let path = params["path"].as_str().unwrap_or_default();
+        let outside = || {
+            (
+                -32602,
+                format!("Path '{path}' is outside the session workspace."),
+            )
+        };
+        let resolved = resolve_existing(std::path::Path::new(path)).ok_or_else(outside)?;
+        let inside = self
+            .read_roots
+            .iter()
+            .any(|root| resolve_existing(root).is_some_and(|root| resolved.starts_with(&root)));
+        if !inside {
+            return Err(outside());
+        }
+        let meta = std::fs::metadata(&resolved)
+            .map_err(|_| (-32002, format!("File '{path}' not found.")))?;
+        if !meta.is_file() || meta.len() > AGY_READ_LIMIT {
+            return Err((
+                -32602,
+                format!("File '{path}' is not a readable text file under {AGY_READ_LIMIT} bytes."),
+            ));
+        }
+        let bytes =
+            std::fs::read(&resolved).map_err(|_| (-32603, format!("Could not read '{path}'.")))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| (-32602, format!("File '{path}' is not a UTF-8 text file.")))?;
+        if text.contains('\0') {
+            return Err((-32602, format!("File '{path}' contains binary data.")));
+        }
+        let line = params["line"].as_u64().filter(|line| *line > 0);
+        let limit = params["limit"].as_u64();
+        if line.is_none() && limit.is_none() {
+            return Ok(text);
+        }
+        let start = line.unwrap_or(1) as usize - 1;
+        let lines = text.split('\n').skip(start);
+        let lines: Vec<&str> = match limit {
+            Some(limit) => lines.take(limit as usize).collect(),
+            None => lines.collect(),
+        };
+        Ok(lines.join("\n"))
     }
 
     /// One `session/update`.
@@ -1491,6 +1947,9 @@ impl<'a> Turn<'a> {
         if self.flavor == Flavor::Grok {
             normalize_mcp(tool);
             normalize_bash(tool);
+        }
+        if self.flavor == Flavor::Antigravity {
+            normalize_antigravity(tool);
         }
         self.show_tool(&id, false);
     }
@@ -1646,6 +2105,17 @@ impl<'a> Turn<'a> {
             .or_else(|| tracked.as_ref().and_then(|tool| tool.kind.clone()))
             .unwrap_or_else(|| "other".into());
         let options: Vec<Value> = params["options"].as_array().cloned().unwrap_or_default();
+        // agy's questions come as permission requests (`interaction_*`).
+        if self.flavor == Flavor::Antigravity && call_id.starts_with("interaction_") {
+            return self.question(agent, rpc_id, &call_id, call, options).await;
+        }
+        // A call to T3's own tools runs in agy's auto modes.
+        let t3_tool = self.flavor == Flavor::Antigravity
+            && matches!(self.runtime_mode.as_str(), "auto" | "auto-accept-edits")
+            && (call["rawInput"]["ServerName"] == "t3-code"
+                || call["title"]
+                    .as_str()
+                    .is_some_and(|title| title.starts_with("Run mcp_t3-code_")));
         let option = |wanted: &str| {
             options
                 .iter()
@@ -1653,7 +2123,12 @@ impl<'a> Turn<'a> {
                 .and_then(|option| option["optionId"].as_str())
                 .map(str::to_owned)
         };
-        match disposition(self.flavor, &self.runtime_mode, &kind) {
+        let disposed = if t3_tool {
+            Disposition::Allow
+        } else {
+            disposition(self.flavor, &self.runtime_mode, &kind)
+        };
+        match disposed {
             Disposition::Allow => {
                 let chosen = option("allow_once").or_else(|| option("allow_always"));
                 return agent.reply(&rpc_id, outcome(chosen)).await;
@@ -1720,6 +2195,39 @@ impl<'a> Turn<'a> {
         if self.flavor == Flavor::Grok {
             open.fields.insert("options".into(), Value::Array(labels));
         }
+        // agy's labels (`antigravityApprovalOptions`), for the options it offers.
+        if self.flavor == Flavor::Antigravity {
+            let offers = |kind: &str| {
+                options.iter().find(|option| {
+                    option["kind"] == kind
+                        && option["optionId"]
+                            .as_str()
+                            .is_some_and(|id| !id.trim().is_empty())
+                })
+            };
+            let mut labels = Vec::new();
+            if offers("allow_once").is_some() {
+                labels.push(json!({"decision": "accept", "label": "Allow once"}));
+            }
+            if let Some(option) = offers("allow_always") {
+                let mut label =
+                    json!({"decision": "acceptForSession", "label": "Allow for this thread"});
+                let warning = &option["_meta"]["agy.security.warning"];
+                if let Some(text) = warning["message"]
+                    .as_str()
+                    .or(warning["title"].as_str())
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    label["warning"] = json!(text.chars().take(512).collect::<String>());
+                }
+                labels.push(label);
+            }
+            if offers("reject_once").is_some() {
+                labels.push(json!({"decision": "decline", "label": "Deny"}));
+            }
+            labels.push(json!({"decision": "cancel", "label": "Cancel"}));
+            open.fields.insert("options".into(), Value::Array(labels));
+        }
         self.pending.insert(
             open.id.clone(),
             Pending {
@@ -1738,8 +2246,50 @@ impl<'a> Turn<'a> {
     /// its reply does not matter; the turn's items show what it did.
     async fn respond(&mut self, agent: &mut Agent, response: RuntimeResponse) {
         if let Some(text) = &response.steer {
+            // agy from 1.5.0 takes another prompt, which the turn then
+            // follows (`steersWithPrompt`).
+            if self.flavor == Flavor::Antigravity {
+                if self.prompt_steering {
+                    let text = crate::workspace::attachment_prompt::text_with_paths(text, &[]);
+                    let params = json!({"sessionId": self.session,
+                        "prompt": [{"type": "text", "text": text}]});
+                    if let Ok(id) = agent.send("session/prompt", params).await {
+                        self.prompt_rpc = id;
+                    }
+                }
+                return;
+            }
             let params = json!({"sessionId": self.session, "text": text});
             let _ = agent.send("_x.ai/interject", params).await;
+            return;
+        }
+        if let Some((rpc_id, options)) = self.questions.remove(&response.id) {
+            let answer = response
+                .answers
+                .as_ref()
+                .and_then(|answers| answers.as_object())
+                .and_then(|answers| answers.values().next().cloned())
+                .map(|answer| match answer {
+                    Value::Array(values) => values.into_iter().next().unwrap_or(Value::Null),
+                    other => other,
+                })
+                .and_then(|answer| answer.as_str().map(str::to_owned));
+            let chosen = answer.and_then(|answer| {
+                options
+                    .iter()
+                    .find(|option| option["optionId"] == answer.as_str())
+                    .or_else(|| {
+                        let named: Vec<&Value> = options
+                            .iter()
+                            .filter(|option| {
+                                option["name"].as_str().map(str::trim) == Some(answer.trim())
+                            })
+                            .collect();
+                        (named.len() == 1).then(|| named[0])
+                    })
+                    .and_then(|option| option["optionId"].as_str().map(str::to_owned))
+            });
+            agent.reply(&rpc_id, outcome(chosen)).await;
             return;
         }
         let Some(pending) = self.pending.remove(&response.id) else {
@@ -1773,8 +2323,68 @@ impl<'a> Turn<'a> {
         agent.reply(&pending.rpc_id, outcome(chosen)).await;
     }
 
+    /// An agy question (`interaction_*`): the user picks one of its options.
+    async fn question(
+        &mut self,
+        agent: &mut Agent,
+        rpc_id: Value,
+        call_id: &str,
+        call: &Value,
+        options: Vec<Value>,
+    ) {
+        let valid = !options.is_empty()
+            && options.iter().all(|option| {
+                option["optionId"]
+                    .as_str()
+                    .is_some_and(|id| !id.trim().is_empty())
+            });
+        if !valid {
+            return agent.reply(&rpc_id, outcome(None)).await;
+        }
+        self.close_streams();
+        let title = call["title"].as_str().unwrap_or_default().trim();
+        let question = if title.is_empty() {
+            "Choose an option."
+        } else {
+            title
+        };
+        let choices: Vec<Value> = options
+            .iter()
+            .map(|option| {
+                let id = option["optionId"].as_str().unwrap_or_default();
+                let name = option["name"].as_str().unwrap_or_default().trim();
+                let label = if name.is_empty() { id } else { name };
+                json!({"value": id, "label": label, "description": label})
+            })
+            .collect();
+        let native = format!("{}:question:{call_id}", self.session);
+        let mut open = requests::open(
+            call_id,
+            &self.scoped(&native),
+            "user_input",
+            &self.runtime_mode,
+        );
+        open.fields.insert(
+            "questions".into(),
+            json!([{"id": call_id, "header": "Question", "question": question,
+                "multiSelect": false, "allowCustomAnswer": false, "options": choices}]),
+        );
+        self.questions.insert(open.id.clone(), (rpc_id, options));
+        self.sink
+            .send(ProviderEvent::RuntimeRequestOpened { request: open });
+    }
+
     /// Cancel every waiting request: the agent hears `cancelled`.
     async fn cancel_pending(&mut self, agent: &mut Agent) {
+        let mut questions: Vec<(String, (Value, Vec<Value>))> = self.questions.drain().collect();
+        questions.sort_by(|a, b| a.0.cmp(&b.0));
+        for (id, (rpc_id, _)) in questions {
+            agent.reply(&rpc_id, outcome(None)).await;
+            self.sink.send(ProviderEvent::RuntimeRequestClosed {
+                id,
+                status: "cancelled".into(),
+            });
+        }
         let mut waiting: Vec<(String, Pending)> = self.pending.drain().collect();
         waiting.sort_by(|a, b| a.0.cmp(&b.0));
         for (id, pending) in waiting {
@@ -1803,7 +2413,8 @@ enum Disposition {
 fn disposition(flavor: Flavor, runtime_mode: &str, kind: &str) -> Disposition {
     let reads = matches!(kind, "read" | "search" | "think");
     match runtime_mode {
-        "auto" if flavor == Flavor::Grok => Disposition::Ask,
+        // agy's own Auto already decided what it asks (`antigravityPermissionDisposition`).
+        "auto" if matches!(flavor, Flavor::Grok | Flavor::Antigravity) => Disposition::Ask,
         "auto" => Disposition::Allow,
         "full-access" => Disposition::Allow,
         _ if reads => Disposition::Allow,

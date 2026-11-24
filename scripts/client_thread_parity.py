@@ -412,6 +412,25 @@ PROVIDER_SCENARIOS = [
     # A provider error fails the turn with its message (a 429 is a usage limit).
     {"name": "opencode failed turn", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode_failed.json"},
     {"name": "opencode missing", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": None},
+    # Antigravity's `agy acp`: the prepared profile's environment, eager sign-in, its session's
+    # modes, its command shapes (`CommandLine`, `combinedOutput`) and the reply.
+    {"name": "antigravity turn", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_turn.json"},
+    # A second turn prompts the agent the thread keeps.
+    {"name": "antigravity second turn", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_two_turns.json", "followUp": "Now append a line"},
+    # Supervised: agy asks, with its labels (Allow once, Allow for this thread, Deny, Cancel).
+    {"name": "antigravity approval", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
+    {"name": "antigravity approval declined", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "decline"}},
+    {"name": "antigravity approval for session", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "acceptForSession"}},
+    # Auto: agy's own Auto decided what it asks, so its requests go to the user.
+    {"name": "antigravity auto", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_approval.json", "runtimeMode": "auto",
+     "respond": {"decision": "accept"}},
+    # Stop cancels the prompt (`session/cancel`); the agent is kept.
+    {"name": "antigravity interrupt", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_interrupt.json", "interrupt": "command"},
+    {"name": "antigravity failed turn", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_failed.json"},
+    {"name": "antigravity missing", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": None},
     # Grok over ACP: its turns run in the `grok agent stdio` session the thread keeps, and stream
     # reasoning, a command and the reply.
     {"name": "grok turn", "instance": "grok", "enable": "grok", "model": "grok-build", "scenario": "grok_turn.json"},
@@ -721,8 +740,18 @@ exec python3 "$(dirname "$FAKE_PROVIDER_CLI")/fake_opencode.py" "$FAKE_PROVIDER_
 FAKE_ACP_AGENT = """#!/bin/sh
 exec python3 "$FAKE_PROVIDER_CLI" "$@"
 """
+# The fake agy: a turn's runtime (`agy acp ...`) replays the scenario; its other commands
+# (`--version`) answer from AGY_STATUS_SPEC.
+FAKE_AGY = """#!/bin/sh
+case "$1" in
+  acp) exec python3 "$FAKE_PROVIDER_CLI" "$@";;
+esac
+FAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 "$FAKE_STATUS_CLI" "$FAKE_AGY_STATUS" "$@"
+"""
+AGY_STATUS_SPEC = {"commands": [command for command in AGY_TITLE_SPEC["commands"] if command.get("args") == ["--version"]]}
 TURN_CLIS = {"codex": "codex", "claudeAgent": "claude", "grok": "grok", "pi": "pi", "acp-local": "fixture-acp",
              "opencode": "opencode",
+             "antigravity": "agy",
              # Installed in the server's home (`registryAgent`), not on PATH.
              "acp-registry": "registry-agent"}
 # The ACP Registry agent a `registryAgent` scenario's servers find in their cached index, already
@@ -950,7 +979,8 @@ def compare_thread(original, rust):
 def write_fake_clis(directory, drivers):
     directory.mkdir(parents=True, exist_ok=True)
     for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK),
-                         ("fixture-acp", FAKE_ACP_AGENT), ("pi", FAKE_PI), ("opencode", FAKE_OPENCODE)):
+                         ("fixture-acp", FAKE_ACP_AGENT), ("pi", FAKE_PI), ("opencode", FAKE_OPENCODE),
+                         ("agy", FAKE_AGY)):
         if name in drivers:
             (directory / name).write_text(script)
             (directory / name).chmod(0o755)
@@ -958,6 +988,8 @@ def write_fake_clis(directory, drivers):
         (directory / "grok.status.json").write_text(json.dumps(GROK_STATUS_SPEC))
     if "pi" in drivers:
         (directory / "pi.status.json").write_text(json.dumps(PI_STATUS_SPEC))
+    if "agy" in drivers:
+        (directory / "agy.status.json").write_text(json.dumps(AGY_STATUS_SPEC))
 
 
 def write_text_provider(directory, provider):
@@ -1471,7 +1503,7 @@ def opencode_calls(log, mask, unserved):
 # The ACP requests a server sends a turn's agent, compared with their parameters.
 ACP_LAUNCH_METHODS = ("initialize", "authenticate", "session/new", "session/load", "session/set_model",
                       "session/set_mode", "session/set_config_option", "session/prompt", "session/cancel",
-                      "session/close")
+                      "session/close", "session/resume")
 
 
 def acp_params(method, params, unserved):
@@ -2146,6 +2178,7 @@ def scenario_env(temporary, name, root, scenario, drivers):
            "FAKE_PROVIDER_LOG": str(log), **login_shell,
            "FAKE_STATUS_CLI": str(FIXTURES / "status_cli.py"), "FAKE_GROK_STATUS": str(fake_bin / "grok.status.json"),
            "FAKE_PI_STATUS": str(fake_bin / "pi.status.json"),
+           "FAKE_AGY_STATUS": str(fake_bin / "agy.status.json"),
            # "titleAfterTurn": the title CLI answers once the driver saw the turn settle.
            **({"FAKE_TITLE_GATE": str(log) + ".turn-settled"} if scenario.get("titleAfterTurn") else {}),
            "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}

@@ -99,6 +99,18 @@ pub(crate) fn item_id(prefix: &str, driver: &str, native: &str) -> String {
     )
 }
 
+/// A provider session's capabilities: its driver's. Antigravity's say
+/// whether it has native goals (`readCapabilities`), which the reference
+/// reads from its status snapshot's `/goal` command; Rust's status check
+/// lists no slash commands, so it has none.
+fn session_capabilities(capabilities: &Value, driver: &str) -> Value {
+    let mut out = capabilities[driver].clone();
+    if driver == provider::ANTIGRAVITY {
+        out["turns"]["supportsNativeGoals"] = json!(false);
+    }
+    out
+}
+
 fn native_ref(driver: &str, native: &str, strength: &str) -> Value {
     json!({"driver": driver, "nativeId": native, "strength": strength})
 }
@@ -709,7 +721,7 @@ impl Thread {
             serde_json::from_str(include_str!("provider_capabilities.json")).unwrap_or_default();
         let row = self.stored_row();
         Some(json!({
-            "capabilities": capabilities[thread.driver.as_str()],
+            "capabilities": session_capabilities(&capabilities, &thread.driver),
             "createdAt": iso(thread.created_at),
             "cwd": self.cwd,
             "driver": thread.driver,
@@ -1060,6 +1072,9 @@ impl Thread {
                     Some(failure) if provider::is_workspace_missing(failure) => {
                         failure.message.clone()
                     }
+                    // Antigravity's driver fails to open with its setup
+                    // error (`ProviderSetupError`), which the item says.
+                    Some(failure) if driver == provider::ANTIGRAVITY => failure.message.clone(),
                     _ => format!("Failed to open {driver} provider session {session}."),
                 };
                 out.items.push((index, json!({

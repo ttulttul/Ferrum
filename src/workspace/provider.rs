@@ -29,18 +29,20 @@ pub const PI: &str = "pi";
 
 /// OpenCode, whose 1.x turns run on its HTTP server (`opencode serve`).
 pub const OPENCODE: &str = "opencode";
+/// Antigravity's `agy` CLI, whose turns run over ACP (`agy acp`).
+pub const ANTIGRAVITY: &str = "antigravity";
 
 /// Whether the workspace runs turns of `driver`'s CLI.
 pub fn runs_turns(driver: &str) -> bool {
     matches!(
         driver,
-        CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI | OPENCODE
+        CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI | OPENCODE | ANTIGRAVITY
     )
 }
 
 /// Whether `driver`'s turns run over ACP.
 pub fn is_acp(driver: &str) -> bool {
-    matches!(driver, GROK | ACP_REGISTRY)
+    matches!(driver, GROK | ACP_REGISTRY | ANTIGRAVITY)
 }
 
 /// Whether the reference gives each of `driver`'s threads a provider
@@ -153,6 +155,12 @@ pub struct ProviderTurn {
     /// predates it sees the same wire bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode: Option<OpenCodeLaunch>,
+    /// What an Antigravity turn's launch resolved besides its command: the
+    /// installed version and where each process's temporary folder goes.
+    /// Optional and omitted when absent, so an agentd or control plane that
+    /// predates it sees the same wire bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antigravity: Option<AntigravityLaunch>,
 }
 
 /// What an OpenCode turn needs beyond the common launch: the configured
@@ -167,6 +175,22 @@ pub struct OpenCodeLaunch {
     pub server_password: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent: String,
+}
+
+/// An Antigravity launch's installed `agy` version (empty when unknown),
+/// which decides the client info it is sent, and the folder each `agy acp`
+/// process gets its own `run-XXXXXX` temporary folder in.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityLaunch {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run_temp_parent: String,
+    /// Why the launch could not be prepared (the executable is missing, the
+    /// sign-in settings are incomplete): the session fails to open with it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub launch_error: String,
 }
 
 /// Where a provider CLI reaches T3's tools for its thread

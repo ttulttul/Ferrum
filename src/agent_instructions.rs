@@ -88,6 +88,26 @@ fn single_line(value: &str) -> String {
 /// `buildRuntimeInstructions`: the runtime sentence, then the pull request
 /// linking text.
 pub(crate) fn runtime(harness: &str, model: Option<&str>, effort: Option<&str>) -> String {
+    without_unserved(
+        &format!(
+            "{}\n\n{}",
+            runtime_info(harness, model, effort),
+            text("pullRequestLinking")
+        ),
+        &unserved(),
+    )
+}
+
+/// The pull request linking text alone, which a session's system prompt
+/// carries for an agent that takes it there (Antigravity's
+/// `_meta.antigravity.systemPrompt.append`).
+pub(crate) fn pull_request_linking() -> String {
+    without_unserved(text("pullRequestLinking"), &unserved())
+}
+
+/// The runtime sentence alone (`buildRuntimeInstructions` with
+/// `pullRequestLinking: false`).
+pub(crate) fn runtime_info(harness: &str, model: Option<&str>, effort: Option<&str>) -> String {
     let model = single_line(model.unwrap_or_default());
     let effort = single_line(effort.unwrap_or_default());
     let model_info = if !model.is_empty() && model != "auto" && model != "default" {
@@ -106,10 +126,7 @@ pub(crate) fn runtime(harness: &str, model: Option<&str>, effort: Option<&str>) 
         single_line(harness),
         text("runtimeInfoSuffix")
     );
-    without_unserved(
-        &format!("{info}\n\n{}", text("pullRequestLinking")),
-        &unserved(),
-    )
+    info
 }
 
 /// Claude Code's system prompt append: the runtime text, then, for a thread
