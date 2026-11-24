@@ -703,6 +703,7 @@ pub(crate) fn provider_turn(
                 .to_owned(),
             agent: option("agent").unwrap_or_default(),
         }),
+        antigravity: None,
     };
     let mut turn = turn;
     if driver == provider::ACP_REGISTRY {

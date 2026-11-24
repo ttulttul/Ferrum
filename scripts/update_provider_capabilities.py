@@ -19,7 +19,8 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "src/provider_capabilities.json"
-ADAPTERS = {"claudeAgent": "apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts",
+ADAPTERS = {"antigravity": "apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts",
+            "claudeAgent": "apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts",
             "codex": "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
             "grok": "packages/provider-grok/src/server/adapter.ts",
             "opencode": "packages/provider-opencode/src/server/adapter.ts",
