@@ -31,6 +31,8 @@ LAUNCHER = ROOT / "src/local_services/agent_device_launcher.mjs"
 VALUE_FLAGS = ROOT / "src/local_services/agent_device_value_flags.txt"
 # The reference's SSH device host scripts (scripts/reference_device_scripts.mjs).
 DEVICE_SSH = ROOT / "src/local_services/device_ssh.json"
+# The reference's Expo GraphQL operations (scripts/reference_expo_documents.mjs).
+EXPO_DOCUMENTS = ROOT / "src/local_services/expo_documents.json"
 START, END = "<!-- tools:start -->", "<!-- tools:end -->"
 
 LISTED_TO = {
@@ -178,10 +180,13 @@ def main() -> int:
     device_ssh_text = subprocess.run(
         ["node", str(ROOT / "scripts/reference_device_scripts.mjs"), str(checkout)],
         check=True, capture_output=True, text=True).stdout
+    expo_text = subprocess.run(
+        ["node", str(ROOT / "scripts/reference_expo_documents.mjs"), str(checkout)],
+        check=True, capture_output=True, text=True).stdout
     launcher, value_flags = agent_device_launcher(checkout)
     outputs = ((RECORDING_ENCODER, recording_encoder(checkout)), (TOOLS, tools_text), (DOC, doc_text), (THEMES, themes_text),
                (INSTRUCTIONS, instructions_text), (HTML_RENDER, html_render_text), (LAUNCHER, launcher),
-               (VALUE_FLAGS, value_flags), (DEVICE_SSH, device_ssh_text))
+               (VALUE_FLAGS, value_flags), (DEVICE_SSH, device_ssh_text), (EXPO_DOCUMENTS, expo_text))
     stale = [path for path, text in outputs if not path.exists() or path.read_text() != text]
     if check:
         for path in stale:

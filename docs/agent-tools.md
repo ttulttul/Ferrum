@@ -511,6 +511,19 @@ the wire state, the launcher and every request to a fake gateway on loopback. Th
 stream and input for a lease go through the hub proxy to the gateway's routes for that lease
 (`upstream`), with its token; its `simlock-stream` phase compares them.
 
+**Expo Simulators hosts** (`EasDeviceHost.ts`, started): the hosts in `easDeviceHosts` are listed
+(after the SSH hosts) and sent to clients as `easHosts`; each platform is available when this server
+can read an Expo credential for the host (the saved token, then `EXPO_TOKEN`, then the `eas login`
+session), and listing shows the two-entry catalog. `device.easAccount` reads the signed-in account
+with the reference's GraphQL documents (`src/local_services/expo_documents.json`, generated from the
+pinned reference) and its error categories. `scripts/device_eas_parity.py` serves a fake of Expo's
+fixed HTTPS API on loopback with a certificate from a generated test CA, behind its own proxy, which
+tunnels only `api.expo.dev:443` there; the Rust server trusts the CA through
+`T3CODE_TEST_EXTRA_CA_FILE`, which only debug builds read (release builds ignore it).
+
+**Not done yet:** Expo sessions (starting, tracking, stopping and reaping them, the session ledger),
+their devices, screenshots and agent tools, and the hub proxy for them.
+
 ### 5. Prompt context and capabilities
 
 Served, as above.

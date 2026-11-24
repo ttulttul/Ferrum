@@ -1,0 +1,22 @@
+{
+ "T3ExpoViewer": {
+  "kind": "query",
+  "query": "query T3ExpoViewer{meActor{__typename...on UserActor{username}...on Robot{firstName}accounts{name appsPaginated(first:100){edges{node{id fullName}}}}}}"
+ },
+ "T3CreateEasSimulatorSession": {
+  "kind": "mutation",
+  "query": "mutation T3CreateEasSimulatorSession($input:CreateDeviceRunSessionInput!){deviceRunSession{createDeviceRunSession(deviceRunSessionInput:$input){id}}}"
+ },
+ "T3EasSimulatorSession": {
+  "kind": "query",
+  "query": "query T3EasSimulatorSession($id:ID!){deviceRunSessions{byId(deviceRunSessionId:$id){id status remoteConfig{__typename...on AgentDeviceRunSessionRemoteConfig{agentDeviceRemoteSessionUrl agentDeviceRemoteSessionToken webPreviewToken previewApiUrl}}}}}"
+ },
+ "T3ActiveEasSimulatorSessions": {
+  "kind": "query",
+  "query": "query T3ActiveEasSimulatorSessions($appId:String!$filter:DeviceRunSessionFilterInput){app{byId(appId:$appId){deviceRunSessionsPaginated(first:50 filter:$filter){edges{node{id status name}}}}}}"
+ },
+ "T3StopEasSimulatorSession": {
+  "kind": "mutation",
+  "query": "mutation T3StopEasSimulatorSession($id:ID!){deviceRunSession{ensureDeviceRunSessionStopped(deviceRunSessionId:$id){id status}}}"
+ }
+}
