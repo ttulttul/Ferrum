@@ -4,7 +4,7 @@
 //! sign-in settings and resolves the installed runtime from disk
 //! (`AntigravityInstallation.resolve`), a custom executable, the managed
 //! install under `<home>/tools/antigravity-acp/<platform>-<arch>`, or
-//! `agy_acp_server.par` (with its `localharness_external`) or `agy` on PATH.
+//! the managed Antigravity CLI or `agy` on PATH.
 //! A healthy runtime then has its Google quota read from the profile's
 //! stored sign-in, when there is one.
 use super::{maintenance, now_iso, unavailable_usage, Draft, ProcessEnv};
@@ -89,12 +89,11 @@ fn target() -> (&'static str, &'static str) {
     (platform, arch)
 }
 
-/// A resolved runtime (`AntigravityExecutable`): what to run, the harness
-/// beside an ACP server (none for the agy CLI), and its version, when known.
+/// A resolved runtime (`AntigravityExecutable`): what to run and its
+/// version, when known before it answers `initialize`.
 pub(super) struct Executable {
     pub(super) version: Option<String>,
     pub(super) path: PathBuf,
-    pub(super) harness: Option<PathBuf>,
 }
 
 fn is_executable_file(path: &Path, bytes: Option<u64>) -> bool {
@@ -165,7 +164,6 @@ fn completed_release(versions: &Path, release: &str) -> Result<Executable, Strin
     Ok(Executable {
         version: record["version"].as_str().map(str::to_owned),
         path: directory.join(cli),
-        harness: None,
     })
 }
 
@@ -202,7 +200,6 @@ fn from_external(candidate: &Path, versions: &Path) -> Result<Option<Executable>
     Ok(is_cli(&[candidate, &real]).then(|| Executable {
         version: None,
         path: candidate.to_path_buf(),
-        harness: None,
     }))
 }
 
