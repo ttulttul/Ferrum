@@ -247,6 +247,24 @@ pub trait McpHost: AuthHost {
     ) -> HostFuture<Result<Vec<Value>, ()>> {
         Box::pin(async { Err(()) })
     }
+    /// The attachment store the attachment tools use: `"prepare"` issues an
+    /// upload URL (`AttachmentUpload.issueAttachmentUploadUrl`), `"discard"`
+    /// deletes a pending upload, `"claim"` claims a message's pending uploads
+    /// for `threadId` (`{attachments, paths}`), and `"release"` removes the
+    /// claimed `paths`. `Err` is the failure's code and message; hosts
+    /// without attachment files leave it unavailable.
+    fn attachment_store(
+        self: &Arc<Self>,
+        _operation: &'static str,
+        _input: Value,
+    ) -> HostFuture<Result<Value, (&'static str, String)>> {
+        Box::pin(async {
+            Err((
+                "orchestration_error",
+                "The operation could not be completed.".to_owned(),
+            ))
+        })
+    }
     /// `claimPreviewRecording`: the recording a stopped preview left as a
     /// pending attachment, moved to `thread_id`'s attachments; the artifact,
     /// or the failure's message.

@@ -181,6 +181,25 @@ pub(super) async fn steer_with<H: CommandHost>(
         || command["text"].as_str().unwrap_or_default().to_owned(),
         |d| d.text.clone(),
     );
+    // What the provider reads: who sent the message, when a person did not
+    // type it (`withMessageSenderNote`), ahead of its text.
+    let mut sender = json!({});
+    for key in [
+        "createdBy",
+        "creationSource",
+        "scheduledTaskId",
+        "senderThreadId",
+        "linkedSender",
+    ] {
+        let value = delivery
+            .as_ref()
+            .and_then(|d| d.wire.get(key))
+            .unwrap_or(&command[key]);
+        if !value.is_null() {
+            sender[key] = value.clone();
+        }
+    }
+    let provider_text = crate::thread_projection::with_message_sender_note(&sender, &text);
     let message = ConversationMessage {
         id: message_id.clone(),
         role: if delivery.is_some() {
@@ -215,7 +234,7 @@ pub(super) async fn steer_with<H: CommandHost>(
             &target.run.to_string(),
             crate::workspace::provider::RuntimeResponse {
                 id: message_id,
-                steer: Some(text),
+                steer: Some(provider_text),
                 ..Default::default()
             },
         )

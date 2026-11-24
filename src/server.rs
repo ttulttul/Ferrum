@@ -580,6 +580,20 @@ impl crate::orchestration::CommandHost for AppState {
                                 &run,
                             )
                         };
+                        // Who sent the run's message, when a person did not type
+                        // it (`withMessageSenderNote`), ahead of its text.
+                        let message = {
+                            let store = self.store.read().await;
+                            crate::attachment_claims::run_message(&store, &run)
+                        };
+                        if let Some(message) =
+                            message.filter(|message| message["text"] == spec.prompt.as_str())
+                        {
+                            spec.prompt = crate::thread_projection::with_message_sender_note(
+                                &message,
+                                &spec.prompt,
+                            );
+                        }
                         spec.provider = Some(provider);
                         spec.env = env;
                     }
@@ -1455,6 +1469,67 @@ impl mcp_oauth::McpHost for AppState {
     }
     fn secrets_dir(&self) -> Option<std::path::PathBuf> {
         Some(self.paths.secrets.clone())
+    }
+    fn attachment_store(
+        self: &Arc<Self>,
+        operation: &'static str,
+        input: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, (&'static str, String)>> {
+        let state = self.clone();
+        Box::pin(async move {
+            let unavailable = || {
+                (
+                    "orchestration_error",
+                    "The operation could not be completed.".to_owned(),
+                )
+            };
+            match operation {
+                "prepare" => match crate::asset_http::upload_url(&state, &input) {
+                    crate::rpc_protocol::Reply::Success(result) => Ok(result),
+                    // The input the upload's schema refuses, as its decoder words it.
+                    crate::rpc_protocol::Reply::Failure(failure)
+                        if failure["_tag"] == "Die" && failure["defect"].is_string() =>
+                    {
+                        Err((
+                            "invalid_arguments",
+                            failure["defect"].as_str().unwrap_or_default().to_owned(),
+                        ))
+                    }
+                    _ => Err(unavailable()),
+                },
+                "discard" => {
+                    let id = input["attachmentId"].as_str().unwrap_or_default();
+                    crate::asset_http::delete_pending(&state, id).await;
+                    Ok(serde_json::json!({}))
+                }
+                "claim" => {
+                    let attachments = input["attachments"].as_array().cloned().unwrap_or_default();
+                    crate::attachment_claims::claim(
+                        &state.paths.attachments,
+                        input["threadId"].as_str().unwrap_or_default(),
+                        &attachments,
+                    )
+                    .map(|claimed| {
+                        serde_json::json!({
+                            "attachments": claimed.attachments,
+                            "paths": claimed.paths.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+                        })
+                    })
+                    .map_err(|message| ("orchestration_error", message))
+                }
+                "release" => {
+                    let paths: Vec<std::path::PathBuf> = input["paths"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|p| p.as_str().map(std::path::PathBuf::from))
+                        .collect();
+                    crate::attachment_claims::release(&paths);
+                    Ok(serde_json::json!({}))
+                }
+                _ => Err(unavailable()),
+            }
+        })
     }
     fn claim_preview_recording(
         &self,

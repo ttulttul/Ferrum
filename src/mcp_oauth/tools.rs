@@ -10,6 +10,7 @@ use std::sync::{Arc, LazyLock};
 
 mod agent_tools;
 mod arguments;
+mod attachments;
 mod delegation;
 mod forge;
 pub(crate) mod html;
@@ -59,6 +60,9 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("task_cancel", &[]),
     ("create_threads", &[]),
     ("request_secret", &[]),
+    ("t3_attachment_prepare_upload", &[]),
+    ("t3_attachment_discard", &[]),
+    ("t3_thread_send_attachments", &[]),
     ("html_preview", &[]),
     ("html_render", &[]),
     // Pull requests and issues (batch 7).
@@ -152,6 +156,10 @@ const SERVED: &[&str] = &[
     // Pages an agent checks and shows.
     "html_preview",
     "html_render",
+    // Attachments an agent uploads and sends.
+    "t3_attachment_prepare_upload",
+    "t3_attachment_discard",
+    "t3_thread_send_attachments",
     // Pull requests and issues (batch 7).
     "link_pull_request",
     "link_pull_requests",
@@ -420,6 +428,8 @@ pub(super) struct Caller {
     pub plan_only: bool,
     /// The thread a provider session's credential acts as, read for this call.
     pub thread: Option<ThreadCaller>,
+    /// The origin this `/mcp` request reached (`McpInvocationContext.origin`).
+    pub origin: Option<String>,
 }
 
 /// The calling thread, as a provider session's tools see it.
@@ -501,6 +511,7 @@ impl Caller {
             runtime_limit: runtime.filter(|r| rank(r).is_some()),
             plan_only: interaction,
             thread: None,
+            origin: None,
         }
     }
     /// The broadest runtime mode this call may start or drive work in, or
@@ -809,6 +820,9 @@ pub(super) async fn call<S: McpHost>(
         "task_cancel" => delegation::task_cancel(host, caller, args).await,
         "create_threads" => delegation::create_threads(host, caller, args).await,
         "request_secret" => secrets::request_secret(host, caller, args).await,
+        "t3_attachment_prepare_upload" => attachments::prepare_upload(host, caller, args).await,
+        "t3_attachment_discard" => attachments::discard(host, caller, args).await,
+        "t3_thread_send_attachments" => attachments::send(host, caller, args).await,
         "html_preview" => html::preview(host, caller, args).await,
         "html_render" => html::render(host, caller, args).await,
         "link_pull_request"

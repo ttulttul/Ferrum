@@ -13,6 +13,51 @@ fn ordered(fields: &[&str], row: &Value) -> Value {
     )
 }
 
+/// `withMessageSenderNote`: `text` as the provider reads it, after a line
+/// saying who sent `message` (a projected message row) when a person did not
+/// type it. Text starting with a slash command or a skill mention such as
+/// `$deploy` stays as sent, since providers parse those from the start.
+pub(crate) fn with_message_sender_note(message: &Value, text: &str) -> String {
+    use std::sync::LazyLock;
+    static LEADING_COMMAND: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"^\s*(?:/|\p{Sc}[a-zA-Z0-9:_-]*[a-zA-Z])").expect("pattern")
+    });
+    let quoted = |value: &Value| serde_json::to_string(value).unwrap_or_default();
+    let agent = message["createdBy"] == "agent";
+    let linked = &message["linkedSender"];
+    let note = if agent && linked.is_object() {
+        Some(format!(
+            "[T3 Code: the agent in T3 thread {} on linked environment {} sent this message, not the user.]",
+            quoted(&linked["threadId"]),
+            quoted(&linked["environmentId"])
+        ))
+    } else if agent && message["senderThreadId"].is_string() {
+        Some(format!(
+            "[T3 Code: the agent in T3 thread {} sent this message, not the user.]",
+            quoted(&message["senderThreadId"])
+        ))
+    } else if message["scheduledTaskId"].is_string() {
+        Some(format!(
+            "[T3 Code: scheduled task {} sent this prompt, not the user typing in this chat.]",
+            quoted(&message["scheduledTaskId"])
+        ))
+    } else if agent && message["creationSource"] == "mcp" {
+        Some("[T3 Code: this message came through T3 Code's tools, not from the user typing in this chat.]".to_owned())
+    } else {
+        None
+    };
+    match note {
+        Some(note) if !LEADING_COMMAND.is_match(text) => {
+            if text.is_empty() {
+                note
+            } else {
+                format!("{note}\n\n{text}")
+            }
+        }
+        _ => text.to_owned(),
+    }
+}
+
 /// The attachments a message carries, as its wire fields keep them.
 pub(crate) fn message_attachments(message: &crate::ConversationMessage) -> Value {
     message
@@ -1663,5 +1708,37 @@ mod stored_tests {
         );
         // The provider thread record keeps the reference's id.
         assert_eq!(thread.provider_thread_id().as_deref(), Some(pending));
+    }
+}
+
+#[cfg(test)]
+mod sender_note_tests {
+    use super::*;
+
+    #[test]
+    fn a_message_nobody_typed_says_who_sent_it() {
+        let agent =
+            json!({"createdBy": "agent", "creationSource": "mcp", "senderThreadId": "thread:a"});
+        assert_eq!(
+            with_message_sender_note(&agent, "Hi"),
+            "[T3 Code: the agent in T3 thread \"thread:a\" sent this message, not the user.]\n\nHi"
+        );
+        let tool = json!({"createdBy": "agent", "creationSource": "mcp"});
+        assert!(
+            with_message_sender_note(&tool, "").starts_with("[T3 Code: this message came through")
+        );
+        let scheduled = json!({"createdBy": "user", "scheduledTaskId": "task:1"});
+        assert!(with_message_sender_note(&scheduled, "Go")
+            .starts_with("[T3 Code: scheduled task \"task:1\""));
+        // Commands and skill mentions stay as sent, and a person's text is unchanged.
+        assert_eq!(with_message_sender_note(&agent, " /compact"), " /compact");
+        assert_eq!(
+            with_message_sender_note(&agent, "$deploy now"),
+            "$deploy now"
+        );
+        assert_eq!(
+            with_message_sender_note(&json!({"createdBy": "user"}), "Hi"),
+            "Hi"
+        );
     }
 }
