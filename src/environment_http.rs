@@ -45,11 +45,12 @@ pub(crate) fn descriptor_value(s: &AppState) -> Value {
         "x86_64" => "x64",
         _ => "other",
     };
-    crate::environment::descriptor(
+    crate::environment::descriptor_with_link_routes(
         &s.environment_id,
         &label,
         (os, arch, crate::machine_kind::current()),
         s.runtime_config.mode == "desktop",
+        true,
     )
 }
 fn valid_protocol(h: &HeaderMap) -> bool {

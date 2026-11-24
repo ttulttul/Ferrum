@@ -1,5 +1,5 @@
 {
   "peer_link_parity": {
-    "descriptor capabilities added upstream": "The reference's descriptor reports previewTunnelSetting (#39415), linkThreadStream (#39406), linkClientPairing and linkPairingForLink (#39439, #40036), agentFeedback (#35871) and issueTrackerAccounts (#39179); Rust has none of these features yet, so it omits them."
+    "descriptor capabilities added upstream": "The reference's descriptor reports previewTunnelSetting (#39415), agentFeedback (#35871) and issueTrackerAccounts (#39179); Rust has none of these features yet, so it omits them."
   }
 }

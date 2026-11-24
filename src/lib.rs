@@ -138,6 +138,8 @@ mod acp_registry;
 mod bitbucket_credential;
 mod feature_flags;
 #[cfg(feature = "native")]
+mod peer_link_http;
+#[cfg(feature = "native")]
 mod peer_link_requests;
 #[cfg(feature = "native")]
 mod peer_links;

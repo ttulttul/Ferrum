@@ -3,7 +3,7 @@
   "cases": {
     "connect.subscribeServerLifecycle": {
       "severity": "low",
-      "reason": "The descriptor's capabilities gained previewTunnelSetting (#39415), linkThreadStream (#39406), linkClientPairing and linkPairingForLink (#39439, #40036), agentFeedback (#35871) and issueTrackerAccounts (#39179); Rust has none of these features yet, so it omits them."
+      "reason": "The descriptor's capabilities gained previewTunnelSetting (#39415), agentFeedback (#35871) and issueTrackerAccounts (#39179); Rust has none of these features yet, so it omits them."
     }
   }
 }

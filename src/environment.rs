@@ -19,6 +19,18 @@ pub fn descriptor(
     platform: (&str, &str, Option<&str>),
     desktop_managed: bool,
 ) -> Value {
+    descriptor_with_link_routes(environment_id, label, platform, desktop_managed, false)
+}
+
+/// [`descriptor`] for a server that also serves `/api/links/thread/*` and
+/// `/api/peer-link/client-pairing` (`link_routes`), as the native server does.
+pub fn descriptor_with_link_routes(
+    environment_id: &str,
+    label: &str,
+    platform: (&str, &str, Option<&str>),
+    desktop_managed: bool,
+    link_routes: bool,
+) -> Value {
     let (os, arch, machine) = platform;
     let mut platform = json!({"os":os,"arch":arch});
     if let Some(machine) = machine {
@@ -94,6 +106,12 @@ pub fn descriptor(
     capability!("peerLinks", true);
     capability!("mcpModeLimitHeader", true);
     capability!("linkFence", true);
+    // Served by the native server's `/api/links/thread/*` and `/api/peer-link/client-pairing`.
+    if link_routes {
+        capability!("linkThreadStream", true);
+        capability!("linkClientPairing", true);
+        capability!("linkPairingForLink", true);
+    }
     capability!("mcpApprovalCodes", true);
     capability!("peerLinkPairingCodes", true);
     capability!("mcpHostedApproval", true);
@@ -183,5 +201,16 @@ mod migration_tests {
     #[test]
     fn the_descriptor_reports_the_pinned_migration_head() {
         assert_eq!(super::DATABASE_MIGRATION, crate::statev2::supported_head());
+    }
+
+    #[test]
+    fn only_a_server_with_the_link_routes_reports_them() {
+        let platform = ("linux", "x64", None);
+        let served = super::descriptor_with_link_routes("env", "Label", platform, false, true);
+        let plain = super::descriptor("env", "Label", platform, false);
+        for capability in ["linkThreadStream", "linkClientPairing", "linkPairingForLink"] {
+            assert_eq!(served["capabilities"][capability], true, "{capability}");
+            assert!(plain["capabilities"].get(capability).is_none(), "{capability}");
+        }
     }
 }
