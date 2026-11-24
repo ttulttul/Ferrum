@@ -33,7 +33,7 @@ impl Progress<'_> {
         .await;
     }
 }
-fn message(error: &Value) -> String {
+pub(super) fn message(error: &Value) -> String {
     let detail = error["detail"].as_str().unwrap_or("");
     let operation = error["operation"].as_str().unwrap_or("");
     match error["_tag"].as_str() {
@@ -425,7 +425,7 @@ async fn commit(
     .await?;
     Ok(json!({"status":"created","commitSha":sha,"subject":subject}))
 }
-async fn push(cwd: &str, branch: &str, primary: Option<&str>) -> Reply {
+pub(super) async fn push(cwd: &str, branch: &str, primary: Option<&str>) -> Reply {
     let upstream = read(
         cwd,
         &[

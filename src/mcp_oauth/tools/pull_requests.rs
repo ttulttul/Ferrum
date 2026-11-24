@@ -3,6 +3,7 @@ use super::{forge::*, *};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 mod list;
 mod target;
+mod writes;
 
 const REPORT: &str = "End your reply with: PR <full URL>, head <SHA>, checks and reviews <state>.";
 
@@ -666,6 +667,16 @@ pub(super) async fn call<S: McpHost>(
     name: &str,
     args: &Value,
 ) -> Outcome {
+    if matches!(
+        name,
+        "pull_request_create"
+            | "pull_request_update"
+            | "pull_request_merge"
+            | "pull_request_review"
+            | "pull_request_respond"
+    ) {
+        return writes::call(host, caller, name, args).await;
+    }
     if name == "pull_request_list" {
         return agent_list(host, caller, args).await;
     }

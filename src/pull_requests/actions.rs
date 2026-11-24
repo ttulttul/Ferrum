@@ -133,7 +133,19 @@ pub(super) async fn run(
     }
     let pinned = if let Some(expected) = input["expectedHeadSha"].as_str() {
         let (current, _) = super::detail::read_core(gh, OP, repo, number).await?;
-        let head = current["repository"]["pullRequest"]["headRefOid"].as_str();
+        let pr = &current["repository"]["pullRequest"];
+        let head = pr["headRefOid"].as_str();
+        // The reference reads unfinished checks with the reviewed head. A rate limit
+        // stops the write just as it does on the core GraphQL read.
+        if let Some(sha) = head.filter(|_| pr["state"] == "OPEN") {
+            let path = format!(
+                "repos/{repo}/actions/runs?head_sha={}&per_page=100",
+                crate::asset_grant::encode_component(sha)
+            );
+            if let Err(Failure::RateLimit) = gh.json("GET", &path, None).await {
+                return Err(provider_error(Failure::RateLimit));
+            }
+        }
         Some(super::pinned_head(head, expected)?.to_owned())
     } else {
         None
@@ -235,11 +247,15 @@ pub(super) async fn run(
             )
         }
     };
-    let query = format!("mutation({signature}){{{method}(input:{argument}){{pullRequest{{...PullRequestActionSummary}}}}}}\n{SUMMARY}");
+    let operation = format!("{}{}", method[..1].to_ascii_uppercase(), &method[1..]);
+    let query = format!("mutation {operation}({signature}){{{method}(input:{argument}){{pullRequest{{...PullRequestActionSummary}}}}}}\n{SUMMARY}");
     let data = gh
         .graphql(&query, parameters)
         .await
         .map_err(provider_error)?;
+    if action == "merge" && data[method]["pullRequest"]["mergedAt"].is_null() {
+        let _ = super::metadata(gh, "summary", repo, project, number).await;
+    }
     if input["replyWithSummary"] != true {
         return Ok(Value::Null);
     }

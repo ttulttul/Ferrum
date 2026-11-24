@@ -18,7 +18,7 @@ pub(crate) fn install(settings: Arc<crate::settings::Settings>) {
     let _ = SETTINGS.set(settings);
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Hash, PartialEq)]
 pub(crate) enum Credential {
     AccessToken(String),
     ApiToken { email: String, token: String },

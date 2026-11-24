@@ -7,6 +7,7 @@ use crate::{
 use serde_json::{json, Value};
 use std::path::Path;
 
+mod create;
 mod hosts;
 mod stacked;
 pub(super) mod status;
@@ -217,6 +218,12 @@ pub async fn pull_request(
     input: &Value,
 ) -> Reply {
     let cwd = string(input, "cwd")?;
+    if name == "createPullRequest" {
+        return create::run(tools, cwd, input).await.map_err(|mut e| {
+            e["message"] = json!(stacked::message(&e));
+            e
+        });
+    }
     let reference = string(input, "reference")?;
     let reference = reference
         .strip_prefix('#')

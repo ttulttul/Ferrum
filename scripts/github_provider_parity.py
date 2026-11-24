@@ -85,6 +85,11 @@ class Provider(BaseHTTPRequestHandler):
         if hasattr(self.server, "requests"):
             self.server.requests.append(f"GET {self.path}")
         path = urlsplit(self.path).path
+        if hasattr(self.server, "forge_calls"):
+            self.server.forge_calls.append(("GET", self.path, None))
+            if path == f"/repos/{REPO}":
+                return self.reply(200, {"name": "parity", "full_name": REPO, "default_branch": "main",
+                                        "owner": {"login": "example"}, "private": False, "fork": False})
         if path == f"/repos/{REPO}/pulls" and hasattr(self.server, "status_rows"):
             head = parse_qs(urlsplit(self.path).query).get("head", [""])[0]
             pulls = []
@@ -143,7 +148,17 @@ class Provider(BaseHTTPRequestHandler):
         if hasattr(self.server, "requests"):
             self.server.requests.append(f"POST {self.path}")
         data = self.read_json()
-        if self.path == f"/repos/{REPO}/issues":
+        if hasattr(self.server, "forge_calls"):
+            self.server.forge_calls.append(("POST", self.path, data))
+        if self.path == f"/repos/{REPO}/pulls" and hasattr(self.server, "forge_calls"):
+            pr = deepcopy(PR)
+            pr.update(title=data["title"], body=data["body"], headRefName=data["head"].split(":")[-1],
+                      isDraft=data.get("draft", False), baseRefName=data["base"])
+            pr["headRepositoryOwner"] = {"__typename":"User", "login": "example"}
+            pr["headRepository"] = {**pr["headRepository"], "name": "parity"}
+            self.server.status_rows.append(pr)
+            self.reply(201, {"number": 3, "html_url": pr["url"]})
+        elif self.path == f"/repos/{REPO}/issues":
             self.server.creates.append(data)
             self.reply(201, {"number": 12, "html_url": ISSUE["url"]})
         elif self.path == f"/repos/{REPO}/issues/12/comments":

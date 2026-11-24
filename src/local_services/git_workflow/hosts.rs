@@ -620,7 +620,7 @@ impl Remote {
             .filter_map(|r| self.normalize(r, &self.repo))
             .collect())
     }
-    fn normalize(&self, v: &Value, target: &str) -> Option<Value> {
+    pub(super) fn normalize(&self, v: &Value, target: &str) -> Option<Value> {
         let head_repo = match self.kind {
             "gitlab" => v
                 .pointer("/source_project/path_with_namespace")

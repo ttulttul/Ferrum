@@ -136,6 +136,16 @@ impl ApiError {
 
 /// `BitbucketApi.request`: a request to the API (a path under it, or a link on its
 /// origin) with the credential, answering the body of a 2xx reply.
+pub(crate) async fn repository_json(
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value, String> {
+    let raw = request(method, path, body).await.map_err(|e| e.detail)?;
+    serde_json::from_str(&raw)
+        .map_err(|_| "Bitbucket returned an unreadable repository response.".into())
+}
+
 async fn request(method: &str, url: &str, body: Option<Value>) -> Result<String, ApiError> {
     let base = base_url();
     let url = if url.starts_with("http://") || url.starts_with("https://") {
@@ -729,6 +739,36 @@ pub(super) async fn run(
             }
             Ok(detail)
         }
+        "summary" => {
+            let detail = repo
+                .change_request(number)
+                .await
+                .map_err(|e| e.to_error("summary", "getChangeRequest"))?;
+            let mut result = json!({"provider":"bitbucket","projectId":project.id,"repository":repo.repository,"observedAt":now_ms()});
+            for key in [
+                "number",
+                "title",
+                "url",
+                "author",
+                "state",
+                "headBranch",
+                "baseBranch",
+                "headSha",
+                "isDraft",
+                "updatedAt",
+                "closedAt",
+                "mergedAt",
+                "additions",
+                "deletions",
+                "changedFiles",
+                "mergeability",
+            ] {
+                if let Some(v) = detail.get(key) {
+                    result[key] = v.clone()
+                }
+            }
+            Ok(result)
+        }
         "preview" => {
             let pr = repo
                 .pull_request(number, true)
@@ -1050,6 +1090,11 @@ pub(super) async fn run(
         )),
         // Bitbucket reports no per-file statistics (`getFileStats`).
         "changeBreakdown" => Ok(Value::Null),
+        "stack" => Ok(Value::Null),
+        "setLabels" => Err(refusal(
+            "setLabels",
+            "This host cannot change the labels on a change request.",
+        )),
         "setReaction" => Err(refusal("setReaction", "This host has no reactions.")),
         "filesViewed" | "setFilesViewed" => viewed_files(&repo, op, input, number).await,
         "runAction" => run_action(&repo, input, number).await,

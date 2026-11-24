@@ -706,10 +706,10 @@ def write_text_provider(directory, provider):
     target.chmod(0o755)
 
 
-def seed_turn(url, cookie, root, scenario):
+def seed_turn(url, cookie, root, scenario, remote=None):
     """A project on a git checkout and a thread on the scenario's provider, with the message to send."""
     checkout = root / "checkout"
-    make_checkout(checkout, "https://github.com/example/parity.git" if scenario["name"] == "codex thread tools" else REMOTES["project:github"][1])
+    make_checkout(checkout, remote or ("https://github.com/example/parity.git" if scenario["name"] == "codex thread tools" else REMOTES["project:github"][1]))
     status, _, body = http(url, "POST", "/api/projects/mutate", encode({
         "type": "project.create", "commandId": "create-project", "projectId": "project:github",
         "title": "Provider turn", "workspaceRoot": str(checkout)}),

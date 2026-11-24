@@ -596,6 +596,13 @@ pub(crate) async fn mcp_workspace(
     method: &str,
     input: &Value,
 ) -> Option<Result<Value, Value>> {
+    if method == "git.createPullRequest" {
+        return Some(
+            workspace
+                .pull_request("createPullRequest", input, &host.git)
+                .await,
+        );
+    }
     if method == "preview.automation" {
         return workspace.preview("automation", input).await;
     }

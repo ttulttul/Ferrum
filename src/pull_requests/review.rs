@@ -113,6 +113,7 @@ fn encoded(s: &str) -> String {
 }
 
 pub(super) async fn run(
+    service: &super::PullRequestService,
     gh: &Github<'_>,
     op: &str,
     repo: &str,
@@ -122,9 +123,48 @@ pub(super) async fn run(
     let (owner, name) = repo.split_once('/').unwrap();
     let mut vars = json!({"owner":owner,"name":name,"number":number});
     let fail = |e| failure(op, e);
-    let base=gh.graphql("query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){viewerPermission pullRequest(number:$number){id viewerDidAuthor}}}",vars.clone()).await.map_err(fail)?;
+    let base = if op == "update" {
+        Value::Null
+    } else {
+        gh.graphql(include_str!("ViewerPermissions.graphql"), vars.clone())
+            .await
+            .map_err(fail)?
+    };
     let pr = &base["repository"]["pullRequest"];
-    let id = pr["id"].as_str().ok_or_else(|| fail(Failure::NotFound))?;
+    let node_id = if matches!(
+        op,
+        "update"
+            | "comment"
+            | "setReaction"
+            | "replyToThread"
+            | "setThreadResolution"
+            | "updateComment"
+    ) {
+        let key = (repo.to_ascii_lowercase(), number);
+        let cached = service.node_ids.lock().await.get(&key).cloned();
+        match cached {
+            Some(id) => id,
+            None => {
+                let data = gh
+                    .graphql(include_str!("PullRequestNodeId.graphql"), vars.clone())
+                    .await
+                    .map_err(fail)?;
+                let id = data["repository"]["pullRequest"]["id"]
+                    .as_str()
+                    .ok_or_else(|| fail(Failure::NotFound))?
+                    .to_owned();
+                let mut cache = service.node_ids.lock().await;
+                if cache.len() >= 128 {
+                    cache.shift_remove_index(0);
+                }
+                cache.insert(key, id.clone());
+                id
+            }
+        }
+    } else {
+        String::new()
+    };
+    let id = node_id.as_str();
     let own = pr["viewerDidAuthor"] == true;
     let permission = base["repository"]["viewerPermission"]
         .as_str()
@@ -163,14 +203,14 @@ pub(super) async fn run(
     }
     let api = format!("repos/{repo}/pulls/{number}");
     let mutation=match op{
-        "comment"=>("mutation($id:ID!,$body:String!){addComment(input:{subjectId:$id,body:$body}){clientMutationId}}",json!({"id":id,"body":input["body"]})),
+        "comment"=>("mutation AddComment($subjectId:ID!,$body:String!){addComment(input:{subjectId:$subjectId,body:$body}){clientMutationId}}",json!({"subjectId":id,"body":input["body"]})),
         "update"=>{
-            let mut args=json!({"id":id});
+            let mut args=json!({"pullRequestId":id});
             if let Some(title)=input.get("title"){args["title"]=json!(trimmed(title).filter(|v|v.len()<=1024).ok_or_else(||error(op,"Invalid title."))?)}
             if let Some(body)=input.get("body"){args["body"]=json!(body.as_str().filter(|v|v.len()<=65536).ok_or_else(||error(op,"Invalid body."))?)}
             if let Some(flag)=input.get("maintainerCanModify"){args["maintainerCanModify"]=json!(flag.as_bool().ok_or_else(||error(op,"Invalid maintainer edit setting."))?)}
             if args.as_object().unwrap().len()==1{return Err(error(op,"Nothing was changed."))}
-            ("mutation($id:ID!,$title:String,$body:String,$maintainerCanModify:Boolean){updatePullRequest(input:{pullRequestId:$id,title:$title,body:$body,maintainerCanModify:$maintainerCanModify}){clientMutationId}}",args)
+            ("mutation UpdatePullRequest($pullRequestId:ID!,$title:String,$body:String,$maintainerCanModify:Boolean){updatePullRequest(input:{pullRequestId:$pullRequestId,title:$title,body:$body,maintainerCanModify:$maintainerCanModify}){pullRequest{id}}}",args)
         }
         "submitReview"=>{
             let data=review_submission(input,own)?;
