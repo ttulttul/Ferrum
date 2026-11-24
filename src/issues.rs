@@ -376,7 +376,11 @@ async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
     let mut next = json!({});
     let cfg = linear::record(state).await?;
     let mut linear_count = 0;
-    let mut linear_error = None;
+    // Accounts of one tracker share its host: it is unusable only when every
+    // account's read failed for want of a credential.
+    let mut linear_accounts: Vec<String> = Vec::new();
+    let mut linear_unusable: std::collections::HashMap<String, String> = Default::default();
+    let mut linear_usable = false;
     let mut host_order = Vec::new();
     let mut total = 0;
     let mut host_error = None;
@@ -387,7 +391,11 @@ async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
             if !host_order.contains(&"linear.app") {
                 host_order.push("linear.app");
             }
-            let key = format!("linear.app {}", scope.to_lowercase());
+            // `listCursorKey`: an added account's scopes keep cursors of their own.
+            let key = match cfg["bindings"][&p.id]["accountId"].as_str() {
+                None => format!("linear.app {}", scope.to_lowercase()),
+                Some(id) => format!("linear.app {id}/{}", scope.to_lowercase()),
+            };
             if input["host"]
                 .as_str()
                 .is_none_or(|h| h.trim().eq_ignore_ascii_case("linear.app"))
@@ -396,10 +404,15 @@ async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
                 scopes.push(
                     json!({"projectId":p.id,"tracker":"linear","host":"linear.app","scope":scope}),
                 );
+                let account = linear::viewer_key(&cfg["bindings"][&p.id]);
+                if !linear_accounts.contains(&account) {
+                    linear_accounts.push(account.clone());
+                }
                 let cursor = &input["cursors"][&key];
                 if input.get("cursors").is_none() || !cursor.is_null() {
                     match linear::page(&cfg, &p, scope, input, cursor, &mut viewers).await {
                         Ok(page) => {
+                            linear_usable = true;
                             entries
                                 .extend(page["entries"].as_array().into_iter().flatten().cloned());
                             if !page["cursor"].is_null() {
@@ -416,9 +429,10 @@ async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
                                     .and_then(|m| m.split_once(": "))
                                     .map(|(_, s)| s)
                                     .unwrap_or("Linear rejected the API key.");
-                                linear_error = Some(detail.to_owned());
+                                linear_unusable.insert(account.clone(), detail.to_owned());
                                 detail
                             } else {
+                                linear_usable = true;
                                 e["detail"]
                                     .as_str()
                                     .unwrap_or("The issue tracker request failed.")
@@ -500,6 +514,12 @@ async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
         trackers.push(json!({"tracker":"github","host":"github.com","projectCount":total,"capabilities":capabilities(),"configured":host_error.is_none(),"detail":host_error}))
     }
     if linear_count > 0 {
+        let linear_error = (!linear_usable
+            && !linear_accounts.is_empty()
+            && linear_accounts
+                .iter()
+                .all(|a| linear_unusable.contains_key(a)))
+        .then(|| linear_unusable[&linear_accounts[0]].clone());
         trackers.push(json!({"tracker":"linear","host":"linear.app","projectCount":linear_count,"capabilities":capabilities(),"configured":linear_error.is_none(),"detail":linear_error}));
     }
     trackers.sort_by_key(|t| host_order.iter().position(|h| t["host"] == *h));

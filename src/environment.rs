@@ -131,6 +131,11 @@ pub fn descriptor_with_link_routes(
     }
     capability!("linkedThreadRefreshes", true);
     capability!("issueLinkedThreads", true);
+    // More than one account per standalone issue tracker (#39179); the native
+    // server's `issueTrackers.*` keep them, the control plane has no trackers.
+    if link_routes {
+        capability!("issueTrackerAccounts", true);
+    }
     json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.11","orchestrationProtocolVersion":2,"databaseMigration":DATABASE_MIGRATION,"capabilities":capabilities})
 }
 
