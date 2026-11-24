@@ -208,9 +208,16 @@ mod migration_tests {
         let platform = ("linux", "x64", None);
         let served = super::descriptor_with_link_routes("env", "Label", platform, false, true);
         let plain = super::descriptor("env", "Label", platform, false);
-        for capability in ["linkThreadStream", "linkClientPairing", "linkPairingForLink"] {
+        for capability in [
+            "linkThreadStream",
+            "linkClientPairing",
+            "linkPairingForLink",
+        ] {
             assert_eq!(served["capabilities"][capability], true, "{capability}");
-            assert!(plain["capabilities"].get(capability).is_none(), "{capability}");
+            assert!(
+                plain["capabilities"].get(capability).is_none(),
+                "{capability}"
+            );
         }
     }
 }
