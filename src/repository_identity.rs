@@ -584,6 +584,10 @@ pub fn invalidate(workspace_root: &str) {
 /// A stored project row with the identity of its workspace filled in.
 pub fn with_identity(row: &Value) -> Value {
     let mut row = row.clone();
+    // A project's nested repositories (#35925); none on a row written before.
+    if row.is_object() && row.get("trackedFolders").is_none() {
+        row["trackedFolders"] = serde_json::json!([]);
+    }
     if row.get("repositoryIdentity").is_some_and(Value::is_null) {
         if let Some(root) = row["workspaceRoot"].as_str() {
             row["repositoryIdentity"] = resolve(root).unwrap_or(Value::Null);

@@ -20,6 +20,7 @@ import shlex
 from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from parity_gaps import Gaps
 from parity_harness import encode, http, managed_server
 
 LINK_REDIRECT = "http://127.0.0.1/t3code-peer-link"
@@ -91,6 +92,12 @@ def descriptor(url):
     return status, headers.get("content-type"), json.loads(body)
 
 
+# Descriptor capabilities for features Rust does not have yet (each a known
+# difference in parity_gaps.json): they are compared apart from the rest.
+ADDED_CAPABILITIES = ("previewTunnelSetting", "linkThreadStream", "linkClientPairing",
+                      "linkPairingForLink", "agentFeedback", "issueTrackerAccounts")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command", required=True)
@@ -103,10 +110,21 @@ def main():
         set_linked_environments(home, True)
         forged = "e30." + base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
         checks = []
+        gaps = Gaps("peer_link_parity")
 
         def same(name, expected, actual):
-            assert expected == actual, (name, expected, actual)
             checks.append(name)
+            if expected != actual and gaps.expected(name):
+                gaps.differs(name)
+                return
+            assert expected == actual, (name, expected, actual)
+
+        def capabilities_added_upstream(found):
+            """The descriptor's capabilities the reference gained upstream
+            (named in parity_gaps.json), apart from the rest of it."""
+            status, kind, body = json.loads(json.dumps(found))
+            added = {key: body["capabilities"].pop(key, None) for key in ADDED_CAPABILITIES}
+            return [status, kind, body], added
 
         with running(reference, home, secret, key) as (url, cookie):
             reference_descriptor = descriptor(url)
@@ -115,7 +133,10 @@ def main():
             reference_forged = call_mcp(url, forged)
             assert reference_live[0] == 200, reference_live
         with running(rust, home, secret, key) as (url, cookie):
-            same("descriptor on the same home", reference_descriptor, descriptor(url))
+            reference_rest, reference_added = capabilities_added_upstream(reference_descriptor)
+            rust_rest, rust_added = capabilities_added_upstream(descriptor(url))
+            same("descriptor on the same home", reference_rest, rust_rest)
+            same("descriptor capabilities added upstream", reference_added, rust_added)
             same("link issued by the reference", reference_live, call_mcp(url, reference_link))
             same("unknown credential", reference_forged, call_mcp(url, forged))
             rust_link, rust_grant = link(url, cookie)
@@ -144,7 +165,9 @@ def main():
             assert reference_off[0] == 403, reference_off
         with running(rust, home, secret, key) as (url, cookie):
             same("link while Linked environments is off", reference_off, call_mcp(url, third))
-        print(f"{len(checks)}/{len(checks)} peer link checks matched across the reference and the Rust server on one home")
+        if gaps.finish(ran=set(checks)):
+            raise SystemExit(1)
+        print(f"{len(checks)}/{len(checks)} peer link checks ran across the reference and the Rust server on one home")
 
 
 if __name__ == "__main__":

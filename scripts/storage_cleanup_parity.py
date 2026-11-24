@@ -157,8 +157,8 @@ def exercise(command, home):
         assert (artifacts / "link").is_symlink()
         assert set(git("for-each-ref", "--format=%(refname)", "refs/t3/").splitlines()) == kept
         git("show-ref", "--verify", "refs/heads/main")
-        # A dangling link fails this category after the preceding file is gone.
-        # The other category still completes and the report includes partial bytes.
+        # A dangling link is skipped (upstream #40528): the file before it is
+        # removed and the other category still completes.
         old_file = artifacts / "a-first.png"
         old_file.write_bytes(b"partial")
         os.utime(old_file, (1, 1))
@@ -168,7 +168,7 @@ def exercise(command, home):
             db.execute("UPDATE orchestration_v2_effect_outbox SET status='succeeded' WHERE effect_id IN ('pending','running')")
         request(4)
         failed = response()
-        assert failed["counts"] == {"removed": 0, "kept": 1, "failed": 1}
+        assert failed["counts"] == {"removed": 1, "kept": 1, "failed": 0}
         assert failed["bytesFreed"] == 7 and failed["entries"][0]["files"] == 1
         failed["entries"][0]["reason"] = failed["entries"][0]["reason"].replace(str(home), "$HOME")
         assert not old_file.exists()

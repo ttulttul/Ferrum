@@ -175,6 +175,8 @@ SIDE_REPLIES = {
     "account/read": {"account": {"type": "apiKey"}, "requiresOpenaiAuth": False},
     "config/read": {"config": {}, "origins": {}},
     "thread/unsubscribe": {},
+    # Codex names a thread after its T3 thread (thread/name/set, upstream #37442).
+    "thread/name/set": {},
     "thread/backgroundTerminals/terminate": {"terminated": True},
     "turn/interrupt": {},
     **scenario.get("replies", {}),

@@ -354,20 +354,29 @@ pub(crate) fn codex_exec_launch_args(args: &[String]) -> Vec<String> {
             "-p=",
         ],
     );
-    let hook = |name: &str| name == "hooks" || name == "codex_hooks";
-    kept.iter()
+    omit_feature_enables(
+        &kept,
+        &["apps", "connectors", "plugins", "hooks", "codex_hooks"],
+    )
+}
+
+/// `omitFeatureEnables`: Codex can apply an explicit `--enable` after the
+/// trailing `-c` overrides, so enables of the features turned off go (#39086).
+fn omit_feature_enables(args: &[String], features: &[&str]) -> Vec<String> {
+    let off = |name: &str| features.contains(&name);
+    args.iter()
         .enumerate()
         .filter(|(index, arg)| {
             if let Some(name) = arg.strip_prefix("--enable=") {
-                return !hook(name);
+                return !off(name);
             }
             if arg.as_str() == "--enable" {
-                return !kept.get(index + 1).is_some_and(|next| hook(next));
+                return !args.get(index + 1).is_some_and(|next| off(next));
             }
             !(index
                 .checked_sub(1)
-                .is_some_and(|previous| kept[previous] == "--enable")
-                && hook(arg))
+                .is_some_and(|previous| args[previous] == "--enable")
+                && off(arg))
         })
         .map(|(_, arg)| arg.clone())
         .collect()
@@ -375,7 +384,7 @@ pub(crate) fn codex_exec_launch_args(args: &[String]) -> Vec<String> {
 
 /// `codexMcpListLaunchArgs`.
 pub(crate) fn codex_mcp_list_launch_args(args: &[String]) -> Vec<String> {
-    filter_launch_args(
+    let kept = filter_launch_args(
         args,
         &[],
         &["--config", "-c", "--enable", "--disable", "--profile", "-p"],
@@ -387,10 +396,14 @@ pub(crate) fn codex_mcp_list_launch_args(args: &[String]) -> Vec<String> {
             "--profile=",
             "-p=",
         ],
-    )
+    );
+    omit_feature_enables(&kept, &["apps", "connectors", "plugins"])
 }
 
-const CODEX_NO_PLUGIN_ARGS: [&str; 4] = [
+// Codex also reads the legacy connectors key for apps (#39086).
+const CODEX_NO_PLUGIN_ARGS: [&str; 6] = [
+    "--config",
+    "features.connectors=false",
     "--config",
     "features.plugins=false",
     "--config",

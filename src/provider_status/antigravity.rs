@@ -140,45 +140,32 @@ fn completed_release(versions: &Path, release: &str) -> Result<Executable, Strin
         return Err(read_failure());
     }
     let windows = target().0 == "win32";
-    let (executable, harness) = if windows {
-        ("agy_acp_server.exe", "localharness_external.exe")
-    } else {
-        ("agy_acp_server.par", "localharness_external")
-    };
+    let cli = if windows { "agy.exe" } else { "antigravity" };
+    // Releases before the Antigravity CLI (an ACP server with a harness)
+    // no longer run (#38970).
+    if record["releaseId"] == release && record["executable"]["name"] != cli {
+        return Err(format!(
+            "Antigravity {} predates the Antigravity CLI and no longer works with this T3 Code release. Update it in Antigravity setup.",
+            record["version"].as_str().unwrap_or("")
+        ));
+    }
     let bytes = |v: &Value| {
         v.as_f64()
             .filter(|b| b.fract() == 0.0 && *b > 0.0 && *b <= 9_007_199_254_740_991.0)
             .map(|b| b as u64)
     };
-    let executable_name = record["executable"]["name"].as_str().unwrap_or("");
-    let names_match = if record["harness"].is_null() {
-        executable_name == if windows { "agy.exe" } else { "antigravity" }
-    } else {
-        executable_name == executable && record["harness"]["name"] == harness
-    };
     let executable_bytes = bytes(&record["executable"]["bytes"]);
-    let harness_ok = record["harness"].is_null()
-        || bytes(&record["harness"]["bytes"]).is_some_and(|b| {
-            is_executable_file(
-                &directory.join(record["harness"]["name"].as_str().unwrap_or("")),
-                Some(b),
-            )
-        });
     if record["releaseId"] != release
-        || !names_match
         || executable_bytes.is_none()
         || record["version"].as_str().unwrap_or("").trim().is_empty()
-        || !is_executable_file(&directory.join(executable_name), executable_bytes)
-        || !harness_ok
+        || !is_executable_file(&directory.join(cli), executable_bytes)
     {
         return Err(incomplete());
     }
     Ok(Executable {
         version: record["version"].as_str().map(str::to_owned),
-        path: directory.join(executable_name),
-        harness: record["harness"]["name"]
-            .as_str()
-            .map(|name| directory.join(name)),
+        path: directory.join(cli),
+        harness: None,
     })
 }
 
@@ -211,25 +198,12 @@ fn from_external(candidate: &Path, versions: &Path) -> Result<Option<Executable>
         }
     }
     // The candidate as found, not its real path, so version-manager shims work.
-    if is_cli(&[candidate, &real]) {
-        return Ok(Some(Executable {
-            version: None,
-            path: candidate.to_path_buf(),
-            harness: None,
-        }));
-    }
-    let harness = if target().0 == "win32" {
-        "localharness_external.exe"
-    } else {
-        "localharness_external"
-    };
-    Ok(
-        is_executable_file(&directory.join(harness), None).then(|| Executable {
-            version: None,
-            path: candidate.to_path_buf(),
-            harness: Some(directory.join(harness)),
-        }),
-    )
+    // Only the agy CLI runs now; an ACP server with a harness does not (#38970).
+    Ok(is_cli(&[candidate, &real]).then(|| Executable {
+        version: None,
+        path: candidate.to_path_buf(),
+        harness: None,
+    }))
 }
 
 /// `commandCandidates`: a path as given, else each PATH entry's match.
@@ -274,7 +248,10 @@ pub(super) fn resolve_executable(
                 return Ok(selected);
             }
         }
-        return Err("The custom Antigravity executable is missing or not executable, or it needs a localharness_external sibling. The agy CLI does not.".into());
+        return Err(
+            "The custom Antigravity executable is missing or not executable, or it is not the agy CLI."
+                .into(),
+        );
     }
     let active = managed.join("active.json");
     if active.exists() {
@@ -299,12 +276,7 @@ pub(super) fn resolve_executable(
         }
         return Ok(installed);
     }
-    let executable = if platform == "win32" {
-        "agy_acp_server.exe"
-    } else {
-        "agy_acp_server.par"
-    };
-    for command in [executable, "agy"] {
+    for command in ["agy"] {
         for candidate in candidates(command, env) {
             if let Some(selected) = from_external(&candidate, &versions)? {
                 return Ok(selected);

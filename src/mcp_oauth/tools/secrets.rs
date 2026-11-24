@@ -149,6 +149,8 @@ pub(super) async fn request_secret<S: McpHost>(
             .map_err(store_failure)?;
         return Ok(json!({"status": "saved", "file": file}));
     }
+    // A later run that reuses a clientRequestId gets its own card (#38167).
+    let key = format!("{run_id}:{key}");
     let part = crate::thread_projection::uri_component;
     let card_id = format!(
         "turn-item:secret-request:{}:{}",

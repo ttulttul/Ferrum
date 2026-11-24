@@ -33,6 +33,10 @@ LISTED_TO = {
     "hiddenFromOutsideClients": "threads only",
     "hiddenFromSubagents": "not subagents",
     "hiddenWhileLinksOff": "links beta on",
+    "hiddenWithoutBackgroundWait": "threads that can wait",
+    "hiddenFromThreads": "outside clients only",
+    "hiddenWithoutForge": "a forge connected",
+    "hiddenWhileFeedbackOff": "feedback on",
 }
 
 

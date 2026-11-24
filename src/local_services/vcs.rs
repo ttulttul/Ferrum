@@ -22,6 +22,108 @@ pub(super) async fn run(cwd: &str, args: &[&str]) -> std::io::Result<Output> {
         .output()
         .await
 }
+/// The reference's `refsDigest` (#40385, #40452, #40556): lets a client keep
+/// its cached branch list while the refs and worktree paths are unchanged.
+/// The first 32 hex digits of the SHA-256 of `readRefSnapshot`.
+async fn refs_digest(cwd: &str) -> Option<String> {
+    let snapshot = ref_snapshot(cwd).await?;
+    Some(hex::encode(Sha256::digest(snapshot.as_bytes()))[..32].to_owned())
+}
+
+/// `readLocalStatusRefSnapshot` and the worktree stamp after it.
+async fn ref_snapshot(cwd: &str) -> Option<String> {
+    let refs = run(cwd, &["show-ref", "--head"]).await.ok()?;
+    if !refs.status.success() {
+        return None;
+    }
+    let head = run(cwd, &["symbolic-ref", "--quiet", "HEAD"]).await.ok()?;
+    // Exit 1 means a detached HEAD.
+    if !matches!(head.status.code(), Some(0 | 1)) {
+        return None;
+    }
+    let common = read(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .await?;
+    let common = Path::new(common.trim());
+    let shallow = std::fs::read_to_string(common.join("shallow")).unwrap_or_default();
+    let stamp = worktree_stamp(common).await?;
+    Some(format!(
+        "{}\0{}\0{shallow}\0{stamp}",
+        String::from_utf8_lossy(&refs.stdout),
+        String::from_utf8_lossy(&head.stdout),
+    ))
+}
+
+/// `readWorktreeBranchPaths`' stamp: each existing, unprunable worktree
+/// with a branch, as `[branch, path]` JSON, sorted, one per line.
+async fn worktree_stamp(common: &Path) -> Option<String> {
+    let dir = if common.file_name().is_some_and(|n| n == ".git") {
+        common.parent()?
+    } else {
+        common
+    };
+    let (dir, git_dir) = (dir.to_str()?, common.to_str()?);
+    let args = ["--git-dir", git_dir, "worktree", "list", "--porcelain"];
+    let listed = run(dir, &[&args[..], &["-z"]].concat()).await.ok()?;
+    let stdout = if listed.status.success() {
+        String::from_utf8_lossy(&listed.stdout).into_owned()
+    } else {
+        let lines = run(dir, &args).await.ok()?;
+        if !lines.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&lines.stdout).replace('\n', "\0")
+    };
+    let mut paths: BTreeMap<String, String> = BTreeMap::new();
+    let (mut path, mut branch, mut prunable) = (None::<String>, None::<String>, false);
+    let mut flush =
+        |path: &mut Option<String>, branch: &mut Option<String>, prunable: &mut bool| {
+            if let (Some(p), Some(b), false) = (path.take(), branch.take(), *prunable) {
+                paths.insert(b, p);
+            }
+            *prunable = false;
+        };
+    for field in stdout.split('\0') {
+        if field.is_empty() {
+            flush(&mut path, &mut branch, &mut prunable);
+        } else if let Some(p) = field.strip_prefix("worktree ") {
+            path = Some(p.to_owned());
+        } else if let Some(b) = field.strip_prefix("branch refs/heads/") {
+            branch = Some(b.to_owned());
+        } else if field == "prunable" || field.starts_with("prunable ") {
+            prunable = true;
+        }
+    }
+    flush(&mut path, &mut branch, &mut prunable);
+    let common = lexical(common);
+    let mut stamp: Vec<String> = paths
+        .into_iter()
+        .map(|(branch, path)| (branch, lexical(Path::new(&path))))
+        .filter(|(_, path)| *path != common && path.exists())
+        .map(|(branch, path)| json!([branch, path.to_string_lossy()]).to_string())
+        .collect();
+    stamp.sort();
+    Some(stamp.join("\n"))
+}
+
+/// Node's `path.normalize` of an absolute path: `.` and `..` resolved
+/// without touching the file system.
+fn lexical(path: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 pub(super) async fn read(cwd: &str, args: &[&str]) -> Option<String> {
     let out = run(cwd, args).await.ok()?;
     out.status.success().then(|| {
@@ -632,7 +734,13 @@ impl VcsService {
                 if refresh_upstream && !local_only {
                     super::vcs_upstream::refresh_if_stale(cwd).await;
                 }
-                status(&root, &self.hosted, local_only, false).await
+                let mut reply = status(&root, &self.hosted, local_only, false).await;
+                if let Some(status) = reply.as_mut().ok().filter(|s| s["isRepo"] == true) {
+                    if let Some(digest) = refs_digest(&root).await {
+                        status["refsDigest"] = json!(digest);
+                    }
+                }
+                reply
             }
             "listRefs" => refs(&root, cwd, input).await,
             "pull" => {

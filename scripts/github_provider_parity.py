@@ -40,7 +40,7 @@ PR["files"] = {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes":[
     {"path":path,"viewerViewedState":"UNVIEWED","additions":i+1,"deletions":2*i}
     for i,path in enumerate(["lib.rs","README.md","tests/test_api.py","__fixtures__/main.txt","Cargo.lock"])]}
 PR.update({"body":"PR body","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED",
-           "additions":1,"deletions":1,"changedFiles":1,"updatedAt":"2026-02-01T00:00:00Z","mergedAt":None,
+           "additions":1,"deletions":1,"changedFiles":1,"updatedAt":"2026-02-01T00:00:00Z","mergedAt":None,"mergeCommit":None,"mergedBy":None,
            "closedAt":None,"headRefName":"feature","baseRefName":"main","headRefOid":"a"*40,
            "isCrossRepository":False,"maintainerCanModify":False,"headRepositoryOwner":{"__typename":"User","login":"tester"},
            "headRepository":{"viewerPermission":"WRITE","nameWithOwner":REPO,"id":"R1"},"headRef":{"id":"HD_3"},
@@ -50,7 +50,7 @@ PR.update({"body":"PR body","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","
                "statusCheckRollup":{"state":"SUCCESS","contexts":{"nodes":[{"__typename":"CheckRun","name":"build",
                    "status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-01-01T12:00:00Z",
                    "completedAt":"2026-01-01T13:00:00Z","detailsUrl":"https://example.test/build",
-                   "isRequired":True,"checkSuite":{"workflowRun":{"workflow":{"name":"CI"}}}}],
+                   "isRequired":True,"checkSuite":{"workflowRun":{"event":"pull_request","runNumber":7,"workflow":{"id":"W1","name":"CI"}}}}],
                    "pageInfo":{"hasNextPage":False,"endCursor":None}}}}}]}})
 REPOSITORY = {"__typename":"Repository", "viewerPermission":"WRITE","mergeCommitAllowed":True,"squashMergeAllowed":True,
               "rebaseMergeAllowed":True,"autoMergeAllowed":True,"pullRequest":PR}

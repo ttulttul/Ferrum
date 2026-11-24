@@ -50,7 +50,7 @@ class Provider(BaseHTTPRequestHandler):
         team=self.server.team
         issue=self.server.issue
         if name=="T3Viewer":
-            data={"viewer":USER,"teams":page([team])}
+            data={"viewer":USER,"organization":{"urlKey":"workspace"},"teams":page([team])}
         elif name=="T3Team":
             data={"teams":page([team] if v["key"]=="ENG" else []),"issueLabels":page([])}
         elif name=="T3IssueCreate":

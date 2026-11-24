@@ -31,6 +31,9 @@ pub struct TerminalService {
     events: broadcast::Sender<Value>,
     metadata: broadcast::Sender<Value>,
     logs: Option<Arc<PathBuf>>,
+    /// This manager's id, new each process: a client that sees it change drops
+    /// the terminals it knew (upstream #38998).
+    manager_id: Arc<str>,
 }
 impl Default for TerminalService {
     fn default() -> Self {
@@ -39,6 +42,7 @@ impl Default for TerminalService {
             events: broadcast::channel(512).0,
             metadata: broadcast::channel(512).0,
             logs: None,
+            manager_id: uuid::Uuid::new_v4().to_string().into(),
         }
     }
 }
@@ -274,7 +278,7 @@ impl TerminalService {
                 .then_with(|| a["threadId"].as_str().cmp(&b["threadId"].as_str()))
                 .then_with(|| a["terminalId"].as_str().cmp(&b["terminalId"].as_str()))
         });
-        json!({"type":"snapshot","terminals":items})
+        json!({"type":"snapshot","terminals":items,"managerId":&*self.manager_id})
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
         self.events.subscribe()

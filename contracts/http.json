@@ -157,6 +157,13 @@
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "revoke",
+    "method": "POST",
+    "path": "/oauth/mcp/revoke",
+    "auth": []
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
     "name": "shellSnapshot",
     "method": "GET",
     "path": "/api/orchestration/shell",
@@ -427,6 +434,15 @@
   },
   {
     "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "liveActivityPreference",
+    "method": "POST",
+    "path": "/api/connect/live-activity-preference",
+    "auth": [
+      "EnvironmentAuthenticatedAuth"
+    ]
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
     "name": "health",
     "method": "POST",
     "path": "/api/t3-connect/health",
@@ -465,6 +481,13 @@
     "name": "webhookGet",
     "method": "GET",
     "path": "/api/hooks/:hookId/:token",
+    "auth": []
+  },
+  {
+    "source": "packages/contracts/src/environmentHttp.ts",
+    "name": "clientPairing",
+    "method": "POST",
+    "path": "/api/peer-link/client-pairing",
     "auth": []
   },
   {
@@ -671,6 +694,15 @@
     "name": "updateLinkPreferences",
     "method": "POST",
     "path": "/v1/environments/:environmentId/link-preferences",
+    "auth": [
+      "RelayEnvironmentAuth"
+    ]
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "updateLiveActivityPreference",
+    "method": "POST",
+    "path": "/v1/environments/:environmentId/live-activity-preference",
     "auth": [
       "RelayEnvironmentAuth"
     ]

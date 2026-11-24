@@ -1,5 +1,93 @@
 {
+  "antigravity title": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude agent mcp": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude approval": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude approval declined": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude approval interrupted": {
+    "live": "Racy: #39502 (ProviderCommitBatch) combines an item's queued snapshots when they queue together; whether the command item's update and its approval land in one batch is timing, so the reference sometimes sends one fewer command_execution update than Rust (seen both matching and differing)."
+  },
+  "claude approval-required": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude attachments": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude auto-accept-edits": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude delegate": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude delegate cancel": {
+    "agent mcp": "#37859: a stopped delegated task's result ends with the child run's stop notice (\"Stopped by an agent: <reason>\"); Rust's interrupt result does not carry the stop reason, so task_status's summary lacks it."
+  },
+  "claude delegate live": {
+    "items": "#39528: the reference steers a delegated result into the parent's running Claude turn (sending it again as a new run if the turn ended first); Rust still queues it for Claude, since it cannot yet send an untaken steer again, so the notification lands outside that turn.",
+    "live": "#39528: the reference steers a delegated result into the parent's running Claude turn (sending it again as a new run if the turn ended first); Rust still queues it for Claude, since it cannot yet send an untaken steer again, so the notification lands outside that turn."
+  },
+  "claude in the login shell PATH": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude question": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
   "claude restart cli restored": {
     "nativeMetadata": "The reference hands the failed continuation's items to its retry as a context handoff (delta_since_target_last_seen), which Rust does not build, and counts the handoff in the session's attachment budget."
+  },
+  "claude second turn": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude steer": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude title fallback": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "claude turn": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "codex agent mcp": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated).",
+    "turn app-servers": "#39247: orchestrator_capabilities rescans the project's Codex skills (refreshWorkspaceSnapshot), starting a skills-helper Codex app-server that Rust does not start."
+  },
+  "codex attachments": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "codex in the login shell PATH": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "codex second turn": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "codex thread tools": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated).",
+    "turn app-servers": "#39247: orchestrator_capabilities rescans the project's Codex skills (refreshWorkspaceSnapshot), starting a skills-helper Codex app-server that Rust does not start.",
+    "agent mcp": "Racy: since #197 Rust reads a newly linked pull request right after the link commits, apart from the tool call, so the agent's next list_thread_pull_requests can come before that read and show the link without its branches and draft state (seen both matching and differing)."
+  },
+  "codex title": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "codex title failed": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "codex turn": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "grok title": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "opencode title": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "pi title": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   }
 }

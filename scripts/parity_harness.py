@@ -7,6 +7,7 @@ import http.client as http_client
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shlex
 import signal
@@ -18,6 +19,8 @@ import threading
 import time
 from urllib.parse import urlsplit
 
+from parity_gaps import Gaps
+
 ROOT = Path(__file__).resolve().parents[1]
 TRACE = "00-0123456789abcdef0123456789abcdef-1234567890abcdef-01"
 
@@ -26,10 +29,10 @@ def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def http(base, method, path, body=None, headers=None):
+def http(base, method, path, body=None, headers=None, timeout=10):
     url = urlsplit(base)
     connection = (http_client.HTTPSConnection if url.scheme == "https" else http_client.HTTPConnection)(
-        url.hostname, url.port, timeout=10
+        url.hostname, url.port, timeout=timeout
     )
     try:
         connection.request(method, url.path.rstrip("/") + path, body, headers or {})
@@ -45,7 +48,8 @@ def ready(url, process=None):
         if process and process.poll() is not None:
             raise RuntimeError(f"server exited before readiness ({process.returncode})")
         try:
-            if http(url, "GET", "/ws")[0] == 426:
+            # A request the reference accepts before it serves is never answered; probe again.
+            if http(url, "GET", "/ws", timeout=0.5)[0] == 426:
                 return
         except (OSError, http_client.HTTPException):
             pass
@@ -282,7 +286,10 @@ def offline_env():
     env = {"T3CODE_TELEMETRY_ENABLED": "false", "NODE_USE_ENV_PROXY": "1",
            # Host CLIs a server may run (gh, az) have telemetry and update checks of their own.
            "GH_TELEMETRY": "false", "DO_NOT_TRACK": "1", "GH_NO_UPDATE_NOTIFIER": "1",
-           "AZURE_CORE_COLLECT_TELEMETRY": "false"}
+           "AZURE_CORE_COLLECT_TELEMETRY": "false",
+           # No session bus: gh would wait on a desktop keyring there (the reference turns the bus
+           # off only where none exists, #23824), so both servers see gh fail fast as in CI.
+           "DBUS_SESSION_BUS_ADDRESS": "disabled:"}
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
         env[name] = env[name.lower()] = proxy
     env["NO_PROXY"] = env["no_proxy"] = loopback
@@ -377,6 +384,25 @@ def managed_server(stack, prefix, root, secret, signing_key, env=None, stderr_pa
         return url, cookie
 
 
+_VOLATILE = [
+    # A server's clock (server.probe, getConfig), read a few milliseconds apart on each server.
+    (re.compile(r'("serverTime"\s*:\s*")[^"]*(")'), r"\1<time>\2"),
+    # The terminal manager's random id, new each process.
+    (re.compile(r'("managerId"\s*:\s*")[0-9a-f-]{36}(")'), r"\1<uuid>\2"),
+]
+
+
+def volatile_masked(value):
+    """`value` (text, bytes or anything repr-able as JSON text) with per-process values masked."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    if not isinstance(value, str):
+        return value
+    for pattern, replacement in _VOLATILE:
+        value = pattern.sub(replacement, value)
+    return value
+
+
 def check(fixture, servers, sockets):
     if "frame" in fixture:
         if "setupFrame" in fixture:
@@ -389,7 +415,7 @@ def check(fixture, servers, sockets):
         frame = encode(fixture["frame"]).decode()
         for ws in sockets:
             ws.send(frame)
-        values = [ws.recv(timeout=10) for ws in sockets]
+        values = [volatile_masked(ws.recv(timeout=10)) for ws in sockets]
         return values[0] == values[1], [repr(v)[:1600] for v in values]
     responses = []
     for url, cookie in servers:
@@ -468,15 +494,17 @@ def main():
                     parser.error("RPC fixtures require managed servers or both parity bootstrap environment variables")
                 sockets.append(stack.enter_context(connect(url.replace("http", "ws", 1) + "/ws?orchestrationProtocol=2",
                                 additional_headers={"Cookie": cookie}, proxy=None, compression=None)))
-        failures = 0
+        failures = differing = 0
+        gaps = Gaps("parity_harness")
         for fixture in fixtures:
             passed, values = check(fixture, servers, sockets)
             if not passed:
-                failures += 1
-                print(f"FAIL {fixture['name']}\n  original {values[0]}\n  rust     {values[1]}")
+                differing += 1
+                failures += gaps.differs(fixture["name"], [f"original {values[0]}", f"rust     {values[1]}"])
             else:
                 print(f"PASS {fixture['name']}")
-        print(f"{len(fixtures) - failures}/{len(fixtures)} fixtures matched")
+        failures += gaps.finish(ran={fixture["name"] for fixture in fixtures})
+        print(f"{len(fixtures) - differing}/{len(fixtures)} fixtures matched")
         return int(failures != 0)
 
 

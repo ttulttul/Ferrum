@@ -67,6 +67,9 @@ struct Inner {
     state: Mutex<State>,
     terminal_events: broadcast::Sender<Value>,
     metadata_events: broadcast::Sender<Value>,
+    /// This mirror's terminal manager id (`managerId`, #38998): its own, as
+    /// each terminal manager has.
+    terminal_manager_id: String,
     preview_events: broadcast::Sender<Value>,
     device_events: broadcast::Sender<Value>,
     clone_events: broadcast::Sender<Value>,
@@ -289,6 +292,7 @@ impl RemoteWorkspace {
                 state: Mutex::default(),
                 terminal_events: broadcast::channel(512).0,
                 metadata_events: broadcast::channel(128).0,
+                terminal_manager_id: crate::platform::uuid_v4().to_string(),
                 preview_events: broadcast::channel(512).0,
                 device_events: broadcast::channel(128).0,
                 clone_events: broadcast::channel(128).0,
@@ -1052,7 +1056,8 @@ impl Workspace for RemoteWorkspace {
         self.inner.terminal_events.subscribe()
     }
     fn terminal_metadata(&self) -> Value {
-        json!({"type": "snapshot", "terminals": self.lock().terminals})
+        json!({"type": "snapshot", "terminals": self.lock().terminals,
+            "managerId": self.inner.terminal_manager_id})
     }
     fn clone_call<'a>(
         &'a self,
@@ -1293,10 +1298,9 @@ mod tests {
             )
             .await
             .is_err());
-        assert_eq!(
-            workspace.terminal_metadata(),
-            json!({"type":"snapshot","terminals":[]})
-        );
+        let metadata = workspace.terminal_metadata();
+        assert_eq!(metadata["terminals"], json!([]));
+        assert!(metadata["managerId"].is_string());
     }
 
     /// A transport whose frames the test reads and answers by hand, as a

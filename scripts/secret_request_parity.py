@@ -58,6 +58,12 @@ def mask(value, server, root):
     return json.loads(text)
 
 
+def card_key(card_id):
+    """The clientRequestId of a secret card's id, which names the run first
+    (`<run id>:<key>`, URI-encoded) since #38167."""
+    return card_id.rsplit("%3A", 1)[-1].rsplit(":", 1)[-1]
+
+
 def secret_cards(projection):
     return [item for item in projection.get("turnItems", []) if item.get("type") == "secret_request"]
 
@@ -82,7 +88,7 @@ def wait_cards(server, keys, status, seconds=60):
     deadline = time.monotonic() + seconds
     while True:
         projection = server.projection()
-        found = {item["id"].rsplit(":", 1)[-1]: item.get("secretStatus") for item in secret_cards(projection)}
+        found = {card_key(item["id"]): item.get("secretStatus") for item in secret_cards(projection)}
         if all(found.get(key) == status for key in keys) or time.monotonic() > deadline:
             return projection
         time.sleep(0.1)
@@ -146,7 +152,7 @@ def main():
                 assert dispatched["_tag"] == "Success", dispatched
                 asked = wait_cards(server, ("card-save", "card-file", "card-decline"), "pending")
                 record["cards while asked"] = cards(asked)
-                by_key = {item["id"].rsplit(":", 1)[-1]: item["id"] for item in secret_cards(asked)}
+                by_key = {card_key(item["id"]): item["id"] for item in secret_cards(asked)}
                 answer = lambda key, payload: server.rpc("secrets.answerRequest", dict(
                     threadId=THREAD, turnItemId=by_key.get(key, f"turn-item:secret-request:missing:{key}"),
                     answer=payload))
@@ -162,7 +168,7 @@ def main():
                     threadId="thread:missing", turnItemId="turn-item:missing", answer={"type": "decline"}))
                 final = wait_runs(server, 1)
                 final = wait_cards(server, ("card-late",), "cancelled")
-                by_key = {item["id"].rsplit(":", 1)[-1]: item["id"] for item in secret_cards(final)}
+                by_key = {card_key(item["id"]): item["id"] for item in secret_cards(final)}
                 record["answer after the run"] = answer("card-late", {"type": "save", "secret": "late"})
                 # The late card's call answers once its run has ended.
                 wait_log(log, 10)

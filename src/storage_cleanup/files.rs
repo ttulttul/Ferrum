@@ -45,10 +45,14 @@ impl Category {
             // a failed entry reports exactly the files removed before that error.
             let mut pending = children(&real)?;
             while let Some(path) = pending.pop() {
+                // Links are skipped before they are resolved (#40528).
+                let meta = fs::symlink_metadata(&path).map_err(|e| fs_error(e, "stat", &path))?;
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
                 if fs::canonicalize(&path).map_err(|e| fs_error(e, "realPath", &path))? != path {
                     continue;
                 }
-                let meta = fs::symlink_metadata(&path).map_err(|e| fs_error(e, "stat", &path))?;
                 let logs = matches!(self, Self::Logs);
                 if logs && meta.is_dir() {
                     pending.extend(children(&path)?);

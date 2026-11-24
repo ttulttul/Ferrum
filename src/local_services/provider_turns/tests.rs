@@ -243,7 +243,7 @@ async fn codex_turn_waits_for_the_users_approval() {
         CODEX,
         "codex_approval.json",
         "turn-codex-approval",
-        "full-access",
+        "approval-required",
         |request| crate::workspace::provider::RuntimeResponse {
             id: request.id.clone(),
             decision: Some("decline".into()),
@@ -262,6 +262,27 @@ async fn codex_turn_waits_for_the_users_approval() {
         .find(|m| m["id"] == "approval-1" && m.get("result").is_some())
         .expect("the approval was answered");
     assert_eq!(answer["result"]["decision"], "decline");
+}
+
+/// Full access accepts Codex's command approvals without asking (#40773).
+#[tokio::test]
+async fn codex_full_access_accepts_commands_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(CODEX, "codex_approval.json", &log, None);
+    spec.turn_id = "turn-codex-full-access".into();
+    spec.provider.as_mut().unwrap().runtime_mode = "full-access".into();
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ProviderEvent::RuntimeRequestOpened { .. })));
+    let log = received(&log);
+    let answer = log
+        .iter()
+        .find(|m| m["id"] == "approval-1" && m.get("result").is_some())
+        .expect("the approval was answered");
+    assert_eq!(answer["result"]["decision"], "accept");
     let turn = log.iter().find(|m| m["method"] == "turn/start").unwrap();
     assert_eq!(turn["params"]["sandboxPolicy"]["type"], "dangerFullAccess");
 }
@@ -360,7 +381,7 @@ async fn codex_turn_reports_a_crash() {
     assert_eq!(failure.class, "unknown");
     assert_eq!(
         failure.message,
-        "The provider event stream closed unexpectedly. Retry the turn; if it keeps failing, check the provider and server logs."
+        "The provider event stream closed unexpectedly: the provider process exited with code 3. Check the server logs for the provider's output, then retry the turn."
     );
 }
 
@@ -380,7 +401,7 @@ async fn codex_turn_reports_a_failed_turn() {
 async fn missing_clis_fail_with_the_reference_errors() {
     for (driver, message) in [
         (CODEX, "Failed to spawn Codex App Server process for command: /nonexistent/codex app-server"),
-        (CLAUDE_AGENT, "The provider could not start this turn. Retry the turn; if it keeps failing, check the provider setup and server logs."),
+        (CLAUDE_AGENT, "Claude Code process exited with code 127 before it started. Check the server logs for the provider's output, then retry the turn."),
     ] {
         let spec = TurnSpec {
             prompt: "hi".into(),

@@ -1007,32 +1007,26 @@ async fn read_task<S: McpHost>(
     acknowledge: bool,
 ) -> Outcome {
     let scope = thread_scope(caller, "task_status")?;
-    let (task, child, parent_runs) = {
+    let (task, child, parent_runs, open) = {
         let store = host.control_state().store.read().await;
         let parent = find_thread(&store, &scope.thread_id)?;
         let parent_projection = parent.full_projection();
-        let task = records(&parent_projection, "subagents")
-            .into_iter()
-            .find(|t| {
-                t["id"] == task_id
-                    && t["origin"] == "app_owned"
-                    && t["threadId"] == scope.thread_id.as_str()
-            });
+        let subagents = records(&parent_projection, "subagents");
+        let open = open_delegated_tasks(&subagents, &records(&parent_projection, "runs"));
+        let task = subagents.into_iter().find(|t| {
+            t["id"] == task_id
+                && t["origin"] == "app_owned"
+                && t["threadId"] == scope.thread_id.as_str()
+        });
         let child = task
             .as_ref()
             .and_then(|t| t["childThreadId"].as_str())
             .and_then(|id| store.threads.get(id))
             .map(|t| t.full_projection());
-        (task, child, records(&parent_projection, "runs"))
+        (task, child, records(&parent_projection, "runs"), open)
     };
     let (Some(task), Some(child)) = (task, child) else {
-        return Err(failure(
-            "task_not_found",
-            format!(
-                "Delegated task {task_id} does not belong to thread {}.",
-                scope.thread_id
-            ),
-        ));
+        return Err(task_not_found(task_id, &scope.thread_id, &open));
     };
     let runs = records(&child, "runs");
     let transfers = records(&child, "contextTransfers");
@@ -1317,6 +1311,71 @@ async fn read_task<S: McpHost>(
         })?;
     }
     Ok(result)
+}
+
+/// The delegated tasks a thread still has open, as the reference's
+/// `taskNotFound` lists them: app-owned with a child, and not settled (ended,
+/// its result delivered, and its run no longer active).
+fn open_delegated_tasks(subagents: &[Value], runs: &[Value]) -> Vec<Value> {
+    subagents
+        .iter()
+        .filter(|task| {
+            task["origin"] == "app_owned"
+                && (!task["childThreadId"].is_null() || !task["remoteChild"].is_null())
+        })
+        .filter(|task| {
+            let ended = matches!(
+                task["status"].as_str(),
+                Some("completed" | "failed" | "cancelled" | "interrupted")
+            );
+            let delivered = matches!(
+                task["completionDelivery"]["state"].as_str(),
+                Some("acknowledged" | "delivered" | "disposed")
+            );
+            let run_active = runs.iter().any(|run| {
+                run["id"] == task["runId"]
+                    && matches!(
+                        run["status"].as_str(),
+                        Some("preparing" | "queued" | "starting" | "running" | "waiting")
+                    )
+            });
+            !(ended && delivered && !run_active)
+        })
+        .cloned()
+        .collect()
+}
+
+/// `taskNotFound`: the reference's answer to a task id the thread has no
+/// task by, listing up to ten open ones (upstream #40886).
+fn task_not_found(task_id: &str, thread_id: &str, open: &[Value]) -> Refusal {
+    const MAX_LISTED: usize = 10;
+    let listed = open
+        .iter()
+        .take(MAX_LISTED)
+        .map(
+            |task| match task["title"].as_str().filter(|t| !t.is_empty()) {
+                Some(title) => format!("{} ({title})", task["id"].as_str().unwrap_or_default()),
+                None => task["id"].as_str().unwrap_or_default().to_owned(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if open.len() > MAX_LISTED {
+        format!(", and {} more", open.len() - MAX_LISTED)
+    } else {
+        String::new()
+    };
+    failure(
+        "task_not_found",
+        format!(
+            "No delegated task with id {task_id} exists on thread {thread_id}. {}",
+            if open.is_empty() {
+                "This thread has no open delegated tasks.".to_owned()
+            } else {
+                format!("Open delegated tasks on this thread: {listed}{more}.")
+            }
+        ),
+    )
 }
 
 #[cfg(test)]

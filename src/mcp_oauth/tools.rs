@@ -257,6 +257,17 @@ fn visible_to<S: McpHost>(host: &S, granted: &McpAccess, listed: &str) -> bool {
     match listed {
         LINKS_ONLY => host.linked_environments_enabled(),
         "hiddenFromOutsideClients" => granted.thread.is_some(),
+        // `hiddenWithoutBackgroundWait`: a thread whose provider can hold for
+        // background work (the reference's `supportsBackgroundWait`). Of the
+        // providers this server runs turns for, that is Claude.
+        "hiddenWithoutBackgroundWait" => granted.thread.as_ref().is_some_and(|scope| {
+            let settings = host.settings();
+            let driver = settings["providerInstances"][&scope.provider_instance_id]["driver"]
+                .as_str()
+                .unwrap_or(&scope.provider_instance_id)
+                .to_owned();
+            driver == crate::workspace::provider::CLAUDE_AGENT
+        }),
         _ => true,
     }
 }
@@ -288,13 +299,19 @@ pub(super) fn listed<S: McpHost>(host: &S, granted: &McpAccess, deferred: bool) 
 }
 
 /// Refuses a tool a client from outside a thread is not offered, as if it did
-/// not exist: the reference registers a thread-only tool for threads alone.
-pub(super) fn callable(caller: &Caller, name: &str) -> Result<(), Refusal> {
+/// not exist: the reference registers a thread-only tool for threads alone,
+/// and `t3_background_wait` for threads whose provider can wait.
+pub(super) fn callable<S: McpHost>(host: &S, caller: &Caller, name: &str) -> Result<(), Refusal> {
     let thread_only = name == "tool_search"
         || SERVED_TOOLS
             .iter()
             .any(|(tool, listed)| tool["name"] == name && listed == "hiddenFromOutsideClients");
-    if thread_only && caller.granted.thread.is_none() {
+    let hidden = SERVED_TOOLS.iter().any(|(tool, listed)| {
+        tool["name"] == name
+            && listed == "hiddenWithoutBackgroundWait"
+            && !visible_to(host, &caller.granted, listed)
+    });
+    if (thread_only && caller.granted.thread.is_none()) || hidden {
         return Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found")));
     }
     Ok(())
@@ -673,15 +690,43 @@ fn no_longer_available<S: McpHost>(host: &S, caller: &Caller, id: &str) -> Refus
 }
 
 /// A project as the project tools return it: the reference leaves
-/// `hasCustomTitle` out until a title is chosen.
+/// `hasCustomTitle` out until a title is chosen, and shows the actions saved
+/// in Settings (#39676).
 fn project_out<S: McpHost>(host: &S, row: &Value) -> Value {
     let mut out = host.project_row(row);
+    if out.is_object() {
+        out["scripts"] = project_scripts(&host.settings(), &out);
+    }
     if out["hasCustomTitle"] == false {
         if let Some(object) = out.as_object_mut() {
             object.remove("hasCustomTitle");
         }
     }
     out
+}
+
+/// `resolveProjectScripts`: the actions new threads of `project` use.
+fn project_scripts(settings: &Value, project: &Value) -> Value {
+    let id = project["id"].as_str().unwrap_or_default();
+    let defaults = || match &settings["defaultProjectScripts"] {
+        scripts @ Value::Array(_) => scripts.clone(),
+        _ => json!([]),
+    };
+    let overridden = &settings["projectSettingsOverrides"][id]["defaultProjectScripts"];
+    if overridden.is_array() {
+        return overridden.clone();
+    }
+    if settings["projectSettingsFolded"] == true {
+        return defaults();
+    }
+    match settings["projectScriptOverrides"].get(id) {
+        Some(Value::Null) => defaults(),
+        Some(legacy @ Value::Array(_)) => legacy.clone(),
+        _ if project["scripts"].as_array().is_some_and(|s| !s.is_empty()) => {
+            project["scripts"].clone()
+        }
+        _ => defaults(),
+    }
 }
 
 fn thread_not_found() -> Refusal {
@@ -2516,6 +2561,20 @@ fn writes_environment(caller: &Caller, refused: Option<&str>) -> Result<(), Refu
         assert_not_linked(caller, what)?;
     }
     if caller.limits() != ("full-access", "default") {
+        // A client a link holds below full access is refused naming that
+        // link (`assertFullAccessNamingLink`, #30471).
+        if caller.thread.is_none()
+            && caller.granted.peer_link
+            && caller.granted.access != "full-access"
+        {
+            return Err(failure(
+                "capability_denied",
+                format!(
+                    "This work was started from {} through a linked environment, so it has that link's {} access, which is below the full access needed to change projects or environment settings. A link paired with full access is not limited this way.",
+                    caller.granted.label, caller.granted.access
+                ),
+            ));
+        }
         return Err(failure("capability_denied", FULL_ACCESS_REQUIRED));
     }
     Ok(())
@@ -2555,7 +2614,9 @@ fn environment_unlink<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outco
     let removed = host
         .unlink_peer(&environment_id)
         .map_err(|message| failure("orchestration_error", message))?;
-    Ok(json!({"environmentId": environment_id, "removed": removed}))
+    // Rust forgets the link here only; it does not end the session at the
+    // peer, as the reference's unlink does (#41005).
+    Ok(json!({"environmentId": environment_id, "removed": removed, "endedThere": false}))
 }
 
 /// The card id a link request gets: turn item ids are global, so the key is
@@ -2777,7 +2838,8 @@ mod sender_tests {
                         "everyone"
                             | LINKS_ONLY
                             | "hiddenFromOutsideClients"
-                            | "hiddenFromSubagents",
+                            | "hiddenFromSubagents"
+                            | "hiddenWithoutBackgroundWait",
                     )
                 ),
                 "{name} needs listing by caller"

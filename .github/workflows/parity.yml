@@ -70,7 +70,7 @@ jobs:
       - name: Fetch the pinned public reference
         run: |
           git init --quiet reference
-          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git 052ca497cf1103b001327bcd964188a71dfec213
+          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git fd0331ca9b1596ed7018c80f52b7e6730014f593
           git -C reference checkout --quiet --detach FETCH_HEAD
       - uses: actions/setup-node@v4
         with:
@@ -97,6 +97,8 @@ jobs:
           python3 scripts/update_statev2_schema.py "$GITHUB_WORKSPACE/reference" --check
           # Rust's agent tool definitions and docs/agent-tools.md must be the pinned reference's.
           python3 scripts/update_agent_tools.py "$GITHUB_WORKSPACE/reference" --check
+          # The providers' capabilities must be the pinned reference adapters'.
+          python3 scripts/update_provider_capabilities.py "$GITHUB_WORKSPACE/reference" --check
       - name: Validate Rust
         run: |
           cargo fmt --all -- --check
@@ -133,7 +135,7 @@ jobs:
       - name: Fetch the pinned public reference
         run: |
           git init --quiet reference
-          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git 052ca497cf1103b001327bcd964188a71dfec213
+          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git fd0331ca9b1596ed7018c80f52b7e6730014f593
           git -C reference checkout --quiet --detach FETCH_HEAD
       - uses: actions/setup-node@v4
         with:

@@ -810,7 +810,8 @@ fn diff_with_command(
             || (item["type"] == "error"
                 && (!turn_reported
                     || item["failure"]["message"]
-                        == crate::workspace::provider::CODEX_STREAM_CLOSED))
+                        .as_str()
+                        .is_some_and(crate::workspace::provider::stream_closed)))
     };
     // A session that failed to open (`ProviderSessionManager`) writes its
     // error, then the run, its attempt and root node.
@@ -858,7 +859,9 @@ fn diff_with_command(
             Step::ReportedProviderThread => {
                 // A turn whose event stream closed reported nothing more.
                 let closed = items.iter().any(|item| {
-                    item["failure"]["message"] == crate::workspace::provider::CODEX_STREAM_CLOSED
+                    item["failure"]["message"]
+                        .as_str()
+                        .is_some_and(crate::workspace::provider::stream_closed)
                 });
                 if turn_reported && !closed {
                     for (_, record) in &collections["providerThreads"] {

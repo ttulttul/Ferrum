@@ -79,9 +79,10 @@ pub(crate) async fn dispatch_orchestration_command<H: CommandHost>(
 /// Where a delegated delivery (`completion`) on `thread_id` steers: into the
 /// running turn, when every task it carries wakes the parent always and that
 /// turn's steering does not interrupt its tools, as the reference's
-/// `dispatchMessage` decides. Claude's steering interrupts its tools
-/// (`activeSteeringInterruptsTools`), so a delivery steers only a Codex turn
-/// and otherwise waits for the run to end.
+/// `dispatchMessage` decides. Since #39528 that includes Claude turns, but
+/// Rust does not yet send a steer the ended turn never took again as its own
+/// run (the reference's EffectWorker does), so a delivery steers only a Codex
+/// turn and otherwise waits for the run to end.
 pub(crate) async fn delivery_steer_target<H: CommandHost>(
     state: &Arc<H>,
     thread_id: &str,
@@ -646,6 +647,24 @@ fn cli_driver<H: CommandHost>(state: &H, row: &Value) -> Option<String> {
     .then(|| driver.to_owned())
 }
 
+/// Whether a message's run follows the thread's model pick when it starts
+/// rather than a copy from now: a scheduled delivery or (#40373) a queued
+/// message that names no model, unless it is a delegated completion, a
+/// monitor notification or a provider's buffered notification.
+fn follows_thread_selection(command: &Value, queued: bool, wire: Option<&Value>) -> bool {
+    if !command["modelSelection"].is_null() {
+        return false;
+    }
+    let delegated = wire.is_some_and(|w| w["delegatedCompletion"].is_object());
+    let notification = command.get("notification").filter(|n| n.is_object());
+    let buffered = command["createdBy"] == "agent"
+        && command["creationSource"] == "provider"
+        && notification.is_some()
+        && !delegated;
+    let monitor = notification.is_some_and(|n| n["source"]["kind"] == "monitor");
+    command["scheduledTaskId"].is_string() || (queued && !delegated && !monitor && !buffered)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn start_run<H: CommandHost>(
     state: Arc<H>,
@@ -1121,7 +1140,7 @@ async fn apply_command<H: CommandHost>(
                     .filter(|source| *source != "web")
                     .map(str::to_owned),
                 command["scheduledTaskId"].as_str().map(str::to_owned),
-                command["scheduledTaskId"].is_string() && command["modelSelection"].is_null(),
+                follows_thread_selection(command, queued, wire.as_ref()),
                 // A delegated task delivery shows as its notification.
                 wire.as_ref().and_then(|_| {
                     command

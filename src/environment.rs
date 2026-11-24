@@ -9,6 +9,10 @@ use std::collections::HashMap;
 /// `/.well-known/t3/environment`. `platform` is the workspace host's (os, arch,
 /// machine kind) in the client's vocabulary, with no `machine` key when the
 /// kind is unknown; `desktop_managed` marks a desktop-owned server.
+/// The reference's migration head, as its descriptor reports it. The native
+/// build checks it against the pinned ledger (`statev2::supported_head`).
+pub const DATABASE_MIGRATION: i64 = 110;
+
 pub fn descriptor(
     environment_id: &str,
     label: &str,
@@ -103,7 +107,7 @@ pub fn descriptor(
     capability!("shellOlderSettled", true);
     capability!("linkedThreadRefreshes", true);
     capability!("issueLinkedThreads", true);
-    json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.10","orchestrationProtocolVersion":2,"databaseMigration":98,"capabilities":capabilities})
+    json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.11","orchestrationProtocolVersion":2,"databaseMigration":DATABASE_MIGRATION,"capabilities":capabilities})
 }
 
 pub(crate) fn project_shell(row: &Value) -> Value {
@@ -124,6 +128,7 @@ pub(crate) fn project_shell(row: &Value) -> Value {
         "faviconPath",
         "projectIcon",
         "scripts",
+        "trackedFolders",
         "pinnedAt",
         "archivedAt",
         "createdAt",
@@ -131,6 +136,8 @@ pub(crate) fn project_shell(row: &Value) -> Value {
     ] {
         if let Some(v) = row.get(k) {
             out.insert(k.to_owned(), v.clone());
+        } else if k == "trackedFolders" {
+            out.insert(k.to_owned(), json!([]));
         }
     }
     Value::Object(out)
@@ -169,4 +176,12 @@ pub(crate) fn project_identities(projects: &Value) -> String {
         hash.update(json!([p["id"], p["repositoryIdentity"]]).to_string());
     }
     URL_SAFE_NO_PAD.encode(hash.finalize())
+}
+
+#[cfg(all(test, feature = "native"))]
+mod migration_tests {
+    #[test]
+    fn the_descriptor_reports_the_pinned_migration_head() {
+        assert_eq!(super::DATABASE_MIGRATION, crate::statev2::supported_head());
+    }
 }

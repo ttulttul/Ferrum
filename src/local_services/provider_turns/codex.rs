@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 /// The server version the reference reports to Codex.
-const SERVER_VERSION: &str = "0.1.10";
+const SERVER_VERSION: &str = "0.1.11";
 
 /// How long an interrupted turn may take to report that it stopped.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
@@ -355,9 +355,10 @@ impl Session {
         let end = self.drive_turn(spec, provider).await;
         // A turn Codex started and ended reports what it used, as the
         // reference does; one whose app-server closed never ends there.
-        let crashed = end.failure.as_ref().is_some_and(|failure| {
-            failure.message == crate::workspace::provider::CODEX_STREAM_CLOSED
-        });
+        let crashed = end
+            .failure
+            .as_ref()
+            .is_some_and(|failure| crate::workspace::provider::stream_closed(&failure.message));
         if self.turn_id.is_some() && !crashed {
             let completed = end.status == TurnStatus::Completed;
             self.sink.send(ProviderEvent::TurnUsage {
@@ -908,6 +909,19 @@ impl Session {
                 let command = method == "item/commandExecution/requestApproval";
                 let kind = if command { "command" } else { "file-change" };
                 let thread = text("threadId");
+                // T3's Full access policy is granular, under which Codex still
+                // asks before commands it deems dangerous; the reference
+                // accepts those itself (#40773). Managed-network asks enforce
+                // the user's allowlist, so they still ask.
+                if command
+                    && mode == "full-access"
+                    && params["networkApprovalContext"].is_null()
+                    && params["proposedNetworkPolicyAmendments"]
+                        .as_array()
+                        .is_none_or(Vec::is_empty)
+                {
+                    return Some(Ok(json!({"decision": "accept"})));
+                }
                 if requests::session_allows(&thread, &mode, kind) {
                     return Some(Ok(json!({"decision": "acceptForSession"})));
                 }

@@ -13,8 +13,8 @@ use std::{
 };
 use tokio::{process::Child, sync::broadcast};
 
-const HUB: (&str, &str, &str) = ("expo-device-hub", "0.22.1", "dist/server/cli.mjs");
-const AGENT: (&str, &str, &str) = ("agent-device", "0.21.36", "bin/agent-device.mjs");
+const HUB: (&str, &str, &str) = ("expo-device-hub", "0.26.1", "dist/server/cli.mjs");
+const AGENT: (&str, &str, &str) = ("agent-device", "0.21.41", "bin/agent-device.mjs");
 type Tool = (&'static str, &'static str, &'static str);
 pub struct DeviceService {
     settings: Arc<Settings>,

@@ -644,7 +644,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             return Reply::defect("Missing key\n  at [\"environmentId\"]".into());
         };
         return match state.peer_links.unlink(environment_id) {
-            Ok(removed) => Reply::Success(json!({"removed":removed})),
+            // Rust does not end the link's session at the peer (#41005).
+            Ok(removed) => Reply::Success(json!({"removed":removed,"endedThere":false})),
             Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e.to_json()})),
         };
     }
@@ -1916,7 +1917,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 .is_some_and(|secret| secret.trim().is_empty())
         {
             return Reply::defect(
-                "Expected a non-blank string\n  at [\"answer\"][\"secret\"]".into(),
+                // Since #31257 a save also decodes as one with `values`.
+                "Expected a non-blank string\n  at [\"answer\"][\"secret\"]\nMissing key\n  at [\"answer\"][\"values\"]".into(),
             );
         }
         let store = crate::secret_requests::Store::new(state.paths.secrets.clone());
@@ -2149,7 +2151,9 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         };
     }
     if method == "server.probe" {
-        return Reply::Success(json!({}));
+        return Reply::Success(
+            json!({"serverTime": crate::auth_service::iso(crate::auth_service::now())}),
+        );
     }
     if method == "orchestration.dispatchCommand" {
         // `ThreadMessageIntake.dispatchCommand`: a message's pending uploads
@@ -2275,6 +2279,7 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                         "faviconPath",
                         "projectIcon",
                         "scripts",
+                        "trackedFolders",
                         "pinnedAt",
                         "archivedAt",
                         "createdAt",
@@ -2282,6 +2287,8 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                     ] {
                         if let Some(value) = row.get(key) {
                             out.insert(key.to_owned(), value.clone());
+                        } else if key == "trackedFolders" {
+                            out.insert(key.to_owned(), serde_json::json!([]));
                         }
                     }
                     Value::Object(out)
