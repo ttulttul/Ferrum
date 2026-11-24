@@ -209,7 +209,7 @@ def start_server(stack, command, home, tmp, base, projects, extra_env=None):
 
 
 def mask(value, port):
-    text = json.dumps(value).replace(str(port), "<port>")
+    text = parity_harness.mask_port(json.dumps(value), port)
     return json.loads(re.sub(r'"observedAt": \d+', '"observedAt": "<ms>"', text))
 
 
@@ -267,7 +267,7 @@ def main():
                                            REPOSITORIES, {"T3CODE_BITBUCKET_ACCESS_TOKEN": TOKEN})
                 record.update({f"listing: {k}": v for k, v in listing(url, cookie, port).items()})
                 # Repositories are read side by side, so compare the set of requests.
-                record["listing: requests"] = sorted(set(json.loads(json.dumps(seen).replace(str(port), "<port>"))))
+                record["listing: requests"] = sorted(set(json.loads(parity_harness.mask_port(json.dumps(seen), port))))
     # Every server ran behind a loopback proxy that forwards nothing; what it refused never left.
     parity_harness.assert_nothing_escaped()
     failures = 0

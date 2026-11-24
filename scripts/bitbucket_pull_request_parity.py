@@ -244,7 +244,7 @@ def call(url, cookie, tag, payload):
 
 
 def masked(value, port, home):
-    text = json.dumps(value).replace(str(port), "<port>").replace(str(home), "<home>")
+    text = parity_harness.mask_port(json.dumps(value), port).replace(str(home), "<home>")
     if ELSEWHERE.get("url"):
         text = text.replace(ELSEWHERE["url"], "<elsewhere>")
     return json.loads(re.sub(r'"observedAt": \d+', '"observedAt": "<ms>"', text))
