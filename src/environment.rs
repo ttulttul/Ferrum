@@ -23,7 +23,8 @@ pub fn descriptor(
 }
 
 /// [`descriptor`] for a server that also serves `/api/links/thread/*` and
-/// `/api/peer-link/client-pairing` (`link_routes`), as the native server does.
+/// `/api/peer-link/client-pairing` (`link_routes`), as the native server does,
+/// along with its other native-only features (agent feedback).
 pub fn descriptor_with_link_routes(
     environment_id: &str,
     label: &str,
@@ -123,6 +124,11 @@ pub fn descriptor_with_link_routes(
     capability!("cloudVoiceTranscription", true);
     capability!("shellThreadFamilies", true);
     capability!("shellOlderSettled", true);
+    // Served by the native server's `src/feedback.rs`, which honours the
+    // `agentFeedback` setting (#35871); the control plane has no feedback.
+    if link_routes {
+        capability!("agentFeedback", true);
+    }
     capability!("linkedThreadRefreshes", true);
     capability!("issueLinkedThreads", true);
     json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.11","orchestrationProtocolVersion":2,"databaseMigration":DATABASE_MIGRATION,"capabilities":capabilities})

@@ -3,7 +3,7 @@
   "cases": {
     "connect.subscribeServerLifecycle": {
       "severity": "low",
-      "reason": "The descriptor's capabilities gained previewTunnelSetting (#39415), agentFeedback (#35871) and issueTrackerAccounts (#39179); Rust has none of these features yet, so it omits them."
+      "reason": "The descriptor's capabilities gained previewTunnelSetting (#39415) and issueTrackerAccounts (#39179); Rust has neither feature yet (no preview tunnel, one account per issue tracker), so it omits them."
     }
   }
 }
