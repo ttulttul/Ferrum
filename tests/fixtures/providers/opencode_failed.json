@@ -1,0 +1,261 @@
+{
+ "version": {
+  "stdout": "1.15.0"
+ },
+ "serve": {
+  "routes": {
+   "GET /global/health": {
+    "body": {
+     "healthy": true,
+     "version": "1.15.0"
+    }
+   },
+   "GET /provider": {
+    "body": {
+     "all": [
+      {
+       "id": "anthropic",
+       "name": "Anthropic",
+       "models": {
+        "claude-opus-5-5": {
+         "id": "claude-opus-5-5",
+         "name": "Claude Opus 5.5",
+         "release_date": "2026-09-01",
+         "status": "active",
+         "variants": {
+          "low": {},
+          "high": {}
+         },
+         "limit": {
+          "context": 200000,
+          "input": 180000,
+          "output": 32000
+         }
+        }
+       }
+      }
+     ],
+     "default": {
+      "anthropic": "claude-opus-5-5"
+     },
+     "connected": [
+      "anthropic"
+     ]
+    }
+   },
+   "GET /agent": {
+    "body": [
+     {
+      "name": "build",
+      "mode": "primary"
+     }
+    ]
+   },
+   "GET /skill": {
+    "body": []
+   },
+   "GET /command": {
+    "body": []
+   },
+   "GET /event": {
+    "sse": true
+   },
+   "POST /mcp": {
+    "body": true
+   },
+   "POST /session": {
+    "body": {
+     "id": "ses_1",
+     "slug": "fixture",
+     "version": "1.15.0",
+     "projectID": "global",
+     "directory": "/w",
+     "title": "New session",
+     "time": {
+      "created": 1767225600000,
+      "updated": 1767225600000
+     }
+    }
+   },
+   "GET /session/ses_1": {
+    "body": {
+     "id": "ses_1",
+     "slug": "fixture",
+     "version": "1.15.0",
+     "projectID": "global",
+     "directory": "/w",
+     "title": "New session",
+     "time": {
+      "created": 1767225600000,
+      "updated": 1767225600000
+     },
+     "permission": []
+    }
+   },
+   "PATCH /session/ses_1": {
+    "body": {
+     "id": "ses_1",
+     "slug": "fixture",
+     "version": "1.15.0",
+     "projectID": "global",
+     "directory": "/w",
+     "title": "New session",
+     "time": {
+      "created": 1767225600000,
+      "updated": 1767225600000
+     }
+    }
+   },
+   "POST /session/ses_1/prompt_async": {
+    "status": 204
+   },
+   "GET /session/status": {
+    "body": {}
+   },
+   "POST /session/ses_1/abort": {
+    "body": true
+   },
+   "GET /session/ses_1/children": {
+    "body": []
+   },
+   "POST /permission/per_1/reply": {
+    "body": true
+   }
+  },
+  "events": {
+   "POST /session/ses_1/prompt_async": [
+    {
+     "type": "message.updated",
+     "properties": {
+      "sessionID": "ses_1",
+      "info": {
+       "id": "{{body.messageID}}",
+       "sessionID": "ses_1",
+       "role": "user",
+       "time": {
+        "created": 1767225600000
+       },
+       "agent": "build",
+       "model": {
+        "providerID": "anthropic",
+        "modelID": "claude-opus-5-5"
+       }
+      }
+     }
+    },
+    {
+     "type": "session.status",
+     "properties": {
+      "sessionID": "ses_1",
+      "status": {
+       "type": "busy"
+      }
+     }
+    },
+    {
+     "type": "message.updated",
+     "properties": {
+      "sessionID": "ses_1",
+      "info": {
+       "id": "msg_a1",
+       "sessionID": "ses_1",
+       "role": "assistant",
+       "parentID": "{{body.messageID}}",
+       "time": {
+        "created": 1767225600001
+       },
+       "modelID": "claude-opus-5-5",
+       "providerID": "anthropic",
+       "mode": "build",
+       "agent": "build",
+       "path": {
+        "cwd": "/w",
+        "root": "/"
+       },
+       "cost": 0,
+       "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+         "read": 0,
+         "write": 0
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "session.error",
+     "properties": {
+      "sessionID": "ses_1",
+      "error": {
+       "name": "APIError",
+       "data": {
+        "message": "Rate limit reached for this model.",
+        "statusCode": 429,
+        "isRetryable": false
+       }
+      }
+     }
+    },
+    {
+     "type": "message.updated",
+     "properties": {
+      "sessionID": "ses_1",
+      "info": {
+       "id": "msg_a1",
+       "sessionID": "ses_1",
+       "role": "assistant",
+       "parentID": "{{body.messageID}}",
+       "time": {
+        "created": 1767225600001,
+        "completed": 1767225600009
+       },
+       "modelID": "claude-opus-5-5",
+       "providerID": "anthropic",
+       "mode": "build",
+       "agent": "build",
+       "path": {
+        "cwd": "/w",
+        "root": "/"
+       },
+       "cost": 0,
+       "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+         "read": 0,
+         "write": 0
+        }
+       },
+       "finish": "stop",
+       "error": {
+        "name": "APIError",
+        "data": {
+         "message": "Rate limit reached for this model."
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "session.status",
+     "properties": {
+      "sessionID": "ses_1",
+      "status": {
+       "type": "idle"
+      }
+     }
+    },
+    {
+     "type": "session.idle",
+     "properties": {
+      "sessionID": "ses_1"
+     }
+    }
+   ]
+  }
+ }
+}

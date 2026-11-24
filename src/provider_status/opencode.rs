@@ -2289,6 +2289,122 @@ async fn check_v2(
 }
 
 // ---------------------------------------------------------------------------
+// Turns: the 1.x server a thread's provider session runs its turns on.
+
+/// A provider session's OpenCode 1.x server: the configured one, or the
+/// `opencode serve` process the session started and owns.
+pub(crate) struct TurnServer {
+    pub(crate) url: String,
+    pub(crate) password: Option<String>,
+    pub(crate) external: bool,
+    pub(crate) child: Option<tokio::process::Child>,
+}
+
+/// Why a thread on an OpenCode 2 server or CLI runs no turns yet.
+pub(crate) const OPENCODE2_TURNS_UNSUPPORTED: &str =
+    "OpenCode 2 turns are not supported by this server yet.";
+
+/// `connectToOpenCodeServer` for a 1.x provider session: the configured
+/// server, checked, or a new `opencode serve` of the session's own (never
+/// shared, unlike the status checks' server). The version decides the
+/// adapter, as `selectOpenCodeRuntimeAdapter` does: a failed probe counts as
+/// 1.x.
+pub(crate) async fn connect_turn_server(
+    binary: &str,
+    server_url: &str,
+    password: &str,
+    env: ProcessEnv,
+    directory: &str,
+) -> Result<TurnServer, String> {
+    let probing = probe_env(&env);
+    if !server_url.trim().is_empty() {
+        let probed = probe_server(server_url, password, &probing).await?;
+        if probed.generation == Generation::V2 {
+            return Err(OPENCODE2_TURNS_UNSUPPORTED.into());
+        }
+        let server = Server {
+            url: server_url.trim().to_owned(),
+            password: (!password.is_empty()).then(|| password.to_owned()),
+            version: String::new(),
+        };
+        verify_v1(&server, directory, &env).await?;
+        return Ok(TurnServer {
+            url: server.url,
+            password: server.password,
+            external: true,
+            child: None,
+        });
+    }
+    if matches!(probe_binary(binary, &probing).await, Ok(p) if p.generation == Generation::V2) {
+        return Err(OPENCODE2_TURNS_UNSUPPORTED.into());
+    }
+    let password = (!password.is_empty())
+        .then(|| password.to_owned())
+        .or_else(|| env.get("OPENCODE_SERVER_PASSWORD").cloned());
+    let mut server_env = env.clone();
+    if let Some(password) = &password {
+        server_env.insert("OPENCODE_SERVER_PASSWORD".into(), password.clone());
+    }
+    server_env.insert("OPENCODE_CONFIG_CONTENT".into(), config_content(&env));
+    let timeout = probe_timeout("opencode", SERVER_START_TIMEOUT_MS, &env);
+    let (server, child) = start_server_retrying(
+        binary,
+        server_env,
+        password,
+        timeout,
+        Generation::V1,
+        directory,
+    )
+    .await?;
+    Ok(TurnServer {
+        url: server.url,
+        password: server.password,
+        external: false,
+        child: Some(child),
+    })
+}
+
+/// `Basic base64("opencode:<password>")`.
+pub(crate) fn basic_authorization(password: &str) -> String {
+    basic(password)
+}
+
+/// `readableProviderErrorMessage`: the provider's message, else the title
+/// of the HTML body it sent, else its status.
+pub(crate) fn readable_provider_error(
+    message: Option<&str>,
+    status: Option<i64>,
+    body: Option<&str>,
+) -> Option<String> {
+    let text = message.map(str::trim).unwrap_or_default();
+    if !text.is_empty() && text.to_lowercase() != "<none>" {
+        return Some(text.to_owned());
+    }
+    let title = body
+        .and_then(|body| {
+            regex::Regex::new(r"(?i)<title[^>]*>([^<]*)</title>")
+                .ok()?
+                .captures(body)
+                .map(|found| found[1].split_whitespace().collect::<Vec<_>>().join(" "))
+        })
+        .filter(|title| !title.is_empty());
+    if let Some(title) = title {
+        return Some(match status {
+            Some(status) => format!("{title} (HTTP {status})."),
+            None => title,
+        });
+    }
+    if let Some(status) = status {
+        return Some(format!(
+            "The model provider failed the request (HTTP {status})."
+        ));
+    }
+    (!text.is_empty()).then(|| {
+        "The model provider failed the request and did not include an error message.".to_owned()
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Text generation
 
 /// How long a text generation run may take (`GENERATION_TIMEOUT`).

@@ -133,6 +133,29 @@ pub(crate) fn claude_append(has_mcp: bool, device: bool) -> String {
     append
 }
 
+/// An OpenCode 1.x prompt's `system` text, which every prompt of a turn
+/// repeats (OpenCode runs each step with the latest user message's): for a
+/// thread with T3's MCP server the orchestration text
+/// (`t3OrchestrationSystemPrompt`, with the device tool text for a thread
+/// that may use devices), then the runtime text naming the model's slug.
+pub(crate) fn opencode_system(has_mcp: bool, device: bool, model: &str) -> String {
+    let mut parts = Vec::new();
+    if has_mcp {
+        let orchestration = if device {
+            format!("{}\n{}\n", text("orchestration"), text("deviceTools"))
+        } else {
+            text("orchestration").to_owned()
+        };
+        parts.push(without_unserved(&orchestration, &unserved()));
+    }
+    parts.push(runtime("OpenCode", Some(model), None));
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// The device tool text a Claude subagent starts with, as the reference's
 /// `SubagentStart` hook adds it.
 pub(crate) fn claude_subagent_device_context() -> String {

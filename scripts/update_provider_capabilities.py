@@ -22,6 +22,7 @@ OUTPUT = ROOT / "src/provider_capabilities.json"
 ADAPTERS = {"claudeAgent": "apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts",
             "codex": "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
             "grok": "packages/provider-grok/src/server/adapter.ts",
+            "opencode": "packages/provider-opencode/src/server/adapter.ts",
             "pi": "packages/provider-pi/src/server/adapter.ts"}
 # Drivers whose capabilities are an exported constant as it is (ACP Registry agents run the generic
 # ACP adapter's): the constant, and the reference module that exports it.

@@ -13,6 +13,7 @@ mod claude;
 mod claude_sessions;
 mod codex;
 mod codex_server;
+mod opencode;
 pub(crate) mod pi;
 mod requests;
 
@@ -26,6 +27,7 @@ pub(crate) struct ProviderProcesses {
     claude: std::sync::Arc<claude_sessions::Sessions>,
     acp: std::sync::Arc<acp::Sessions>,
     pi: std::sync::Arc<pi::Sessions>,
+    opencode: std::sync::Arc<opencode::Sessions>,
 }
 
 impl ProviderProcesses {
@@ -36,6 +38,7 @@ impl ProviderProcesses {
         self.claude.close(thread);
         self.acp.close(thread);
         self.pi.close(thread);
+        self.opencode.close(thread);
     }
 
     /// Stop them all (the server is shutting down), once their turns ended
@@ -45,6 +48,7 @@ impl ProviderProcesses {
         self.claude.shutdown().await;
         self.acp.shutdown().await;
         self.pi.shutdown().await;
+        self.opencode.shutdown().await;
     }
 }
 pub(crate) use requests::respond;
@@ -100,6 +104,15 @@ pub(crate) fn start(
             responses,
             sink,
             processes.pi.clone(),
+        ));
+    } else if provider.driver == crate::workspace::provider::OPENCODE {
+        tokio::spawn(opencode::run(
+            spec,
+            provider,
+            cancel,
+            responses,
+            sink,
+            processes.opencode.clone(),
         ));
     } else if crate::workspace::provider::is_acp(&provider.driver) {
         tokio::spawn(acp::run(
