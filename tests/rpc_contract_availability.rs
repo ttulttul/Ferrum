@@ -47,7 +47,6 @@ const NOT_SWEPT: &[&str] = &[
 /// this server does not serve yet: they answer "registered but unavailable".
 /// One that starts answering must come off this list.
 const NOT_YET_SERVED: &[&str] = &[
-    "agentFeedback.answerRequest",
     "workspace.listFolders",
     "workspace.scanFolders",
     "workspace.taskFolder",

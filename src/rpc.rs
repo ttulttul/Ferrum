@@ -1911,6 +1911,12 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.to_json()})),
         };
     }
+    if method == "agentFeedback.answerRequest" {
+        return match crate::feedback::answer(state, params).await {
+            Ok(()) => Reply::Success(Value::Null),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+        };
+    }
     if method == "secrets.answerRequest" {
         if params["answer"]["type"] == "save"
             && params["answer"]["secret"]

@@ -194,7 +194,7 @@ fn recorded_migrations(path: &Path) -> Result<Vec<(i64, String)>, OpenError> {
 }
 
 /// The connection settings `Sqlite.ts` applies before migrating.
-fn configure(conn: &Connection, fresh: bool) -> rusqlite::Result<()> {
+pub(crate) fn configure(conn: &Connection, fresh: bool) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     if fresh {

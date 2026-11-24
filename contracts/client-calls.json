@@ -17,8 +17,10 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "feedback_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -1023,8 +1025,10 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "attachment_tools_parity.py",
         "client_initial_sync_parity.py",
         "client_thread_parity.py",
+        "feedback_parity.py",
         "html_render_parity.py",
         "link_request_parity.py",
         "managed_policy_parity.py",
@@ -1032,6 +1036,7 @@
         "parity-fixtures.json",
         "preview_provider_parity.py",
         "preview_session_parity.py",
+        "run_output_parity.py",
         "secret_request_parity.py",
         "shared_store_parity.py",
         "storage_cleanup_parity.py",
@@ -1246,9 +1251,11 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
+        "attachment_tools_parity.py",
         "client_thread_parity.py",
         "link_request_parity.py",
         "orchestration_parity.py",
+        "run_output_parity.py",
         "shared_store_parity.py"
       ],
       "validationOnly": false,
@@ -3662,12 +3669,7 @@
         "vcs.stacked.file",
         "vcs.stacked.reviewCommit"
       ],
-      "knownGaps": [
-        "vcs.review.getDiffPreview",
-        "vcs.stacked.diff",
-        "vcs.stacked.metadata",
-        "vcs.stacked.file"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "rpc",
@@ -4772,6 +4774,7 @@
         "client_thread_parity.py",
         "config_parity.py",
         "config_snapshot_parity.py",
+        "feedback_parity.py",
         "managed_policy_parity.py",
         "preview_provider_parity.py",
         "settings_mutation_parity.py",
@@ -6079,9 +6082,7 @@
       "clientHarness": [
         "auth.sessionState"
       ],
-      "knownGaps": [
-        "auth.sessionState"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "http",
@@ -6134,9 +6135,7 @@
       "clientHarness": [
         "auth.bootstrapBearerSession"
       ],
-      "knownGaps": [
-        "auth.bootstrapBearerSession"
-      ]
+      "knownGaps": []
     },
     {
       "kind": "http",
@@ -7368,6 +7367,7 @@
       "auth": "session",
       "usage": "client",
       "existingCoverage": [
+        "attachment_tools_parity.py",
         "cors_parity.py"
       ],
       "validationOnly": false,
@@ -7390,6 +7390,7 @@
       "auth": "signed URL",
       "usage": "client",
       "existingCoverage": [
+        "attachment_tools_parity.py",
         "cors_parity.py"
       ],
       "validationOnly": false,

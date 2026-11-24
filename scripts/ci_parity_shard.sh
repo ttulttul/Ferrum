@@ -71,6 +71,7 @@ case "$shard" in
     run python3 scripts/run_output_parity.py "${both[@]}"
     run python3 scripts/secret_request_parity.py "${both[@]}"
     run python3 scripts/attachment_tools_parity.py "${both[@]}"
+    run python3 scripts/feedback_parity.py "${both[@]}"
     ;;
   status-relay)
     # Suites that run their servers side by side, so mostly wait on the servers' timers.

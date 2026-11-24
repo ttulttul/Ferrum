@@ -36,6 +36,8 @@ mod environment_http;
 #[cfg(feature = "native")]
 mod environment_theme;
 #[cfg(feature = "native")]
+mod feedback;
+#[cfg(feature = "native")]
 pub mod guest_service;
 #[cfg(feature = "native")]
 pub mod host_rpc;

@@ -1545,6 +1545,20 @@ impl mcp_oauth::McpHost for AppState {
             }
         })
     }
+    fn feedback_submit(
+        self: &Arc<Self>,
+        input: serde_json::Value,
+        thread_id: Option<String>,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, (&'static str, String)>> {
+        let state = self.clone();
+        Box::pin(async move {
+            let caller = crate::feedback::Caller {
+                source: "mcp",
+                thread_id,
+            };
+            crate::feedback::submit(&state, &input, caller).await
+        })
+    }
     fn claim_preview_recording(
         &self,
         thread_id: &str,
