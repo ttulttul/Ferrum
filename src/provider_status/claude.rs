@@ -925,6 +925,7 @@ async fn probe_capabilities(
     env: &ProcessEnv,
     cwd: &Path,
     timeout: Duration,
+    include_status: bool,
 ) -> Result<Capabilities, ProbeError> {
     let mut env = probe_env(env);
     env.insert("ENABLE_CLAUDEAI_MCP_SERVERS".into(), "false".into());
@@ -979,6 +980,15 @@ async fn probe_capabilities(
             .remove(&init_id)
             .ok_or(ProbeError::Failed)?
             .map_err(|_| ProbeError::Failed)?;
+        // A folder probe (`includeStatus: false`) reads neither usage nor settings.
+        if !include_status {
+            return Ok(Capabilities {
+                account: init["account"].clone(),
+                commands: init_commands(&init["commands"]),
+                models: init["models"].as_array().cloned().unwrap_or_default(),
+                ..Default::default()
+            });
+        }
         let usage_checked_at = now_iso();
         let (usage_id, usage_line) = request(json!({"subtype": "get_usage", "skip_behaviors": true}));
         let (settings_id, settings_line) = request(json!({"subtype": "get_settings"}));
@@ -1070,7 +1080,7 @@ async fn capabilities(
             }
         }
     }
-    let result = probe_capabilities(binary, env, cwd, timeout).await;
+    let result = probe_capabilities(binary, env, cwd, timeout, true).await;
     let mut caches = service
         .claude_caps
         .lock()
@@ -1100,6 +1110,53 @@ async fn capabilities(
                 _ => Err(error),
             }
         }
+    }
+}
+
+/// `probeClaudeWorkspaceSnapshot` (`snapshotForCwd`): the folder's skills, and
+/// the slash commands of a capability probe run there (without usage or
+/// settings). A folder that no longer exists is not probed; a failed probe
+/// leaves the commands pending.
+pub(super) async fn folder_scan(config: &Value, env: &ProcessEnv, cwd: &str) -> super::FolderScan {
+    let resolved = process_env(env);
+    let skills = super::claude_skills::discover(config, Path::new(cwd), &resolved);
+    let binary = expand_home(
+        config["binaryPath"]
+            .as_str()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .unwrap_or("claude"),
+    );
+    // A missing folder counts as present (`orElseSucceed(() => true)`) only when
+    // its existence cannot be read.
+    let exists = std::fs::metadata(cwd).is_ok()
+        || std::fs::metadata(cwd)
+            .err()
+            .is_some_and(|e| e.kind() != std::io::ErrorKind::NotFound);
+    let caps = if exists {
+        let timeout = probe_timeout("claude", CAPABILITIES_TIMEOUT_MS, &resolved);
+        probe_capabilities(
+            &binary,
+            &claude_env(config, &resolved),
+            Path::new(cwd),
+            timeout,
+            false,
+        )
+        .await
+        .ok()
+    } else {
+        None
+    };
+    let mut commands = vec![compact_slash_command()];
+    commands.extend(
+        caps.as_ref()
+            .map(|c| c.commands.clone())
+            .unwrap_or_default(),
+    );
+    super::FolderScan {
+        skills,
+        slash_commands: dedupe_commands(commands),
+        slash_pending: Some(exists && caps.is_none()),
     }
 }
 

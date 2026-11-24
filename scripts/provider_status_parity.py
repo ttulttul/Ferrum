@@ -966,6 +966,41 @@ SCENARIOS += [
 ]
 
 
+# Folder scans (`refreshWorkspaceSnapshot` through `server.refreshProviders {instanceId, cwd}`): a
+# project's own skills and commands, scanned in its folder.
+FOLDER_SKILL = "---\ndescription: Ships the project\n---\nDeploy it.\n"
+CATALOGS = {"providerCatalogsOnDemand": True, "machineCatalog": True}
+SCENARIOS += [
+    {"name": "folder scan codex", "instance": "codex",
+     "fakes": {"codex": {"version": "ok", "app": "ok", "fixture": "status_codex_signed_in.json"}},
+     "folder": {}},
+    {"name": "folder scan codex with catalogs", "instance": "codex",
+     "fakes": {"codex": {"version": "ok", "app": "ok", "fixture": "status_codex_signed_in.json"}},
+     "folder": {"payload": CATALOGS}},
+    {"name": "folder scan claude", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "folder": {"files": {".claude/skills/deploy/SKILL.md": FOLDER_SKILL,
+                          ".claude/settings.json": '{"skillOverrides": {"deploy": "user-invocable-only"}}'}}},
+    {"name": "folder scan claude with catalogs", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "folder": {"files": {".claude/skills/deploy/SKILL.md": FOLDER_SKILL}, "payload": CATALOGS}},
+    {"name": "folder scan claude of a missing folder", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "folder": {"exists": False}},
+    {"name": "folder scan claude fresh", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "folder": {"files": {".claude/skills/deploy/SKILL.md": FOLDER_SKILL}, "payload": {"fresh": True}}},
+    {"name": "folder scan claude for every client", "instance": "claudeAgent", "fakes": CLAUDE_SIGNED_IN,
+     "folder": {"files": {".claude/skills/deploy/SKILL.md": FOLDER_SKILL}, "onDemand": False}},
+    {"name": "folder scan grok", "instance": "grok", "settings": enabled("grok"), "fakes": {"grok": GROK_FAKE},
+     "folder": {}},
+    {"name": "folder scan grok fails", "instance": "grok", "settings": enabled("grok"),
+     # `grok inspect` fails, in the folder as on the machine: the scan publishes nothing.
+     "fakes": {"grok": {"spec": {"commands": [{"args": ["--version"], **ok("grok 1.0.52")}, GROK_MODELS,
+                                              {"args": ["inspect", "--json"], **ok("", 1, "boom")}, GROK_ACP]}}},
+     "folder": {"payload": CATALOGS}},
+    {"name": "folder scan pi", "instance": "pi", "settings": enabled("pi"),
+     "fakes": {"pi": {"spec": {"commands": [{"args": ["--version"], **ok("0.85.0")}, PI_TEXT_GENERATION, pi_rpc()]}}},
+     "folder": {}},
+]
+
+
 class FakeApi:
     """A provider's HTTP API for one server: answers each `METHOD /path` from `routes`
     ({"GET /v1/me": {"status": 200, "body": {...}, "sleep": seconds}}) and records the
@@ -1245,6 +1280,17 @@ def run_server(args, command, root, scenario, temporary):
         outcome["row"] = strip(wait_checked(url, cookie, scenario["instance"], scenario.get("wait", 20),
                                             scenario.get("settled", False), temporary,
                                             scenario.get("stable", 1.5)), temporary)
+        if "folder" in scenario:
+            folder = scenario["folder"]
+            request = {"instanceId": scenario["instance"], "cwd": str(temporary / "workspace"), **folder.get("payload", {})}
+            if folder.get("onDemand", True):
+                request["workspaceSnapshotsOnDemand"] = True
+            # The folder's scan (`refreshWorkspaceSnapshot`), then the same request again, which a
+            # current snapshot answers without scanning.
+            for step in ("folder", "folderAgain"):
+                reply = rpc(url, cookie, "server.refreshProviders", request)["providers"]
+                outcome[step] = strip(reply if folder.get("onDemand", True) else row_of(reply, scenario["instance"]),
+                                      temporary)
         if "redeem" in scenario:
             outcome["redeem"] = redeem(url, cookie, scenario["redeem"])
             # The row once its recheck has settled (the reference publishes it before its
@@ -1306,7 +1352,7 @@ def differences(left, right, path="$"):
 def compare(outcomes):
     problems = {}
     original, rust = outcomes["original"], outcomes["rust"]
-    for check in ("row", "refresh", "event", "interval", "redeem", "afterRedeem"):
+    for check in ("row", "refresh", "event", "interval", "redeem", "afterRedeem", "folder", "folderAgain"):
         if original.get(check) != rust.get(check):
             problems[check] = [f"original {json.dumps(original.get(check), sort_keys=True)}",
                                f"rust     {json.dumps(rust.get(check), sort_keys=True)}",
@@ -1342,6 +1388,13 @@ def main():
     def outcomes_of(scenario):
         with tempfile.TemporaryDirectory(prefix="t3-status-") as directory:
             temporary = Path(directory)
+            # A "folder" scenario's project folder, shared by both servers.
+            for name, text in scenario.get("folder", {}).get("files", {}).items():
+                target = temporary / "workspace" / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text)
+            if "folder" in scenario and scenario["folder"].get("exists", True):
+                (temporary / "workspace").mkdir(exist_ok=True)
             commands = (("original", shlex.split(args.original_command)), ("rust", shlex.split(args.rust_command)))
             results = run_concurrently(
                 [lambda name=name, command=command: run_server(args, command, temporary / name, scenario, temporary)

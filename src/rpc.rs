@@ -209,6 +209,79 @@ async fn send_frame(
 }
 
 // Subscribe before reading the initial snapshot so updates during the read are queued.
+/// `server.refreshProviders`' answer for a client that fetches folder
+/// snapshots on demand (`workspaceSnapshotsOnDemand`): every provider without
+/// its snapshots, or, for a folder, that instance alone with only the
+/// folder's snapshot (`workspaceSnapshotOrCatalog`).
+fn on_demand_providers(providers: &Value, folder: Option<(&str, &str)>, params: &Value) -> Value {
+    let rows = providers.as_array().cloned().unwrap_or_default();
+    let Some((instance_id, cwd)) = folder else {
+        return rows
+            .into_iter()
+            .map(|mut row| {
+                if let Some(object) = row.as_object_mut() {
+                    object.shift_remove("workspaceSnapshots");
+                }
+                row
+            })
+            .collect();
+    };
+    rows.into_iter()
+        .filter(|row| row["instanceId"] == instance_id)
+        .map(|mut row| {
+            let catalog_on_demand = params["providerCatalogsOnDemand"] == true
+                && crate::provider_status::scans_folders(row["driver"].as_str().unwrap_or(""));
+            let mut snapshots: Vec<Value> = row["workspaceSnapshots"]
+                .as_array()
+                .map(|all| all.iter().filter(|s| s["cwd"] == cwd).cloned().collect())
+                .unwrap_or_default();
+            if snapshots.is_empty() && catalog_on_demand {
+                snapshots.push(json!({"cwd":cwd,"checkedAt":row["checkedAt"],"slashCommands":row["slashCommands"],
+                    "slashCommandsPending":true,"skills":row["skills"]}));
+            }
+            let catalog = catalog_on_demand && params["machineCatalog"] == true;
+            let digest = catalog.then(|| {
+                use sha2::Digest;
+                let catalogs = json!([row["slashCommands"], row["skills"]]);
+                format!("{:x}", sha2::Sha256::digest(catalogs.to_string()))[..16].to_owned()
+            });
+            // Callers read only the folder's snapshot; the config stream carries the rest.
+            row["models"] = json!([]);
+            if catalog {
+                let names: Vec<Value> = row["slashCommands"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|c| json!({"name": c["name"]}))
+                    .collect();
+                let skills: Vec<Value> = row["skills"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|skill| {
+                        let mut skill = skill.clone();
+                        if let Some(object) = skill.as_object_mut() {
+                            object.shift_remove("description");
+                            object.shift_remove("shortDescription");
+                        }
+                        skill
+                    })
+                    .collect();
+                row["slashCommands"] = json!(names);
+                row["skills"] = json!(skills);
+            } else {
+                row["slashCommands"] = json!([]);
+                row["skills"] = json!([]);
+            }
+            if let Some(digest) = digest {
+                row["catalogDigest"] = json!(digest);
+            }
+            row["workspaceSnapshots"] = json!(snapshots);
+            row
+        })
+        .collect()
+}
+
 async fn run_call(
     state: &Arc<AppState>,
     client: (&crate::auth_service::Session, bool),
@@ -1797,15 +1870,42 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                 manifest.refresh().await;
             });
         }
-        // A refresh checks the providers' CLIs again and answers with what
-        // the checks found.
-        crate::provider_status::refresh(state, params["instanceId"].as_str()).await;
-        return match crate::config_rpc::snapshot(state, false, &Value::Null).await {
-            Ok(config) => Reply::Success(
-                json!({"providers":crate::provider_status::before_enrichment(&config["providers"])}),
-            ),
-            Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error})),
+        let instance_id = params["instanceId"].as_str();
+        let cwd = params["cwd"].as_str();
+        let folder = instance_id.zip(cwd);
+        if let Some((id, cwd)) = folder {
+            // `refreshWorkspaceSnapshot`: scan the folder, rechecking the
+            // instance only for a `fresh` refresh.
+            crate::provider_status::refresh_workspace_snapshot(
+                state,
+                id,
+                cwd,
+                params["fresh"] == true,
+            )
+            .await;
+        } else {
+            // A refresh checks the providers' CLIs again and answers with what
+            // the checks found.
+            crate::provider_status::refresh(state, instance_id).await;
+        }
+        if params["omitProviders"] == true && folder.is_none() {
+            return Reply::Success(json!({"providers":[]}));
+        }
+        let config = match crate::config_rpc::snapshot(state, false, &Value::Null).await {
+            Ok(config) => config,
+            Err(error) => return Reply::Failure(json!({"_tag":"Fail","error":error})),
         };
+        let providers = if folder.is_some() {
+            config["providers"].clone()
+        } else {
+            crate::provider_status::before_enrichment(&config["providers"])
+        };
+        if params["workspaceSnapshotsOnDemand"] != true {
+            return Reply::Success(json!({"providers":providers}));
+        }
+        return Reply::Success(
+            json!({"providers":on_demand_providers(&providers, folder, params)}),
+        );
     }
     if method == "server.runStorageCleanup" {
         return match crate::storage_cleanup::run(state.clone(), "manual").await {

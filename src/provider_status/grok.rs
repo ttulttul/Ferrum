@@ -332,6 +332,29 @@ async fn discover_skills(binary: &str, env: &ProcessEnv, timeout: Duration) -> V
     decode_skills(&output.stdout).unwrap_or_default()
 }
 
+/// `discoverGrokSkills` for a folder (`snapshotForCwd`): `grok inspect --json`
+/// run there; any failure fails the scan.
+pub(super) async fn folder_skills(
+    config: &Value,
+    env: &ProcessEnv,
+    cwd: &str,
+) -> Option<Vec<Value>> {
+    let args = vec!["inspect".to_owned(), "--json".to_owned()];
+    let output = super::run_collect(
+        &binary(config),
+        &args,
+        &grok_probe_env(env),
+        Path::new(cwd),
+        probe_timeout("grok", SKILLS_TIMEOUT_MS, env),
+    )
+    .await
+    .ok()?;
+    if output.code != 0 {
+        return None;
+    }
+    decode_skills(&output.stdout)
+}
+
 fn decode_skills(stdout: &str) -> Option<Vec<Value>> {
     let parsed: Value = serde_json::from_str(stdout).ok()?;
     let entries = parsed.as_object()?.get("skills")?.as_array()?;

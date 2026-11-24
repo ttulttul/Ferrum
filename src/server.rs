@@ -1789,7 +1789,8 @@ impl mcp_oauth::McpHost for AppState {
                     let state = state.clone();
                     let cwd = cwd.clone();
                     async move {
-                        crate::provider_status::refresh_workspace_snapshot(&state, &id, &cwd).await
+                        crate::provider_status::refresh_workspace_snapshot(&state, &id, &cwd, false)
+                            .await
                     }
                 });
             futures_util::future::join_all(scans).await;

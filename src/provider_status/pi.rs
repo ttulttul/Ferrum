@@ -648,6 +648,25 @@ async fn read_inventory(
     })
 }
 
+/// `discoverPiCommandsForCwd` (`snapshotForCwd`): Pi's commands and skills in
+/// a folder, read over RPC there; any failure fails the scan.
+pub(super) async fn folder_commands(
+    config: &Value,
+    env: &ProcessEnv,
+    cwd: &str,
+) -> Option<(Vec<Value>, Vec<Value>)> {
+    let launch_args =
+        resolve_launch_args(config["launchArgs"].as_str().unwrap_or("").trim()).ok()?;
+    let timeout = probe_timeout("pi", RPC_DISCOVERY_TIMEOUT_MS, env);
+    let read = async {
+        let (args, env) = rpc_launch(&launch_args, &probe_env(env), false);
+        let mut rpc = Rpc::start(&binary(config), &args, &env, Path::new(cwd)).ok()?;
+        rpc.request("get_commands", timeout).await.ok()
+    };
+    let data = tokio::time::timeout(timeout, read).await.ok().flatten()?;
+    Some(parse_commands(&data))
+}
+
 /// `discoverPiTextGenerationModelSlugs`: `Some(empty)` when Pi exits
 /// before answering, `None` when the read failed otherwise.
 async fn text_generation_slugs(
