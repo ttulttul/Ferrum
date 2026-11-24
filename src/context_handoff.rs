@@ -85,6 +85,9 @@ pub(crate) struct PreparedHandoff {
     /// handoffs only after the provider thread loads; a turn that fails first
     /// leaves none.
     pub recorded: bool,
+    /// The handoffs did not fit the session's budget, so none is delivered
+    /// (the reference's ContextHandoffBudgetError).
+    pub over_budget: bool,
 }
 
 impl PreparedHandoff {
@@ -635,6 +638,8 @@ fn allocate_handoff_id(thread_id: &str, from_instance: &str, to_instance: &str) 
 /// `prepareProviderHandoff` (`strategy: "delta_since_target_last_seen"`).
 #[allow(clippy::too_many_arguments)]
 fn prepare_provider_handoff(
+    strategy: &str,
+    transfer_id: Option<&str>,
     thread_id: &str,
     target_run_id: &str,
     provider_thread_id: &str,
@@ -666,7 +671,7 @@ fn prepare_provider_handoff(
     let summary_text = render_history(&selected.messages, &selected.context);
     json!({
         "id": handoff_id,
-        "transferId": Value::Null,
+        "transferId": transfer_id,
         "threadId": thread_id,
         "targetRunId": target_run_id,
         "fromProviderThreadIds": [provider_thread_id],
@@ -675,7 +680,7 @@ fn prepare_provider_handoff(
             "from": covered_from,
             "to": covered_to,
         },
-        "strategy": "delta_since_target_last_seen",
+        "strategy": strategy,
         "status": "ready",
         "summaryMessageId": Value::Null,
         "summaryText": summary_text,
@@ -691,6 +696,212 @@ fn prepare_provider_handoff(
     })
 }
 
+/// The types of turn item a provider turn start reads as history
+/// (`ProjectionStore.getTurnStartHistory`).
+const TURN_START_HISTORY_TYPES: [&str; 7] = [
+    "user_message",
+    "assistant_message",
+    "command_execution",
+    "error",
+    "run_interrupt_result",
+    "file_change",
+    "proposed_plan",
+];
+
+/// `contextBoundaryOrdinal`: the ordinal of the latest started fresh-context
+/// run, before which no run reaches a provider again (0 for none). A fresh
+/// session a schedule starts is a side conversation and sets no boundary.
+fn context_boundary_ordinal(runs: &[Value], turn_items: &[Value]) -> u64 {
+    runs.iter()
+        .filter(|run| {
+            run["freshContext"] == true
+                && run["status"] != "queued"
+                && !(run["status"] == "cancelled" && run["startedAt"].is_null())
+                && !turn_items.iter().any(|item| {
+                    item["type"] == "user_message"
+                        && item["messageId"] == run["userMessageId"]
+                        && item.get("scheduledTaskId").is_some_and(|id| !id.is_null())
+                })
+        })
+        .filter_map(|run| run["ordinal"].as_u64())
+        .max()
+        .unwrap_or(0)
+}
+
+/// A resume fallback prepared for a turn that resumes a native session: what
+/// the turn sends, and records, if that session cannot be resumed and a fresh
+/// one starts (`ProviderTurnStartService.prepareRecoveryHandoff`).
+#[derive(Clone, Debug)]
+pub(crate) struct Recovery {
+    /// The `full_thread_summary` handoff of the thread's history.
+    pub handoff: Value,
+    /// Its `provider_resume_fallback` context transfer, resolved portably.
+    pub transfer: Value,
+    /// The "Recovered context" `handoff` turn item at the run's start.
+    pub turn_item: Value,
+    /// The handoffs' delivery to the fresh session.
+    pub delivery: PreparedHandoff,
+    /// The native session the turn asks to resume, which a fresh one
+    /// replaces.
+    pub resumes: String,
+}
+
+impl Recovery {
+    /// The prompt the fresh session gets instead of `user_text`.
+    pub(crate) fn prompt(&self, user_text: &str) -> String {
+        with_inline_context(&self.delivery.inline_context, user_text)
+    }
+}
+
+/// Prepare the resume fallback of `run`, whose provider turn resumes a native
+/// session: a summary of the thread before it, and its delivery to a fresh
+/// session. None when the fresh session could not take it either.
+pub(crate) fn prepare_recovery(
+    thread: &Thread,
+    run: &Run,
+    user_text: &str,
+    provider: &ProviderTurn,
+    now_secs: u64,
+) -> Option<Recovery> {
+    let projection = thread.full_projection();
+    let run_wire_id = run.wire_id();
+    let runs = projection["runs"].as_array()?;
+    let run_row = runs
+        .iter()
+        .find(|candidate| candidate["id"].as_str() == Some(run_wire_id.as_str()))?;
+    let run_ordinal = run_row["ordinal"].as_u64()?;
+    let provider_thread_id = run_row["providerThreadId"].as_str()?;
+    let provider_thread = projection["providerThreads"]
+        .as_array()?
+        .iter()
+        .find(|candidate| candidate["id"].as_str() == Some(provider_thread_id))?;
+    let to_instance = run_row["providerInstanceId"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&provider.instance_id);
+    let from_instance = provider_thread["providerInstanceId"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(to_instance);
+    let turn_items = projection["turnItems"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let created_at = iso(now_secs);
+    let transfer_id = format!(
+        "context-transfer:type:provider_resume_fallback:source-thread:{}:target-thread:{}:{}",
+        uri_component(&thread.id),
+        uri_component(&thread.id),
+        crate::platform::uuid_v4()
+    );
+    let boundary = context_boundary_ordinal(runs, turn_items);
+    let from = boundary.max(1);
+    let to = from.max(run_ordinal.saturating_sub(1));
+    // A fork's inherited history (`readInheritedHandoffItems`) is not read:
+    // this server forks no threads whose history its own runs lack.
+    let run_rows: HashMap<&str, &Value> = runs
+        .iter()
+        .filter_map(|source| Some((source["id"].as_str()?, source)))
+        .collect();
+    let history: Vec<&Value> = turn_items
+        .iter()
+        .filter(|item| {
+            item["type"]
+                .as_str()
+                .is_some_and(|kind| TURN_START_HISTORY_TYPES.contains(&kind))
+        })
+        .filter(|item| match item["runId"].as_str() {
+            None => boundary == 0,
+            Some(run_id) => run_rows.get(run_id).is_some_and(|source| {
+                let ordinal = source["ordinal"].as_u64().unwrap_or(0);
+                ordinal >= boundary && ordinal < run_ordinal && source["status"] != "rolled_back"
+            }),
+        })
+        .collect();
+    let handoff = prepare_provider_handoff(
+        "full_thread_summary",
+        Some(&transfer_id),
+        &thread.id,
+        &run_wire_id,
+        provider_thread_id,
+        from_instance,
+        to_instance,
+        from,
+        to,
+        runs,
+        &history,
+        handoff_token_cap(),
+        &created_at,
+    );
+    let delivery = prepare(thread, run, user_text, provider, now_secs, Some(&handoff))?;
+    if delivery.over_budget {
+        return None;
+    }
+    let transfer = json!({
+        "id": transfer_id,
+        "type": "provider_handoff",
+        "sourceThreadId": thread.id,
+        "targetThreadId": thread.id,
+        "sourcePoint": {"threadId": thread.id},
+        "basePoint": Value::Null,
+        "sourceProviderInstanceId": from_instance,
+        "targetProviderInstanceId": to_instance,
+        "targetRunId": run_wire_id,
+        "status": "resolved_portable",
+        "resolution": {"strategy": "portable_context", "contextHandoffId": handoff["id"]},
+        "createdBy": "system",
+        "error": Value::Null,
+        "createdAt": created_at,
+        "updatedAt": created_at,
+        "consumedAt": Value::Null,
+    });
+    let previous_selection = runs
+        .iter()
+        .rev()
+        .find(|source| {
+            source["providerThreadId"].as_str() == Some(provider_thread_id)
+                && source["ordinal"].as_u64().is_some_and(|o| o < run_ordinal)
+                && !source["startedAt"].is_null()
+        })
+        .map(|source| source["modelSelection"].clone());
+    let turn_item = json!({
+        "id": format!(
+            "turn-item:run:{}:signal:resume-fallback-handoff",
+            uri_component(&run_wire_id)
+        ),
+        "threadId": thread.id,
+        "runId": run_wire_id,
+        "nodeId": run_row["rootNodeId"],
+        "providerThreadId": provider_thread_id,
+        "providerTurnId": Value::Null,
+        "nativeItemRef": Value::Null,
+        "parentItemId": Value::Null,
+        "ordinal": 0,
+        "status": "completed",
+        "title": "Recovered context",
+        "startedAt": created_at,
+        "completedAt": created_at,
+        "updatedAt": created_at,
+        "type": "handoff",
+        "contextHandoffId": handoff["id"],
+        "fromProviderThreadIds": handoff["fromProviderThreadIds"],
+        "toProviderThreadId": handoff["toProviderThreadId"],
+        "fromProviderInstanceIds": [from_instance],
+        "toProviderInstanceId": to_instance,
+        "fromModelSelections": previous_selection.into_iter().collect::<Vec<_>>(),
+        "toModel": run_row["modelSelection"]["model"],
+        "strategy": handoff["strategy"],
+        "summary": handoff["summaryText"],
+    });
+    Some(Recovery {
+        handoff,
+        transfer,
+        turn_item,
+        delivery,
+        resumes: provider.resume.clone().unwrap_or_default(),
+    })
+}
+
 /// Prepare and budget any pending or retry context handoffs for `run` before
 /// its provider turn starts (`ProviderTurnStartService.prepareRetryHandoff` +
 /// `deliverContextHandoffs`).
@@ -700,6 +911,22 @@ pub(crate) fn prepare_for_turn(
     user_text: &str,
     provider: &ProviderTurn,
     now_secs: u64,
+) -> Option<PreparedHandoff> {
+    prepare(thread, run, user_text, provider, now_secs, None)
+}
+
+/// [`prepare_for_turn`], or with `recovery` (a resume fallback's
+/// `full_thread_summary` handoff) the delivery for a fresh native session:
+/// nothing delivered to the old session counts, and the summary goes after
+/// earlier runs' pending handoffs and before this run's own
+/// (`withRecoveryHandoff`).
+fn prepare(
+    thread: &Thread,
+    run: &Run,
+    user_text: &str,
+    provider: &ProviderTurn,
+    now_secs: u64,
+    recovery: Option<&Value>,
 ) -> Option<PreparedHandoff> {
     let projection = thread.full_projection();
     let run_wire_id = run.wire_id();
@@ -717,8 +944,14 @@ pub(crate) fn prepare_for_turn(
         .as_str()
         .filter(|s| !s.is_empty())
         .unwrap_or(&provider.instance_id);
-    let stored_native_id = provider_thread["nativeThreadRef"]["nativeId"].as_str();
-    let loaded_native_id = provider.resume.as_deref().filter(|id| !id.is_empty());
+    // A fresh session (`nativeThreadRef: null`) has seen nothing yet.
+    let stored_native_id = provider_thread["nativeThreadRef"]["nativeId"]
+        .as_str()
+        .filter(|_| recovery.is_none());
+    let loaded_native_id = provider
+        .resume
+        .as_deref()
+        .filter(|id| !id.is_empty() && recovery.is_none());
     let same_native_thread = loaded_native_id.is_some() && loaded_native_id == stored_native_id;
 
     let current_attachments = &provider.attachments;
@@ -917,7 +1150,11 @@ pub(crate) fn prepare_for_turn(
     let token_cap = handoff_token_cap();
     let now_iso = iso(now_secs);
     let mut retry_handoffs = Vec::new();
-    if let (Some(first_missed), Some(last_missed)) = (missed_runs.first(), missed_runs.last()) {
+    // A resume fallback's summary already covers every earlier run in order;
+    // a retry copy after it would rank older missed requests as the newest.
+    if let (Some(first_missed), Some(last_missed), None) =
+        (missed_runs.first(), missed_runs.last(), recovery)
+    {
         if !missed_items.is_empty() {
             let from_ord = first_missed["ordinal"].as_u64().unwrap_or(1).max(1);
             let to_ord = last_missed["ordinal"]
@@ -925,6 +1162,8 @@ pub(crate) fn prepare_for_turn(
                 .unwrap_or(from_ord)
                 .max(from_ord);
             retry_handoffs.push(prepare_provider_handoff(
+                "delta_since_target_last_seen",
+                None,
                 &thread.id,
                 &run_wire_id,
                 provider_thread_id,
@@ -990,7 +1229,18 @@ pub(crate) fn prepare_for_turn(
             .collect()
     };
 
-    let mut combined = existing_handoffs;
+    let mut combined = match recovery {
+        Some(summary) => {
+            let (this_run, earlier): (Vec<Value>, Vec<Value>) = existing_handoffs
+                .into_iter()
+                .partition(|handoff| handoff["targetRunId"].as_str() == Some(run_wire_id.as_str()));
+            let mut ordered = earlier;
+            ordered.push(summary.clone());
+            ordered.extend(this_run);
+            ordered
+        }
+        None => existing_handoffs,
+    };
     combined.extend(retry_handoffs);
     let pending: Vec<Value> = combined
         .into_iter()
@@ -1016,6 +1266,7 @@ pub(crate) fn prepare_for_turn(
             unsent: Vec::new(),
             native_thread_id: loaded_native_id.map(str::to_owned),
             recorded: false,
+            over_budget: false,
         });
     }
 
@@ -1238,7 +1489,7 @@ pub(crate) fn prepare_for_turn(
             budget,
             "context handoff exceeded budget; skipping inline delivery"
         );
-        return (!missed_attachments.is_empty()).then(|| PreparedHandoff {
+        return Some(PreparedHandoff {
             inline_context: String::new(),
             missed_attachments,
             pending: Vec::new(),
@@ -1246,6 +1497,7 @@ pub(crate) fn prepare_for_turn(
             unsent: Vec::new(),
             native_thread_id: loaded_native_id.map(str::to_owned),
             recorded: false,
+            over_budget: true,
         });
     }
 
@@ -1302,6 +1554,7 @@ pub(crate) fn prepare_for_turn(
         unsent: pending,
         native_thread_id: loaded_native_id.map(str::to_owned),
         recorded: false,
+        over_budget: false,
     })
 }
 
@@ -1413,6 +1666,8 @@ mod tests {
             checkpoints: vec![],
             link_requests: vec![],
             context_handoffs: vec![],
+            context_transfers: Vec::new(),
+            handoff_items: Vec::new(),
             provider: Box::default(),
             stored: None,
         };
@@ -1530,8 +1785,9 @@ mod tests {
         assert!(history_cost(&selected.messages, &selected.context) <= 1_400);
     }
 
-    #[test]
-    fn unsent_clears_delivery_and_compaction_defers_inline_handoff() {
+    /// A thread whose first run failed before its provider started ("missing
+    /// cli") and whose second run is starting.
+    fn failed_then_running_thread() -> Thread {
         let thread_id = "thread:t";
         let run1_wire = Run::reference_id(thread_id, 1);
         let run2_wire = Run::reference_id(thread_id, 2);
@@ -1612,6 +1868,8 @@ mod tests {
             checkpoints: vec![],
             link_requests: vec![],
             context_handoffs: vec![],
+            context_transfers: Vec::new(),
+            handoff_items: Vec::new(),
             provider: Box::default(),
             stored: None,
         };
@@ -1626,6 +1884,12 @@ mod tests {
             },
             11,
         );
+        thread
+    }
+
+    #[test]
+    fn unsent_clears_delivery_and_compaction_defers_inline_handoff() {
+        let thread = failed_then_running_thread();
         let provider = ProviderTurn {
             driver: CLAUDE_AGENT.into(),
             instance_id: "claudeAgent".into(),
@@ -1647,5 +1911,89 @@ mod tests {
         assert!(prepared.inline_context.contains("missing cli"));
         let unsent = prepared.into_unsent(13);
         assert!(unsent[0].get("delivery").is_none());
+    }
+
+    #[test]
+    fn resume_fallback_summarizes_the_thread_for_a_fresh_session() {
+        let mut thread = failed_then_running_thread();
+        let provider = ProviderTurn {
+            driver: CLAUDE_AGENT.into(),
+            instance_id: "claudeAgent".into(),
+            resume: Some("sess-1".into()),
+            ..Default::default()
+        };
+        let run = thread.runs[1].clone();
+        let recovery =
+            prepare_recovery(&thread, &run, "second", &provider, 12).expect("resume fallback");
+        let handoff = &recovery.handoff;
+        assert_eq!(handoff["strategy"], "full_thread_summary");
+        assert_eq!(handoff["coveredRunOrdinals"], json!({"from": 1, "to": 1}));
+        assert_eq!(handoff["targetRunId"], run.wire_id());
+        let transfer_id = handoff["transferId"].as_str().unwrap();
+        assert!(transfer_id.starts_with(
+            "context-transfer:type:provider_resume_fallback:source-thread:thread%3At:target-thread:thread%3At:"
+        ));
+        assert_eq!(recovery.transfer["id"], transfer_id);
+        assert_eq!(recovery.transfer["status"], "resolved_portable");
+        assert_eq!(
+            recovery.transfer["resolution"],
+            json!({"strategy": "portable_context", "contextHandoffId": handoff["id"]})
+        );
+        let item = &recovery.turn_item;
+        assert_eq!(
+            item["id"],
+            format!(
+                "turn-item:run:{}:signal:resume-fallback-handoff",
+                uri_component(&run.wire_id())
+            )
+        );
+        assert_eq!(item["title"], "Recovered context");
+        assert_eq!(item["contextHandoffId"], handoff["id"]);
+        // The summary replaces the retry copy of the failed run.
+        let context = &recovery.delivery.inline_context;
+        assert!(
+            context.starts_with("Context handoff (full_thread_summary):"),
+            "{context}"
+        );
+        assert!(
+            !context.contains("delta_since_target_last_seen"),
+            "{context}"
+        );
+        assert!(context.contains("first") && context.contains("missing cli"));
+        assert_eq!(recovery.delivery.pending.len(), 1);
+        assert!(recovery.delivery.pending[0].get("delivery").is_none());
+        assert!(recovery
+            .prompt("second")
+            .ends_with("\n\nUser message:\nsecond"));
+
+        // Recorded, it shows ahead of the run's prompt, without its summary
+        // on the wire.
+        thread.handoff_items.push(item.clone());
+        let projection = thread.projection();
+        let types: Vec<&str> = projection["turnItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["runId"] == run.wire_id().as_str())
+            .map(|i| i["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(types.first(), Some(&"handoff"), "{types:?}");
+        assert_eq!(types.get(1), Some(&"user_message"), "{types:?}");
+        let wire = projection["turnItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["type"] == "handoff")
+            .unwrap();
+        assert!(wire.get("summary").is_none());
+        assert_eq!(
+            thread.full_projection()["turnItems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["type"] == "handoff")
+                .unwrap()["summary"],
+            handoff["summaryText"]
+        );
     }
 }

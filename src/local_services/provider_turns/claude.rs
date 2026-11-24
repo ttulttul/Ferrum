@@ -37,28 +37,129 @@ pub(super) async fn run(
 ) {
     let mut cancel = Some(cancel);
     let mut resume = provider.resume.clone().filter(|id| !id.is_empty());
-    loop {
-        let attempt = Attempt::run(
-            &spec,
-            &provider,
-            resume.as_deref(),
-            &mut cancel,
-            &mut responses,
-            &sink,
-            &sessions,
-        )
-        .await;
-        match attempt {
-            // A session Claude no longer has starts over, as the reference does.
-            Outcome::ConversationMissing if resume.is_some() => resume = None,
-            Outcome::ConversationMissing => {
-                return sink.finish(TurnEnd::failed(
-                    ProviderFailure::new("provider_error", CONVERSATION_NOT_FOUND),
-                    ThreadDisposition::Broken,
-                ))
+    let mut spec = spec;
+    if let Some(id) = resume.clone() {
+        // A session Claude Code said it no longer has, or whose saved
+        // transcript holds no conversation, cannot be resumed: the turn starts
+        // a fresh session with the thread's recovered context, as the
+        // reference's resumeThread fails into its resume fallback. A running
+        // CLI holds its session even before saving it.
+        if !sessions.holds(&id)
+            && (sessions.is_missing(&id)
+                || transcript_state(&spec, &provider, &id).await == Transcript::Empty)
+        {
+            resume = None;
+            if let Some(prompt) = provider.recovery_prompt.clone() {
+                spec.prompt = prompt;
             }
-            Outcome::Ended(end) => return sink.finish(end),
         }
+    }
+    let attempt = Attempt::run(
+        &spec,
+        &provider,
+        resume.as_deref(),
+        &mut cancel,
+        &mut responses,
+        &sink,
+        &sessions,
+    )
+    .await;
+    match attempt {
+        // The reference fails the turn (ClaudeConversationNotFoundError) and
+        // remembers the session, so the next turn recovers its context in a
+        // fresh one.
+        Outcome::ConversationMissing => {
+            if let Some(id) = &resume {
+                sessions.mark_missing(id);
+            }
+            sink.finish(TurnEnd::failed(
+                ProviderFailure::new("provider_error", CONVERSATION_NOT_FOUND_FAILURE),
+                ThreadDisposition::Reusable,
+            ))
+        }
+        Outcome::Ended(end) => sink.finish(end),
+    }
+}
+
+/// The reference's ClaudeConversationNotFoundError message.
+const CONVERSATION_NOT_FOUND_FAILURE: &str = "Claude Code could not find this conversation to resume. Send the message again to continue in a new Claude session with this thread's history.";
+
+/// What Claude Code saved of a session (the reference's
+/// `claudeTranscriptState`).
+#[derive(Debug, PartialEq, Eq)]
+enum Transcript {
+    /// A transcript with a user or assistant message: Claude may resume it.
+    Conversation,
+    /// Only transcripts holding no conversation (metadata), which can be
+    /// neither resumed nor recreated.
+    Empty,
+    /// No transcript, or one that could not be read: the CLI decides.
+    Missing,
+}
+
+/// The transcript state of `session` under Claude Code's projects directory:
+/// `CLAUDE_CONFIG_DIR` (relative to the turn's folder) or `~/.claude`.
+async fn transcript_state(spec: &TurnSpec, provider: &ProviderTurn, session: &str) -> Transcript {
+    let configured = spec
+        .env
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "CLAUDE_CONFIG_DIR")
+        .map(|(_, value)| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| Some(provider.home_path.trim().to_owned()).filter(|v| !v.is_empty()));
+    let base = match configured {
+        Some(dir) => std::path::Path::new(&spec.cwd).join(dir),
+        None => match std::env::var_os("HOME") {
+            Some(home) => std::path::Path::new(&home).join(".claude"),
+            None => return Transcript::Missing,
+        },
+    };
+    let projects = base.join("projects");
+    let file = format!("{session}.jsonl");
+    tokio::task::spawn_blocking(move || transcript_in(&projects, &file))
+        .await
+        .unwrap_or(Transcript::Missing)
+}
+
+fn transcript_in(projects: &std::path::Path, file: &str) -> Transcript {
+    use std::io::BufRead;
+    let Ok(entries) = std::fs::read_dir(projects) else {
+        return Transcript::Missing;
+    };
+    let (mut found, mut unreadable) = (false, false);
+    for entry in entries.flatten() {
+        let path = entry.path().join(file);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(handle) = std::fs::File::open(&path) else {
+            unreadable = true;
+            continue;
+        };
+        let mut conversation = false;
+        for line in std::io::BufReader::new(handle).lines() {
+            let Ok(line) = line else {
+                unreadable = true;
+                break;
+            };
+            let kind = serde_json::from_str::<Value>(&line)
+                .ok()
+                .and_then(|entry| entry["type"].as_str().map(str::to_owned));
+            if matches!(kind.as_deref(), Some("user" | "assistant")) {
+                conversation = true;
+                break;
+            }
+        }
+        if conversation {
+            return Transcript::Conversation;
+        }
+        found = true;
+    }
+    if found && !unreadable {
+        Transcript::Empty
+    } else {
+        Transcript::Missing
     }
 }
 
@@ -120,6 +221,10 @@ struct Attempt<'a> {
     blocks: HashMap<u64, (String, &'static str)>,
     /// Streamed items the final assistant message has not completed yet.
     open_items: Vec<(String, &'static str)>,
+    /// How many text and thinking blocks each assistant message has streamed
+    /// and snapshotted, by (message, `text`/`thinking`): a block's item is
+    /// `<message>:<kind>:<n>`, as the reference numbers them.
+    block_counts: HashMap<(String, &'static str, bool), u64>,
     /// Tool calls still waiting for a result, in the order they started.
     tools: IndexMap<String, ProviderItem>,
     next_control: u64,
@@ -326,6 +431,7 @@ impl<'a> Attempt<'a> {
             message_id: None,
             blocks: HashMap::new(),
             open_items: vec![],
+            block_counts: HashMap::new(),
             tools: IndexMap::new(),
             next_control: 1,
             device_hook: provider.mcp.as_ref().is_some_and(|mcp| mcp.device_tools),
@@ -345,8 +451,12 @@ impl<'a> Attempt<'a> {
             usage_reported: false,
         };
         let outcome = attempt.drive(spec, cancel).await;
-        // A prompt the CLI took without starting a turn still counts.
-        attempt.report_delivery();
+        // A prompt the CLI took without starting a turn still counts; one it
+        // refused with the session it could not resume does not, as the
+        // reference commits no budget for a turn that never opened.
+        if !matches!(outcome, Outcome::ConversationMissing) {
+            attempt.report_delivery();
+        }
         // Steers a completed turn took settle before its usage; ones a
         // stopped turn never took are cancelled after it, as the reference
         // reports them.
@@ -742,9 +852,15 @@ impl<'a> Attempt<'a> {
                     Some("thinking") => "reasoning",
                     _ => return,
                 };
+                let message = self.message_id.as_deref().unwrap_or("message").to_owned();
+                let label = if kind == "assistant_message" {
+                    "text"
+                } else {
+                    "thinking"
+                };
                 let id = format!(
-                    "{}:{index}",
-                    self.message_id.as_deref().unwrap_or("message")
+                    "{message}:{label}:{}",
+                    self.next_block(&message, label, true)
                 );
                 self.blocks.insert(index, (id.clone(), kind));
                 self.open_items.push((id.clone(), kind));
@@ -846,19 +962,15 @@ impl<'a> Attempt<'a> {
             }
         }
         let message_id = message["id"].as_str().unwrap_or("message").to_owned();
-        for (index, block) in message["content"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
+        for block in message["content"].as_array().into_iter().flatten() {
             match block["type"].as_str() {
-                Some(kind @ ("text" | "thinking")) => {
-                    let kind = if kind == "text" {
-                        "assistant_message"
+                Some(label @ ("text" | "thinking")) => {
+                    let (label, kind) = if label == "text" {
+                        ("text", "assistant_message")
                     } else {
-                        "reasoning"
+                        ("thinking", "reasoning")
                     };
+                    let index = self.next_block(&message_id, label, false);
                     let text = block["text"]
                         .as_str()
                         .or(block["thinking"].as_str())
@@ -869,7 +981,7 @@ impl<'a> Attempt<'a> {
                             *k == kind && id.starts_with(&format!("{message_id}:"))
                         }) {
                             Some(position) => self.open_items.remove(position).0,
-                            None => format!("{message_id}:{kind}:{index}"),
+                            None => format!("{message_id}:{label}:{index}"),
                         };
                     self.sink.send(ProviderEvent::TurnItem {
                         item: ProviderItem::new(id, kind, "completed")
@@ -881,6 +993,17 @@ impl<'a> Attempt<'a> {
                 _ => {}
             }
         }
+    }
+
+    /// The next number of `message`'s `label` blocks, streamed or
+    /// snapshotted.
+    fn next_block(&mut self, message: &str, label: &'static str, streamed: bool) -> u64 {
+        let count = self
+            .block_counts
+            .entry((message.to_owned(), label, streamed))
+            .or_default();
+        *count += 1;
+        *count - 1
     }
 
     fn tool_use(&mut self, block: &Value) {

@@ -7,7 +7,7 @@
 //! detach and server shutdown. An idle CLI closes after
 //! [`IDLE_RELEASE_DELAY`].
 use super::Cli;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -15,9 +15,10 @@ use std::time::Duration;
 /// timeout).
 pub(super) const IDLE_RELEASE_DELAY: Duration = Duration::from_secs(30 * 60);
 
-/// A workspace's running Claude CLIs, by native session id.
+/// A workspace's running Claude CLIs, by native session id, and the sessions
+/// Claude Code said it no longer has.
 #[derive(Default)]
-pub(crate) struct Sessions(Mutex<HashMap<String, Live>>);
+pub(crate) struct Sessions(Mutex<HashMap<String, Live>>, Mutex<HashSet<String>>);
 
 struct Live {
     cli: Cli,
@@ -31,6 +32,28 @@ struct Live {
 impl Sessions {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Live>> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether a running CLI holds `session` (which it may not have saved yet).
+    pub(super) fn holds(&self, session: &str) -> bool {
+        self.lock().contains_key(session)
+    }
+
+    /// Remember that Claude Code could not find `session` to resume
+    /// (the reference's `missingNativeThreads`).
+    pub(super) fn mark_missing(&self, session: &str) {
+        self.1
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session.to_owned());
+    }
+
+    /// Whether Claude Code said it no longer has `session`.
+    pub(super) fn is_missing(&self, session: &str) -> bool {
+        self.1
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(session)
     }
 
     /// The running CLI of `session`, for a turn launched as `launch`: taken

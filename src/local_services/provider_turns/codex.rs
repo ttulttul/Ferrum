@@ -456,6 +456,10 @@ impl Session {
         }
         let mut resumed = false;
         let mut thread = None;
+        // The prompt the turn sends: a thread Codex no longer has starts over
+        // with the thread's recovered context ahead of it, as the reference's
+        // resumeThread fails into its resume fallback.
+        let mut prompt = spec.prompt.as_str();
         // What the thread was loaded with: a thread still loaded with the
         // same model and runtime policy is not resumed again.
         let load_key = json!({
@@ -482,7 +486,11 @@ impl Session {
                     thread = Some(reply);
                 }
                 // A thread Codex no longer has starts over, as the reference does.
-                Err(Failed::Rpc(error)) if thread_not_found(&error) => {}
+                Err(Failed::Rpc(error)) if thread_not_found(&error) => {
+                    if let Some(recovery) = provider.recovery_prompt.as_deref() {
+                        prompt = recovery;
+                    }
+                }
                 Err(other) => return Err(other),
             }
         }
@@ -520,10 +528,10 @@ impl Session {
         let (approval_policy, reviewer, sandbox_policy) = runtime_mode_policy(&self.runtime_mode);
         // `toCodexInput`: the text naming each attachment's file, then each
         // supported image as a data URL.
-        let mut input = vec![json!({"type": "text", "text": spec.prompt})];
+        let mut input = vec![json!({"type": "text", "text": prompt})];
         if !provider.attachments.is_empty() {
-            use crate::workspace::attachment_prompt as prompt;
-            let text = prompt::text_with_paths(&spec.prompt, &provider.attachments);
+            use crate::workspace::attachment_prompt;
+            let text = attachment_prompt::text_with_paths(prompt, &provider.attachments);
             input.clear();
             if !text.is_empty() {
                 input.push(json!({"type": "text", "text": text}));
@@ -531,9 +539,9 @@ impl Session {
             for attachment in provider
                 .attachments
                 .iter()
-                .filter(|a| prompt::is_native_image(a))
+                .filter(|a| attachment_prompt::is_native_image(a))
             {
-                match prompt::image_base64(attachment) {
+                match attachment_prompt::image_base64(attachment) {
                     Ok(data) => input.push(json!({
                         "type": "image",
                         "url": format!("data:{};base64,{data}", attachment["mimeType"].as_str().unwrap_or_default()),

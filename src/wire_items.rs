@@ -343,6 +343,10 @@ pub(crate) fn wire_item(item: &Value) -> Value {
         return item;
     };
     match map.get("type").and_then(Value::as_str) {
+        // `projectTurnItemForWire` drops a handoff's summary.
+        Some("handoff") => {
+            map.remove("summary");
+        }
         Some("command_execution") => {
             let output = map.remove("output");
             let text = output.as_ref().and_then(Value::as_str).unwrap_or_default();
@@ -412,6 +416,7 @@ fn bound_value(value: &Value) -> Value {
 pub(crate) fn detail_item(item: &Value) -> Value {
     let mut out = item.clone();
     match item["type"].as_str() {
+        Some("handoff") => return wire_item(item),
         Some("command_execution") => {
             out["input"] = json!(truncate(
                 item["input"].as_str().unwrap_or_default(),

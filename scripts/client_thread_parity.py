@@ -533,6 +533,21 @@ PROVIDER_SCENARIOS = [
          "providerInstances": {"claudeAgent": {"driver": "claudeAgent", "enabled": False}}}}},
     {"name": "claude restart cli missing", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_restart.json", "restart": {"after": "running", "removeCli": True}},
+    # The restarted server resumes the idle thread's session for a follow-up, and Claude Code no
+    # longer has it: the reference starts a fresh session.
+    {"name": "claude restart resume missing", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_restart_resume_missing.json", "restart": {"after": "settled", "transcript": "conversation",
+                                                                     "followUp": "Now append a line"}},
+    # Sent again, the message goes to a fresh session with the thread's history: Claude Code
+    # said it no longer has the old one.
+    {"name": "claude restart resume missing retried", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_restart_resume_missing.json", "restart": {"after": "settled", "transcript": "conversation",
+                                                                     "followUp": ["Now append a line", "Now append a line again"]}},
+    # The thread's saved session holds no conversation: the reference recovers its context in a
+    # fresh session, with a summary of the thread (full_thread_summary).
+    {"name": "claude restart transcript empty", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_restart_resume_missing.json", "restart": {"after": "settled", "transcript": "empty",
+                                                                     "followUp": "Now append a line"}},
     # A continuation that fails to start (no CLI) is tried again a minute later.
     {"name": "claude restart cli restored", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_restart.json", "restart": {"after": "running", "removeCli": True, "restoreCli": True}},
@@ -1667,6 +1682,17 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
         quiet(root, url, cookie, effects=False)
         if restart.get("settings"):
             rpc(url, cookie, "server.updateSettings", {"patch": restart["settings"]})
+        if restart.get("transcript"):
+            # What Claude Code saved of the thread's session while the server was stopped: a
+            # transcript holding only metadata ("empty"), or a conversation ("conversation").
+            native = next(t["nativeThreadRef"]["nativeId"] for t in thread_projection(url, cookie)["providerThreads"]
+                          if (t.get("nativeThreadRef") or {}).get("nativeId"))
+            project = root / ".claude" / "projects" / "-workspace"
+            project.mkdir(parents=True, exist_ok=True)
+            line = ({"type": "summary", "summary": "Fixture session", "leafUuid": native}
+                    if restart["transcript"] == "empty" else
+                    {"type": "user", "sessionId": native, "message": {"role": "user", "content": "Run echo hi"}})
+            (project / f"{native}.jsonl").write_text(json.dumps(line) + "\n")
     # Stopped as a service manager stops it.
     if restart.get("live"):
         watcher.join(90)
@@ -1711,13 +1737,16 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
                 # The restarted server's provider check settles first: its snapshot (the
                 # models it lists, say) is what the turn's agent reads.
                 provider_status(url, cookie, scenario["instance"], root)
-            runs = len(thread_projection(url, cookie).get("runs", []))
-            rpc(url, cookie, "orchestration.dispatchCommand", {
-                "type": "message.dispatch", "commandId": "follow-up-message", "threadId": THREAD,
-                "messageId": "message:follow-up", "text": follow_up, "attachments": [],
-                "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
-            wait_for(url, cookie, lambda p: len(p.get("runs", [])) > runs
-                     and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", [])), 40)
+            # One message, or several sent one after another once each settles.
+            for index, text in enumerate([follow_up] if isinstance(follow_up, str) else follow_up):
+                suffix = "" if index == 0 else f"-{index + 1}"
+                runs = len(thread_projection(url, cookie).get("runs", []))
+                rpc(url, cookie, "orchestration.dispatchCommand", {
+                    "type": "message.dispatch", "commandId": f"follow-up-message{suffix}", "threadId": THREAD,
+                    "messageId": f"message:follow-up{suffix}", "text": text, "attachments": [],
+                    "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
+                wait_for(url, cookie, lambda p: len(p.get("runs", [])) > runs
+                         and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", [])), 40)
         quiet(root, url, cookie, clock_offset=offset())
         if scenario.get("title"):
             title = title_outcome(url, cookie, scenario, Path(env["FAKE_PROVIDER_LOG"]), root.parent)

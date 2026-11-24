@@ -565,21 +565,98 @@ async fn claude_turn_resumes_the_native_session() {
     assert!(args.contains("--resume=sess-saved"), "{args}");
 }
 
+/// The text of the first prompt the fake CLI logged in `log`.
+fn first_prompt(log: &Path) -> Value {
+    received(log)
+        .into_iter()
+        .find(|m| m["type"] == "user")
+        .map(|m| m["message"]["content"].clone())
+        .unwrap_or(Value::Null)
+}
+
 #[tokio::test]
-async fn claude_turn_starts_over_when_the_session_is_gone() {
+async fn claude_turn_fails_when_the_session_is_gone_and_the_next_one_recovers() {
     let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("in.jsonl");
+    let session = format!("sess-gone-{}", uuid::Uuid::new_v4());
     // The scenario refuses any `--resume`, then plays a fresh turn.
-    let (events, exit) = run(fake_spec(
+    let log = dir.path().join("first.jsonl");
+    let mut spec = fake_spec(
         CLAUDE_AGENT,
         "claude_resume_missing.json",
         &log,
-        Some("sess-gone"),
-    ))
-    .await;
+        Some(&session),
+    );
+    spec.provider.as_mut().unwrap().recovery_prompt = Some("Recovered\n\nHello".into());
+    let (events, exit) = run(spec).await;
+    // As the reference's ClaudeConversationNotFoundError, the turn fails.
+    assert!(!exit.success, "{exit:?}");
+    let (status, failure) = terminal(&events);
+    assert_eq!(status, TurnStatus::Failed);
+    assert!(failure
+        .unwrap()
+        .message
+        .starts_with("Claude Code could not find this conversation to resume."));
+    // The next turn starts a fresh session with the recovered context.
+    let log = dir.path().join("second.jsonl");
+    let mut spec = fake_spec(
+        CLAUDE_AGENT,
+        "claude_resume_missing.json",
+        &log,
+        Some(&session),
+    );
+    spec.provider.as_mut().unwrap().recovery_prompt = Some("Recovered\n\nHello".into());
+    let (events, exit) = run(spec).await;
     assert!(exit.success, "{exit:?}");
-    let (session, resumed) = native_thread(&events);
-    assert!(session != "sess-gone" && !resumed);
+    let (fresh, resumed) = native_thread(&events);
+    assert!(fresh != session && !resumed);
+    let args = std::fs::read_to_string(dir.path().join("second.jsonl.args")).unwrap();
+    assert!(!args.contains("--resume"), "{args}");
+    assert_eq!(first_prompt(&log), json!("Recovered\n\nHello"));
+}
+
+#[tokio::test]
+async fn claude_turn_recovers_a_session_whose_transcript_holds_no_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("claude-home");
+    let project = home.join("projects").join("-workspace");
+    std::fs::create_dir_all(&project).unwrap();
+    let empty = format!("sess-empty-{}", uuid::Uuid::new_v4());
+    std::fs::write(
+        project.join(format!("{empty}.jsonl")),
+        "{\"type\":\"summary\",\"summary\":\"Fixture\"}\n",
+    )
+    .unwrap();
+    let saved = format!("sess-saved-{}", uuid::Uuid::new_v4());
+    std::fs::write(
+        project.join(format!("{saved}.jsonl")),
+        "{\"type\":\"summary\"}\n{\"type\":\"user\",\"message\":{}}\n",
+    )
+    .unwrap();
+    let turn = |name: &str, session: &str| {
+        let log = dir.path().join(name);
+        let mut spec = fake_spec(
+            CLAUDE_AGENT,
+            "claude_resume_missing.json",
+            &log,
+            Some(session),
+        );
+        spec.env
+            .push(("CLAUDE_CONFIG_DIR".into(), home.display().to_string()));
+        spec.provider.as_mut().unwrap().recovery_prompt = Some("Recovered\n\nHello".into());
+        (spec, log)
+    };
+    let (spec, log) = turn("empty.jsonl", &empty);
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    let (fresh, resumed) = native_thread(&events);
+    assert!(fresh != empty && !resumed);
+    assert_eq!(first_prompt(&log), json!("Recovered\n\nHello"));
+    // A transcript with a conversation is resumed (the scenario refuses it).
+    let (spec, _) = turn("saved.jsonl", &saved);
+    let (_, exit) = run(spec).await;
+    assert!(!exit.success, "{exit:?}");
+    let args = std::fs::read_to_string(dir.path().join("saved.jsonl.args")).unwrap();
+    assert!(args.contains(&format!("--resume={saved}")), "{args}");
 }
 
 #[tokio::test]

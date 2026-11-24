@@ -90,20 +90,55 @@ pub(crate) async fn launch<H: TurnHost>(
     // Prepare and record any retry/pending context handoffs before starting
     // the provider turn, prepending inline context to the prompt and carrying
     // missed attachments forward (`ProviderTurnStartService.prepareRetryHandoff`).
-    let mut prepared_handoff = if let Some(provider) = spec.provider.as_ref() {
-        let store = host.store.read().await;
-        store.threads.get(&run.thread_id).and_then(|thread| {
-            crate::context_handoff::prepare_for_turn(
-                thread,
-                &run,
-                &spec.prompt,
-                provider,
-                crate::now(),
-            )
-        })
-    } else {
-        None
+    // A turn that resumes a native session also prepares its resume fallback
+    // (`prepareRecoveryHandoff`): the thread's history for a fresh session,
+    // should that one not resume.
+    let (mut prepared_handoff, mut recovery) = match spec.provider.as_ref() {
+        Some(provider) => {
+            let store = host.store.read().await;
+            match store.threads.get(&run.thread_id) {
+                Some(thread) => {
+                    let now = crate::now();
+                    let prepared = crate::context_handoff::prepare_for_turn(
+                        thread,
+                        &run,
+                        &spec.prompt,
+                        provider,
+                        now,
+                    );
+                    let resumes = provider.resume.as_deref().is_some_and(|id| !id.is_empty());
+                    let recovery = resumes
+                        .then(|| {
+                            crate::context_handoff::prepare_recovery(
+                                thread,
+                                &run,
+                                &spec.prompt,
+                                provider,
+                                now,
+                            )
+                        })
+                        .flatten();
+                    (prepared, recovery)
+                }
+                None => (None, None),
+            }
+        }
+        None => (None, None),
     };
+    // Handoffs the resumed session has no room for go to a fresh one with
+    // the thread's history (`handoff_budget_exhausted`).
+    if prepared_handoff.as_ref().is_some_and(|p| p.over_budget) {
+        if let Some(fallback) = recovery.take() {
+            if let Some(provider) = spec.provider.as_mut() {
+                provider.resume = None;
+            }
+            commit_recovery(&*host, &run, &fallback).await;
+            prepared_handoff = Some(fallback.delivery);
+        }
+    }
+    if let (Some(fallback), Some(provider)) = (recovery.as_ref(), spec.provider.as_mut()) {
+        provider.recovery_prompt = Some(fallback.prompt(&spec.prompt));
+    }
     if let Some(prepared) = prepared_handoff.as_mut() {
         // A Codex turn records its handoffs once its app-server has loaded
         // the native thread (see `record`): the reference prepares them only
@@ -135,7 +170,7 @@ pub(crate) async fn launch<H: TurnHost>(
             if let Some(stream) = turn.stream() {
                 host.turn_started(&run, &cwd, stream);
             }
-            record(&host, &run, cwd, turn, prepared_handoff.take()).await
+            record(&host, &run, cwd, turn, prepared_handoff.take(), recovery).await
         }
         Err(error) => {
             if let Some(prepared) = prepared_handoff.take() {
@@ -154,7 +189,7 @@ pub(crate) async fn launch<H: TurnHost>(
 /// Record a turn started before a restart, picked up again with
 /// [`crate::workspace::RemoteWorkspace::resume_turn`].
 pub(crate) async fn resume<H: TurnHost>(host: Arc<H>, run: Run, cwd: String, turn: TurnItems) {
-    if let Err(error) = record(&host, &run, cwd, turn, None).await {
+    if let Err(error) = record(&host, &run, cwd, turn, None, None).await {
         fail(&*host, &run, error).await;
     }
 }
@@ -393,6 +428,8 @@ async fn commit_handoffs<H: TurnHost>(
             .commit(Event::ContextHandoffUpdated {
                 thread_id: run.thread_id.clone(),
                 handoff,
+                transfer: None,
+                turn_item: None,
             })
             .await;
     }
@@ -527,6 +564,23 @@ impl Snapshots {
     }
 }
 
+/// Record a resume fallback: its summary handoff, the context transfer it
+/// resolves, and the "Recovered context" item at the run's start.
+async fn commit_recovery<H: TurnHost>(
+    host: &H,
+    run: &Run,
+    fallback: &crate::context_handoff::Recovery,
+) {
+    let _ = host
+        .commit(Event::ContextHandoffUpdated {
+            thread_id: run.thread_id.clone(),
+            handoff: fallback.handoff.clone(),
+            transfer: Some(fallback.transfer.clone()),
+            turn_item: Some(fallback.turn_item.clone()),
+        })
+        .await;
+}
+
 /// Record `turn`'s events as `run`'s, acknowledging each once it is in the
 /// event log, so a workspace that keeps unacknowledged events redelivers
 /// the rest after a reconnect or a restart.
@@ -536,6 +590,7 @@ async fn record<H: TurnHost>(
     cwd: String,
     mut turn: TurnItems,
     mut pending_handoff: Option<crate::context_handoff::PreparedHandoff>,
+    mut recovery: Option<crate::context_handoff::Recovery>,
 ) -> anyhow::Result<()> {
     let host: &H = owner;
     let done = |position: Option<StreamPosition>| {
@@ -650,7 +705,9 @@ async fn record<H: TurnHost>(
             snapshots.flush(host, run).await;
         }
         if let TurnEvent::Provider(ProviderEvent::ProviderThread {
-            native_thread_id, ..
+            native_thread_id,
+            resumed,
+            ..
         }) = &event
         {
             observed_native_thread = Some(native_thread_id.clone());
@@ -658,6 +715,21 @@ async fn record<H: TurnHost>(
             if let Some(prepared) = pending_handoff.as_mut().filter(|p| !p.recorded) {
                 commit_handoffs(host, run, prepared.pending.iter().cloned()).await;
                 prepared.recorded = true;
+            }
+            // The session it was to resume could not be, so the workspace
+            // started a fresh one with the recovery prompt: record the
+            // fallback, whose delivery replaces the resumed session's.
+            match recovery.take() {
+                // A provider that reports its running session again (ACP)
+                // names the same one.
+                Some(fallback) if !resumed && *native_thread_id != fallback.resumes => {
+                    commit_recovery(host, run, &fallback).await;
+                    commit_handoffs(host, run, fallback.delivery.pending.iter().cloned()).await;
+                    let mut delivery = fallback.delivery;
+                    delivery.recorded = true;
+                    pending_handoff = Some(delivery);
+                }
+                _ => {}
             }
         }
         // Held text is recorded before any later event: an item's end

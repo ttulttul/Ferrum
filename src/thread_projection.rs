@@ -553,6 +553,28 @@ impl Thread {
                 Some((index, _)) => ((index as u64 + 1) * 1_000_000).max(ordinal) + 1,
                 None => ordinal + 1,
             };
+            // A handoff recorded at its run's start (a resume fallback's
+            // recovered context) sits ahead of the run's prompt, as the
+            // reference's `run_start` placement puts it.
+            if let Some((index, run)) = run.filter(|_| message.role == "user") {
+                let start = (index as u64 + 1) * 1_000_000;
+                let run_id = run.wire_id();
+                for handoff in self
+                    .handoff_items
+                    .iter()
+                    .filter(|item| item["runId"] == run_id.as_str())
+                {
+                    let mut handoff = handoff.clone();
+                    if ordinal == start + 1 && !items.iter().any(|i: &Value| i["ordinal"] == start)
+                    {
+                        handoff["ordinal"] = json!(start);
+                    } else {
+                        handoff["ordinal"] = json!(ordinal);
+                        ordinal += 1;
+                    }
+                    items.push(handoff);
+                }
+            }
             let run_id = run.map(|(_, run)| run.wire_id());
             let at = iso(message.created_at);
             let base = |id: String,
@@ -592,6 +614,17 @@ impl Thread {
                 run.filter(|(_, run)| matches!(run.status.as_str(), "queued" | "preparing"))
             {
                 if let Some(ids) = self.queued_run_ids(pending_run) {
+                    item["nodeId"] = json!(ids.root_node);
+                    item["providerThreadId"] = json!(ids.provider_thread);
+                }
+            } else if let Some((_, started)) = run.filter(|_| message.role == "user") {
+                // A prompt stays on its run's root node and provider thread
+                // once the run starts, as the reference writes it.
+                if let Some(ids) = self
+                    .provider_run_ids(started)
+                    .or_else(|| self.starting_run_ids(started))
+                    .filter(|ids| !ids.provider_thread.is_empty())
+                {
                     item["nodeId"] = json!(ids.root_node);
                     item["providerThreadId"] = json!(ids.provider_thread);
                 }
@@ -1066,10 +1099,17 @@ impl Thread {
         } else {
             self.context_handoffs.clone()
         };
+        // Transfers this server recorded, after those the stored thread had.
+        let mut context_transfers = array("contextTransfers");
+        for transfer in &self.context_transfers {
+            if !context_transfers.iter().any(|t| t["id"] == transfer["id"]) {
+                context_transfers.push(transfer.clone());
+            }
+        }
         let mut projection = json!({"thread":app,"runs":self.run_rows(&row),"attempts":with("attempts",provider.attempts),"nodes":with("nodes",provider.nodes),"subagents":array("subagents"),
             "providerSessions":with("providerSessions",provider.provider_sessions),"providerThreads":with("providerThreads",provider.provider_threads),"providerTurns":with("providerTurns",provider.provider_turns),"runtimeRequests":with("runtimeRequests",provider.runtime_requests),
             "messages":messages,"plans":provider.plans,"turnItems":turn_items,"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
-            "contextHandoffs":context_handoffs,"contextTransfers":array("contextTransfers"),"visibleTurnItems":visible,"updatedAt":row["updatedAt"]});
+            "contextHandoffs":context_handoffs,"contextTransfers":context_transfers,"visibleTurnItems":visible,"updatedAt":row["updatedAt"]});
         sort_messages_by_turn_item_order(&mut projection);
         projection
     }
@@ -1463,6 +1503,8 @@ impl Thread {
             checkpoints,
             link_requests: Vec::new(),
             context_handoffs,
+            context_transfers: Vec::new(),
+            handoff_items: Vec::new(),
             provider,
             stored: Some(Box::new(projection)),
             row,
