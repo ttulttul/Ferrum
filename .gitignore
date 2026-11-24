@@ -2,3 +2,5 @@
 /.t3/
 __pycache__/
 *.pyc
+# The client thread suite's diagnostics, written to the working directory on an agent mcp mismatch.
+/agent-mcp-diff.txt
