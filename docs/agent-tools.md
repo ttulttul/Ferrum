@@ -388,8 +388,18 @@ schemas.
    `scripts/update_agent_tools.py`), under the owner name `ownerFor` gives this server, with its
    failure messages (connect errors, host keys, Windows hosts) and encoded causes.
    `scripts/device_ssh_parity.py` compares them against a fake `ssh` that runs a host's commands
-   under its own fake home on this machine. Not done yet: starting a host (its hub and the `ssh -L`
-   tunnels), its devices and agent tools; Expo and Simlock hosts.
+   under its own fake home on this machine.
+
+   With device support on, listing starts each SSH host as `ensureReady` and `connect` do: probe,
+   the `installing`/`starting`/`ready` statuses, the bootstrap's `start` (which installs and starts
+   the hub there), an `ssh -L` tunnel to fresh loopback ports here, and `/readyz` through it
+   (retried with fresh ports when the forward fails). Its devices are listed through the tunnel,
+   with `adb` and `emulator` run over SSH from the hub's directory (`run`); opening, booting,
+   the ffmpeg check (the reference's `node -e` script on the host's Node), closing, shutting down,
+   `retryHostId` and screenshots work on it as on this machine, and turning device support off
+   (or removing the host) stops what this server started there. Not done yet: agent tools on SSH
+   hosts (`device_open` there), the reference's automatic reconnect (a dropped tunnel reconnects
+   on next use instead), device detail and actions on SSH hosts; Expo and Simlock hosts.
 5. **Prompt context and capabilities** (served), as above.
 6. **Scheduled tasks**: `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task` and
    `run_scheduled_task_now` share the reference's `scheduled_tasks` table. Thread callers

@@ -44,6 +44,12 @@ impl Drop for HubRuntime {
     }
 }
 
+/// An SSH host's forwarded hub.
+struct SshReady {
+    ctx: HostCtx,
+    tunnel: ssh_host::Tunnel,
+}
+
 pub struct DeviceService {
     settings: Arc<Settings>,
     state: Mutex<Value>,
@@ -56,6 +62,10 @@ pub struct DeviceService {
     /// The SSH device hosts from settings (`deviceHosts`) that are not this
     /// machine, in settings order, with each one's latest summary.
     ssh_hosts: Mutex<Vec<(SshConfig, Value)>>,
+    /// The SSH hosts whose hub is forwarded here, by id.
+    ssh_ready: tokio::sync::Mutex<HashMap<String, SshReady>>,
+    /// The SSH hosts this server started something on, which `stop` stops.
+    ssh_activated: Mutex<HashSet<String>>,
     /// Serializes host reconciles (the reference's lifecycle lock).
     reconcile_lock: tokio::sync::Mutex<()>,
 }
@@ -82,6 +92,8 @@ impl DeviceService {
             agent: Mutex::new(None),
             launchers: Default::default(),
             ssh_hosts: Mutex::new(Vec::new()),
+            ssh_ready: Default::default(),
+            ssh_activated: Default::default(),
             reconcile_lock: Default::default(),
         })
     }
@@ -782,6 +794,89 @@ fn is_simulator_list_failed(message: &str) -> bool {
         || rest.starts_with("`xcrun simctl list devices --json` did not respond within ")
 }
 
+/// How a host's commands run: on this machine, or over SSH from the
+/// directory its hub runs in (`DeviceHostReady.run`).
+#[derive(Clone)]
+pub(super) enum HostRun {
+    Local,
+    Ssh { config: SshConfig, owner: String },
+}
+
+/// A ready host: its id, its hub's origin here, how its commands run, its
+/// Node, and which platforms it can run (`DeviceHostReady`).
+#[derive(Clone)]
+pub(super) struct HostCtx {
+    pub id: String,
+    pub origin: String,
+    pub run: HostRun,
+    pub node_path: String,
+    pub ios: bool,
+    pub android: bool,
+}
+
+impl HostCtx {
+    fn local(origin: &str) -> Self {
+        Self {
+            id: LOCAL_HOST_ID.into(),
+            origin: origin.to_owned(),
+            run: HostRun::Local,
+            node_path: agent_device::node_executable()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "node".into()),
+            ios: availability("ios")["available"] == true,
+            android: availability("android")["available"] == true,
+        }
+    }
+
+    /// `run`: stdout, stderr and the exit code (124 on a timeout, 127 when
+    /// it could not run).
+    async fn run(
+        &self,
+        command: &str,
+        args: &[&str],
+        timeout: Option<Duration>,
+    ) -> (String, String, i32) {
+        match &self.run {
+            HostRun::Local => {
+                run_host_command(
+                    command,
+                    args,
+                    sdk_root().as_deref(),
+                    timeout.unwrap_or(Duration::from_secs(20)),
+                )
+                .await
+            }
+            HostRun::Ssh { config, owner } => {
+                let words = std::iter::once(command)
+                    .chain(args.iter().copied())
+                    .map(ssh_host::quote_remote_arg)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                // Match the hub cwd so relative executables and PATH entries resolve identically.
+                let script = format!("cd \"$HOME/.t3/device/hosts/{owner}\" && exec {words}");
+                let identity = config
+                    .identity_file
+                    .iter()
+                    .flat_map(|file| ["-i".to_owned(), file.clone()])
+                    .collect::<Vec<_>>();
+                match ssh_host::run_ssh(
+                    config,
+                    &identity,
+                    &ssh_host::command_args(&script),
+                    None,
+                    timeout,
+                    true,
+                )
+                .await
+                {
+                    Ok((stdout, stderr)) => (stdout, stderr, 0),
+                    Err(error) => (error.stdout, error.message, error.exit_code.unwrap_or(127)),
+                }
+            }
+        }
+    }
+}
+
 struct HubListResult {
     devices: Vec<Value>,
     detail: Option<String>,
@@ -789,9 +884,8 @@ struct HubListResult {
     incomplete_platforms: Vec<&'static str>,
 }
 
-async fn list_adb_devices(sdk: Option<&Path>) -> Option<Vec<Value>> {
-    let (stdout, _, code) =
-        run_host_command("adb", &["devices", "-l"], sdk, Duration::from_secs(20)).await;
+async fn list_adb_devices(ctx: &HostCtx) -> Option<Vec<Value>> {
+    let (stdout, _, code) = ctx.run("adb", &["devices", "-l"], None).await;
     if code != 0 {
         return None;
     }
@@ -804,13 +898,9 @@ async fn list_adb_devices(sdk: Option<&Path>) -> Option<Vec<Value>> {
     }
     let mut devices = Vec::with_capacity(serials.len());
     for serial in serials {
-        let (getprop_out, _, _) = run_host_command(
-            "adb",
-            &["-s", &serial, "shell", "getprop"],
-            sdk,
-            Duration::from_secs(20),
-        )
-        .await;
+        let (getprop_out, _, _) = ctx
+            .run("adb", &["-s", &serial, "shell", "getprop"], None)
+            .await;
         let mut props = HashMap::new();
         for line in getprop_out.lines() {
             let trimmed = line.trim();
@@ -825,13 +915,9 @@ async fn list_adb_devices(sdk: Option<&Path>) -> Option<Vec<Value>> {
         let emulator = props.get("ro.kernel.qemu").map(String::as_str) == Some("1")
             || props.get("ro.boot.qemu").map(String::as_str) == Some("1");
         let avd_name = if emulator {
-            let (avd_out, _, _) = run_host_command(
-                "adb",
-                &["-s", &serial, "emu", "avd", "name"],
-                sdk,
-                Duration::from_secs(20),
-            )
-            .await;
+            let (avd_out, _, _) = ctx
+                .run("adb", &["-s", &serial, "emu", "avd", "name"], None)
+                .await;
             avd_out
                 .lines()
                 .map(str::trim)
@@ -868,7 +954,7 @@ async fn list_adb_devices(sdk: Option<&Path>) -> Option<Vec<Value>> {
             None => "Android".to_owned(),
         };
         devices.push(json!({
-            "hostId": LOCAL_HOST_ID,
+            "hostId": ctx.id,
             "id": serial,
             "name": name,
             "platform": "android",
@@ -880,10 +966,10 @@ async fn list_adb_devices(sdk: Option<&Path>) -> Option<Vec<Value>> {
     Some(devices)
 }
 
-async fn list_hub(origin: &str) -> Result<HubListResult, Value> {
-    let sdk = sdk_root();
-    let android_available = availability("android")["available"] == true;
-    let ios_available = availability("ios")["available"] == true;
+async fn list_hub(ctx: &HostCtx) -> Result<HubListResult, Value> {
+    let origin = &ctx.origin;
+    let android_available = ctx.android;
+    let ios_available = ctx.ios;
     let request = hub_client(LIST_TIMEOUT).get(format!("{origin}/api/devices"));
     let result: Value = match tokio::time::timeout(LIST_TIMEOUT, request.send()).await {
         Err(_) => {
@@ -918,7 +1004,7 @@ async fn list_hub(origin: &str) -> Result<HubListResult, Value> {
         .ok_or_else(|| op_err("list", "request_failed"))?;
     let mut devices = Vec::with_capacity(simulators.len() + emulators.len());
     for device in simulators.iter().chain(emulators.iter()) {
-        let mut record = json!({"hostId": LOCAL_HOST_ID});
+        let mut record = json!({"hostId": ctx.id});
         for k in ["id", "platform", "name", "version", "booted", "physical"] {
             record[k] = device[k].clone();
         }
@@ -951,7 +1037,7 @@ async fn list_hub(origin: &str) -> Result<HubListResult, Value> {
             .iter()
             .any(|(message, _)| message.starts_with(AVDMANAGER_LIST_FAILED))
         {
-            match list_adb_devices(sdk.as_deref()).await {
+            match list_adb_devices(ctx).await {
                 None => {
                     android_discovery_incomplete = true;
                     details.push("Could not list Android devices (adb devices -l).".into());
@@ -959,13 +1045,7 @@ async fn list_hub(origin: &str) -> Result<HubListResult, Value> {
                 Some(adb_devices) => devices.extend(adb_devices),
             }
         }
-        let (avds_stdout, _, avds_code) = run_host_command(
-            "emulator",
-            &["-list-avds"],
-            sdk.as_deref(),
-            Duration::from_secs(20),
-        )
-        .await;
+        let (avds_stdout, _, avds_code) = ctx.run("emulator", &["-list-avds"], None).await;
         if avds_code != 0 {
             android_discovery_incomplete = true;
             details.push(format!(
@@ -982,7 +1062,7 @@ async fn list_hub(origin: &str) -> Result<HubListResult, Value> {
                     .any(|d| d["platform"] == "android" && d["name"] == name)
                 {
                     devices.push(json!({
-                        "hostId": LOCAL_HOST_ID,
+                        "hostId": ctx.id,
                         "id": name,
                         "name": name,
                         "platform": "android",
@@ -1011,13 +1091,15 @@ async fn list_hub(origin: &str) -> Result<HubListResult, Value> {
     })
 }
 
-fn apply_list_result(state: &mut Value, dir: &Path, listed: HubListResult) {
+/// `refresh`: a host's listing into the state. Only this machine's sets the
+/// top-level status detail.
+fn apply_list_result(state: &mut Value, dir: &Path, host_id: &str, listed: HubListResult) {
     let mut merged: Vec<Value> = state["devices"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|d| {
-            d["hostId"] != LOCAL_HOST_ID
+            d["hostId"] != host_id
                 || d["platform"]
                     .as_str()
                     .is_some_and(|p| listed.incomplete_platforms.contains(&p))
@@ -1033,17 +1115,10 @@ fn apply_list_result(state: &mut Value, dir: &Path, listed: HubListResult) {
         }
     }
     state["devices"] = Value::Array(merged);
-    state["hosts"] = json!([host(dir, true)]);
-    state["hostStatus"] = json!("ready");
-    if let Some(obj) = state.as_object_mut() {
-        match &listed.detail {
-            Some(detail) => {
-                obj.insert("hostStatusDetail".into(), json!(detail));
-            }
-            None => {
-                obj.insert("hostStatusDetail".into(), Value::Null);
-            }
-        }
+    if host_id == LOCAL_HOST_ID {
+        state["hosts"] = json!([host(dir, true)]);
+        state["hostStatus"] = json!("ready");
+        state["hostStatusDetail"] = listed.detail.clone().map_or(Value::Null, Value::from);
     }
     let mut host_status = json!({"status": "ready"});
     if let Some(detail) = &listed.detail {
@@ -1055,26 +1130,23 @@ fn apply_list_result(state: &mut Value, dir: &Path, listed: HubListResult) {
     if !listed.incomplete_platforms.is_empty() {
         host_status["incompletePlatforms"] = json!(listed.incomplete_platforms);
     }
-    state["hostStatuses"][LOCAL_HOST_ID] = host_status;
+    state["hostStatuses"][host_id] = host_status;
 }
 
-async fn check_android_ffmpeg(sdk: Option<&Path>) -> Result<(), Value> {
-    let binary = env::var("SERVE_EMU_FFMPEG")
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "ffmpeg".to_owned());
-    let (stdout, stderr, code) = run_host_command(
-        &binary,
-        &["-hide_banner", "-encoders"],
-        sdk,
-        Duration::from_secs(10),
-    )
-    .await;
+/// The reference's ffmpeg check, run on the device host as its hub would
+/// resolve `SERVE_EMU_FFMPEG` there.
+const FFMPEG_CHECK: &str = r#"const { spawnSync } = require("node:child_process");
+  const result = spawnSync(process.env.SERVE_EMU_FFMPEG?.trim() || "ffmpeg", ["-hide_banner", "-encoders"], {
+    stdio: "inherit", timeout: 10000, killSignal: "SIGKILL",
+  });
+  process.exitCode = result.error ? 1 : (result.status ?? 1);"#;
+
+async fn check_android_ffmpeg(ctx: &HostCtx) -> Result<(), Value> {
+    let (stdout, stderr, code) = ctx.run(&ctx.node_path, &["-e", FFMPEG_CHECK], None).await;
     if code != 0 {
         return Err(json!({
             "_tag": "DevicePlatformUnavailableError",
-            "hostId": LOCAL_HOST_ID,
+            "hostId": ctx.id,
             "platform": "android",
             "reason": "Android emulator video needs working ffmpeg with the libx264 encoder. Install it on the device host's PATH or set SERVE_EMU_FFMPEG there, then retry opening the emulator. After changing PATH or SERVE_EMU_FFMPEG, turn device support off and on for SSH hosts, or restart the local environment server.",
         }));
@@ -1088,7 +1160,7 @@ async fn check_android_ffmpeg(sdk: Option<&Path>) -> Result<(), Value> {
     if !has_x264 {
         return Err(json!({
             "_tag": "DevicePlatformUnavailableError",
-            "hostId": LOCAL_HOST_ID,
+            "hostId": ctx.id,
             "platform": "android",
             "reason": "Android emulator video needs the libx264 encoder. Install an ffmpeg build that includes libx264 on the device host, then retry opening the emulator. After changing PATH or SERVE_EMU_FFMPEG, turn device support off and on for SSH hosts, or restart the local environment server.",
         }));
@@ -1132,7 +1204,8 @@ fn classify_boot_reason(diagnostics: Option<&str>) -> &'static str {
     }
 }
 
-async fn shutdown(origin: &str, platform: &str, id: &str) -> Reply {
+async fn shutdown(ctx: &HostCtx, platform: &str, id: &str) -> Reply {
+    let origin = ctx.origin.as_str();
     let post_shutdown = |path: String, body: Value| async move {
         let res = query(
             hub_client(Duration::from_secs(15))
@@ -1154,7 +1227,7 @@ async fn shutdown(origin: &str, platform: &str, id: &str) -> Reply {
         .await
         {
             Ok(v) => Ok(v),
-            Err(cause) => match list_hub(origin).await {
+            Err(cause) => match list_hub(ctx).await {
                 Ok(listed)
                     if listed
                         .devices
@@ -1417,7 +1490,10 @@ impl DeviceService {
         let mut runtime = self.runtime.lock().await;
         let mut state = self.snapshot(dir);
         let host_id = input["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
-        if name != "close" && host_id != LOCAL_HOST_ID {
+        if name != "close"
+            && host_id != LOCAL_HOST_ID
+            && !(matches!(name, "open" | "shutdown") && self.ssh_config(host_id).is_some())
+        {
             return Err(bad_host(host_id));
         }
         let preferences = self
@@ -1446,6 +1522,16 @@ impl DeviceService {
                 self.stop_agent_locked(dir).await;
             }
             if !enabled {
+                let hosts: Vec<SshConfig> = self
+                    .ssh_hosts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(config, _)| config.clone())
+                    .collect();
+                for config in &hosts {
+                    self.ssh_stop(config, dir).await;
+                }
                 runtime.take();
                 state["sessions"] = json!([]);
                 state["devices"] = json!([]);
@@ -1465,7 +1551,15 @@ impl DeviceService {
         if name == "list" || name == "configure" {
             if let Some(id) = input["retryHostId"].as_str() {
                 if id != LOCAL_HOST_ID {
-                    return Err(bad_host(id));
+                    if self.ssh_config(id).is_none() {
+                        return Err(bad_host(id));
+                    }
+                    // `retryHost`: only that host, made ready and listed again.
+                    drop(runtime);
+                    if enabled {
+                        self.list_ssh_host(id, dir).await;
+                    }
+                    return Ok(self.snapshot(dir));
                 }
             }
             if let Some(tool) = input["updateTool"].as_str() {
@@ -1519,9 +1613,9 @@ impl DeviceService {
                     .any(|p| p["available"] == true)
             {
                 match ensure_hub(&mut runtime, dir).await {
-                    Ok(origin) => match list_hub(&origin).await {
+                    Ok(origin) => match list_hub(&HostCtx::local(&origin)).await {
                         Ok(listed) => {
-                            apply_list_result(&mut state, dir, listed);
+                            apply_list_result(&mut state, dir, LOCAL_HOST_ID, listed);
                             self.publish(&mut state);
                         }
                         Err(error) => {
@@ -1542,6 +1636,11 @@ impl DeviceService {
                         self.publish(&mut state);
                     }
                 }
+            }
+            if enabled && input["inspectOnly"] != true {
+                drop(runtime);
+                self.list_ssh_hosts(dir).await;
+                return Ok(self.snapshot(dir));
             }
             return Ok(wire(&state));
         }
@@ -1575,10 +1674,22 @@ impl DeviceService {
             } else {
                 closing.clone()
             };
+            // A lost SSH tunnel does not establish that the remote daemon stopped.
+            for s in &ending {
+                let session_host = s["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
+                if session_host != LOCAL_HOST_ID && self.ssh_current(session_host).await.is_none() {
+                    return Err(json!({
+                        "_tag": "DeviceHostUnavailableError",
+                        "hostId": session_host,
+                        "hostLabel": self.host_label(session_host),
+                        "reason": "Device host is reconnecting. Retry close after it reconnects.",
+                    }));
+                }
+            }
             // Open publishes under the same lock; an old close must not release a reopened claim.
             let agent = self.agent.lock().unwrap().clone();
             if let (Some(endpoint), true) = (agent, runtime.is_some()) {
-                for s in &ending {
+                for s in ending.iter().filter(|s| s["hostId"] == LOCAL_HOST_ID) {
                     let session = agent_device::session_name(
                         s["threadId"].as_str().unwrap_or(""),
                         s["hostId"].as_str().unwrap_or(""),
@@ -1595,18 +1706,24 @@ impl DeviceService {
             if do_shutdown {
                 self.release_launchers(&ending).await;
             }
-            if do_shutdown && !closing.is_empty() {
-                let Some(origin) = running_origin(&mut runtime) else {
-                    return Err(json!({
-                        "_tag": "DeviceHostUnavailableError",
-                        "hostId": closing[0]["hostId"],
-                        "reason": "Device host is not running. Reconnect before retrying close.",
-                    }));
-                };
+            if do_shutdown {
                 for s in &closing {
+                    let session_host = s["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
+                    let current = if session_host == LOCAL_HOST_ID {
+                        running_origin(&mut runtime).map(|origin| HostCtx::local(&origin))
+                    } else {
+                        self.ssh_current(session_host).await
+                    };
+                    let Some(ctx) = current else {
+                        return Err(json!({
+                            "_tag": "DeviceHostUnavailableError",
+                            "hostId": session_host,
+                            "reason": "Device host is not running. Reconnect before retrying close.",
+                        }));
+                    };
                     let dev_id = s["deviceId"].as_str().unwrap_or("");
                     let platform = s["platform"].as_str().unwrap_or("");
-                    shutdown(&origin, platform, dev_id).await?;
+                    shutdown(&ctx, platform, dev_id).await?;
                     if let Some(devices) = state["devices"].as_array_mut() {
                         for d in devices.iter_mut() {
                             if d["hostId"] == s["hostId"] && d["id"] == dev_id {
@@ -1622,11 +1739,20 @@ impl DeviceService {
                 .unwrap()
                 .retain(|s| !ending.iter().any(|e| e == s));
             self.publish(&mut state);
-            if do_shutdown && !closing.is_empty() {
-                if let Some(origin) = running_origin(&mut runtime) {
-                    if let Ok(listed) = list_hub(&origin).await {
-                        apply_list_result(&mut state, dir, listed);
-                        self.publish(&mut state);
+            if do_shutdown {
+                for s in &closing {
+                    let session_host = s["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
+                    let current = if session_host == LOCAL_HOST_ID {
+                        running_origin(&mut runtime).map(|origin| HostCtx::local(&origin))
+                    } else {
+                        self.ssh_current(session_host).await
+                    };
+                    if let Some(ctx) = current {
+                        if let Ok(listed) = list_hub(&ctx).await {
+                            state = self.snapshot(dir);
+                            apply_list_result(&mut state, dir, &ctx.id, listed);
+                            self.publish(&mut state);
+                        }
                     }
                 }
             }
@@ -1635,7 +1761,11 @@ impl DeviceService {
         let id = string(input, "deviceId")?;
         if name == "open" {
             let p = string(input, "platform")?;
-            let a = availability(p);
+            let a = if host_id == LOCAL_HOST_ID {
+                availability(p)
+            } else {
+                self.ssh_platform(host_id, p, dir).await
+            };
             if a["available"] == false {
                 return Err(
                     json!({"_tag":"DevicePlatformUnavailableError","hostId":host_id,"platform":p,"reason":a["reason"]}),
@@ -1643,23 +1773,31 @@ impl DeviceService {
             }
         }
         if !enabled {
-            return Err(disabled());
+            return Err(self.disabled_for(host_id));
         }
-        let origin = ensure_hub(&mut runtime, dir).await?;
+        let ctx = if host_id == LOCAL_HOST_ID {
+            HostCtx::local(&ensure_hub(&mut runtime, dir).await?)
+        } else {
+            let ctx = self.ssh_readiness(host_id, dir).await?;
+            // Readiness published the host's status.
+            state = self.snapshot(dir);
+            ctx
+        };
+        let origin = ctx.origin.clone();
         if name == "shutdown" {
-            let result = shutdown(&origin, string(input, "platform")?, id).await?;
+            let result = shutdown(&ctx, string(input, "platform")?, id).await?;
             state["sessions"]
                 .as_array_mut()
                 .unwrap()
                 .retain(|s| s["hostId"] != host_id || s["deviceId"] != id);
-            if let Ok(listed) = list_hub(&origin).await {
-                apply_list_result(&mut state, dir, listed);
+            if let Ok(listed) = list_hub(&ctx).await {
+                apply_list_result(&mut state, dir, &ctx.id, listed);
             }
             self.publish(&mut state);
             return Ok(result);
         }
-        let listed = list_hub(&origin).await?;
-        apply_list_result(&mut state, dir, listed);
+        let listed = list_hub(&ctx).await?;
+        apply_list_result(&mut state, dir, &ctx.id, listed);
         self.publish(&mut state);
         let device = state["devices"]
             .as_array()
@@ -1673,7 +1811,7 @@ impl DeviceService {
         if name == "open" {
             let thread = string(input, "threadId")?;
             if device["platform"] == "android" && device["physical"] != true {
-                check_android_ffmpeg(sdk_root().as_deref()).await?;
+                check_android_ffmpeg(&ctx).await?;
             }
             let mut active_device = device.clone();
             if device["booted"] != true && input["boot"] != false {
@@ -1740,11 +1878,11 @@ impl DeviceService {
                     .or(boot["id"].as_str())
                     .unwrap_or(id)
                     .to_owned();
-                let refreshed = list_hub(&origin).await?;
+                let refreshed = list_hub(&ctx).await?;
                 let platform_incomplete = device["platform"]
                     .as_str()
                     .is_some_and(|p| refreshed.incomplete_platforms.contains(&p));
-                apply_list_result(&mut state, dir, refreshed);
+                apply_list_result(&mut state, dir, &ctx.id, refreshed);
                 self.publish(&mut state);
                 active_device = if platform_incomplete {
                     None
@@ -1781,7 +1919,7 @@ impl DeviceService {
                 return Err(json!({
                     "_tag": "DeviceHostUnavailableError",
                     "hostId": host_id,
-                    "hostLabel": LOCAL_HOST_LABEL,
+                    "hostLabel": self.host_label(host_id),
                     "reason": "Device support was turned off while the device was opening.",
                 }));
             }
@@ -2027,7 +2165,8 @@ fn runs_on_xcode26_runtime(version: &str) -> bool {
 }
 
 /// `DeviceHubOperations.screenshot`.
-async fn hub_screenshot(origin: &str, device: &Value) -> Result<Vec<u8>, Value> {
+async fn hub_screenshot(ctx: &HostCtx, device: &Value) -> Result<Vec<u8>, Value> {
+    let origin = &ctx.origin;
     let platform = device["platform"].as_str().unwrap_or("");
     let id = device["id"].as_str().unwrap_or("");
     let url = format!(
@@ -2047,50 +2186,30 @@ async fn hub_screenshot(origin: &str, device: &Value) -> Result<Vec<u8>, Value> 
         && platform == "ios"
         && runs_on_xcode26_runtime(device["version"].as_str().unwrap_or(""))
     {
-        return default_display_screenshot(id).await;
+        return default_display_screenshot(ctx, id).await;
     }
     Err(op_err("screenshot", reason))
 }
 
-async fn default_display_screenshot(udid: &str) -> Result<Vec<u8>, Value> {
+async fn default_display_screenshot(ctx: &HostCtx, udid: &str) -> Result<Vec<u8>, Value> {
     use base64::Engine as _;
-    let sdk = sdk_root();
-    let mut command = tokio::process::Command::new("sh");
-    command
-        .args(["-c", DEFAULT_DISPLAY_SCREENSHOT, "sh", udid])
-        .envs(device_host_env(sdk.as_deref()))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let failed = |code: i64, stderr: String| {
-        json!({
+    let (stdout, stderr, code) = ctx
+        .run(
+            "sh",
+            &["-c", DEFAULT_DISPLAY_SCREENSHOT, "sh", udid],
+            Some(SCREENSHOT_TIMEOUT),
+        )
+        .await;
+    if code != 0 {
+        return Err(json!({
             "_tag": "DeviceOperationError",
             "operation": "screenshot",
             "reason": "command_failed",
             "exitCode": code,
             "cause": stderr.trim(),
-        })
-    };
-    let output = match command.spawn() {
-        Ok(child) => tokio::time::timeout(SCREENSHOT_TIMEOUT, child.wait_with_output()).await,
-        Err(error) => return Err(failed(127, error.to_string())),
-    };
-    let output = match output {
-        Err(_) => return Err(failed(124, String::new())),
-        Ok(Err(error)) => return Err(failed(127, error.to_string())),
-        Ok(Ok(output)) => output,
-    };
-    if !output.status.success() {
-        return Err(failed(
-            i64::from(output.status.code().unwrap_or(127)),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ));
+        }));
     }
-    let text: String = String::from_utf8_lossy(&output.stdout)
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
+    let text: String = stdout.chars().filter(|c| !c.is_whitespace()).collect();
     Ok(base64::engine::general_purpose::STANDARD
         .decode(text)
         .unwrap_or_default())
@@ -2151,8 +2270,13 @@ impl DeviceService {
 
     /// `setHostStatus` for the local host.
     fn set_host_status(&self, status: &str, detail: Option<String>) {
+        self.set_host_status_for(LOCAL_HOST_ID, status, detail)
+    }
+
+    /// `setHostStatus`: a host's status; this machine's is also the top-level one.
+    fn set_host_status_for(&self, host_id: &str, status: &str, detail: Option<String>) {
         let mut state = self.snapshot(Path::new(""));
-        let previous = state["hostStatuses"][LOCAL_HOST_ID].clone();
+        let previous = state["hostStatuses"][host_id].clone();
         let mut next = json!({});
         if previous["androidDiscoveryIncomplete"] == true {
             next["androidDiscoveryIncomplete"] = json!(true);
@@ -2161,17 +2285,14 @@ impl DeviceService {
             next["incompletePlatforms"] = previous["incompletePlatforms"].clone();
         }
         next["status"] = json!(status);
-        state["hostStatus"] = json!(status);
-        match &detail {
-            Some(detail) => {
-                next["detail"] = json!(detail);
-                state["hostStatusDetail"] = json!(detail);
-            }
-            None => {
-                state["hostStatusDetail"] = Value::Null;
-            }
+        if let Some(detail) = &detail {
+            next["detail"] = json!(detail);
         }
-        state["hostStatuses"][LOCAL_HOST_ID] = next;
+        if host_id == LOCAL_HOST_ID {
+            state["hostStatus"] = json!(status);
+            state["hostStatusDetail"] = detail.map_or(Value::Null, Value::from);
+        }
+        state["hostStatuses"][host_id] = next;
         self.publish(&mut state);
     }
 
@@ -2426,7 +2547,7 @@ impl DeviceService {
         };
         let target_host = target["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
         let device_id = target["deviceId"].as_str().unwrap_or("");
-        if target_host != LOCAL_HOST_ID {
+        if target_host != LOCAL_HOST_ID && self.ssh_config(target_host).is_none() {
             return Err(bad_host(target_host));
         }
         // resolveDevice: a ready host and its device, refreshed if not listed.
@@ -2436,16 +2557,20 @@ impl DeviceService {
             .map_err(|_| op_err("settings", "settings_failed"))?["enableDeviceSupport"]
             == true;
         if !enabled {
-            return Err(disabled());
+            return Err(self.disabled_for(target_host));
         }
         let mut runtime = self.runtime.lock().await;
-        let origin = match ensure_hub(&mut runtime, dir).await {
-            Ok(origin) => origin,
-            Err(error) => {
-                drop(runtime);
-                self.set_host_status("failed", Some(error_detail(&error)));
-                return Err(error);
+        let ctx = if target_host == LOCAL_HOST_ID {
+            match ensure_hub(&mut runtime, dir).await {
+                Ok(origin) => HostCtx::local(&origin),
+                Err(error) => {
+                    drop(runtime);
+                    self.set_host_status("failed", Some(error_detail(&error)));
+                    return Err(error);
+                }
             }
+        } else {
+            self.ssh_readiness(target_host, dir).await?
         };
         let find = |state: &Value| {
             state["devices"]
@@ -2459,9 +2584,9 @@ impl DeviceService {
         let device = match find(&self.snapshot(dir)) {
             Some(device) => device,
             None => {
-                let listed = list_hub(&origin).await?;
+                let listed = list_hub(&ctx).await?;
                 let mut state = self.snapshot(dir);
-                apply_list_result(&mut state, dir, listed);
+                apply_list_result(&mut state, dir, &ctx.id, listed);
                 self.publish(&mut state);
                 find(&state).ok_or_else(|| {
                     json!({"_tag":"DeviceNotFoundError","hostId":target_host,"deviceId":device_id})
@@ -2469,7 +2594,7 @@ impl DeviceService {
             }
         };
         drop(runtime);
-        let bytes = hub_screenshot(&origin, &device).await?;
+        let bytes = hub_screenshot(&ctx, &device).await?;
         let Some(png) = extract_png(&bytes) else {
             return Err(json!({
                 "_tag": "DeviceOperationError",
@@ -2546,6 +2671,277 @@ async fn test_host(input: &Value, dir: &Path) -> Reply {
 }
 
 impl DeviceService {
+    fn ssh_config(&self, host_id: &str) -> Option<SshConfig> {
+        self.ssh_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(config, _)| config.id == host_id)
+            .map(|(config, _)| config.clone())
+    }
+
+    fn ssh_summary(&self, host_id: &str) -> Option<Value> {
+        self.ssh_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(config, _)| config.id == host_id)
+            .map(|(_, summary)| summary.clone())
+    }
+
+    fn set_ssh_summary(&self, host_id: &str, update: impl FnOnce(&mut Value)) {
+        if let Some((_, summary)) = self
+            .ssh_hosts
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|(config, _)| config.id == host_id)
+        {
+            update(summary);
+        }
+    }
+
+    pub(super) fn host_label(&self, host_id: &str) -> String {
+        if host_id == LOCAL_HOST_ID {
+            return LOCAL_HOST_LABEL.into();
+        }
+        self.ssh_config(host_id)
+            .map(|config| config.label)
+            .unwrap_or_else(|| host_id.to_owned())
+    }
+
+    /// `readiness`'s refusal while device support is off.
+    fn disabled_for(&self, host_id: &str) -> Value {
+        let mut error = disabled();
+        error["hostId"] = json!(host_id);
+        error["hostLabel"] = json!(self.host_label(host_id));
+        error
+    }
+
+    /// `platformAvailability` for an SSH host: its probe, so tooling
+    /// installed since is found, or that it cannot be reached.
+    async fn ssh_platform(&self, host_id: &str, platform: &str, dir: &Path) -> Value {
+        let Some(config) = self.ssh_config(host_id) else {
+            return json!({"platform": platform, "available": false});
+        };
+        match ssh_host::probe(&config, &ssh_host::owner(dir, host_id)).await {
+            Ok(probed) => {
+                let platforms = probed["platforms"].clone();
+                self.set_ssh_summary(host_id, |summary| summary["platforms"] = platforms.clone());
+                platforms
+                    .as_array()
+                    .and_then(|list| list.iter().find(|p| p["platform"] == platform))
+                    .cloned()
+                    .unwrap_or_else(|| json!({"platform": platform, "available": false}))
+            }
+            Err(_) => json!({
+                "platform": platform,
+                "available": false,
+                "reason": "Cannot reach device host. Test its SSH connection in Settings.",
+            }),
+        }
+    }
+
+    /// `current`: an SSH host's hub while its tunnel is up.
+    async fn ssh_current(&self, host_id: &str) -> Option<HostCtx> {
+        let mut ready = self.ssh_ready.lock().await;
+        let entry = ready.get_mut(host_id)?;
+        if !entry.tunnel.alive() {
+            ready.remove(host_id);
+            return None;
+        }
+        Some(entry.ctx.clone())
+    }
+
+    /// `readiness` for an SSH host: probes it, starts its hub with the
+    /// bootstrap, forwards its ports here, and reports each phase.
+    async fn ssh_readiness(&self, host_id: &str, dir: &Path) -> Result<HostCtx, Value> {
+        let Some(config) = self.ssh_config(host_id) else {
+            return Err(bad_host(host_id));
+        };
+        let enabled = self
+            .settings
+            .internal()
+            .map_err(|_| op_err("settings", "settings_failed"))?["enableDeviceSupport"]
+            == true;
+        if !enabled {
+            return Err(self.disabled_for(host_id));
+        }
+        let ctx = match self.ssh_connect(&config, dir).await {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                let actionable = (error.step == "probe")
+                    .then(|| ssh_host::probe_failure_message(&error))
+                    .flatten();
+                let detail = actionable.clone().unwrap_or_else(|| {
+                    format!("Device host {host_id} failed while {}.", error.step)
+                });
+                self.set_host_status_for(host_id, "failed", Some(detail));
+                return Err(json!({
+                    "_tag": "DeviceHostUnavailableError",
+                    "hostId": host_id,
+                    "hostLabel": config.label,
+                    "reason": actionable.unwrap_or_else(|| format!("Device support failed during {}.", error.step)),
+                    "cause": error.encoded(host_id),
+                }));
+            }
+        };
+        if self.snapshot(dir)["hostStatuses"][host_id]["status"] != "ready" {
+            self.set_host_status_for(host_id, "ready", None);
+        }
+        Ok(ctx)
+    }
+
+    /// `ensureReady` and `connect` for an SSH host.
+    async fn ssh_connect(
+        &self,
+        config: &SshConfig,
+        dir: &Path,
+    ) -> Result<HostCtx, ssh_host::HostError> {
+        let mut ready = self.ssh_ready.lock().await;
+        if let Some(entry) = ready.get_mut(&config.id) {
+            if entry.tunnel.alive() {
+                return Ok(entry.ctx.clone());
+            }
+            ready.remove(&config.id);
+        }
+        let owner = ssh_host::owner(dir, &config.id);
+        let probed = ssh_host::probe(config, &owner).await?;
+        let hub_installed = probed["hubInstalled"] == true;
+        let hub_tool = probed["tools"]["hub"].clone();
+        self.set_ssh_summary(&config.id, |summary| *summary = probed);
+        if hub_installed {
+            self.set_host_status_for(&config.id, "starting", None);
+        } else {
+            self.set_host_status_for(
+                &config.id,
+                "installing",
+                Some(ssh_host::install_message("device hub", &hub_tool)),
+            );
+        }
+        self.ssh_activated.lock().unwrap().insert(config.id.clone());
+        let mut attempt = 0;
+        loop {
+            let started = ssh_host::start(config, &owner, false).await?;
+            self.set_host_status_for(&config.id, "starting", None);
+            let previous_agent = self
+                .ssh_summary(&config.id)
+                .is_some_and(|summary| summary["agentDeviceInstalled"] == true);
+            self.set_ssh_summary(&config.id, |summary| {
+                summary["platforms"] = started.platforms.clone();
+                match started.tools.is_null() {
+                    true => {
+                        if let Some(object) = summary.as_object_mut() {
+                            object.remove("tools");
+                        }
+                    }
+                    false => summary["tools"] = started.tools.clone(),
+                }
+                summary["hubInstalled"] = json!(true);
+                summary["agentDeviceInstalled"] = json!(previous_agent);
+            });
+            match ssh_host::open_tunnel(config, &started).await {
+                Ok((tunnel, hub_port, _daemon_port)) => {
+                    let platform = |name: &str| {
+                        started.platforms.as_array().is_some_and(|list| {
+                            list.iter()
+                                .any(|p| p["platform"] == name && p["available"] == true)
+                        })
+                    };
+                    let ctx = HostCtx {
+                        id: config.id.clone(),
+                        origin: format!("http://127.0.0.1:{hub_port}"),
+                        run: HostRun::Ssh {
+                            config: config.clone(),
+                            owner: owner.clone(),
+                        },
+                        node_path: started.node_path.clone(),
+                        ios: platform("ios"),
+                        android: platform("android"),
+                    };
+                    ready.insert(
+                        config.id.clone(),
+                        SshReady {
+                            ctx: ctx.clone(),
+                            tunnel,
+                        },
+                    );
+                    self.set_host_status_for(&config.id, "ready", None);
+                    return Ok(ctx);
+                }
+                // SSH binds after the reservation is released, so a competing bind needs fresh ports.
+                Err(error)
+                    if attempt < 2
+                        && ["forwarding ports", "waiting for SSH forward"]
+                            .contains(&error.step.as_str()) =>
+                {
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// `stop` for an SSH host: drops its tunnel and stops what it started there.
+    async fn ssh_stop(&self, config: &SshConfig, dir: &Path) {
+        self.ssh_ready.lock().await.remove(&config.id);
+        if self.ssh_activated.lock().unwrap().remove(&config.id) {
+            let _ = ssh_host::bootstrap(config, &ssh_host::owner(dir, &config.id), "stop").await;
+        }
+    }
+
+    /// `list` for the SSH hosts: each one made ready and listed, or its failure as its status.
+    async fn list_ssh_hosts(&self, dir: &Path) {
+        let hosts: Vec<SshConfig> = self
+            .ssh_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(config, _)| config.clone())
+            .collect();
+        futures_util::stream::iter(hosts)
+            .for_each_concurrent(4, |config| async move {
+                self.list_ssh_host(&config.id, dir).await
+            })
+            .await;
+    }
+
+    /// One SSH host made ready and listed, or its failure as its status.
+    async fn list_ssh_host(&self, host_id: &str, dir: &Path) {
+        let Some(config) = self.ssh_config(host_id) else {
+            return;
+        };
+        {
+            {
+                let listed = match self.ssh_readiness(&config.id, dir).await {
+                    Ok(ctx) => list_hub(&ctx).await,
+                    Err(error) => Err(error),
+                };
+                match listed {
+                    Ok(listed) => {
+                        if self.ssh_config(&config.id).as_ref() != Some(&config) {
+                            return;
+                        }
+                        let mut state = self.snapshot(dir);
+                        if state["hostStatus"] == "disabled" {
+                            return;
+                        }
+                        apply_list_result(&mut state, dir, &config.id, listed);
+                        self.publish(&mut state);
+                    }
+                    Err(error) => {
+                        let detail = if error["_tag"] == "DeviceHostUnavailableError" {
+                            error["reason"].as_str().unwrap_or_default().to_owned()
+                        } else {
+                            crate::mcp_oauth::format_device_error(&error)
+                        };
+                        self.set_host_status_for(&config.id, "failed", Some(detail));
+                    }
+                }
+            }
+        }
+    }
+
     /// `inspect` for the SSH hosts: each one's probe, or the reference's
     /// note that its versions could not be checked.
     async fn inspect_ssh_hosts(&self, dir: &Path) {
@@ -2595,20 +2991,26 @@ impl DeviceService {
             .unwrap_or_default();
         super::local_ssh::retain_remote(&mut next).await;
         let next: Vec<SshConfig> = next.iter().filter_map(SshConfig::from_settings).collect();
-        let removed: Vec<String> = {
+        let removed_hosts: Vec<SshConfig> = {
             let mut hosts = self.ssh_hosts.lock().unwrap();
             let removed = hosts
                 .iter()
                 .filter(|(config, _)| !next.contains(config))
-                .map(|(config, _)| config.id.clone())
+                .map(|(config, _)| config.clone())
                 .collect::<Vec<_>>();
             hosts.retain(|(config, _)| next.contains(config));
             removed
         };
+        let removed: Vec<String> = removed_hosts
+            .iter()
+            .map(|config| config.id.clone())
+            .collect();
         if !removed.is_empty() {
             self.refresh_hosts(dir, &removed);
-            for id in &removed {
-                let _ = tokio::fs::remove_file(agent_device::config_path(dir, id)).await;
+            // Stop old writers before deleting config files or publishing replacements.
+            for config in &removed_hosts {
+                self.ssh_stop(config, dir).await;
+                let _ = tokio::fs::remove_file(agent_device::config_path(dir, &config.id)).await;
             }
         }
         let added = {

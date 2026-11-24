@@ -21,7 +21,7 @@ fn require_device_access<'a, S: McpHost>(host: &S, caller: &'a Caller) -> Result
 }
 
 /// Formats a `DeviceToolError` payload as its `@t3tools/contracts` `.message` getter.
-pub(super) fn format_device_error(error: &Value) -> String {
+pub(crate) fn format_device_error(error: &Value) -> String {
     match error["_tag"].as_str() {
         Some("DeviceToolUnavailableError") => error["reason"]
             .as_str()

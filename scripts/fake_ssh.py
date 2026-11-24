@@ -79,7 +79,9 @@ def main():
     hosts = json.loads(open(os.environ["T3_FAKE_SSH_HOSTS"]).read())
     tunnel = any(option == "-L" for option, _ in options)
     stdin = b"" if tunnel or sys.stdin.isatty() else sys.stdin.buffer.read()
-    entry = {"args": argv}
+    # Forwarded ports are fresh on every connection.
+    entry = {"args": [re.sub(r"^127\.0\.0\.1:\d+:127\.0\.0\.1:\d+$", "127.0.0.1:<port>:127.0.0.1:<port>", arg)
+                      for arg in argv]}
     if stdin:
         text = stdin.decode()
         owner = re.search(r'^const owner = "([^"]*)";$', text, re.M)
