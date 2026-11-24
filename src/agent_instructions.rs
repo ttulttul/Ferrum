@@ -114,25 +114,36 @@ pub(crate) fn runtime(harness: &str, model: Option<&str>, effort: Option<&str>) 
 
 /// Claude Code's system prompt append: the runtime text, then, for a thread
 /// with T3's MCP server, the orchestration text and Claude's own text about
-/// background waits and `send_to_user`.
-pub(crate) fn claude_append(has_mcp: bool) -> String {
+/// background waits and `send_to_user`, then the device tool text (with its
+/// ToolSearch line) for a thread that may use devices.
+pub(crate) fn claude_append(has_mcp: bool, device: bool) -> String {
     let mut append = runtime("Claude Code", None, None);
     if has_mcp {
-        let tools = format!(
+        let mut tools = format!(
             "{}{}{}",
             text("orchestration"),
             text("claudeBackgroundWait"),
             text("claudeSendToUser")
         );
+        if device {
+            tools.push_str(&format!("\n{}\n", text("deviceToolsWithToolSearch")));
+        }
         append.push_str(&without_unserved(&tools, &unserved()));
     }
     append
 }
 
+/// The device tool text a Claude subagent starts with, as the reference's
+/// `SubagentStart` hook adds it.
+pub(crate) fn claude_subagent_device_context() -> String {
+    without_unserved(text("deviceToolsWithToolSearch"), &unserved())
+}
+
 /// Codex's turn context for a thread with T3's MCP server: each
-/// orchestration section, the runtime text, and the browser tool text, each
-/// left out when nothing of it remains.
-pub(crate) fn codex_additional_context(model: &str, effort: Option<&str>) -> Value {
+/// orchestration section, the runtime text, and the browser tool text (with
+/// the device tool text for a thread that may use devices), each left out
+/// when nothing of it remains.
+pub(crate) fn codex_additional_context(model: &str, effort: Option<&str>, device: bool) -> Value {
     let unserved = unserved();
     let mut context = serde_json::Map::new();
     for (index, section) in INSTRUCTIONS["orchestrationSections"]
@@ -153,7 +164,17 @@ pub(crate) fn codex_additional_context(model: &str, effort: Option<&str>) -> Val
         "t3_code_runtime".into(),
         json!({"kind": "application", "value": runtime("Codex", Some(model), effort)}),
     );
-    let tools = without_unserved(text("browserTools"), &unserved);
+    // `toolInstructions`: the browser text, then the device text for a
+    // thread that may use devices.
+    let mut tools = text("browserTools").to_owned();
+    if device {
+        tools = [tools.as_str(), text("deviceTools")]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+    }
+    let tools = without_unserved(&tools, &unserved);
     if !tools.trim().is_empty() {
         context.insert(
             "t3_code_tools".into(),
@@ -198,11 +219,35 @@ mod tests {
     }
 
     #[test]
+    fn device_text_goes_only_to_threads_that_may_use_devices() {
+        let devices = "## T3 Code devices";
+        assert!(!claude_append(true, false).contains(devices));
+        assert!(claude_append(true, true)
+            .ends_with(&format!("\n{}\n", text("deviceToolsWithToolSearch"))));
+        assert!(!claude_append(false, true).contains(devices));
+        let tools =
+            |device| codex_additional_context("m", None, device)["t3_code_tools"]["value"].clone();
+        assert!(!tools(false).as_str().unwrap().contains(devices));
+        assert_eq!(
+            tools(true),
+            json!(format!(
+                "{}\n\n{}",
+                text("browserTools"),
+                text("deviceTools")
+            ))
+        );
+        assert_eq!(
+            claude_subagent_device_context(),
+            text("deviceToolsWithToolSearch")
+        );
+    }
+
+    #[test]
     fn served_instructions_name_only_served_tools() {
         let unserved = unserved();
         for text in [
-            claude_append(true),
-            codex_additional_context("m", None).to_string(),
+            claude_append(true, true),
+            codex_additional_context("m", None, true).to_string(),
         ] {
             for line in text.split('\n') {
                 assert!(!names_any(line, &unserved), "{line}");

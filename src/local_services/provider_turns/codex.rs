@@ -572,10 +572,11 @@ impl Session {
             json!({"mode": provider.interaction_mode(), "settings": settings});
         // T3's instructions for the agent, as the reference's turns carry
         // them (`buildCodexAdditionalContext`).
-        if provider.mcp.is_some() {
+        if let Some(mcp) = &provider.mcp {
             turn_params["additionalContext"] = crate::agent_instructions::codex_additional_context(
                 &provider.model,
                 provider.reasoning_effort.as_deref(),
+                mcp.device_tools,
             );
         }
         let started = self.request("turn/start", turn_params).await?;

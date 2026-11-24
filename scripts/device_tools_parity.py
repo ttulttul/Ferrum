@@ -35,7 +35,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
 
-from client_thread_parity import FIXTURES, rpc, scenario_env, seed_turn
+from client_thread_parity import FIXTURES, cli_launch, rpc, scenario_env, seed_turn
 from parity_harness import REFUSED, assert_nothing_escaped, managed_server
 
 # Startup fetches both servers attempt, which the harness's refusing proxy refuses.
@@ -418,7 +418,7 @@ def launcher_files(root: Path):
     return files
 
 
-def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None):
+def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False):
     root = Path(directory, name, phase)
     root.mkdir(parents=True, exist_ok=True)
     request_log = root / "fake-requests.jsonl"
@@ -429,13 +429,14 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
     if avdmanager_failed:
         hub_mode_file.write_text(json.dumps({"avdmanagerFailed": True}))
 
+    claude = provider == "claude"
     scenario = {
         "name": f"device tools {phase}",
-        "instance": "codex",
-        "model": "fixture",
-        "scenario": "codex_turn.json",
+        "instance": "claudeAgent" if claude else "codex",
+        "model": "claude-opus-5-5" if claude else "fixture",
+        "scenario": "claude_turn.json" if claude else "codex_turn.json",
     }
-    env, _, log = scenario_env(Path(directory, name), phase, root, scenario, {"codex"})
+    env, _, log = scenario_env(Path(directory, name), phase, root, scenario, {provider})
     env["ANDROID_HOME"] = str(sdk)
     env.pop("ANDROID_SDK_ROOT", None)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
@@ -444,13 +445,22 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
     env.pop("EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS", None)
     env.pop("SERVE_EMU_FFMPEG", None)
 
-    turn = json.loads((FIXTURES / "codex_turn.json").read_text())
+    turn = json.loads((FIXTURES / scenario["scenario"]).read_text())
     started = next(
-        i for i, step in enumerate(turn["steps"]) if step.get("send", {}).get("method") == "turn/started"
+        i for i, step in enumerate(turn["steps"])
+        if step.get("send", {}).get("method") == "turn/started"
+        or step.get("send", {}).get("subtype") == "init"
     )
-    turn["steps"][started + 1 : started + 1] = [
-        {"mcp": {"tool": tool, "arguments": arguments}} for tool, arguments in plan
-    ]
+    steps = [{"mcp": {"tool": tool, "arguments": arguments}} for tool, arguments in plan]
+    if claude and enable_devices:
+        # A native subagent starting: Claude Code calls the SubagentStart hook the server registered.
+        steps[:0] = [
+            {"send": {"type": "control_request", "request_id": "hook-1", "request": {
+                "subtype": "hook_callback", "callback_id": "hook_0", "tool_use_id": None,
+                "input": {"hook_event_name": "SubagentStart", "agent_id": "agent-1", "agent_type": "general-purpose"}}}},
+            {"expect": "control_response"},
+        ]
+    turn["steps"][started + 1 : started + 1] = steps
     fixture = root / "device-turn.json"
     fixture.write_text(json.dumps(turn))
     env["FAKE_PROVIDER_SCENARIO"] = str(fixture)
@@ -489,6 +499,25 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
         rpc(url, cookie, "orchestration.dispatchCommand", seeded["dispatch"])
         raw_answers = wait_answers(log, len(plan))
         answers = [normalize_answer(a, Path(directory)) for a in raw_answers]
+        if launch:
+            # The agent instructions the CLI was launched with (Codex's turn context, Claude Code's
+            # system prompt append), compared as the thread suite compares them.
+            answers.append(cli_launch(log, Path(directory)))
+            plan = [*plan, ("instructions", {})]
+        if claude:
+            # Claude Code's initialize hooks and the server's answer to the SubagentStart hook.
+            seen = []
+            for line in Path(f"{log}.messages").read_text().splitlines():
+                message = json.loads(json.loads(line)["line"])
+                request = message.get("request") or {}
+                if request.get("subtype") == "initialize":
+                    # Only the device hook: Rust does not register the reference's Stop hook yet.
+                    hooks = request.get("hooks") or {}
+                    seen.append({"initialize SubagentStart hook": hooks.get("SubagentStart")})
+                if message.get("type") == "control_response":
+                    seen.append({"control_response": message.get("response")})
+            answers.append(seen)
+            plan = [*plan, ("subagent hook", {})]
         launched = None
         if configure:
             # Turning agent access off stops the daemon with its own CLI.
@@ -545,7 +574,7 @@ def run_server(name, command, reference_root, directory):
         (
             "off",
             [("device_list", {}), ("device_open", {}), ("device_screenshot", {}), ("device_close", {})],
-            dict(enable_devices=False),
+            dict(enable_devices=False, launch=True),
         ),
         (
             "ready",
@@ -557,7 +586,7 @@ def run_server(name, command, reference_root, directory):
                 ("device_close", {"hostId": "unknown-host"}),
                 ("device_close", {"deviceId": "   "}),
             ],
-            dict(enable_devices=True),
+            dict(enable_devices=True, launch=True),
         ),
         (
             "sessions",
@@ -605,6 +634,16 @@ def run_server(name, command, reference_root, directory):
                 enable_devices=True,
                 configure=({"agentAccessEnabled": True}, {"agentAccessEnabled": False}),
             ),
+        ),
+        (
+            "claude",
+            [("device_list", {"hostId": "local"})],
+            dict(enable_devices=True, provider="claude", launch=True),
+        ),
+        (
+            "claude-off",
+            [("device_list", {})],
+            dict(enable_devices=False, provider="claude", launch=True),
         ),
         (
             "fallback",
