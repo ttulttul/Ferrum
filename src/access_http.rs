@@ -1,4 +1,4 @@
-use crate::auth_service::{AuthService, Session, STANDARD};
+use crate::auth_service::{AuthService, Session, ADMINISTRATIVE};
 #[cfg(feature = "native")]
 use crate::AppState;
 use axum::{
@@ -237,7 +237,7 @@ async fn exchange<S: AuthHost>(
         .get("scope")
         .map(|v| v.split_whitespace().map(str::to_owned).collect::<Vec<_>>());
     if scopes.as_ref().is_some_and(|scopes| {
-        scopes.is_empty() || scopes.iter().any(|p| !STANDARD.contains(&p.as_str()))
+        scopes.is_empty() || scopes.iter().any(|p| !ADMINISTRATIVE.contains(&p.as_str()))
     }) {
         return auth_failure(&h, "invalid_scope");
     }
@@ -347,7 +347,27 @@ async fn admin<S: AuthHost>(State(state): State<Arc<S>>, req: Request) -> Respon
         "/api/auth/pairing-token" if state.pairing_refusal().is_some() => {
             return policy_forbidden(&state.pairing_refusal().unwrap_or_default());
         }
-        "/api/auth/pairing-token" => state.auth().pair(&p, &json),
+        "/api/auth/pairing-token" => {
+            // A known scope the caller does not hold is refused as that scope's requirement,
+            // after the empty and repeated lists the grant itself refuses.
+            if json.get("access").is_none() {
+                if let Some(scopes) = json["scopes"].as_array() {
+                    let names: Vec<&str> = scopes.iter().filter_map(Value::as_str).collect();
+                    let repeated = names
+                        .iter()
+                        .enumerate()
+                        .any(|(i, s)| names[..i].contains(s));
+                    let known = names.len() == scopes.len()
+                        && names.iter().all(|s| ADMINISTRATIVE.contains(s));
+                    if !names.is_empty() && !repeated && known {
+                        if let Some(missing) = names.iter().find(|s| !p.has(s)) {
+                            return scope_error(&parts.headers, missing);
+                        }
+                    }
+                }
+            }
+            state.auth().pair(&p, &json)
+        }
         "/api/auth/pairing-links/revoke" => match field("id") {
             Some(id) => state
                 .auth()

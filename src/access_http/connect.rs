@@ -1,4 +1,4 @@
-use super::{header, principal, scope_error, SECRET_HEADERS};
+use super::{principal, scope_error, SECRET_HEADERS};
 use crate::{
     auth_error,
     auth_service::{iso, now, storage::Storage},
@@ -7,7 +7,7 @@ use crate::{
 use axum::{
     body::to_bytes,
     extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -136,29 +136,24 @@ fn internal() -> Response {
         "Could not persist environment relay configuration.",
     )
 }
-fn forwarded(h: &HeaderMap) -> bool {
-    ["x-forwarded-host", "x-forwarded-proto"]
-        .iter()
-        .any(|k| header(h, k).is_some_and(|v| !v.trim().is_empty()))
-}
 async fn handler(State(s): State<Arc<AppState>>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let path = parts.uri.path();
     let kind = path.rsplit('/').next().unwrap_or_default();
-    let owner = if path.starts_with("/api/connect/") {
+    let linkable = if path.starts_with("/api/connect/") {
         let session = match principal(&s, &parts.headers) {
             Ok(p) => p,
             Err(e) => return auth_error(&parts.headers, e),
         };
-        let scope = if matches!(kind, "link-state" | "reachability") {
-            "relay:read"
-        } else {
-            "relay:write"
+        let scope = match kind {
+            "link-state" | "reachability" => "relay:read",
+            "link-proof" | "relay-config" => crate::auth_service::RELAY_CONFIGURE,
+            _ => "relay:write",
         };
         if !session.has(scope) {
             return scope_error(&parts.headers, scope);
         }
-        session.owner
+        session.has(crate::auth_service::RELAY_CONFIGURE) && session.has("relay:write")
     } else {
         false
     };
@@ -186,7 +181,8 @@ async fn handler(State(s): State<Arc<AppState>>, req: Request) -> Response {
     match kind {
         "link-state" => {
             let mut result = service.state();
-            result["linkableHere"] = json!(owner && !forwarded(&parts.headers));
+            // Linking also writes relay preferences, so configure alone cannot finish it.
+            result["linkableHere"] = json!(linkable);
             Json(result).into_response()
         }
         "reachability" => {

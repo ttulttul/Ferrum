@@ -306,6 +306,28 @@ def exercise(stack, url, owner_cookie, relay_key):
 
     record("unlink manual environment", post("/api/connect/unlink",{}))
 
+    # #37823: setting up T3 Connect needs relay:configure, which only the owner's session holds.
+    # A session granted the standard relay scopes is refused link proofs and relay configuration,
+    # and is told it cannot link here; a grant may name relay:configure only if its issuer holds it.
+    def standard_session(scopes):
+        status, _, body = post("/api/auth/pairing-token", {"scopes": scopes})
+        assert status == 200, (status, body)
+        status, headers, _ = post("/api/auth/browser-session", {"credential": json.loads(body)["credential"]}, "")
+        assert status == 200
+        return headers["set-cookie"].split(";", 1)[0]
+    relay_writer = standard_session(["relay:read", "relay:write", "access:write"])
+    record("relay writer asks for a link proof", post("/api/connect/link-proof", proof_input, relay_writer))
+    record("relay writer applies relay config", post("/api/connect/relay-config", config, relay_writer))
+    status, _, body = harness.http(url, "GET", "/api/connect/link-state", headers={"Cookie": relay_writer})
+    observations["relay writer can link here"] = status, status == 200 and json.loads(body)["linkableHere"]
+    configurer = standard_session(["relay:read", "relay:write", "relay:configure"])
+    # The proof itself is signed afresh on each server, so only its status is compared.
+    observations["configure grant asks for a link proof"] = post("/api/connect/link-proof", proof_input, configurer)[0]
+    status, _, body = harness.http(url, "GET", "/api/connect/link-state", headers={"Cookie": configurer})
+    observations["configure grant can link here"] = status, status == 200 and json.loads(body)["linkableHere"]
+    record("reader cannot grant relay:configure",
+           post("/api/auth/pairing-token", {"scopes": ["relay:configure"]}, relay_writer))
+
     code = issue()
     status, headers, _ = post("/api/auth/browser-session", {"credential": code}, "")
     assert status == 200
@@ -373,6 +395,9 @@ def main():
             else:
                 print("FAIL", name, repr(original), repr(rust), sep="\n")
                 failures += 1
+        # Relay issuers and endpoints here are example hosts; every server ran behind the
+        # harness's loopback proxy, so none of them was reached.
+        harness.assert_nothing_escaped()
         raise SystemExit(bool(failures))
 
 
