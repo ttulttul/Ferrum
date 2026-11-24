@@ -184,6 +184,8 @@ class Provider(BaseHTTPRequestHandler):
                         if target["pullRequestId"] != "PR_3":
                             self.reply(422, {"errors":[{"message":"Wrong PR"}]})
                             return
+                        if key == "mergePullRequest":
+                            self.server.merge_heads.append(target.get("expectedHeadOid"))
                         self.server.actions.append((key,target.get("mergeMethod"),target.get("updateMethod")))
                         pr = self.server.repository["pullRequest"]
                         if key == "closePullRequest":
@@ -255,6 +257,7 @@ def github_fixture(stack, directory):
     host.requests = []
     host.repository = deepcopy(REPOSITORY)
     host.actions = []
+    host.merge_heads = []
     host.file_writes = []
     host.deleted = 0
     host.ref_oid = "a"*40
@@ -344,6 +347,10 @@ def main():
                 payload["replyWithSummary"] = True
             if action == "merge":
                 payload["mergeMethod"] = "squash"
+                for label, sha in [("stale head", "abc1234"), ("abbreviated head", "AAAAAAA")]:
+                    pinned = rpc("pullRequests.runAction", {**payload, "expectedHeadSha": sha})
+                    pinned["name"] += " " + label
+                    cases.append(pinned)
             case=rpc("pullRequests.runAction",payload)
             case["name"] += " " + action
             cases.append(case)
@@ -355,7 +362,7 @@ def main():
                     ws.send(harness.encode(case["frame"]).decode())
                 packets = [harness.recv_frame(ws, timeout=15) for ws in sockets]
                 payload = case["frame"]["payload"]
-                expected_failure = payload.get("scope") == "other/repo" or "stackNumber" in payload or payload.get("threadId")=="Other"
+                expected_failure = payload.get("scope") == "other/repo" or payload.get("expectedHeadSha") == "abc1234" or "stackNumber" in payload or payload.get("threadId")=="Other"
                 exits = [json.loads(p)["exit"] for p in packets]
                 ok = packets[0] == packets[1] and all(
                     e["_tag"] == ("Failure" if expected_failure else "Success") for e in exits)
@@ -370,7 +377,10 @@ def main():
         for provider in providers:
             expected_actions = [(m,None,None) for m in ("convertPullRequestToDraft","markPullRequestReadyForReview",
                 "closePullRequest","reopenPullRequest","disablePullRequestAutoMerge","revertPullRequest")]
-            expected_actions.append(("mergePullRequest","SQUASH",None))
+            expected_actions.extend([("mergePullRequest","SQUASH",None)] * 2)
+            if provider.merge_heads != [PR["headRefOid"], None]:
+                failures += 1
+                print("FAIL merge head pins", provider.merge_heads)
             if provider.file_writes != [("lib.rs",True),("README.md",True),("lib.rs",False)]:
                 failures += 1
                 print("FAIL file toggles",provider.file_writes)
@@ -389,6 +399,7 @@ def main():
             if provider.reviews != [{"event":"COMMENT","body":"Reviewed","comments":[{"path":"lib.rs","side":"RIGHT","line":1,"body":"Inline remark"}]}]:
                 failures += 1
                 print("FAIL unexpected submitted review",provider.reviews)
+        harness.assert_nothing_escaped()
         print(f"{len(cases)} client comparisons and two provider write logs checked")
         return 1 if failures else 0
 

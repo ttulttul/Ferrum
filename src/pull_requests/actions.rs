@@ -129,6 +129,13 @@ pub(super) async fn run(
     if input.get("updateMethod").is_some() && action != "update-branch" {
         return Err(refused("update-branch"));
     }
+    let pinned = if let Some(expected) = input["expectedHeadSha"].as_str() {
+        let (current, _) = super::detail::read_core(gh, OP, repo, number).await?;
+        let head = current["repository"]["pullRequest"]["headRefOid"].as_str();
+        Some(super::pinned_head(head, expected)?.to_owned())
+    } else {
+        None
+    };
     if action == "delete-branch" {
         return delete_branch(gh, &vars, number).await;
     }
@@ -192,12 +199,11 @@ pub(super) async fn run(
                 } else {
                     ("mergePullRequest", "$input:MergePullRequestInput!")
                 };
-                (
-                    method,
-                    signature,
-                    "$input",
-                    json!({"input":{"pullRequestId":id,"mergeMethod":strategy}}),
-                )
+                let mut merge = json!({"pullRequestId":id,"mergeMethod":strategy});
+                if let Some(head) = pinned {
+                    merge["expectedHeadOid"] = json!(head);
+                }
+                (method, signature, "$input", json!({"input":merge}))
             }
         }
         _ => {

@@ -146,6 +146,29 @@ fn valid_sha(v: &str) -> bool {
     (7..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Resolve the caller's reviewed revision to the full head reported by the host.
+fn pinned_head<'a>(current: Option<&'a str>, expected: &str) -> Result<&'a str, Value> {
+    let prefix = expected.len() >= 7 && expected.bytes().all(|b| b.is_ascii_hexdigit());
+    current
+        .filter(|head| {
+            if prefix {
+                head.get(..expected.len())
+                    .is_some_and(|start| start.eq_ignore_ascii_case(expected))
+            } else {
+                *head == expected
+            }
+        })
+        .ok_or_else(|| {
+            error(
+                "runAction",
+                &format!(
+                    "The head is now {}, not {expected}. Review the new commits first.",
+                    current.unwrap_or("unknown")
+                ),
+            )
+        })
+}
+
 /// One pull request of a Bitbucket project (`bitbucket_pr`), its cached summaries cleared
 /// after a write.
 async fn bitbucket_read(

@@ -1161,6 +1161,13 @@ async fn run_action(repo: &Repository<'_>, input: &Value, number: u64) -> Result
     if action == "merge" && !can_write {
         return Err(refusal("runAction", action_refusal(action)));
     }
+    if let Some(expected) = input["expectedHeadSha"].as_str() {
+        let current = repo
+            .change_request(number)
+            .await
+            .map_err(|e| e.to_error("runAction", "getChangeRequest"))?;
+        super::pinned_head(current["headSha"].as_str(), expected)?;
+    }
     let failed = |e: ApiError| e.to_error("runAction", "runAction");
     let (path, _) = repo.path().map_err(failed)?;
     let pull = format!("{path}/pullrequests/{number}");
