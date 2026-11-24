@@ -57,6 +57,9 @@ Steps:
                              "headers" are sent with that request only.
                              With "background": true the call runs while
                              later steps play; {"await": "<as>"} waits for it.
+                             With "retryWhenText": "..." and "retries": n, the
+                             call is made again while its answer holds that
+                             text, up to n more times ("retried" in the log).
 
 A request the scenario does not expect is answered from SIDE_REPLIES (or the
 scenario's own "replies" by method), so a client that reads its config or
@@ -404,6 +407,14 @@ def mcp_call(step):
         params = {"name": step["tool"], "arguments": arguments} if method == "tools/call" else {}
         status, received, answer = mcp_post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                                             step.get("headers"), server=target)
+        # "retryWhenText": the same call again, up to "retries" more times, while its answer
+        # holds that text (a known flake of one server); the record counts the retries.
+        for _ in range(step.get("retries", 0) if step.get("retryWhenText") else 0):
+            if step["retryWhenText"] not in json.dumps(answer):
+                break
+            status, received, answer = mcp_post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                                                step.get("headers"), server=target)
+            record["retried"] = record.get("retried", 0) + 1
         record.update(status=status, answer=answer)
         if received.get("x-notifications"):
             record["notifications"] = received["x-notifications"]

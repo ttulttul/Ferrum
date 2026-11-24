@@ -89,6 +89,10 @@ def cases(work, loopback):
     ]
 
 
+# The reference's answer when Chrome killed the page's renderer (`captureHtmlScreenshot`).
+LOAD_TIMEOUT = "the page did not finish loading within 20 seconds"
+
+
 def write_fixtures(work):
     work.mkdir(parents=True, exist_ok=True)
     buffer = BytesIO()
@@ -161,7 +165,11 @@ def run(name, command, args, directory, work, loopback):
     calls = cases(work, loopback)
     turn = json.loads((FIXTURES / "codex_turn.json").read_text())
     started = next(i for i, step in enumerate(turn["steps"]) if step.get("send", {}).get("method") == "turn/started")
-    turn["steps"][started + 1:started + 1] = [{"mcp": {"tool": tool, "arguments": arguments}}
+    # Chrome can kill a page's renderer under load (see Browser::load_page in
+    # src/html_render/chrome.rs); Rust loads the page again, the reference does not and answers
+    # with a load timeout. That one answer is asked for again on the reference only.
+    retry = {"retryWhenText": LOAD_TIMEOUT, "retries": 2} if name == "original" else {}
+    turn["steps"][started + 1:started + 1] = [{"mcp": {"tool": tool, "arguments": arguments, **retry}}
                                               for tool, arguments in calls]
     fixture = root / "html-turn.json"
     fixture.write_text(json.dumps(turn))
@@ -172,6 +180,10 @@ def run(name, command, args, directory, work, loopback):
         seeded = seed_turn(url, cookie, Path(directory, f"{name}-checkouts"), scenario)
         rpc(url, cookie, "orchestration.dispatchCommand", seeded["dispatch"])
         results = answers(log, len(calls))
+        for index, line in enumerate(Path(f"{log}.mcp").read_text().splitlines()):
+            if json.loads(line).get("retried"):
+                print(f"note: the {name} server's {calls[index][0]} call {index + 1} timed out loading "
+                      f"and was asked again {json.loads(line)['retried']} time(s)")
         return {
             "answers": [comparable(answer, Path(directory)) for answer in results],
             "stored pages": [UUID.sub("<uuid>", page.replace(str(work), "<work>"))
