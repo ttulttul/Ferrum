@@ -356,6 +356,7 @@
       "usage": "client",
       "existingCoverage": [
         "device_ssh_parity.py",
+        "device_tools_parity.py",
         "host-parity.json",
         "provider-parity.json"
       ],
@@ -2193,8 +2194,10 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "shared_store_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },

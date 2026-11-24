@@ -143,7 +143,8 @@ pub(crate) async fn mutate_checked(
         ));
     }
     drop(store);
-    let at = iso(time::OffsetDateTime::now_utc());
+    let now = time::OffsetDateTime::now_utc();
+    let at = iso(now);
     let mut workspace = None;
     if kind == "project.create" || input.get("workspaceRoot").is_some() {
         let raw = input["workspaceRoot"]
@@ -189,7 +190,8 @@ pub(crate) async fn mutate_checked(
             id: id.into(),
             name: name.into(),
             path: workspace.as_ref().unwrap().clone(),
-            created_at: crate::now(),
+            // The row's `createdAt`, in milliseconds.
+            created_at: (now.unix_timestamp_nanos() / 1_000_000).max(0) as u64,
         };
         let mut r = wire(&p);
         r["createdAt"] = json!(at);
