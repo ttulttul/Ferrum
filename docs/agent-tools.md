@@ -90,16 +90,21 @@ The "Caller check" column is the tool's declaration in the reference's
     the orchestration text and Claude's own background-wait and `send_to_user` text;
   - each Codex `turn/start` of such a thread carries `additionalContext`: the orchestration
     sections as `t3_code_orchestration_01..`, `t3_code_runtime` with the model and effort, and
-    `t3_code_tools` with the browser text (`buildCodexAdditionalContext`).
+    `t3_code_tools` with the browser text (`buildCodexAdditionalContext`);
+  - a thread whose credential has the `"device"` capability also gets the device text: Codex's
+    `t3_code_tools` adds `deviceTools`, Claude Code's append ends with
+    `deviceToolsWithToolSearch`, and Claude's `initialize` registers the reference's
+    `SubagentStart` hook (`hook_0`), whose callback answers with that text so native subagents
+    get it too. `scripts/device_tools_parity.py` compares the text with devices on and off for
+    both providers, and the hook and its answer.
 
   Each line that names a tool Rust does not serve yet is left out, with a heading left with
   nothing under it, so an agent is never pointed at a tool it cannot call; once those tools are
   served the text is the reference's, unchanged. Every tool those texts name is now served,
   so both go out as the reference sends them. `cli_launch` in
   `scripts/client_thread_parity.py` compares both servers' text, filtered the same way. Not
-  sent yet: the rest of Claude's `initialize` (hooks, title, prompt suggestions, dialog kinds),
-  device text (the four tools are served; sending it for threads with the `"device"`
-  capability is next), and the Cursor, OpenCode, Pi and ACP variants.
+  sent yet: the rest of Claude's `initialize` (the `Stop` hook, title, prompt suggestions,
+  dialog kinds), and the Cursor, OpenCode, Pi and ACP variants.
 - **`orchestrator_capabilities`** answers as the reference's: every provider instance, with
   its constraints (`providerConstraints`; a Rust instance whose driver it cannot run children
   on says so), its models as `listCapabilityModels` lists them (pinned, favourite, preferred
@@ -345,8 +350,9 @@ schemas.
    launcher script). Closing a session releases its agent-device session on the daemon (`/rpc`
    `close`); a shutdown also runs the launcher's `close`. Turning agent access off stops the daemon
    with `daemon stop`. `device_screenshot` is an image tool: hub screenshot, `extractPng`, the Xcode
-   26 `simctl` fallback, and the reference's `imageToolFailure` shape. Not done yet: SSH, Expo and
-   Simlock device hosts, and sending the device instruction text to providers.
+   26 `simctl` fallback, and the reference's `imageToolFailure` shape. Threads that may use
+   devices get the reference's device instruction text (see above). Not done yet: SSH, Expo and
+   Simlock device hosts.
 5. **Prompt context and capabilities** (served), as above.
 6. **Scheduled tasks**: `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task` and
    `run_scheduled_task_now` share the reference's `scheduled_tasks` table. Thread callers

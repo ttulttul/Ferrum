@@ -78,6 +78,9 @@ fn permission_mode(runtime_mode: &str) -> &'static str {
     }
 }
 
+/// The callback id the reference's SDK gives its one hook (`hook_0`).
+const SUBAGENT_DEVICE_HOOK: &str = "hook_0";
+
 /// A `can_use_tool` request waiting for the user.
 struct PendingPermission {
     /// The control request to answer.
@@ -112,6 +115,9 @@ struct Attempt<'a> {
     /// Tool calls still waiting for a result, in the order they started.
     tools: IndexMap<String, ProviderItem>,
     next_control: u64,
+    /// Whether the CLI was given the SubagentStart hook that adds the device
+    /// text (the thread may use devices), so it answers that hook's callbacks.
+    device_hook: bool,
     runtime_mode: String,
     responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
     /// Permission requests waiting for the user, by request id.
@@ -314,6 +320,7 @@ impl<'a> Attempt<'a> {
             open_items: vec![],
             tools: IndexMap::new(),
             next_control: 1,
+            device_hook: provider.mcp.as_ref().is_some_and(|mcp| mcp.device_tools),
             runtime_mode: provider.runtime_mode().to_owned(),
             responses,
             pending: HashMap::new(),
@@ -377,12 +384,23 @@ impl<'a> Attempt<'a> {
         // T3's instructions for the agent, appended to Claude Code's system
         // prompt as the reference's query initializes it, once per CLI.
         if !self.reused {
-            let has_mcp = spec.provider.as_ref().is_some_and(|p| p.mcp.is_some());
+            let mcp = spec.provider.as_ref().and_then(|p| p.mcp.as_ref());
+            let device = mcp.is_some_and(|mcp| mcp.device_tools);
             let request_id = format!("t3-initialize-{}", self.next_control);
             self.next_control += 1;
+            let mut init = json!({"subtype": "initialize"});
+            // Native subagents start from their task, not this session's
+            // system prompt, so a SubagentStart hook gives them the device text.
+            if device {
+                init["hooks"] =
+                    json!({"SubagentStart": [{"hookCallbackIds": [SUBAGENT_DEVICE_HOOK]}]});
+            }
+            init["appendSystemPrompt"] = json!(crate::agent_instructions::claude_append(
+                mcp.is_some(),
+                device
+            ));
             let request = json!({"type": "control_request", "request_id": request_id,
-                "request": {"subtype": "initialize",
-                    "appendSystemPrompt": crate::agent_instructions::claude_append(has_mcp)}});
+                "request": init});
             if self.cli.write(&request).await.is_err() {
                 return self.closed().await;
             }
@@ -966,6 +984,16 @@ impl<'a> Attempt<'a> {
         let request = &message["request"];
         let request_id = message["request_id"].clone();
         let response = match request["subtype"].as_str() {
+            Some("hook_callback")
+                if self.device_hook && request["callback_id"] == SUBAGENT_DEVICE_HOOK =>
+            {
+                json!({"subtype": "success", "request_id": request_id, "response": {
+                    "hookSpecificOutput": {
+                        "hookEventName": "SubagentStart",
+                        "additionalContext": crate::agent_instructions::claude_subagent_device_context(),
+                    },
+                }})
+            }
             Some("can_use_tool") => match self.can_use_tool(&request_id, request) {
                 Some(result) => json!({"subtype": "success", "request_id": request_id,
                     "response": result}),

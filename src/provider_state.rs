@@ -571,6 +571,7 @@ pub(crate) fn thread_provider_turn(
         provider.mcp = Some(provider::McpServer {
             url: endpoint.to_owned(),
             authorization: format!("Bearer {token}"),
+            device_tools: device,
         });
     }
     Ok(Some((provider, env)))

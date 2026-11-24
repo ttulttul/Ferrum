@@ -90,6 +90,11 @@ pub struct McpServer {
     pub url: String,
     /// `Bearer <token>`: the thread's credential.
     pub authorization: String,
+    /// Whether the credential carries the `"device"` capability, so the
+    /// agent is told about the device tools. Omitted when false, so an
+    /// agentd or control plane that predates it sees the same wire bytes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub device_tools: bool,
 }
 
 impl ProviderTurn {
