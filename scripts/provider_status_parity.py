@@ -876,6 +876,11 @@ SCENARIOS += [
          "plugins/solo/SKILL.md": skill("A single skill", name="solo:Deploy Now"),
          "plugins/here/skills/local/SKILL.md": skill("Project plugin"),
          "plugins/elsewhere/skills/other/SKILL.md": skill("Another project's plugin"),
+         # The workspace is its own repository, so the other project's plugin never shares its
+         # root: both servers walk up from each project path looking for `.git`, and a `.git`
+         # that comes and goes above the temporary root (another process's, in /tmp) made the
+         # reference count that plugin on some runs.
+         "userdata/.git/HEAD": "ref: refs/heads/main\n",
          "plugins/off/skills/never/SKILL.md": skill("Disabled plugin"),
          "inline/alpha/.claude-plugin/plugin.json": json.dumps({"name": "alpha"}),
          "inline/alpha/skills/run/SKILL.md": skill("Inline"),
@@ -1268,13 +1273,37 @@ def run_server(args, command, root, scenario, temporary):
     return outcome
 
 
+def differences(left, right, path="$"):
+    """Each place two JSON values differ, as `path: left != right` lines, so a
+    long row's difference is printed even where the whole row is cut off."""
+    if isinstance(left, dict) and isinstance(right, dict):
+        out = []
+        for key in sorted(set(left) | set(right)):
+            if key not in left or key not in right:
+                side = "original only" if key in left else "rust only"
+                value = left.get(key, right.get(key))
+                out.append(f"{path}.{key}: {side} {json.dumps(value, sort_keys=True)[:300]}")
+            else:
+                out += differences(left[key], right[key], f"{path}.{key}")
+        return out
+    if isinstance(left, list) and isinstance(right, list):
+        out = [f"{path}: length {len(left)} != {len(right)}"] if len(left) != len(right) else []
+        for index, (a, b) in enumerate(zip(left, right)):
+            out += differences(a, b, f"{path}[{index}]")
+        return out
+    if left != right:
+        return [f"{path}: {json.dumps(left, sort_keys=True)[:300]} != {json.dumps(right, sort_keys=True)[:300]}"]
+    return []
+
+
 def compare(outcomes):
     problems = {}
     original, rust = outcomes["original"], outcomes["rust"]
     for check in ("row", "refresh", "event", "interval", "redeem", "afterRedeem"):
         if original.get(check) != rust.get(check):
             problems[check] = [f"original {json.dumps(original.get(check), sort_keys=True)}",
-                               f"rust     {json.dumps(rust.get(check), sort_keys=True)}"]
+                               f"rust     {json.dumps(rust.get(check), sort_keys=True)}",
+                               *differences(original.get(check), rust.get(check))[:40]]
     # The CLI sessions each server started for its checks (arguments only).
     if original["requests"] != rust["requests"]:
         problems["api requests"] = [f"original {original['requests']}", f"rust     {rust['requests']}"]
