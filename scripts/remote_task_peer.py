@@ -9,6 +9,7 @@ compared. All data is fake: loopback addresses and fixture ids, labels and token
 """
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlencode
 
@@ -81,7 +82,7 @@ class RemoteTaskPeer:
     """The linked environment. `finish_after` waits answer that many times before its run ends
     (None: never, so a cancel lands while it runs); a stop ends the run interrupted."""
 
-    def __init__(self, finish_after=0):
+    def __init__(self, finish_after=0, follow_up_after=0):
         self.lock = threading.Lock()
         self.changed = threading.Condition(self.lock)
         self.log = []
@@ -89,6 +90,9 @@ class RemoteTaskPeer:
         # `finish_after` None: the run there goes on until it is stopped, and a wait on it waits
         # (up to 10 s) as a wait there does.
         self.finish_after = finish_after
+        # A follow-up's run there ends this many seconds after its send (its waits wait for it),
+        # so it ends after the parent's turn here, whichever server follows it.
+        self.follow_up_after = follow_up_after
         self.state = dict(runs=[self.new_run(1, "Say hi to the parent.", REPLY)])
         peer = self
 
@@ -154,12 +158,20 @@ class RemoteTaskPeer:
                     latest = runs[-1]
                     if name == "t3_thread_send":
                         # A follow-up starts the thread's next run there.
-                        runs.append(peer.new_run(len(runs) + 1, arguments.get("message", ""), FOLLOW_UP_REPLY))
+                        run = peer.new_run(len(runs) + 1, arguments.get("message", ""), FOLLOW_UP_REPLY)
+                        if peer.follow_up_after:
+                            run.update(finished=False, waits_left=None,
+                                       finish_at=time.monotonic() + peer.follow_up_after)
+                        runs.append(run)
                     if name == "t3_thread_interrupt" and not latest["finished"]:
                         latest["stopped"] = True
                         peer.changed.notify_all()
                     run = next((r for r in runs if r["id"] == arguments.get("runId")), runs[-1])
-                    if name == "t3_thread_wait" and run["waits_left"] is None:
+                    if name == "t3_thread_wait" and run.get("finish_at") is not None:
+                        peer.changed.wait_for(lambda: run["stopped"],
+                                              timeout=max(0, run["finish_at"] - time.monotonic()))
+                        run["finished"] = not run["stopped"]
+                    elif name == "t3_thread_wait" and run["waits_left"] is None:
                         peer.changed.wait_for(lambda: run["stopped"], timeout=10)
                     answer = answers(peer.state, arguments).get(name)
                     if name == "t3_thread_wait" and run["waits_left"] is not None \
