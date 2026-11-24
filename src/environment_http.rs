@@ -124,8 +124,34 @@ pub(super) async fn thread_snapshot(
         return Json(thread.transcript()).into_response();
     }
     let sequence = *state.next_event_id.lock().await;
+    if uri.path().ends_with("/history") {
+        // Validated above.
+        let cursor = query.get("cursor").map(String::as_str).unwrap_or_default();
+        let projection = thread.snapshot_projection();
+        let rows = projection["visibleTurnItems"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        let subagents = projection["subagents"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        let options = crate::thread_history::PageOptions {
+            through_entry_id: query.get("throughEntryId").map(String::as_str),
+            conversation_only: query.get("view").is_some_and(|view| view == "conversation"),
+        };
+        return match crate::thread_history::history_page(rows, subagents, &id, cursor, sequence, options) {
+            Some(page) => Json(page).into_response(),
+            None => (StatusCode::BAD_REQUEST,Json(json!({"_tag":"EnvironmentRequestInvalidError","code":"invalid_request","reason":"invalid_history_cursor","traceId":crate::trace_id(&h)}))).into_response(),
+        };
+    }
     if uri.path().ends_with("/bounded") {
-        let mut out = thread.stream_snapshot(sequence, &json!({"acceptBoundedSnapshot":true}));
+        // The query's options, as the client's subscription asks for them.
+        let flag = |key: &str| query.get(key).is_some_and(|v| v == "1");
+        let mut out = thread.stream_snapshot(
+            sequence,
+            &json!({"acceptBoundedSnapshot": true,
+                "acceptCompactTurnItems": flag("compactTurnItems"),
+                "acceptDedupedBodies": flag("dedupeBodies")}),
+        );
         out.as_object_mut().expect("snapshot").shift_remove("kind");
         return Json(out).into_response();
     }
