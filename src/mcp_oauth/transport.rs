@@ -75,6 +75,8 @@ pub(super) async fn handle<S: McpHost>(
         )
             .into_response();
     }
+    let link_expires_ms = granted.link_expires_ms;
+    let mut response: Response = async {
     let sid = h.get("mcp-session-id").and_then(|v| v.to_str().ok());
     if let Some(sid) = sid {
         if !s.oauth().session_held(sid, token) {
@@ -205,4 +207,19 @@ pub(super) async fn handle<S: McpHost>(
         _ => return rpc_error(id, -32601, &format!("Method not found: {operation}")),
     };
     body(json!({"jsonrpc":"2.0","id":id,"result":result}))
+    }
+    .await;
+    with_link_expiry(&mut response, link_expires_ms);
+    response
+}
+
+/// A peer link's session renews each time it is used; the answer says when it now ends
+/// (`t3-link-expires-at`), so the linking environment can keep its record current.
+pub(crate) fn with_link_expiry(response: &mut Response, link_expires_ms: Option<i64>) {
+    if let Some(value) = link_expires_ms
+        .map(crate::auth_service::iso)
+        .and_then(|iso| HeaderValue::from_str(&iso).ok())
+    {
+        response.headers_mut().insert("t3-link-expires-at", value);
+    }
 }

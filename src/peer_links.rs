@@ -161,6 +161,10 @@ impl LinkInput {
 pub(crate) struct Resolved {
     pub url: String,
     pub token: String,
+    /// What the peer calls itself now.
+    pub label: String,
+    /// The peer's descriptor capabilities, as it answered just now.
+    pub capabilities: Value,
 }
 
 /// What this environment knows of itself when linking.
@@ -244,6 +248,8 @@ pub(crate) struct Descriptor {
     pub label: String,
     /// It holds a linked agent to its limits and keeps its work within its link.
     pub link_limits_hold: bool,
+    /// Every capability its descriptor reports.
+    pub capabilities: Value,
 }
 
 /// Node's name for the system error under a failed connection.
@@ -488,6 +494,40 @@ impl PeerLinks {
         }
     }
 
+    /// A peer renews a link each time it is used and says when it now ends
+    /// (`t3-link-expires-at`); a later expiry replaces the stored one.
+    pub(crate) fn record_expiry(&self, environment_id: &str, expires_at: &str) {
+        let Some(ms) = iso_ms(expires_at) else { return };
+        let Ok(Some(link)) = self.get(environment_id) else {
+            return;
+        };
+        if iso_ms(&link.expires_at).is_some_and(|stored| stored >= ms) {
+            return;
+        }
+        let Ok(conn) = self.open() else { return };
+        if let Err(e) = conn.execute(
+            "UPDATE peer_environment_links SET expires_at = ?1 WHERE environment_id = ?2",
+            params![iso(ms), environment_id],
+        ) {
+            tracing::warn!("could not record a peer link's expiry: {e}");
+        }
+    }
+
+    /// The unexpired links' names (`PeerLinks.names`), for a client that reads threads.
+    pub(crate) fn names(&self) -> Result<Vec<(String, String)>> {
+        if !self.has_store() {
+            return Ok(Vec::new());
+        }
+        let now = crate::platform::now_ms();
+        Ok(self
+            .read_rows()?
+            .into_iter()
+            .filter_map(|row| row.into_link().ok())
+            .filter(|link| !link.expired(now))
+            .map(|link| (link.environment_id, link.label))
+            .collect())
+    }
+
     /// Forgets the link here. The peer still lists the session until it is revoked there.
     pub(crate) fn unlink(&self, environment_id: &str) -> Result<bool> {
         Ok(!self.forget(environment_id)?.is_empty())
@@ -599,6 +639,7 @@ impl PeerLinks {
             label,
             link_limits_hold: capabilities["mcpModeLimitHeader"] == true
                 && capabilities["linkFence"] == true,
+            capabilities: capabilities.clone(),
         })
     }
 
@@ -1091,6 +1132,8 @@ impl PeerLinks {
         Ok(Resolved {
             url,
             token: String::from_utf8_lossy(&token).into_owned(),
+            label: peer.label,
+            capabilities: peer.capabilities,
         })
     }
 }

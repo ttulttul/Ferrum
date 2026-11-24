@@ -119,6 +119,10 @@ pub struct Session {
     connect: bool,
 }
 impl Session {
+    /// The client metadata the session was issued to, as Connections lists it.
+    pub(crate) fn client_metadata(&self) -> &Value {
+        &self.client
+    }
     pub fn has(&self, scope: &str) -> bool {
         self.permissions.iter().any(|p| p == scope)
     }

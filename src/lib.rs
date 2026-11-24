@@ -148,6 +148,8 @@ mod peer_links;
 #[cfg(feature = "native")]
 mod peer_mcp;
 #[cfg(feature = "native")]
+mod peer_thread_relay;
+#[cfg(feature = "native")]
 mod project_clone;
 #[cfg(feature = "native")]
 mod project_favicon;
