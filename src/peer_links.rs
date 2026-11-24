@@ -490,22 +490,80 @@ impl PeerLinks {
 
     /// Forgets the link here. The peer still lists the session until it is revoked there.
     pub(crate) fn unlink(&self, environment_id: &str) -> Result<bool> {
+        Ok(!self.forget(environment_id)?.is_empty())
+    }
+
+    /// Forgets the link to `environment_id` and ends its session at the peer
+    /// (`PeerLinks.unlink`): whether there was one, and whether the peer revoked it.
+    pub(crate) async fn unlink_ending(&self, environment_id: &str) -> Result<(bool, bool)> {
+        let forgotten = self.forget(environment_id)?;
+        let mut ended_there = false;
+        for (urls_json, token) in &forgotten {
+            if let Some(token) = token {
+                ended_there = self.revoke_at_peer(environment_id, urls_json, token).await;
+            }
+        }
+        Ok((!forgotten.is_empty(), ended_there))
+    }
+
+    /// `revokeAtPeer`: the link's token revoked at the first of its addresses that still
+    /// answers as the peer; an address can change hands after linking, and only the linked
+    /// peer may see the token.
+    async fn revoke_at_peer(&self, environment_id: &str, urls_json: &str, token: &str) -> bool {
+        let urls: Vec<String> = serde_json::from_str(urls_json).unwrap_or_default();
+        if urls.is_empty() {
+            return false;
+        }
+        let attempts: Vec<BoxFuture<'_, std::result::Result<(), ()>>> = urls
+            .iter()
+            .map(|url| {
+                async move {
+                    self.answers_as(url, environment_id).await.ok_or(())?;
+                    let response = self
+                        .http
+                        .post(format!("{url}/oauth/mcp/revoke"))
+                        .form(&[("token", token)])
+                        .timeout(probe_timeout(url))
+                        .send()
+                        .await
+                        .map_err(|_| ())?;
+                    response.status().is_success().then_some(()).ok_or(())
+                }
+                .boxed()
+            })
+            .collect();
+        let revoked = select_ok(attempts).await.is_ok();
+        revoked
+    }
+
+    /// Deletes the link's rows and secrets: each row's addresses and its token, if readable.
+    fn forget(&self, environment_id: &str) -> Result<Vec<(String, Option<String>)>> {
         if !self.has_store() {
-            return Ok(false);
+            return Ok(Vec::new());
         }
         let conn = self.open()?;
         let mut statement = conn
-            .prepare("DELETE FROM peer_environment_links WHERE environment_id = ?1 RETURNING secret_name")
+            .prepare("DELETE FROM peer_environment_links WHERE environment_id = ?1 RETURNING secret_name, urls_json")
             .map_err(PeerLinkError::storage)?;
-        let names = statement
-            .query_map([environment_id], |row| row.get::<_, String>(0))
+        let rows = statement
+            .query_map([environment_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(PeerLinkError::storage)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(PeerLinkError::storage)?;
-        for name in &names {
-            self.remove_secret(name)?;
+        let mut forgotten = Vec::new();
+        for (name, urls_json) in rows {
+            // An unreadable token only skips the revocation; the secret is still removed.
+            let token = self
+                .read_secret(&name)
+                .ok()
+                .flatten()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+            self.remove_secret(&name)?;
+            forgotten.push((urls_json, token));
         }
-        Ok(!names.is_empty())
+        Ok(forgotten)
     }
 
     // --- the peer ------------------------------------------------------------

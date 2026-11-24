@@ -25,6 +25,7 @@ from tempfile import TemporaryDirectory
 from websockets.sync.client import connect
 
 from parity_gaps import Gaps
+import parity_harness
 from parity_harness import encode, free_port, http, managed_server
 
 THIRTY_DAYS_MS = 30 * 86_400_000
@@ -107,6 +108,22 @@ def tokens(home):
     return sorted(path.name for path in (home / "userdata" / "secrets").glob("peer-link-*.bin"))
 
 
+def link_token(home):
+    """The access token the link holds for the peer (never printed)."""
+    found = sorted((home / "userdata" / "secrets").glob("peer-link-*.bin"))
+    return found[0].read_bytes().decode() if found else None
+
+
+def peer_accepts(peer_url, token):
+    """Whether the peer's /mcp still accepts `token`: the session the link signed in with."""
+    status, _, _ = http(peer_url, "POST", "/mcp", encode(dict(
+        jsonrpc="2.0", id=0, method="initialize", params=dict(
+            protocolVersion="2025-06-18", capabilities={}, clientInfo=dict(name="Fixture", version="1")))),
+        {"authorization": f"Bearer {token}", "content-type": "application/json",
+         "accept": "application/json, text/event-stream"})
+    return status == 200
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command", required=True)
@@ -170,11 +187,15 @@ def main():
                 made_by = kind
                 # The other server on the same home reads, then forgets, the link.
                 other = "rust" if kind == "reference" else "reference"
+                token = link_token(local_home)
+                answers.setdefault("the peer accepts the link's token", {})[made_by] = peer_accepts(peer.url, token)
                 with running(servers[other], local_home, secret, key) as local:
                     ask(made_by, "list from the other server", local, "peerLinks.list", {})
                     ask(made_by, "unlink on the other server", local, "peerLinks.unlink",
                         dict(environmentId=peer.descriptor["environmentId"]))
                     answers.setdefault("token removed by the other server", {})[made_by] = tokens(local_home)
+                    # #41005: unlinking ends the link's session at the peer.
+                    answers.setdefault("the peer refuses the token after unlinking", {})[made_by] = not peer_accepts(peer.url, token)
                     ask(made_by, "unlink again", local, "peerLinks.unlink",
                         dict(environmentId=peer.descriptor["environmentId"]))
                 with running(servers[kind], local_home, secret, key) as local:
@@ -193,6 +214,7 @@ def main():
             assert linked["_tag"] == "Success" and linked["value"]["environmentId"] == "<peer>", linked
             listed = answers["list from the other server"]["reference"]["value"]["links"]
             assert [row["status"] for row in listed] == ["reachable"], listed
+    parity_harness.assert_nothing_escaped()
     if gaps.finish(ran=set(checks)):
         raise SystemExit(1)
     print(f"{len(checks)}/{len(checks)} outgoing peer link checks ran across the reference and the Rust server")

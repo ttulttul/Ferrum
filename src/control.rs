@@ -255,6 +255,21 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
             .map_err(|error| error.message)
     }
     #[cfg(feature = "native")]
+    fn unlink_peer_ending(
+        self: &Arc<Self>,
+        environment_id: &str,
+    ) -> crate::mcp_oauth::HostFuture<Result<(bool, bool), String>> {
+        let plane = self.clone();
+        let environment_id = environment_id.to_owned();
+        Box::pin(async move {
+            plane
+                .peer_links
+                .unlink_ending(&environment_id)
+                .await
+                .map_err(|error| error.message)
+        })
+    }
+    #[cfg(feature = "native")]
     fn peer_link(&self, environment_id: &str) -> Option<crate::mcp_oauth::PeerLinkInfo> {
         let link = self.peer_links.get(environment_id).ok().flatten()?;
         Some(crate::mcp_oauth::PeerLinkInfo {
@@ -1274,7 +1289,7 @@ impl ControlPlane {
         }
         #[cfg(feature = "native")]
         if method == "peerLinks.unlink" {
-            return Call::Done(self.peer_links_unlink(params));
+            return Call::Done(self.peer_links_unlink(params).await);
         }
         #[cfg(feature = "native")]
         if method == "peerLinks.answerRequest" {
@@ -1337,13 +1352,14 @@ impl ControlPlane {
     }
 
     #[cfg(feature = "native")]
-    fn peer_links_unlink(&self, params: &Value) -> Reply {
+    async fn peer_links_unlink(&self, params: &Value) -> Reply {
         let Some(environment_id) = params["environmentId"].as_str() else {
             return Reply::defect("Missing key\n  at [\"environmentId\"]".into());
         };
-        match self.peer_links.unlink(environment_id) {
-            // Rust does not end the link's session at the peer (#41005).
-            Ok(removed) => Reply::Success(json!({"removed": removed, "endedThere": false})),
+        match self.peer_links.unlink_ending(environment_id).await {
+            Ok((removed, ended_there)) => {
+                Reply::Success(json!({"removed": removed, "endedThere": ended_there}))
+            }
             Err(error) => Reply::Failure(json!({"_tag":"Fail","error":error.to_json()})),
         }
     }
