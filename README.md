@@ -83,6 +83,10 @@ Parity is tested by running the original TypeScript server and the Rust server s
 
 A suite fails on any difference it doesn't list, and on any listed case that starts to match.
 
+## Performance
+
+Measured against the pinned reference on the same machine, with the same fake provider CLIs ([method and full results](docs/performance.md)), Ferrum installs about 3× smaller, starts about 17× faster (0.11 s against 1.85 s), uses about 11× less memory at idle (40 MiB against 452 MiB) and about 8.5× less under load, and runs 2–3× the fake turns per second with about a third of the CPU per turn. Most client RPCs answer 2–13× faster. `server.getConfig` is slower in Rust, and Rust uses a little more CPU while idle. CI measures again on every push to `main` and records the trend on the [`perf-data`](https://github.com/ttulttul/Ferrum/tree/perf-data) branch.
+
 ## Install and switching
 
 From the repository root, use `./install` to temporarily replace a running standalone TypeScript server with the Rust build and restore it later:
