@@ -7,6 +7,13 @@ a missing session, a closed port, the server's own port, bytes carried both ways
 and a 300 KB one), the tunnel closing when `enablePreviewTunnel` is switched off, the refusal while
 it is off, and a managed policy whose `limits.previewTunnel` is false (with its summary in the
 config).
+
+The reference (run from source, a dev build) reads that policy from `T3CODE_DEV_MANAGED_POLICY_PATH`.
+The Rust server gets it at the system path, /etc/t3code/policy.json, through
+`with_system_policy.sh`, so a release build, which ignores the variable as the reference's release
+builds do, is tested too. Where unprivileged user namespaces are unavailable (GitHub's runners, for
+one), the Rust server falls back to the variable, which only debug builds read; `--rust-release`
+then skips the policy checks and says why.
 """
 import argparse
 from contextlib import ExitStack, closing
@@ -17,6 +24,7 @@ from pathlib import Path
 import secrets
 import shlex
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -27,6 +35,22 @@ from websockets.sync.client import connect
 from parity_harness import encode, http, managed_server, recv_frame
 
 REFUSALS = ("x-t3-tunnel-disabled", "x-t3-tunnel-port-refused")
+WITH_SYSTEM_POLICY = Path(__file__).resolve().parent / "with_system_policy.sh"
+POLICY_CHECKS = ("policy refusal", "policy summary")
+
+
+def system_policy_works(root):
+    """Whether `with_system_policy.sh` can place a policy at the system path on this machine."""
+    root.mkdir(parents=True)
+    policy = root / "probe.json"
+    policy.write_text("{}")
+    try:
+        # parity-env: probes the namespace wrapper with `cat`, not a T3 server
+        found = subprocess.run([str(WITH_SYSTEM_POLICY), "cat", "/etc/t3code/policy.json"], capture_output=True,
+                               timeout=30, env={**os.environ, "T3CODE_DEV_MANAGED_POLICY_PATH": str(policy)})
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return found.returncode == 0 and found.stdout == b"{}"
 
 
 def echo_server(stack):
@@ -147,14 +171,15 @@ def observe(command, root, echo):
     return out
 
 
-def observe_policy(command, root, echo):
-    """A server under a managed policy that switches the tunnel off."""
+def observe_policy(command, root, echo, system=False):
+    """A server under a managed policy that switches the tunnel off; with `system`, the policy is
+    at the system path (`with_system_policy.sh`) rather than named by the dev-build variable."""
     root.mkdir(parents=True)
     policy = root / "policy.json"
     policy.write_bytes(encode({"schemaVersion": 1, "organization": "Fixture Org", "limits": {"previewTunnel": False}}))
     out = {}
     with ExitStack() as stack:
-        prefix = ["env", f"T3CODE_DEV_MANAGED_POLICY_PATH={policy}"] + command
+        prefix = ["env", f"T3CODE_DEV_MANAGED_POLICY_PATH={policy}"] + ([str(WITH_SYSTEM_POLICY)] if system else []) + command
         url, cookie = managed_server(stack, prefix, root / "home", secrets.token_hex(16), secrets.token_bytes(32))
         out["policy refusal"] = attempt(url, cookie, echo)
         config = rpc(url, cookie, "server.getConfig", {})
@@ -166,16 +191,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command", required=True)
     parser.add_argument("--rust-command", required=True)
+    parser.add_argument("--rust-release", action="store_true",
+                        help="the Rust command is a release build, which reads its policy only from the system path")
     args = parser.parse_args()
     outcomes = {}
     with ExitStack() as stack:
         echo = echo_server(stack)
         root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="t3-tunnel-parity-")))
+        system = system_policy_works(root / "probe")
+        skipped = args.rust_release and not system
         for name, command in (("original", args.original_command), ("rust", args.rust_command)):
             command = shlex.split(command)
-            outcomes[name] = {**observe(command, root / name, echo), **observe_policy(command, root / f"{name}-policy", echo)}
+            outcomes[name] = observe(command, root / name, echo)
+            if name == "original" or not skipped:
+                outcomes[name].update(observe_policy(command, root / f"{name}-policy", echo, system=name == "rust" and system))
     failures = 0
+    print(f"policy for the Rust server: {'at /etc/t3code/policy.json' if system else 'from T3CODE_DEV_MANAGED_POLICY_PATH'}")
     for check in outcomes["original"]:
+        if skipped and check in POLICY_CHECKS:
+            print(f"SKIP {check}: a release build reads its policy only from /etc/t3code/policy.json, and this "
+                  "machine has no unprivileged user namespaces to place one there")
+            continue
         same = outcomes["original"][check] == outcomes["rust"].get(check)
         print(("PASS" if same else "FAIL"), check)
         if not same:
@@ -187,7 +223,8 @@ def main():
         if outcomes["original"].get(check) is not True:
             failures += 1
             print(f"FAIL {check}: the reference did not succeed ({outcomes['original'].get(check)})")
-    print(f"{len(outcomes['original'])} preview tunnel checks compared across the reference and the Rust server")
+    compared = [check for check in outcomes["original"] if not (skipped and check in POLICY_CHECKS)]
+    print(f"{len(compared)} preview tunnel checks compared across the reference and the Rust server")
     return int(bool(failures))
 
 
