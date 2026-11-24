@@ -20,11 +20,11 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 
 | Kind | Calls | Used by the client | Mobile only | Server-only / unused | Existing parity | Client harness | Either |
 |---|---|---|---|---|---|---|---|
-| rpc | 224 | 221 | 0 | 3 | 146 | 78 | 169 |
+| rpc | 224 | 221 | 0 | 3 | 147 | 78 | 170 |
 | rpc-stream | 33 | 32 | 0 | 1 | 21 | 23 | 28 |
 | http | 55 | 40 | 1 | 14 | 40 | 14 | 41 |
 | http-raw | 7 | 7 | 0 | 0 | 7 | 3 | 7 |
-| **all** | 319 | 300 | 1 | 18 | 214 | 118 | 245 |
+| **all** | 319 | 300 | 1 | 18 | 215 | 118 | 246 |
 
 Newly covered by the client harness (no earlier parity script): 31. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 0.
 
@@ -49,7 +49,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `device.configure` | user action | `packages/client-runtime/src/state/device.ts:47` | DeviceConfigureInput | DeviceServiceState | session (settings:write) | client | device_ssh_parity.py, device_tools_parity.py, host-parity.json | — |
 | `device.detail` | user action | `packages/client-runtime/src/state/device.ts:85` | DeviceDetailInput | DeviceDetail | session (orchestration:read) | client | host-parity.json | 1 case(s) |
 | `device.easAccount` | user action | `apps/web/src/state/device.ts:168`<br>`packages/client-runtime/src/state/device.ts:57` | DeviceEasAccountInput | DeviceEasAccount | session (settings:write) | client | host-parity.json, settings_secrets_parity.py | — |
-| `device.list` | user action | `packages/client-runtime/src/state/device.ts:61` | DeviceListInput | DeviceServiceState | session (orchestration:read) | client | device_ssh_parity.py, host-parity.json, provider-parity.json | 1 case(s) |
+| `device.list` | user action | `packages/client-runtime/src/state/device.ts:61` | DeviceListInput | DeviceServiceState | session (orchestration:read) | client | device_ssh_parity.py, device_tools_parity.py, host-parity.json, provider-parity.json | 1 case(s) |
 | `device.open` | user action | `packages/client-runtime/src/state/device.ts:67` | DeviceOpenInput | DeviceSession | session (orchestration:operate) | client | device_ssh_parity.py, device_tools_parity.py, host-parity.json | — |
 | `device.shutdown` | user action | `packages/client-runtime/src/state/device.ts:79` | DeviceShutdownInput | void | session (orchestration:operate) | client | validation only | — |
 | `device.simlockIdentity` | user action | `apps/web/src/state/device.ts:178` | DeviceSimlockIdentityInput | DeviceSimlockIdentity | session (settings:write) | client | host-parity.json, settings_secrets_parity.py | — |
@@ -117,7 +117,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `projectClone.retry` | user action | `packages/client-runtime/src/state/sourceControl.ts:69` | ProjectCloneActionInput | ProjectCloneActionResult | session (source-control:write) | client | project_clone_parity.py | — |
 | `projectClone.start` | user action | `packages/client-runtime/src/state/sourceControl.ts:49` | ProjectCloneStartInput | ProjectCloneStartResult | session (source-control:write) | client | project_clone_parity.py, project_favicon_parity.py | — |
 | `projects.createFromThread` | user action | `packages/client-runtime/src/state/projectCommands.ts:230` | ProjectCreateFromThreadInput | ProjectCreateFromThreadResult | session (orchestration:operate) | client | validation only | — |
-| `projects.createNew` | user action | `packages/client-runtime/src/state/projectCommands.ts:224` | ProjectCreateNewInput | ProjectCreateNewResult | session (orchestration:operate) | client | validation only | — |
+| `projects.createNew` | user action | `packages/client-runtime/src/state/projectCommands.ts:224` | ProjectCreateNewInput | ProjectCreateNewResult | session (orchestration:operate) | client | shared_store_parity.py | — |
 | `projects.ensureScratch` | user action | `packages/client-runtime/src/state/projectCommands.ts:203` | Struct{} | ProjectEnsureScratchResult | session (orchestration:operate) | client | validation only | — |
 | `projects.listEntries` | open project/thread | `packages/client-runtime/src/state/projectCommands.ts:159`<br>`packages/client-runtime/src/state/projectCommands.ts:164` | ProjectListEntriesInput | ProjectListEntriesResult | session (filesystem:read) | client | validation only | 11 case(s) |
 | `projects.listIgnoredFiles` | open project/thread | `packages/client-runtime/src/state/projectCommands.ts:170` | ProjectListIgnoredFilesInput | ProjectListIgnoredFilesResult | session (filesystem:read) | client | validation only | 3 case(s) |
