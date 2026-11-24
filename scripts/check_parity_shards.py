@@ -3,8 +3,8 @@
 
 Each scripts/*_parity.py (and parity_harness.py) must appear in exactly one shard of
 scripts/ci_parity_shard.sh, unless it is listed in NOT_SHARDED with the reason. The
-shards in .github/workflows/parity.yml's matrix must match the shard script's, and the
-thread shards must cover 1..N of one N.
+shards in .github/workflows/parity.yml's matrix must match the shard script's, and a split
+suite's shards (thread-I-N, status-I-N) must cover 1..N of one N.
 
 Every process a suite starts must take its environment from parity_harness.server_env
 (directly, or through managed_server), which hides the host's provider CLIs (codex,
@@ -131,18 +131,21 @@ def main():
     matrix = [shard.strip() for shard in listed.group(1).split(",") if shard.strip()] if listed else []
     if not matrix:
         problems.append(f"no matrix shards found in {WORKFLOW.relative_to(ROOT)}")
-    threads = [shard for shard in matrix if shard.startswith("thread-")]
-    named = sorted(shard for shard in matrix if not shard.startswith("thread-"))
-    if named != sorted(shard for shard in shards if shard != "thread-*"):
+    # A `<prefix>-*` shard runs part I of N of one suite as `<prefix>-I-N`.
+    split = sorted(shard[:-2] for shard in shards if shard.endswith("-*"))
+    named = sorted(shard for shard in matrix if not any(shard.startswith(f"{p}-") for p in split))
+    if named != sorted(shard for shard in shards if not shard.endswith("-*")):
         problems.append(f"workflow matrix shards {named} differ from the shard script's "
-                        f"{sorted(s for s in shards if s != 'thread-*')}")
-    counts = {shard.rsplit("-", 1)[-1] for shard in threads}
-    if len(counts) != 1:
-        problems.append(f"thread shards {threads} must all be I-N of one N")
-    else:
+                        f"{sorted(s for s in shards if not s.endswith('-*'))}")
+    for prefix in split:
+        parts = [shard for shard in matrix if re.fullmatch(rf"{prefix}-\d+-\d+", shard)]
+        counts = {shard.rsplit("-", 1)[-1] for shard in parts}
+        if len(counts) != 1:
+            problems.append(f"{prefix} shards {parts} must all be I-N of one N")
+            continue
         count = int(counts.pop())
-        if sorted(threads) != sorted(f"thread-{index}-{count}" for index in range(1, count + 1)):
-            problems.append(f"thread shards {threads} must be thread-1-{count} .. thread-{count}-{count}")
+        if sorted(parts) != sorted(f"{prefix}-{index}-{count}" for index in range(1, count + 1)):
+            problems.append(f"{prefix} shards {parts} must be {prefix}-1-{count} .. {prefix}-{count}-{count}")
 
     for problem in problems:
         print(f"FAIL {problem}")
