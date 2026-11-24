@@ -551,6 +551,7 @@ pub(super) fn target_args(platform: &str, id: &str) -> Vec<String> {
 pub(super) enum QuickStartHost<'a> {
     Machine,
     Simlock { install_directory: Option<&'a str> },
+    Eas,
 }
 
 pub(super) fn quick_start(device: &Value, target: &[String], command: &str) -> String {
@@ -586,6 +587,7 @@ pub(super) fn quick_start_on(
         .flatten()
         .collect::<Vec<_>>()
         .join(" "),
+        QuickStartHost::Eas => "This is an Expo Simulators session in the cloud. It bills the Expo account per minute until it stops, so call device_close with shutdown: true when you are done. It starts with no apps installed: install-from-source <url> installs a build from a URL (iOS needs a .tar.gz containing a .app), and install uploads one from this machine.".to_owned(),
         QuickStartHost::Machine if ios => "First use builds an XCTest runner and can take a couple of minutes; later commands are fast.".to_owned(),
         QuickStartHost::Machine => "The Android snapshot helper installs itself on first use.".to_owned(),
     };

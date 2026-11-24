@@ -30,6 +30,16 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
 const AVDMANAGER_LIST_FAILED: &str = "[android-utils] Failed to run `avdmanager list avd`";
 const LOCAL_HOST_ID: &str = "local";
 const LOCAL_HOST_LABEL: &str = "This machine";
+/// Expo Simulators: how often a starting session is polled, how stale a
+/// running session's status may get, and how long a start may take.
+const EAS_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const STATUS_TTL_MS: f64 = 15_000.0;
+const EAS_START_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const EAS_PREVIEW_TIMEOUT: Duration = Duration::from_secs(20);
+const REAP_INTERVAL_MS: f64 = 60_000.0;
+const RECORD_LIFETIME_MS: f64 = 180.0 * 60_000.0;
+const RECORD_MAX_AGE_MS: f64 = 24.0 * 60.0 * 60_000.0;
+const UNCERTAIN_CREATE_MS: f64 = 5.0 * 60_000.0;
 type Tool = (&'static str, &'static str, &'static str);
 type HubEnv = (Vec<(OsString, OsString)>, Option<String>);
 
@@ -89,6 +99,8 @@ pub struct DeviceService {
     ssh_wants_agent: Mutex<HashSet<String>>,
     /// The Expo Simulators hosts from settings (`easDeviceHosts`).
     eas_hosts: Mutex<Vec<EasState>>,
+    /// Serializes the Expo hosts' session ledgers (`ledgerLock`).
+    eas_ledger_lock: tokio::sync::Mutex<()>,
     /// The Simlock hosts from settings (`simlockDeviceHosts`, when the alpha is on).
     simlock_hosts: Mutex<Vec<SimlockState>>,
     /// Launchers on a session a host leases to every thread (a Simlock
@@ -124,6 +136,7 @@ impl DeviceService {
             ssh_activated: Default::default(),
             ssh_wants_agent: Default::default(),
             eas_hosts: Default::default(),
+            eas_ledger_lock: Default::default(),
             simlock_hosts: Default::default(),
             host_session_launchers: Default::default(),
             reconcile_lock: Default::default(),
@@ -1567,6 +1580,13 @@ impl DeviceService {
         {
             return self.simlock_apply(name, input, dir).await;
         }
+        if matches!(name, "open" | "shutdown")
+            && input["hostId"]
+                .as_str()
+                .is_some_and(|id| self.eas_config(id).is_some())
+        {
+            return self.eas_apply(name, input, dir).await;
+        }
         let mut runtime = self.runtime.lock().await;
         let mut state = self.current();
         let host_id = input["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
@@ -1633,6 +1653,16 @@ impl DeviceService {
                     .collect();
                 for config in simlock_hosts {
                     self.simlock_release_all(config).await;
+                }
+                let eas_hosts: Vec<EasConfig> = self
+                    .eas_hosts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|host| host.config.clone())
+                    .collect();
+                for config in eas_hosts {
+                    self.eas_stop_all(&config, dir).await;
                 }
                 runtime.take();
                 state["sessions"] = json!([]);
@@ -1819,7 +1849,24 @@ impl DeviceService {
             }
             for s in ending.iter().filter(|s| s["hostId"] != LOCAL_HOST_ID) {
                 let session_host = s["hostId"].as_str().unwrap_or_default();
-                if let Some(endpoint) = self.ssh_agent_endpoint(session_host).await {
+                // Each Expo session runs its own daemon, so one that has ended holds no agent sessions.
+                let eas_endpoint = self
+                    .with_eas(session_host, |host| {
+                        host.sessions
+                            .get(s["deviceId"].as_str().unwrap_or_default())
+                            .map(|session| AgentEndpoint {
+                                base_url: session.agent_url.clone(),
+                                token: session.agent_token.clone(),
+                                entry: PathBuf::new(),
+                                state_dir: None,
+                            })
+                    })
+                    .flatten();
+                let endpoint = match eas_endpoint {
+                    Some(endpoint) => Some(endpoint),
+                    None => self.ssh_agent_endpoint(session_host).await,
+                };
+                if let Some(endpoint) = endpoint {
                     let session = agent_device::session_name(
                         s["threadId"].as_str().unwrap_or(""),
                         session_host,
@@ -1857,6 +1904,25 @@ impl DeviceService {
                 for s in &closing {
                     let session_host = s["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
                     let dev_id = s["deviceId"].as_str().unwrap_or("");
+                    if let Some(config) = self.eas_config(session_host) {
+                        if self.with_eas(session_host, |host| host.ready) != Some(true) {
+                            return Err(json!({
+                                "_tag": "DeviceHostUnavailableError",
+                                "hostId": session_host,
+                                "reason": "Device host is not running. Reconnect before retrying close.",
+                            }));
+                        }
+                        self.eas_shutdown(&config, dir, dev_id).await?;
+                        if let Some(devices) = state["devices"].as_array_mut() {
+                            for d in devices.iter_mut() {
+                                if d["hostId"] == s["hostId"] && d["id"] == dev_id {
+                                    d["booted"] = json!(false);
+                                }
+                            }
+                        }
+                        self.publish(&mut state);
+                        continue;
+                    }
                     if self.simlock_config(session_host).is_some() {
                         // A Simlock host's readiness is its CLI; its shutdown returns the lease.
                         if self.with_simlock(session_host, |host| host.cli.is_some()) != Some(true)
@@ -1913,6 +1979,10 @@ impl DeviceService {
                     let session_host = s["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
                     if self.simlock_config(session_host).is_some() {
                         let _ = self.simlock_refresh(session_host, dir).await;
+                        continue;
+                    }
+                    if let Some(config) = self.eas_config(session_host) {
+                        self.eas_refresh(&config, dir).await;
                         continue;
                     }
                     let current = if session_host == LOCAL_HOST_ID {
@@ -2646,6 +2716,11 @@ impl DeviceService {
         } else {
             None
         };
+        let eas_session = if self.eas_config(&session_host).is_some() {
+            Some(self.eas_agent_endpoint(&session_host, &session_device)?)
+        } else {
+            None
+        };
         let (target_args, agent_session) = match &simlock_lease {
             // A host with a daemon per device: the lease's own session and config.
             Some((lease, url)) => {
@@ -2674,6 +2749,34 @@ impl DeviceService {
                     ],
                     lease.session.clone(),
                 )
+            }
+            // An Expo session runs its own daemon, and agent-device selects its
+            // device by the preview host's id for it.
+            None if eas_session.is_some() => {
+                let session = eas_session.as_ref().unwrap();
+                let config = agent_device::device_config_path(dir, &session_host, &session_device);
+                agent_device::write_config(
+                    &config,
+                    &AgentEndpoint {
+                        base_url: session.agent_url.clone(),
+                        token: session.agent_token.clone(),
+                        entry: PathBuf::new(),
+                        state_dir: None,
+                    },
+                )
+                .await
+                .map_err(|_| op_err("configure agent", "settings_failed"))?;
+                let mut target_args = agent_device::target_args(
+                    device["platform"].as_str().unwrap_or("android"),
+                    &session.remote_device_id,
+                );
+                target_args.extend([
+                    "--config".to_owned(),
+                    config.to_string_lossy().into_owned(),
+                    "--session".to_owned(),
+                    own_session.clone(),
+                ]);
+                (target_args, own_session.clone())
             }
             None => {
                 let config = agent_device::config_path(dir, &session_host);
@@ -2743,12 +2846,17 @@ impl DeviceService {
                         install_directory: Some(&lease.install_directory),
                     },
                 ),
+                None if eas_session.is_some() => agent_device::quick_start_on(
+                    &device,
+                    &[],
+                    &command,
+                    agent_device::QuickStartHost::Eas,
+                ),
                 None => agent_device::quick_start(&device, &[], &command),
             },
         }))
     }
 
-    /// `device_screenshot`: the PNG of a device open in the calling thread.
     /// `screenshot`: a device's screen as PNG bytes, through its host's hub
     /// (`resolveDevice`, then `extractPng`).
     pub(crate) async fn screenshot(
@@ -2757,6 +2865,38 @@ impl DeviceService {
         device_id: &str,
         dir: &Path,
     ) -> Result<(Value, Vec<u8>), Value> {
+        if let Some(config) = self.eas_config(target_host) {
+            // resolveDevice on an Expo host, then the session's preview host.
+            self.eas_readiness(target_host, dir).await?;
+            let find = |state: &Value| {
+                state["devices"]
+                    .as_array()
+                    .and_then(|ds| {
+                        ds.iter()
+                            .find(|d| d["hostId"] == target_host && d["id"] == device_id)
+                    })
+                    .cloned()
+            };
+            let device = match find(&self.current()) {
+                Some(device) => device,
+                None => {
+                    self.eas_refresh(&config, dir).await;
+                    find(&self.current()).ok_or_else(|| {
+                        json!({"_tag":"DeviceNotFoundError","hostId":target_host,"deviceId":device_id})
+                    })?
+                }
+            };
+            let bytes = self.eas_screenshot(target_host, device_id).await?;
+            let Some(png) = extract_png(&bytes).map(<[u8]>::to_vec) else {
+                return Err(json!({
+                    "_tag": "DeviceOperationError",
+                    "operation": "screenshot",
+                    "reason": "hub_rejected",
+                    "cause": format!("The hub returned {} bytes without a complete PNG.", bytes.len()),
+                }));
+            };
+            return Ok((device, png));
+        }
         if self.simlock_config(target_host).is_some() {
             // resolveDevice on a Simlock host, then the lease's screenshot.
             self.simlock_readiness(target_host, dir).await?;
@@ -2848,6 +2988,7 @@ impl DeviceService {
         Ok((device, png))
     }
 
+    /// `device_screenshot`: the PNG of a device open in the calling thread.
     pub(super) async fn tool_screenshot(&self, input: &Value, dir: &Path) -> Reply {
         let thread_id = input["threadId"].as_str().unwrap_or("");
         let state = self.snapshot(dir);
@@ -3255,6 +3396,28 @@ impl DeviceService {
         if host_id == LOCAL_HOST_ID {
             return self.agent_readiness(dir).await;
         }
+        if self.eas_config(host_id).is_some() {
+            let preferences = self
+                .settings
+                .internal()
+                .map_err(|_| op_err("settings", "settings_failed"))?;
+            if preferences["enableDeviceSupport"] != true
+                || preferences["enableAgentDeviceAccess"] != true
+            {
+                return Ok(None);
+            }
+            // Each session runs its own daemon (`agentDevice: null`).
+            self.eas_readiness(host_id, dir).await?;
+            let mut state = self.current();
+            self.publish(&mut state);
+            self.set_host_status_for(host_id, "ready", None);
+            return Ok(Some(AgentEndpoint {
+                base_url: String::new(),
+                token: String::new(),
+                entry: PathBuf::new(),
+                state_dir: None,
+            }));
+        }
         if let Some(config) = self.simlock_config(host_id) {
             let preferences = self
                 .settings
@@ -3368,6 +3531,17 @@ impl DeviceService {
             .collect();
         for config in simlock_hosts {
             self.simlock_release_all(config).await;
+        }
+        let eas_hosts: Vec<EasConfig> = self
+            .eas_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|host| host.config.clone())
+            .collect();
+        // Unlike machines the user owns, every running session here is billed.
+        for config in eas_hosts {
+            self.eas_stop_all(&config, dir).await;
         }
     }
 
@@ -3517,40 +3691,950 @@ impl DeviceService {
         }
     }
 
-    /// `list` for one Expo host: made ready (its credential need not be
-    /// there yet), then its catalog and running sessions.
-    async fn list_eas_host(&self, host_id: &str, dir: &Path) {
-        if self.eas_config(host_id).is_none() {
+    fn eas_unavailable(config: &EasConfig, reason: impl Into<String>) -> Value {
+        json!({
+            "_tag": "DeviceHostUnavailableError",
+            "hostId": config.id,
+            "hostLabel": config.label,
+            "reason": reason.into(),
+        })
+    }
+
+    /// `api`: the host's Expo credential, read now (and kept for stops).
+    async fn eas_api(&self, config: &EasConfig) -> Result<expo_api::Credential, Value> {
+        match self.eas_credential(config).await {
+            Ok(credential) => {
+                self.with_eas(&config.id, |host| {
+                    host.last_credential = Some(credential.clone())
+                });
+                Ok(credential)
+            }
+            Err(reason) => Err(Self::eas_unavailable(config, reason)),
+        }
+    }
+
+    /// `apiForStop`: stopping a billed session must not depend on the
+    /// secret still being readable; starting one must.
+    async fn eas_api_for_stop(&self, config: &EasConfig) -> Result<expo_api::Credential, Value> {
+        match self.eas_api(config).await {
+            Ok(credential) => Ok(credential),
+            Err(error) => self
+                .with_eas(&config.id, |host| host.last_credential.clone())
+                .flatten()
+                .ok_or(error),
+        }
+    }
+
+    /// `writeLedger`, under the host's ledger lock.
+    async fn eas_write_ledger(
+        &self,
+        config: &EasConfig,
+        dir: &Path,
+        update: impl FnOnce(Vec<eas::LedgerEntry>) -> Vec<eas::LedgerEntry>,
+    ) -> Result<(), Value> {
+        let _lock = self.eas_ledger_lock.lock().await;
+        let path = eas::ledger_path(dir, &config.id);
+        let entries = eas::read_ledger(&path).map_err(|_| {
+            Self::eas_unavailable(
+                config,
+                format!(
+                    "The record of running Expo Simulators sessions at {} could not be read. Fix or remove it.",
+                    path.display()
+                ),
+            )
+        })?;
+        eas::write_ledger(&path, &update(entries)).map_err(|_| {
+            Self::eas_unavailable(
+                config,
+                format!(
+                    "The record of running Expo Simulators sessions at {} could not be written.",
+                    path.display()
+                ),
+            )
+        })
+    }
+
+    async fn eas_forget_entry(&self, config: &EasConfig, dir: &Path, name: &str) {
+        let name = name.to_owned();
+        if self
+            .eas_write_ledger(config, dir, |entries| {
+                entries
+                    .into_iter()
+                    .filter(|entry| entry.name != name)
+                    .collect()
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!("Could not update the Expo Simulators session record");
+        }
+    }
+
+    async fn eas_mark_refused(&self, config: &EasConfig, dir: &Path, name: &str) {
+        let name = name.to_owned();
+        if self
+            .eas_write_ledger(config, dir, |entries| {
+                entries
+                    .into_iter()
+                    .map(|mut entry| {
+                        if entry.name == name {
+                            entry.refused = true;
+                        }
+                        entry
+                    })
+                    .collect()
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!("Could not update the Expo Simulators session record");
+        }
+    }
+
+    /// `stopSession`: stops a session and, once Expo confirms it, drops it from the ledger.
+    async fn eas_stop_session(
+        &self,
+        config: &EasConfig,
+        dir: &Path,
+        credential: &expo_api::Credential,
+        session_id: &str,
+        name: &str,
+    ) -> Result<(), ()> {
+        match expo_api::stop(credential, session_id).await {
+            Ok(_) => {
+                self.eas_forget_entry(config, dir, name).await;
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(%session_id, error = %error.message(), "Could not stop Expo Simulators session");
+                Err(())
+            }
+        }
+    }
+
+    /// `stopRecorded`: finds recorded sessions by name in each app's running
+    /// sessions and stops them; the names found and the apps listed.
+    async fn eas_stop_recorded(
+        &self,
+        config: &EasConfig,
+        dir: &Path,
+        credential: &expo_api::Credential,
+        entries: &[eas::LedgerEntry],
+    ) -> (HashSet<String>, HashSet<String>) {
+        let mut found = HashSet::new();
+        let mut listed = HashSet::new();
+        let mut apps: Vec<String> = Vec::new();
+        for entry in entries {
+            if !apps.contains(&entry.app_id) {
+                apps.push(entry.app_id.clone());
+            }
+        }
+        for app_id in apps {
+            let Ok(active) = expo_api::active_sessions(credential, &app_id).await else {
+                continue;
+            };
+            for entry in entries.iter().filter(|entry| entry.app_id == app_id) {
+                let running: Vec<&Value> = active
+                    .iter()
+                    .filter(|s| s["name"] == entry.name.as_str())
+                    .collect();
+                if running.is_empty() {
+                    continue;
+                }
+                found.insert(entry.name.clone());
+                for session in running {
+                    let session_id = session["id"].as_str().unwrap_or_default().to_owned();
+                    if self
+                        .eas_stop_session(config, dir, credential, &session_id, &entry.name)
+                        .await
+                        .is_err()
+                    {
+                        // Still running and billed: owned, counted, and retried by listing.
+                        self.with_eas(&config.id, |host| {
+                            host.unresolved
+                                .insert(entry.name.clone(), session_id.clone())
+                        });
+                    }
+                }
+            }
+            listed.insert(app_id);
+        }
+        (found, listed)
+    }
+
+    /// `retryUnresolved`: a session Expo already ended is let go even if stopping it keeps failing.
+    async fn eas_retry_unresolved(
+        &self,
+        config: &EasConfig,
+        dir: &Path,
+        credential: &expo_api::Credential,
+        name: &str,
+        session_id: &str,
+    ) {
+        let settled = if self
+            .eas_stop_session(config, dir, credential, session_id, name)
+            .await
+            .is_ok()
+        {
+            true
+        } else {
+            match expo_api::session(credential, session_id).await {
+                Ok(current) if current.status == "STOPPED" || current.status == "ERRORED" => {
+                    self.eas_forget_entry(config, dir, name).await;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if settled {
+            self.with_eas(&config.id, |host| host.unresolved.remove(name));
+        }
+    }
+
+    /// `adoptRecorded`: records a previous server left count against the
+    /// limit until a sweep finds them.
+    fn eas_adopt_recorded(&self, config: &EasConfig, dir: &Path) {
+        let Ok(entries) = eas::read_ledger(&eas::ledger_path(dir, &config.id)) else {
+            return;
+        };
+        let now = eas::now_ms();
+        self.with_eas(&config.id, |host| {
+            let owned = host.owned_names();
+            for entry in entries {
+                let until = (entry.recorded_at + UNCERTAIN_CREATE_MS).max(now);
+                // A refused create made nothing: its record is for the reaper only.
+                if !owned.contains(&entry.name) && !entry.refused {
+                    host.uncertain.insert(entry.name.clone(), (entry, until));
+                }
+            }
+        });
+    }
+
+    /// `reapLeftovers`: stops recorded sessions this host does not own.
+    async fn eas_reap(&self, config: &EasConfig, dir: &Path, credential: &expo_api::Credential) {
+        let reaped_at = eas::now_ms();
+        self.with_eas(&config.id, |host| host.reaped_at = reaped_at);
+        let Ok(entries) = eas::read_ledger(&eas::ledger_path(dir, &config.id)) else {
+            tracing::warn!("Could not stop recorded Expo Simulators sessions");
+            return;
+        };
+        let owned = self
+            .with_eas(&config.id, |host| host.owned_names())
+            .unwrap_or_default();
+        let leftovers: Vec<eas::LedgerEntry> = entries
+            .into_iter()
+            .filter(|entry| !owned.contains(&entry.name))
+            .collect();
+        let (found, listed) = self
+            .eas_stop_recorded(config, dir, credential, &leftovers)
+            .await;
+        self.with_eas(&config.id, |host| {
+            host.uncertain.retain(|name, (entry, until)| {
+                !(found.contains(name) || (reaped_at >= *until && listed.contains(&entry.app_id)))
+            });
+        });
+        for entry in &leftovers {
+            let age = reaped_at - entry.recorded_at;
+            if age > RECORD_LIFETIME_MS {
+                self.with_eas(&config.id, |host| host.uncertain.remove(&entry.name));
+            }
+            if found.contains(&entry.name) {
+                continue;
+            }
+            if (age > RECORD_LIFETIME_MS && listed.contains(&entry.app_id))
+                || age > RECORD_MAX_AGE_MS
+            {
+                self.eas_forget_entry(config, dir, &entry.name).await;
+            }
+        }
+    }
+
+    /// `ensureReady` for an Expo host: adopts records a previous server
+    /// left and sweeps them. Without a credential the host is still ready.
+    async fn eas_ensure_ready(&self, config: &EasConfig, dir: &Path) {
+        if self.with_eas(&config.id, |host| host.ready) == Some(true) {
             return;
         }
+        self.eas_adopt_recorded(config, dir);
+        if let Ok(credential) = self.eas_api(config).await {
+            self.eas_reap(config, dir, &credential).await;
+        }
+        self.with_eas(&config.id, |host| host.ready = true);
+    }
+
+    /// `readiness` for an Expo host.
+    async fn eas_readiness(&self, host_id: &str, dir: &Path) -> Result<EasConfig, Value> {
+        let config = self.eas_config(host_id).ok_or_else(|| bad_host(host_id))?;
         let enabled = self
             .settings
             .internal()
-            .is_ok_and(|settings| settings["enableDeviceSupport"] == true);
+            .map_err(|_| op_err("settings", "settings_failed"))?["enableDeviceSupport"]
+            == true;
         if !enabled {
-            return;
+            return Err(self.disabled_for(host_id));
         }
-        self.with_eas(host_id, |host| host.ready = true);
+        self.eas_ensure_ready(&config, dir).await;
         if self.current()["hostStatuses"][host_id]["status"] != "ready" {
             self.set_host_status_for(host_id, "ready", None);
         }
-        self.refresh_eas_platforms().await;
-        let mut state = self.current();
-        if state["hostStatus"] == "disabled" {
+        Ok(config)
+    }
+
+    /// `dropEnded`: Expo ends sessions at their run or idle limit; stop
+    /// listing those, retry failed stops, and reap now and then.
+    async fn eas_drop_ended(&self, config: &EasConfig, dir: &Path) {
+        let now = eas::now_ms();
+        let Some((stale, unresolved, uncertain, reap_due)) = self.with_eas(&config.id, |host| {
+            let stale: Vec<eas::RunningSession> = host
+                .sessions
+                .values()
+                .filter(|session| {
+                    session.stopping
+                        || now
+                            - host
+                                .checked_at
+                                .get(&session.session_id)
+                                .copied()
+                                .unwrap_or(0.0)
+                            > STATUS_TTL_MS
+                })
+                .cloned()
+                .collect();
+            let unresolved: Vec<(String, String)> = host
+                .unresolved
+                .iter()
+                .map(|(n, s)| (n.clone(), s.clone()))
+                .collect();
+            (
+                stale,
+                unresolved,
+                host.uncertain.len(),
+                now - host.reaped_at > REAP_INTERVAL_MS,
+            )
+        }) else {
             return;
+        };
+        if stale.is_empty() && unresolved.is_empty() && uncertain == 0 && !reap_due {
+            return;
+        }
+        let reap = reap_due || uncertain > 0;
+        if reap {
+            self.with_eas(&config.id, |host| host.reaped_at = now);
+        }
+        let credential = match self.eas_api_for_stop(config).await {
+            Ok(credential) => credential,
+            Err(_) => {
+                // Without a credential no sweep can look; a record Expo would
+                // have listed by now still stops counting.
+                self.with_eas(&config.id, |host| {
+                    host.uncertain.retain(|_, (_, until)| now < *until)
+                });
+                return;
+            }
+        };
+        for (name, session_id) in unresolved {
+            self.eas_retry_unresolved(config, dir, &credential, &name, &session_id)
+                .await;
+        }
+        for session in stale {
+            if session.stopping
+                && self
+                    .eas_stop_session(config, dir, &credential, &session.session_id, &session.name)
+                    .await
+                    .is_ok()
+            {
+                self.eas_forget_session(&config.id, &session.session_id);
+                continue;
+            }
+            match expo_api::session(&credential, &session.session_id).await {
+                Ok(current) if current.status == "STOPPED" || current.status == "ERRORED" => {
+                    self.eas_forget_session(&config.id, &session.session_id);
+                    self.eas_forget_entry(config, dir, &session.name).await;
+                }
+                Ok(_) if !session.stopping => {
+                    self.with_eas(&config.id, |host| {
+                        host.checked_at.insert(session.session_id.clone(), now)
+                    });
+                }
+                _ => {}
+            }
+        }
+        if reap {
+            self.eas_reap(config, dir, &credential).await;
+        }
+    }
+
+    fn eas_forget_session(&self, host_id: &str, session_id: &str) {
+        self.with_eas(host_id, |host| {
+            host.sessions.shift_remove(session_id);
+            host.checked_at.remove(session_id);
+        });
+    }
+
+    /// `refresh` for an Expo host: its catalog and running sessions. It ends
+    /// devices itself, so sessions on devices it no longer lists go.
+    async fn eas_refresh(&self, config: &EasConfig, dir: &Path) {
+        let before: Vec<Value> = self.current()["sessions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        self.eas_drop_ended(config, dir).await;
+        self.refresh_eas_platforms().await;
+        let mut devices = eas::catalog(&config.id);
+        devices.extend(
+            self.with_eas(&config.id, |host| {
+                host.sessions
+                    .values()
+                    .map(|session| {
+                        json!({
+                            "hostId": config.id,
+                            "id": session.session_id,
+                            "platform": session.platform,
+                            "name": eas::platform_name(&session.platform),
+                            "version": "Cloud",
+                            "booted": true,
+                            "physical": false,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        );
+        let mut state = self.current();
+        if state["hostStatus"] == "disabled" || self.eas_config(&config.id).is_none() {
+            return;
+        }
+        let ids: Vec<Value> = devices.iter().map(|d| d["id"].clone()).collect();
+        if let Some(sessions) = state["sessions"].as_array_mut() {
+            sessions.retain(|session| {
+                session["hostId"] != config.id.as_str()
+                    || !before.contains(session)
+                    || ids.contains(&session["deviceId"])
+            });
         }
         apply_list_result(
             &mut state,
             dir,
-            host_id,
+            &config.id,
             HubListResult {
-                devices: eas::catalog(host_id),
+                devices,
                 detail: None,
                 android_discovery_incomplete: false,
                 incomplete_platforms: Vec::new(),
             },
         );
         self.publish(&mut state);
+    }
+
+    /// `list` for one Expo host.
+    async fn list_eas_host(&self, host_id: &str, dir: &Path) {
+        match self.eas_readiness(host_id, dir).await {
+            Ok(config) => self.eas_refresh(&config, dir).await,
+            Err(error) => {
+                if self.eas_config(host_id).is_some()
+                    && error["_tag"] == "DeviceHostUnavailableError"
+                {
+                    let detail = error["reason"].as_str().unwrap_or_default().to_owned();
+                    self.set_host_status_for(host_id, "failed", Some(detail));
+                }
+            }
+        }
+    }
+
+    /// `startSession`: records the session, asks Expo for it, waits for it
+    /// and starts tracking it. A session Expo made is always either tracked
+    /// or stopped.
+    async fn eas_start_session(
+        &self,
+        config: &EasConfig,
+        dir: &Path,
+        device: &Value,
+        _workspace_root: Option<&str>,
+    ) -> Result<String, Value> {
+        let started_in = self
+            .with_eas(&config.id, |host| host.epoch)
+            .unwrap_or_default();
+        let name = format!(
+            "T3 Code · {} · {:06x}",
+            config.label,
+            rand::random::<u32>() & 0x00ff_ffff
+        );
+        // The credential comes first: without one, the answer is how to sign in.
+        let credential = self.eas_api(config).await?;
+        // reserveSlot
+        let refused = self
+            .with_eas(&config.id, |host| {
+                let pending = host.unresolved.len() + host.uncertain.len();
+                if host.sessions.len() + host.starting.len() + pending >= config.max_concurrent_sessions {
+                    let max = config.max_concurrent_sessions;
+                    let limit = format!(
+                        "{} is limited to {max} running {}.",
+                        config.label,
+                        if max == 1 { "session" } else { "sessions" }
+                    );
+                    return Some(if pending > 0 {
+                        format!(
+                            "{limit} {} that failed to start or stop {} still being cleaned up; try again shortly.",
+                            if pending == 1 { "A session".to_owned() } else { format!("{pending} sessions") },
+                            if pending == 1 { "is" } else { "are" }
+                        )
+                    } else {
+                        format!("{limit} Close one in the Device panel first.")
+                    });
+                }
+                host.starting.insert(name.clone());
+                None
+            })
+            .flatten();
+        if let Some(reason) = refused {
+            return Err(Self::eas_unavailable(config, reason));
+        }
+        let result = self
+            .eas_start_reserved(config, dir, device, &credential, &name, started_in)
+            .await;
+        self.with_eas(&config.id, |host| host.starting.remove(&name));
+        result
+    }
+
+    async fn eas_start_reserved(
+        &self,
+        config: &EasConfig,
+        dir: &Path,
+        device: &Value,
+        credential: &expo_api::Credential,
+        name: &str,
+        started_in: u64,
+    ) -> Result<String, Value> {
+        let Some(app_id) = config.app_id.clone() else {
+            return Err(Self::eas_unavailable(
+                config,
+                "No Expo project to run the session under. Choose one for this host in Settings, or open the device from a thread whose project names extra.eas.projectId in app.json or its app config.",
+            ));
+        };
+        let entry = eas::LedgerEntry {
+            name: name.to_owned(),
+            app_id: app_id.clone(),
+            recorded_at: eas::now_ms(),
+            refused: false,
+        };
+        // Recorded first: a session the ledger cannot hold is never started.
+        let recorded = entry.clone();
+        self.eas_write_ledger(config, dir, move |mut entries| {
+            entries.push(recorded);
+            entries
+        })
+        .await?;
+        if self.with_eas(&config.id, |host| host.epoch) != Some(started_in) {
+            self.eas_forget_entry(config, dir, name).await;
+            return Err(Self::eas_unavailable(
+                config,
+                format!("{} was stopped while the session started.", config.label),
+            ));
+        }
+        let platform = device["platform"].as_str().unwrap_or("ios").to_owned();
+        let session_id = match expo_api::create(
+            credential,
+            &app_id,
+            &platform,
+            name,
+            config.max_session_minutes,
+            config.idle_minutes,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                // Unless Expo refused, it may have made the session before
+                // failing to answer; unlisted, it stays counted for a while.
+                let (found, _) = self
+                    .eas_stop_recorded(config, dir, credential, std::slice::from_ref(&entry))
+                    .await;
+                if !found.contains(name) {
+                    if error.rejected {
+                        self.eas_mark_refused(config, dir, name).await;
+                    } else {
+                        let until = eas::now_ms() + UNCERTAIN_CREATE_MS;
+                        self.with_eas(&config.id, |host| {
+                            host.uncertain
+                                .insert(name.to_owned(), (entry.clone(), until))
+                        });
+                    }
+                }
+                return Err(Self::eas_unavailable(config, error.message()));
+            }
+        };
+        match self
+            .eas_track_session(config, credential, &session_id, name, &platform, started_in)
+            .await
+        {
+            Ok(id) => Ok(id),
+            Err(error) => {
+                if self
+                    .eas_stop_session(config, dir, credential, &session_id, name)
+                    .await
+                    .is_err()
+                {
+                    // Still running and billed: owned, counted, and retried by listing.
+                    self.with_eas(&config.id, |host| {
+                        host.unresolved.insert(name.to_owned(), session_id.clone())
+                    });
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// `trackSession`: waits for a created session (`awaitRunning`), reads
+    /// its preview host's device id, and starts tracking it.
+    async fn eas_track_session(
+        &self,
+        config: &EasConfig,
+        credential: &expo_api::Credential,
+        session_id: &str,
+        name: &str,
+        platform: &str,
+        started_in: u64,
+    ) -> Result<String, Value> {
+        let boot_error = |reason: &str| {
+            json!({
+                "_tag": "DeviceBootError",
+                "hostId": config.id,
+                "deviceId": session_id,
+                "reason": reason,
+            })
+        };
+        let deadline = tokio::time::Instant::now() + EAS_START_TIMEOUT;
+        let endpoints = loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(boot_error("timeout"));
+            }
+            let mut attempt = 0;
+            let session = loop {
+                match expo_api::session(credential, session_id).await {
+                    Ok(session) => break session,
+                    Err(_) if attempt < 3 => {
+                        attempt += 1;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    Err(error) => return Err(Self::eas_unavailable(config, error.message())),
+                }
+            };
+            if session.status == "STOPPED" || session.status == "ERRORED" {
+                return Err(boot_error("launch_failed"));
+            }
+            if session.status == "IN_PROGRESS" {
+                if let Some(endpoints) = session.endpoints {
+                    break endpoints;
+                }
+            }
+            tokio::time::sleep(EAS_POLL_INTERVAL).await;
+        };
+        let Some((preview_url, preview_token)) = endpoints.preview.clone() else {
+            return Err(boot_error("launch_failed"));
+        };
+        let origin = url::Url::parse(&preview_url)
+            .map(|url| url.origin().ascii_serialization())
+            .map_err(|_| boot_error("launch_failed"))?;
+        let remote_device_id = self
+            .eas_preview_device(&origin, &preview_token, platform)
+            .await
+            .ok_or_else(|| boot_error("launch_failed"))?;
+        if self.with_eas(&config.id, |host| host.epoch) != Some(started_in) {
+            return Err(Self::eas_unavailable(
+                config,
+                format!("{} was stopped while the session started.", config.label),
+            ));
+        }
+        self.with_eas(&config.id, |host| {
+            host.sessions.insert(
+                session_id.to_owned(),
+                eas::RunningSession {
+                    session_id: session_id.to_owned(),
+                    name: name.to_owned(),
+                    platform: platform.to_owned(),
+                    remote_device_id,
+                    preview_origin: origin.clone(),
+                    preview_token: preview_token.clone(),
+                    agent_url: endpoints.agent_url.clone(),
+                    agent_token: endpoints.agent_token.clone(),
+                    stopping: false,
+                },
+            )
+        });
+        Ok(session_id.to_owned())
+    }
+
+    /// `previewDevice`: the device id the session's preview host serves.
+    async fn eas_preview_device(
+        &self,
+        origin: &str,
+        token: &str,
+        platform: &str,
+    ) -> Option<String> {
+        let client = expo_api::client();
+        for attempt in 0..4 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            let request = client
+                .get(format!("{origin}{}/api", eas::preview_prefix(platform)))
+                .bearer_auth(token)
+                .timeout(EAS_PREVIEW_TIMEOUT)
+                .send()
+                .await;
+            let Ok(response) = request else { continue };
+            if !response.status().is_success() {
+                continue;
+            }
+            let Ok(api) = response.json::<Value>().await else {
+                continue;
+            };
+            let key = if platform == "ios" {
+                "device"
+            } else {
+                "serial"
+            };
+            if let Some(id) = api[key].as_str().filter(|id| !id.is_empty()) {
+                return Some(id.to_owned());
+            }
+        }
+        None
+    }
+
+    /// `stopTracked`: until Expo confirms the stop, the session stays
+    /// tracked, listed, counted, and retried by the next listing.
+    async fn eas_stop_tracked(
+        &self,
+        config: &EasConfig,
+        dir: &Path,
+        credential: &expo_api::Credential,
+        session_id: &str,
+    ) -> Result<(), ()> {
+        let name = self
+            .with_eas(&config.id, |host| {
+                host.sessions.get_mut(session_id).map(|session| {
+                    session.stopping = true;
+                    session.name.clone()
+                })
+            })
+            .flatten()
+            .ok_or(())?;
+        self.eas_stop_session(config, dir, credential, session_id, &name)
+            .await?;
+        self.eas_forget_session(&config.id, session_id);
+        Ok(())
+    }
+
+    /// `stopAll`: every session this host runs stopped (each is billed), and
+    /// leftovers reaped.
+    async fn eas_stop_all(&self, config: &EasConfig, dir: &Path) {
+        self.with_eas(&config.id, |host| host.epoch += 1);
+        let Ok(credential) = self.eas_api_for_stop(config).await else {
+            return;
+        };
+        let sessions: Vec<String> = self
+            .with_eas(&config.id, |host| host.sessions.keys().cloned().collect())
+            .unwrap_or_default();
+        for session_id in sessions {
+            let _ = self
+                .eas_stop_tracked(config, dir, &credential, &session_id)
+                .await;
+        }
+        let unresolved: Vec<(String, String)> = self
+            .with_eas(&config.id, |host| {
+                host.unresolved
+                    .iter()
+                    .map(|(n, s)| (n.clone(), s.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (name, session_id) in unresolved {
+            self.eas_retry_unresolved(config, dir, &credential, &name, &session_id)
+                .await;
+        }
+        self.eas_reap(config, dir, &credential).await;
+    }
+
+    /// `open` and `shutdown` for an Expo host: a session started (as
+    /// `boot`) or stopped (as `shutdown`).
+    async fn eas_apply(&self, name: &str, input: &Value, dir: &Path) -> Reply {
+        let host_id = input["hostId"].as_str().unwrap_or_default().to_owned();
+        let id = string(input, "deviceId")?.to_owned();
+        let platform = string(input, "platform")?.to_owned();
+        let find = |state: &Value, wanted: &str| {
+            state["devices"]
+                .as_array()
+                .and_then(|devices| {
+                    devices
+                        .iter()
+                        .find(|d| d["hostId"] == host_id.as_str() && d["id"] == wanted)
+                })
+                .cloned()
+        };
+        if name == "shutdown" {
+            let mut state = self.current();
+            if let Some(sessions) = state["sessions"].as_array_mut() {
+                sessions
+                    .retain(|s| s["hostId"] != host_id.as_str() || s["deviceId"] != id.as_str());
+            }
+            self.publish(&mut state);
+            let config = self.eas_readiness(&host_id, dir).await?;
+            self.eas_shutdown(&config, dir, &id).await?;
+            self.eas_refresh(&config, dir).await;
+            return Ok(Value::Null);
+        }
+        let thread = string(input, "threadId")?.to_owned();
+        let Some(config) = self.eas_config(&host_id) else {
+            return Err(bad_host(&host_id));
+        };
+        let availability = match self.eas_credential(&config).await {
+            Ok(_) => json!({"available": true}),
+            Err(reason) => json!({"available": false, "reason": reason}),
+        };
+        if availability["available"] != true {
+            return Err(json!({
+                "_tag": "DevicePlatformUnavailableError",
+                "hostId": host_id,
+                "platform": platform,
+                "reason": availability["reason"],
+            }));
+        }
+        let config = self.eas_readiness(&host_id, dir).await?;
+        self.eas_refresh(&config, dir).await;
+        let mut device = find(&self.current(), &id)
+            .ok_or_else(|| json!({"_tag":"DeviceNotFoundError","hostId":host_id,"deviceId":id}))?;
+        if device["booted"] != true && input["boot"] != false {
+            let mut booting = device.clone();
+            booting["threadId"] = json!(thread);
+            let mut state = self.current();
+            let mut list: Vec<Value> = state["bootingDevices"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            list.retain(|e| e["hostId"] != booting["hostId"] || e["id"] != booting["id"]);
+            list.push(booting.clone());
+            state["bootingDevices"] = Value::Array(list);
+            self.publish(&mut state);
+            let booted = self
+                .eas_start_session(&config, dir, &device, input["workspaceRoot"].as_str())
+                .await;
+            let mut state = self.current();
+            if let Some(list) = state["bootingDevices"].as_array_mut() {
+                list.retain(|e| e["hostId"] != booting["hostId"] || e["id"] != booting["id"]);
+            }
+            self.publish(&mut state);
+            let booted_id = booted?;
+            self.eas_refresh(&config, dir).await;
+            let state = self.current();
+            device = find(&state, &booted_id)
+                .or_else(|| find(&state, &id))
+                .ok_or_else(
+                    || json!({"_tag":"DeviceNotFoundError","hostId":host_id,"deviceId":booted_id}),
+                )?;
+        }
+        if self.eas_config(&host_id).as_ref() != Some(&config) {
+            return Err(json!({
+                "_tag": "DeviceHostUnavailableError",
+                "hostId": host_id,
+                "hostLabel": config.label,
+                "reason": "Host configuration changed. Retry the operation.",
+            }));
+        }
+        if self
+            .settings
+            .internal()
+            .map_err(|_| op_err("settings", "settings_failed"))?["enableDeviceSupport"]
+            != true
+        {
+            return Err(json!({
+                "_tag": "DeviceHostUnavailableError",
+                "hostId": host_id,
+                "hostLabel": config.label,
+                "reason": "Device support was turned off while the device was opening.",
+            }));
+        }
+        let active_id = device["id"].as_str().unwrap_or_default().to_owned();
+        let session = json!({
+            "threadId": thread,
+            "hostId": host_id,
+            "deviceId": active_id,
+            "platform": device["platform"],
+            "openedAt": timestamp(),
+        });
+        let mut state = self.current();
+        let sessions = state["sessions"].as_array_mut().unwrap();
+        sessions.retain(|s| {
+            s["threadId"] != thread.as_str()
+                || s["hostId"] != host_id.as_str()
+                || s["deviceId"] != active_id.as_str()
+        });
+        sessions.push(session.clone());
+        self.publish(&mut state);
+        Ok(session)
+    }
+
+    /// `devices.shutdown` for an Expo session.
+    async fn eas_shutdown(
+        &self,
+        config: &EasConfig,
+        dir: &Path,
+        device_id: &str,
+    ) -> Result<(), Value> {
+        let tracked = self
+            .with_eas(&config.id, |host| host.sessions.contains_key(device_id))
+            .unwrap_or(false);
+        if !tracked {
+            return Ok(());
+        }
+        let failed = || op_err("shutdown", "request_failed");
+        let credential = self.eas_api_for_stop(config).await.map_err(|_| failed())?;
+        self.eas_stop_tracked(config, dir, &credential, device_id)
+            .await
+            .map_err(|_| failed())
+    }
+
+    /// `devices.screenshot` for an Expo session, from its preview host.
+    async fn eas_screenshot(&self, host_id: &str, device_id: &str) -> Result<Vec<u8>, Value> {
+        let failed = || op_err("screenshot", "request_failed");
+        let session = self
+            .with_eas(host_id, |host| host.sessions.get(device_id).cloned())
+            .flatten()
+            .ok_or_else(failed)?;
+        let response = expo_api::client()
+            .post(format!(
+                "{}{}/api/screenshot?device={}",
+                session.preview_origin,
+                eas::preview_prefix(&session.platform),
+                agent_device::encode_uri_component(&session.remote_device_id)
+            ))
+            .bearer_auth(&session.preview_token)
+            .timeout(EAS_PREVIEW_TIMEOUT)
+            .send()
+            .await
+            .map_err(|_| failed())?;
+        if !response.status().is_success() {
+            return Err(failed());
+        }
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|_| failed())
+    }
+
+    /// `agentEndpoint` for an Expo session: its own daemon, and the id
+    /// agent-device selects its device by.
+    fn eas_agent_endpoint(
+        &self,
+        host_id: &str,
+        device_id: &str,
+    ) -> Result<eas::RunningSession, Value> {
+        let config = self.eas_config(host_id).ok_or_else(|| bad_host(host_id))?;
+        self.with_eas(host_id, |host| host.sessions.get(device_id).cloned())
+            .flatten()
+            .ok_or_else(|| {
+                Self::eas_unavailable(&config, "This Expo Simulator is no longer running.")
+            })
     }
 
     fn simlock_config(&self, host_id: &str) -> Option<SimlockConfig> {
@@ -4409,6 +5493,19 @@ impl DeviceService {
                 next_eas.push(config);
             }
         }
+        // Closing an Expo host stops its sessions, so a changed limit or token never leaves a
+        // billed session behind.
+        let leaving: Vec<EasConfig> = self
+            .eas_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|host| !next_eas.iter().any(|c| c.raw == host.config.raw))
+            .map(|host| host.config.clone())
+            .collect();
+        for config in &leaving {
+            self.eas_stop_all(config, dir).await;
+        }
         let removed_eas: Vec<String> = {
             let mut hosts = self.eas_hosts.lock().unwrap();
             let removed = hosts
@@ -4804,6 +5901,9 @@ impl DeviceService {
         path: &str,
         query: &str,
     ) -> Option<Option<HubRoute>> {
+        if let Some(host) = host.filter(|h| self.eas_config(h).is_some()) {
+            return Some(self.eas_upstream(host, path, query));
+        }
         let host = host.filter(|h| self.simlock_config(h).is_some())?;
         const INPUT_PATH: &str = "/vendor/serve-sim/helper/ws";
         let stream = path
@@ -4843,9 +5943,95 @@ impl DeviceService {
         )
     }
 
+    /// An Expo host's `upstream`: clients name the device by its session id,
+    /// the preview host by its own id, so that is swapped in the path and in
+    /// the `device` parameter. A session answers only on its own platform's
+    /// server. The `sec-websocket-protocol` header is sent only on upgrades.
+    fn eas_upstream(&self, host: &str, path: &str, query: &str) -> Option<HubRoute> {
+        let platform = ["ios", "android"]
+            .into_iter()
+            .find(|p| path.starts_with(&format!("{}/", eas::hub_prefix(p))))?;
+        let helper = path
+            .strip_prefix("/vendor/serve-sim/helper/")
+            .and_then(|rest| {
+                let (segment, tail) = rest.split_once('/')?;
+                (!segment.is_empty()).then_some((segment, tail))
+            });
+        let device = match helper {
+            Some((segment, _)) => Some(
+                percent_encoding::percent_decode_str(segment)
+                    .decode_utf8()
+                    .ok()?
+                    .into_owned(),
+            ),
+            None => url::form_urlencoded::parse(query.as_bytes())
+                .find(|(k, _)| k == "device")
+                .map(|(_, v)| v.into_owned()),
+        };
+        self.with_eas(host, |state| {
+            let session = match &device {
+                Some(id) => state.sessions.get(id)?,
+                None if state.sessions.len() == 1 => state.sessions.values().next()?,
+                None => return None,
+            };
+            if session.platform != platform {
+                return None;
+            }
+            let rest = match helper {
+                Some((_, tail)) => format!(
+                    "/helper/{}/{tail}",
+                    agent_device::encode_uri_component(&session.remote_device_id)
+                ),
+                None => format!(
+                    "{}{}",
+                    eas::preview_prefix(platform),
+                    &path[eas::hub_prefix(platform).len()..]
+                ),
+            };
+            let mut params = url::form_urlencoded::Serializer::new(String::new());
+            for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+                if k == "device" {
+                    params.append_pair(&k, &session.remote_device_id);
+                } else {
+                    params.append_pair(&k, &v);
+                }
+            }
+            let params = params.finish();
+            let query = if params.is_empty() {
+                String::new()
+            } else {
+                format!("?{params}")
+            };
+            Some((
+                format!("{}{rest}{query}", session.preview_origin),
+                vec![
+                    (
+                        "authorization".to_owned(),
+                        format!("Bearer {}", session.preview_token),
+                    ),
+                    (
+                        "sec-websocket-protocol".to_owned(),
+                        format!(
+                            "{}.token.{}",
+                            eas::protocol(platform),
+                            session.preview_token
+                        ),
+                    ),
+                ],
+            ))
+        })
+        .flatten()
+    }
+
     /// `currentReadiness`'s hub: this machine's, or an SSH host's through its tunnel.
     pub async fn hub_origin(&self, host: Option<&str>) -> Option<String> {
         match host.filter(|h| *h != LOCAL_HOST_ID) {
+            // An Expo host's sessions route themselves (`hub_upstream`).
+            Some(host) if self.eas_config(host).is_some() => self
+                .with_eas(host, |state| {
+                    state.ready.then(|| "https://api.expo.dev".to_owned())
+                })
+                .flatten(),
             // A Simlock host is ready once its CLI is; its leases route themselves (`hub_upstream`).
             Some(host) if self.simlock_config(host).is_some() => self
                 .with_simlock(host, |state| {

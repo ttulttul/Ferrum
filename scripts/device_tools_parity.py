@@ -531,7 +531,7 @@ def launcher_files(root: Path):
     return files
 
 
-def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False, ssh_host=False, simlock_host=False, hub_requests=()):
+def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False, ssh_host=False, simlock_host=False, eas_host=False, hub_requests=()):
     root = Path(directory, name, phase)
     root.mkdir(parents=True, exist_ok=True)
     request_log = root / "fake-requests.jsonl"
@@ -559,6 +559,19 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
     env.pop("SERVE_EMU_FFMPEG", None)
     remote_home = None
     gateway = FakeSimlockGateway(request_log) if simlock_host else None
+    expo = None
+    if eas_host:
+        # Expo's API through a proxy of its own (device_eas_parity.py), with each session's
+        # preview host and agent-device daemon on loopback.
+        from device_eas_parity import ExpoProxy, FakeExpo, FakeSessionHost, make_certificates
+        ca, cert, key = make_certificates(root)
+        session_hosts = FakeSessionHost(request_log)
+        expo = FakeExpo(cert, key, root / "expo.jsonl", preview_url=session_hosts.url, agent_url=session_hosts.url)
+        expo_proxy = ExpoProxy(expo.port)
+        for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            env[variable] = env[variable.lower()] = expo_proxy.url
+        env["NODE_EXTRA_CA_CERTS"] = env["T3CODE_TEST_EXTRA_CA_FILE"] = str(ca)
+        env.pop("EXPO_TOKEN", None)
     if ssh_host:
         # An SSH device host (scripts/fake_ssh.py) with the same fakes under its own home.
         from device_ssh_parity import seed_remote_home
@@ -622,6 +635,12 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
                                         "maxLeases": 2}]}})
             deadline = monotonic() + 30
             while monotonic() < deadline and not rpc(url, cookie, "device.list", {}).get("simlockHosts"):
+                sleep(0.2)
+        if expo is not None:
+            rpc(url, cookie, "server.updateSettings", {"patch": {"easDeviceHosts": [
+                {"kind": "eas", "id": "expo", "label": "Expo cloud", "accessToken": "tok-ok", "appId": "app-1"}]}})
+            deadline = monotonic() + 30
+            while monotonic() < deadline and not rpc(url, cookie, "device.list", {}).get("easHosts"):
                 sleep(0.2)
         if ssh_host:
             rpc(url, cookie, "server.updateSettings", {"patch": {"deviceHosts": [
@@ -722,6 +741,17 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
         )
 
     stop_fake_daemons(root)
+    if expo is not None:
+        expo.close()
+        session_hosts.close()
+        expo_requests = [json.loads(line) for line in (root / "expo.jsonl").read_text().splitlines()]
+        escaped = sorted({entry.split(" ", 1)[1] for entry in expo_proxy.refused} - STARTUP_FETCHES)
+        requests.append({"expo": [entry["body"] for entry in expo_requests], "escaped": escaped})
+        # A session's name ends in six random hex digits on both servers.
+        text = re.sub(r"(T3 Code · [^\"]*? · )[0-9a-f]{6}", r"\1<random>", json.dumps(requests, ensure_ascii=False))
+        port = session_hosts.url.rsplit(":", 1)[1]
+        requests = json.loads(text.replace(f"127.0.0.1:{port}", "127.0.0.1:<session>"))
+        answers = json.loads(json.dumps(answers).replace(f"127.0.0.1:{port}", "127.0.0.1:<session>"))
     if gateway is not None:
         gateway.close()
         # A lease's session and directory are a random six hex digits on both servers.
@@ -882,6 +912,26 @@ def run_server(name, command, reference_root, directory):
                 "/api/device-hub/api/devices?hostId=lab",
                 "/api/device-hub/vendor/serve-emu/api/screenshot?hostId=lab&device=lease-1",
             )),
+        ),
+        (
+            "eas",
+            [
+                ("device_list", {"hostId": "Expo cloud"}),
+                ("device_open", {"hostId": "expo", "deviceId": "eas-android"}),
+                ("device_screenshot", {}),
+                ("device_list", {"hostId": "expo"}),
+            ],
+            # The session stays open for the launcher; the server stops it as it shuts down.
+            dict(enable_devices=True, eas_host=True, run_launcher=True),
+        ),
+        (
+            "eas-close",
+            [
+                ("device_open", {"hostId": "Expo cloud", "platform": "ios"}),
+                ("device_close", {"hostId": "expo", "shutdown": True}),
+                ("device_list", {"hostId": "expo"}),
+            ],
+            dict(enable_devices=True, eas_host=True, list_launchers=True),
         ),
         (
             "ssh-agent-off",

@@ -216,6 +216,10 @@ async fn hub(State(state): State<Arc<AppState>>, req: Request) -> Response {
         }
     }
     for (name, value) in &extra_headers {
+        // A route's WebSocket protocols apply to upgrades only.
+        if name.starts_with("sec-websocket-") {
+            continue;
+        }
         request = request.header(name.as_str(), value.as_str());
     }
     if !matches!(req.method(), &Method::GET | &Method::HEAD) {
