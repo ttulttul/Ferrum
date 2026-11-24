@@ -16,11 +16,18 @@ otherwise) until it is stopped. A route with "sequence": [route, ...] answers
 its successive requests with each entry in turn, the last one repeating. A
 route with "sse": true holds the response open as an event stream (OpenCode
 2's `GET /api/event`), and "serve.events": {"METHOD /path": [event, ...]}
-sends those events on every open stream once that request was answered. Every launch appends its arguments to
+sends those events on every open stream once that request was answered. In
+place of a list, {"sequence": [[event, ...], ...]} sends each list for one
+request in turn (an OpenCode 1.x turn's events, prompt by prompt), the last
+one repeating, and an event {"sleep": seconds} pauses the stream. Text
+"{{body.<field>}}" in an event becomes that field of the request's JSON body
+(the message id T3 gave a prompt). A route with "status": 204 answers with no
+body. Every launch appends its arguments to
 FAKE_PROVIDER_LOG.args (with the port replaced by PORT), and every request
 `METHOD /path` to one of OpenCode's routes (plus " basic" when it carries
 Basic credentials) to FAKE_PROVIDER_LOG.http, and every `/session` (OpenCode
-2: `/api/session`) request as JSON with its query and body.
+2: `/api/session`), `/mcp`, `/permission/...` and `/question/...` request as
+JSON with its query and body.
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -69,6 +76,22 @@ streams, streams_lock = [], threading.Lock()
 OPENCODE_PATH = re.compile(r"^/(?:api/|global/|provider$|agent$|skill$|command$)")
 
 
+# How many requests to each route sent their events ("sequence" event lists).
+event_lists = {}
+PLACEHOLDER = re.compile(r"\{\{body\.([A-Za-z0-9_]+)\}\}")
+
+
+def substitute(value, fields):
+    """`value` with each "{{body.<field>}}" replaced by that field of the request's body."""
+    if isinstance(value, str):
+        return PLACEHOLDER.sub(lambda match: str(fields.get(match.group(1), "")), value)
+    if isinstance(value, list):
+        return [substitute(item, fields) for item in value]
+    if isinstance(value, dict):
+        return {key: substitute(item, fields) for key, item in value.items()}
+    return value
+
+
 def wait_for_title_gate():
     """With FAKE_TITLE_GATE set (a scenario's "titleAfterTurn"), answer a title prompt only once
     that file exists: the parity driver creates it when the turn settled, so the title lands
@@ -90,8 +113,9 @@ class Handler(BaseHTTPRequestHandler):
         if log and OPENCODE_PATH.match(path):
             with open(log + ".http", "a") as out:
                 out.write(f"{self.command} {path}{' basic' if basic else ''}\n")
-        # A session's requests (text generation) with their query and body, as JSON.
-        if log and (path.startswith("/session") or path.startswith("/api/session")):
+        # A session's requests (text generation, turns), T3's MCP server and the answers to
+        # OpenCode's requests, with their query and body, as JSON.
+        if log and re.match(r"^/(?:session|api/session|mcp$|permission/|question/)", path):
             try:
                 body = json.loads(raw) if raw else None
             except ValueError:
@@ -113,16 +137,32 @@ class Handler(BaseHTTPRequestHandler):
             served[key] = count + 1
             route = route["sequence"][min(count, len(route["sequence"]) - 1)]
         time.sleep(route.get("sleep", 0))
-        body = json.dumps(route.get("body", {})).encode()
+        status = route.get("status", 200)
+        body = b"" if status == 204 else json.dumps(route.get("body", {})).encode()
         try:
-            self.send_response(route.get("status", 200))
-            self.send_header("Content-Type", route.get("contentType", "application/json"))
+            self.send_response(status)
+            if status != 204:
+                self.send_header("Content-Type", route.get("contentType", "application/json"))
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass
-        for event in serve.get("events", {}).get(key, []):
+        events = serve.get("events", {}).get(key, [])
+        if isinstance(events, dict):
+            count = event_lists.get(key, 0)
+            event_lists[key] = count + 1
+            lists = events.get("sequence") or [[]]
+            events = lists[min(count, len(lists) - 1)]
+        try:
+            fields = json.loads(raw) if raw else {}
+        except ValueError:
+            fields = {}
+        for event in events:
+            if set(event) == {"sleep"}:
+                time.sleep(event["sleep"])
+                continue
+            event = substitute(event, fields if isinstance(fields, dict) else {})
             with streams_lock:
                 for stream in streams:
                     stream.put(event)
@@ -152,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
             with streams_lock:
                 streams.remove(events)
 
-    do_GET = do_POST = do_DELETE = do_PATCH = answer
+    do_GET = do_POST = do_DELETE = do_PATCH = do_PUT = answer
 
     def log_message(self, *_):
         pass

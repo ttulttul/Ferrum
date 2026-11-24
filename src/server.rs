@@ -605,6 +605,22 @@ impl crate::orchestration::CommandHost for AppState {
                             }
                         }
                     }
+                    // An OpenCode turn is named by its session and attempt
+                    // (`<session>:attempt:<attempt>`) until OpenCode reports
+                    // its user message; the runner knows the session.
+                    if turn.driver == crate::workspace::provider::OPENCODE {
+                        let store = self.store.read().await;
+                        if let Some(thread) = store.threads.get(&run.thread_id) {
+                            let ids = thread
+                                .runs
+                                .iter()
+                                .find(|known| known.id == run.id)
+                                .and_then(|known| thread.starting_run_ids(known));
+                            if let Some(ids) = ids {
+                                turn.native_turn = format!("attempt:{}", ids.attempt);
+                            }
+                        }
+                    }
                 }
                 let mut spec = crate::workspace::TurnSpec {
                     prompt: text,

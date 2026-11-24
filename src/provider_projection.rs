@@ -518,7 +518,11 @@ impl Thread {
                     .thread
                     .as_ref()
                     .and_then(|thread| thread.conversation_head.as_deref())
-                    .map_or(Value::Null, |head| native_ref(&driver, head, "strong")),
+                    .map_or(Value::Null, |head| {
+                        // OpenCode's head is the turn's user message (weak).
+                        let strength = if driver == provider::OPENCODE { "weak" } else { "strong" };
+                        native_ref(&driver, head, strength)
+                    }),
                 "status": status,
                 "firstRunOrdinal": first_ordinal,
                 "lastRunOrdinal": last_ordinal,
@@ -555,6 +559,11 @@ impl Thread {
         // that could not be resumed starts with no usage. Claude resumes the
         // session it names up front, whatever id the CLI reports.
         let current = &self.provider.runs[&self.runs[last].id];
+        // OpenCode's provider turns name no native thread, so none of them
+        // is found on the turn's (`latestNativeContextUsage`).
+        if current.driver == provider::OPENCODE {
+            return Value::Null;
+        }
         let native = current.native_thread_id.as_ref();
         // A Claude turn continues the session unless it started a new one.
         let claude_resumed = current.driver == provider::CLAUDE_AGENT
@@ -679,10 +688,13 @@ impl Thread {
             .find_map(|run| self.provider.terminals.get(&run.id));
         // A Pi session ends in error with any failed turn, and stopped with
         // a stopped one (its process is stopped).
+        // An OpenCode session ends in error with a failed turn too, but
+        // stays ready after a stop (its server keeps running).
         let pi = thread.driver == provider::PI;
-        let crash = last
-            .and_then(|t| t.failure.as_ref())
-            .filter(|failure| pi || (!claude && provider::stream_closed(&failure.message)));
+        let opencode = thread.driver == provider::OPENCODE;
+        let crash = last.and_then(|t| t.failure.as_ref()).filter(|failure| {
+            pi || opencode || (!claude && provider::stream_closed(&failure.message))
+        });
         let crashed = crash.is_some();
         // A restart stops a session that has not failed.
         let stopped = self
@@ -844,6 +856,14 @@ impl Thread {
         // Pi's turn is named by its provider thread and attempt (weak) until
         // its end names its first user entry (strong), or none; its records
         // also carry the session file.
+        if driver == provider::OPENCODE {
+            // OpenCode's turn is named by its session and attempt until its
+            // user message is seen (both weak).
+            turn["nativeTurnRef"] = record
+                .native_turn_ref
+                .clone()
+                .unwrap_or_else(|| native_ref(driver, &native_turn, "weak"));
+        }
         if driver == provider::PI {
             turn["nativeTurnRef"] = record
                 .native_turn_ref
@@ -1246,7 +1266,7 @@ impl Thread {
         let done = match state.status {
             // Pi's adapter resolves its own dialogs: answered is completed.
             "resolved" => Some(
-                if driver != provider::PI
+                if !provider::resolves_own_requests(driver)
                     && matches!(request.decision.as_deref(), Some("decline" | "cancel"))
                 {
                     "cancelled"
@@ -1273,7 +1293,7 @@ impl Thread {
             "resolvedAt": state.resolved_at.map(iso)
         });
         // Pi's resolution records no decision.
-        if state.status == "resolved" && driver != provider::PI {
+        if state.status == "resolved" && !provider::resolves_own_requests(driver) {
             for (key, value) in [
                 ("decision", &request.decision),
                 ("feedback", &request.feedback),

@@ -27,9 +27,15 @@ pub const ACP_REGISTRY: &str = "acpRegistry";
 /// Pi's CLI, whose turns run over its RPC mode (`pi --mode rpc`).
 pub const PI: &str = "pi";
 
+/// OpenCode, whose 1.x turns run on its HTTP server (`opencode serve`).
+pub const OPENCODE: &str = "opencode";
+
 /// Whether the workspace runs turns of `driver`'s CLI.
 pub fn runs_turns(driver: &str) -> bool {
-    matches!(driver, CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI)
+    matches!(
+        driver,
+        CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI | OPENCODE
+    )
 }
 
 /// Whether `driver`'s turns run over ACP.
@@ -39,9 +45,16 @@ pub fn is_acp(driver: &str) -> bool {
 
 /// Whether the reference gives each of `driver`'s threads a provider
 /// session of its own, named after the thread and a random id (the ACP
-/// agents and Pi).
+/// agents, Pi and OpenCode 1.x).
 pub fn thread_session(driver: &str) -> bool {
-    is_acp(driver) || driver == PI
+    is_acp(driver) || driver == PI || driver == OPENCODE
+}
+
+/// Whether `driver`'s adapter resolves the requests it asks itself, with no
+/// decision recorded and its items completed however they were answered
+/// (Pi's dialogs, OpenCode's permissions).
+pub fn resolves_own_requests(driver: &str) -> bool {
+    driver == PI || driver == OPENCODE
 }
 
 /// How to run one turn of a provider instance.
@@ -135,6 +148,25 @@ pub struct ProviderTurn {
     /// omitted when empty, likewise.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub thread_title: String,
+    /// An OpenCode instance's server settings and the selection's agent.
+    /// Optional and omitted when absent, so an agentd or control plane that
+    /// predates it sees the same wire bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode: Option<OpenCodeLaunch>,
+}
+
+/// What an OpenCode turn needs beyond the common launch: the configured
+/// server (`serverUrl`, `serverPassword`; none for a server of the session's
+/// own) and the selection's `agent` option. Each field is omitted when empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCodeLaunch {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub server_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub server_password: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
 }
 
 /// Where a provider CLI reaches T3's tools for its thread

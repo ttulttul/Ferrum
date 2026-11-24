@@ -626,19 +626,24 @@ pub(crate) fn provider_turn(
     }
     let config = &instance["config"];
     let text = |key: &str| config[key].as_str().unwrap_or_default().trim().to_owned();
-    // Pi's thinking level is its "thinking" option.
-    let effort_option = if driver == provider::PI {
-        "thinking"
-    } else {
-        "reasoningEffort"
+    // Pi's thinking level is its "thinking" option, OpenCode's variant its
+    // "variant" (`t3:default` choosing none).
+    let effort_option = match driver {
+        provider::PI => "thinking",
+        provider::OPENCODE => "variant",
+        _ => "reasoningEffort",
     };
-    let reasoning_effort = selection["options"].as_array().and_then(|options| {
-        options
-            .iter()
-            .find(|option| option["id"] == effort_option)
-            .and_then(|option| option["value"].as_str())
-            .map(str::to_owned)
-    });
+    let option = |id: &str| {
+        selection["options"].as_array().and_then(|options| {
+            options
+                .iter()
+                .find(|option| option["id"] == id)
+                .and_then(|option| option["value"].as_str())
+                .map(str::to_owned)
+        })
+    };
+    let reasoning_effort = option(effort_option)
+        .filter(|value| !(driver == provider::OPENCODE && value == "t3:default"));
     let env = instance["environment"]
         .as_array()
         .map(|variables| {
@@ -689,6 +694,15 @@ pub(crate) fn provider_turn(
             .then(|| crate::model_manifest::claude_context_window(manifest, selection))
             .flatten(),
         auth_method: String::new(),
+        opencode: (driver == provider::OPENCODE).then(|| provider::OpenCodeLaunch {
+            server_url: text("serverUrl"),
+            // `settingsSecretLiteral`: a referenced secret is not a password.
+            server_password: config["serverPassword"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            agent: option("agent").unwrap_or_default(),
+        }),
     };
     let mut turn = turn;
     if driver == provider::ACP_REGISTRY {

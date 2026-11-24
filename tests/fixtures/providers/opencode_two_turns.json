@@ -1,0 +1,810 @@
+{
+ "version": {
+  "stdout": "1.15.0"
+ },
+ "serve": {
+  "routes": {
+   "GET /global/health": {
+    "body": {
+     "healthy": true,
+     "version": "1.15.0"
+    }
+   },
+   "GET /provider": {
+    "body": {
+     "all": [
+      {
+       "id": "anthropic",
+       "name": "Anthropic",
+       "models": {
+        "claude-opus-5-5": {
+         "id": "claude-opus-5-5",
+         "name": "Claude Opus 5.5",
+         "release_date": "2026-09-01",
+         "status": "active",
+         "variants": {
+          "low": {},
+          "high": {}
+         },
+         "limit": {
+          "context": 200000,
+          "input": 180000,
+          "output": 32000
+         }
+        }
+       }
+      }
+     ],
+     "default": {
+      "anthropic": "claude-opus-5-5"
+     },
+     "connected": [
+      "anthropic"
+     ]
+    }
+   },
+   "GET /agent": {
+    "body": [
+     {
+      "name": "build",
+      "mode": "primary"
+     }
+    ]
+   },
+   "GET /skill": {
+    "body": []
+   },
+   "GET /command": {
+    "body": []
+   },
+   "GET /event": {
+    "sse": true
+   },
+   "POST /mcp": {
+    "body": true
+   },
+   "POST /session": {
+    "body": {
+     "id": "ses_1",
+     "slug": "fixture",
+     "version": "1.15.0",
+     "projectID": "global",
+     "directory": "/w",
+     "title": "New session",
+     "time": {
+      "created": 1767225600000,
+      "updated": 1767225600000
+     }
+    }
+   },
+   "GET /session/ses_1": {
+    "body": {
+     "id": "ses_1",
+     "slug": "fixture",
+     "version": "1.15.0",
+     "projectID": "global",
+     "directory": "/w",
+     "title": "New session",
+     "time": {
+      "created": 1767225600000,
+      "updated": 1767225600000
+     },
+     "permission": []
+    }
+   },
+   "PATCH /session/ses_1": {
+    "body": {
+     "id": "ses_1",
+     "slug": "fixture",
+     "version": "1.15.0",
+     "projectID": "global",
+     "directory": "/w",
+     "title": "New session",
+     "time": {
+      "created": 1767225600000,
+      "updated": 1767225600000
+     }
+    }
+   },
+   "POST /session/ses_1/prompt_async": {
+    "status": 204
+   },
+   "GET /session/status": {
+    "body": {}
+   },
+   "POST /session/ses_1/abort": {
+    "body": true
+   },
+   "GET /session/ses_1/children": {
+    "body": []
+   },
+   "POST /permission/per_1/reply": {
+    "body": true
+   }
+  },
+  "events": {
+   "POST /session/ses_1/prompt_async": {
+    "sequence": [
+     [
+      {
+       "type": "message.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "info": {
+         "id": "{{body.messageID}}",
+         "sessionID": "ses_1",
+         "role": "user",
+         "time": {
+          "created": 1767225600000
+         },
+         "agent": "build",
+         "model": {
+          "providerID": "anthropic",
+          "modelID": "claude-opus-5-5"
+         }
+        }
+       }
+      },
+      {
+       "type": "session.status",
+       "properties": {
+        "sessionID": "ses_1",
+        "status": {
+         "type": "busy"
+        }
+       }
+      },
+      {
+       "type": "message.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "info": {
+         "id": "msg_a1",
+         "sessionID": "ses_1",
+         "role": "assistant",
+         "parentID": "{{body.messageID}}",
+         "time": {
+          "created": 1767225600001
+         },
+         "modelID": "claude-opus-5-5",
+         "providerID": "anthropic",
+         "mode": "build",
+         "agent": "build",
+         "path": {
+          "cwd": "/w",
+          "root": "/"
+         },
+         "cost": 0,
+         "tokens": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cache": {
+           "read": 0,
+           "write": 0
+          }
+         }
+        }
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_r1",
+         "messageID": "msg_a1",
+         "type": "reasoning",
+         "text": "Planning the command.",
+         "time": {
+          "start": 1767225600002,
+          "end": 1767225600003
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_b1",
+         "messageID": "msg_a1",
+         "type": "tool",
+         "callID": "call_prt_b1",
+         "tool": "bash",
+         "state": {
+          "status": "running",
+          "input": {
+           "command": "echo hi",
+           "description": "Print hi"
+          },
+          "title": "echo hi",
+          "metadata": {},
+          "time": {
+           "start": 1767225600003
+          }
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "sleep": 0.6
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_b1",
+         "messageID": "msg_a1",
+         "type": "tool",
+         "callID": "call_prt_b1",
+         "tool": "bash",
+         "state": {
+          "status": "completed",
+          "input": {
+           "command": "echo hi",
+           "description": "Print hi"
+          },
+          "output": "hi\n",
+          "title": "echo hi",
+          "metadata": {
+           "exit": 0,
+           "output": "hi\n"
+          },
+          "time": {
+           "start": 1767225600003,
+           "end": 1767225600004
+          }
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_e1",
+         "messageID": "msg_a1",
+         "type": "tool",
+         "callID": "call_e1",
+         "tool": "edit",
+         "state": {
+          "status": "running",
+          "input": {
+           "filePath": "/w/notes.txt",
+           "oldString": "",
+           "newString": "hi\n"
+          },
+          "output": null,
+          "title": "notes.txt",
+          "metadata": {
+           "diff": "--- a/notes.txt\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hi\n"
+          },
+          "time": {
+           "start": 1767225600005,
+           "end": 1767225600006
+          }
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "sleep": 0.6
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_e1",
+         "messageID": "msg_a1",
+         "type": "tool",
+         "callID": "call_e1",
+         "tool": "edit",
+         "state": {
+          "status": "completed",
+          "input": {
+           "filePath": "/w/notes.txt",
+           "oldString": "",
+           "newString": "hi\n"
+          },
+          "output": "Edit applied successfully.",
+          "title": "notes.txt",
+          "metadata": {
+           "diff": "--- a/notes.txt\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hi\n"
+          },
+          "time": {
+           "start": 1767225600005,
+           "end": 1767225600006
+          }
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_t1",
+         "messageID": "msg_a1",
+         "type": "text",
+         "text": "",
+         "time": {
+          "start": 1767225600007
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.part.delta",
+       "properties": {
+        "sessionID": "ses_1",
+        "messageID": "msg_a1",
+        "partID": "prt_t1",
+        "field": "text",
+        "delta": "Ran e"
+       }
+      },
+      {
+       "type": "message.part.delta",
+       "properties": {
+        "sessionID": "ses_1",
+        "messageID": "msg_a1",
+        "partID": "prt_t1",
+        "field": "text",
+        "delta": "cho hi and wrote notes.txt."
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_t1",
+         "messageID": "msg_a1",
+         "type": "text",
+         "text": "Ran echo hi and wrote notes.txt.",
+         "time": {
+          "start": 1767225600007,
+          "end": 1767225600008
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_t1_step",
+         "messageID": "msg_a1",
+         "type": "step-finish",
+         "reason": "stop",
+         "cost": 0,
+         "tokens": {
+          "input": 1200,
+          "output": 80,
+          "reasoning": 20,
+          "cache": {
+           "read": 3000,
+           "write": 100
+          }
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "info": {
+         "id": "msg_a1",
+         "sessionID": "ses_1",
+         "role": "assistant",
+         "parentID": "{{body.messageID}}",
+         "time": {
+          "created": 1767225600001,
+          "completed": 1767225600009
+         },
+         "modelID": "claude-opus-5-5",
+         "providerID": "anthropic",
+         "mode": "build",
+         "agent": "build",
+         "path": {
+          "cwd": "/w",
+          "root": "/"
+         },
+         "cost": 0,
+         "tokens": {
+          "input": 1200,
+          "output": 80,
+          "reasoning": 20,
+          "cache": {
+           "read": 3000,
+           "write": 100
+          }
+         },
+         "finish": "stop"
+        }
+       }
+      },
+      {
+       "type": "session.status",
+       "properties": {
+        "sessionID": "ses_1",
+        "status": {
+         "type": "idle"
+        }
+       }
+      },
+      {
+       "type": "session.idle",
+       "properties": {
+        "sessionID": "ses_1"
+       }
+      }
+     ],
+     [
+      {
+       "type": "message.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "info": {
+         "id": "{{body.messageID}}",
+         "sessionID": "ses_1",
+         "role": "user",
+         "time": {
+          "created": 1767225600000
+         },
+         "agent": "build",
+         "model": {
+          "providerID": "anthropic",
+          "modelID": "claude-opus-5-5"
+         }
+        }
+       }
+      },
+      {
+       "type": "session.status",
+       "properties": {
+        "sessionID": "ses_1",
+        "status": {
+         "type": "busy"
+        }
+       }
+      },
+      {
+       "type": "message.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "info": {
+         "id": "msg_a2",
+         "sessionID": "ses_1",
+         "role": "assistant",
+         "parentID": "{{body.messageID}}",
+         "time": {
+          "created": 1767225600001
+         },
+         "modelID": "claude-opus-5-5",
+         "providerID": "anthropic",
+         "mode": "build",
+         "agent": "build",
+         "path": {
+          "cwd": "/w",
+          "root": "/"
+         },
+         "cost": 0,
+         "tokens": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cache": {
+           "read": 0,
+           "write": 0
+          }
+         }
+        }
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_r2",
+         "messageID": "msg_a2",
+         "type": "reasoning",
+         "text": "Planning the command.",
+         "time": {
+          "start": 1767225600002,
+          "end": 1767225600003
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_b2",
+         "messageID": "msg_a2",
+         "type": "tool",
+         "callID": "call_prt_b2",
+         "tool": "bash",
+         "state": {
+          "status": "running",
+          "input": {
+           "command": "echo hi",
+           "description": "Print hi"
+          },
+          "title": "echo hi",
+          "metadata": {},
+          "time": {
+           "start": 1767225600003
+          }
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "sleep": 0.6
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_b2",
+         "messageID": "msg_a2",
+         "type": "tool",
+         "callID": "call_prt_b2",
+         "tool": "bash",
+         "state": {
+          "status": "completed",
+          "input": {
+           "command": "echo hi",
+           "description": "Print hi"
+          },
+          "output": "hi\n",
+          "title": "echo hi",
+          "metadata": {
+           "exit": 0,
+           "output": "hi\n"
+          },
+          "time": {
+           "start": 1767225600003,
+           "end": 1767225600004
+          }
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_e2",
+         "messageID": "msg_a2",
+         "type": "tool",
+         "callID": "call_e2",
+         "tool": "edit",
+         "state": {
+          "status": "running",
+          "input": {
+           "filePath": "/w/notes.txt",
+           "oldString": "",
+           "newString": "hi\n"
+          },
+          "output": null,
+          "title": "notes.txt",
+          "metadata": {
+           "diff": "--- a/notes.txt\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hi\n"
+          },
+          "time": {
+           "start": 1767225600005,
+           "end": 1767225600006
+          }
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "sleep": 0.6
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_e2",
+         "messageID": "msg_a2",
+         "type": "tool",
+         "callID": "call_e2",
+         "tool": "edit",
+         "state": {
+          "status": "completed",
+          "input": {
+           "filePath": "/w/notes.txt",
+           "oldString": "",
+           "newString": "hi\n"
+          },
+          "output": "Edit applied successfully.",
+          "title": "notes.txt",
+          "metadata": {
+           "diff": "--- a/notes.txt\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hi\n"
+          },
+          "time": {
+           "start": 1767225600005,
+           "end": 1767225600006
+          }
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_t2",
+         "messageID": "msg_a2",
+         "type": "text",
+         "text": "",
+         "time": {
+          "start": 1767225600007
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.part.delta",
+       "properties": {
+        "sessionID": "ses_1",
+        "messageID": "msg_a2",
+        "partID": "prt_t2",
+        "field": "text",
+        "delta": "Appen"
+       }
+      },
+      {
+       "type": "message.part.delta",
+       "properties": {
+        "sessionID": "ses_1",
+        "messageID": "msg_a2",
+        "partID": "prt_t2",
+        "field": "text",
+        "delta": "ded a line."
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_t2",
+         "messageID": "msg_a2",
+         "type": "text",
+         "text": "Appended a line.",
+         "time": {
+          "start": 1767225600007,
+          "end": 1767225600008
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.part.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "part": {
+         "sessionID": "ses_1",
+         "id": "prt_t2_step",
+         "messageID": "msg_a2",
+         "type": "step-finish",
+         "reason": "stop",
+         "cost": 0,
+         "tokens": {
+          "input": 1200,
+          "output": 80,
+          "reasoning": 20,
+          "cache": {
+           "read": 3000,
+           "write": 100
+          }
+         }
+        },
+        "time": 1767225600002
+       }
+      },
+      {
+       "type": "message.updated",
+       "properties": {
+        "sessionID": "ses_1",
+        "info": {
+         "id": "msg_a2",
+         "sessionID": "ses_1",
+         "role": "assistant",
+         "parentID": "{{body.messageID}}",
+         "time": {
+          "created": 1767225600001,
+          "completed": 1767225600009
+         },
+         "modelID": "claude-opus-5-5",
+         "providerID": "anthropic",
+         "mode": "build",
+         "agent": "build",
+         "path": {
+          "cwd": "/w",
+          "root": "/"
+         },
+         "cost": 0,
+         "tokens": {
+          "input": 1200,
+          "output": 80,
+          "reasoning": 20,
+          "cache": {
+           "read": 3000,
+           "write": 100
+          }
+         },
+         "finish": "stop"
+        }
+       }
+      },
+      {
+       "type": "session.status",
+       "properties": {
+        "sessionID": "ses_1",
+        "status": {
+         "type": "idle"
+        }
+       }
+      },
+      {
+       "type": "session.idle",
+       "properties": {
+        "sessionID": "ses_1"
+       }
+      }
+     ]
+    ]
+   }
+  }
+ }
+}

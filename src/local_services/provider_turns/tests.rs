@@ -1,7 +1,9 @@
 //! Provider turns against fake CLIs that replay recorded Codex app-server and
 //! Claude Code stream-json transcripts (`tests/fixtures/providers`).
 use super::*;
-use crate::workspace::provider::{ProviderTurn, TurnStatus, ACP_REGISTRY, CLAUDE_AGENT, GROK, PI};
+use crate::workspace::provider::{
+    ProviderTurn, TurnStatus, ACP_REGISTRY, CLAUDE_AGENT, GROK, OPENCODE, PI,
+};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -1367,4 +1369,146 @@ async fn pi_turn_asks_the_user_before_a_command() {
         answer,
         &json!({"type": "extension_ui_response", "id": "ui-1", "confirmed": false})
     );
+}
+
+/// An OpenCode turn on the fake `opencode serve` playing `scenario`; its
+/// requests are logged to `<log>.http`.
+fn opencode_spec(dir: &Path, scenario: &str, log: &Path) -> TurnSpec {
+    let shim = dir.join("opencode");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nexec python3 {} {} \"$@\"\n",
+            fixtures().join("fake_opencode.py").display(),
+            fixtures().join(scenario).display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut spec = fake_spec(OPENCODE, scenario, log, None);
+    if let Some(provider) = spec.provider.as_mut() {
+        provider.binary_path = shim.display().to_string();
+        provider.model = "anthropic/claude-opus-5-5".into();
+        provider.native_turn = "attempt:attempt-1".into();
+    }
+    spec
+}
+
+fn opencode_requests(log: &Path) -> Vec<Value> {
+    std::fs::read_to_string(format!("{}.http", log.display()))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+#[tokio::test]
+async fn opencode_turn_streams_reasoning_tools_and_the_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("oc.log");
+    let (events, exit) = run(opencode_spec(dir.path(), "opencode_turn.json", &log)).await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    assert_eq!(native_thread(&events), ("ses_1".into(), false));
+    let command = items(&events, "command_execution");
+    let done = command.last().expect("the command");
+    assert_eq!(
+        (
+            done.status.as_str(),
+            &done.fields["input"],
+            &done.fields["exitCode"]
+        ),
+        ("completed", &json!("echo hi"), &json!(0))
+    );
+    let edit = items(&events, "file_change");
+    assert_eq!(edit.last().unwrap().fields["fileName"], "/w/notes.txt");
+    assert_eq!(final_text(&events), "Ran echo hi and wrote notes.txt.");
+    // The last step's tokens, with the catalog's input limit as the window.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::Usage { usage } if usage.used_tokens == 4380 && usage.max_tokens == Some(180_000)
+    )));
+    // The turn is named by its session and attempt, then by its user message.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::ProviderTurn { native_turn_id: Some(id), .. } if id == "ses_1:attempt:attempt-1"
+    )));
+    let requests = opencode_requests(&log);
+    let session = requests
+        .iter()
+        .find(|r| r["method"] == "POST" && r["path"] == "/session")
+        .expect("a session was created");
+    assert_eq!(session["body"]["permission"][0]["action"], "allow");
+    let prompt = requests
+        .iter()
+        .find(|r| r["path"] == "/session/ses_1/prompt_async")
+        .expect("the prompt");
+    assert!(prompt["body"]["messageID"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("msg_") && id.len() == 44));
+    assert_eq!(
+        prompt["body"]["model"],
+        json!({"providerID": "anthropic", "modelID": "claude-opus-5-5"})
+    );
+    assert_eq!(
+        prompt["body"]["parts"],
+        json!([{"type": "text", "text": "Say hello"}])
+    );
+    assert!(prompt["body"]["system"]
+        .as_str()
+        .is_some_and(|s| s.contains("through the OpenCode harness, as anthropic/claude-opus-5-5")));
+}
+
+#[tokio::test]
+async fn opencode_turn_fails_with_the_providers_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("oc.log");
+    let (events, exit) = run(opencode_spec(dir.path(), "opencode_failed.json", &log)).await;
+    assert!(!exit.success);
+    let (status, failure) = terminal(&events);
+    let failure = failure.expect("a failure");
+    assert_eq!(status, TurnStatus::Failed);
+    assert_eq!(
+        (failure.class.as_str(), failure.message.as_str()),
+        ("usage_limit", "Rate limit reached for this model.")
+    );
+}
+
+#[tokio::test]
+async fn opencode_stop_aborts_the_session_and_waits_for_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("oc.log");
+    let (cancel, cancelled) = oneshot::channel();
+    let mut events = start(
+        opencode_spec(dir.path(), "opencode_interrupt.json", &log),
+        cancelled,
+        TEST_SERVERS.clone(),
+    )
+    .unwrap();
+    while let Some(event) = events.recv().await {
+        if matches!(&event, TurnEvent::Provider(ProviderEvent::TurnItem { item })
+            if item.kind == "command_execution" && item.status == "running")
+        {
+            break;
+        }
+    }
+    cancel.send(()).unwrap();
+    let (rest, exit) = collect(events).await;
+    assert!(exit.cancelled && !exit.success, "{exit:?}");
+    assert_eq!(terminal(&rest), (TurnStatus::Interrupted, None));
+    // The aborted tool ends interrupted, as OpenCode reports it.
+    assert_eq!(
+        items(&rest, "command_execution")
+            .last()
+            .map(|i| i.status.as_str()),
+        Some("interrupted")
+    );
+    assert!(opencode_requests(&log)
+        .iter()
+        .any(|r| r["method"] == "POST" && r["path"] == "/session/ses_1/abort"));
 }

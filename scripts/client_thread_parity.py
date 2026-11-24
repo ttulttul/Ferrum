@@ -383,6 +383,28 @@ PROVIDER_SCENARIOS = [
     # A model error fails the turn with Pi's message.
     {"name": "pi failed turn", "instance": "pi", "enable": "pi", "model": "default", "scenario": "pi_failed.json"},
     {"name": "pi missing", "instance": "pi", "enable": "pi", "model": "default", "scenario": None},
+    # OpenCode 1.x on an `opencode serve` of the session's own: T3's MCP server is registered, the
+    # prompt goes to `prompt_async` and the event stream carries reasoning, a command, an edit and
+    # the reply until the session is idle; the OpenCode session is the native thread.
+    {"name": "opencode turn", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode_turn.json"},
+    # A second turn prompts the session the thread keeps.
+    {"name": "opencode second turn", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode_two_turns.json", "followUp": "Now append a line"},
+    # Stop aborts the session's run; the turn ends when OpenCode reports it idle.
+    {"name": "opencode interrupt", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode_interrupt.json", "interrupt": "command"},
+    # Supervised: the session's rules ask before a command runs (`permission.asked`), and the
+    # answer goes to `POST /permission/<id>/reply`.
+    {"name": "opencode approval", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
+    {"name": "opencode approval declined", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode_approval_declined.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "decline"}},
+    {"name": "opencode approval for session", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "acceptForSession"}},
+    # A message steers the running turn: another `prompt_async` with the turn's model and system text.
+    {"name": "opencode steer", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode_steer.json",
+     "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}},
+    # A provider error fails the turn with its message (a 429 is a usage limit).
+    {"name": "opencode failed turn", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode_failed.json"},
+    {"name": "opencode missing", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": None},
     # Grok over ACP: its turns run in the `grok agent stdio` session the thread keeps, and stream
     # reasoning, a command and the reply.
     {"name": "grok turn", "instance": "grok", "enable": "grok", "model": "grok-build", "scenario": "grok_turn.json"},
@@ -674,12 +696,18 @@ FAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 "$FAKE_STATUS_CLI" "$FA
 """
 PI_STATUS_SPEC = {"commands": [command for command in PI_TITLE_SPEC["commands"]
                                if command.get("prefix") == ["--mode", "rpc"] or command.get("args") == ["--version"]]}
+# The fake OpenCode: `opencode --version` and `opencode serve` answer from the scenario's
+# fake_opencode.py spec, for the status checks and the turn's server alike.
+FAKE_OPENCODE = """#!/bin/sh
+exec python3 "$(dirname "$FAKE_PROVIDER_CLI")/fake_opencode.py" "$FAKE_PROVIDER_SCENARIO" "$@"
+"""
 # A local ACP Registry agent: the executable its instance names (`commandPath`), which plays the
 # scenario whatever its arguments.
 FAKE_ACP_AGENT = """#!/bin/sh
 exec python3 "$FAKE_PROVIDER_CLI" "$@"
 """
 TURN_CLIS = {"codex": "codex", "claudeAgent": "claude", "grok": "grok", "pi": "pi", "acp-local": "fixture-acp",
+             "opencode": "opencode",
              # Installed in the server's home (`registryAgent`), not on PATH.
              "acp-registry": "registry-agent"}
 # The ACP Registry agent a `registryAgent` scenario's servers find in their cached index, already
@@ -907,7 +935,7 @@ def compare_thread(original, rust):
 def write_fake_clis(directory, drivers):
     directory.mkdir(parents=True, exist_ok=True)
     for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK),
-                         ("fixture-acp", FAKE_ACP_AGENT), ("pi", FAKE_PI)):
+                         ("fixture-acp", FAKE_ACP_AGENT), ("pi", FAKE_PI), ("opencode", FAKE_OPENCODE)):
         if name in drivers:
             (directory / name).write_text(script)
             (directory / name).chmod(0o755)
@@ -1384,6 +1412,7 @@ def cli_launch(log, root):
     if session in initializes:
         out.append(f"initialize {json.dumps(mask(initializes[session]), sort_keys=True)}")
     out.extend(calls)
+    out.extend(opencode_calls(log, mask, unserved))
     # The other app-servers' initialize, once each and in no particular order, as how many run
     # and when is up to each server. The reference asks for the MCP app extension and the
     # turn/diff/updated opt-out only for a turn's session (CodexAdapterV2), not for the status
@@ -1391,6 +1420,32 @@ def cli_launch(log, root):
     others = sorted({json.dumps(mask(params), sort_keys=True)
                      for pid, params in initializes.items() if pid not in sessions})
     out.extend(f"other initialize {params}" for params in others)
+    return out
+
+
+def opencode_calls(log, mask, unserved):
+    """What a server asked of OpenCode for a turn: each session, MCP, permission and question
+    request with its query and body. The message ids T3 picks are masked, and the system text is
+    compared as Rust sends it, without what names a tool Rust does not serve yet."""
+    out = []
+    path = Path(str(log) + ".http")
+    for line in (path.read_text().splitlines() if path.exists() else []):
+        if not line.startswith("{"):
+            continue
+        request = json.loads(line)
+        # Text generation's sessions are not the turn's.
+        if "ses_title" in request["path"]:
+            continue
+        body = request.get("body")
+        if isinstance(body, dict):
+            body = dict(body)
+            if "messageID" in body:
+                body["messageID"] = "<message>"
+            if isinstance(body.get("system"), str):
+                body["system"] = without_unserved(body["system"], unserved)
+        query = re.sub(r"directory=[^&]*", "directory=<cwd>", request.get("query", ""))
+        out.append(f"opencode {request['method']} {request['path']} {query} "
+                   + json.dumps(mask(body), sort_keys=True))
     return out
 
 
