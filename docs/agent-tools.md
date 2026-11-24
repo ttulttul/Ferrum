@@ -427,8 +427,24 @@ schemas.
    apart, reconnects ("Reconnecting to device host…"), backing off from 1 to 30 seconds.
    `scripts/device_tools_parity.py`'s `ssh` phases drive the tools on the fake host and run the
    returned launcher through the tunnel; `scripts/device_ssh_parity.py` drops the tunnel and
-   compares the reconnect. Not done yet: device detail and actions on SSH hosts; Expo and Simlock
-   hosts.
+   compares the reconnect. Not done yet: device detail and actions on SSH hosts.
+
+   Simlock hosts (`SimlockDeviceHost.ts`, alpha): with `simlockDeviceHostsEnabled`, the hosts in
+   `simlockDeviceHosts` (after the SSH hosts; an id two lists share stays the first one's) are
+   listed, and clients receive them as `simlockHosts`, apart from this machine's and SSH hosts, as
+   `DeviceServiceState`'s encoding splits them. Their devices are the gateway's catalog (phones and
+   tablets with a runtime, cached for a minute when every platform has some) and the leases this
+   server holds. The agent token is the saved one for that gateway, else this machine's
+   agent-device token when it points at the same gateway. Opening a device takes a lease through
+   this machine's agent-device CLI (`connect proxy`, `open` from the thread's workspace, the lease
+   recorded under `remote-connections`), within `maxLeases`; it is renewed every two minutes until
+   the gateway ends it or it reaches `maxLeaseMinutes`, and released through its session (or
+   `DELETE /v1/leases/<id>`) on shutdown, removal, turning device support off, or server shutdown.
+   `device_open` binds the lease's own session and per-device config, with the reference's Simlock
+   quick-start notes; screenshots go through the lease's session. `scripts/device_tools_parity.py`'s
+   `simlock` phase compares the tools, the wire state, the launcher and every request to a fake
+   gateway on loopback. Not done yet: the Device panel's stream and input for a lease through the
+   hub proxy (it follows #266, which routes the proxy per host).
 5. **Prompt context and capabilities** (served), as above.
 6. **Scheduled tasks**: `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task` and
    `run_scheduled_task_now` share the reference's `scheduled_tasks` table. Thread callers

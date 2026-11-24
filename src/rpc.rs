@@ -2320,6 +2320,23 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             }
         }
     }
+    // `threadWorkspaceRoot`: a Simlock lease accepts installs only from the directory that opened it.
+    let opened;
+    let params = if method == "device.open" {
+        let root = state
+            .store
+            .read()
+            .await
+            .thread_workspace_root(params["threadId"].as_str().unwrap_or_default());
+        let mut with_root = params.clone();
+        if let (Some(root), Some(object)) = (root, with_root.as_object_mut()) {
+            object.insert("workspaceRoot".into(), json!(root));
+        }
+        opened = with_root;
+        &opened
+    } else {
+        params
+    };
     let result = match crate::dispatch::workspace(
         &*state.workspace,
         &state.workspace_settings(method).await,

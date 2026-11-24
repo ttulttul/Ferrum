@@ -418,6 +418,20 @@ pub struct Store {
     pub(crate) turn_positions: HashMap<Uuid, crate::workspace::StreamPosition>,
 }
 impl Store {
+    /// `threadWorkspaceRoot`: the directory a thread works in (its worktree,
+    /// else its project's root), or `None` when the thread or project is gone.
+    pub(crate) fn thread_workspace_root(&self, thread_id: &str) -> Option<String> {
+        let thread = self.threads.get(thread_id)?;
+        let row = thread.stored_row();
+        if let Some(worktree) = row["worktreePath"].as_str().filter(|path| !path.is_empty()) {
+            return Some(worktree.to_owned());
+        }
+        self.project_rows
+            .get(&thread.project_id)
+            .filter(|project| project["deletedAt"].is_null())
+            .and_then(|project| project["workspaceRoot"].as_str())
+            .map(str::to_owned)
+    }
     /// The project rows whose fields fold into the settings clients read:
     /// those committed here. The reference already folded the ones read from
     /// `statev2.sqlite` into `settings.json` when it migrated its settings.

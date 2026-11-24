@@ -46,7 +46,7 @@ Most suites match the original exactly; the few expected differences are listed 
 ### Agents and tools
 
 - **Pull request changes.** Agents can read pull requests and CI, but can't open, update, review, respond to or merge one, or re-run CI (`pull_request_create`, `pull_request_update`, `pull_request_review`, `pull_request_respond`, `pull_request_merge`, `ci_rerun`).
-- **Devices.** Agents can use simulators and emulators on this machine and on SSH device hosts, but not on Expo or Simlock hosts. Device detail and actions (settings, foreground app) work on this machine only.
+- **Devices.** Agents can use simulators and emulators on this machine, on SSH device hosts and from Simlock pools (alpha), but not on Expo hosts. Device detail and actions (settings, foreground app) work on this machine only, and the Device panel can't stream a Simlock lease yet.
 - **Delegated tasks.** On the embeddable control plane a child can't run in its own worktree (`isolation: "worktree"`), and a follow-up sent to a child on a linked machine isn't tracked as a task.
 - **Codex skills.** `orchestrator_capabilities` doesn't rescan the project's Codex skills, as the original does (upstream #39247).
 - **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing. So are browser setup hints and installing a browser when none is found.

@@ -186,7 +186,7 @@ process.on("SIGTERM", () => server.close(() => process.exit(0)));
 FAKE_AGENT_DEVICE_SOURCE = r"""import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const args = process.argv.slice(2);
 const logFile = process.env.T3_FAKE_DEVICE_LOG;
@@ -266,10 +266,115 @@ if (args[0] === "__daemon") {
       fs.rmSync(path.join(dir, "daemon.json"), { force: true });
     } catch {}
   } else {
+    // A session on a remote daemon (a Simlock gateway's agent-device front): its commands go there.
+    const flag = (name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
+    let remote;
+    try { remote = JSON.parse(fs.readFileSync(flag("--config"), "utf8")); } catch {}
+    if (remote?.stateDir && ["open", "screenshot", "close"].includes(args[0])) {
+      const call = (body) => {
+        const done = spawnSync(process.execPath, ["-e", `
+          fetch(process.argv[1] + "/rpc", { method: "POST", headers: { authorization: "Bearer " + process.argv[2], "content-type": "application/json" }, body: process.argv[3] })
+            .then(async (r) => { process.stdout.write(await r.text()); process.exitCode = r.ok ? 0 : 1; })
+            .catch(() => { process.exitCode = 1; });`, remote.daemonBaseUrl, remote.daemonAuthToken, JSON.stringify(body)], { encoding: "utf8" });
+        if (done.status !== 0) {
+          console.log(JSON.stringify({ success: false, error: { message: "The daemon refused " + args[0] + ".", hint: "Check the gateway." } }));
+          process.exit(1);
+        }
+        return JSON.parse(done.stdout);
+      };
+      const session = flag("--session");
+      if (args[0] === "open") {
+        const answer = call({ command: "open", session, platform: flag("--platform"), device: flag("--device"), cwd: process.cwd() === remote.stateDir ? "<stateDir>" : "<workspace>" });
+        fs.mkdirSync(path.join(remote.stateDir, "remote-connections"), { recursive: true });
+        fs.writeFileSync(path.join(remote.stateDir, "remote-connections", session + ".json"), JSON.stringify({ leaseId: answer.leaseId }));
+      } else if (args[0] === "screenshot") {
+        const answer = call({ command: "screenshot", session });
+        fs.writeFileSync(args[1], Buffer.from(answer.png, "base64"));
+      } else {
+        call({ command: "close", session });
+      }
+    }
     console.log(JSON.stringify({ success: true, data: { command: args[0] ?? null } }));
   }
 }
 """
+
+
+class FakeSimlockGateway:
+    """A Simlock gateway on loopback: its identity, catalog and lease routes, and the
+    agent-device front the fake agent-device CLI sends a lease's commands to. Every request
+    is logged to `log`."""
+
+    PNG = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000030000000208020000001216f14d0000001049444154789c63f8cfc0f01f0418000017f402fe5a7a2d7a0000000049454e44ae426082")
+
+    def __init__(self, log):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        gateway = self
+        self.log, self.leases, self.lock, self.count = log, {}, threading.Lock(), 0
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def answer(self, status, body):
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def handle_any(self):
+                length = int(self.headers.get("content-length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    body = json.loads(raw) if raw else None
+                except ValueError:
+                    body = raw.decode(errors="replace")
+                entry = {"kind": "gateway", "method": self.command, "path": self.path,
+                         "authorization": self.headers.get("authorization")}
+                if body is not None:
+                    entry["body"] = body
+                with gateway.lock:
+                    with open(gateway.log, "a") as file:
+                        file.write(json.dumps(entry) + "\n")
+                if self.headers.get("authorization") != "Bearer tok-lab":
+                    return self.answer(401, {"error": "unauthorized"})
+                if self.path == "/v1/identity":
+                    return self.answer(200, {"name": "lab-agent", "role": "agent"})
+                if self.path == "/v1/catalog":
+                    return self.answer(200, {"platforms": [
+                        {"platform": "android", "modelRuntimes": {"Pixel 9": ["14", "15"]},
+                         "modelClasses": {"Pixel 9": "phone"}},
+                        {"platform": "ios", "modelRuntimes": {"iPhone 16": ["18.2"], "Apple Watch": ["11"]},
+                         "modelClasses": {"iPhone 16": "phone", "Apple Watch": "watch"}},
+                    ]})
+                if self.path == "/v1/agent-device/rpc":
+                    if body["command"] == "open":
+                        with gateway.lock:
+                            gateway.count += 1
+                            lease = f"lease-{gateway.count}"
+                            gateway.leases[body["session"]] = lease
+                        return self.answer(200, {"leaseId": lease})
+                    if body["command"] == "screenshot":
+                        import base64
+                        return self.answer(200, {"png": base64.b64encode(b"noise" + gateway.PNG).decode()})
+                    return self.answer(200, {"ok": True})
+                if self.path.startswith("/v1/leases/"):
+                    return self.answer(200, {"ok": True})
+                return self.answer(404, {"error": "not_found"})
+
+            do_GET = do_POST = do_DELETE = handle_any
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
 
 
 def write_executable(path: Path, content: str):
@@ -418,7 +523,7 @@ def launcher_files(root: Path):
     return files
 
 
-def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False, ssh_host=False):
+def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False, ssh_host=False, simlock_host=False):
     root = Path(directory, name, phase)
     root.mkdir(parents=True, exist_ok=True)
     request_log = root / "fake-requests.jsonl"
@@ -445,6 +550,7 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
     env.pop("EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS", None)
     env.pop("SERVE_EMU_FFMPEG", None)
     remote_home = None
+    gateway = FakeSimlockGateway(request_log) if simlock_host else None
     if ssh_host:
         # An SSH device host (scripts/fake_ssh.py) with the same fakes under its own home.
         from device_ssh_parity import seed_remote_home
@@ -500,6 +606,15 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
             secrets.token_bytes(32),
             env=env,
         )
+        if gateway is not None:
+            rpc(url, cookie, "server.updateSettings", {"patch": {
+                "simlockDeviceHostsEnabled": True,
+                "simlockDeviceHosts": [{"kind": "simlock", "id": "lab", "label": "Lab pool",
+                                        "gatewayUrl": f"http://127.0.0.1:{gateway.port}", "agentToken": "tok-lab",
+                                        "maxLeases": 2}]}})
+            deadline = monotonic() + 30
+            while monotonic() < deadline and not rpc(url, cookie, "device.list", {}).get("simlockHosts"):
+                sleep(0.2)
         if ssh_host:
             rpc(url, cookie, "server.updateSettings", {"patch": {"deviceHosts": [
                 {"id": "linux", "label": "Linux box", "target": "linux-box"}]}})
@@ -548,6 +663,12 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
                     seen.append({"control_response": message.get("response")})
             answers.append(seen)
             plan = [*plan, ("hooks", {})]
+        if gateway is not None:
+            # Clients receive Simlock hosts apart from this machine's and SSH hosts.
+            wire = rpc(url, cookie, "device.list", {})
+            answers.append({"hosts": [h["id"] for h in wire["hosts"]], "easHosts": wire.get("easHosts"),
+                            "simlockHosts": wire.get("simlockHosts"), "hostStatuses": wire["hostStatuses"]})
+            plan = [*plan, ("wire state", {})]
         launched = None
         if configure:
             # Turning agent access off stops the daemon with its own CLI.
@@ -586,6 +707,17 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
         )
 
     stop_fake_daemons(root)
+    if gateway is not None:
+        gateway.close()
+        # A lease's session and directory are a random six hex digits on both servers.
+        text = re.sub(r"\bt3-[0-9a-f]{6}\b", "t3-<lease>", json.dumps(requests))
+        text = re.sub(r"(/simlock/[^/\"]+/)[0-9a-f]{6}", r"\1<lease>", text)
+        text = text.replace(f"127.0.0.1:{gateway.port}", "127.0.0.1:<gateway>")
+        text = re.sub(r"screenshot-[0-9a-f]+\.png", "screenshot-<random>.png", text)
+        requests = sorted(json.loads(text), key=lambda entry: json.dumps(entry, sort_keys=True))
+        text = re.sub(r"\bt3-[0-9a-f]{6}\b", "t3-<lease>", json.dumps(answers))
+        text = re.sub(r"(/simlock/[^/\"]+/)[0-9a-f]{6}", r"\1<lease>", text)
+        answers = json.loads(text.replace(f"127.0.0.1:{gateway.port}", "127.0.0.1:<gateway>"))
     if remote_home is not None:
         for record in list(remote_home.glob(".t3/device/hosts/*/hub.json")) + list(
                 remote_home.glob(".t3/device/hosts/*/daemon.json")):
@@ -710,6 +842,21 @@ def run_server(name, command, reference_root, directory):
                 ("device_list", {"hostId": "linux"}),
             ],
             dict(enable_devices=True, ssh_host=True, run_launcher=True),
+        ),
+        (
+            "simlock",
+            [
+                ("device_list", {"hostId": "Lab pool"}),
+                ("device_open", {"hostId": "lab", "deviceId": "simlock:android:Pixel 9"}),
+                ("device_screenshot", {}),
+                ("device_list", {"hostId": "lab"}),
+                ("device_open", {"hostId": "lab", "platform": "ios"}),
+                # maxLeases is 2: a third lease is refused.
+                ("device_open", {"hostId": "lab", "deviceId": "simlock:android:Pixel 9"}),
+                ("device_close", {"hostId": "lab", "shutdown": True}),
+                ("device_list", {"hostId": "lab"}),
+            ],
+            dict(enable_devices=True, simlock_host=True, run_launcher=True),
         ),
         (
             "ssh-agent-off",

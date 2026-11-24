@@ -27,6 +27,9 @@ pub(super) struct AgentEndpoint {
     pub base_url: String,
     pub token: String,
     pub entry: PathBuf,
+    /// The agent-device state its sessions keep, for a host whose sessions
+    /// are its own (a Simlock lease's directory).
+    pub state_dir: Option<PathBuf>,
 }
 
 /// `agentDeviceStateDir`.
@@ -90,6 +93,7 @@ fn to_endpoint(file: &Value, entry: &Path) -> AgentEndpoint {
         base_url: format!("http://127.0.0.1:{}", file["httpPort"]),
         token: file["token"].as_str().unwrap_or_default().to_owned(),
         entry: entry.to_path_buf(),
+        state_dir: None,
     }
 }
 
@@ -291,6 +295,14 @@ pub(super) fn config_path(dir: &Path, host_id: &str) -> PathBuf {
         .join(format!("{}.json", key(host_id)))
 }
 
+/// `agentDeviceConfigPath` for a host with a daemon per device.
+pub(super) fn device_config_path(dir: &Path, host_id: &str, device_id: &str) -> PathBuf {
+    dir.join("device").join("hosts").join(format!(
+        "{}.json",
+        key(&json!([host_id, device_id]).to_string())
+    ))
+}
+
 /// `agentDeviceSession`: the agent-device session of one thread's device.
 pub(super) fn session_name(thread_id: &str, host_id: &str, device_id: &str) -> String {
     format!(
@@ -303,11 +315,14 @@ pub(super) fn session_name(thread_id: &str, host_id: &str, device_id: &str) -> S
 pub(super) async fn write_config(file: &Path, endpoint: &AgentEndpoint) -> std::io::Result<()> {
     let parent = file.parent().unwrap_or(Path::new("."));
     tokio::fs::create_dir_all(parent).await?;
-    let content = json!({
+    let mut content = json!({
         "daemonBaseUrl": endpoint.base_url,
         "daemonAuthToken": endpoint.token,
-    })
-    .to_string();
+    });
+    if let Some(state_dir) = &endpoint.state_dir {
+        content["stateDir"] = json!(state_dir.to_string_lossy());
+    }
+    let content = content.to_string();
     if tokio::fs::read_to_string(file).await.ok().as_deref() == Some(content.as_str()) {
         return Ok(());
     }
@@ -532,7 +547,22 @@ pub(super) fn target_args(platform: &str, id: &str) -> Vec<String> {
 }
 
 /// `agentDeviceQuickStart` for a local device with a bound launcher (no target flags).
+/// The host kinds `agentDeviceQuickStart` has notes for.
+pub(super) enum QuickStartHost<'a> {
+    Machine,
+    Simlock { install_directory: Option<&'a str> },
+}
+
 pub(super) fn quick_start(device: &Value, target: &[String], command: &str) -> String {
+    quick_start_on(device, target, command, QuickStartHost::Machine)
+}
+
+pub(super) fn quick_start_on(
+    device: &Value,
+    target: &[String],
+    command: &str,
+    host: QuickStartHost,
+) -> String {
     let executable = shell_word(command);
     let target = target
         .iter()
@@ -547,10 +577,17 @@ pub(super) fn quick_start(device: &Value, target: &[String], command: &str) -> S
             .join(" ")
     };
     let ios = device["platform"] == "ios";
-    let platform_note = if ios {
-        "First use builds an XCTest runner and can take a couple of minutes; later commands are fast."
-    } else {
-        "The Android snapshot helper installs itself on first use."
+    let platform_note = match host {
+        QuickStartHost::Simlock { install_directory } => [
+            Some("This device is leased from a Simlock pool (alpha in T3 Code). The lease returns it to the pool, wiped, when it ends, so call device_close with shutdown: true when you are done. It starts with no apps installed.".to_owned()),
+            install_directory.map(|directory| format!("agent-device accepts install for this lease only when run from {directory}.")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" "),
+        QuickStartHost::Machine if ios => "First use builds an XCTest runner and can take a couple of minutes; later commands are fast.".to_owned(),
+        QuickStartHost::Machine => "The Android snapshot helper installs itself on first use.".to_owned(),
     };
     let name = device["name"].as_str().unwrap_or_default();
     let version = device["version"].as_str().unwrap_or_default();
@@ -587,7 +624,7 @@ pub(super) fn quick_start(device: &Value, target: &[String], command: &str) -> S
     if target.is_empty() {
         lines.push("The command is removed when the device closes or T3 Code restarts. If it is missing, call device_open again.".to_owned());
     }
-    lines.push(platform_note.to_owned());
+    lines.push(platform_note);
     lines.join("\n")
 }
 
