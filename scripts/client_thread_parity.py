@@ -1159,6 +1159,9 @@ def text_provider_runs(log, root, provider):
                 value = value.replace(urllib.parse.quote(f"{root}/{server}", safe=""), "<home>/<server>")
             # Temporary directories with random suffixes (Antigravity's session and runtime).
             value = re.sub(r"(t3-antigravity-text-|/run-)[A-Za-z0-9]{6}", r"\1<random>", value)
+            # The reference and Rust servers may resolve Node through different safe PATH
+            # entries. The executable location is irrelevant to the provider protocol.
+            value = re.sub(r"/(?:[^\"']+/)*node(?=[\"'])", "<node>", value)
             return value.replace(str(root), "<home>").replace(urllib.parse.quote(str(root), safe=""), "<home>")
         if isinstance(value, list):
             return [mask(item) for item in value]
