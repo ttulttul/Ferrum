@@ -376,6 +376,23 @@ async fn run_call(
         }
         return Reply::Success(result);
     }
+    if matches!(method, "workflows.subscribe" | "workflows.counts") {
+        crate::workflows::stream(state, method == "workflows.counts", send).await;
+        return Reply::Success(Value::Null);
+    }
+    if method == "workflows.get" {
+        return match crate::workflows::get_run(state, params["runId"].as_str().unwrap_or_default())
+        {
+            Ok(detail) => Reply::Success(detail),
+            Err(error) => Reply::Failure(json!({"_tag": "Fail", "error": error})),
+        };
+    }
+    if method == "workflows.answer" {
+        return match crate::workflows::answer(state, params) {
+            Ok(()) => Reply::Success(Value::Null),
+            Err(error) => Reply::Failure(json!({"_tag": "Fail", "error": error})),
+        };
+    }
     if method == "server.getStorageCleanupReport" {
         let mut reports = state.storage_cleanup.subscribe();
         while let Some(report) = reports.recv().await {

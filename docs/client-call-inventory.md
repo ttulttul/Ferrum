@@ -20,11 +20,11 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 
 | Kind | Calls | Used by the client | Mobile only | Server-only / unused | Existing parity | Client harness | Either |
 |---|---|---|---|---|---|---|---|
-| rpc | 224 | 221 | 0 | 3 | 142 | 78 | 165 |
-| rpc-stream | 33 | 32 | 0 | 1 | 18 | 23 | 26 |
+| rpc | 224 | 221 | 0 | 3 | 144 | 78 | 167 |
+| rpc-stream | 33 | 32 | 0 | 1 | 20 | 23 | 28 |
 | http | 55 | 40 | 1 | 14 | 40 | 14 | 41 |
 | http-raw | 7 | 7 | 0 | 0 | 7 | 3 | 7 |
-| **all** | 319 | 300 | 1 | 18 | 207 | 118 | 239 |
+| **all** | 319 | 300 | 1 | 18 | 211 | 118 | 243 |
 
 Newly covered by the client harness (no earlier parity script): 32. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 1.
 
@@ -222,7 +222,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `server.uninstallAcpRegistryManagedBinary` | user action | `packages/client-runtime/src/state/server.ts:1846` | AcpRegistryManagedBinaryUninstallInput | AcpRegistryManagedBinaryUninstallResult | session (providers:manage) | client | acp_install_parity.py | — |
 | `server.updateProvider` | background | `apps/web/src/rpc/requestLatencyState.ts:38`<br>`packages/client-runtime/src/state/server.ts:1815` | ServerProviderUpdateInput | ServerProviderUpdatedPayload | session (providers:manage) | client | validation only | — |
 | `server.updateServer` | background | `apps/web/src/rpc/requestLatencyState.ts:40`<br>`packages/client-runtime/src/connection/outdatedHostUpdate.ts:182`<br>(+2) | ServerSelfUpdateInput | ServerSelfUpdateResult | session (environment:maintain) | client | validation only | — |
-| `server.updateSettings` | user action | `packages/client-runtime/src/state/server.ts:1501` | Struct{patch,providerInstanceMutation} | ServerSettings | session (settings:write) | client | bitbucket_settings_parity.py, client_thread_parity.py, config_parity.py, config_snapshot_parity.py, feedback_parity.py, managed_policy_parity.py, preview_provider_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, settings_syntax_parity.py, storage_cleanup_parity.py, workers_peer_link_parity.py | 6 case(s) |
+| `server.updateSettings` | user action | `packages/client-runtime/src/state/server.ts:1501` | Struct{patch,providerInstanceMutation} | ServerSettings | session (settings:write) | client | bitbucket_settings_parity.py, client_thread_parity.py, config_parity.py, config_snapshot_parity.py, feedback_parity.py, managed_policy_parity.py, preview_provider_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, settings_syntax_parity.py, storage_cleanup_parity.py, workers_peer_link_parity.py, workflow_rpc_parity.py | 6 case(s) |
 | `server.upsertKeybinding` | user action | `packages/client-runtime/src/state/server.ts:1824` | ServerUpsertKeybindingInput | ServerUpsertKeybindingResult | session (settings:write) | client | validation only | 1 case(s) |
 | `shell.openInEditor` | user action | `packages/client-runtime/src/state/shellCommands.ts:13` | LaunchEditorInput | void | session (orchestration:operate) | client | validation only | — |
 | `sourceControl.appAccess` | user action | `packages/client-runtime/src/state/sourceControl.ts:26`<br>`packages/client-runtime/src/state/sourceControl.ts:31` | SourceControlAppAccessInput | SourceControlAppAccess | session (orchestration:read) | client | validation only | — |
@@ -248,10 +248,10 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `vcs.refreshStatus` | background | `apps/web/src/rpc/requestLatencyState.ts:41`<br>`packages/client-runtime/src/state/vcs.ts:354`<br>(+2) | Struct{localOnly} | VcsRefreshStatusResult | session (orchestration:read) | client | git_workflow_parity.py, provider-parity.json, source_control_hosts_parity.py | 2 case(s) |
 | `vcs.removeWorktree` | open project/thread | `packages/client-runtime/src/state/vcs.ts:386` | VcsRemoveWorktreeInput | void | session (source-control:write) | client | git_workflow_parity.py | 2 case(s) |
 | `vcs.switchRef` | open project/thread | `packages/client-runtime/src/state/vcs.ts:400` | VcsSwitchRefInput | VcsSwitchRefResult | session (source-control:write) | client | host-parity.json | 3 case(s) |
-| `workflows.answer` | user action | `packages/client-runtime/src/state/server.ts:1960` | WorkflowAnswerInput | void | session (orchestration:operate) | client | validation only | — |
+| `workflows.answer` | user action | `packages/client-runtime/src/state/server.ts:1960` | WorkflowAnswerInput | void | session (orchestration:operate) | client | workflow_rpc_parity.py | — |
 | `workflows.cancel` | user action | `packages/client-runtime/src/state/server.ts:1973` | WorkflowRunCancelInput | void | session (orchestration:operate) | client | validation only | — |
 | `workflows.deleteDefinition` | user action | `packages/client-runtime/src/state/server.ts:1985` | WorkflowDefinitionDeleteInput | WorkflowDefinitionChangeResult | session (terminal:operate) | client | validation only | — |
-| `workflows.get` | user action | `packages/client-runtime/src/state/server.ts:1645` | WorkflowRunGetInput | WorkflowRunDetail | session (orchestration:read) | client | validation only | — |
+| `workflows.get` | user action | `packages/client-runtime/src/state/server.ts:1645` | WorkflowRunGetInput | WorkflowRunDetail | session (orchestration:read) | client | workflow_rpc_parity.py | — |
 | `workflows.getDefinition` | user action | `packages/client-runtime/src/state/server.ts:1655` | WorkflowDefinitionGetInput | WorkflowDefinitionFiles | session (filesystem:read) | client | validation only | — |
 | `workflows.resume` | user action | `packages/client-runtime/src/state/server.ts:1968` | WorkflowRunResumeInput | void | session (orchestration:operate) | client | validation only | — |
 | `workflows.saveDefinition` | user action | `packages/client-runtime/src/state/server.ts:1979` | WorkflowDefinitionSaveInput | WorkflowDefinitionChangeResult | session (terminal:operate) | client | validation only | — |
@@ -296,8 +296,8 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `subscribeWorktreeSetup` | open project/thread | `packages/client-runtime/src/state/vcs.ts:377` | WorktreeSetupSubscribeInput | WorktreeSetupStreamEvent | session (orchestration:read) | client | client_thread_parity.py | 1 case(s) |
 | `terminal.attach` | open project/thread | `packages/client-runtime/src/state/terminal.ts:96` | TerminalAttachInput | TerminalAttachStreamEvent | session (terminal:operate) | client | validation only | 2 case(s) |
 | `terminal.observe` | open project/thread | `packages/client-runtime/src/state/terminal.ts:84` | TerminalObserveInput | TerminalAttachStreamEvent | session (terminal:read) | client | provider-parity.json | 1 case(s) |
-| `workflows.counts` | - | — | WorkflowRunsSubscribeInput | WorkflowCounts | session (orchestration:read) | server-only/unused | validation only | — |
-| `workflows.subscribe` | user action | `packages/client-runtime/src/state/server.ts:1467` | WorkflowRunsSubscribeInput | WorkflowRunsSnapshot | session (orchestration:read) | client | validation only | — |
+| `workflows.counts` | - | — | WorkflowRunsSubscribeInput | WorkflowCounts | session (orchestration:read) | server-only/unused | workflow_rpc_parity.py | — |
+| `workflows.subscribe` | user action | `packages/client-runtime/src/state/server.ts:1467` | WorkflowRunsSubscribeInput | WorkflowRunsSnapshot | session (orchestration:read) | client | workflow_rpc_parity.py | — |
 
 ## Environment HTTP API
 
@@ -363,7 +363,7 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 
 | Call | Trigger | Callers | Request | Response | Auth | Usage | Existing | Client harness |
 |---|---|---|---|---|---|---|---|---|
-| `GET /ws` | connect | `packages/client-runtime/src/rpc/session.ts:251`<br>`packages/client-runtime/src/rpc/session.ts:252` | websocket upgrade: orchestrationProtocol=2, frameParts=1, clientCapabilities; cookie, or wsTicket from a bearer/DPoP ticket |  | session | client | acp_install_parity.py, auth_parity.py, bitbucket_pull_request_parity.py, bitbucket_pull_requests_parity.py, bitbucket_settings_parity.py, client_initial_sync_parity.py, client_sessions_parity.py, config_parity.py, cors_parity.py, git_workflow_parity.py, github_provider_parity.py, linear_provider_parity.py, link_request_parity.py, login_shell_refresh_parity.py, managed_policy_parity.py, orchestration_parity.py, parity-fixtures.json, peer_link_outgoing_parity.py, peer_link_relay_parity.py, peer_link_routes_parity.py, preview_provider_parity.py, project_clone_parity.py, project_favicon_parity.py, provider-parity.json, provider_status_parity.py, relay_client_parity.py, rpc_edge_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, source_control_clone_parity.py, source_control_hosts_parity.py, source_control_lookup_parity.py, storage_cleanup_parity.py | 1 case(s) |
+| `GET /ws` | connect | `packages/client-runtime/src/rpc/session.ts:251`<br>`packages/client-runtime/src/rpc/session.ts:252` | websocket upgrade: orchestrationProtocol=2, frameParts=1, clientCapabilities; cookie, or wsTicket from a bearer/DPoP ticket |  | session | client | acp_install_parity.py, auth_parity.py, bitbucket_pull_request_parity.py, bitbucket_pull_requests_parity.py, bitbucket_settings_parity.py, client_initial_sync_parity.py, client_sessions_parity.py, config_parity.py, cors_parity.py, git_workflow_parity.py, github_provider_parity.py, linear_provider_parity.py, link_request_parity.py, login_shell_refresh_parity.py, managed_policy_parity.py, orchestration_parity.py, parity-fixtures.json, peer_link_outgoing_parity.py, peer_link_relay_parity.py, peer_link_routes_parity.py, preview_provider_parity.py, project_clone_parity.py, project_favicon_parity.py, provider-parity.json, provider_status_parity.py, relay_client_parity.py, rpc_edge_parity.py, settings_mutation_parity.py, settings_secrets_parity.py, source_control_clone_parity.py, source_control_hosts_parity.py, source_control_lookup_parity.py, storage_cleanup_parity.py, workflow_rpc_parity.py | 1 case(s) |
 | `GET /api/attachments/:id` | user action | — | attachment bytes shown in the transcript |  | session | client | attachment_tools_parity.py, cors_parity.py | — |
 | `POST /api/attachments/upload/:token` | user action | `apps/web/src/lib/attachmentUploadQueue.ts:154` | unauthenticated XHR upload to the signed URL attachments.createUploadUrl returns |  | signed URL | client | attachment_tools_parity.py, cors_parity.py | 9 case(s) |
 | `GET /api/assets/:token` | user action | `packages/shared/src/preview.ts:16` | asset URLs from assets.createUrl |  | signed URL | client | project_favicon_parity.py | 17 case(s) |
