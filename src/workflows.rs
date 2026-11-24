@@ -12,7 +12,8 @@ use crate::AppState;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::broadcast;
 
 /// `Workflows.OFF`.
 pub(crate) const OFF: &str = "Workflows are off on this server. Turn them on in its Settings → Labs → Workflows, or without a desktop, set \"workflowsEnabled\": true in userdata/settings.json in its T3 home (~/.t3 by default).";
@@ -68,6 +69,13 @@ fn open(state: &AppState) -> rusqlite::Result<Connection> {
     )?;
     crate::statev2::configure(&conn, false)?;
     Ok(conn)
+}
+
+/// `WorkflowStore.changes`: a run this server wrote to, for the streams.
+static CHANGES: LazyLock<broadcast::Sender<()>> = LazyLock::new(|| broadcast::channel(64).0);
+
+fn changed() {
+    let _ = CHANGES.send(());
 }
 
 /// The engine is built once, when it is first needed.
@@ -559,6 +567,7 @@ fn run_ended(
         .is_some();
     transaction.execute("DELETE FROM workflow_waits WHERE run_id = ?1", [run_id])?;
     transaction.commit()?;
+    changed();
     Ok(ended)
 }
 
@@ -680,6 +689,7 @@ fn cancel<'a>(
             params![now(), run_id, END_STEP],
         )
         .map_err(unavailable)?;
+        changed();
         let children = select(
             conn,
             "SELECT run_id FROM workflow_runs WHERE parent_run_id = ?1 AND ended_at IS NULL",
@@ -866,6 +876,159 @@ pub(crate) async fn tool(state: &Arc<AppState>, input: &Value) -> Result<Value, 
             get(&conn, &run_id).map(answered)
         }
     }
+}
+
+fn enabled(state: &AppState) -> bool {
+    state.settings.internal().unwrap_or_default()["workflowsEnabled"] == true
+}
+
+/// What the definitions loader says of an empty folder: nothing reported
+/// yet, nothing wrong. The snapshot of a server with workflows on carries it.
+fn definition() -> Value {
+    json!({"revision": 0, "problem": null})
+}
+
+/// `Workflows.watch`'s snapshot: the workflows registered (none), the recent
+/// runs and the open questions; with workflows on, also the definitions' state.
+fn snapshot(state: &AppState) -> Value {
+    let empty = json!({"workflows": [], "runs": [], "questions": []});
+    let Ok(conn) = open(state) else {
+        return empty;
+    };
+    match mode(state, &conn) {
+        Mode::Off => empty,
+        Mode::Disabled => {
+            json!({"workflows": [], "runs": [], "questions": [], "definition": definition()})
+        }
+        Mode::History => json!({
+            "workflows": [],
+            "runs": runs(&conn, None).unwrap_or_default(),
+            "questions": questions(&conn).unwrap_or_default(),
+            "definition": definition(),
+        }),
+    }
+}
+
+/// `WorkflowStore.counts`: what waits on a person, what has not ended, and every run.
+fn counts(state: &AppState) -> Value {
+    let none = json!({"needsYou": 0, "active": 0, "total": 0});
+    let Ok(conn) = open(state) else {
+        return none;
+    };
+    if mode(state, &conn) != Mode::History {
+        return none;
+    }
+    conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM workflow_waits
+             WHERE request_json IS NOT NULL AND signalled_at IS NULL),
+           (SELECT COUNT(*) FROM workflow_runs WHERE status = 'paused'),
+           (SELECT COUNT(*) FROM workflow_runs WHERE ended_at IS NULL),
+           (SELECT COUNT(*) FROM workflow_runs)",
+        [],
+        |row| {
+            let (questions, paused, active, total): (i64, i64, i64, i64) =
+                (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+            Ok(json!({"needsYou": questions + paused, "active": active, "total": total}))
+        },
+    )
+    .unwrap_or(none)
+}
+
+/// How long a burst of writes settles before the streams look again (`WATCH_SETTLE`).
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// `workflows.subscribe` (`counts` false) and `workflows.counts`: the value
+/// now, and again once a burst of changes to runs settles. Counts that did
+/// not move are not sent again. Turning workflows on or off starts over with
+/// the other service's value. Never returns.
+pub(crate) async fn stream<F, Fut>(state: &Arc<AppState>, counted: bool, send: F)
+where
+    F: Fn(Value) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut settings = state.settings.subscribe();
+    let mut changes = CHANGES.subscribe();
+    let mut on = enabled(state);
+    let mut last: Option<Value> = None;
+    loop {
+        let value = if counted {
+            counts(state)
+        } else {
+            snapshot(state)
+        };
+        if !counted || last.as_ref() != Some(&value) {
+            send(json!([value.clone()])).await;
+        }
+        last = Some(value);
+        // Off, or with nothing kept, the service's streams say nothing more.
+        let live = on && open(state).is_ok_and(|conn| mode(state, &conn) == Mode::History);
+        loop {
+            tokio::select! {
+                change = changes.recv(), if live => {
+                    if matches!(change, Err(broadcast::error::RecvError::Closed)) {
+                        return std::future::pending().await;
+                    }
+                    while tokio::time::timeout(SETTLE, changes.recv()).await.is_ok() {}
+                    break;
+                }
+                turned = settings.recv() => {
+                    if matches!(turned, Err(broadcast::error::RecvError::Closed)) {
+                        return std::future::pending().await;
+                    }
+                    if enabled(state) != on {
+                        on = !on;
+                        last = None;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `WorkflowRequestError`.
+fn request_error((_, message): Refused) -> Value {
+    json!({"_tag": "WorkflowRequestError", "message": message})
+}
+
+/// `workflows.get`: a run with its steps and what it refers to.
+pub(crate) fn get_run(state: &AppState, run_id: &str) -> Result<Value, Value> {
+    let conn = open(state).map_err(|e| request_error(unavailable(e)))?;
+    match mode(state, &conn) {
+        Mode::Off => Err(request_error(invalid(OFF))),
+        Mode::Disabled => Err(request_error(not_found(run_id))),
+        Mode::History => get(&conn, run_id).map_err(request_error),
+    }
+}
+
+/// `workflows.answer` (`Workflows.answer`): a person's answer to the question
+/// a run asks, as one signal per asking. A question answered already, or never
+/// asked, takes nothing.
+pub(crate) fn answer(state: &AppState, params: &Value) -> Result<(), Value> {
+    let mut conn = open(state).map_err(|e| request_error(unavailable(e)))?;
+    let mode = mode(state, &conn);
+    if mode != Mode::History {
+        return Err(request_error(refusal(mode)));
+    }
+    let address = Address::Run {
+        run_id: params["runId"].as_str().unwrap_or_default().to_owned(),
+        wait: params["name"].as_str().unwrap_or_default().to_owned(),
+    };
+    let Some(wait) = wait_at(&conn, &address).map_err(|e| request_error(unavailable(e)))? else {
+        return Ok(());
+    };
+    if wait.get("request_json").is_none_or(Value::is_null) {
+        return Ok(());
+    }
+    let mut value = json!({"choice": params["choice"]});
+    if let Some(reason) = params.get("reason") {
+        value["reason"] = reason.clone();
+    }
+    let id = format!("answer:{}", text(&wait, "token"));
+    signal(&mut conn, &address, &value, &id)
+        .map(|_| ())
+        .map_err(request_error)
 }
 
 #[cfg(test)]

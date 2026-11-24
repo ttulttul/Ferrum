@@ -4796,7 +4796,8 @@
         "settings_secrets_parity.py",
         "settings_syntax_parity.py",
         "storage_cleanup_parity.py",
-        "workers_peer_link_parity.py"
+        "workers_peer_link_parity.py",
+        "workflow_rpc_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -5771,8 +5772,10 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "workflow_rpc_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -5809,8 +5812,10 @@
       "stream": true,
       "auth": "session (orchestration:read)",
       "usage": "server-only/unused",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "workflow_rpc_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -5849,8 +5854,10 @@
       "stream": false,
       "auth": "session (orchestration:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "workflow_rpc_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -5929,8 +5936,10 @@
       "stream": true,
       "auth": "session (orchestration:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "workflow_rpc_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -7374,7 +7383,8 @@
         "source_control_clone_parity.py",
         "source_control_hosts_parity.py",
         "source_control_lookup_parity.py",
-        "storage_cleanup_parity.py"
+        "storage_cleanup_parity.py",
+        "workflow_rpc_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
