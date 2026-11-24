@@ -140,7 +140,7 @@ def github_request(request):
     return (method, path, {**body, "query": tokens, "operationName": name, "variables": variables})
 
 
-def bitbucket_requests(requests):
+def bitbucket_requests(label, requests):
     # A change-request snapshot fans out five reads concurrently. Its second diffstat
     # page makes six requests in this fixture. Keep each snapshot and each write in order.
     ordered = []
@@ -148,7 +148,15 @@ def bitbucket_requests(requests):
     while i < len(requests):
         group = requests[i:i + 6]
         ends = sorted(r["path"].rsplit("/", 1)[-1] for r in group)
-        if ends == ["7", "conflicts", "diffstat", "diffstat", "repositories", "statuses"]:
+        # Only the preflight snapshot has the extra permission read. After the
+        # merge, two ordinary snapshots follow back-to-back.
+        merge_reads = requests[i:i + 7]
+        if (i == 0 and label in ("merge", "merge moved head")
+                and len(merge_reads) == 7 and all(r["method"] == "GET" for r in merge_reads)
+                and sorted(r["path"].rsplit("/", 1)[-1] for r in merge_reads)
+                == ["7", "conflicts", "diffstat", "diffstat", "repositories", "repositories", "statuses"]):
+            size = 7
+        elif ends == ["7", "conflicts", "diffstat", "diffstat", "repositories", "statuses"]:
             size = 6
         elif ([r["method"] for r in requests[i:i + 2]] == ["GET", "GET"]
               and {r["path"].rsplit("/", 1)[-1] for r in requests[i:i + 2]}
@@ -181,7 +189,7 @@ def main():
                 if forge == "github":
                     requests_ok = list(map(github_request, requests)) == list(map(github_request, rust[2]))
                 else:
-                    requests_ok = bitbucket_requests(requests) == bitbucket_requests(rust[2])
+                    requests_ok = bitbucket_requests(label, requests) == bitbucket_requests(label, rust[2])
                 print(f"{'PASS' if good and requests_ok else 'FAIL'} {forge} {label}", flush=True)
                 if not good:
                     print(f"  original {answer}\n  rust {rust[1]}")
