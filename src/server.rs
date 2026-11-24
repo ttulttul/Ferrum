@@ -2030,6 +2030,19 @@ impl mcp_oauth::McpHost for AppState {
     ) -> mcp_oauth::HostFuture<Result<serde_json::Value, serde_json::Value>> {
         let state = self.clone();
         Box::pin(async move {
+            let mut input = input;
+            // A Simlock lease accepts installs only from the directory that opened it.
+            if operation == "open" {
+                let root = state
+                    .control
+                    .store
+                    .read()
+                    .await
+                    .thread_workspace_root(input["threadId"].as_str().unwrap_or_default());
+                if let Some(root) = root {
+                    input["workspaceRoot"] = serde_json::json!(root);
+                }
+            }
             state
                 .local
                 .devices

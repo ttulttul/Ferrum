@@ -1,4 +1,5 @@
 use super::agent_device::{self, AgentEndpoint, StartError};
+use super::simlock_device_host::{self as simlock, Lease, SimlockConfig, SimlockState};
 use super::ssh_device_host::{self as ssh_host, SshConfig};
 use super::{invalid, string, timestamp, Reply};
 use crate::settings::{
@@ -80,6 +81,11 @@ pub struct DeviceService {
     ssh_activated: Mutex<HashSet<String>>,
     /// The SSH hosts agents use (`wantsAgent`), which start with their daemon.
     ssh_wants_agent: Mutex<HashSet<String>>,
+    /// The Simlock hosts from settings (`simlockDeviceHosts`, when the alpha is on).
+    simlock_hosts: Mutex<Vec<SimlockState>>,
+    /// Launchers on a session a host leases to every thread (a Simlock
+    /// lease's); the host ends it, not a retiring thread.
+    host_session_launchers: Mutex<HashSet<String>>,
     /// Serializes host reconciles (the reference's lifecycle lock).
     reconcile_lock: tokio::sync::Mutex<()>,
 }
@@ -109,6 +115,8 @@ impl DeviceService {
             ssh_ready: Default::default(),
             ssh_activated: Default::default(),
             ssh_wants_agent: Default::default(),
+            simlock_hosts: Default::default(),
+            host_session_launchers: Default::default(),
             reconcile_lock: Default::default(),
         })
     }
@@ -351,7 +359,28 @@ fn initial(dir: &Path, saved: &Value) -> Value {
     })
 }
 
+/// The state as clients receive it (`DeviceServiceState`'s encoding): this
+/// machine's and SSH hosts in `hosts`, Expo and Simlock hosts in their own lists.
 fn wire(state: &Value) -> Value {
+    let mut state = state.clone();
+    let hosts: Vec<Value> = state["hosts"].as_array().cloned().unwrap_or_default();
+    let kind = |kinds: &[&str]| {
+        Value::Array(
+            hosts
+                .iter()
+                .filter(|host| kinds.iter().any(|k| host["kind"] == *k))
+                .cloned()
+                .collect(),
+        )
+    };
+    state["hosts"] = kind(&["local", "ssh"]);
+    state["easHosts"] = kind(&["eas"]);
+    state["simlockHosts"] = kind(&["simlock"]);
+    ordered(&state)
+}
+
+/// The state with its keys in the reference's order.
+fn ordered(state: &Value) -> Value {
     let mut ordered = json!({});
     for k in [
         "supportsHostRetry",
@@ -1347,8 +1376,15 @@ impl DeviceService {
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
         self.events.subscribe()
     }
+    /// The state as clients receive it.
     pub fn snapshot(&self, _dir: &Path) -> Value {
         wire(&self.state.lock().unwrap())
+    }
+
+    /// The state with every host in `hosts`, as the service and the device
+    /// tools see it (`DeviceServiceState` decoded).
+    fn current(&self) -> Value {
+        ordered(&self.state.lock().unwrap())
     }
     fn publish(&self, state: &mut Value) {
         // This machine first, then the configured hosts, as the reference's host map orders them.
@@ -1363,6 +1399,13 @@ impl DeviceService {
                 .unwrap()
                 .iter()
                 .map(|(_, summary)| summary.clone()),
+        );
+        hosts.extend(
+            self.simlock_hosts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(SimlockState::summary),
         );
         state["hosts"] = Value::Array(hosts);
         state["revision"] = json!(state["revision"].as_u64().unwrap_or(0) + 1);
@@ -1387,7 +1430,12 @@ impl DeviceService {
         }
         let reply = self.apply(name, input, dir).await;
         self.prune_launchers(dir).await;
-        Some(reply)
+        // `list` and `configure` answer with the state, as clients receive it.
+        Some(if matches!(name, "list" | "configure") {
+            reply.map(|state| wire(&state))
+        } else {
+            reply
+        })
     }
 
     pub async fn tool_call(&self, operation: &str, input: &Value, dir: &Path) -> Reply {
@@ -1450,7 +1498,7 @@ impl DeviceService {
             }
             "close" => {
                 let thread_id = input["threadId"].as_str().unwrap_or("");
-                let state = self.snapshot(dir);
+                let state = self.current();
                 let hosts = state["hosts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
                 let input_host_id = match input["hostId"].as_str() {
                     Some(h) => resolve_host_id(hosts, Some(h))?,
@@ -1502,8 +1550,15 @@ impl DeviceService {
             "testHost" => return test_host(input, dir).await,
             _ => {}
         }
+        if matches!(name, "open" | "shutdown")
+            && input["hostId"]
+                .as_str()
+                .is_some_and(|id| self.simlock_config(id).is_some())
+        {
+            return self.simlock_apply(name, input, dir).await;
+        }
         let mut runtime = self.runtime.lock().await;
-        let mut state = self.snapshot(dir);
+        let mut state = self.current();
         let host_id = input["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
         if name != "close"
             && host_id != LOCAL_HOST_ID
@@ -1559,6 +1614,16 @@ impl DeviceService {
                 for config in &hosts {
                     self.ssh_stop(config, dir).await;
                 }
+                let simlock_hosts: Vec<SimlockConfig> = self
+                    .simlock_hosts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|host| host.config.clone())
+                    .collect();
+                for config in simlock_hosts {
+                    self.simlock_release_all(config).await;
+                }
                 runtime.take();
                 state["sessions"] = json!([]);
                 state["devices"] = json!([]);
@@ -1572,12 +1637,19 @@ impl DeviceService {
                 && input["agentAccessEnabled"] == true
             {
                 self.agent_readiness_locked(&mut runtime, dir).await?;
-                state = self.snapshot(dir);
+                state = self.current();
             }
         }
         if name == "list" || name == "configure" {
             if let Some(id) = input["retryHostId"].as_str() {
                 if id != LOCAL_HOST_ID {
+                    if self.simlock_config(id).is_some() {
+                        drop(runtime);
+                        if enabled {
+                            self.list_simlock_host(id, dir).await;
+                        }
+                        return Ok(self.current());
+                    }
                     if self.ssh_config(id).is_none() {
                         return Err(bad_host(id));
                     }
@@ -1586,7 +1658,7 @@ impl DeviceService {
                     if enabled {
                         self.retry_ssh_host(id, dir).await;
                     }
-                    return Ok(self.snapshot(dir));
+                    return Ok(self.current());
                 }
             }
             if let Some(tool) = input["updateTool"].as_str() {
@@ -1629,7 +1701,7 @@ impl DeviceService {
             if input["inspectOnly"] == true && input.get("updateTool").is_none() {
                 drop(runtime);
                 self.inspect_ssh_hosts(dir).await;
-                return Ok(self.snapshot(dir));
+                return Ok(self.current());
             }
             if enabled
                 && input["inspectOnly"] != true
@@ -1667,9 +1739,19 @@ impl DeviceService {
             if enabled && input["inspectOnly"] != true {
                 drop(runtime);
                 self.list_ssh_hosts(dir).await;
-                return Ok(self.snapshot(dir));
+                let simlock_hosts: Vec<String> = self
+                    .simlock_hosts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|host| host.config.id.clone())
+                    .collect();
+                for id in simlock_hosts {
+                    self.list_simlock_host(&id, dir).await;
+                }
+                return Ok(self.current());
             }
-            return Ok(wire(&state));
+            return Ok(ordered(&state));
         }
         if name == "close" {
             let thread = string(input, "threadId")?;
@@ -1704,7 +1786,9 @@ impl DeviceService {
             // A lost SSH tunnel does not establish that the remote daemon stopped.
             for s in &ending {
                 let session_host = s["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
-                if session_host != LOCAL_HOST_ID && self.ssh_current(session_host).await.is_none() {
+                if self.ssh_config(session_host).is_some()
+                    && self.ssh_current(session_host).await.is_none()
+                {
                     return Err(json!({
                         "_tag": "DeviceHostUnavailableError",
                         "hostId": session_host,
@@ -1752,6 +1836,28 @@ impl DeviceService {
             if do_shutdown {
                 for s in &closing {
                     let session_host = s["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
+                    let dev_id = s["deviceId"].as_str().unwrap_or("");
+                    if self.simlock_config(session_host).is_some() {
+                        // A Simlock host's readiness is its CLI; its shutdown returns the lease.
+                        if self.with_simlock(session_host, |host| host.cli.is_some()) != Some(true)
+                        {
+                            return Err(json!({
+                                "_tag": "DeviceHostUnavailableError",
+                                "hostId": session_host,
+                                "reason": "Device host is not running. Reconnect before retrying close.",
+                            }));
+                        }
+                        self.simlock_shutdown(session_host, dev_id).await;
+                        if let Some(devices) = state["devices"].as_array_mut() {
+                            for d in devices.iter_mut() {
+                                if d["hostId"] == s["hostId"] && d["id"] == dev_id {
+                                    d["booted"] = json!(false);
+                                }
+                            }
+                        }
+                        self.publish(&mut state);
+                        continue;
+                    }
                     let current = if session_host == LOCAL_HOST_ID {
                         running_origin(&mut runtime).map(|origin| HostCtx::local(&origin))
                     } else {
@@ -1785,6 +1891,10 @@ impl DeviceService {
             if do_shutdown {
                 for s in &closing {
                     let session_host = s["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
+                    if self.simlock_config(session_host).is_some() {
+                        let _ = self.simlock_refresh(session_host, dir).await;
+                        continue;
+                    }
                     let current = if session_host == LOCAL_HOST_ID {
                         running_origin(&mut runtime).map(|origin| HostCtx::local(&origin))
                     } else {
@@ -1792,7 +1902,7 @@ impl DeviceService {
                     };
                     if let Some(ctx) = current {
                         if let Ok(listed) = list_hub(&ctx).await {
-                            state = self.snapshot(dir);
+                            state = self.current();
                             apply_list_result(&mut state, dir, &ctx.id, listed);
                             self.publish(&mut state);
                         }
@@ -1823,7 +1933,7 @@ impl DeviceService {
         } else {
             let ctx = self.ssh_readiness(host_id, dir).await?;
             // Readiness published the host's status.
-            state = self.snapshot(dir);
+            state = self.current();
             ctx
         };
         let origin = ctx.origin.clone();
@@ -2287,7 +2397,10 @@ impl DeviceService {
         let mut ending = Vec::new();
         for session in retired {
             if let Some(launcher) = launchers.remove(&session) {
-                ending.push(launcher);
+                // A session the host leases ends with the host's own release, not here.
+                if !self.host_session_launchers.lock().unwrap().remove(&session) {
+                    ending.push(launcher);
+                }
             }
         }
         futures_util::future::join_all(ending.iter().map(|l| agent_device::release_launcher(l)))
@@ -2304,6 +2417,9 @@ impl DeviceService {
                 session["hostId"].as_str().unwrap_or(""),
                 session["deviceId"].as_str().unwrap_or(""),
             );
+            if self.host_session_launchers.lock().unwrap().contains(&name) {
+                continue;
+            }
             if let Some(launcher) = launchers.get(&name).cloned() {
                 agent_device::release_launcher(&launcher).await;
                 launchers.remove(&name);
@@ -2318,7 +2434,7 @@ impl DeviceService {
 
     /// `setHostStatus`: a host's status; this machine's is also the top-level one.
     fn set_host_status_for(&self, host_id: &str, status: &str, detail: Option<String>) {
-        let mut state = self.snapshot(Path::new(""));
+        let mut state = self.current();
         let previous = state["hostStatuses"][host_id].clone();
         let mut next = json!({});
         if previous["androidDiscoveryIncomplete"] == true {
@@ -2405,7 +2521,7 @@ impl DeviceService {
         match started {
             Ok(endpoint) => {
                 *self.agent.lock().unwrap() = Some(endpoint.clone());
-                let mut state = self.snapshot(dir);
+                let mut state = self.current();
                 state["hosts"] = json!([host(dir, true)]);
                 self.publish(&mut state);
                 self.set_host_status("ready", None);
@@ -2473,6 +2589,7 @@ impl DeviceService {
                     "hostId": target["hostId"],
                     "deviceId": target["id"],
                     "platform": target["platform"],
+                    "workspaceRoot": input["workspaceRoot"],
                 }),
                 dir,
             )
@@ -2484,7 +2601,7 @@ impl DeviceService {
             .unwrap_or(LOCAL_HOST_ID)
             .to_owned();
         let session_device = session["deviceId"].as_str().unwrap_or("").to_owned();
-        let after = self.snapshot(dir);
+        let after = self.current();
         let device = after["devices"]
             .as_array()
             .and_then(|devices| {
@@ -2503,21 +2620,59 @@ impl DeviceService {
                 "reason": AGENT_ACCESS_UNAVAILABLE,
             }));
         };
-        let config = agent_device::config_path(dir, &session_host);
-        agent_device::write_config(&config, &endpoint)
-            .await
-            .map_err(|_| op_err("configure agent", "settings_failed"))?;
-        let agent_session = agent_device::session_name(&thread_id, &session_host, &session_device);
-        let mut target_args = agent_device::target_args(
-            device["platform"].as_str().unwrap_or("android"),
-            &session_device,
-        );
-        target_args.extend([
-            "--config".to_owned(),
-            config.to_string_lossy().into_owned(),
-            "--session".to_owned(),
-            agent_session.clone(),
-        ]);
+        let own_session = agent_device::session_name(&thread_id, &session_host, &session_device);
+        let simlock_lease = if self.simlock_config(&session_host).is_some() {
+            Some(self.simlock_agent_endpoint(&session_host, &session_device)?)
+        } else {
+            None
+        };
+        let (target_args, agent_session) = match &simlock_lease {
+            // A host with a daemon per device: the lease's own session and config.
+            Some((lease, url)) => {
+                let config = agent_device::device_config_path(dir, &session_host, &session_device);
+                agent_device::write_config(
+                    &config,
+                    &AgentEndpoint {
+                        base_url: url.clone(),
+                        token: lease.token.clone(),
+                        entry: PathBuf::new(),
+                        state_dir: Some(lease.dir.clone()),
+                    },
+                )
+                .await
+                .map_err(|_| op_err("configure agent", "settings_failed"))?;
+                self.host_session_launchers
+                    .lock()
+                    .unwrap()
+                    .insert(own_session.clone());
+                (
+                    vec![
+                        "--config".to_owned(),
+                        config.to_string_lossy().into_owned(),
+                        "--session".to_owned(),
+                        lease.session.clone(),
+                    ],
+                    lease.session.clone(),
+                )
+            }
+            None => {
+                let config = agent_device::config_path(dir, &session_host);
+                agent_device::write_config(&config, &endpoint)
+                    .await
+                    .map_err(|_| op_err("configure agent", "settings_failed"))?;
+                let mut target_args = agent_device::target_args(
+                    device["platform"].as_str().unwrap_or("android"),
+                    &session_device,
+                );
+                target_args.extend([
+                    "--config".to_owned(),
+                    config.to_string_lossy().into_owned(),
+                    "--session".to_owned(),
+                    own_session.clone(),
+                ]);
+                (target_args, own_session.clone())
+            }
+        };
         // agentLauncher: bound only while the session is still open.
         let command = {
             let mut launchers = self.launchers.lock().await;
@@ -2544,12 +2699,12 @@ impl DeviceService {
                 .await
                 .map_err(|_| op_err("install agent CLI", "command_failed"))?;
             let launcher =
-                agent_device::bind_launcher(dir, &node, &entry, &agent_session, &target_args)
+                agent_device::bind_launcher(dir, &node, &entry, &own_session, &target_args)
                     .await
                     .map_err(|_| {
                         local_unavailable("Could not prepare the agent-device launcher.")
                     })?;
-            launchers.insert(agent_session.clone(), launcher.clone());
+            launchers.insert(own_session.clone(), launcher.clone());
             launcher.to_string_lossy().into_owned()
         };
         Ok(json!({
@@ -2559,14 +2714,24 @@ impl DeviceService {
                 "targetArgs": target_args,
                 "session": agent_session,
             },
-            "quickStart": agent_device::quick_start(&device, &[], &command),
+            "quickStart": match &simlock_lease {
+                Some((lease, _)) => agent_device::quick_start_on(
+                    &device,
+                    &[],
+                    &command,
+                    agent_device::QuickStartHost::Simlock {
+                        install_directory: Some(&lease.install_directory),
+                    },
+                ),
+                None => agent_device::quick_start(&device, &[], &command),
+            },
         }))
     }
 
     /// `device_screenshot`: the PNG of a device open in the calling thread.
     pub(super) async fn tool_screenshot(&self, input: &Value, dir: &Path) -> Reply {
         let thread_id = input["threadId"].as_str().unwrap_or("");
-        let state = self.snapshot(dir);
+        let state = self.current();
         let hosts = state["hosts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
         let host_id = match input["hostId"].as_str() {
             Some(h) => resolve_host_id(hosts, Some(h))?,
@@ -2594,6 +2759,48 @@ impl DeviceService {
         };
         let target_host = target["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
         let device_id = target["deviceId"].as_str().unwrap_or("");
+        if self.simlock_config(target_host).is_some() {
+            // resolveDevice on a Simlock host, then the lease's screenshot.
+            self.simlock_readiness(target_host, dir).await?;
+            let find = |state: &Value| {
+                state["devices"]
+                    .as_array()
+                    .and_then(|ds| {
+                        ds.iter()
+                            .find(|d| d["hostId"] == target_host && d["id"] == device_id)
+                    })
+                    .cloned()
+            };
+            let device = match find(&self.current()) {
+                Some(device) => device,
+                None => {
+                    self.simlock_refresh(target_host, dir).await?;
+                    find(&self.current()).ok_or_else(|| {
+                        json!({"_tag":"DeviceNotFoundError","hostId":target_host,"deviceId":device_id})
+                    })?
+                }
+            };
+            let bytes = self.simlock_screenshot(target_host, device_id).await?;
+            let Some(png) = extract_png(&bytes).map(<[u8]>::to_vec) else {
+                return Err(json!({
+                    "_tag": "DeviceOperationError",
+                    "operation": "screenshot",
+                    "reason": "hub_rejected",
+                    "cause": format!("The hub returned {} bytes without a complete PNG.", bytes.len()),
+                }));
+            };
+            use base64::Engine as _;
+            let (width, height) = png_dimensions(&png);
+            return Ok(json!({
+                "device": device,
+                "screenshot": {
+                    "mimeType": "image/png",
+                    "data": base64::engine::general_purpose::STANDARD.encode(&png),
+                    "width": width,
+                    "height": height,
+                },
+            }));
+        }
         if target_host != LOCAL_HOST_ID && self.ssh_config(target_host).is_none() {
             return Err(bad_host(target_host));
         }
@@ -2628,11 +2835,11 @@ impl DeviceService {
                 })
                 .cloned()
         };
-        let device = match find(&self.snapshot(dir)) {
+        let device = match find(&self.current()) {
             Some(device) => device,
             None => {
                 let listed = list_hub(&ctx).await?;
-                let mut state = self.snapshot(dir);
+                let mut state = self.current();
                 apply_list_result(&mut state, dir, &ctx.id, listed);
                 self.publish(&mut state);
                 find(&state).ok_or_else(|| {
@@ -2754,6 +2961,7 @@ impl DeviceService {
         }
         self.ssh_config(host_id)
             .map(|config| config.label)
+            .or_else(|| self.simlock_config(host_id).map(|config| config.label))
             .unwrap_or_else(|| host_id.to_owned())
     }
 
@@ -2833,7 +3041,7 @@ impl DeviceService {
                 }));
             }
         };
-        if self.snapshot(dir)["hostStatuses"][host_id]["status"] != "ready" {
+        if self.current()["hostStatuses"][host_id]["status"] != "ready" {
             self.set_host_status_for(host_id, "ready", None);
         }
         Ok(ctx)
@@ -2925,6 +3133,7 @@ impl DeviceService {
                             base_url: format!("http://127.0.0.1:{daemon_port}"),
                             token: token.clone(),
                             entry: PathBuf::from(entry),
+                            state_dir: None,
                         }),
                         _ => None,
                     };
@@ -3022,6 +3231,28 @@ impl DeviceService {
         if host_id == LOCAL_HOST_ID {
             return self.agent_readiness(dir).await;
         }
+        if let Some(config) = self.simlock_config(host_id) {
+            let preferences = self
+                .settings
+                .internal()
+                .map_err(|_| op_err("settings", "settings_failed"))?;
+            if preferences["enableDeviceSupport"] != true
+                || preferences["enableAgentDeviceAccess"] != true
+            {
+                return Ok(None);
+            }
+            // Each lease is its own daemon session (`agentDevice: null`).
+            let (_, entry) = self.simlock_readiness(host_id, dir).await?;
+            let mut state = self.current();
+            self.publish(&mut state);
+            self.set_host_status_for(host_id, "ready", None);
+            return Ok(Some(AgentEndpoint {
+                base_url: config.agent_device_url(),
+                token: String::new(),
+                entry,
+                state_dir: None,
+            }));
+        }
         let Some(config) = self.ssh_config(host_id) else {
             return Err(bad_host(host_id));
         };
@@ -3036,7 +3267,7 @@ impl DeviceService {
         }
         match self.ssh_agent_ready(&config, dir).await {
             Ok(endpoint) => {
-                let mut state = self.snapshot(dir);
+                let mut state = self.current();
                 self.publish(&mut state);
                 self.set_host_status_for(host_id, "ready", None);
                 Ok(Some(endpoint))
@@ -3104,6 +3335,16 @@ impl DeviceService {
         futures_util::stream::iter(hosts)
             .for_each_concurrent(4, |config| async move { self.ssh_stop(&config, dir).await })
             .await;
+        let simlock_hosts: Vec<SimlockConfig> = self
+            .simlock_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|host| host.config.clone())
+            .collect();
+        for config in simlock_hosts {
+            self.simlock_release_all(config).await;
+        }
     }
 
     /// `stop` for an SSH host: drops its tunnel and stops what it started there.
@@ -3143,7 +3384,7 @@ impl DeviceService {
                 };
                 match listed {
                     Ok(listed) => {
-                        let mut state = self.snapshot(dir);
+                        let mut state = self.current();
                         apply_list_result(&mut state, dir, host_id, listed);
                         self.publish(&mut state);
                     }
@@ -3178,7 +3419,7 @@ impl DeviceService {
                         if self.ssh_config(&config.id).as_ref() != Some(&config) {
                             return;
                         }
-                        let mut state = self.snapshot(dir);
+                        let mut state = self.current();
                         if state["hostStatus"] == "disabled" {
                             return;
                         }
@@ -3196,6 +3437,758 @@ impl DeviceService {
                 }
             }
         }
+    }
+
+    fn simlock_config(&self, host_id: &str) -> Option<SimlockConfig> {
+        self.simlock_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|host| host.config.id == host_id)
+            .map(|host| host.config.clone())
+    }
+
+    fn with_simlock<T>(&self, host_id: &str, f: impl FnOnce(&mut SimlockState) -> T) -> Option<T> {
+        self.simlock_hosts
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|host| host.config.id == host_id)
+            .map(f)
+    }
+
+    fn simlock_unavailable(config: &SimlockConfig, reason: impl Into<String>) -> Value {
+        json!({
+            "_tag": "DeviceHostUnavailableError",
+            "hostId": config.id,
+            "hostLabel": config.label,
+            "reason": reason.into(),
+        })
+    }
+
+    /// `currentToken`: the saved agent token for this gateway, else this
+    /// machine's agent-device token when it points at the same gateway.
+    async fn simlock_token(&self, config: &SimlockConfig) -> Result<String, Value> {
+        let settings = self
+            .settings
+            .internal()
+            .map_err(|_| op_err("settings", "settings_failed"))?;
+        let present = |v: &Value| v.is_object() || v.as_str().is_some_and(|s| !s.is_empty());
+        let same_origin = |a: &str, b: &str| match (url::Url::parse(a), url::Url::parse(b)) {
+            (Ok(a), Ok(b)) => a.origin() == b.origin(),
+            _ => false,
+        };
+        if present(&config.agent_token) {
+            return device_token(&self.settings.resolver, &settings, &config.agent_token)
+                .await
+                .map_err(|reason| Self::simlock_unavailable(config, reason));
+        }
+        let machine_url = env::var("AGENT_DEVICE_DAEMON_BASE_URL").ok().and_then(|v| {
+            v.trim()
+                .trim_end_matches('/')
+                .strip_suffix(simlock::AGENT_DEVICE_PATH)
+                .filter(|url| url::Url::parse(url).is_ok())
+                .map(str::to_owned)
+        });
+        let machine_token = env::var("AGENT_DEVICE_DAEMON_AUTH_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        match (machine_url, machine_token) {
+            (Some(url), Some(token)) if same_origin(&url, &config.gateway_url) => Ok(token),
+            _ => Err(Self::simlock_unavailable(
+                config,
+                format!("Add an agent token for {} in Settings.", config.label),
+            )),
+        }
+    }
+
+    /// `loadCatalog`: the pool's devices (cached for a minute when every
+    /// platform has some), and the host's platforms from them or the failure.
+    async fn simlock_load_catalog(&self, host_id: &str, _dir: &Path) -> Result<Vec<Value>, Value> {
+        let Some(config) = self.simlock_config(host_id) else {
+            return Err(bad_host(host_id));
+        };
+        let cached = self
+            .with_simlock(host_id, |host| {
+                host.catalog
+                    .as_ref()
+                    .filter(|(at, _)| at.elapsed() < simlock::CATALOG_TTL)
+                    .map(|(_, devices)| devices.clone())
+            })
+            .flatten();
+        let result: Result<Vec<Value>, Value> = match cached {
+            Some(devices) => Ok(devices),
+            None => {
+                async {
+                    let token = self.simlock_token(&config).await?;
+                    let gateway = config.gateway();
+                    let answer = simlock::request(&gateway, &token, "GET", "/v1/catalog", None)
+                        .await
+                        .map_err(|error| {
+                            Self::simlock_unavailable(
+                                &config,
+                                simlock::describe_gateway_failure(&error, &gateway, &config.label),
+                            )
+                        })?;
+                    let by_platform = simlock::catalog_devices(&answer).ok_or_else(|| {
+                        Self::simlock_unavailable(
+                            &config,
+                            simlock::describe_gateway_failure(
+                                &simlock::GatewayError::Unreadable,
+                                &gateway,
+                                &config.label,
+                            ),
+                        )
+                    })?;
+                    let devices: Vec<Value> =
+                        by_platform.iter().flatten().flatten().cloned().collect();
+                    // A platform with nothing to offer is usually its workers reconnecting.
+                    let keep = !devices.is_empty()
+                        && by_platform
+                            .iter()
+                            .all(|entry| entry.as_ref().is_none_or(|d| !d.is_empty()));
+                    self.with_simlock(host_id, |host| {
+                        host.catalog = keep.then(|| (Instant::now(), devices.clone()));
+                    });
+                    Ok(devices)
+                }
+                .await
+            }
+        };
+        let platforms = match &result {
+            Ok(devices) => ["ios", "android"]
+                .map(|platform| {
+                    if devices.iter().any(|d| d["platform"] == platform) {
+                        json!({"platform": platform, "available": true})
+                    } else {
+                        json!({
+                            "platform": platform,
+                            "available": false,
+                            "reason": format!(
+                                "The pool has no {} devices.",
+                                if platform == "ios" { "iOS" } else { "Android" }
+                            ),
+                        })
+                    }
+                })
+                .to_vec(),
+            Err(error) => ["ios", "android"]
+                .map(|platform| {
+                    json!({"platform": platform, "available": false, "reason": error["reason"]})
+                })
+                .to_vec(),
+        };
+        self.with_simlock(host_id, |host| host.platforms = Value::Array(platforms));
+        result
+    }
+
+    /// `platformAvailability` for a Simlock host.
+    async fn simlock_platform(&self, host_id: &str, platform: &str, dir: &Path) -> Value {
+        let _ = self.simlock_load_catalog(host_id, dir).await;
+        self.with_simlock(host_id, |host| {
+            host.platforms
+                .as_array()
+                .and_then(|list| list.iter().find(|p| p["platform"] == platform))
+                .cloned()
+        })
+        .flatten()
+        .unwrap_or_else(|| json!({"platform": platform, "available": false}))
+    }
+
+    /// `ensureReady` and `readiness` for a Simlock host: this machine's
+    /// agent-device CLI, installed on first use.
+    async fn simlock_readiness(
+        &self,
+        host_id: &str,
+        dir: &Path,
+    ) -> Result<(PathBuf, PathBuf), Value> {
+        let Some(config) = self.simlock_config(host_id) else {
+            return Err(bad_host(host_id));
+        };
+        let enabled = self
+            .settings
+            .internal()
+            .map_err(|_| op_err("settings", "settings_failed"))?["enableDeviceSupport"]
+            == true;
+        if !enabled {
+            return Err(self.disabled_for(host_id));
+        }
+        if let Some(cli) = self
+            .with_simlock(host_id, |host| host.cli.clone())
+            .flatten()
+        {
+            if self.current()["hostStatuses"][host_id]["status"] != "ready" {
+                self.set_host_status_for(host_id, "ready", None);
+            }
+            return Ok(cli);
+        }
+        // A missing token or unreachable gateway does not stop readiness:
+        // listing and opening devices say what is wrong instead.
+        self.set_host_status_for(host_id, "installing", None);
+        let cli = async {
+            let node = agent_device::node_executable().ok_or_else(|| {
+                (
+                    "installing agent tools",
+                    Some("Device automation requires Node.js. Install Node.js and make sure node is on PATH, then retry.".to_owned()),
+                )
+            })?;
+            let entry = install(dir, AGENT)
+                .await
+                .map_err(|_| ("installing agent tools", None))?;
+            Ok::<_, (&str, Option<String>)>((node, entry))
+        }
+        .await;
+        match cli {
+            Ok(cli) => {
+                self.with_simlock(host_id, |host| host.cli = Some(cli.clone()));
+                if self.current()["hostStatuses"][host_id]["status"] != "ready" {
+                    self.set_host_status_for(host_id, "ready", None);
+                }
+                Ok(cli)
+            }
+            Err((step, reason)) => {
+                let reason =
+                    reason.unwrap_or_else(|| format!("Device support failed during {step}."));
+                self.set_host_status_for(host_id, "failed", Some(reason.clone()));
+                Err(Self::simlock_unavailable(&config, reason))
+            }
+        }
+    }
+
+    /// `devices.list` for a Simlock host: the pool's models, and the leases held.
+    async fn simlock_list(&self, host_id: &str, dir: &Path) -> Result<HubListResult, Value> {
+        let available = self
+            .simlock_load_catalog(host_id, dir)
+            .await
+            .map_err(|_| op_err("list", "request_failed"))?;
+        let mut devices: Vec<Value> = available
+            .into_iter()
+            .map(|mut device| {
+                device["hostId"] = json!(host_id);
+                device
+            })
+            .collect();
+        let leases: Vec<Lease> = self
+            .with_simlock(host_id, |host| host.leases.values().cloned().collect())
+            .unwrap_or_default();
+        devices.extend(leases.into_iter().map(|lease| {
+            json!({
+                "hostId": host_id,
+                "id": lease.lease_id,
+                "platform": lease.platform,
+                "name": lease.name,
+                "version": lease.version,
+                "booted": true,
+                "physical": false,
+            })
+        }));
+        Ok(HubListResult {
+            devices,
+            detail: None,
+            android_discovery_incomplete: false,
+            incomplete_platforms: Vec::new(),
+        })
+    }
+
+    /// `refresh` for a Simlock host. It ends devices itself (a lease can end
+    /// at the gateway), so sessions from before the listing on devices it no
+    /// longer lists go.
+    async fn simlock_refresh(&self, host_id: &str, dir: &Path) -> Result<(), Value> {
+        let before: Vec<Value> = self.current()["sessions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let listed = self.simlock_list(host_id, dir).await?;
+        if self.simlock_config(host_id).is_none() {
+            return Ok(());
+        }
+        let mut state = self.current();
+        if state["hostStatus"] == "disabled" {
+            return Ok(());
+        }
+        let ids: Vec<Value> = listed.devices.iter().map(|d| d["id"].clone()).collect();
+        if let Some(sessions) = state["sessions"].as_array_mut() {
+            sessions.retain(|session| {
+                session["hostId"] != host_id
+                    || !before.contains(session)
+                    || ids.contains(&session["deviceId"])
+            });
+        }
+        apply_list_result(&mut state, dir, host_id, listed);
+        self.publish(&mut state);
+        Ok(())
+    }
+
+    /// `list` for one Simlock host, or its failure as its status.
+    async fn list_simlock_host(&self, host_id: &str, dir: &Path) {
+        let result = match self.simlock_readiness(host_id, dir).await {
+            Ok(_) => self.simlock_refresh(host_id, dir).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = result {
+            let detail = if error["_tag"] == "DeviceHostUnavailableError" {
+                error["reason"].as_str().unwrap_or_default().to_owned()
+            } else {
+                crate::mcp_oauth::format_device_error(&error)
+            };
+            self.set_host_status_for(host_id, "failed", Some(detail));
+        }
+    }
+
+    /// `openLease`: a lease of one of the pool's models, through this
+    /// machine's agent-device CLI and the gateway's agent-device front.
+    async fn simlock_open_lease(
+        &self,
+        host_id: &str,
+        device: &Value,
+        workspace_root: Option<&str>,
+        dir: &Path,
+    ) -> Result<String, Value> {
+        let Some(config) = self.simlock_config(host_id) else {
+            return Err(bad_host(host_id));
+        };
+        let device_id = device["id"].as_str().unwrap_or_default().to_owned();
+        let boot_error = |reason: &str| {
+            json!({
+                "_tag": "DeviceBootError",
+                "hostId": host_id,
+                "deviceId": device_id,
+                "reason": "launch_failed",
+                "diagnostics": simlock::truncate(reason, 1_997),
+            })
+        };
+        let Some((platform, model)) = simlock::parse_catalog_id(&device_id) else {
+            return Err(boot_error(
+                "This Simlock device is no longer leased. Open it again from the list.",
+            ));
+        };
+        // reserveSlot
+        let reserved = self.with_simlock(host_id, |host| {
+            if host.leases.len() + host.starting >= host.config.max_leases {
+                false
+            } else {
+                host.starting += 1;
+                true
+            }
+        });
+        if reserved != Some(true) {
+            let max = config.max_leases;
+            return Err(Self::simlock_unavailable(
+                &config,
+                format!(
+                    "{} is limited to {max} {} at once. Close one in the Device panel first.",
+                    config.label,
+                    if max == 1 { "device" } else { "devices" }
+                ),
+            ));
+        }
+        let opened = async {
+            let cli = self
+                .with_simlock(host_id, |host| host.cli.clone())
+                .flatten()
+                .ok_or_else(|| {
+                    Self::simlock_unavailable(&config, format!("{} is not ready.", config.label))
+                })?;
+            let suffix = simlock::lease_suffix();
+            let session = format!("t3-{suffix}");
+            let lease_dir = dir
+                .join("device")
+                .join("simlock")
+                .join(host_id)
+                .join(&suffix);
+            let config_path = lease_dir.join("agent-device.json");
+            let token = self.simlock_token(&config).await?;
+            agent_device::write_config(
+                &config_path,
+                &AgentEndpoint {
+                    base_url: config.agent_device_url(),
+                    token: token.clone(),
+                    entry: PathBuf::new(),
+                    state_dir: Some(lease_dir.clone()),
+                },
+            )
+            .await
+            .map_err(|_| {
+                Self::simlock_unavailable(&config, "Could not write the agent-device config.")
+            })?;
+            // agent-device ties installs to the directory that opened the session.
+            let install_directory = match workspace_root {
+                Some(root) => std::fs::canonicalize(root).unwrap_or_else(|_| lease_dir.clone()),
+                None => lease_dir.clone(),
+            };
+            let stops_at_open = self
+                .with_simlock(host_id, |host| host.stops)
+                .unwrap_or_default();
+            let attempt = async {
+                simlock::lease_command(
+                    &cli,
+                    &session,
+                    &config_path,
+                    &[
+                        "connect",
+                        "proxy",
+                        "--daemon-base-url",
+                        &config.agent_device_url(),
+                    ],
+                )
+                .await
+                .map_err(|reason| Self::simlock_unavailable(&config, reason))?;
+                simlock::agent_device(
+                    &cli,
+                    &session,
+                    &config_path,
+                    &["open", "--platform", &platform, "--device", &model],
+                    Some(&install_directory),
+                    simlock::OPEN_TIMEOUT,
+                )
+                .await
+                .map_err(|reason| Self::simlock_unavailable(&config, reason))?;
+                let record = tokio::fs::read_to_string(
+                    lease_dir
+                        .join("remote-connections")
+                        .join(format!("{session}.json")),
+                )
+                .await
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|record| record["leaseId"].as_str().map(str::to_owned))
+                .ok_or_else(|| {
+                    Self::simlock_unavailable(&config, "agent-device recorded no Simlock lease.")
+                })?;
+                let now = Instant::now();
+                let lease = Lease {
+                    lease_id: record.clone(),
+                    platform: platform.clone(),
+                    name: model.clone(),
+                    version: device["version"].as_str().unwrap_or_default().to_owned(),
+                    session: session.clone(),
+                    dir: lease_dir.clone(),
+                    config_path: config_path.clone(),
+                    install_directory: install_directory.to_string_lossy().into_owned(),
+                    token: token.clone(),
+                    deadline: now + Duration::from_secs(config.max_lease_minutes * 60),
+                    next_renewal: now
+                        + simlock::RENEW_INTERVAL
+                            .min(Duration::from_secs(config.max_lease_minutes * 60)),
+                };
+                let kept = self.with_simlock(host_id, |host| {
+                    if host.stops != stops_at_open {
+                        return false;
+                    }
+                    host.leases.insert(lease.lease_id.clone(), lease);
+                    true
+                });
+                if kept != Some(true) {
+                    return Err(Self::simlock_unavailable(
+                        &config,
+                        "Device support stopped while the device was opening.",
+                    ));
+                }
+                Ok(record)
+            }
+            .await;
+            if attempt.is_err() {
+                // A failed open may still hold a lease: close the session either way.
+                let _ = simlock::lease_command(&cli, &session, &config_path, &["close"]).await;
+                let _ = tokio::fs::remove_dir_all(&lease_dir).await;
+            }
+            attempt
+        }
+        .await;
+        self.with_simlock(host_id, |host| {
+            host.starting = host.starting.saturating_sub(1)
+        });
+        opened.map_err(|error| {
+            if error["_tag"] == "DeviceHostUnavailableError" {
+                boot_error(error["reason"].as_str().unwrap_or_default())
+            } else {
+                error
+            }
+        })
+    }
+
+    /// `release`: ends a lease through its session, or over HTTP when the
+    /// session is gone, then forgets it.
+    async fn simlock_release(&self, host_id: &str, lease: Lease) {
+        let Some(config) = self.simlock_config(host_id).or_else(|| None) else {
+            let _ = tokio::fs::remove_dir_all(&lease.dir).await;
+            return;
+        };
+        self.simlock_release_with(&config, lease).await;
+    }
+
+    async fn simlock_release_with(&self, config: &SimlockConfig, lease: Lease) {
+        let cli = self
+            .with_simlock(&config.id, |host| host.cli.clone())
+            .flatten();
+        let closed = match &cli {
+            Some(cli) => {
+                simlock::lease_command(cli, &lease.session, &lease.config_path, &["close"])
+                    .await
+                    .is_ok()
+            }
+            None => false,
+        };
+        if !closed {
+            let route = format!(
+                "/v1/leases/{}",
+                agent_device::encode_uri_component(&lease.lease_id)
+            );
+            if simlock::request(&config.gateway(), &lease.token, "DELETE", &route, None)
+                .await
+                .is_err()
+            {
+                tracing::warn!(lease = %lease.lease_id, "Could not release Simlock lease");
+            }
+        }
+        self.with_simlock(&config.id, |host| host.leases.shift_remove(&lease.lease_id));
+        let _ = tokio::fs::remove_dir_all(&lease.dir).await;
+    }
+
+    /// `stopAll`: every lease back to the pool.
+    async fn simlock_release_all(&self, config: SimlockConfig) {
+        let cli_and_leases = {
+            let mut hosts = self.simlock_hosts.lock().unwrap();
+            let host = hosts.iter_mut().find(|host| host.config.id == config.id);
+            host.map(|host| {
+                host.stops += 1;
+                host.leases.values().cloned().collect::<Vec<_>>()
+            })
+        };
+        // A removed host's leases are still released with the token they were opened with.
+        let leases = cli_and_leases.unwrap_or_default();
+        for lease in leases {
+            self.simlock_release_with(&config, lease).await;
+        }
+    }
+
+    /// `shutdown` for a Simlock device: its lease released, if this server holds it.
+    async fn simlock_shutdown(&self, host_id: &str, device_id: &str) {
+        let lease = self
+            .with_simlock(host_id, |host| host.leases.get(device_id).cloned())
+            .flatten();
+        if let Some(lease) = lease {
+            self.simlock_release(host_id, lease).await;
+        }
+    }
+
+    /// `screenshot` for a Simlock lease, through its session.
+    async fn simlock_screenshot(&self, host_id: &str, device_id: &str) -> Result<Vec<u8>, Value> {
+        let screenshot_failed = || op_err("screenshot", "request_failed");
+        let (lease, cli) = self
+            .with_simlock(host_id, |host| {
+                (host.leases.get(device_id).cloned(), host.cli.clone())
+            })
+            .ok_or_else(screenshot_failed)?;
+        let (Some(lease), Some(cli)) = (lease, cli) else {
+            return Err(screenshot_failed());
+        };
+        let file = lease.dir.join(format!(
+            "screenshot-{:x}.png",
+            rand::random::<u32>() & 0x00ff_ffff
+        ));
+        let file_text = file.to_string_lossy().into_owned();
+        let result = match simlock::lease_command(
+            &cli,
+            &lease.session,
+            &lease.config_path,
+            &["screenshot", &file_text],
+        )
+        .await
+        {
+            Ok(_) => tokio::fs::read(&file)
+                .await
+                .map_err(|_| screenshot_failed()),
+            Err(_) => Err(screenshot_failed()),
+        };
+        let _ = tokio::fs::remove_file(&file).await;
+        result
+    }
+
+    /// The renewals due, as each lease's keep-alive does: renewed every two
+    /// minutes until Simlock ends it (404) or it reaches its maximum age.
+    async fn renew_simlock_leases(&self) {
+        let now = Instant::now();
+        let due: Vec<(SimlockConfig, Lease)> = self
+            .simlock_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|host| {
+                host.leases
+                    .values()
+                    .filter(|lease| lease.next_renewal <= now)
+                    .map(|lease| (host.config.clone(), lease.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (config, lease) in due {
+            if Instant::now() >= lease.deadline {
+                tracing::info!(lease = %lease.lease_id, "Releasing Simlock lease at its maximum age");
+                self.simlock_release_with(&config, lease).await;
+                continue;
+            }
+            let route = format!(
+                "/v1/leases/{}/renew",
+                agent_device::encode_uri_component(&lease.lease_id)
+            );
+            match simlock::request(&config.gateway(), &lease.token, "POST", &route, None).await {
+                Err(simlock::GatewayError::Status(404)) => {
+                    // Simlock ended it (lease_lost, an agent's close, or its TTL): stop listing it.
+                    self.with_simlock(&config.id, |host| host.leases.shift_remove(&lease.lease_id));
+                    let _ = tokio::fs::remove_dir_all(&lease.dir).await;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(lease = %lease.lease_id, ?error, "Could not renew Simlock lease")
+                }
+                Ok(_) => {}
+            }
+            let left = lease.deadline.saturating_duration_since(Instant::now());
+            self.with_simlock(&config.id, |host| {
+                if let Some(held) = host.leases.get_mut(&lease.lease_id) {
+                    held.next_renewal = Instant::now() + simlock::RENEW_INTERVAL.min(left);
+                }
+            });
+        }
+    }
+
+    /// `open` and `shutdown` for a Simlock host: a lease taken (as `boot`)
+    /// or returned (as `shutdown`).
+    async fn simlock_apply(&self, name: &str, input: &Value, dir: &Path) -> Reply {
+        let host_id = input["hostId"].as_str().unwrap_or_default().to_owned();
+        let id = string(input, "deviceId")?.to_owned();
+        let platform = string(input, "platform")?.to_owned();
+        let find = |state: &Value, wanted: &str| {
+            state["devices"]
+                .as_array()
+                .and_then(|devices| {
+                    devices
+                        .iter()
+                        .find(|d| d["hostId"] == host_id.as_str() && d["id"] == wanted)
+                })
+                .cloned()
+        };
+        if name == "shutdown" {
+            // Sessions retire before the lease ends.
+            let mut state = self.current();
+            if let Some(sessions) = state["sessions"].as_array_mut() {
+                sessions
+                    .retain(|s| s["hostId"] != host_id.as_str() || s["deviceId"] != id.as_str());
+            }
+            self.publish(&mut state);
+            self.simlock_readiness(&host_id, dir).await?;
+            self.simlock_shutdown(&host_id, &id).await;
+            let mut state = self.current();
+            if let Some(devices) = state["devices"].as_array_mut() {
+                for d in devices.iter_mut() {
+                    if d["hostId"] == host_id.as_str() && d["id"] == id.as_str() {
+                        d["booted"] = json!(false);
+                    }
+                }
+            }
+            self.publish(&mut state);
+            let _ = self.simlock_refresh(&host_id, dir).await;
+            return Ok(Value::Null);
+        }
+        let thread = string(input, "threadId")?.to_owned();
+        let availability = self.simlock_platform(&host_id, &platform, dir).await;
+        if availability["available"] != true {
+            return Err(json!({
+                "_tag": "DevicePlatformUnavailableError",
+                "hostId": host_id,
+                "platform": platform,
+                "reason": availability.get("reason").cloned().unwrap_or(json!("Platform toolchain missing.")),
+            }));
+        }
+        self.simlock_readiness(&host_id, dir).await?;
+        self.simlock_refresh(&host_id, dir).await?;
+        let mut device = find(&self.current(), &id)
+            .ok_or_else(|| json!({"_tag":"DeviceNotFoundError","hostId":host_id,"deviceId":id}))?;
+        if device["booted"] != true && input["boot"] != false {
+            let mut booting = device.clone();
+            booting["threadId"] = json!(thread);
+            let mut state = self.current();
+            let mut list: Vec<Value> = state["bootingDevices"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            list.retain(|e| e["hostId"] != booting["hostId"] || e["id"] != booting["id"]);
+            list.push(booting.clone());
+            state["bootingDevices"] = Value::Array(list);
+            self.publish(&mut state);
+            let booted = self
+                .simlock_open_lease(&host_id, &device, input["workspaceRoot"].as_str(), dir)
+                .await;
+            let mut state = self.current();
+            if let Some(list) = state["bootingDevices"].as_array_mut() {
+                list.retain(|e| e["hostId"] != booting["hostId"] || e["id"] != booting["id"]);
+            }
+            self.publish(&mut state);
+            let booted_id = booted?;
+            self.simlock_refresh(&host_id, dir).await?;
+            let state = self.current();
+            device = find(&state, &booted_id)
+                .or_else(|| find(&state, &id))
+                .ok_or_else(
+                    || json!({"_tag":"DeviceNotFoundError","hostId":host_id,"deviceId":booted_id}),
+                )?;
+        }
+        if self.simlock_config(&host_id).is_none() {
+            return Err(json!({
+                "_tag": "DeviceHostUnavailableError",
+                "hostId": host_id,
+                "reason": "Host configuration changed. Retry the operation.",
+            }));
+        }
+        if self
+            .settings
+            .internal()
+            .map_err(|_| op_err("settings", "settings_failed"))?["enableDeviceSupport"]
+            != true
+        {
+            return Err(json!({
+                "_tag": "DeviceHostUnavailableError",
+                "hostId": host_id,
+                "hostLabel": self.host_label(&host_id),
+                "reason": "Device support was turned off while the device was opening.",
+            }));
+        }
+        let active_id = device["id"].as_str().unwrap_or_default().to_owned();
+        let session = json!({
+            "threadId": thread,
+            "hostId": host_id,
+            "deviceId": active_id,
+            "platform": device["platform"],
+            "openedAt": timestamp(),
+        });
+        let mut state = self.current();
+        let sessions = state["sessions"].as_array_mut().unwrap();
+        sessions.retain(|s| {
+            s["threadId"] != thread.as_str()
+                || s["hostId"] != host_id.as_str()
+                || s["deviceId"] != active_id.as_str()
+        });
+        sessions.push(session.clone());
+        self.publish(&mut state);
+        Ok(session)
+    }
+
+    /// `agentEndpoint` for a Simlock lease: its own session at the gateway.
+    fn simlock_agent_endpoint(
+        &self,
+        host_id: &str,
+        device_id: &str,
+    ) -> Result<(Lease, String), Value> {
+        let config = self
+            .simlock_config(host_id)
+            .ok_or_else(|| bad_host(host_id))?;
+        let lease = self
+            .with_simlock(host_id, |host| host.leases.get(device_id).cloned())
+            .flatten()
+            .ok_or_else(|| Self::simlock_unavailable(&config, "This Simlock lease has ended."))?;
+        Ok((lease, config.agent_device_url()))
     }
 
     /// `inspect` for the SSH hosts: each one's probe, or the reference's
@@ -3228,7 +4221,7 @@ impl DeviceService {
                     }
                 }
             }
-            let mut state = self.snapshot(dir);
+            let mut state = self.current();
             self.publish(&mut state);
         }
     }
@@ -3282,14 +4275,79 @@ impl DeviceService {
             }
             added
         };
-        if added || !removed.is_empty() {
+        // Simlock hosts (alpha) follow the SSH hosts; an id two lists share stays the first one's.
+        let ssh_ids: HashSet<String> = self
+            .ssh_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(config, _)| config.id.clone())
+            .collect();
+        let mut next_simlock: Vec<SimlockConfig> = Vec::new();
+        if settings["simlockDeviceHostsEnabled"] == true {
+            for config in settings["simlockDeviceHosts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(SimlockConfig::from_settings)
+            {
+                if !ssh_ids.contains(&config.id) && !next_simlock.iter().any(|c| c.id == config.id)
+                {
+                    next_simlock.push(config);
+                }
+            }
+        }
+        let removed_simlock: Vec<SimlockConfig> = {
+            let mut hosts = self.simlock_hosts.lock().unwrap();
+            let removed = hosts
+                .iter()
+                .filter(|host| !next_simlock.iter().any(|c| c.raw == host.config.raw))
+                .map(|host| host.config.clone())
+                .collect::<Vec<_>>();
+            hosts.retain(|host| next_simlock.iter().any(|c| c.raw == host.config.raw));
+            removed
+        };
+        let removed_simlock_ids: Vec<String> = removed_simlock
+            .iter()
+            .map(|config| config.id.clone())
+            .collect();
+        if !removed_simlock_ids.is_empty() {
+            self.refresh_hosts(dir, &removed_simlock_ids);
+            for config in &removed_simlock {
+                // Closing a Simlock host returns its leases to the pool.
+                self.simlock_release_all(config.clone()).await;
+                let _ = tokio::fs::remove_file(agent_device::config_path(dir, &config.id)).await;
+            }
+        }
+        let mut added_simlock = Vec::new();
+        {
+            let mut hosts = self.simlock_hosts.lock().unwrap();
+            for config in next_simlock {
+                if hosts.iter().any(|host| host.config.id == config.id) {
+                    continue;
+                }
+                added_simlock.push(config.id.clone());
+                hosts.push(SimlockState::new(config));
+            }
+        }
+        // Ask the gateway now, so a refused token shows in Settings before anyone opens a device.
+        if settings["enableDeviceSupport"] == true {
+            for id in &added_simlock {
+                let _ = self.simlock_load_catalog(id, dir).await;
+                let mut state = self.current();
+                self.publish(&mut state);
+            }
+        }
+        let mut removed = removed;
+        removed.extend(removed_simlock_ids);
+        if added || !added_simlock.is_empty() || !removed.is_empty() {
             self.refresh_hosts(dir, &removed);
         }
     }
 
     /// `refreshHosts`: publishes the hosts, without what removed hosts had.
-    fn refresh_hosts(&self, dir: &Path, removed: &[String]) {
-        let mut state = self.snapshot(dir);
+    fn refresh_hosts(&self, _dir: &Path, removed: &[String]) {
+        let mut state = self.current();
         let gone = |id: &Value| {
             id.as_str()
                 .is_some_and(|id| removed.iter().any(|r| r == id))
@@ -3331,6 +4389,7 @@ impl DeviceService {
 
     /// One second of SSH host supervision.
     async fn supervise_ssh_hosts(&self, dir: &Path, supervision: &mut Supervision) {
+        self.renew_simlock_leases().await;
         supervision.ticks += 1;
         let probe = supervision.ticks.is_multiple_of(10);
         let mut lost = Vec::new();
