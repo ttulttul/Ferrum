@@ -61,13 +61,16 @@ def answers(state):
 
 
 class RemoteTaskPeer:
-    """The linked environment. `finish_after` waits answer that many times before its run ends,
-    so a cancel can land while it runs; a stop ends the run interrupted."""
+    """The linked environment. `finish_after` waits answer that many times before its run ends
+    (None: never, so a cancel lands while it runs); a stop ends the run interrupted."""
 
     def __init__(self, finish_after=0):
         self.lock = threading.Lock()
+        self.changed = threading.Condition(self.lock)
         self.log = []
         self.sessions = set()
+        # `finish_after` None: the run there goes on until it is stopped, and a wait on it waits
+        # (up to 10 s) as a wait there does.
         self.state = dict(stopped=False, finished=finish_after == 0, waits_left=finish_after)
         peer = self
 
@@ -132,8 +135,12 @@ class RemoteTaskPeer:
                     state = peer.state
                     if name == "t3_thread_interrupt" and not state["finished"]:
                         state["stopped"] = True
+                        peer.changed.notify_all()
+                    if name == "t3_thread_wait" and state["waits_left"] is None:
+                        peer.changed.wait_for(lambda: state["stopped"], timeout=10)
                     answer = answers(state).get(name)
-                    if name == "t3_thread_wait" and not state["finished"] and not state["stopped"]:
+                    if name == "t3_thread_wait" and state["waits_left"] is not None \
+                            and not state["finished"] and not state["stopped"]:
                         state["waits_left"] -= 1
                         if state["waits_left"] <= 0:
                             state["finished"] = True

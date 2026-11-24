@@ -51,6 +51,21 @@ fn refusal_code(refusal: &Refusal) -> Option<(&'static str, String)> {
     }
 }
 
+/// `encodeURIComponent`.
+fn encode_component(text: &str) -> String {
+    const COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'!')
+        .remove(b'~')
+        .remove(b'*')
+        .remove(b'\'')
+        .remove(b'(')
+        .remove(b')');
+    percent_encoding::utf8_percent_encode(text, COMPONENT).to_string()
+}
+
 /// `formatThreadLink` for a thread in another environment.
 fn remote_link(remote: &Value) -> String {
     let label = remote["title"]
@@ -391,13 +406,10 @@ pub(super) async fn delegate<S: McpHost>(
     if !launched["runId"].is_null() {
         remote_child["runId"] = launched["runId"].clone();
     }
-    let encode = |text: &str| {
-        percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC).to_string()
-    };
     let command_id = format!(
         "command:mcp:{}:remote-delegate:{}",
-        encode(&caller.request_namespace()),
-        encode(&key)
+        encode_component(&caller.request_namespace()),
+        encode_component(&key)
     );
     let task_id = crate::orchestration::task_node_id(&command_id);
     let run_end = (a["mode"] == "wait").then(|| crate::orchestration::watch_run_end(&task_id));
@@ -656,6 +668,26 @@ pub(super) fn spawn_follower<S: McpHost>(host: &Arc<S>, parent_id: &str, task_id
 static FOLLOWING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
 
+/// Tasks a cancel is stopping there: their follower leaves the result to the cancel, which
+/// records it once the stop is answered (the reference's cancel records first, as its follower
+/// still reads the thread's reply).
+static CANCELLING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn cancelling(task_id: &str) -> bool {
+    CANCELLING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(task_id)
+}
+
+/// Waits while a cancel of `task_id` is recording its result.
+async fn after_cancel<S: McpHost>(host: &Arc<S>, task_id: &str) {
+    while cancelling(task_id) {
+        host.sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// `follow`: waits for the task's run there to end and completes the task here, stopping it
 /// there when it ended here first. A gone link, thread or run fails the task; anything else is
 /// retried with back-off.
@@ -700,6 +732,7 @@ async fn follow_once<S: McpHost>(
     parent_id: &str,
     task_id: &str,
 ) -> Result<bool, (&'static str, String)> {
+    after_cancel(host, task_id).await;
     let Some(task) = read_task_row(host, parent_id, task_id).await else {
         return Ok(true);
     };
@@ -764,10 +797,11 @@ async fn follow_once<S: McpHost>(
         .call(host, environment, "t3_thread_wait", wait)
         .await
         .map_err(fail)?;
-    // A cancel or Stop here meanwhile: the next look reads the result and stops it there.
+    // A cancel or Stop recorded here meanwhile: the next look reads the result and stops it
+    // there. One still being recorded wins the result after this reads the reply.
     if read_task_row(host, parent_id, task_id)
-        .await
-        .is_some_and(|t| !t["result"].is_null())
+            .await
+            .is_some_and(|t| !t["result"].is_null())
     {
         return Ok(false);
     }
@@ -777,6 +811,7 @@ async fn follow_once<S: McpHost>(
     let complete_with = |status: &str, text: Option<String>, model: Option<String>| {
         let status = status.to_owned();
         async move {
+            after_cancel(host, task_id).await;
             let _ = complete(
                 host,
                 parent_id,
@@ -916,10 +951,15 @@ pub(super) async fn read<S: McpHost>(
         )
         .await?;
     }
-    let mut result = json!({
+    let result = json!({
         "taskId": task["id"],
         "childThreadId": null,
-        "remoteChild": remote,
+        // The answer's `remoteChild` names where the task runs, as the reference's schema has it.
+        "remoteChild": {
+            "environmentId": remote["environmentId"],
+            "threadId": remote["threadId"],
+            "label": remote["label"],
+        },
         "link": remote_link(remote),
         "childRunId": null,
         "childNodeId": task["id"],
@@ -939,9 +979,7 @@ pub(super) async fn read<S: McpHost>(
         "pendingApproval": null,
         "waitTimedOut": wait_timed_out,
     });
-    if !ends_wait(&result) && task["completionDelivery"]["state"] != "disposed" {
-        result["next"] = json!(RUNNING_TASK_NEXT);
-    }
+    // The reference's remote answer carries no `next`.
     Ok(result)
 }
 
@@ -985,12 +1023,9 @@ pub(super) async fn cancel<S: McpHost>(
         ));
     };
     let follow = Follow::of(&parent);
-    let encode = |text: &str| {
-        percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC).to_string()
-    };
     let key = format!(
         "cancel:{}:{}",
-        encode(&caller.request_namespace()),
+        encode_component(&caller.request_namespace()),
         client_request_id
             .map(str::to_owned)
             .unwrap_or_else(|| crate::platform::uuid_v4().to_string())
@@ -1022,6 +1057,10 @@ pub(super) async fn cancel<S: McpHost>(
         };
         return Ok(json!({"taskId": task_id, "status": status}));
     }
+    CANCELLING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(task_id.to_owned());
     let unstopped = stop_there(host, &follow, remote, &key, reason)
         .await
         .err()
@@ -1037,7 +1076,7 @@ pub(super) async fn cancel<S: McpHost>(
             remote["label"].as_str().unwrap_or_default()
         ),
     };
-    complete(
+    let recorded = complete(
         host,
         parent_id,
         task_id,
@@ -1047,8 +1086,12 @@ pub(super) async fn cancel<S: McpHost>(
         stop_count,
         None,
     )
-    .await
-    .map_err(|_| failure("orchestration_error", "Unable to record the cancellation."))?;
+    .await;
+    CANCELLING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(task_id);
+    recorded.map_err(|_| failure("orchestration_error", "Unable to record the cancellation."))?;
     if unstopped.is_some() {
         spawn_follower(host, parent_id, task_id);
     }

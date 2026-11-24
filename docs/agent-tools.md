@@ -259,7 +259,11 @@ schemas.
    open tasks are followed again after a restart. Pending: a follow-up sent to the thread there
    with `t3_thread_send` is not recorded as a task, and a task whose thread there waits on its own
    delegated tasks is reported when its run ends. The control plane still refuses these tasks.
-   Parity: `claude delegate remote`, against a loopback linked environment that records each call.
+   Parity: `claude delegate remote` (a wait) and `claude delegate remote cancel` (cancelled while its
+   thread there runs, then cancelled again), against a loopback linked environment that records
+   each call (`scripts/remote_task_peer.py`). In the cancel, the result is steered into the parent's
+   running Claude turn, which the fixture never reads: the reference counts that steer delivered and
+   Rust sends it again as a wake when the turn ends (expected failures; a steering difference).
 4c. **Attachments** (served, native server only): `t3_attachment_prepare_upload` issues an
    upload URL (with `uploadUrl` at the origin the call reached) for an upload its caller owns;
    `t3_attachment_discard` deletes it, for that caller only; `t3_thread_send_attachments` sends

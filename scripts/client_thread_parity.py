@@ -232,6 +232,10 @@ PROVIDER_SCENARIOS = [
     # task's result here.
     {"name": "claude delegate remote", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate_remote.json", "awaitStatus": True, "peer": {"finish_after": 1}},
+    # A task in a linked environment cancelled while its thread there runs: the thread there is
+    # stopped through the link, and cancelling it again stops it there again.
+    {"name": "claude delegate remote cancel", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_remote_cancel.json", "awaitStatus": True, "peer": {"finish_after": None}},
     # A delegated task that runs on after the parent's turn: its result wakes the idle parent
     # with a delivery turn, which reads it with task_status.
     {"name": "claude delegate async", "instance": "claudeAgent", "model": "claude-opus-5-5",
@@ -851,7 +855,8 @@ def seed_turn(url, cookie, root, scenario, remote=None):
 
 
 def peer_calls(peer, url):
-    """What a server asked its linked environment, in order, with its own environment id and the
+    """What a server asked its linked environment (sorted: calls made at once arrive in either order),
+    with its own environment id and the
     retry keys it scoped to its caller (`fwd:<digest>`) masked."""
     status, _, body = http(url, "GET", "/.well-known/t3/environment")
     here = json.loads(body)["environmentId"] if status == 200 else None
@@ -866,7 +871,8 @@ def peer_calls(peer, url):
         if isinstance(value, dict):
             return {key: mask(item) for key, item in value.items()}
         return value
-    return mask(peer.calls())
+    # A task's follower and a tool reading its status call at once, in either order on either server.
+    return sorted((mask(call) for call in peer.calls()), key=lambda call: json.dumps(call, sort_keys=True))
 
 
 def upload_attachments(url, cookie, uploads):
