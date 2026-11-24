@@ -21,7 +21,7 @@ const AUTH_URL_LINE: &str = "Open the following link to authenticate the ACP ser
 const BROWSER_PREFLIGHT_URL: &str = "https://example.invalid/t3-antigravity-browser-preflight";
 const PREAMBLE: &str = "Use only the input below. Do not use tools, read or write files, run commands, or ask questions.\nReturn only the requested JSON object.\n\n";
 /// Keys the runtime must not inherit (`removedEnvironmentKeys`).
-const REMOVED_ENV: [&str; 14] = [
+const REMOVED_ENV: [&str; 13] = [
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "GOOGLE_APPLICATION_CREDENTIALS",
@@ -35,7 +35,6 @@ const REMOVED_ENV: [&str; 14] = [
     "AGY_ACP_ENABLE_OAUTH",
     "GEMINI_HOME",
     "AGY_ACP_FORCE_FILE_STORAGE",
-    "ANTIGRAVITY_HARNESS_PATH",
 ];
 
 /// Why a run failed: a message for the user, or a sign-in the runtime asked
@@ -523,25 +522,18 @@ async fn run(
         .rand_bytes(6)
         .tempdir_in(&profile.temp_directory)
         .map_err(|_| Failure::detail("Could not create an Antigravity runtime temp directory."))?;
-    let mut spawn_env = environment(&profile, env, &auth, run_temp.path());
-    let args: Vec<String> = match &executable.harness {
-        None => vec![
-            "acp".into(),
-            "--gemini-dir".into(),
-            profile.gemini_home.display().to_string(),
-            "--app-data-dir".into(),
-            "antigravity-acp".into(),
-        ],
-        Some(harness) => {
-            spawn_env.insert(
-                "ANTIGRAVITY_HARNESS_PATH".into(),
-                harness.display().to_string(),
-            );
-            vec!["--uid=".into()]
-        }
-    };
+    let spawn_env = environment(&profile, env, &auth, run_temp.path());
+    let args: Vec<String> = vec![
+        "acp".into(),
+        "--gemini-dir".into(),
+        profile.gemini_home.display().to_string(),
+        "--app-data-dir".into(),
+        // The CLI joins this beneath gemini-dir, including when the value is absolute.
+        "antigravity-acp".into(),
+    ];
     let mut session_id = None;
     let result = prompt_session(
+        manifest,
         &executable,
         &args,
         &spawn_env,
@@ -575,6 +567,7 @@ async fn run(
 /// prompt; the reply's text. The runtime is stopped on return.
 #[allow(clippy::too_many_arguments)]
 async fn prompt_session(
+    manifest: &Value,
     executable: &Executable,
     args: &[String],
     env: &ProcessEnv,
@@ -632,16 +625,25 @@ async fn prompt_session(
         )
         .await
         .map_err(fail)?;
+    // `startCompatible` (#38970): a runtime the manifest rates broken (anything
+    // before 1.5) is refused once it names its version, before anything
+    // else. The refusal is a transport error, which text generation reports
+    // as a plain failure.
+    if let Some(version) = initialized["agentInfo"]["version"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+    {
+        let advisory = super::provider_compatibility(manifest, "antigravity", version);
+        if advisory.is_some_and(|a| a["status"] == "broken") {
+            return Err(Failure::Other);
+        }
+    }
     // Eagerly, with the configured method: Antigravity takes ones it does not list.
     session
         .request("authenticate", json!({"methodId": auth.method}))
         .await
         .map_err(fail)?;
-    let mut new_session = json!({"cwd": cwd, "mcpServers": []});
-    let agent_version = initialized["agentInfo"]["version"].as_str().unwrap_or("");
-    if ["1.4.2", "1.4.3", "1.4.4", "1.4.5"].contains(&agent_version) {
-        new_session["_meta"] = json!({"antigravity": {"disabledTools": ["run_workflow"]}});
-    }
+    let new_session = json!({"cwd": cwd, "mcpServers": []});
     let setup = session
         .request("session/new", new_session)
         .await

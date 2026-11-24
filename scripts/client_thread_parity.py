@@ -140,6 +140,13 @@ AGY_TITLE_SPEC = {"logEnv": ["GEMINI_HOME", "AGY_ACP_FORCE_FILE_STORAGE", "BROWS
     {"args": ["--version"], "stdout": "agy 1.6.2", "stderr": "", "exit": 0},
     {"prefix": ["acp"], **_AGY_ACP}]}
 
+# The same CLI naming a release the manifest rates broken (anything before 1.5): the runtime is
+# refused once it answers `initialize` (#38970).
+AGY_BROKEN_TITLE_SPEC = {**AGY_TITLE_SPEC, "commands": [
+    {"args": ["--version"], "stdout": "agy 1.4.5", "stderr": "", "exit": 0},
+    {"prefix": ["acp"], **{**_AGY_ACP, "rpc": {**_AGY_ACP["rpc"], "initialize": {
+        **_AGY_ACP["rpc"]["initialize"], "agentInfo": {"name": "agy", "version": "1.4.5"}}}}}]}
+
 # A signed-in Pi (as provider_status_parity.py has it) whose text generation runs answer with a title.
 _PI_STATE = {"model": {"provider": "openai", "id": "gpt-5.6"}, "thinkingLevel": "minimal"}
 _PI_MODELS = {"models": [{"provider": "openai", "id": "gpt-5.6", "reasoning": False}]}
@@ -290,6 +297,13 @@ PROVIDER_SCENARIOS = [
      "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate", "titleAfterTurn": True,
      "textProvider": {"instance": "antigravity", "driver": "antigravity", "cli": "agy", "model": "antigravity-default",
                       "launch": "acp", "spec": AGY_TITLE_SPEC,
+                      "records": ["initialize", "authenticate", "session/new", "session/set_mode", "session/set_model",
+                                  "session/set_config_option", "session/prompt", "session/cancel"]}},
+    {"name": "antigravity title refused for a broken runtime", "instance": "codex", "model": "fixture",
+     "scenario": "codex_turn.json", "dispatch": {"titleSeed": "Run echo hi and write notes.txt"},
+     "title": "regenerate", "titleAfterTurn": True,
+     "textProvider": {"instance": "antigravity", "driver": "antigravity", "cli": "agy", "model": "antigravity-default",
+                      "launch": "acp", "spec": AGY_BROKEN_TITLE_SPEC,
                       "records": ["initialize", "authenticate", "session/new", "session/set_mode", "session/set_model",
                                   "session/set_config_option", "session/prompt", "session/cancel"]}},
     # A title the provider cannot generate leaves the seed, and a regenerate reports why.
