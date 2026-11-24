@@ -1,0 +1,648 @@
+{
+ "version": {
+  "stdout": "2.2.6"
+ },
+ "serve": {
+  "routes": {
+   "GET /api/info": {
+    "body": {
+     "version": "2.2.6",
+     "pid": 4242,
+     "urls": [],
+     "paths": {
+      "tmp": "/tmp"
+     }
+    }
+   },
+   "GET /api/model": {
+    "body": {
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": [
+      {
+       "id": "claude-opus-5-5",
+       "modelID": "claude-opus-5-5",
+       "providerID": "anthropic",
+       "name": "Claude Opus 5.5",
+       "capabilities": {
+        "tools": true,
+        "input": [
+         "text"
+        ],
+        "output": [
+         "text"
+        ]
+       },
+       "variants": [
+        {
+         "id": "high"
+        }
+       ],
+       "time": {
+        "released": 1767225600000
+       },
+       "cost": [],
+       "status": "active",
+       "enabled": true,
+       "limit": {
+        "context": 200000,
+        "input": 180000,
+        "output": 32000
+       }
+      }
+     ]
+    }
+   },
+   "GET /api/provider": {
+    "body": {
+     "location": {
+      "directory": "/"
+     },
+     "data": [
+      {
+       "id": "anthropic",
+       "name": "Anthropic",
+       "activation": "auto",
+       "package": ""
+      }
+     ]
+    }
+   },
+   "GET /api/agent": {
+    "body": {
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": [
+      {
+       "id": "build",
+       "name": "Build",
+       "description": "The default agent.",
+       "request": {
+        "settings": {},
+        "headers": {},
+        "body": {}
+       },
+       "mode": "primary",
+       "hidden": false,
+       "permissions": [
+        {
+         "action": "*",
+         "resource": "*",
+         "effect": "allow"
+        },
+        {
+         "action": "external_directory",
+         "resource": "/tmp/opencode/*",
+         "effect": "allow"
+        }
+       ]
+      },
+      {
+       "id": "plan",
+       "name": "Plan",
+       "description": "Plans.",
+       "request": {
+        "settings": {},
+        "headers": {},
+        "body": {}
+       },
+       "mode": "primary",
+       "hidden": false,
+       "permissions": [
+        {
+         "action": "*",
+         "resource": "*",
+         "effect": "allow"
+        },
+        {
+         "action": "edit",
+         "resource": "*",
+         "effect": "deny"
+        },
+        {
+         "action": "edit",
+         "resource": "/tmp/plans/*",
+         "effect": "allow"
+        }
+       ]
+      }
+     ]
+    }
+   },
+   "GET /api/event": {
+    "sse": true
+   },
+   "POST /api/session": {
+    "body": {
+     "data": {
+      "id": "ses_1",
+      "projectID": "global",
+      "model": {
+       "providerID": "anthropic",
+       "id": "claude-opus-5-5"
+      },
+      "cost": 0,
+      "tokens": {
+       "input": 0,
+       "output": 0,
+       "reasoning": 0,
+       "cache": {
+        "read": 0,
+        "write": 0
+       }
+      },
+      "time": {
+       "created": 1767225600000,
+       "updated": 1767225600000
+      },
+      "title": "Thread",
+      "location": {
+       "directory": "/tmp"
+      }
+     }
+    }
+   },
+   "GET /api/session/ses_1": {
+    "body": {
+     "data": {
+      "id": "ses_1",
+      "projectID": "global",
+      "model": {
+       "providerID": "anthropic",
+       "id": "claude-opus-5-5"
+      },
+      "cost": 0,
+      "tokens": {
+       "input": 0,
+       "output": 0,
+       "reasoning": 0,
+       "cache": {
+        "read": 0,
+        "write": 0
+       }
+      },
+      "time": {
+       "created": 1767225600000,
+       "updated": 1767225600000
+      },
+      "title": "Thread",
+      "location": {
+       "directory": "/tmp"
+      }
+     }
+    }
+   },
+   "PATCH /api/session/ses_1": {
+    "status": 204,
+    "body": null
+   },
+   "POST /api/session/ses_1/agent": {
+    "status": 204,
+    "body": null
+   },
+   "POST /api/session/ses_1/model": {
+    "status": 204,
+    "body": null
+   },
+   "PUT /api/experimental/session/ses_1/instructions/entries/t3-code": {
+    "status": 204,
+    "body": null
+   },
+   "PUT /api/experimental/mcp/t3-code-thread_client-thread": {
+    "status": 204,
+    "body": null
+   },
+   "DELETE /api/experimental/mcp/t3-code-thread_client-thread": {
+    "status": 204,
+    "body": null
+   },
+   "POST /api/session/ses_1/prompt": {
+    "body": {
+     "data": {
+      "id": "msg_inbox",
+      "sessionID": "ses_1",
+      "time": {
+       "created": 1767225600000
+      },
+      "type": "user",
+      "payload": {
+       "text": "prompt"
+      },
+      "delivery": "steer"
+     }
+    }
+   },
+   "POST /api/session/ses_1/synthetic": {
+    "status": 204,
+    "body": null
+   },
+   "POST /api/session/ses_1/interrupt": {
+    "body": {
+     "interrupted": true
+    }
+   },
+   "GET /api/session/active": {
+    "body": {
+     "data": {}
+    }
+   },
+   "POST /api/session/ses_1/permission/per_1/reply": {
+    "status": 204,
+    "body": null
+   },
+   "POST /api/session/ses_1/form/frm_1/reply": {
+    "status": 204,
+    "body": null
+   },
+   "DELETE /api/session/ses_1/form/frm_1": {
+    "status": 204,
+    "body": null
+   }
+  },
+  "events": {
+   "POST /api/session/ses_1/prompt": {
+    "sequence": [
+     [
+      {
+       "id": "evt_fixture0142",
+       "created": 1767225600142,
+       "type": "session.execution.started",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 142,
+        "version": 1
+       },
+       "data": {
+        "sessionID": "ses_1"
+       }
+      },
+      {
+       "id": "evt_fixture0143",
+       "created": 1767225600143,
+       "type": "session.step.started",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 143,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "agent": "build",
+        "model": {
+         "providerID": "anthropic",
+         "id": "claude-opus-5-5"
+        },
+        "assistantMessageID": "msg_a11",
+        "snapshot": "99482b54df6361365fa0ed7363ccf07edaa7fc93",
+        "started": 1767225600000
+       }
+      },
+      {
+       "id": "evt_fixture0144",
+       "created": 1767225600144,
+       "type": "session.text.started",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 144,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a11",
+        "ordinal": 0
+       }
+      },
+      {
+       "id": "evt_fixture0145",
+       "created": 1767225600145,
+       "type": "session.text.delta",
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a11",
+        "ordinal": 0,
+        "delta": "Runnin"
+       }
+      },
+      {
+       "id": "evt_fixture0146",
+       "created": 1767225600146,
+       "type": "session.text.delta",
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a11",
+        "ordinal": 0,
+        "delta": "g it."
+       }
+      },
+      {
+       "id": "evt_fixture0147",
+       "created": 1767225600147,
+       "type": "session.text.ended",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 147,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a11",
+        "ordinal": 0,
+        "text": "Running it."
+       }
+      },
+      {
+       "id": "evt_fixture0148",
+       "created": 1767225600148,
+       "type": "session.tool.input.started",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 148,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a11",
+        "id": "call_1",
+        "name": "shell"
+       }
+      },
+      {
+       "id": "evt_fixture0149",
+       "created": 1767225600149,
+       "type": "session.tool.input.ended",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 149,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a11",
+        "id": "call_1",
+        "text": "{\"command\": \"echo hi\"}"
+       }
+      },
+      {
+       "id": "evt_fixture0150",
+       "created": 1767225600150,
+       "type": "session.tool.called",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 150,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a11",
+        "id": "call_1",
+        "input": {
+         "command": "echo hi"
+        },
+        "executed": false
+       }
+      }
+     ],
+     [
+      {
+       "id": "evt_fixture0151",
+       "created": 1767225600151,
+       "type": "session.inbox.delivered",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 151,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "inboxID": "{{body.id}}"
+       }
+      },
+      {
+       "id": "evt_fixture0152",
+       "created": 1767225600152,
+       "type": "session.tool.success",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 152,
+        "version": 2
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a11",
+        "id": "call_1",
+        "content": [
+         {
+          "type": "text",
+          "text": "hi\n"
+         }
+        ],
+        "metadata": {
+         "status": "completed",
+         "truncated": false,
+         "exit": 0
+        },
+        "executed": false
+       }
+      },
+      {
+       "id": "evt_fixture0153",
+       "created": 1767225600153,
+       "type": "session.step.ended",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 153,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a11",
+        "finish": "tool-calls",
+        "rawFinish": "tool-calls",
+        "cost": 0,
+        "tokens": {
+         "input": 1200,
+         "output": 80,
+         "reasoning": 20,
+         "cache": {
+          "read": 3000,
+          "write": 100
+         }
+        },
+        "snapshot": "99482b54df6361365fa0ed7363ccf07edaa7fc93",
+        "files": []
+       }
+      },
+      {
+       "id": "evt_fixture0154",
+       "created": 1767225600154,
+       "type": "session.step.started",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 154,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "agent": "build",
+        "model": {
+         "providerID": "anthropic",
+         "id": "claude-opus-5-5"
+        },
+        "assistantMessageID": "msg_a12",
+        "snapshot": "99482b54df6361365fa0ed7363ccf07edaa7fc93",
+        "started": 1767225600000
+       }
+      },
+      {
+       "id": "evt_fixture0155",
+       "created": 1767225600155,
+       "type": "session.text.started",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 155,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a12",
+        "ordinal": 0
+       }
+      },
+      {
+       "id": "evt_fixture0156",
+       "created": 1767225600156,
+       "type": "session.text.delta",
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a12",
+        "ordinal": 0,
+        "delta": "Steere"
+       }
+      },
+      {
+       "id": "evt_fixture0157",
+       "created": 1767225600157,
+       "type": "session.text.delta",
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a12",
+        "ordinal": 0,
+        "delta": "d: printing the date too"
+       }
+      },
+      {
+       "id": "evt_fixture0158",
+       "created": 1767225600158,
+       "type": "session.text.ended",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 158,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a12",
+        "ordinal": 0,
+        "text": "Steered: printing the date too"
+       }
+      },
+      {
+       "id": "evt_fixture0159",
+       "created": 1767225600159,
+       "type": "session.step.ended",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 159,
+        "version": 1
+       },
+       "location": {
+        "directory": "/tmp"
+       },
+       "data": {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a12",
+        "finish": "stop",
+        "rawFinish": "stop",
+        "cost": 0,
+        "tokens": {
+         "input": 1200,
+         "output": 80,
+         "reasoning": 20,
+         "cache": {
+          "read": 3000,
+          "write": 100
+         }
+        },
+        "snapshot": "99482b54df6361365fa0ed7363ccf07edaa7fc93",
+        "files": []
+       }
+      },
+      {
+       "id": "evt_fixture0160",
+       "created": 1767225600160,
+       "type": "session.execution.succeeded",
+       "durable": {
+        "aggregateID": "ses_1",
+        "seq": 160,
+        "version": 1
+       },
+       "data": {
+        "sessionID": "ses_1"
+       }
+      }
+     ]
+    ]
+   }
+  }
+ }
+}

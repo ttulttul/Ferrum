@@ -52,6 +52,11 @@ impl LocalWorkspace {
 }
 
 impl LocalWorkspace {
+    /// Run OpenCode turns on the managed servers the status checks keep.
+    pub(crate) fn share_opencode_servers(&self, owners: crate::provider_status::opencode::Owners) {
+        self.providers.share_opencode_servers(owners);
+    }
+
     /// A workspace that keeps its state (settings, terminal logs, device
     /// state) under `state_dir`, for a process that runs only the workspace.
     pub fn open(state_dir: &Path) -> anyhow::Result<Self> {

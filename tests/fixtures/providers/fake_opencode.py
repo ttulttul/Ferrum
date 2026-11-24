@@ -26,8 +26,8 @@ body. Every launch appends its arguments to
 FAKE_PROVIDER_LOG.args (with the port replaced by PORT), and every request
 `METHOD /path` to one of OpenCode's routes (plus " basic" when it carries
 Basic credentials) to FAKE_PROVIDER_LOG.http, and every `/session` (OpenCode
-2: `/api/session`), `/mcp`, `/permission/...` and `/question/...` request as
-JSON with its query and body.
+2: `/api/session`, and its MCP and instructions routes under `/api/experimental/`), `/mcp`, `/permission/...` and
+`/question/...` request as JSON with its query and body.
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -115,7 +115,7 @@ class Handler(BaseHTTPRequestHandler):
                 out.write(f"{self.command} {path}{' basic' if basic else ''}\n")
         # A session's requests (text generation, turns), T3's MCP server and the answers to
         # OpenCode's requests, with their query and body, as JSON.
-        if log and re.match(r"^/(?:session|api/session|mcp$|permission/|question/)", path):
+        if log and re.match(r"^/(?:session|api/session|api/experimental/(?:mcp|session)/|mcp$|permission/|question/)", path):
             try:
                 body = json.loads(raw) if raw else None
             except ValueError:

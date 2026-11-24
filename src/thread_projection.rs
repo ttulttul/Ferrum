@@ -1702,8 +1702,16 @@ fn stored_provider(
     {
         state.attachment_budget = Some((bytes, pages));
     }
+    // Only an OpenCode 2 thread's record names the session's model.
+    let opencode2 = (driver == crate::workspace::provider::OPENCODE
+        && record["nativeMetadata"]["modelSelection"].is_object())
+    .then(|| crate::workspace::provider::OpenCode2Thread {
+        version: String::new(),
+        model_selection: record["nativeMetadata"]["modelSelection"].clone(),
+    });
     if let Some(first_run) = first_run {
         state.thread = Some(crate::provider_state::ThreadRecord {
+            opencode2,
             driver,
             first_run: crate::Run::uuid_for(&first_run),
             created_at: iso_seconds(&record["createdAt"]),

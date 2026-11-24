@@ -4210,6 +4210,8 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
                     native_thread_id: "thr_1".into(),
                     resumed: n == 2,
                     model: None,
+
+                    opencode2: None,
                 }),
             );
             agentd.emit(
@@ -4287,6 +4289,8 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             native_thread_id: "thr_1".into(),
             resumed: false,
             model: None,
+
+            opencode2: None,
         });
         emit(ProviderEvent::ProviderTurn {
             native_turn_id: Some("turn_1".into()),
@@ -4533,6 +4537,8 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             native_thread_id: "thr_1".into(),
             resumed: false,
             model: None,
+
+            opencode2: None,
         });
         emit(ProviderEvent::TurnItem {
             item: ProviderItem::new("rs_1", "reasoning", "completed").with("text", ""),
