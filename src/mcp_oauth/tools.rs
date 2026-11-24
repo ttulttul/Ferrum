@@ -37,6 +37,7 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
         )],
     ),
     ("t3_queue", &[]),
+    ("t3_submit_output", &[]),
     ("t3_pending_request", &[]),
     ("t3_workflow_stop", &[]),
     ("t3_thread_search", &[]),
@@ -127,6 +128,7 @@ const SERVED: &[&str] = &[
     "t3_thread_configure",
     "t3_thread_transfer",
     "t3_queue",
+    "t3_submit_output",
     "t3_pending_request",
     "t3_workflow_stop",
     "t3_thread_search",
@@ -791,6 +793,7 @@ pub(super) async fn call<S: McpHost>(
         "t3_thread_configure" => threads::configure(host, caller, args).await,
         "t3_thread_transfer" => threads::transfer(host, caller, args).await,
         "t3_queue" => threads::queue(host, caller, args).await,
+        "t3_submit_output" => threads::submit_output(host, caller, args).await,
         "t3_pending_request" => threads::pending_request(host, caller, args).await,
         "t3_workflow_stop" => threads::workflow_stop(host, caller, args).await,
         "t3_environment_links" => environment_links(host, caller).await,
@@ -1732,6 +1735,21 @@ fn default_selection<S: McpHost>(host: &S, project: &Value) -> Option<Value> {
 async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> Outcome {
     let ceiling = caller.writable()?.to_owned();
     let title = required(a, "title")?.to_owned();
+    // A result is asked of the first message, which must ask for it.
+    let output_schema = a.get("outputSchema").filter(|s| s.is_object()).cloned();
+    if let Some(schema) = &output_schema {
+        let text = a["message"].as_str().unwrap_or_default();
+        let attachments = a["attachments"].as_array().map_or(0, Vec::len);
+        let problem = crate::run_output::request_problem(schema, text, attachments);
+        if problem.is_some() || text.is_empty() {
+            return Err(failure(
+                "invalid_request",
+                problem.unwrap_or_else(|| {
+                    "outputSchema needs a message that asks for the result.".into()
+                }),
+            ));
+        }
+    }
     if a.get("attachments")
         .and_then(Value::as_array)
         .is_some_and(|items| !items.is_empty())
@@ -1907,7 +1925,7 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
                 .await
                 .map_err(|e| failure("orchestration_error", dispatch_message(&e)))?;
             if let Some(text) = message.as_ref() {
-                let dispatch = json!({
+                let mut dispatch = json!({
                     "type": "message.dispatch",
                     "commandId": format!("{command_id}:message"),
                     "threadId": thread_id,
@@ -1919,6 +1937,9 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
                     "createdBy": "agent",
                     "creationSource": "mcp",
                 });
+                if let Some(schema) = &output_schema {
+                    dispatch["outputSchema"] = schema.clone();
+                }
                 host.dispatch(dispatch)
                     .await
                     .map_err(|e| failure("orchestration_error", dispatch_message(&e)))?;
@@ -1973,9 +1994,14 @@ fn within_limits(caller: &Caller, row: &Value) -> Result<(), Refusal> {
 async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> Outcome {
     let id = required(a, "threadId")?.to_owned();
     let text = required(a, "message")?.to_owned();
-    let mode = arg_str(a, "mode")?.unwrap_or("auto");
+    let mut mode = arg_str(a, "mode")?.unwrap_or("auto");
     if !matches!(mode, "auto" | "queue" | "steer" | "restart") {
         return Err(invalid_arguments());
+    }
+    // A send that asks for a result never joins a running turn.
+    let output_schema = a.get("outputSchema").filter(|s| s.is_object()).cloned();
+    if output_schema.is_some() && matches!(mode, "steer" | "restart") {
+        mode = "queue";
     }
     if matches!(mode, "steer" | "restart") || arg_bool(a, "freshContext")? == Some(true) {
         return Err(failure(
@@ -1988,6 +2014,12 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
         let thread = find_thread(&store, &id)?;
         let row = thread.stored_row();
         within_limits(caller, &row)?;
+        if let Some(problem) = output_schema
+            .as_ref()
+            .and_then(|schema| crate::run_output::request_problem(schema, &text, 0))
+        {
+            return Err(failure("invalid_request", problem));
+        }
         let projection = thread.projection();
         (
             active(&runs(&projection)).is_some(),
@@ -2035,6 +2067,9 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
         }
         if selection.is_object() {
             dispatch["modelSelection"] = selection;
+        }
+        if let Some(schema) = &output_schema {
+            dispatch["outputSchema"] = schema.clone();
         }
         host.dispatch(dispatch).await.map_err(|e| {
             failure(
@@ -2084,6 +2119,7 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
 
 async fn thread_wait<S: McpHost>(host: &S, a: &Value) -> Outcome {
     let id = required(a, "threadId")?.to_owned();
+    let until_output = arg_bool(a, "untilOutput")? == Some(true);
     let run_id = arg_str(a, "runId")?.map(str::to_owned);
     let timeout = match a.get("timeoutMs") {
         None | Some(Value::Null) => DEFAULT_WAIT_TIMEOUT_MS,
@@ -2112,15 +2148,25 @@ async fn thread_wait<S: McpHost>(host: &S, a: &Value) -> Outcome {
             return Ok(json!({"threadId": id, "runId": null, "status": "idle", "timedOut": false}));
         };
         let status = run["status"].as_str().unwrap_or("failed").to_owned();
-        let settled = TERMINAL.contains(&status.as_str()) || status == "waiting";
+        // With untilOutput, a completed run that still owes its result is not
+        // settled: a later turn may submit it.
+        let owes_output = until_output
+            && status == "completed"
+            && run["outputSchema"].is_object()
+            && run["output"].is_null();
+        let settled = (TERMINAL.contains(&status.as_str()) || status == "waiting") && !owes_output;
         let now = crate::platform::now_ms();
         if settled || now >= deadline {
-            return Ok(json!({
+            let mut answer = json!({
                 "threadId": id,
                 "runId": run["id"],
                 "status": status,
                 "timedOut": !settled,
-            }));
+            });
+            if run["output"].is_object() {
+                answer["output"] = run["output"]["value"].clone();
+            }
+            return Ok(answer);
         }
         let pause = (deadline - now).clamp(1, WAIT_POLL_MS as i64) as u64;
         host.sleep(std::time::Duration::from_millis(pause)).await;

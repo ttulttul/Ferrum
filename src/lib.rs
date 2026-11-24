@@ -61,6 +61,7 @@ mod orchestration;
 #[cfg(feature = "native")]
 mod projects;
 mod rpc_protocol;
+mod run_output;
 pub mod runtime;
 mod scratch;
 mod server_config;
