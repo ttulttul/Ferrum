@@ -1074,6 +1074,116 @@ pub(super) async fn consume_reset_credit(
         .unwrap_or(Err(None))
 }
 
+/// How long the skills helper outlives its last read
+/// (`CODEX_SKILLS_HELPER_IDLE_TTL`).
+const SKILLS_HELPER_IDLE: Duration = Duration::from_secs(30);
+
+/// The reference's `makeCodexSkillsProbe`: one `codex app-server` per launch
+/// identity (binary, home, launch arguments and environment), reused by
+/// every folder scan and stopped once idle for 30 seconds.
+#[derive(Default)]
+pub(crate) struct SkillsHelper {
+    inner: Arc<tokio::sync::Mutex<Option<Helper>>>,
+}
+
+struct Helper {
+    key: Value,
+    session: Session,
+    used: tokio::time::Instant,
+}
+
+impl SkillsHelper {
+    /// `CodexSkillsProbe.probe`: `skills/list` for `cwd`, reread from disk. A
+    /// failed read drops the helper and is retried once on a fresh one.
+    pub(super) async fn probe(
+        &self,
+        config: &Value,
+        env: &ProcessEnv,
+        cwd: &str,
+    ) -> Option<Vec<Value>> {
+        let Launch {
+            env, binary, args, ..
+        } = launch(config, env);
+        let key = json!({"binary": binary, "args": args, "env": env});
+        for _ in 0..2 {
+            let mut guard = self.inner.lock().await;
+            // Retire a helper for a previous binary, home, credentials or options.
+            if guard.as_ref().is_some_and(|helper| helper.key != key) {
+                if let Some(old) = guard.take() {
+                    old.session.stop().await;
+                }
+            }
+            if guard.is_none() {
+                let started = async {
+                    let process_cwd = std::env::current_dir().unwrap_or_default();
+                    let mut session = Session::start(&binary, &args, &env, &process_cwd).ok()?;
+                    let initialized = session
+                        .request(
+                            "initialize",
+                            json!({"clientInfo": {"name": CLIENT_NAME, "title": CLIENT_NAME, "version": crate::server_runtime::SERVER_VERSION},
+                                   "capabilities": {"experimentalApi": true}}),
+                        )
+                        .await;
+                    if initialized.is_err() {
+                        session.stop().await;
+                        return None;
+                    }
+                    session.notify("initialized").await;
+                    Some(session)
+                }
+                .await;
+                let Some(session) = started else {
+                    continue;
+                };
+                *guard = Some(Helper {
+                    key: key.clone(),
+                    session,
+                    used: tokio::time::Instant::now(),
+                });
+                self.reap_when_idle();
+            }
+            let helper = guard.as_mut()?;
+            helper.used = tokio::time::Instant::now();
+            let read = helper
+                .session
+                .request("skills/list", json!({"cwds": [cwd], "forceReload": true}))
+                .await;
+            match read {
+                Ok(response) => return Some(parse_skills(&response, cwd)),
+                Err(_) => {
+                    if let Some(dead) = guard.take() {
+                        dead.session.stop().await;
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Stop the helper once it has gone unused for the idle time.
+    fn reap_when_idle(&self) {
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            loop {
+                let deadline = match inner.lock().await.as_ref() {
+                    Some(helper) => helper.used + SKILLS_HELPER_IDLE,
+                    None => return,
+                };
+                tokio::time::sleep_until(deadline).await;
+                let mut guard = inner.lock().await;
+                if guard.as_ref().is_some_and(|helper| {
+                    helper.used + SKILLS_HELPER_IDLE <= tokio::time::Instant::now()
+                }) {
+                    if let Some(idle) = guard.take() {
+                        idle.session.stop().await;
+                    }
+                    return;
+                }
+            }
+        });
+    }
+}
+
 pub(super) async fn check(config: &Value, env: &ProcessEnv, manifest: &Value) -> Draft {
     let Launch {
         env,
