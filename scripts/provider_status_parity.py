@@ -1146,6 +1146,18 @@ def final(row):
         or "versionAdvisory" in row
 
 
+def without_enrichment(value):
+    """`value`'s rows without the version advisory of an enriched driver, for replies read right
+    after a probe (a refresh, a `fresh` folder scan). The reference answers those from its rows as
+    they stand when the reply is built, so whether the advisory its enrichment adds is back yet
+    depends on timing. The `row` and `event` checks compare the advisory in the final rows."""
+    if isinstance(value, list):
+        return [without_enrichment(item) for item in value]
+    if isinstance(value, dict) and value.get("driver") in ENRICHED_DRIVERS:
+        return {key: item for key, item in value.items() if key != "versionAdvisory"}
+    return value
+
+
 def wait_checked(url, cookie, instance, seconds, settled, root, stable=1.5):
     """The instance's row once its first check has completed (`final`) and the row has stopped
     changing for `stable` seconds, or after a few seconds for a scenario whose row is final from
@@ -1340,6 +1352,8 @@ def run_server(args, command, root, scenario, temporary):
             # current snapshot answers without scanning.
             for step in ("folder", "folderAgain"):
                 reply = rpc(url, cookie, "server.refreshProviders", request)["providers"]
+                if request.get("fresh"):
+                    reply = without_enrichment(reply)
                 outcome[step] = strip(reply if folder.get("onDemand", True) else row_of(reply, scenario["instance"]),
                                       temporary)
         if "redeem" in scenario:
@@ -1358,7 +1372,8 @@ def run_server(args, command, root, scenario, temporary):
                 shutil.copyfile(FIXTURES / scenario["refresh"], fixture)
             ws = stack.enter_context(contextlib.closing(config_socket(url, cookie)))
             refreshed = rpc(url, cookie, "server.refreshProviders", {})
-            outcome["refresh"] = strip(row_of(refreshed["providers"], scenario["instance"]), temporary)
+            outcome["refresh"] = strip(without_enrichment(row_of(refreshed["providers"], scenario["instance"])),
+                                       temporary)
             outcome["event"] = strip(next_provider_event(ws, scenario["instance"]), temporary)
     launches = Path(str(log) + ".args")
     # `codex app-server --help` is the reference's managed Codex runtime deciding whether a
