@@ -800,8 +800,8 @@ async fn follow_once<S: McpHost>(
     // A cancel or Stop recorded here meanwhile: the next look reads the result and stops it
     // there. One still being recorded wins the result after this reads the reply.
     if read_task_row(host, parent_id, task_id)
-            .await
-            .is_some_and(|t| !t["result"].is_null())
+        .await
+        .is_some_and(|t| !t["result"].is_null())
     {
         return Ok(false);
     }
