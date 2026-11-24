@@ -11,7 +11,7 @@ use crate::{
 };
 use indexmap::IndexMap;
 use serde_json::Value;
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 pub struct ControlState {
@@ -268,12 +268,85 @@ impl ControlState {
         self.commit_receipted(event, None).await
     }
 
+    /// What each of `events` would send live if they were committed in turn
+    /// now: its provider snapshot events (`node.updated`, `message.updated`,
+    /// `turn-item.updated`, `plan.updated`) as `type:id` keys in order, and
+    /// how many live events it sends in all.
+    pub(crate) async fn dry_run(&self, events: &[Event]) -> Vec<(Vec<String>, usize)> {
+        let store = self.store.read().await;
+        let mut scratch = Store::default();
+        for event in events {
+            if let Some(id) = event.thread_id() {
+                if let (false, Some(thread)) =
+                    (scratch.threads.contains_key(id), store.threads.get(id))
+                {
+                    scratch.threads.insert(id.to_owned(), thread.clone());
+                }
+            }
+        }
+        drop(store);
+        let at = crate::now();
+        events
+            .iter()
+            .map(|event| {
+                let record = ServerEvent {
+                    id: 0,
+                    at,
+                    event: event.clone(),
+                    receipt: None,
+                    thread_events: None,
+                };
+                // A thread read from the shared database projects its stored
+                // records, which a commit plans along with it.
+                let stored_after = if scratch
+                    .threads
+                    .values()
+                    .any(|thread| thread.stored.is_some())
+                {
+                    shared_commit(&scratch, &record, 0).1
+                } else {
+                    Vec::new()
+                };
+                let items = thread_events(&scratch, &record, &stored_after, &[])
+                    .and_then(|events| events.items)
+                    .unwrap_or_default();
+                scratch.apply_record(&record);
+                for (thread_id, stored) in stored_after {
+                    if let Some(thread) = scratch.threads.get_mut(&thread_id) {
+                        thread.stored = Some(Box::new(stored));
+                    }
+                }
+                (items.iter().filter_map(snapshot_key).collect(), items.len())
+            })
+            .collect()
+    }
+
+    /// `commit`, leaving the live events `suppress` names (`type:id` keys
+    /// of snapshots a later snapshot of the same batch replaces) out of what
+    /// subscribers get, as the reference's provider commit batch drops them.
+    pub(crate) async fn commit_suppressing(
+        &self,
+        event: Event,
+        suppress: Vec<String>,
+    ) -> anyhow::Result<ServerEvent> {
+        self.commit_with(event, None, &suppress).await
+    }
+
     /// Writes one event to the shared database (when there is one), appends
     /// it to the log, applies it to the store and broadcasts it.
     pub(crate) async fn commit_receipted(
         &self,
         event: Event,
         receipt: Option<CommandReceipt>,
+    ) -> anyhow::Result<ServerEvent> {
+        self.commit_with(event, receipt, &[]).await
+    }
+
+    async fn commit_with(
+        &self,
+        event: Event,
+        receipt: Option<CommandReceipt>,
+        suppress: &[String],
     ) -> anyhow::Result<ServerEvent> {
         let mut store = self.store.write().await;
         let mut next_event_id = self.next_event_id.lock().await;
@@ -300,7 +373,7 @@ impl ControlState {
         // domain events, one sequence number each.
         let mut live_events = 0;
         if self.events.receiver_count() > 0 {
-            if let Some(mut events) = thread_events(&store, &record, &stored_after) {
+            if let Some(mut events) = thread_events(&store, &record, &stored_after, suppress) {
                 live_events = events.items.as_ref().map_or(0, Vec::len) as u64;
                 record.id = *next_event_id + live_events.max(stored_events).max(1);
                 if let Some(items) = events.items.take() {
@@ -444,10 +517,54 @@ fn shared_commit(
 /// What `record` changes in its thread's projection, worked out on a copy of
 /// the thread so the store changes only once the record is logged. `None`
 /// when the record touches no thread that exists before and after it.
+/// A provider snapshot live event's `type:id` key.
+fn snapshot_key(item: &Value) -> Option<String> {
+    let event = if item["event"].is_object() {
+        &item["event"]
+    } else {
+        item
+    };
+    let kind = event["type"].as_str()?;
+    matches!(
+        kind,
+        "node.updated" | "message.updated" | "turn-item.updated" | "plan.updated"
+    )
+    .then(|| Some(format!("{kind}:{}", event["payload"]["id"].as_str()?)))
+    .flatten()
+}
+
+/// The reference's `coalesce` (ProviderCommitBatch) over a batch's snapshot
+/// keys, by commit: an earlier snapshot is dropped when a later one of the
+/// same entity follows it with no first appearance of another entity in
+/// between. Gives, per commit, the keys it leaves out.
+pub(crate) fn coalesce(batch: &[Vec<String>]) -> Vec<Vec<String>> {
+    let jobs: Vec<(usize, &String)> = batch
+        .iter()
+        .enumerate()
+        .flat_map(|(commit, keys)| keys.iter().map(move |key| (commit, key)))
+        .collect();
+    let mut first_seen = HashMap::new();
+    for (index, (_, key)) in jobs.iter().enumerate() {
+        first_seen.entry(*key).or_insert(index);
+    }
+    let mut dropped = vec![Vec::new(); batch.len()];
+    let mut next_of_key: HashMap<&String, usize> = HashMap::new();
+    for index in (0..jobs.len()).rev() {
+        let (commit, key) = jobs[index];
+        let next = next_of_key.insert(key, index);
+        let Some(next) = next else { continue };
+        if (index + 1..next).all(|between| first_seen[jobs[between].1] <= index) {
+            dropped[commit].push(key.clone());
+        }
+    }
+    dropped
+}
+
 fn thread_events(
     store: &Store,
     record: &ServerEvent,
     stored_after: &[(String, Value)],
+    suppress: &[String],
 ) -> Option<crate::thread_events::ThreadEvents> {
     let thread_id = record.event.thread_id()?.to_owned();
     let mut scratch = Store::default();
@@ -481,6 +598,12 @@ fn thread_events(
             command_type,
         ),
     };
+    let items = items.map(|mut items| {
+        if !suppress.is_empty() {
+            items.retain(|item| snapshot_key(item).is_none_or(|key| !suppress.contains(&key)));
+        }
+        items
+    });
     Some(crate::thread_events::ThreadEvents {
         before: crate::thread_events::digest(&before),
         after: crate::thread_events::digest(&after),
@@ -503,4 +626,50 @@ fn read_by_id(documents: &dyn DocumentStore, path: &std::path::Path) -> IndexMap
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::coalesce;
+
+    fn keys(batch: &[&[&str]]) -> Vec<Vec<String>> {
+        batch
+            .iter()
+            .map(|commit| commit.iter().map(|key| key.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_later_snapshot_of_the_same_entity_replaces_an_earlier_one() {
+        // A tool's running update, then its completion, in one batch: the
+        // item's running snapshot goes. The node's stays, since the item
+        // first appears after it (the reference's stream shows it so).
+        let dropped = coalesce(&keys(&[
+            &["node.updated:n", "turn-item.updated:i"],
+            &["node.updated:n", "turn-item.updated:i"],
+        ]));
+        assert_eq!(dropped, keys(&[&["turn-item.updated:i"], &[]]));
+    }
+
+    #[test]
+    fn another_entity_appearing_first_in_between_keeps_the_earlier_snapshot() {
+        // b first appears between a's two snapshots, so a's first stays.
+        let dropped = coalesce(&keys(&[&["a"], &["b"], &["a"]]));
+        assert_eq!(dropped, keys(&[&[], &[], &[]]));
+    }
+
+    #[test]
+    fn an_entity_seen_before_in_between_does_not_keep_it() {
+        // b was seen before a's first snapshot, so a later b between a's
+        // snapshots does not keep it; b's own earlier snapshot stays, as a
+        // first appears after it.
+        let dropped = coalesce(&keys(&[&["b", "a"], &["b", "a"]]));
+        assert_eq!(dropped, keys(&[&["a"], &[]]));
+    }
+
+    #[test]
+    fn a_lone_snapshot_is_kept() {
+        assert_eq!(coalesce(&keys(&[&["a"]])), keys(&[&[]]));
+        assert_eq!(coalesce(&keys(&[])), keys(&[]));
+    }
 }
