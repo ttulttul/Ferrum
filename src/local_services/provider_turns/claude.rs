@@ -207,6 +207,9 @@ struct Attempt<'a> {
     resume: Option<&'a str>,
     /// The thread's running CLI took the turn: it has its MCP servers.
     reused: bool,
+    /// The model selection the running CLI ran before this turn's, which
+    /// the turn switches it from.
+    switched_from: Option<Value>,
     /// The native session the CLI was launched with (`--session-id` or
     /// `--resume`), under which it stays running for the thread's next turn.
     /// As the reference keys its live query: a session Claude Code reports
@@ -361,19 +364,37 @@ impl<'a> Attempt<'a> {
         }
         // What the CLI is launched with, but for its session: a turn launched
         // the same way goes to the thread's running CLI.
+        // The model selection is not part of it: a running CLI switches
+        // model, effort and flag settings in place (`applySelectionLive`).
+        let selection = json!({
+            "model": provider.model,
+            "effort": provider.reasoning_effort,
+            "settings": provider.claude_settings,
+        });
+        let settings_at = args.iter().position(|a| a == "--settings").map(|at| at + 1);
         let launch = json!({
             "binary": binary,
-            "args": args.iter().filter(|a| !a.starts_with("--resume=")).collect::<Vec<_>>(),
+            "args": args
+                .iter()
+                .enumerate()
+                .filter(|(at, a)| {
+                    !a.starts_with("--resume=")
+                        && !a.starts_with("--model=")
+                        && !a.starts_with("--effort=")
+                        && Some(*at) != settings_at
+                })
+                .map(|(_, a)| a)
+                .collect::<Vec<_>>(),
             "env": spec.env, "extraEnv": extra_env, "home": provider.home_path,
             "mcp": provider.mcp.as_ref().map(|mcp| (&mcp.url, &mcp.authorization)),
         })
         .to_string();
-        let (running, queued) = match resume {
-            Some(id) => match sessions.take(id, &launch).await {
-                Some((cli, queued)) => (Some(cli), queued),
-                None => (None, Vec::new()),
+        let (running, queued, switched_from) = match resume {
+            Some(id) => match sessions.take(id, &launch, &selection).await {
+                Some((cli, queued, from)) => (Some(cli), queued, from),
+                None => (None, Vec::new(), None),
             },
-            None => (None, Vec::new()),
+            None => (None, Vec::new(), None),
         };
         let reused = running.is_some();
         if let (Some(flag), Some(id)) = (&new_session, &session) {
@@ -425,6 +446,7 @@ impl<'a> Attempt<'a> {
             cli,
             resume,
             reused,
+            switched_from,
             session,
             answered: false,
             interrupted: false,
@@ -488,7 +510,9 @@ impl<'a> Attempt<'a> {
             ..
         } = attempt;
         match session {
-            Some(session) if keep && cli.alive() => sessions.keep(session, cli, launch, queued),
+            Some(session) if keep && cli.alive() => {
+                sessions.keep(session, cli, launch, selection, queued)
+            }
             _ => cli.close().await,
         }
         outcome
@@ -544,6 +568,32 @@ impl<'a> Attempt<'a> {
             }}}});
             if self.cli.write(&request).await.is_err() {
                 return self.closed().await;
+            }
+        }
+        // A running CLI given another model selection switches to it before
+        // the prompt (`applySelectionLive`): the model when it changed, then
+        // the flag settings.
+        if let (Some(live), Some(provider)) = (self.switched_from.take(), spec.provider.as_ref()) {
+            let mut requests = Vec::new();
+            if live["model"].as_str() != Some(provider.model.as_str()) {
+                requests.push(json!({"subtype": "set_model", "model": provider.model}));
+            }
+            let mut flags = serde_json::Map::new();
+            if let Some(effort) = &provider.reasoning_effort {
+                flags.insert("effortLevel".into(), json!(effort));
+            }
+            for key in ["fastMode", "ultracode"] {
+                flags.insert(key.into(), provider.claude_settings[key].clone());
+            }
+            requests.push(json!({"subtype": "apply_flag_settings", "settings": flags}));
+            for request in requests {
+                let request_id = format!("t3-selection-{}", self.next_control);
+                self.next_control += 1;
+                let request = json!({"type": "control_request", "request_id": request_id,
+                    "request": request});
+                if self.cli.write(&request).await.is_err() {
+                    return self.closed().await;
+                }
             }
         }
         // A plain prompt goes as a string, as the reference's

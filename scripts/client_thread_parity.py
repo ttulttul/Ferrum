@@ -439,6 +439,14 @@ PROVIDER_SCENARIOS = [
      "scenario": "claude_two_turns.json", "followUp": "Now append a line"},
     {"name": "codex second turn", "instance": "codex", "model": "fixture", "scenario": "codex_two_turns.json",
      "followUp": "Now append a line"},
+    # The follow-up picks another model of the thread's provider: the thread switches to it, the
+    # running Claude CLI takes it in place (set_model, apply_flag_settings), Codex resumes its
+    # thread with it, and the follow-up's prompt shows the switch (modelSwitch).
+    {"name": "claude model switch", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_two_turns.json", "followUp": "Now append a line",
+     "followUpModel": {"instanceId": "claudeAgent", "model": "claude-sonnet-5-5"}},
+    {"name": "codex model switch", "instance": "codex", "model": "fixture", "scenario": "codex_model_switch.json",
+     "followUp": "Now append a line", "followUpModel": {"instanceId": "codex", "model": "fixture-mini"}},
     # A message steers the running turn (Codex `turn/steer`), which then answers it, and Stop
     # interrupts it.
     # A message steers the running Claude turn: it goes to the CLI the turn runs (priority
@@ -1152,7 +1160,11 @@ def cli_approvals(log):
         except ValueError:
             continue
         method = message.get("method")
-        if method in ("thread/start", "thread/resume", "turn/start"):
+        request = message.get("request") if message.get("type") == "control_request" else None
+        if isinstance(request, dict) and request.get("subtype") in ("set_model", "apply_flag_settings"):
+            # A running Claude CLI switched to another model selection.
+            out.append("control " + json.dumps(request, sort_keys=True))
+        elif method in ("thread/start", "thread/resume", "turn/start"):
             params = message.get("params") or {}
             out.append(f"{method} " + json.dumps({k: params[k] for k in CODEX_POLICY_KEYS if k in params},
                                                  sort_keys=True))
@@ -1528,12 +1540,14 @@ def text_provider_runs(log, root, provider):
             **({"environments": environments} if environments else {})}
 
 
-def follow_up_turn(args, url, cookie, text):
-    """A second message once the first run settled; the thread as read once it settled too."""
+def follow_up_turn(args, url, cookie, text, model=None):
+    """A second message once the first run settled, with `model` (a model selection) to switch
+    the thread's model or provider with it; the thread as read once it settled too."""
     runs = len(thread_projection(url, cookie).get("runs", []))
     rpc(url, cookie, "orchestration.dispatchCommand", {
         "type": "message.dispatch", "commandId": "follow-up-message", "threadId": THREAD,
         "messageId": "message:follow-up", "text": text, "attachments": [],
+        **({"modelSelection": model} if model else {}),
         "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
     wait_for(url, cookie, lambda p: len(p.get("runs", [])) > runs
              and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", [])), 40)
@@ -2077,7 +2091,11 @@ def scenario_env(temporary, name, root, scenario, drivers):
 
 
 def scenario_drivers(scenario):
-    return set() if scenario["scenario"] is None else {TURN_CLIS[scenario["instance"]]}
+    if scenario["scenario"] is None:
+        return set()
+    # A follow-up on another provider needs that provider's CLI too.
+    switched = (scenario.get("followUpModel") or {}).get("instanceId")
+    return {TURN_CLIS[instance] for instance in {scenario["instance"], switched} if instance}
 
 
 def provider_turns(args, credentials):
@@ -2143,7 +2161,8 @@ def provider_turns(args, credentials):
                         without_home(outcomes[name], len(str(root)) - len("<home>/<server>"),
                                      len(scenario["uploads"]))
                     if scenario.get("followUp"):
-                        outcomes[name]["steps"].update(follow_up_turn(args, url, cookie, scenario["followUp"]))
+                        outcomes[name]["steps"].update(follow_up_turn(args, url, cookie, scenario["followUp"],
+                                                                      scenario.get("followUpModel")))
                     if scenario.get("title"):
                         outcomes[name]["title"] = title_outcome(url, cookie, scenario, log, temporary)
                     if scenario.get("status"):

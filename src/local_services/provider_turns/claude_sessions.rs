@@ -24,8 +24,12 @@ struct Live {
     cli: Cli,
     /// Prompts the CLI holds queued (steers a turn ended without taking).
     queued: Vec<String>,
-    /// What the CLI was launched with, but for its session.
+    /// What the CLI was launched with, but for its session and its model
+    /// selection.
     launch: String,
+    /// The model selection it runs (model, effort, settings), which a later
+    /// turn can change without a new CLI.
+    selection: serde_json::Value,
     idle: tokio::task::JoinHandle<()>,
 }
 
@@ -60,12 +64,25 @@ impl Sessions {
     /// for the turn when it was launched the same way and still runs, else
     /// closed.
     /// With it, the prompts it holds queued.
-    pub(super) async fn take(&self, session: &str, launch: &str) -> Option<(Cli, Vec<String>)> {
+    /// A turn with another model selection takes it too when the CLI can
+    /// switch to that one (`canApplyClaudeSelectionLive`), with the selection
+    /// it runs, for the turn to switch it.
+    pub(super) async fn take(
+        &self,
+        session: &str,
+        launch: &str,
+        selection: &serde_json::Value,
+    ) -> Option<(Cli, Vec<String>, Option<serde_json::Value>)> {
         let live = self.lock().remove(session)?;
         live.idle.abort();
         let mut cli = live.cli;
         if live.launch == launch && cli.alive() {
-            return Some((cli, live.queued));
+            if &live.selection == selection {
+                return Some((cli, live.queued, None));
+            }
+            if can_apply_live(&live.selection, selection) {
+                return Some((cli, live.queued, Some(live.selection)));
+            }
         }
         cli.stop().await;
         None
@@ -77,6 +94,7 @@ impl Sessions {
         session: String,
         cli: Cli,
         launch: String,
+        selection: serde_json::Value,
         queued: Vec<String>,
     ) {
         let sessions: Weak<Self> = Arc::downgrade(self);
@@ -96,6 +114,7 @@ impl Sessions {
                 cli,
                 queued,
                 launch,
+                selection,
                 idle,
             },
         );
@@ -120,5 +139,32 @@ impl Sessions {
             live.idle.abort();
             live.cli.stop().await;
         }
+    }
+}
+
+/// Whether a running CLI can switch from the `live` model selection to
+/// `next` (`canApplyClaudeSelectionLive`): thinking is set at launch, and an
+/// effort the CLI was given cannot be taken back.
+fn can_apply_live(live: &serde_json::Value, next: &serde_json::Value) -> bool {
+    live["settings"]["alwaysThinkingEnabled"] == next["settings"]["alwaysThinkingEnabled"]
+        && (!next["effort"].is_null() || live["effort"].is_null())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_apply_live;
+    use serde_json::json;
+
+    #[test]
+    fn a_running_cli_takes_another_model_or_effort_but_not_thinking_or_a_dropped_effort() {
+        let live = json!({"model": "claude-opus-5-5", "effort": "medium", "settings": {"fastMode": false}});
+        let sonnet = json!({"model": "claude-sonnet-5-5", "effort": "high", "settings": {}});
+        assert!(can_apply_live(&live, &sonnet));
+        let thinking = json!({"model": "claude-opus-5-5", "effort": "medium",
+            "settings": {"alwaysThinkingEnabled": true}});
+        assert!(!can_apply_live(&live, &thinking));
+        let no_effort = json!({"model": "claude-haiku-5-5", "effort": null, "settings": {}});
+        assert!(!can_apply_live(&live, &no_effort));
+        assert!(can_apply_live(&no_effort, &sonnet));
     }
 }
