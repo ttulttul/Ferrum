@@ -299,14 +299,36 @@ pub(super) async fn list(state: &AppState, cli: &Path, input: &Value) -> Reply {
             );
         }
     }
-    let mut projects = state
-        .store
-        .read()
-        .await
-        .projects
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
+    let store = state.store.read().await;
+    let mut projects = store.projects.values().cloned().collect::<Vec<_>>();
+    // Projects loaded from statev2.sqlite live in the projection rows rather than the legacy
+    // settings map. Pull-request listings still need their checkout path and remote, so include
+    // those rows when a process has not materialized a legacy `Project` value for them yet.
+    for row in store.project_rows.values() {
+        let Some(id) = row["id"].as_str() else {
+            continue;
+        };
+        if projects.iter().any(|project| project.id == id) {
+            continue;
+        }
+        let Some(path) = row["workspaceRoot"]
+            .as_str()
+            .or_else(|| row["path"].as_str())
+        else {
+            continue;
+        };
+        projects.push(Project {
+            id: id.to_owned(),
+            name: row["title"]
+                .as_str()
+                .or_else(|| row["name"].as_str())
+                .unwrap_or(id)
+                .to_owned(),
+            path: path.to_owned(),
+            created_at: row["createdAt"].as_u64().unwrap_or_default(),
+        });
+    }
+    drop(store);
     projects.sort_by_key(|p| (p.created_at, p.id.clone()));
     let mut repos = Vec::new();
     let mut bitbucket = Vec::new();

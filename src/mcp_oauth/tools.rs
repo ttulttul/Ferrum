@@ -77,6 +77,9 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("unwatch_pull_request", &[]),
     ("write_pull_request_guides", &[]),
     ("read_pull_request_guide", &[]),
+    ("pull_request_list", &[]),
+    ("pull_request_read", &[]),
+    ("ci_logs", &[]),
     ("list_issues", &[]),
     ("read_issue", &[]),
     ("create_issue", &[]),
@@ -174,6 +177,9 @@ const SERVED: &[&str] = &[
     "unwatch_pull_request",
     "write_pull_request_guides",
     "read_pull_request_guide",
+    "pull_request_list",
+    "pull_request_read",
+    "ci_logs",
     "list_issues",
     "read_issue",
     "create_issue",
@@ -284,6 +290,28 @@ fn visible_to<S: McpHost>(host: &S, granted: &McpAccess, listed: &str) -> bool {
                 .to_owned();
             driver == crate::workspace::provider::CLAUDE_AGENT
         }),
+        "hiddenWithoutForge" => host
+            .control_state()
+            .store
+            .try_read()
+            .map(|store| {
+                store.project_rows.values().any(|row| {
+                    let row = host.project_row(row);
+                    matches!(
+                        row["repositoryIdentity"]["provider"].as_str(),
+                        Some(
+                            "github"
+                                | "bitbucket"
+                                | "gitlab"
+                                | "forgejo"
+                                | "azure-devops"
+                                | "gitcafe"
+                                | "cursor-origin"
+                        )
+                    )
+                })
+            })
+            .unwrap_or(false),
         _ => true,
     }
 }
@@ -846,7 +874,10 @@ pub(super) async fn call<S: McpHost>(
         | "watch_pull_request"
         | "unwatch_pull_request"
         | "write_pull_request_guides"
-        | "read_pull_request_guide" => pull_requests::call(host, caller, name, args).await,
+        | "read_pull_request_guide"
+        | "pull_request_list"
+        | "pull_request_read"
+        | "ci_logs" => pull_requests::call(host, caller, name, args).await,
         "list_issues" | "read_issue" | "create_issue" | "comment_on_issue" | "set_issue_state"
         | "link_issue" | "unlink_issue" | "list_thread_issues" => {
             issues::call(host, caller, name, args).await
@@ -2908,6 +2939,7 @@ mod sender_tests {
                             | LINKS_ONLY
                             | "hiddenFromOutsideClients"
                             | "hiddenFromSubagents"
+                            | "hiddenWithoutForge"
                             | "hiddenWithoutBackgroundWait"
                             | "hiddenWhileFeedbackOff",
                     )

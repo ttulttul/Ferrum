@@ -289,3 +289,85 @@ pub(super) async fn read(
     }
     Ok(result)
 }
+
+/// Read the tail of selected GitHub Actions jobs. Non-Actions checks have no log endpoint and are
+/// reported as a per-check detail, matching the provider contract.
+pub(super) async fn logs(gh: &Github<'_>, repository: &str, number: u64, input: &Value) -> Reply {
+    let checks = read(
+        gh,
+        &Project {
+            id: String::new(),
+            path: String::new(),
+            name: String::new(),
+            created_at: 0,
+        },
+        "checks",
+        repository,
+        number,
+    )
+    .await?;
+    let checks = checks["checks"].as_array().cloned().unwrap_or_default();
+    let wanted = input["check"].as_str().map(|s| s.to_ascii_lowercase());
+    let selected: Vec<Value> = checks
+        .iter()
+        .filter(|check| {
+            wanted.as_ref().is_none_or(|w| {
+                check["name"]
+                    .as_str()
+                    .is_some_and(|n| n.to_ascii_lowercase() == *w)
+            })
+        })
+        .filter(|check| {
+            wanted.is_some() || matches!(check["status"].as_str(), Some("failure" | "cancelled"))
+        })
+        .cloned()
+        .collect();
+    if let Some(wanted) = wanted.as_ref() {
+        if selected.is_empty() {
+            return Err(error(
+                "checkLogs",
+                &format!(
+                    "No check is named {}. Checks: {}.",
+                    input["check"].as_str().unwrap_or_default(),
+                    checks
+                        .iter()
+                        .filter_map(|c| c["name"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+        let _ = wanted;
+    }
+    let tail_lines = input["tailLines"].as_u64().unwrap_or(200).clamp(1, 2000) as usize;
+    let mut output = Vec::new();
+    for check in selected {
+        let name = check["name"].as_str().unwrap_or_default();
+        let url = check["url"].as_str().map(str::to_owned);
+        let Some(url) = url.as_deref() else {
+            output.push(json!({"name":name,"url":null,"log":null,"truncated":false,"detail":"This check is not a GitHub Actions job, so GitHub holds no log for it."}));
+            continue;
+        };
+        let Some(job) = url
+            .split("/job/")
+            .nth(1)
+            .and_then(|s| s.split(['/', '?']).next())
+            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            output.push(json!({"name":name,"url":url,"log":null,"truncated":false,"detail":"This check is not a GitHub Actions job, so GitHub holds no log for it."}));
+            continue;
+        };
+        let (owner, repo) = repository.split_once('/').unwrap();
+        match gh.request("GET", &format!("repos/{owner}/{repo}/actions/jobs/{job}/logs"), "application/vnd.github+json", None).await {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                let lines: Vec<&str> = text.lines().collect();
+                let start = lines.len().saturating_sub(tail_lines);
+                output.push(json!({"name":name,"url":url,"log":lines[start..].join("\n"),"truncated":start > 0,"detail":null}));
+            }
+            Err(Failure::NotFound) => output.push(json!({"name":name,"url":url,"log":null,"truncated":false,"detail":"GitHub could not find the check log."})),
+            Err(e) => return Err(failure("checkLogs", e)),
+        }
+    }
+    Ok(json!(output))
+}

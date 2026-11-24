@@ -259,6 +259,28 @@
   },
   {
    "mcp": {
+    "tool": "pull_request_list",
+    "arguments": {}
+   }
+  },
+  {
+   "mcp": {
+    "tool": "pull_request_read",
+    "arguments": {
+     "url": "https://github.com/example/parity/pull/3"
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "ci_logs",
+    "arguments": {
+     "url": "https://github.com/example/parity/pull/3"
+    }
+   }
+  },
+  {
+   "mcp": {
     "tool": "watch_pull_request",
     "arguments": {
      "url": "https://github.com/example/parity/pull/3"
