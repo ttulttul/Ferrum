@@ -90,6 +90,9 @@
   "opencode title": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   },
+  "opencode2 title": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
   "pi title": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   }
