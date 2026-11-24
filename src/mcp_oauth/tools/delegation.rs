@@ -1039,7 +1039,14 @@ async fn await_task<S: McpHost>(
         if left <= 0 {
             break None;
         }
-        let pause = host.sleep(std::time::Duration::from_millis(left.min(250) as u64));
+        // A remote task's reads ask the linked environment, so its wait reads again only when
+        // its end is announced (or the wait times out), as the reference's event stream does.
+        let poll = if read["childThreadId"].is_null() {
+            left
+        } else {
+            left.min(250)
+        };
+        let pause = host.sleep(std::time::Duration::from_millis(poll as u64));
         match run_end.as_mut() {
             Some(rx) => {
                 tokio::select! {
