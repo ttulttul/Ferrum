@@ -31,7 +31,7 @@ from time import monotonic, sleep
 
 from client_initial_sync_parity import socket
 from client_thread_parity import scenario_env
-from device_tools_parity import STARTUP_FETCHES, write_executable
+from device_tools_parity import FAKE_HUB_SOURCE, STARTUP_FETCHES, seed_fake_android_sdk, write_executable
 from parity_harness import REFUSED, assert_nothing_escaped, encode, managed_server, recv_frame
 
 HERE = Path(__file__).resolve().parent
@@ -48,9 +48,10 @@ def call(url, cookie, tag, payload):
                 return frame["exit"]
 
 
-def seed_remote_home(home: Path, reference_root: Path):
-    """What a prepared device host has: Node and npm on its login PATH, an Android SDK, and the
-    device hub the reference installs under ~/.t3/device/tools."""
+def seed_remote_home(home: Path, reference_root: Path, request_log: Path):
+    """What a prepared device host has: Node, npm and ffmpeg on its login PATH, an Android SDK
+    (the device tools suite's fakes), and the device hub the reference installs under
+    ~/.t3/device/tools (the device tools suite's fake hub). The fakes log to `request_log`."""
     bin_dir = home / ".local" / "bin"
     bin_dir.mkdir(parents=True)
     for tool in ("node", "npm"):
@@ -58,16 +59,28 @@ def seed_remote_home(home: Path, reference_root: Path):
         if found is None:
             raise RuntimeError(f"{tool} is not on PATH")
         (bin_dir / tool).symlink_to(found)
-    sdk = home / "Android" / "Sdk"
-    write_executable(sdk / "platform-tools" / "adb", "#!/bin/sh\necho 'Android Debug Bridge version 1.0.41'\n")
-    write_executable(sdk / "emulator" / "emulator", "#!/bin/sh\nexit 0\n")
-    write_executable(sdk / "cmdline-tools" / "latest" / "bin" / "avdmanager", "#!/bin/sh\nexit 0\n")
+    staging = home.parent / f"{home.name}-staging"
+    sdk, fake_bin = seed_fake_android_sdk(staging, request_log)
+    (home / "Android").mkdir()
+    shutil.move(str(sdk), str(home / "Android" / "Sdk"))
+    shutil.move(str(fake_bin / "ffmpeg"), str(bin_dir / "ffmpeg"))
     versions = json.loads((reference_root / "apps/server/src/device/deviceToolVersions.json").read_text())
     hub = home / ".t3" / "device" / "tools" / f"expo-device-hub@{versions['expo-device-hub']}"
     entry = hub / "node_modules" / "expo-device-hub" / "dist" / "server" / "cli.mjs"
     entry.parent.mkdir(parents=True)
-    entry.write_text("// fake hub\n")
+    # The hub runs under the host's fresh SSH environment, so its log path is written into it.
+    entry.write_text(FAKE_HUB_SOURCE.replace(
+        "process.env.T3_FAKE_DEVICE_LOG", json.dumps(str(request_log))))
     (hub / ".install-complete").write_text(versions["expo-device-hub"])
+
+
+def stop_remote_hubs(home: Path):
+    """Hubs a bootstrap started run detached, as on a real host; end any a server left running."""
+    for record in home.glob(".t3/device/hosts/*/hub.json"):
+        try:
+            os.kill(json.loads(record.read_text())["pid"], 15)
+        except (OSError, ValueError, KeyError):
+            pass
 
 
 def owner_for(state_dir: Path, host_id: str) -> str:
@@ -77,6 +90,19 @@ def owner_for(state_dir: Path, host_id: str) -> str:
     except OSError:
         environment = str(state_dir)
     return hashlib.sha256(f"{environment}\0{state_dir}\0{host_id}".encode()).hexdigest()[:24]
+
+
+def drop_volatile(value):
+    """Session timestamps differ between runs; keep that they are there."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "openedAt" and isinstance(item, str):
+                value[key] = "<time>"
+            else:
+                drop_volatile(item)
+    elif isinstance(value, list):
+        for item in value:
+            drop_volatile(item)
 
 
 def wait_hosts(url, cookie, ids, seconds=30):
@@ -104,7 +130,8 @@ def run_server(name, command, reference_root, directory):
     root = Path(directory, name)
     root.mkdir()
     home = root / "remote-linux"
-    seed_remote_home(home, reference_root)
+    request_log = root / "remote-requests.jsonl"
+    seed_remote_home(home, reference_root, request_log)
     fake_bin = root / "fake-ssh-bin"
     write_executable(fake_bin / "ssh", f"#!/bin/sh\nexec python3 {shlex.quote(str(HERE / 'fake_ssh.py'))} \"$@\"\n")
     hosts_file = root / "ssh-hosts.json"
@@ -140,13 +167,31 @@ def run_server(name, command, reference_root, directory):
         answers.append(("inspect", call(url, cookie, "device.list", {"inspectOnly": True})))
         call(url, cookie, "server.updateSettings", {"patch": {"deviceHosts": HOSTS[:1]}})
         answers.append(("hosts after removal", wait_hosts(url, cookie, ["local", "linux"])))
+        # Starting the host: its hub over the bootstrap and an ssh -L tunnel, then its devices.
+        answers.append(("enable (starts the host)", call(url, cookie, "device.configure", {"enabled": True})))
+        for label, payload in [
+            ("open booted emulator", {"threadId": "thread-ssh", "hostId": "linux", "deviceId": "emulator-5554",
+                                      "platform": "android"}),
+            ("open unbooted AVD", {"threadId": "thread-ssh", "hostId": "linux", "deviceId": "Pixel_Unbooted",
+                                   "platform": "android"}),
+            ("open missing device", {"threadId": "thread-ssh", "hostId": "linux", "deviceId": "nope",
+                                     "platform": "android"}),
+        ]:
+            answers.append((label, call(url, cookie, "device.open", payload)))
+        answers.append(("close with shutdown", call(url, cookie, "device.close", {
+            "threadId": "thread-ssh", "hostId": "linux", "deviceId": "emulator-5556", "shutdown": True})))
+        answers.append(("list", call(url, cookie, "device.list", {})))
+        answers.append(("retry host", call(url, cookie, "device.list", {"retryHostId": "linux"})))
+        answers.append(("disable (stops the host)", call(url, cookie, "device.configure", {"enabled": False})))
+    stop_remote_hubs(home)
+    requests = [json.loads(line) for line in request_log.read_text().splitlines()] if request_log.exists() else []
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     state_dir = server_root / "userdata"
     owners = {}
     for entry in calls:
         if "owner" in entry:
             owners.setdefault(entry["owner"], []).append(entry.get("mode"))
-    text = json.dumps({"answers": answers, "calls": calls})
+    text = json.dumps({"answers": answers, "calls": calls, "requests": requests})
     for owner in owners:
         text = text.replace(owner, "<owner>")
     text = text.replace(str(root), "<root>")
@@ -160,6 +205,8 @@ def run_server(name, command, reference_root, directory):
         + [entry for entry in result["calls"] if "-G" not in entry["args"]],
         key=lambda entry: json.dumps(entry, sort_keys=True))
     expected = {owner_for(state_dir, host["id"]) for host in HOSTS + [{"id": f"t{i}"} for i in range(1, 6)]}
+    for entry in result["answers"]:
+        drop_volatile(entry[1])
     result["owner check"] = sorted("ownerFor" if owner in expected else f"unexpected owner {owner}" for owner in owners)
     return result
 
@@ -191,7 +238,7 @@ def main():
         print(f"{'PASS' if same else 'FAIL'} {label}")
         if not same:
             print(f"  original {json.dumps(left)[:3000]}\n  rust     {json.dumps(right)[:3000]}")
-    for key in ("calls", "owner check"):
+    for key in ("calls", "requests", "owner check"):
         total += 1
         same = original[key] == rust[key]
         failures += not same

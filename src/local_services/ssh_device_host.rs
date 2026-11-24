@@ -6,7 +6,12 @@
 //! host's own `node`.
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{path::Path, process::Stdio, sync::LazyLock, time::Duration};
+use std::{
+    path::Path,
+    process::Stdio,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 use tokio::io::AsyncWriteExt;
 
 static SCRIPTS: LazyLock<Value> = LazyLock::new(|| {
@@ -122,6 +127,8 @@ pub(super) fn base_ssh_args(port: Option<u16>) -> Vec<String> {
 #[derive(Clone, Debug)]
 pub(super) struct SshCommandError {
     pub exit_code: Option<i32>,
+    /// What the command printed, redacted and bounded.
+    pub stdout: String,
     pub stderr: String,
     pub message: String,
 }
@@ -227,6 +234,7 @@ pub(super) async fn run_ssh(
         .kill_on_drop(true);
     let spawn_failed = |message: String| SshCommandError {
         exit_code: None,
+        stdout: String::new(),
         stderr: String::new(),
         message,
     };
@@ -245,6 +253,7 @@ pub(super) async fn run_ssh(
         Err(_) => {
             return Err(SshCommandError {
                 exit_code: None,
+                stdout: String::new(),
                 stderr: String::new(),
                 message: format!("SSH command timed out after {}ms.", timeout.as_millis()),
             })
@@ -279,6 +288,7 @@ pub(super) async fn run_ssh(
         );
         return Err(SshCommandError {
             exit_code,
+            stdout: diagnostic,
             stderr,
             message,
         });
@@ -307,7 +317,7 @@ pub(super) enum Cause {
 #[derive(Clone, Debug)]
 pub(super) struct HostError {
     pub step: String,
-    pub cause: Cause,
+    pub cause: Box<Cause>,
 }
 
 impl HostError {
@@ -320,7 +330,7 @@ impl HostError {
             "name": "DeviceHostError",
             "message": format!("Device host {host_id} failed while {}.", self.step),
         });
-        match &self.cause {
+        match self.cause.as_ref() {
             Cause::Ssh(ssh) => encoded["cause"] = command(ssh),
             Cause::Connect {
                 reason,
@@ -364,7 +374,7 @@ const WINDOWS_MESSAGE: &str = "Connected over SSH, but this host runs Windows, a
 
 /// `explainSshConnectFailure`: ssh exits 255 for its own failures.
 fn explain_connect(config: &SshConfig, error: HostError) -> HostError {
-    let Cause::Ssh(ssh) = &error.cause else {
+    let Cause::Ssh(ssh) = error.cause.as_ref() else {
         return error;
     };
     if ssh.exit_code != Some(255) {
@@ -394,12 +404,12 @@ fn explain_connect(config: &SshConfig, error: HostError) -> HostError {
         if let Some(detail) = lines.iter().find(|line| pattern.is_match(line)) {
             return HostError {
                 step: error.step.clone(),
-                cause: Cause::Connect {
+                cause: Box::new(Cause::Connect {
                     reason,
                     target: config.target.clone(),
                     detail: (*detail).to_owned(),
                     ssh: ssh.clone(),
-                },
+                }),
             };
         }
     }
@@ -408,7 +418,7 @@ fn explain_connect(config: &SshConfig, error: HostError) -> HostError {
 
 /// `explainWindowsHost`: a bootstrap that failed on a Windows host.
 async fn explain_windows(config: &SshConfig, error: HostError) -> HostError {
-    let Cause::Ssh(ssh) = &error.cause else {
+    let Cause::Ssh(ssh) = error.cause.as_ref() else {
         return error;
     };
     let Some(code) = ssh.exit_code else {
@@ -442,7 +452,7 @@ async fn explain_windows(config: &SshConfig, error: HostError) -> HostError {
     }
     HostError {
         step: error.step,
-        cause: Cause::Windows(ssh.clone()),
+        cause: Box::new(Cause::Windows(ssh.clone())),
     }
 }
 
@@ -470,7 +480,7 @@ pub(super) async fn bootstrap(
     .await
     .map_err(|error| HostError {
         step: mode.to_owned(),
-        cause: Cause::Ssh(error),
+        cause: Box::new(Cause::Ssh(error)),
     })
 }
 
@@ -482,7 +492,7 @@ pub(super) async fn probe(config: &SshConfig, owner: &str) -> Result<Value, Host
     };
     let reading = || HostError {
         step: "reading probe result".into(),
-        cause: Cause::Other,
+        cause: Box::new(Cause::Other),
     };
     let value: Value = serde_json::from_str(stdout.trim()).map_err(|error| {
         tracing::warn!(host = %config.id, %error, "Could not read the device host probe result");
@@ -509,7 +519,7 @@ pub(super) async fn probe(config: &SshConfig, owner: &str) -> Result<Value, Host
 
 /// `sshProbeFailureMessage`: what a failed probe tells the user.
 pub(super) fn probe_failure_message(error: &HostError) -> Option<String> {
-    let (cause, windows) = match &error.cause {
+    let (cause, windows) = match error.cause.as_ref() {
         Cause::Connect {
             reason,
             target,
@@ -544,6 +554,239 @@ pub(super) fn probe_failure_message(error: &HostError) -> Option<String> {
     ))
 }
 
+/// `Started`: what the bootstrap's `start` reports, with the host's ports.
+#[derive(Clone, Debug)]
+pub(super) struct Started {
+    pub node_path: String,
+    pub hub_port: u16,
+    pub daemon_port: Option<u16>,
+    pub token: Option<String>,
+    pub entry_path: Option<String>,
+    pub platforms: Value,
+    pub tools: Value,
+}
+
+/// `connectOnce`'s first half: the bootstrap's `start` (or `agent-start`),
+/// which installs and starts the hub (and agent daemon) on the host.
+pub(super) async fn start(
+    config: &SshConfig,
+    owner: &str,
+    agent: bool,
+) -> Result<Started, HostError> {
+    let (stdout, _) = bootstrap(config, owner, if agent { "agent-start" } else { "start" }).await?;
+    let reading = || HostError {
+        step: "reading host endpoints".into(),
+        cause: Box::new(Cause::Other),
+    };
+    let value: Value = serde_json::from_str(stdout.trim()).map_err(|_| reading())?;
+    let port = |key: &str| {
+        value[key]
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+    };
+    let (Some(node_path), Some(hub_port)) = (value["nodePath"].as_str(), port("hubPort")) else {
+        return Err(reading());
+    };
+    if !value["platforms"].is_array() || !value["helpers"].is_object() {
+        return Err(reading());
+    }
+    Ok(Started {
+        node_path: node_path.to_owned(),
+        hub_port,
+        daemon_port: port("daemonPort"),
+        token: value["token"].as_str().map(str::to_owned),
+        entry_path: value["entryPath"].as_str().map(str::to_owned),
+        platforms: value["platforms"].clone(),
+        tools: value["tools"].clone(),
+    })
+}
+
+/// The `ssh -L` connection that carries a host's hub (and agent daemon) here.
+pub(super) struct Tunnel {
+    pub child: tokio::process::Child,
+    /// Held so the remote `cat` sees EOF, and ssh exits, when this server goes.
+    _stdin: Option<tokio::process::ChildStdin>,
+    /// The end of ssh's stderr, for a forward that never answers.
+    pub stderr: Arc<std::sync::Mutex<String>>,
+}
+
+impl Tunnel {
+    pub fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
+fn host_error(step: &str, message: impl Into<String>) -> HostError {
+    let _ = message.into();
+    HostError {
+        step: step.to_owned(),
+        cause: Box::new(Cause::Other),
+    }
+}
+
+/// `net.reserveLoopbackPort`.
+fn reserve_port(step: &str) -> Result<u16, HostError> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|listener| listener.local_addr())
+        .map(|address| address.port())
+        .map_err(|error| host_error(step, error.to_string()))
+}
+
+/// `connectOnce`'s second half: forwards the host's ports to fresh loopback
+/// ports here and waits for them to answer.
+pub(super) async fn open_tunnel(
+    config: &SshConfig,
+    started: &Started,
+) -> Result<(Tunnel, u16, u16), HostError> {
+    let hub_port = reserve_port("reserving hub port")?;
+    let daemon_port = reserve_port("reserving daemon port")?;
+    let mut args = base_ssh_args(config.port);
+    args.extend(config.identity_args());
+    args.extend(
+        [
+            "-o",
+            "ExitOnForwardFailure=yes",
+            // Multiplexed clients exit after handing forwards to the master; own this connection.
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
+            "-o",
+            "ControlPersist=no",
+            "-o",
+            "ServerAliveInterval=10",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-T",
+            "-L",
+        ]
+        .map(String::from),
+    );
+    args.push(format!(
+        "127.0.0.1:{hub_port}:127.0.0.1:{}",
+        started.hub_port
+    ));
+    if let Some(remote) = started.daemon_port {
+        args.push("-L".into());
+        args.push(format!("127.0.0.1:{daemon_port}:127.0.0.1:{remote}"));
+    }
+    args.push(config.target.clone());
+    // The server holds the only write end of this stdin, so when it exits for any reason the
+    // remote `cat` sees EOF and ssh exits once its forwarded connections close.
+    args.extend([
+        "sh".into(),
+        "-c".into(),
+        quote_remote_arg("exec cat >/dev/null"),
+    ]);
+    let mut child = crate::login_shell::tokio_command("ssh")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| host_error("forwarding ports", error.to_string()))?;
+    let stdin = child.stdin.take();
+    let stderr = Arc::new(std::sync::Mutex::new(String::new()));
+    if let Some(mut pipe) = child.stderr.take() {
+        let stderr = stderr.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buffer = [0u8; 4096];
+            while let Ok(read) = pipe.read(&mut buffer).await {
+                if read == 0 {
+                    break;
+                }
+                let mut tail = stderr.lock().unwrap();
+                tail.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                let chars: Vec<char> = tail.chars().collect();
+                if chars.len() > 2000 {
+                    *tail = chars[chars.len() - 2000..].iter().collect();
+                }
+            }
+        });
+    }
+    let tunnel = Tunnel {
+        child,
+        _stdin: stdin,
+        stderr,
+    };
+    let mut endpoints = vec![(format!("http://127.0.0.1:{hub_port}"), "/readyz")];
+    if started.daemon_port.is_some() && started.token.is_some() && started.entry_path.is_some() {
+        endpoints.push((format!("http://127.0.0.1:{daemon_port}"), "/health"));
+    }
+    for (base, route) in endpoints {
+        wait_ready(&base, route, &tunnel.stderr).await?;
+    }
+    Ok((tunnel, hub_port, daemon_port))
+}
+
+/// `waitForHttpReady`: 15 seconds of probes, 100 ms apart.
+async fn wait_ready(
+    base: &str,
+    route: &str,
+    stderr: &std::sync::Mutex<String>,
+) -> Result<(), HostError> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(response) = client.get(format!("{base}{route}")).send().await {
+            if response.status().is_success() {
+                return Ok(());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let tail = stderr.lock().unwrap().clone();
+            return Err(host_error(
+                "waiting for SSH forward",
+                if tail.is_empty() {
+                    "Forwarded endpoint did not answer.".to_owned()
+                } else {
+                    tail
+                },
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// `deviceToolInstallMessage`.
+pub(super) fn install_message(name: &str, tool: &Value) -> String {
+    if !tool.is_object() {
+        return format!("Installing {name}…");
+    }
+    let required = tool["requiredVersion"].as_str().unwrap_or_default();
+    let installed: Vec<&str> = tool["installedVersions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let numeric = |version: &str| -> Vec<u64> {
+        version
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    };
+    let previous = tool["runningVersion"].as_str().or_else(|| {
+        installed
+            .iter()
+            .copied()
+            .max_by(|a, b| numeric(a).cmp(&numeric(b)))
+    });
+    match previous {
+        Some(previous) if !installed.contains(&required) => {
+            format!("Updating {name} from {previous} to {required}…")
+        }
+        _ => format!("Installing {name} {required}…"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,11 +811,12 @@ mod tests {
         };
         let failed = |code, stderr: &str| HostError {
             step: "probe".into(),
-            cause: Cause::Ssh(SshCommandError {
+            cause: Box::new(Cause::Ssh(SshCommandError {
                 exit_code: Some(code),
+                stdout: String::new(),
                 stderr: stderr.into(),
                 message: String::new(),
-            }),
+            })),
         };
         let explained = explain_connect(
             &config,

@@ -17,6 +17,8 @@ pub(crate) mod themes;
 mod thread_credentials;
 mod tools;
 pub use thread_credentials::ThreadScope;
+#[allow(unused_imports)]
+pub(crate) use tools::format_device_error;
 pub(crate) use tools::unserved_tool_names;
 pub(crate) use tools::{answer_matches, card_command};
 mod transport;

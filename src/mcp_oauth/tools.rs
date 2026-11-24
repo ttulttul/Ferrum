@@ -13,6 +13,8 @@ mod arguments;
 mod attachments;
 mod delegation;
 mod devices;
+#[allow(unused_imports)]
+pub(crate) use devices::format_device_error;
 mod forge;
 pub(crate) mod html;
 mod issues;
