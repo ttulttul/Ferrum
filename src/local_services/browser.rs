@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 use std::{
     borrow::Cow,
     collections::{HashMap, VecDeque},
-    env,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
@@ -190,50 +189,14 @@ impl Page {
     }
 }
 
-pub(super) fn executable() -> Option<PathBuf> {
-    if let Some(p) = env::var_os("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
-    {
-        return Some(p);
+/// The browser process a tab runs in: its own for an incognito tab, else its profile's.
+fn process_key(id: &str, snap: &Value) -> String {
+    match snap["profileId"].as_str().unwrap_or("default") {
+        "incognito" => format!("incognito/{id}"),
+        profile => format!("persistent/{profile}"),
     }
-    let home = env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let cache = env::var_os("PLAYWRIGHT_BROWSERS_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".cache/ms-playwright"));
-    let mut browsers: Vec<_> = std::fs::read_dir(cache)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|d| d.file_name().to_string_lossy().starts_with("chromium"))
-        .map(|d| d.path())
-        .collect();
-    browsers.sort();
-    for p in browsers.into_iter().rev() {
-        for file in [
-            "chrome-headless-shell-linux64/chrome-headless-shell",
-            "chrome-linux64/chrome",
-            "chrome-linux/chrome",
-            "chrome-headless-shell-mac-arm64/chrome-headless-shell",
-            "chrome-headless-shell-win64/chrome-headless-shell.exe",
-        ] {
-            if p.join(file).is_file() {
-                return Some(p.join(file));
-            }
-        }
-    }
-    env::split_paths(&crate::login_shell::path().unwrap_or_default()).find_map(|p| {
-        [
-            "chromium",
-            "chromium-browser",
-            "google-chrome",
-            "chrome.exe",
-        ]
-        .into_iter()
-        .map(|n| p.join(n))
-        .find(|p| p.is_file())
-    })
 }
+
 impl Browsers {
     pub fn page(&self, thread: &str, tab: &str) -> Option<Page> {
         self.pages.get(tab).filter(|p| p.thread == thread).cloned()
@@ -259,20 +222,40 @@ impl Browsers {
             .cloned()
             .or_else(|| (explicit.is_none() && recording.len() == 1).then(|| recording[0].clone()))
     }
-    pub async fn open(&mut self, dir: &Path, snap: &Value) -> Option<Page> {
-        let id = snap["tabId"].as_str()?;
+    /// The tab's page, launching its browser if need be. `Err(Some(message))`
+    /// when the browser is not installed yet (`PreviewBrowser.executable`),
+    /// `Err(None)` when the tab could not be opened otherwise.
+    pub async fn open(&mut self, dir: &Path, snap: &Value) -> Result<Page, Option<String>> {
+        let id = snap["tabId"].as_str().ok_or(None)?;
         if let Some(page) = self.pages.get(id) {
-            return Some(page.clone());
+            return Ok(page.clone());
         }
+        let executable = if self.processes.contains_key(&process_key(id, snap)) {
+            None
+        } else {
+            let home = crate::config::state_base_dir(dir);
+            Some(
+                crate::preview_browser::for_home(home)
+                    .executable()
+                    .await
+                    .map_err(|error| Some(error.message()))?,
+            )
+        };
+        self.launch(dir, snap, executable).await.ok_or(None)
+    }
+
+    async fn launch(
+        &mut self,
+        dir: &Path,
+        snap: &Value,
+        executable: Option<PathBuf>,
+    ) -> Option<Page> {
+        let id = snap["tabId"].as_str()?;
         let profile_id = snap["profileId"].as_str().unwrap_or("default");
         let ephemeral = profile_id == "incognito";
-        let key = if ephemeral {
-            format!("incognito/{id}")
-        } else {
-            format!("persistent/{profile_id}")
-        };
+        let key = process_key(id, snap);
         if !self.processes.contains_key(&key) {
-            let executable = executable()?;
+            let executable = executable?;
             let path = if ephemeral {
                 dir.join("server-browser/scratch")
                     .join(Uuid::new_v4().to_string())

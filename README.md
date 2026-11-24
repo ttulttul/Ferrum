@@ -55,8 +55,7 @@ Most suites match the original exactly; the few expected differences are listed 
 - **Pull request changes.** Agents can read pull requests and CI, but can't open, update, review, respond to or merge one, or re-run CI (`pull_request_create`, `pull_request_update`, `pull_request_review`, `pull_request_respond`, `pull_request_merge`, `ci_rerun`).
 - **Devices.** Agents can use simulators and emulators on this machine, on SSH device hosts and from Simlock pools (alpha), but not on Expo hosts yet (they are listed, and accounts can be checked). Device detail and actions (settings, foreground app) work on this machine only.
 - **Delegated tasks.** On the embeddable control plane a child can't run in its own worktree (`isolation: "worktree"`), and a follow-up sent to a child on a linked machine isn't tracked as a task.
-- **Codex skills.** `orchestrator_capabilities` doesn't rescan the project's Codex skills, as the original does (upstream #39247).
-- **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing. So are browser setup hints and installing a browser when none is found.
+- **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing. So are the setup hints shown when the browser cannot start.
 - **Secrets in schedules.** A scheduled task can't use a secret yet, and the embeddable control plane stores no secrets.
 - **Claude workflows.** Rust's Claude sessions run no workflow tasks.
 
@@ -185,7 +184,7 @@ Parity runs stay off the network. `server_env()` in `scripts/parity_harness.py` 
 - npm releases: a loopback registry through `npm_config_registry`, read by the npm CLI.
 - The ACP Registry: a seeded `caches/acp-registry/registry.json`. Both servers fall back to it when the registry's fixed HTTPS URL is refused.
 - Provider release lookups in `provider_status_parity.py`: fake `npm`, `mise` and the like on `PATH`, and a loopback HTTPS proxy (`scripts/fake_https_proxy.py`) with a test CA both servers trust through `NODE_EXTRA_CA_CERTS`. It answers registry.npmjs.org and the Codex, Claude and Muse Code release channels, and forwards nothing.
-- The preview browser: the reference's pinned `chrome-headless-shell` folder, linked to the Playwright headless shell the Rust server runs, so nothing is downloaded.
+- The preview browser: both servers' pinned `chrome-headless-shell` folder, linked to the Playwright headless shell, so nothing is downloaded.
 
 Some targets are still refused. Each has no setting that points it elsewhere, and both servers handle the failure the same way:
 

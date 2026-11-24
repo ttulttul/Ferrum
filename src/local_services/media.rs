@@ -467,7 +467,7 @@ async fn preview(State(state): State<Arc<AppState>>, req: Request) -> Response {
                 .tab(thread, tab)
                 .filter(|s| s["runtime"] == "server");
             if let Some(snap) = snapshot {
-                let page = browsers.open(&state.data_dir, &snap).await;
+                let page = browsers.open(&state.data_dir, &snap).await.ok();
                 drop(browsers);
                 if let Some(page) = page {
                     return ws.on_upgrade(move |socket| async move {

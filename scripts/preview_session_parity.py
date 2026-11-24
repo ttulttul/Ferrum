@@ -13,6 +13,10 @@ A fake Codex turn calls the tools on the MCP server its server gave it:
   page changed, the recording stopped, and a second stop;
 - a status for a tab that does not exist.
 
+Then, on fresh homes with no browser installed: a tab opened, a page previewed, the tab opened
+again and a status. Each server tries to install its pinned headless shell, the refusing proxy
+refuses the download, and both must answer with the same install error and leave no tab.
+
 Compared: every answer, with tab ids, times, ports and homes masked, and for a recording its
 type, size range, the attachment it became and that the file is a playable video container.
 Both servers launch the same headless shell from the Playwright cache, as the preview suite
@@ -32,10 +36,12 @@ from time import monotonic, sleep
 
 from client_thread_parity import FIXTURES, rpc, scenario_env, seed_turn
 from parity_harness import REFUSED, assert_nothing_escaped, managed_server
-from preview_provider_parity import seed_reference_browser
+from preview_provider_parity import seed_browser
 
 # What both servers fetch at start-up, which the harness's refusing proxy refuses (parity_harness).
 STARTUP_FETCHES = {"raw.githubusercontent.com:443", "registry.npmjs.org:443"}
+# The pinned headless shell's download, which the no-browser phase starts.
+BROWSER_DOWNLOAD = "storage.googleapis.com:443"
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z")
 
@@ -84,6 +90,15 @@ def steps(page):
         ("preview_recording_stop", {}),
         ("preview_recording_stop", {}),
         ("preview_status", {"tabId": "tab-missing"}),
+    ]
+
+
+def no_browser_steps(page):
+    return [
+        ("preview_open", {"url": page, "open": False}),
+        ("html_preview", {"html": "<!doctype html><p>No browser yet</p>"}),
+        ("preview_open", {"url": page, "open": False}),
+        ("preview_status", {}),
     ]
 
 
@@ -138,15 +153,15 @@ def comparable(answer, home, port, tabs):
     return json.loads(TIME.sub("<time>", UUID.sub("<uuid>", text)))
 
 
-def run(name, command, args, directory, page, port):
+def run(name, command, args, directory, page, port, plan=None, browser=True):
     root = Path(directory, name)
     (root / ".cache").mkdir(parents=True)
-    (root / ".cache/ms-playwright").symlink_to(args.browser_cache.resolve(), target_is_directory=True)
-    if name == "original":
-        seed_reference_browser(root, args.reference_root, args.browser_cache)
+    if browser:
+        (root / ".cache/ms-playwright").symlink_to(args.browser_cache.resolve(), target_is_directory=True)
+        seed_browser(root, args.reference_root, args.browser_cache)
     scenario = {"name": "preview session tools", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"}
     env, _, log = scenario_env(Path(directory), name, root, scenario, {"codex"})
-    plan = steps(page)
+    plan = plan or steps(page)
     turn = json.loads((FIXTURES / "codex_turn.json").read_text())
     started = next(i for i, step in enumerate(turn["steps"]) if step.get("send", {}).get("method") == "turn/started")
     turn["steps"][started + 1:started + 1] = [
@@ -182,25 +197,38 @@ def main():
         with TemporaryDirectory() as directory:
             for name, command in (("original", args.original_command), ("rust", args.rust_command)):
                 results[name], calls = run(name, command, args, directory, page, server.server_port)
+            for name, command in (("original", args.original_command), ("rust", args.rust_command)):
+                results[f"{name} without a browser"], bare = run(
+                    f"{name}-bare", command, args, directory, page, server.server_port,
+                    plan=no_browser_steps(page), browser=False)
     finally:
         server.shutdown()
     # Every server (and the browsers they launched) sent its HTTP(S) through the loopback refusing
     # proxy; what it refused is only the servers' start-up fetches, never a page's request.
     assert_nothing_escaped()
-    refused = sorted({entry.split(" ", 1)[1] for entry in REFUSED} - STARTUP_FETCHES)
+    refused = sorted({entry.split(" ", 1)[1] for entry in REFUSED} - STARTUP_FETCHES - {BROWSER_DOWNLOAD})
     if refused:
         print(f"FAIL requests besides the servers' start-up fetches reached the refusing proxy: {refused}")
         return 1
     if args.dump:
         args.dump.write_text(json.dumps(results, indent=1, sort_keys=True))
     failures = 0
-    for index, ((tool, _), left, right) in enumerate(zip(calls, results["original"], results["rust"], strict=True)):
+    checks = [(f"{index + 1} {tool}", left, right)
+              for index, ((tool, _), left, right) in enumerate(zip(calls, results["original"], results["rust"], strict=True))]
+    checks += [(f"without a browser {index + 1} {tool}", left, right)
+               for index, ((tool, _), left, right) in enumerate(zip(
+                   bare, results["original without a browser"], results["rust without a browser"], strict=True))]
+    for name, left, right in checks:
         same = left == right
         failures += not same
-        print(f"{'PASS' if same else 'FAIL'} {index + 1} {tool}")
+        print(f"{'PASS' if same else 'FAIL'} {name}")
         if not same:
             print(f"  original {json.dumps(left)[:3000]}\n  rust     {json.dumps(right)[:3000]}")
-    print(f"{len(calls) - failures}/{len(calls)} preview session checks matched across the reference and the Rust server")
+    # The reference must really have tried, and failed, to install its browser.
+    if "could not install its headless browser" not in json.dumps(results["original without a browser"][0]):
+        failures += 1
+        print("FAIL without a browser: the reference did not report a failed install")
+    print(f"{len(checks) - failures}/{len(checks)} preview session checks matched across the reference and the Rust server")
     return int(failures != 0)
 
 

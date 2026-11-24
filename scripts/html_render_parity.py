@@ -36,7 +36,7 @@ from PIL import Image
 
 from client_thread_parity import FIXTURES, rpc, scenario_env, seed_turn
 from parity_harness import REFUSED, assert_nothing_escaped, managed_server
-from preview_provider_parity import seed_reference_browser
+from preview_provider_parity import seed_browser
 
 # What both servers fetch at start-up, which the harness's refusing proxy refuses (parity_harness).
 STARTUP_FETCHES = {"raw.githubusercontent.com:443", "registry.npmjs.org:443"}
@@ -158,8 +158,7 @@ def run(name, command, args, directory, work, loopback):
     root = Path(directory, name)
     (root / ".cache").mkdir(parents=True)
     (root / ".cache/ms-playwright").symlink_to(args.browser_cache.resolve(), target_is_directory=True)
-    if name == "original":
-        seed_reference_browser(root, args.reference_root, args.browser_cache)
+    seed_browser(root, args.reference_root, args.browser_cache)
     scenario = {"name": "html tools", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"}
     env, _, log = scenario_env(Path(directory), name, root, scenario, {"codex"})
     calls = cases(work, loopback)
