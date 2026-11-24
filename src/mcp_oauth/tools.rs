@@ -1022,8 +1022,113 @@ async fn workflow<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> O
         })
 }
 
+/// `OrchestratorMcpService.scheduleTask`: a new task, saved as the client's
+/// `scheduledTasks.upsert` saves one (so a webhook task gets its URL token and
+/// signing secret, a `secretRef` spent for it), bound to the caller's thread in
+/// its own project, at the caller's modes.
+async fn create_scheduled_task<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    args: &Value,
+) -> Outcome {
+    let (Some(prompt), Some(schedule)) = (
+        args["prompt"].as_str(),
+        args.get("schedule").filter(|value| value.is_object()),
+    ) else {
+        return Err(failure(
+            "invalid_request",
+            "A new scheduled task needs `prompt` and `schedule`.",
+        ));
+    };
+    let project = args["projectId"]
+        .as_str()
+        .or_else(|| {
+            caller
+                .thread
+                .as_ref()
+                .map(|thread| thread.project_id.as_str())
+        })
+        .ok_or_else(|| {
+            failure(
+                "invalid_request",
+                "projectId is required outside a project thread.",
+            )
+        })?;
+    let own_project = caller
+        .thread
+        .as_ref()
+        .is_some_and(|thread| thread.project_id == project);
+    let bind = args["bindToCurrentThread"].as_bool().unwrap_or(own_project);
+    if bind && !own_project {
+        return Err(failure(
+            "invalid_request",
+            if caller.thread.is_none() {
+                "bindToCurrentThread needs an agent running inside a T3 thread."
+            } else {
+                "bindToCurrentThread binds to this thread, which belongs to a different project."
+            },
+        ));
+    }
+    // The first line, at most 80 UTF-16 units, never ending on a lone high surrogate.
+    let mut units: Vec<u16> = prompt
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .encode_utf16()
+        .take(80)
+        .collect();
+    if units
+        .last()
+        .is_some_and(|unit| (0xD800..0xDC00).contains(unit))
+    {
+        units.pop();
+    }
+    let derived = String::from_utf16_lossy(&units);
+    let title = args["title"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or(if derived.is_empty() {
+            "Scheduled task".to_owned()
+        } else {
+            derived
+        });
+    let (runtime, interaction) = caller.limits();
+    let thread_id = bind
+        .then(|| caller.thread.as_ref().map(|thread| thread.id.clone()))
+        .flatten();
+    let mut input = json!({
+        "title": title,
+        "prompt": prompt,
+        "enabled": args["enabled"].as_bool().unwrap_or(true),
+        "schedule": schedule,
+        "projectId": project,
+        "threadId": thread_id,
+        "threadMode": if args["freshSession"] == true { "fresh_session" } else if bind { "continue" } else { "new_thread" },
+        "workspaceStrategy": {"type": "root"},
+        "modelSelection": caller.thread.as_ref().map(|thread| json!({"instanceId": thread.provider_instance_id, "model": thread.model})).unwrap_or(json!({"instanceId": "codex", "model": ""})),
+        "runtimeMode": runtime,
+        "interactionMode": interaction,
+        "createdBy": "agent",
+        "creationSource": "mcp",
+    });
+    if let Some(key) = args["clientRequestId"].as_str() {
+        input["commandId"] = json!(delegation::stable_command_id(caller, "schedule-task", key));
+    }
+    let task = host.scheduled_task_save(input).await.map_err(|message| {
+        failure(
+            "orchestration_error",
+            format!("Could not schedule task: {message}"),
+        )
+    })?;
+    Ok(scheduled_task_summary(&task))
+}
+
 async fn schedule_task<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
     caller.refuse_read_only()?;
+    if args.get("scheduledTaskId").is_none() {
+        return create_scheduled_task(host, caller, args).await;
+    }
     let project = args["projectId"]
         .as_str()
         .or_else(|| {

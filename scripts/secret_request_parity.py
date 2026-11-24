@@ -11,7 +11,10 @@ server gave it:
 - a pasted `value`, which goes straight to a file, then again with the same
   key and another value, then with `delivery: "secretRef"` (refused);
 - a retry of the saved cards with the same keys once they are answered;
-- one more asked mid-turn and left open, which closes when the run ends.
+- one more asked mid-turn and left open, which closes when the run ends;
+- `schedule_task` for a webhook task whose signature check takes the saved
+  card's `secretRef`, which the save spends: again with the spent ref, the same
+  save replayed (its `clientRequestId`), and a ref that is not one.
 
 The user answers through `secrets.answerRequest`:
 - a secret provider that cannot read (no secret provider is configured, so
@@ -20,7 +23,9 @@ The user answers through `secrets.answerRequest`:
 - an empty secret, a card answered twice, requests naming no card or no
   thread, and an answer after its run ended.
 
-Compared: every MCP answer and `answerRequest` reply, the cards in the
+Compared: every MCP answer and `answerRequest` reply, the webhook tasks
+saved and how their URL answers a delivery signed with the saved secret
+(trimmed or as typed) or with another, the cards in the
 thread's projection and where each sits in the timeline, the files the agent
 was given (contents and mode), and what the secrets directory keeps. Refs and
 file names are compared by form, as each server's salt differs. All data is
@@ -29,6 +34,8 @@ generated keys and a fake CLI.
 """
 import argparse
 from contextlib import ExitStack
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -37,9 +44,11 @@ import secrets
 from tempfile import TemporaryDirectory
 import time
 
+from websockets.sync.client import connect
+
 from client_thread_parity import FAKE_CLAUDE, FIXTURES, GIT_ISOLATION, THREAD, agent_mcp, comparable_mcp, seed_turn
 from link_request_parity import Server, TIME, UUID, wait_runs
-from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, isolated_git_env, path_without
+from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, http, isolated_git_env, path_without
 
 SCENARIO = {"name": "claude secret request", "instance": "claudeAgent", "model": "claude-opus-5-5"}
 REF = re.compile(r"secret-ref:[0-9a-f]{32}")
@@ -123,6 +132,47 @@ def kept(root):
     return sorted(out, key=lambda e: json.dumps(e, sort_keys=True))
 
 
+def first_chunk(server, tag):
+    """The first value a stream sends, read on a connection of its own."""
+    with connect(server.url.replace("http", "ws", 1) + "/ws?orchestrationProtocol=2",
+                 additional_headers={"Cookie": server.cookie}, compression=None, proxy=None) as socket:
+        socket.send(encode(dict(_tag="Request", id="first", tag=tag, payload={}, headers=[])).decode())
+        while True:
+            frame = json.loads(socket.recv(timeout=30))
+            if frame.get("_tag") == "Ping":
+                socket.send(encode({"_tag": "Pong"}).decode())
+            elif frame.get("_tag") == "Chunk":
+                return frame["values"][0]
+            elif frame.get("_tag") == "Exit":
+                return frame["exit"]
+
+
+def webhooks(server):
+    """The webhook tasks the agent saved, and what their URL answers a delivery signed with the
+    saved secret, trimmed or as typed, or with another. Each delivery says it was received an
+    hour ago, past the task's minute, so a delivery whose signature passes is turned away as too
+    old instead of starting a run."""
+    tasks = first_chunk(server, "scheduledTasks.subscribe")
+    tasks = tasks.get("tasks", []) if isinstance(tasks, dict) else []
+    hooks = [task for task in tasks if task["schedule"]["type"] == "webhook"]
+    record = {"webhook tasks": sorted(
+        ({k: task.get(k) for k in ("title", "prompt", "enabled", "schedule", "threadMode", "runtimeMode",
+                                    "interactionMode", "createdBy", "creationSource", "workspaceStrategy")}
+         | {"hasSecret": task.get("webhook", {}).get("hasSecret")} for task in hooks),
+        key=lambda task: json.dumps(task, sort_keys=True))}
+    body = b'{"event":"fixture"}'
+    received = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+    for task in hooks:
+        for name, secret in (("trimmed secret", "fixture-secret-save"), ("secret as typed", "  fixture-secret-save  "),
+                             ("another secret", "not-the-secret")):
+            digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+            status, _, answer = http(server.url, "POST", task["webhook"]["path"], body, {
+                "content-type": "application/json", "x-fixture-signature": f"sha256={digest}",
+                "x-t3-relay-received-at": received})
+            record[f"delivery signed with the {name}"] = [status, json.loads(answer or b"null")]
+    return record
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-command", required=True)
@@ -176,6 +226,7 @@ def main():
                 record["cards after the turn"] = cards(final)
                 record["timeline"] = timeline(final)
                 record["secrets kept"] = kept(root)
+                record.update(webhooks(server))
                 results[side] = mask(record, server, tmp)
                 raws[side] = mask({k: final.get(k) for k in ("turnItems", "runs")}, server, tmp)
     if args.dump:

@@ -3832,8 +3832,10 @@
       "stream": true,
       "auth": "session (orchestration:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "secret_request_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [
         "connect.scheduledTasks.subscribe"
       ],
@@ -7378,6 +7380,7 @@
         "provider_status_parity.py",
         "relay_client_parity.py",
         "rpc_edge_parity.py",
+        "secret_request_parity.py",
         "settings_mutation_parity.py",
         "settings_secrets_parity.py",
         "source_control_clone_parity.py",

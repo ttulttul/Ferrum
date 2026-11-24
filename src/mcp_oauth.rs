@@ -310,6 +310,12 @@ pub trait McpHost: AuthHost {
             ))
         })
     }
+    /// `ScheduledTaskService.upsert`, as the client's `scheduledTasks.upsert`
+    /// saves a task: the saved task as the server shows it, or the failure's
+    /// message. Hosts that keep no tasks leave it unavailable.
+    fn scheduled_task_save(self: &Arc<Self>, _input: Value) -> HostFuture<Result<Value, String>> {
+        Box::pin(async { Err("Could not save schedule task.".to_owned()) })
+    }
     /// `claimPreviewRecording`: the recording a stopped preview left as a
     /// pending attachment, moved to `thread_id`'s attachments; the artifact,
     /// or the failure's message.

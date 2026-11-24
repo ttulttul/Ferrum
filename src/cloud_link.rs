@@ -385,6 +385,59 @@ fn origin_value(origin: &LocalOrigin) -> Value {
     json!({"localHttpHost": origin.host, "localHttpPort": origin.port})
 }
 
+/// `RELAY_HOOK_DELIVERY_TYP`: the relay's signed proof of a webhook delivery it forwards.
+const RELAY_HOOK_DELIVERY_TYP: &str = "t3-relay-hook-delivery+jwt";
+/// How old a delivery proof may be: the relay's 24-hour hold plus a margin.
+const MAX_DELIVERY_PROOF_AGE_SECONDS: i64 = 25 * 60 * 60;
+
+/// `RelayDeliveryProof.verify`: the relay's delivery id and receive time of a
+/// webhook request, only when it carries the relay's proof (an EdDSA JWT from
+/// the cloud mint key, for this environment, naming exactly this delivery and
+/// hook). Without one the request is a direct one: its relay headers count for
+/// nothing.
+pub(crate) fn relay_delivery(
+    secrets: &Path,
+    environment_id: &str,
+    proof: Option<&str>,
+    delivery_id: Option<&str>,
+    received_at: Option<&str>,
+    hook_id: &str,
+) -> Option<(String, String)> {
+    use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+    let (proof, delivery_id, received_at) = (proof?, delivery_id?, received_at?);
+    let public_key = read_secret_string(secrets, CLOUD_MINT_PUBLIC_KEY)?;
+    let issuer = read_secret_string(secrets, RELAY_ISSUER_SECRET)
+        .or_else(|| read_secret_string(secrets, RELAY_URL_SECRET))?;
+    let key = DecodingKey::from_ed_pem(public_key.replace("\\n", "\n").as_bytes()).ok()?;
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.set_required_spec_claims(&["exp", "iss", "sub", "aud"]);
+    validation.set_issuer(&[normalize_relay_issuer(&issuer)]);
+    validation.set_audience(&[format!("t3-env:{environment_id}")]);
+    validation.leeway = 60;
+    let token = decode::<Value>(proof, &key, &validation).ok()?;
+    if token.header.typ.as_deref() != Some(RELAY_HOOK_DELIVERY_TYP) {
+        return None;
+    }
+    let claims = token.claims;
+    let now = crate::platform::now_ms() / 1000;
+    let issued = claims["iat"].as_i64()?;
+    if issued > now + 60 || now - issued > MAX_DELIVERY_PROOF_AGE_SECONDS + 60 {
+        return None;
+    }
+    let named = |key: &str| {
+        claims[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    named("jti")?;
+    let exact = claims["environmentId"] == environment_id
+        && named("deliveryId") == Some(delivery_id)
+        && named("receivedAt") == Some(received_at)
+        && named("hookId") == Some(hook_id);
+    exact.then(|| (delivery_id.to_owned(), received_at.to_owned()))
+}
+
 /// `normalizeRelayIssuer`.
 fn normalize_relay_issuer(value: &str) -> String {
     value.trim().trim_end_matches('/').to_owned()
@@ -1548,6 +1601,64 @@ fn id_token_identity(id_token: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_headers_count_only_with_the_relays_proof() {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        let dir = tempfile::tempdir().unwrap();
+        let mint = SigningKey::from_bytes(&[7u8; 32]);
+        let public = mint
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        write_secret(dir.path(), CLOUD_MINT_PUBLIC_KEY, public.as_bytes()).unwrap();
+        write_secret(dir.path(), RELAY_URL_SECRET, b"https://relay.example/").unwrap();
+        let sign = |key: &SigningKey, claims: Value| {
+            let mut header = Header::new(jsonwebtoken::Algorithm::EdDSA);
+            header.typ = Some(RELAY_HOOK_DELIVERY_TYP.to_owned());
+            let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+            encode(
+                &header,
+                &claims,
+                &EncodingKey::from_ed_pem(pem.as_bytes()).unwrap(),
+            )
+            .unwrap()
+        };
+        let now = crate::platform::now_ms() / 1000;
+        let claims = json!({"iss": "https://relay.example", "aud": "t3-env:env-1", "sub": "relay",
+            "jti": "j1", "iat": now, "exp": now + 3600, "environmentId": "env-1",
+            "deliveryId": "d1", "receivedAt": "2026-11-24T00:00:00Z", "hookId": "task-1"});
+        let proof = sign(&mint, claims.clone());
+        let check = |proof: &str, delivery: &str, hook: &str| {
+            relay_delivery(
+                dir.path(),
+                "env-1",
+                Some(proof),
+                Some(delivery),
+                Some("2026-11-24T00:00:00Z"),
+                hook,
+            )
+        };
+        assert_eq!(
+            check(&proof, "d1", "task-1"),
+            Some(("d1".into(), "2026-11-24T00:00:00Z".into()))
+        );
+        assert_eq!(
+            relay_delivery(
+                dir.path(),
+                "env-1",
+                None,
+                Some("d1"),
+                Some("2026-11-24T00:00:00Z"),
+                "task-1"
+            ),
+            None
+        );
+        assert_eq!(check(&proof, "d1", "task-2"), None);
+        assert_eq!(check(&proof, "d2", "task-1"), None);
+        let forged = sign(&SigningKey::from_bytes(&[9u8; 32]), claims);
+        assert_eq!(check(&forged, "d1", "task-1"), None);
+    }
     use crate::managed_endpoint::RuntimeOptions;
     use axum::{
         extract::State,

@@ -234,9 +234,15 @@ schemas.
    owner-only `secret-request-<hex>.bin`, and for `delivery: "file"` or a pasted `value` an
    owner-only file under `files/`. A secret provider answer reads the value once through the
    settings' resolver. `scripts/secret_request_parity.py` compares it all with dummy values.
-   Values unused after 24 hours, and files given out longer ago, are swept hourly. Not yet:
-   `schedule_task` does not spend a `secretRef` (its webhook signing is not ported), and the
-   control plane keeps no secrets (`request_secret` there cannot store one).
+   Values unused after 24 hours, and files given out longer ago, are swept hourly. A new
+   `schedule_task` is saved as the client's `scheduledTasks.upsert` saves a task, so a webhook
+   task gets its URL token and signing secret; a signature's `secretRef` is spent by that save
+   (one use, for its project; a replayed save keeps the secret it stored), and the suite checks
+   which secret the task's URL then accepts. A webhook request's relay headers (its delivery id
+   and receive time, which `maxDeliveryAgeMinutes` checks) count only with the relay's signed
+   delivery proof (`RelayDeliveryProof`). Not yet: the control plane keeps no secrets
+   (`request_secret` there cannot store one), a relay delivery sent twice is not yet answered as
+   a duplicate, and updating a task with `schedule_task` still writes it directly.
 4e. **HTML pages** (served, native server only): `html_preview` and `html_render` work as the
    reference's `HtmlRender` does (`src/html_render.rs`). A page given inline, or as a file by a
    full-access thread, is checked (a regular, singly linked `.html` file outside the server's

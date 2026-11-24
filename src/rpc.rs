@@ -2780,7 +2780,7 @@ fn random_webhook_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
+pub(crate) async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
     let now = crate::auth_service::now();
     let id = params["id"]
         .as_str()
@@ -2825,39 +2825,29 @@ async fn scheduled_task_upsert(state: &Arc<AppState>, params: &Value) -> Reply {
             .unwrap_or(Value::Null)
     };
     let schedule = scheduled_task_schedule(&params["schedule"], existing.as_ref());
+    // A secretRef is a value the user entered for an agent; this save consumes
+    // it, so it cannot be used again. A replay of a save that already used it
+    // keeps the secret that save stored. A ref, when given, is the only source.
     let webhook_secret =
         if schedule["type"] == "webhook" && params["schedule"]["signature"].is_object() {
             let signature = &params["schedule"]["signature"];
-            let from_ref = if signature["secret"].is_null() {
-                if let Some(reference) = signature.get("secretRef") {
-                    if let Ok(settings) = state.settings.internal() {
-                        state
-                            .settings
-                            .resolver
-                            .resolve(
-                                &settings,
-                                reference,
-                                crate::settings::secrets::ReadMode::Check,
-                            )
-                            .await
-                    } else {
-                        None
+            let stored = existing
+                .as_ref()
+                .and_then(|task| task["_webhookSecret"].as_str().map(str::to_owned));
+            let replay = params["commandId"].is_string() && stored.is_some();
+            let provided = match signature.get("secretRef").and_then(Value::as_str) {
+                Some(reference) => {
+                    let consumed = crate::secret_requests::Store::new(state.paths.secrets.clone())
+                        .consume(reference, params["projectId"].as_str().unwrap_or_default());
+                    match consumed {
+                        Ok(value) => Some(value),
+                        Err(_) if replay => None,
+                        Err(failure) => return scheduled_task_error(failure.message(), Some(&id)),
                     }
-                } else {
-                    None
                 }
-            } else {
-                None
+                None => signature["secret"].as_str().map(str::to_owned),
             };
-            signature["secret"]
-                .as_str()
-                .map(str::to_owned)
-                .or(from_ref)
-                .or_else(|| {
-                    existing
-                        .as_ref()
-                        .and_then(|task| task["_webhookSecret"].as_str().map(str::to_owned))
-                })
+            provided.or(stored)
         } else {
             None
         };
