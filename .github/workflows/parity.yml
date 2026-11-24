@@ -167,7 +167,6 @@ jobs:
           key: parity-python-ubuntu-24.04-${{ steps.keys.outputs.python }}-${{ hashFiles('scripts/parity-requirements.txt') }}
       - name: Prepare the reference environment
         env:
-          BROWSER: ${{ matrix.browser }}
           FAKETIME_CACHED: ${{ steps.faketime.outputs.cache-hit }}
           PYTHON_CACHED: ${{ steps.python.outputs.cache-hit }}
         run: |
@@ -183,26 +182,43 @@ jobs:
           # pnpm 12 completes the workspace install on the first `exec`; the reference does not
           # run without it (Cannot find package 'effect').
           pnpm --dir reference --filter t3 exec node --version
-          if [ "$BROWSER" = true ]; then
-            # Downloads only the browsers the cache does not have; the system libraries always.
-            pnpm --dir reference --filter t3 exec playwright-core install --with-deps chromium
-            # Permit the installed test browser to start its user-namespace sandbox on Ubuntu.
-            shell_path=$(find "$HOME/.cache/ms-playwright" -type f -name chrome-headless-shell -print -quit)
-            test -x "$shell_path"
-            printf '%s\n' \
-              'abi <abi/4.0>,' \
-              'include <tunables/global>' \
-              "profile t3-parity-playwright \"$shell_path\" flags=(unconfined) { userns, }" \
-              'profile t3-chrome-headless-shell /**/tools/chrome-headless-shell/*/*/chrome-headless-shell flags=(unconfined) { userns, }' \
-              > "$RUNNER_TEMP/browser.apparmor"
-            sudo install -m 644 "$RUNNER_TEMP/browser.apparmor" /etc/apparmor.d/t3-chrome-headless-shell
-            sudo apparmor_parser -r /etc/apparmor.d/t3-chrome-headless-shell
-          fi
           if [ "$PYTHON_CACHED" != true ]; then
             python3 -m venv "$RUNNER_TEMP/parity-python"
             "$RUNNER_TEMP/parity-python/bin/pip" install -r scripts/parity-requirements.txt
           fi
           echo "$RUNNER_TEMP/parity-python/bin" >> "$GITHUB_PATH"
+      # Its own step, so a stuck Ubuntu mirror fails it fast and retries instead of using up the job.
+      - name: Install the test browser
+        if: matrix.browser
+        timeout-minutes: 8
+        run: |
+          # Downloads only the browser the cache does not have.
+          pnpm --dir reference --filter t3 exec playwright-core install chromium
+          shell_path=$(find "$HOME/.cache/ms-playwright" -type f -name chrome-headless-shell -print -quit)
+          test -x "$shell_path"
+          # The system libraries, only when the browser lacks some. apt gives up on a mirror that
+          # stops answering, each try has 3 minutes, and a failed try is retried once.
+          if ldd "$shell_path" | grep -q 'not found'; then
+            printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' \
+              | sudo tee /etc/apt/apt.conf.d/80-parity-timeouts > /dev/null
+            for attempt in 1 2; do
+              if timeout --kill-after=15 180 pnpm --dir reference --filter t3 exec playwright-core install-deps chromium; then
+                break
+              elif [ "$attempt" = 2 ]; then
+                exit 1
+              fi
+              echo "::warning::Installing the browser's system libraries failed or timed out; trying again."
+            done
+          fi
+          # Permit the installed test browser to start its user-namespace sandbox on Ubuntu.
+          printf '%s\n' \
+            'abi <abi/4.0>,' \
+            'include <tunables/global>' \
+            "profile t3-parity-playwright \"$shell_path\" flags=(unconfined) { userns, }" \
+            'profile t3-chrome-headless-shell /**/tools/chrome-headless-shell/*/*/chrome-headless-shell flags=(unconfined) { userns, }' \
+            > "$RUNNER_TEMP/browser.apparmor"
+          sudo install -m 644 "$RUNNER_TEMP/browser.apparmor" /etc/apparmor.d/t3-chrome-headless-shell
+          sudo apparmor_parser -r /etc/apparmor.d/t3-chrome-headless-shell
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: parity-build
