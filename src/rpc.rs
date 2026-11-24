@@ -3515,7 +3515,7 @@ pub(crate) async fn create_new_project(state: &AppState, name: &str) -> Result<V
         id: id.clone(),
         name: name.into(),
         path: created.workspace_root.to_string_lossy().into_owned(),
-        created_at: crate::now(),
+        created_at: crate::store::project_now(),
     };
     let row = crate::projects::wire(&project);
     if state

@@ -346,6 +346,26 @@ def main():
             pass
         same("reference opens the Rust server's database without migrating", rust_schema, schema(database(rust_home)))
 
+        # Projects created within one second keep the order they were made in: both servers
+        # store a project's creation time in milliseconds, so the shell lists them, and the
+        # database orders them, by when they were made rather than by their (random) ids.
+        def same_second(command, home):
+            with running(command, home, credentials) as (url, cookie):
+                for name in ("Zeta", "Alpha", "Mu"):
+                    rpc(url, cookie, "projects.createNew", {"name": name})
+                    time.sleep(0.01)
+                status, _, body = http(url, "GET", "/api/orchestration/shell", headers={"Cookie": cookie, **HEADERS})
+                assert status == 200, (status, body[:400])
+                listed = [row["title"] for row in json.loads(body).get("projects", [])]
+            with sqlite3.connect(f"file:{database(home)}?mode=ro", uri=True) as conn:
+                rows = conn.execute("SELECT title, created_at FROM projection_projects "
+                                    "ORDER BY created_at, project_id").fetchall()
+            return {"shell order": listed, "database order": [row[0] for row in rows],
+                    "distinct times": len({row[1] for row in rows}) == len(rows)}
+
+        same("projects made within one second", same_second(reference, root / "reference-order"),
+             same_second(rust, root / "rust-order"))
+
         # Read a disabled task across a server switch, edit it on Rust, then read
         # that exact row (including timestamps and run history) on the reference.
         task_input = dict(id="task:shared", title="Read the report", prompt="Read today's report",

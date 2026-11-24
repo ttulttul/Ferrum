@@ -10,7 +10,6 @@ import re
 import secrets
 import shlex
 import tempfile
-import time
 from threading import Thread
 
 from websockets.sync.client import connect
@@ -183,9 +182,6 @@ def main():
             prefix=["env",f"T3CODE_LINEAR_API_URL=http://127.0.0.1:{host.server_port}/graphql"]
             url,cookie=harness.managed_server(stack,prefix+shlex.split(command),root/who,secret,signing)
             for project_id,title,folder in (("test-project","Work",checkout),("ops-project","Ops",ops_checkout)):
-                # A second apart: Rust orders projects created in the same second by id.
-                if project_id=="ops-project":
-                    time.sleep(1.1)
                 cmd={"type":"project.create","commandId":f"add-{project_id}","projectId":project_id,"title":title,"workspaceRoot":str(folder)}
                 code,_,body=harness.http(url,"POST","/api/projects/mutate",harness.encode(cmd),{"Cookie":cookie,"Content-Type":"application/json"})
                 if code!=200:

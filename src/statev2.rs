@@ -330,7 +330,9 @@ fn project_from_row(id: &str, row: &serde_json::Value) -> crate::Project {
             row["createdAt"].as_str().unwrap_or_default(),
             &time::format_description::well_known::Rfc3339,
         )
-        .map_or(0, |at| at.unix_timestamp().max(0) as u64),
+        .map_or(0, |at| {
+            (at.unix_timestamp_nanos() / 1_000_000).max(0) as u64
+        }),
     }
 }
 

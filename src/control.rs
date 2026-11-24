@@ -1603,7 +1603,7 @@ impl ControlPlane {
             id: id.into(),
             name: title.into(),
             path,
-            created_at: crate::now(),
+            created_at: crate::store::project_now(),
         };
         let row = crate::store::wire_project(&project);
         match self.commit(Event::ProjectCreated(project)) {
@@ -1673,7 +1673,7 @@ impl ControlPlane {
             id: id.clone(),
             name: name.into(),
             path: created.workspace_root.to_string_lossy().into_owned(),
-            created_at: crate::now(),
+            created_at: crate::store::project_now(),
         };
         {
             let _guard = self.mutation_lock.lock().await;

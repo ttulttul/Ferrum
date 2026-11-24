@@ -14,7 +14,31 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub path: String,
+    /// When the project was created, in milliseconds since the epoch, as
+    /// the reference stores it, so projects created within one second keep
+    /// their order. Logs written before carry whole seconds, which read as
+    /// milliseconds too ([`project_millis`]).
+    #[serde(deserialize_with = "project_millis")]
     pub created_at: u64,
+}
+
+/// Below this, a project's `created_at` is whole seconds (until the year
+/// 5138); at or above it, milliseconds (since March 1973).
+const MILLIS_FROM: u64 = 100_000_000_000;
+
+/// A project's creation time in milliseconds, from either unit.
+fn project_millis<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let value = u64::deserialize(deserializer)?;
+    Ok(if value < MILLIS_FROM {
+        value.saturating_mul(1000)
+    } else {
+        value
+    })
+}
+
+/// The time a new project is created at (milliseconds).
+pub(crate) fn project_now() -> u64 {
+    crate::platform::now_ms().max(0) as u64
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ConversationMessage {
@@ -859,10 +883,10 @@ pub(crate) fn iso(time: time::OffsetDateTime) -> String {
     .expect("valid project timestamp")
 }
 pub(crate) fn wire_project(p: &Project) -> serde_json::Value {
-    let at = iso(
-        time::OffsetDateTime::from_unix_timestamp(p.created_at as i64)
-            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
-    );
+    let at = iso(time::OffsetDateTime::from_unix_timestamp_nanos(
+        i128::from(p.created_at) * 1_000_000,
+    )
+    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH));
     serde_json::json!({"id":p.id,"title":p.name,"hasCustomTitle":false,"workspaceRoot":p.path,"repositoryIdentity":null,"faviconPath":null,"projectIcon":null,"defaultModelSelection":null,"defaultThreadEnvMode":null,"autoPull":false,"scripts":[],"trackedFolders":[],"pinnedAt":null,"archivedAt":null,"createdAt":at,"updatedAt":at,"deletedAt":null})
 }
 
@@ -920,6 +944,30 @@ pub(crate) fn older_settled_threads(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_project_logged_in_whole_seconds_reads_in_milliseconds() {
+        let read = |created_at: u64| {
+            serde_json::from_value::<Project>(
+                json!({"id": "p", "name": "P", "path": "/p", "created_at": created_at}),
+            )
+            .unwrap()
+            .created_at
+        };
+        // A log from before milliseconds.
+        assert_eq!(read(1_795_000_000), 1_795_000_000_000);
+        assert_eq!(read(1_795_000_000_123), 1_795_000_000_123);
+        let project = Project {
+            id: "p".into(),
+            name: "P".into(),
+            path: "/p".into(),
+            created_at: 1_795_000_000_123,
+        };
+        assert_eq!(
+            wire_project(&project)["createdAt"],
+            "2026-11-18T11:06:40.123Z"
+        );
+    }
 
     #[test]
     fn a_finished_run_ends_when_its_record_was_committed() {
