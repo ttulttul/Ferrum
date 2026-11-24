@@ -8,6 +8,7 @@
 //! server; `workers` builds the platform-neutral control plane for wasm32.
 
 pub mod access_http;
+#[cfg(feature = "native")]
 pub mod acp_mcp_bridge;
 #[cfg(feature = "native")]
 mod agent_instructions;
