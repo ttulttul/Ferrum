@@ -195,16 +195,46 @@ def driver_scenarios(instance, cli, version, signed_in, variants, wait=30):
     return scenarios
 
 
-FX_STATUS = {"args": ["status", "--json"], **ok('{"auth": "oauth", "model": "fx-large"}')}
-FX_MODELS = {"args": ["models", "--json"], **ok('{"ids": ["fx-large", "fx-small", "default", "fx-small"]}')}
-SCENARIOS += driver_scenarios("fx", "fx", "fx 0.0.13", [FX_STATUS, FX_MODELS], {
-    "signed out": ([{"args": ["status", "--json"], **ok('{"auth": "missing"}')}, FX_MODELS], {}),
-    "login unknown": ([{"args": ["status", "--json"], **ok("not json")}, FX_MODELS], {}),
-    "model listing fails": ([FX_STATUS, {"args": ["models", "--json"], **ok("", 1, "offline")}], {}),
-    "status times out": ([{"args": ["status", "--json"], "sleep": 60}, FX_MODELS], {"wait": 40}),
-    "sign-in picked up by a refresh": ([{"args": ["status", "--json"], **ok('{"auth": "missing"}')}, FX_MODELS],
+def fx_status(stdout, backend=None):
+    """`fx status --json`, for fx's default (backend None) or one backend (`FX_PROVIDER`)."""
+    return {"args": ["status", "--json"], "env": {"FX_PROVIDER": backend}, **ok(stdout)}
+
+
+def fx_models(ids, backend):
+    return {"args": ["models", "--json"], "env": {"FX_PROVIDER": backend}, **ok(json.dumps({"ids": ids}))}
+
+
+# fx probes its default, then every backend: the gateway and Codex are signed in, Grok is not.
+FX_STATUS = fx_status('{"auth": "oauth", "model": "fx-large"}')
+FX_BACKENDS = [fx_status('{"auth": "oauth"}', "gateway"),
+               fx_models(["fx-large", "fx-small", "default", "fx-small"], "gateway"),
+               fx_status('{"auth": "chatgpt"}', "codex"), fx_models(["gpt-6-astra", " "], "codex"),
+               fx_status('{"auth": "missing"}', "grok"), fx_models(["grok-5"], "grok")]
+FX_SIGNED_OUT = [fx_status('{"auth": "missing"}', backend) for backend in ("gateway", "codex", "grok")]
+SCENARIOS += driver_scenarios("fx", "fx", "fx 0.0.13", [FX_STATUS, *FX_BACKENDS], {
+    "signed out": ([fx_status('{"auth": "missing"}'), *FX_SIGNED_OUT], {}),
+    "login unknown": ([fx_status("not json"), *FX_BACKENDS], {}),
+    "model listing fails": ([FX_STATUS, {"args": ["models", "--json"], "env": {"FX_PROVIDER": "codex"},
+                                         **ok("", 1, "offline")}, *FX_BACKENDS], {}),
+    "status times out": ([{"args": ["status", "--json"], "sleep": 60}, *FX_BACKENDS], {"wait": 40}),
+    "sign-in picked up by a refresh": ([fx_status('{"auth": "missing"}'), *FX_SIGNED_OUT],
                                        {"refresh": {"fx": {"commands": [{"args": ["--version"], **ok("fx 0.0.13")},
-                                                                        FX_STATUS, FX_MODELS]}}}),
+                                                                        FX_STATUS, *FX_BACKENDS]}}}),
+    # A backend's own sign-in counts when fx's default reports none.
+    "signed in on another backend": ([fx_status('{"auth": "missing"}'), *FX_BACKENDS], {}),
+    "default backend signed out": ([fx_status('{"auth": "oauth", "model": "grok-5", "model_source": "Grok subscription"}'),
+                                    *FX_BACKENDS], {}),
+    # fx 0.0.14+ lists its session modes; `full-access` adds Full access.
+    "full access": ([fx_status('{"auth": "oauth", "model": "fx-large", "modes": [{"id": "ask"}, {"id": "full-access"}]}'),
+                     *FX_BACKENDS], {}),
+    "malformed modes": ([fx_status('{"auth": "oauth", "modes": [{"name": "ask"}]}'), *FX_BACKENDS], {}),
+    # Endpoints configured in fx's profile settings are backends too, by id.
+    "configured endpoints": ([fx_status('{"auth": "oauth", "model": "qwen-9", "model_source": "local"}'),
+                              fx_status('{"auth": "api-key"}', "local"), fx_models(["qwen-9"], "local"),
+                              fx_status('{"auth": "missing", "auth_help": "Set REMOTE_KEY for this endpoint."}', "remote"),
+                              fx_status('{"auth": "missing"}', "spare"), *FX_BACKENDS],
+                             {"files": {".fx/settings.json": json.dumps({"providers": {
+                                 "local": {}, "remote": {}, "spare": {}, "Codex": {}, "1bad": {}, "bad.id": {}}})}}),
 })
 
 KIRO_TEMPLATE = {"configOptions": [{"id": "mode", "type": "select", "currentValue": "kiro_default", "options": [
@@ -612,7 +642,23 @@ def checks_on(settings):
 
 
 GROK_FAKE = {"spec": {"commands": [{"args": ["--version"], **ok("grok 1.0.52")}, GROK_MODELS, GROK_SKILLS, GROK_ACP]}}
+FX_FAKE = {"spec": {"commands": [{"args": ["--version"], **ok("fx 0.0.13")}, FX_STATUS, *FX_BACKENDS]}}
+FX_RELEASE = "GET releases.fx.sh/latest.txt"
 SCENARIOS += [
+    # fx updates itself with `fx upgrade`, and its release channel says what that installs.
+    {"name": "advisory fx upgrade", "instance": "fx", "settings": checks_on(enabled("fx")),
+     "fakes": {"fx": FX_FAKE}, "proxy": {FX_RELEASE: {"body": "v0.0.20\n"}}},
+    {"name": "advisory fx up to date", "instance": "fx", "settings": checks_on(enabled("fx")),
+     "fakes": {"fx": FX_FAKE}, "proxy": {FX_RELEASE: {"body": "0.0.13"}}},
+    {"name": "advisory fx release unreachable", "instance": "fx", "settings": checks_on(enabled("fx")),
+     "fakes": {"fx": FX_FAKE}, "proxy": {FX_RELEASE: {"status": 503, "body": "v0.0.20"}}},
+    {"name": "advisory fx release malformed", "instance": "fx", "settings": checks_on(enabled("fx")),
+     "fakes": {"fx": FX_FAKE}, "proxy": {FX_RELEASE: {"body": "latest: 0.0.20"}}},
+    # fx has no mise registry tool: a mise install stays manual-only, still told the latest release.
+    {"name": "advisory fx installed by mise", "instance": "fx",
+     "settings": checks_on(enabled("fx", binaryPath="<root>/mise/installs/fx/0.0.13/bin/fx")),
+     "fakes": {"fx": {**FX_FAKE, "at": "mise/installs/fx/0.0.13/bin/fx"}},
+     "proxy": {FX_RELEASE: {"body": "v0.0.20"}}},
     {"name": "advisory grok update available", "instance": "grok", "settings": checks_on(enabled("grok")),
      "fakes": {"grok": GROK_FAKE, "npm": npm_view("@xai-official/grok", "1.2.0")}},
     {"name": "advisory grok up to date", "instance": "grok", "settings": checks_on(enabled("grok")),
@@ -992,7 +1038,7 @@ def pending(row):
 
 # Drivers whose version advisory is added by an enrichment pass after the probe's row is
 # published: their row is final only once it carries the advisory.
-ENRICHED_DRIVERS = {"codex", "claudeAgent", "grok", "pi", "opencode", "muse"}
+ENRICHED_DRIVERS = {"codex", "claudeAgent", "grok", "pi", "opencode", "muse", "fx"}
 # How long a server may take to finish an instance's first check on a loaded machine.
 CHECK_DEADLINE = 180
 

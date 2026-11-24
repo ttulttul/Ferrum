@@ -95,7 +95,15 @@ const CHECKED_DRIVERS: [&str; 10] = [
 ];
 /// The drivers whose snapshot gets its version advisory from an enrichment
 /// pass after the probe, rather than from the probe itself.
-const ENRICHED_DRIVERS: [&str; 6] = ["codex", "claudeAgent", "grok", "pi", "opencode", "muse"];
+const ENRICHED_DRIVERS: [&str; 7] = [
+    "codex",
+    "claudeAgent",
+    "grok",
+    "pi",
+    "opencode",
+    "muse",
+    "fx",
+];
 /// `AUTH_PROBE_TIMEOUT_MS`.
 const AUTH_PROBE_TIMEOUT_MS: u64 = 10_000;
 /// `FAILED_CHECK_RECHECK_DELAY`: a periodic check that failed over a ready
@@ -595,10 +603,19 @@ pub(crate) async fn refresh(state: &Arc<AppState>, only: Option<&str>) {
 pub(crate) fn before_enrichment(providers: &Value) -> Value {
     let mut providers = providers.clone();
     for row in providers.as_array_mut().into_iter().flatten() {
-        if ENRICHED_DRIVERS.contains(&row["driver"].as_str().unwrap_or("")) {
-            if let Some(object) = row.as_object_mut() {
-                object.shift_remove("versionAdvisory");
-            }
+        let driver = row["driver"].as_str().unwrap_or("").to_owned();
+        if !ENRICHED_DRIVERS.contains(&driver.as_str()) {
+            continue;
+        }
+        // fx's probe builds its row with the manual advisory, which its
+        // enrichment then replaces.
+        if driver == "fx" && row.get("versionAdvisory").is_some() {
+            row["versionAdvisory"] = manual_version_advisory(
+                row["version"].as_str(),
+                row["checkedAt"].as_str().unwrap_or(""),
+            );
+        } else if let Some(object) = row.as_object_mut() {
+            object.shift_remove("versionAdvisory");
         }
     }
     providers
