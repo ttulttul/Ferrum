@@ -282,6 +282,7 @@
       "auth": "session (settings:write)",
       "usage": "client",
       "existingCoverage": [
+        "device_tools_parity.py",
         "host-parity.json"
       ],
       "validationOnly": false,
@@ -377,6 +378,7 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "device_tools_parity.py",
         "host-parity.json"
       ],
       "validationOnly": false,
@@ -1029,6 +1031,7 @@
         "attachment_tools_parity.py",
         "client_initial_sync_parity.py",
         "client_thread_parity.py",
+        "device_tools_parity.py",
         "feedback_parity.py",
         "html_render_parity.py",
         "link_request_parity.py",
@@ -4799,6 +4802,7 @@
         "client_thread_parity.py",
         "config_parity.py",
         "config_snapshot_parity.py",
+        "device_tools_parity.py",
         "feedback_parity.py",
         "managed_policy_parity.py",
         "preview_provider_parity.py",

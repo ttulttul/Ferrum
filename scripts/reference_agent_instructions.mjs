@@ -1,6 +1,7 @@
 // The pinned reference's agent instructions, as its provider adapters send them: the orchestration
 // sections, the browser and device tool text, the runtime and pull request linking text
-// (buildRuntimeInstructions), and Claude Code's background-wait and send_to_user text. Rust sends
+// (buildRuntimeInstructions), Claude Code's background-wait and send_to_user text, and the ACP
+// prompt's interaction mode and terminal fallback text. Rust sends
 // them as they are, leaving out each line that names a tool it does not serve yet
 // (src/agent_instructions.rs).
 //
@@ -32,6 +33,20 @@ const constant = (name) => {
   return match[1].replaceAll("\\`", "`");
 };
 
+// The ACP prompt's own text is module-private too: the interaction mode sections and the terminal
+// fallback, whose escapes (\` and \${) are undone here.
+const orchestrationSource = readFileSync(
+  resolve(root, "packages/provider-core/src/server/orchestrationInstructions.ts"),
+  "utf8",
+);
+const literal = (name) => {
+  const match = orchestrationSource.match(new RegExp(`const ${name} = \`([\\s\\S]*?)(?<!\\\\)\`;`));
+  if (match === null || /(?<!\\)\$\{/.test(match[1])) {
+    throw new Error(`${name} is not a plain template literal in orchestrationInstructions.ts`);
+  }
+  return match[1].replace(/\\(.)/g, "$1");
+};
+
 const instructions = {
   orchestrationSections: [...orchestration.T3_CODE_ORCHESTRATION_SECTIONS],
   orchestration: orchestration.T3_CODE_ORCHESTRATION_INSTRUCTIONS,
@@ -43,5 +58,8 @@ const instructions = {
   pullRequestLinking: runtime.PULL_REQUEST_LINKING_INSTRUCTIONS,
   claudeBackgroundWait: constant("CLAUDE_BACKGROUND_WAIT_INSTRUCTIONS"),
   claudeSendToUser: constant("CLAUDE_SEND_TO_USER_INSTRUCTIONS"),
+  acpDefaultMode: literal("T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS"),
+  acpPlanMode: literal("T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS"),
+  acpMcpFallback: literal("T3_CODE_ACP_MCP_FALLBACK_INSTRUCTIONS"),
 };
 process.stdout.write(`${JSON.stringify(instructions, null, 1)}\n`);

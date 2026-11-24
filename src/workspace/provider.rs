@@ -18,12 +18,19 @@ use serde_json::{Map, Value};
 /// The drivers whose CLI the workspace can run as a provider turn.
 pub const CODEX: &str = "codex";
 pub const CLAUDE_AGENT: &str = "claudeAgent";
+/// Grok's CLI, whose turns run over ACP (`grok agent stdio`).
+pub const GROK: &str = "grok";
+
+/// Whether the workspace runs turns of `driver`'s CLI.
+pub fn runs_turns(driver: &str) -> bool {
+    matches!(driver, CODEX | CLAUDE_AGENT | GROK)
+}
 
 /// How to run one turn of a provider instance.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderTurn {
-    /// The instance's driver: [`CODEX`] or [`CLAUDE_AGENT`].
+    /// The instance's driver: [`CODEX`], [`CLAUDE_AGENT`] or [`GROK`].
     pub driver: String,
     /// The provider instance, whose turns share one Codex app-server.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -80,6 +87,12 @@ pub struct ProviderTurn {
     /// agentd or control plane that predates it sees the same wire bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Value>,
+    /// The ordinal of this turn among its provider thread's turns, which an
+    /// ACP turn names its native turn by (`<session>:turn:<ordinal>`).
+    /// Optional and omitted when absent, so an agentd or control plane that
+    /// predates it sees the same wire bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_ordinal: Option<u64>,
 }
 
 /// Where a provider CLI reaches T3's tools for its thread

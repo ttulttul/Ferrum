@@ -1,0 +1,70 @@
+{
+ "replies": {
+  "authenticate": {},
+  "session/set_model": {},
+  "session/set_mode": {},
+  "session/set_config_option": {
+   "configOptions": []
+  },
+  "session/close": {
+   "_meta": {
+    "x.ai/closeOutcome": "closed"
+   }
+  }
+ },
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "protocolVersion": 1,
+     "agentCapabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+       "image": true,
+       "embeddedContext": true
+      },
+      "sessionCapabilities": {
+       "close": {}
+      }
+     },
+     "authMethods": [
+      {
+       "id": "cached_token",
+       "name": "Cached token"
+      },
+      {
+       "id": "xai.api_key",
+       "name": "API key"
+      }
+     ],
+     "_meta": {
+      "modelState": {
+       "currentModelId": "grok-build",
+       "availableModels": [
+        {
+         "modelId": "grok-build",
+         "name": "Grok Build"
+        },
+        {
+         "modelId": "grok-4-fast",
+         "name": "Grok 4 Fast"
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  {
+   "branch": {
+    "session/new": "grok_new_turn.json",
+    "session/load": "grok_load_turn.json"
+   }
+  }
+ ]
+}

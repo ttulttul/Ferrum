@@ -1,0 +1,198 @@
+{
+ "replies": {
+  "authenticate": {},
+  "session/set_model": {},
+  "session/set_mode": {},
+  "session/set_config_option": {
+   "configOptions": []
+  },
+  "session/close": {
+   "_meta": {
+    "x.ai/closeOutcome": "closed"
+   }
+  }
+ },
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "protocolVersion": 1,
+     "agentCapabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+       "image": true,
+       "embeddedContext": true
+      },
+      "sessionCapabilities": {
+       "close": {}
+      }
+     },
+     "authMethods": [
+      {
+       "id": "cached_token",
+       "name": "Cached token"
+      },
+      {
+       "id": "xai.api_key",
+       "name": "API key"
+      }
+     ],
+     "_meta": {
+      "modelState": {
+       "currentModelId": "grok-build",
+       "availableModels": [
+        {
+         "modelId": "grok-build",
+         "name": "Grok Build"
+        },
+        {
+         "modelId": "grok-4-fast",
+         "name": "Grok 4 Fast"
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  {
+   "expect": "session/new"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "sessionId": "grok-session-1",
+     "models": {
+      "currentModelId": "grok-build",
+      "availableModels": [
+       {
+        "modelId": "grok-build",
+        "name": "Grok Build"
+       },
+       {
+        "modelId": "grok-4-fast",
+        "name": "Grok 4 Fast"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "expect": "session/prompt"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "grok-session-1",
+     "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "call-2",
+      "title": "write",
+      "status": "pending",
+      "rawInput": {
+       "path": "notes.txt",
+       "content": "hi\n"
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "perm-2",
+    "method": "session/request_permission",
+    "params": {
+     "sessionId": "grok-session-1",
+     "toolCall": {
+      "toolCallId": "call-2",
+      "kind": "edit",
+      "title": "Write `notes.txt`",
+      "rawInput": {
+       "path": "notes.txt",
+       "content": "hi\n"
+      }
+     },
+     "options": [
+      {
+       "optionId": "allow-edits-session",
+       "name": "Yes, allow all edits during this session",
+       "kind": "allow_always"
+      },
+      {
+       "optionId": "allow-once",
+       "name": "Yes",
+       "kind": "allow_once"
+      },
+      {
+       "optionId": "reject-once",
+       "name": "No, and tell Grok what to do differently",
+       "kind": "reject_once"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "expectReply": "perm-2"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "grok-session-1",
+     "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "call-2",
+      "kind": "edit",
+      "status": "completed",
+      "content": [
+       {
+        "type": "diff",
+        "path": "notes.txt",
+        "oldText": null,
+        "newText": "hi\n"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "grok-session-1",
+     "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "content": {
+       "type": "text",
+       "text": "Wrote notes.txt."
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "stopReason": "end_turn"
+    }
+   }
+  }
+ ]
+}

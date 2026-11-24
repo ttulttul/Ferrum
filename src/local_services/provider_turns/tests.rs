@@ -1,7 +1,7 @@
 //! Provider turns against fake CLIs that replay recorded Codex app-server and
 //! Claude Code stream-json transcripts (`tests/fixtures/providers`).
 use super::*;
-use crate::workspace::provider::{ProviderTurn, TurnStatus};
+use crate::workspace::provider::{ProviderTurn, TurnStatus, CLAUDE_AGENT, GROK};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -852,4 +852,177 @@ async fn a_steer_goes_to_the_running_claude_turn_and_is_pending_until_claude_tak
         json!({"role": "user", "content": "Also print the date"})
     );
     assert!(steer["uuid"].as_str().is_some_and(|uuid| uuid.len() == 36));
+}
+
+#[tokio::test]
+async fn grok_turn_streams_reasoning_a_command_and_the_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (events, exit) = run(fake_spec(GROK, "grok_turn.json", &log, None)).await;
+    assert!(exit.success && !exit.cancelled, "{exit:?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    assert_eq!(native_thread(&events), ("grok-session-1".into(), false));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::ProviderTurn { native_turn_id: Some(id), .. }
+            if id == "provider-instance:grok:grok-session-1:turn:1"
+    )));
+    let reasoning = items(&events, "reasoning");
+    assert_eq!(
+        reasoning
+            .last()
+            .map(|item| (item.status.as_str(), &item.fields["text"])),
+        Some(("completed", &json!("I'll run the command.")))
+    );
+    let command = items(&events, "command_execution");
+    let done = command.last().expect("the command");
+    assert_eq!(
+        (
+            done.status.as_str(),
+            &done.fields["input"],
+            &done.fields["exitCode"]
+        ),
+        ("completed", &json!("echo hi"), &json!(0))
+    );
+    assert_eq!(done.fields["nativeItemRef"]["nativeId"], "call-1");
+    assert_eq!(final_text(&events), "Ran echo hi; it printed hi.");
+    // The turn's usage is unavailable, and goes with its end.
+    let ProviderEvent::TurnTerminal { closing, .. } = events.last().unwrap() else {
+        unreachable!()
+    };
+    assert!(closing.iter().any(|e| matches!(
+        e,
+        ProviderEvent::TurnUsage { usage } if usage["usageStatus"] == "unavailable"
+    )));
+    let sent = received(&log);
+    let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
+    assert_eq!(methods, ["initialize", "session/new", "session/prompt"]);
+    assert_eq!(
+        sent[0]["params"]["_meta"],
+        json!({"clientType": "extension"})
+    );
+    let prompt = &sent[2]["params"];
+    assert_eq!(
+        prompt["_meta"],
+        json!({"promptId": "t3-xai-prompt-1", "requestId": "t3-xai-prompt-1"})
+    );
+    let text = prompt["prompt"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("<t3_code_instructions>\n## T3 Code interaction mode: Default"));
+    assert!(text.ends_with("<user_request>\nSay hello\n</user_request>"));
+    assert!(prompt["prompt"][1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("through the Grok harness, as grok-build."));
+}
+
+#[tokio::test]
+async fn grok_turn_waits_for_the_users_approval() {
+    let (request, log, exit) = answered_turn(
+        GROK,
+        "grok_approval.json",
+        "turn-grok-approval",
+        "approval-required",
+        |request| crate::workspace::provider::RuntimeResponse {
+            id: request.id.clone(),
+            decision: Some("accept".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(
+        (request.kind.as_str(), request.native_request_id.as_str()),
+        ("command", "call-1")
+    );
+    assert_eq!(request.fields["prompt"], "echo hi");
+    // Bash's "always allow" is not offered; Grok's own options map to T3's.
+    assert_eq!(
+        request.fields["options"],
+        json!([{"decision": "cancel", "label": "Cancel"},
+            {"decision": "decline", "label": "Decline"},
+            {"decision": "accept", "label": "Approve"}])
+    );
+    let answer = log
+        .iter()
+        .find(|m| m["id"] == "perm-1" && m.get("result").is_some())
+        .expect("the approval was answered");
+    assert_eq!(
+        answer["result"],
+        json!({"outcome": {"outcome": "selected", "optionId": "allow-once"}})
+    );
+}
+
+#[tokio::test]
+async fn grok_turn_fails_with_groks_own_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (events, exit) = run(fake_spec(GROK, "grok_failed.json", &log, None)).await;
+    assert!(!exit.success);
+    let (status, failure) = terminal(&events);
+    assert_eq!(status, TurnStatus::Failed);
+    let failure = failure.unwrap();
+    assert_eq!(
+        (
+            failure.class.as_str(),
+            failure.message.as_str(),
+            failure.code.as_deref()
+        ),
+        (
+            "provider_error",
+            "API error (status 400 Bad Request): invalid_request_error: grok prompt error fixture",
+            Some("-32603")
+        )
+    );
+}
+
+#[tokio::test]
+async fn grok_stop_ends_the_turn_without_a_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (cancel, cancelled) = oneshot::channel();
+    let mut events = start(
+        fake_spec(GROK, "grok_interrupt.json", &log, None),
+        cancelled,
+        TEST_SERVERS.clone(),
+    )
+    .unwrap();
+    // Stop once the command runs.
+    while let Some(event) = events.recv().await {
+        if matches!(&event, TurnEvent::Provider(ProviderEvent::TurnItem { item })
+            if item.kind == "command_execution" && item.status == "running")
+        {
+            break;
+        }
+    }
+    cancel.send(()).unwrap();
+    let (rest, exit) = collect(events).await;
+    assert!(exit.cancelled && !exit.success, "{exit:?}");
+    assert_eq!(terminal(&rest), (TurnStatus::Interrupted, None));
+    assert!(items(&rest, "command_execution")
+        .iter()
+        .any(|item| item.status == "interrupted"));
+    // Grok's Stop kills its process rather than cancelling the prompt.
+    assert!(!received(&log)
+        .iter()
+        .any(|m| m["method"] == "session/cancel"));
+}
+
+#[tokio::test]
+async fn missing_grok_fails_to_start_its_session() {
+    let spec = TurnSpec {
+        prompt: "hi".into(),
+        cwd: "/".into(),
+        provider: Some(ProviderTurn {
+            driver: GROK.into(),
+            binary_path: "/nonexistent/grok".into(),
+            ..ProviderTurn::default()
+        }),
+        ..TurnSpec::default()
+    };
+    let (events, exit) = run(spec).await;
+    assert!(!exit.success);
+    assert_eq!(terminal(&events).0, TurnStatus::Failed);
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, ProviderEvent::ProviderTurn { .. })));
 }
