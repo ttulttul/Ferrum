@@ -66,6 +66,7 @@ case "$shard" in
     run python3 scripts/attachment_tools_parity.py "${both[@]}"
     run python3 scripts/attachment_flows_parity.py "${both[@]}"
     run python3 scripts/feedback_parity.py "${both[@]}"
+    run python3 scripts/device_tools_parity.py "${both[@]}" --reference-root "$checkout"
     ;;
   integrations-2)
     # Settings, storage, source control hosts and projects, then the relay and client call suites.

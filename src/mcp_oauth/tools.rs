@@ -12,6 +12,7 @@ mod agent_tools;
 mod arguments;
 mod attachments;
 mod delegation;
+mod devices;
 mod forge;
 pub(crate) mod html;
 mod issues;
@@ -108,6 +109,9 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("preview_dialog", &[]),
     ("preview_recording_start", &[]),
     ("preview_recording_stop", &[]),
+    // Device hub and sessions.
+    ("device_list", &[]),
+    ("device_close", &[]),
 ];
 
 /// The reference's agent tools that Rust serves. `tools.json` holds every tool
@@ -211,6 +215,9 @@ const SERVED: &[&str] = &[
     "preview_dialog",
     "preview_recording_start",
     "preview_recording_stop",
+    // Device hub and sessions.
+    "device_list",
+    "device_close",
 ];
 
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
@@ -906,6 +913,8 @@ pub(super) async fn call<S: McpHost>(
         }
         "t3_preview_list" => agent_tools::preview_list(host, caller, args).await,
         "t3_preview_close" => agent_tools::preview_close(host, caller, args).await,
+        "device_list" => devices::list(host, caller, args).await,
+        "device_close" => devices::close(host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }

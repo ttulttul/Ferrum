@@ -35,6 +35,8 @@ struct Record {
     last_alive_ms: i64,
     #[serde(default)]
     browser_access: bool,
+    #[serde(default)]
+    device_access: bool,
     // Tab assignments only live as long as the broker.
     #[serde(skip)]
     preview_sequence: u64,
@@ -133,7 +135,7 @@ impl ThreadCredentials {
         provider_instance_id: &str,
         now_ms: i64,
     ) -> io::Result<String> {
-        self.issue(thread_id, provider_instance_id, now_ms, false)
+        self.issue(thread_id, provider_instance_id, now_ms, false, false)
     }
 
     pub(super) fn issue(
@@ -142,12 +144,14 @@ impl ThreadCredentials {
         provider_instance_id: &str,
         now_ms: i64,
         browser_access: bool,
+        device_access: bool,
     ) -> io::Result<String> {
         let mut records = self.records.lock().unwrap();
         if let Some(record) = records.values_mut().find(|r| {
             r.scope.thread_id == thread_id
                 && r.scope.provider_instance_id == provider_instance_id
                 && r.browser_access == browser_access
+                && r.device_access == device_access
                 && !r.expired
                 && now_ms.saturating_sub(r.last_alive_ms) <= LIVENESS_WINDOW_MS
         }) {
@@ -163,6 +167,7 @@ impl ThreadCredentials {
             last_alive_ms: now_ms,
             expired: false,
             browser_access,
+            device_access,
             preview_sequence: 0,
             preview_tab: None,
         };
@@ -171,6 +176,13 @@ impl ThreadCredentials {
         records.retain(|_, r| r.scope.thread_id != thread_id);
         records.insert(super::hashed(&token), record);
         Ok(token)
+    }
+
+    pub(super) fn device_access(&self, scope: &ThreadScope) -> bool {
+        let records = self.records.lock().unwrap();
+        records
+            .get(&super::hashed(&Self::token(&self.key, scope)))
+            .is_some_and(|record| !record.expired && record.device_access)
     }
 
     /// The thread `token` acts as, or `None` when it is unknown, revoked or idle too long.
@@ -304,8 +316,9 @@ mod tests {
         let open =
             || ThreadCredentials::open(docs.clone(), PathBuf::from("sessions"), key).unwrap();
         let credentials = open();
-        let token = credentials.issue("thread", "codex", 0, true).unwrap();
+        let token = credentials.issue("thread", "codex", 0, true, true).unwrap();
         let scope = credentials.resolve(&token, 0).unwrap();
+        assert!(credentials.device_access(&scope));
         let (first, _) = credentials.preview_target(&scope).unwrap();
         let (second, _) = credentials.preview_target(&scope).unwrap();
         credentials.remember_preview_tab(&scope, second, Some("tab-2".into()));
@@ -315,13 +328,19 @@ mod tests {
             Some("tab-2")
         );
         let credentials = open();
+        assert!(credentials.device_access(&scope));
         assert_eq!(credentials.preview_target(&scope).unwrap().1, None);
-        let disabled = credentials.issue("thread", "codex", 1, false).unwrap();
+        let disabled = credentials
+            .issue("thread", "codex", 1, false, false)
+            .unwrap();
         assert_ne!(token, disabled);
         assert!(credentials.preview_target(&scope).is_none());
+        assert!(!credentials.device_access(&scope));
         let current = credentials.resolve(&disabled, 1).unwrap();
         assert!(credentials.preview_target(&current).is_none());
+        assert!(!credentials.device_access(&current));
         assert!(open().preview_target(&current).is_none());
+        assert!(!open().device_access(&current));
     }
 
     #[test]
