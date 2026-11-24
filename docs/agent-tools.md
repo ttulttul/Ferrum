@@ -199,20 +199,21 @@ schemas.
      (`activeSteeringInterruptsTools`), so its delivery runs once the turn ends. A delegated
      child's Codex thread starts with `threadSource: "subagent"`, as the reference starts it.
 
-   Parity: the scenarios `claude delegate` (a wait), `claude delegate async` (a delivery run
-   on an idle parent), `claude delegate cancel` (cancelled while its child runs),
-   `claude delegate stop` (the user stops the parent) and `claude create threads` (one thread
-   started with its prompt, one left idle) and `claude delegate followup` (the parent sends its
-   finished child more work, whose result wakes it) in `scripts/client_thread_parity.py`, with
-   fake CLIs for the parent and the child, and `claude delegate restart` (the server restarts
-   while a child runs), `claude delegate live` and `codex delegate live` (a child that
-   finishes while its parent's turn runs). Still pending, each its own PR: worktree isolation
-   (`isolation: "worktree"` is refused), tasks in a linked environment (refused), a cancelled
-   child's pull request watches, a stop's queued delivery runs (the reference cancels a
-   cohort's queued delivery), and recovery on the control plane (only the server recovers
-   delegated tasks after a restart). While a Claude turn runs, the reference shows its
-   delivery as a queued run at once; Rust, which holds queued runs until a client starts
-   them, records the delivery's run when the turn ends, so only the final state matches.
+   Parity: the scenarios `claude delegate` / `codex delegate` (a wait), `claude delegate async` /
+   `codex delegate async` (a delivery run on an idle parent), `claude delegate cancel` /
+   `codex delegate cancel` (cancelled while its child runs), `claude delegate stop` /
+   `codex delegate stop` (the user stops the parent), `claude create threads` (one thread started
+   with its prompt, one left idle), `claude delegate followup` / `codex delegate followup` (the
+   parent sends its finished child more work, whose result wakes it), `claude delegate restart` /
+   `codex delegate restart` (the server restarts while a child runs), and `claude delegate live` /
+   `codex delegate live` (a child that finishes while its parent's turn runs) in
+   `scripts/client_thread_parity.py`, with fake CLIs for the parent and the child. Still pending,
+   each its own PR: worktree isolation (`isolation: "worktree"` is refused), tasks in a linked
+   environment (refused), a cancelled child's pull request watches, a stop's queued delivery runs
+   (the reference cancels a cohort's queued delivery), and recovery on the control plane (only
+   the server recovers delegated tasks after a restart). While a Claude turn runs, the reference
+   shows its delivery as a queued run at once; Rust, which holds queued runs until a client
+   starts them, records the delivery's run when the turn ends, so only the final state matches.
 4c. **Attachments** (served, native server only): `t3_attachment_prepare_upload` issues an
    upload URL (with `uploadUrl` at the origin the call reached) for an upload its caller owns;
    `t3_attachment_discard` deletes it, for that caller only; `t3_thread_send_attachments` sends
@@ -412,10 +413,11 @@ Gaps the thread tools surface that live in shared code, not in the tools:
   when the provider refuses a steer. `t3_thread_send` still refuses `mode: "steer"`. Parity:
   `codex steer then stop`, `claude steer` and `claude steer then stop` in
   `scripts/client_thread_parity.py`.
-- **Codex delegation parity.** Rust now runs an instance's Codex turns in one shared
+- **Codex delegation parity** (covered). Rust runs an instance's Codex turns in one shared
   app-server, as the reference does (#152), so a delegated child's Codex turn comes into the
-  parent's app-server. The delegation scenarios still compare Claude only; a Codex one is to
-  come.
+  parent's app-server. The Codex delegation scenarios (`codex delegate`, `codex delegate async`,
+  `codex delegate followup`, `codex delegate cancel`, `codex delegate stop`,
+  `codex delegate restart`, `codex delegate live`) compare all of them alongside Claude's.
 - **Run start.** Rust records a run as running from its start; the reference's run is
   `starting` until its provider turn begins. `task_status` reads a run without a provider
   attempt as `starting`, as the reference reports it.

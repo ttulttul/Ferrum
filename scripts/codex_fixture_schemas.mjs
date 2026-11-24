@@ -37,6 +37,22 @@ for (const name of fs.readdirSync(fixtures).filter((file) => /^(status_)?codex_.
       console.log(`${name}: reply to ${method} does not decode:\n${String(error.message).slice(0, 2000)}`);
     }
   }
+  for (const notes of Object.values(scenario.sideNotifications ?? {})) {
+    for (const message of notes) {
+      const schema = meta.SERVER_NOTIFICATION_PARAMS[message.method];
+      if (!schema) {
+        problems += 1;
+        console.log(`${name}: no reference schema for side notification ${message.method}`);
+        continue;
+      }
+      try {
+        Schema.decodeUnknownSync(schema)(message.params, { errors: "all" });
+      } catch (error) {
+        problems += 1;
+        console.log(`${name}: side notification ${message.method} does not decode:\n${String(error.message).slice(0, 2000)}`);
+      }
+    }
+  }
   // A variant that plays another fixture (`scenario`) is checked with that fixture.
   const played = scenario.steps
     ? [scenario.steps]

@@ -300,8 +300,15 @@ const liveTurn = (client, seed) =>
     }
     if (seed.change) {
       // A thread change sent while the turn runs (archive, model, runtime mode, ...); with
-      // `seed.changeAfter === "subagent"`, once the turn has delegated a task.
-      yield* Deferred.await(seed.changeAfter === "subagent" ? subagentShown : turnRunning);
+      // `seed.changeAfter === "subagent"`, once the turn has delegated a task; with `"command"`,
+      // once a command it runs is running.
+      const trigger =
+        seed.changeAfter === "subagent"
+          ? subagentShown
+          : seed.changeAfter === "command"
+            ? commandRunning
+            : turnRunning;
+      yield* Deferred.await(trigger);
       if (seed.changeAfter === "quiet") {
         while (Date.now() - lastItemAt < QUIET_MS) yield* Effect.sleep(50);
       }
@@ -384,9 +391,9 @@ const program = Effect.gen(function* () {
       yield* record(
         "orchestration.subscribeThread (live turn)",
         liveTurn(client, seed).pipe(Effect.timeoutOption(seed.turnMs ?? 30000), Effect.map(Option.getOrNull)),
-        // A thread change waits out its turn's reaction, and a steer its answer, longer than a
-        // reply.
-        seed.change || seed.steer ? seed.turnMs ?? 30000 : waitMs,
+        // Respect `seed.turnMs` so multi-turn or delegated turns do not time out at the single-RPC
+        // reply limit under load.
+        Math.max(waitMs, seed.turnMs ?? 0),
       );
       // A watcher of a turn its server stops (`seed.liveOnly`) has nothing more to read.
       if (seed.liveOnly) return;

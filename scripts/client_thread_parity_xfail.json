@@ -63,6 +63,13 @@
   "codex attachments": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   },
+  "codex delegate": {
+    "agent mcp": "Racy: on a blocking delegate_task wait, the reference's waitForTask races its outbox finalizer, so resultContextTransferId can already be populated on one server while still null on the other (seen both matching and differing).",
+    "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
+  },
+  "codex delegate followup": {
+    "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after the first task's context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
+  },
   "codex in the login shell PATH": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   },
