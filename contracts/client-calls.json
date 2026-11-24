@@ -1025,6 +1025,7 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "attachment_flows_parity.py",
         "attachment_tools_parity.py",
         "client_initial_sync_parity.py",
         "client_thread_parity.py",
@@ -1252,10 +1253,12 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
+        "attachment_flows_parity.py",
         "attachment_tools_parity.py",
         "client_thread_parity.py",
         "link_request_parity.py",
         "orchestration_parity.py",
+        "peer_link_history_parity.py",
         "run_output_parity.py",
         "shared_store_parity.py"
       ],
@@ -1410,6 +1413,7 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "attachment_flows_parity.py",
         "project_clone_parity.py"
       ],
       "validationOnly": false,
@@ -1666,6 +1670,7 @@
       "existingCoverage": [
         "link_request_parity.py",
         "peer_forwarding_parity.py",
+        "peer_link_history_parity.py",
         "peer_link_outgoing_parity.py",
         "peer_link_relay_parity.py"
       ],
@@ -1805,6 +1810,7 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
+        "peer_link_history_parity.py",
         "peer_link_relay_parity.py"
       ],
       "validationOnly": false,
@@ -2930,6 +2936,7 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
+        "bitbucket_pull_request_parity.py",
         "github_provider_parity.py"
       ],
       "validationOnly": false,
@@ -3332,6 +3339,7 @@
       "auth": "session (source-control:write)",
       "usage": "client",
       "existingCoverage": [
+        "bitbucket_pull_request_parity.py",
         "github_provider_parity.py"
       ],
       "validationOnly": false,
@@ -5796,8 +5804,10 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "workflow_rpc_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -5898,8 +5908,10 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "workflow_rpc_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -6240,6 +6252,7 @@
         "managed_policy_parity.py",
         "mcp_parity.py",
         "peer_forwarding_parity.py",
+        "peer_link_history_parity.py",
         "peer_link_outgoing_parity.py",
         "peer_link_parity.py",
         "peer_link_routes_parity.py",
@@ -6716,6 +6729,7 @@
         "cors_parity.py",
         "github_provider_parity.py",
         "linear_provider_parity.py",
+        "peer_link_history_parity.py",
         "peer_link_routes_parity.py",
         "project_clone_parity.py",
         "project_favicon_parity.py",
@@ -6752,6 +6766,7 @@
         "client_thread_parity.py",
         "github_provider_parity.py",
         "linear_provider_parity.py",
+        "peer_link_history_parity.py",
         "peer_link_routes_parity.py",
         "project_favicon_parity.py",
         "shared_store_parity.py"
@@ -7370,6 +7385,7 @@
         "managed_policy_parity.py",
         "orchestration_parity.py",
         "parity-fixtures.json",
+        "peer_link_history_parity.py",
         "peer_link_outgoing_parity.py",
         "peer_link_relay_parity.py",
         "peer_link_routes_parity.py",

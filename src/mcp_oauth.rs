@@ -342,6 +342,21 @@ pub trait McpHost: AuthHost {
             ))
         })
     }
+    /// Runs a device agent tool (`list`, `open`, `screenshot`, `close`) against
+    /// the host's device service. Hosts without local device support leave it
+    /// unavailable.
+    fn device_tool(
+        self: &Arc<Self>,
+        _operation: &'static str,
+        _input: Value,
+    ) -> HostFuture<Result<Value, Value>> {
+        Box::pin(async {
+            Err(json!({
+                "_tag": "DeviceToolUnavailableError",
+                "reason": "Device support is unavailable on this server.",
+            }))
+        })
+    }
     /// The server's secrets directory, where the secrets the user gives an
     /// agent (`request_secret`) are kept; `None` where it keeps none.
     fn secrets_dir(&self) -> Option<std::path::PathBuf> {
@@ -748,8 +763,10 @@ impl OAuth {
         thread: &str,
         instance: &str,
         browser: bool,
+        device: bool,
     ) -> std::io::Result<String> {
-        self.threads.issue(thread, instance, now_ms(), browser)
+        self.threads
+            .issue(thread, instance, now_ms(), browser, device)
     }
 
     /// A turn of `thread_id` started, so its credential stays live.

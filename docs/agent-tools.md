@@ -14,8 +14,10 @@ server browser tab. The Chromium parity suite exercises these tools against loop
 through the fake provider CLI, including control handoff and project-level access refusals.
 
 Device discovery, boot, and screenshots depend on the host's iOS Simulator or Android Emulator.
-The parity suite exercises the disabled and unavailable-host responses. It does not boot a real
-simulator or emulator in CI.
+`device_list` and `device_close` are served on the native server, with `scripts/device_tools_parity.py`
+exercising disabled/access-off refusals, local hub startup, emulator camera probing, AVD and `adb`
+fallback discovery, host label resolution, and session close/shutdown against loopback fakes without
+booting a real simulator or emulator. `device_open` and `device_screenshot` follow in the next PRs.
 
 ## Where the list comes from
 
@@ -95,7 +97,7 @@ The "Caller check" column is the tool's declaration in the reference's
   so both go out as the reference sends them. `cli_launch` in
   `scripts/client_thread_parity.py` compares both servers' text, filtered the same way. Not
   sent yet: the rest of Claude's `initialize` (hooks, title, prompt suggestions, dialog kinds),
-  device text (Rust serves no device tools), and the Cursor, OpenCode, Pi and ACP variants.
+  device text (sent once all four device tools are served), and the Cursor, OpenCode, Pi and ACP variants.
 - **`orchestrator_capabilities`** answers as the reference's: every provider instance, with
   its constraints (`providerConstraints`; a Rust instance whose driver it cannot run children
   on says so), its models as `listCapabilityModels` lists them (pinned, favourite, preferred
@@ -221,8 +223,12 @@ schemas.
    message and its turn item keep them, and the run's provider turn carries them in the
    optional `ProviderTurn.attachments` (omitted when empty, so the agentd wire is unchanged
    without attachments). Codex gets the text naming each file and each supported image as a
-   data URL; Claude gets each image as a base64 block, then that text. Not yet: attachments on
-   steers, queued-run edits, runtime-request answers and thread launches, Claude's PDF document
+   data URL; Claude gets each image as a base64 block, then that text. A queued run's edit
+   that names attachments replaces its message's (claiming pending uploads; a thread file that is
+   gone is refused, unless the edit is a retry of one accepted), and a launched thread's first
+   message claims its uploads for the new thread (which then needs its id); a send's copies that
+   no message keeps go again. `scripts/attachment_flows_parity.py` compares both, and what the
+   provider is asked. Not yet: attachments on steers and runtime-request answers, Claude's PDF document
    blocks and its image budget cap, captured-window context, document text extraction, and a
    remote agentd reading the server's attachment files.
 4d. **Secrets** (served): `request_secret` shows a card in the caller's running turn
@@ -314,11 +320,23 @@ schemas.
    and compares every action in the three states and the tables left. The client's
    `workflows.subscribe` (a snapshot of runs and questions, sent again once a burst of run changes
    settles), `workflows.counts` (sent when a count moves), `workflows.get` and
-   `workflows.answer` answer the same way, starting over when workflows are turned on or off;
-   `scripts/workflow_rpc_parity.py` compares them. Not yet: `workflows.resume`,
-   `workflows.cancel` and the definition RPCs; running
+   `workflows.answer` answer the same way, starting over when workflows are turned on or off,
+   and `workflows.resume` (nothing is registered to resume) and `workflows.cancel` act as the
+   tool's resume and cancel do; `scripts/workflow_rpc_parity.py` compares them. Not yet: the
+   definition RPCs; running
    workflows (definitions, triggers, hooks, the sweep), milestone news of answered questions
    and ended runs, and stopping an agent step's thread in a linked environment on cancel.
+4j. **Device hub and sessions** (served, native server only): `device_list` and `device_close`,
+   gated by the thread's `"device"` capability (`enableDeviceSupport` and effective
+   `enableAgentDeviceAccess`, including project overrides). `DeviceService` starts the local
+   `expo-device-hub` with the reference's environment (`FORCE_COLOR=0`, `NO_COLOR=1`, `ANDROID_HOME`,
+   emulator camera overrides, `hub.json` stale-hub reaping, `/readyz` readiness), lists booted
+   devices, unbooted AVDs (`emulator -list-avds`) and the `avdmanager`-failure `adb` fallback,
+   resolves host ids or unique case-insensitive labels, checks `ffmpeg` `libx264` before opening
+   Android emulators, and closes or shuts down thread sessions cleanly. `scripts/device_tools_parity.py`
+   compares both tools and every request sent to loopback fakes (fake `expo-device-hub`, fake Android
+   SDK and fake `ffmpeg`). Pending: `device_open` (with `agent-device` daemon and launcher) and
+   `device_screenshot`.
 5. **Prompt context and capabilities** (served), as above.
 6. **Scheduled tasks**: `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task` and
    `run_scheduled_task_now` share the reference's `scheduled_tasks` table. Thread callers
@@ -405,15 +423,15 @@ still answer "Invalid tool arguments".
 ## Checklist
 
 <!-- tools:start -->
-<!-- Generated by scripts/update_agent_tools.py: 84 of 94 served. -->
+<!-- Generated by scripts/update_agent_tools.py: 86 of 94 served. -->
 
 | | Tool | Toolkit | Listed to | Caller check |
 |---|---|---|---|---|
 | [x] | `t3_attachment_discard` | attachment | every caller | `writes` |
 | [x] | `t3_attachment_prepare_upload` | attachment | every caller | `writes` |
 | [x] | `t3_thread_send_attachments` | attachment | every caller | `writesThreads` |
-| [ ] | `device_close` | device | threads only | `actsAsCaller` |
-| [ ] | `device_list` | device | threads only | `readsAsCaller` |
+| [x] | `device_close` | device | threads only | `actsAsCaller` |
+| [x] | `device_list` | device | threads only | `readsAsCaller` |
 | [ ] | `device_open` | device | threads only | `actsAsCaller` |
 | [ ] | `device_screenshot` | device | threads only | `readsAsCaller` |
 | [x] | `t3_environment_preferences_update` | environment | every caller | `writesEnvironment` |

@@ -7,8 +7,9 @@ network and no agents), and every server starts from a copy of that database, wi
 off, on with no run kept, and on with the copied runs. Covered: the first snapshot of
 workflows.subscribe and of workflows.counts, workflows.get (a run, one that is not there),
 workflows.answer (a question, the same question again, a wait that asks nothing, a run that is
-not there, a choice that does not fit), and what both streams send after a cancel and after
-workflows are turned off and on again. Times and ids are masked. All data is fake.
+not there, a choice that does not fit), workflows.resume (a paused run, one that is not there),
+workflows.cancel (with a reason, again, a parent with its child, one that is not there), and
+what both streams send after the cancels and after workflows are turned off and on again. Times and ids are masked. All data is fake.
 """
 import argparse
 from contextlib import ExitStack
@@ -71,7 +72,8 @@ def observe(server, mode):
         record["first snapshot"] = snapshots.taken()
         record["first counts"] = counts.taken()
         agent = McpClient(server.url, mcp_token(server, "full-access"))
-        run = ids(agent) if mode == "history" else {"ask": "run-1", "wait": "run-2", "cancel-me": "run-3"}
+        run = ids(agent) if mode == "history" else {"ask": "run-1", "wait": "run-2", "cancel-me": "run-3",
+                                                      "fail": "run-4", "parent": "run-5", "child": "run-6"}
         record["get"] = server.rpc("workflows.get", {"runId": run["ask"]})
         record["get a run that is not there"] = server.rpc("workflows.get", {"runId": "run-missing"})
         answer = lambda **payload: server.rpc("workflows.answer", payload)
@@ -84,7 +86,13 @@ def observe(server, mode):
         time.sleep(SETTLE)
         record["after answering: snapshots"] = snapshots.taken()
         record["after answering: counts"] = counts.taken()
-        agent.call("t3_workflow", {"action": "cancel", "runId": run["cancel-me"], "reason": "done here"})
+        record["resume the paused run"] = server.rpc("workflows.resume", {"runId": run["fail"]})
+        record["resume a run that is not there"] = server.rpc("workflows.resume", {"runId": "run-missing"})
+        record["cancel"] = server.rpc("workflows.cancel", {"runId": run["cancel-me"], "reason": "done here"})
+        record["cancel again"] = server.rpc("workflows.cancel", {"runId": run["cancel-me"]})
+        record["cancel the parent"] = server.rpc("workflows.cancel", {"runId": run["parent"]})
+        record["cancel a run that is not there"] = server.rpc("workflows.cancel", {"runId": "run-missing"})
+        record["get the child after"] = server.rpc("workflows.get", {"runId": run["child"]})
         time.sleep(SETTLE)
         record["after a cancel: snapshots"] = snapshots.taken()
         record["after a cancel: counts"] = counts.taken()

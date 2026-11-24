@@ -118,6 +118,41 @@ OPENCODE_TITLE_SPEC = {"version": {"stdout": "1.15.0"}, "serve": {"routes": {
     "POST /session/ses_title/message": {"body": {"info": {"id": "msg_title", "role": "assistant", "sessionID": "ses_title"},
         "parts": [{"type": "text", "text": '{"title": "Echo Greeting via OpenCode", "needsRefinement": false}'}]}},
     "DELETE /session/ses_title": {"body": True}, "POST /session/ses_title/abort": {"body": True}}}}
+# OpenCode 2: its event stream carries the reply. After the prompt it asks for a tool (which both
+# servers must reject), ends the title's text, and ends the execution. Every body is one the
+# reference's OpenCode 2 schemas decode.
+_OC2_EVENT = {"created": 1767225600000, "durable": {"aggregateID": "ses_title", "seq": 1, "version": 1}}
+OPENCODE2_TITLE_SPEC = {"version": {"stdout": "2.2.5"}, "serve": {"routes": {
+    "GET /api/info": {"body": {"version": "2.2.5", "pid": 4242, "urls": [], "paths": {"tmp": "/tmp"}}},
+    "GET /api/model": {"body": {"location": {"directory": "/"}, "data": [
+        {"id": "claude-opus-5-5", "modelID": "claude-opus-5-5", "providerID": "anthropic", "name": "Claude Opus 5.5",
+         "capabilities": {"tools": True, "input": ["text"], "output": ["text"]}, "variants": [{"id": "high"}],
+         "time": {"released": 1767225600000}, "cost": [], "status": "active", "enabled": True,
+         "limit": {"context": 200000, "output": 32000}}]}},
+    "GET /api/provider": {"body": {"location": {"directory": "/"}, "data": [
+        {"id": "anthropic", "name": "Anthropic", "activation": "auto", "package": ""}]}},
+    "GET /api/event": {"sse": True},
+    "POST /api/session": {"body": {"data": {
+        "id": "ses_title", "projectID": "prj_fixture", "title": "T3 Code generateThreadTitle", "cost": 0,
+        "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        "time": {"created": 1767225600000, "updated": 1767225600000}, "location": {"directory": "/tmp"}}}},
+    "POST /api/session/ses_title/prompt": {"body": {"data": {
+        "id": "msg_title", "sessionID": "ses_title", "type": "user", "time": {"created": 1767225600000},
+        "payload": {"text": "title"}, "delivery": "queue"}}},
+    "POST /api/session/ses_title/permission/per_title/reply": {"status": 204, "body": None},
+    "POST /api/session/ses_title/interrupt": {"body": {"data": {"interrupted": True}}},
+    "DELETE /api/session/ses_title": {"status": 204, "body": None}},
+    "events": {"POST /api/session/ses_title/prompt": [
+        {**_OC2_EVENT, "id": "evt_ask", "type": "permission.asked", "durable": None, "data": {
+            "id": "per_title", "sessionID": "ses_title", "action": "read", "resources": ["/etc/hosts"],
+            "source": {"type": "tool", "messageID": "msg_reply", "id": "call_1"}}},
+        {**_OC2_EVENT, "id": "evt_text", "type": "session.text.ended", "data": {
+            "sessionID": "ses_title", "assistantMessageID": "msg_reply", "ordinal": 0, "state": {},
+            "text": '{"title": "Echo Greeting via OpenCode 2", "needsRefinement": false}'}},
+        {**_OC2_EVENT, "id": "evt_done", "type": "session.execution.succeeded", "data": {"sessionID": "ses_title"}}]}}}
+for _event in OPENCODE2_TITLE_SPEC["serve"]["events"]["POST /api/session/ses_title/prompt"]:
+    if _event.get("durable") is None:
+        _event.pop("durable", None)
 # An Antigravity agy CLI on PATH (as provider_status_parity.py has it) serving ACP, whose session
 # answers a prompt with a title.
 _AGY_SESSION = "0b6a3c1e-5d2f-4a8b-9c7d-1e2f3a4b5c6d"
@@ -292,6 +327,12 @@ PROVIDER_SCENARIOS = [
      "textProvider": {"instance": "opencode", "driver": "opencode", "cli": "opencode", "opencode": True,
                       "model": "anthropic/claude-opus-5-5", "options": [{"id": "variant", "value": "high"}],
                       "launch": "serve", "spec": OPENCODE_TITLE_SPEC}},
+    # OpenCode 2 through the server T3 starts for it: a session, its event stream, a refused tool.
+    {"name": "opencode2 title", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
+     "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate", "titleAfterTurn": True,
+     "textProvider": {"instance": "opencode", "driver": "opencode", "cli": "opencode", "opencode": True,
+                      "model": "anthropic/claude-opus-5-5", "options": [{"id": "variant", "value": "high"}],
+                      "launch": "serve", "spec": OPENCODE2_TITLE_SPEC}},
     # Antigravity's agy CLI over ACP.
     {"name": "antigravity title", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json",
      "dispatch": {"titleSeed": "Run echo hi and write notes.txt"}, "title": "regenerate", "titleAfterTurn": True,

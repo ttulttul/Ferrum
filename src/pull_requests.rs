@@ -14,6 +14,7 @@ mod discussion;
 mod files;
 mod listing;
 mod review;
+pub(crate) mod viewed_files;
 pub(crate) fn handles(method: &str) -> bool {
     let Some(op) = method.strip_prefix("pullRequests.") else {
         return false;
@@ -176,6 +177,7 @@ async fn bitbucket_read(
         repository: named,
         host,
         project: p,
+        state_dir: &state.paths.state_dir,
     };
     let result = bitbucket_pr::run(repository, op, input, number).await;
     if !matches!(
@@ -188,6 +190,9 @@ async fn bitbucket_read(
             | "diff"
             | "diffFileContents"
             | "changeBreakdown"
+            // Ticking a file off says nothing about the change request.
+            | "filesViewed"
+            | "setFilesViewed"
     ) {
         state.pull_requests.clear(&p.id, named, number).await;
     }

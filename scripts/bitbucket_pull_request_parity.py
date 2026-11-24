@@ -24,6 +24,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import sqlite3
 import subprocess
 from tempfile import TemporaryDirectory
 import threading
@@ -293,6 +294,17 @@ def scenario(url, cookie, seen, port, home):
     step("a file's contents at both sides", "pullRequests.diffFileContents",
          {**pr, "changeType": "change", "oldPath": "src/a.rs", "newPath": "src/a.rs"})
     step("change breakdown", "pullRequests.changeBreakdown", pr)
+    # Viewed files, which this environment keeps for Bitbucket: a tick without a version takes the
+    # head's from the diff (src/a.rs), one with an older version reads back dismissed (src/b.rs),
+    # one the diff lacks is a deleted file (docs/gone.md), and an untick removes its mark.
+    viewed = {**pr, "number": 17}
+    step("files viewed, none yet", "pullRequests.filesViewed", viewed)
+    step("tick files", "pullRequests.setFilesViewed", {**viewed, "files": [
+        {"path": "src/a.rs", "viewed": True}, {"path": "src/b.rs", "viewed": True, "revision": "1111111"},
+        {"path": "docs/gone.md", "viewed": True}]})
+    step("files viewed after ticking", "pullRequests.filesViewed", viewed)
+    step("untick a file", "pullRequests.setFilesViewed", {**viewed, "files": [{"path": "src/b.rs", "viewed": False}]})
+    step("files viewed after unticking", "pullRequests.filesViewed", viewed)
     step("update title and body", "pullRequests.update", {**pr, "title": "New title", "body": "New body"})
     step("update nothing", "pullRequests.update", pr)
     step("comment", "pullRequests.comment", {**pr, "body": "Thanks!"})
@@ -317,6 +329,15 @@ def scenario(url, cookie, seen, port, home):
     step("an action Bitbucket lacks", "pullRequests.runAction", {**pr, "action": "ready"})
     step("merge on a read-only repository", "pullRequests.runAction", {**ro, "action": "merge"})
     return record
+
+
+def viewed_rows(home):
+    """The marks a server wrote to pull_request_files_viewed, its tick times masked."""
+    [database] = list(home.rglob("statev2.sqlite"))
+    with sqlite3.connect(database) as db:
+        rows = db.execute("SELECT provider, host, repository, number, viewer, path, revision, viewed_at"
+                          " FROM pull_request_files_viewed ORDER BY path").fetchall()
+    return [[*row[:7], "<time>" if row[7] else None] for row in rows]
 
 
 def main():
@@ -361,6 +382,8 @@ def main():
                         {"Cookie": cookie, "Content-Type": "application/json"})
                     assert status == 200, (status, body)
                 answers[side] = scenario(url, cookie, seen, api.server_port, home)
+                answers[side]["viewed files kept in the shared database"] = {
+                    "answer": viewed_rows(home), "requests": []}
     parity_harness.assert_nothing_escaped()
     failures = 0
     # A detail's reads run side by side and the first failure stops the rest, so which of them

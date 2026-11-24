@@ -136,6 +136,14 @@ fn issue(
                 return expected("a value with a length of at most 128".into());
             }
         }
+        if tool == "device_close" && matches!(path, ["deviceId"] | ["hostId"]) {
+            if trimmed.is_empty() {
+                return expected("a non-blank string".into());
+            }
+            if path == ["hostId"] && trimmed.encode_utf16().count() > 128 {
+                return expected("a value with a length of at most 128".into());
+            }
+        }
         let length = text.encode_utf16().count() as f64;
         if let Some(max) = schema["maxLength"].as_f64().filter(|max| length > *max) {
             return expected(format!("a value with a length of at most {max}"));

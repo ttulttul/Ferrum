@@ -527,18 +527,47 @@ pub(crate) fn thread_provider_turn(
             .project_rows
             .get(&thread.project_id)
             .filter(|row| row["deletedAt"].is_null());
-        let unresolved = project.is_none()
-            && overrides.as_object().is_some_and(|entries| {
-                entries
-                    .values()
-                    .any(|entry| entry.get("enableAgentBrowserAccess").is_some())
-            });
-        let browser = !unresolved
-            && overrides[&thread.project_id]["enableAgentBrowserAccess"]
-                .as_bool()
-                .or(settings["enableAgentBrowserAccess"].as_bool())
-                .unwrap_or(true);
-        let token = oauth.provider_credential(&thread.id, provider_instance_id(&row), browser)?;
+        let browser_overridden = overrides.as_object().is_some_and(|entries| {
+            entries
+                .values()
+                .any(|entry| entry.get("enableAgentBrowserAccess").is_some())
+        });
+        let device_overridden = overrides.as_object().is_some_and(|entries| {
+            entries
+                .values()
+                .any(|entry| entry.get("enableAgentDeviceAccess").is_some())
+        });
+        let enable_device_support = settings["enableDeviceSupport"].as_bool().unwrap_or(false);
+        let (browser, device) = if project.is_none() && (browser_overridden || device_overridden) {
+            (
+                if browser_overridden {
+                    false
+                } else {
+                    settings["enableAgentBrowserAccess"]
+                        .as_bool()
+                        .unwrap_or(true)
+                },
+                enable_device_support
+                    && !device_overridden
+                    && settings["enableAgentDeviceAccess"]
+                        .as_bool()
+                        .unwrap_or(false),
+            )
+        } else {
+            (
+                overrides[&thread.project_id]["enableAgentBrowserAccess"]
+                    .as_bool()
+                    .or(settings["enableAgentBrowserAccess"].as_bool())
+                    .unwrap_or(true),
+                enable_device_support
+                    && overrides[&thread.project_id]["enableAgentDeviceAccess"]
+                        .as_bool()
+                        .or(settings["enableAgentDeviceAccess"].as_bool())
+                        .unwrap_or(false),
+            )
+        };
+        let token =
+            oauth.provider_credential(&thread.id, provider_instance_id(&row), browser, device)?;
         provider.mcp = Some(provider::McpServer {
             url: endpoint.to_owned(),
             authorization: format!("Bearer {token}"),

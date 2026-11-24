@@ -51,8 +51,6 @@ const NOT_YET_SERVED: &[&str] = &[
     "workspace.scanFolders",
     "workspace.taskFolder",
     "workspace.addTaskFolderRepository",
-    "workflows.resume",
-    "workflows.cancel",
     "workflows.getDefinition",
     "workflows.saveDefinition",
     "workflows.deleteDefinition",

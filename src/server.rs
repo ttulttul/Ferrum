@@ -1940,6 +1940,20 @@ impl mcp_oauth::McpHost for AppState {
             }
         })
     }
+    fn device_tool(
+        self: &Arc<Self>,
+        operation: &'static str,
+        input: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, serde_json::Value>> {
+        let state = self.clone();
+        Box::pin(async move {
+            state
+                .local
+                .devices
+                .tool_call(operation, &input, &state.data_dir)
+                .await
+        })
+    }
     fn workspace_call(
         self: &Arc<Self>,
         method: String,

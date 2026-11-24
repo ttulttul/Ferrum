@@ -88,6 +88,8 @@ def observations(url, cookie, root):
         ("preview_evaluate", {"expression": "1"}),
         ("preview_set_appearance", {"colorScheme": "dark"}),
         ("preview_resize", {"mode": "fill"}),
+        ("device_list", {}),
+        ("device_close", {}),
         ("t3_thread_configure", {}),
         ("t3_thread_configure", dict(threadId="thread-missing")),
         ("t3_queue", dict(action="list", threadId="thread-missing")),
