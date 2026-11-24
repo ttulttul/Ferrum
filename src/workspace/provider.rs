@@ -206,7 +206,15 @@ pub enum ProviderEvent {
     /// `completed` once the CLI took it, or `cancelled` with a turn that
     /// ended first. `message_id` is the steer message's id.
     #[serde(rename = "steer.updated", rename_all = "camelCase")]
-    SteerUpdated { message_id: String, status: String },
+    SteerUpdated {
+        message_id: String,
+        status: String,
+        /// The turn completed before the CLI took it (`turnCompleted`), so
+        /// the server sends its message again as a run of its own. Additive
+        /// and skippable: absent means false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        untaken: bool,
+    },
     /// Recorded by earlier builds, which approved every request themselves.
     /// Kept so their event logs still load; it changes nothing.
     #[serde(rename = "runtime_request.resolved", rename_all = "camelCase")]

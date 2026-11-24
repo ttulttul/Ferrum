@@ -240,7 +240,23 @@ pub(super) async fn steer_with<H: CommandHost>(
         )
         .await;
     if !delivered {
-        tracing::warn!(run = %target.wire_id, "the steered run's provider turn was not running");
+        // The turn ended before the steer was sent: it is sent again as a
+        // run of its own once this run ends, as the reference's steer fails
+        // with `turnCompleted` and its EffectWorker dispatches it again.
+        tracing::info!(run = %target.wire_id, "the steered turn had ended; sending its message again");
+        let untaken = Event::RunProvider {
+            run_id: target.run,
+            thread_id: thread_id.to_owned(),
+            event: crate::workspace::ProviderEvent::SteerUpdated {
+                message_id: command["messageId"].as_str().unwrap_or_default().to_owned(),
+                status: "completed".into(),
+                untaken: true,
+            },
+            position: None,
+        };
+        if let Err(error) = state.commit(untaken).await {
+            tracing::warn!(%error, "could not record an unsent steer");
+        }
     }
     Ok(sequence)
 }

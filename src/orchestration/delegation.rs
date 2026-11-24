@@ -580,14 +580,27 @@ fn result_for_run(child: &Value, run: &Value) -> (String, Value) {
                 format!("{reason}\n\nLast assistant message before the run failed:\n\n{report}")
             }
         }
-    } else if let Some(text) = message.and_then(|m| m["text"].as_str()) {
-        text.to_owned()
-    } else if let Some(text) = item.and_then(|i| i["text"].as_str()) {
-        text.to_owned()
-    } else if status == "completed" {
-        "Child task completed without an assistant result.".to_owned()
     } else {
-        format!("Child task ended with status {status}.")
+        let report = if let Some(text) = message.and_then(|m| m["text"].as_str()) {
+            text.to_owned()
+        } else if let Some(text) = item.and_then(|i| i["text"].as_str()) {
+            text.to_owned()
+        } else if status == "completed" {
+            "Child task completed without an assistant result.".to_owned()
+        } else {
+            format!("Child task ended with status {status}.")
+        };
+        // `withStopNotice` (#37859): a stopped run's result ends with why it
+        // stopped.
+        let notice = items.iter().find(|i| {
+            i["runId"] == *run_id
+                && i["type"] == "run_interrupt_result"
+                && i["message"].as_str().is_some_and(|m| !m.is_empty())
+        });
+        match notice.and_then(|n| n["message"].as_str()) {
+            Some(notice) => format!("{report}\n\n{notice}"),
+            None => report,
+        }
     };
     let turn_item = failure
         .map(|f| f["id"].clone())
@@ -1070,8 +1083,62 @@ pub(crate) async fn after_run<H: CommandHost>(state: Arc<H>, thread_id: &str) {
     if let Err(error) = finalize_delivery(&*state, thread_id).await {
         tracing::warn!(%error, thread_id, "could not settle a delegated delivery");
     }
+    resend_untaken_deliveries(state.clone(), thread_id).await;
     offer_delivery(state.clone(), thread_id).await;
     start_queued_wake(state, thread_id).await;
+}
+
+/// A delegated delivery steered into a turn that completed before the CLI
+/// took it is sent again as a queued message of its own, so its results
+/// still reach the thread: the reference's steer fails with
+/// `turnCompleted` and its EffectWorker dispatches the message again
+/// (`queue_after_active` for a delivery). The command id is the steer's, so
+/// this happens once.
+async fn resend_untaken_deliveries<H: CommandHost>(state: Arc<H>, thread_id: &str) {
+    let untaken: Vec<(String, String, Value, Value)> = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(thread_id) else {
+            return;
+        };
+        thread
+            .messages
+            .iter()
+            .filter(|m| m.steer.as_ref().is_some_and(|s| s["untaken"] == true))
+            .filter_map(|m| {
+                let completion = m.wire.as_ref()?["delegatedCompletion"].clone();
+                completion.is_object().then(|| {
+                    (
+                        m.id.clone(),
+                        m.content.clone(),
+                        completion,
+                        m.notification.clone().unwrap_or(Value::Null),
+                    )
+                })
+            })
+            .collect()
+    };
+    for (message_id, text, completion, notification) in untaken {
+        let command = json!({
+            "type": "message.dispatch",
+            "commandId": join_id("command:steer-follow-up", &[&message_id]),
+            "threadId": thread_id,
+            "messageId": join_id("message:steer-follow-up", &[&message_id]),
+            "text": text,
+            "attachments": [],
+            "dispatchMode": {"type": "queue_after_active"},
+            "createdBy": "agent",
+            "creationSource": "server",
+            "delegatedCompletion": completion,
+            "notification": notification,
+        });
+        if let Err(error) = super::dispatch_orchestration_command(state.clone(), command).await {
+            tracing::warn!(
+                ?error,
+                thread_id,
+                "could not send an untaken delivery again"
+            );
+        }
+    }
 }
 
 /// `finalizeDelegatedCompletionDelivery`, once a wake run has ended: the
@@ -2591,6 +2658,29 @@ mod tests {
         assert_eq!(
             subagent_thread_title("P", None, &long, 1),
             format!("{}...", "a".repeat(69))
+        );
+    }
+
+    #[test]
+    fn a_stopped_run_s_result_ends_with_why_it_stopped() {
+        let run = json!({"id": "run:c", "status": "interrupted"});
+        let child = json!({"turnItems": [
+            {"id": "i1", "runId": "run:c", "type": "run_interrupt_result", "status": "interrupted",
+             "ordinal": 3, "message": "Stopped by an agent: No longer needed"},
+        ], "messages": []});
+        assert_eq!(
+            subagent_result(&child, &run),
+            "Child task ended with status interrupted.\n\nStopped by an agent: No longer needed"
+        );
+        let report = json!({"turnItems": [
+            {"id": "i0", "runId": "run:c", "type": "assistant_message", "status": "completed",
+             "ordinal": 2, "text": "Counted to five.", "messageId": null},
+            {"id": "i1", "runId": "run:c", "type": "run_interrupt_result", "status": "interrupted",
+             "ordinal": 3, "message": "Stopped by user"},
+        ], "messages": []});
+        assert_eq!(
+            subagent_result(&report, &run),
+            "Counted to five.\n\nStopped by user"
         );
     }
 

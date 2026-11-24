@@ -597,8 +597,11 @@ impl Store {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.provider.apply(*run_id, event, at);
                     // A steer's status, on its message (its turn item).
-                    if let crate::workspace::ProviderEvent::SteerUpdated { message_id, status } =
-                        event
+                    if let crate::workspace::ProviderEvent::SteerUpdated {
+                        message_id,
+                        status,
+                        untaken,
+                    } = event
                     {
                         if let Some(steer) = thread
                             .messages
@@ -608,6 +611,9 @@ impl Store {
                         {
                             steer["status"] = serde_json::json!(status);
                             steer["statusAt"] = serde_json::json!(at);
+                            if *untaken {
+                                steer["untaken"] = serde_json::json!(true);
+                            }
                         }
                     }
                     if let crate::workspace::ProviderEvent::ProviderThread { driver, .. } = event {
@@ -702,6 +708,13 @@ impl Store {
                             .interrupt_requests
                             .entry(run)
                             .or_insert((at, slot));
+                        if let Some(reason) = patch["interruptReason"].as_str() {
+                            thread
+                                .provider
+                                .interrupt_reasons
+                                .entry(run)
+                                .or_insert_with(|| reason.to_owned());
+                        }
                     }
                     if let Some(value) = patch.get("snoozed_until") {
                         thread.snoozed_until = value.as_str().map(str::to_owned);
