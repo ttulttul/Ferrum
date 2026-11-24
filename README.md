@@ -75,7 +75,7 @@ Parity is tested by running the original TypeScript server and the Rust server s
 - **Pinned reference:** [upstream commit `fd0331ca`](https://github.com/pingdotgg/t3code/tree/fd0331ca9b1596ed7018c80f52b7e6730014f593) (`fd0331ca9b1596ed7018c80f52b7e6730014f593`). This is the only place the README names it.
 - **Suites:** 48 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
 - **Client calls:** the [client RPC suite](scripts/client_rpc_cases.json) drives 242 recorded client steps through the original client. 1 check is expected to fail ([list](scripts/client_rpc_parity_xfail.json)).
-- **Live turns:** the client thread suite runs 87 provider scenarios. 38 checks are expected to fail, 7 of them races ([list](scripts/client_thread_parity_xfail.json)).
+- **Live turns:** the client thread suite runs 81 provider scenarios. 35 checks are expected to fail, 5 of them races ([list](scripts/client_thread_parity_xfail.json)).
 - **Shared home:** the server-switch suite has 1 expected failure ([list](scripts/shared_store_parity_xfail.json)).
 - **Provider status:** the [provider status suite](scripts/provider_status_parity.py) has no expected failures.
 - **Other suites:** 1 known difference in the peer link suites ([list](scripts/parity_gaps.json)).
