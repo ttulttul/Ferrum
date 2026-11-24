@@ -78,8 +78,16 @@ fn permission_mode(runtime_mode: &str) -> &'static str {
     }
 }
 
-/// The callback id the reference's SDK gives its one hook (`hook_0`).
-const SUBAGENT_DEVICE_HOOK: &str = "hook_0";
+/// The callback ids the reference's SDK gives its hooks, numbered in the
+/// order it registers them: the device `SubagentStart` hook when the thread
+/// may use devices, then the `Stop` hook every query has.
+fn hook_ids(device: bool) -> (Option<&'static str>, &'static str) {
+    if device {
+        (Some("hook_0"), "hook_1")
+    } else {
+        (None, "hook_0")
+    }
+}
 
 /// A `can_use_tool` request waiting for the user.
 struct PendingPermission {
@@ -116,7 +124,7 @@ struct Attempt<'a> {
     tools: IndexMap<String, ProviderItem>,
     next_control: u64,
     /// Whether the CLI was given the SubagentStart hook that adds the device
-    /// text (the thread may use devices), so it answers that hook's callbacks.
+    /// text (the thread may use devices), which also numbers its Stop hook.
     device_hook: bool,
     runtime_mode: String,
     responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
@@ -388,13 +396,15 @@ impl<'a> Attempt<'a> {
             let device = mcp.is_some_and(|mcp| mcp.device_tools);
             let request_id = format!("t3-initialize-{}", self.next_control);
             self.next_control += 1;
-            let mut init = json!({"subtype": "initialize"});
+            let mut init = json!({"subtype": "initialize", "hooks": {}});
+            let (subagent, stop) = hook_ids(device);
             // Native subagents start from their task, not this session's
             // system prompt, so a SubagentStart hook gives them the device text.
-            if device {
-                init["hooks"] =
-                    json!({"SubagentStart": [{"hookCallbackIds": [SUBAGENT_DEVICE_HOOK]}]});
+            if let Some(subagent) = subagent {
+                init["hooks"]["SubagentStart"] = json!([{"hookCallbackIds": [subagent]}]);
             }
+            // The reference's goal Stop hook, which every query registers.
+            init["hooks"]["Stop"] = json!([{"hookCallbackIds": [stop]}]);
             init["appendSystemPrompt"] = json!(crate::agent_instructions::claude_append(
                 mcp.is_some(),
                 device
@@ -985,7 +995,7 @@ impl<'a> Attempt<'a> {
         let request_id = message["request_id"].clone();
         let response = match request["subtype"].as_str() {
             Some("hook_callback")
-                if self.device_hook && request["callback_id"] == SUBAGENT_DEVICE_HOOK =>
+                if hook_ids(self.device_hook).0 == request["callback_id"].as_str() =>
             {
                 json!({"subtype": "success", "request_id": request_id, "response": {
                     "hookSpecificOutput": {
@@ -993,6 +1003,12 @@ impl<'a> Attempt<'a> {
                         "additionalContext": crate::agent_instructions::claude_subagent_device_context(),
                     },
                 }})
+            }
+            // The reference's Stop hook keeps a Claude goal from re-prompting while T3
+            // work that will wake the thread runs; Rust runs no Claude goals, so it
+            // answers as the reference does without an active goal.
+            Some("hook_callback") if request["callback_id"] == hook_ids(self.device_hook).1 => {
+                json!({"subtype": "success", "request_id": request_id, "response": {}})
             }
             Some("can_use_tool") => match self.can_use_tool(&request_id, request) {
                 Some(result) => json!({"subtype": "success", "request_id": request_id,
