@@ -20,11 +20,11 @@ lists the `client_rpc_parity.py` cases that call it through the reference client
 
 | Kind | Calls | Used by the client | Mobile only | Server-only / unused | Existing parity | Client harness | Either |
 |---|---|---|---|---|---|---|---|
-| rpc | 224 | 221 | 0 | 3 | 144 | 78 | 167 |
+| rpc | 224 | 221 | 0 | 3 | 146 | 78 | 169 |
 | rpc-stream | 33 | 32 | 0 | 1 | 21 | 23 | 28 |
 | http | 55 | 40 | 1 | 14 | 40 | 14 | 41 |
 | http-raw | 7 | 7 | 0 | 0 | 7 | 3 | 7 |
-| **all** | 319 | 300 | 1 | 18 | 212 | 118 | 243 |
+| **all** | 319 | 300 | 1 | 18 | 214 | 118 | 245 |
 
 Newly covered by the client harness (no earlier parity script): 31. Calls with a known Rust gap (an expected failure in `scripts/client_rpc_parity_xfail.json`): 1.
 
@@ -249,11 +249,11 @@ model providers, T3 Connect relay, voice models, simulators, a browser), are des
 | `vcs.removeWorktree` | open project/thread | `packages/client-runtime/src/state/vcs.ts:386` | VcsRemoveWorktreeInput | void | session (source-control:write) | client | git_workflow_parity.py | 2 case(s) |
 | `vcs.switchRef` | open project/thread | `packages/client-runtime/src/state/vcs.ts:400` | VcsSwitchRefInput | VcsSwitchRefResult | session (source-control:write) | client | host-parity.json | 3 case(s) |
 | `workflows.answer` | user action | `packages/client-runtime/src/state/server.ts:1960` | WorkflowAnswerInput | void | session (orchestration:operate) | client | workflow_rpc_parity.py | — |
-| `workflows.cancel` | user action | `packages/client-runtime/src/state/server.ts:1973` | WorkflowRunCancelInput | void | session (orchestration:operate) | client | validation only | — |
+| `workflows.cancel` | user action | `packages/client-runtime/src/state/server.ts:1973` | WorkflowRunCancelInput | void | session (orchestration:operate) | client | workflow_rpc_parity.py | — |
 | `workflows.deleteDefinition` | user action | `packages/client-runtime/src/state/server.ts:1985` | WorkflowDefinitionDeleteInput | WorkflowDefinitionChangeResult | session (terminal:operate) | client | validation only | — |
 | `workflows.get` | user action | `packages/client-runtime/src/state/server.ts:1645` | WorkflowRunGetInput | WorkflowRunDetail | session (orchestration:read) | client | workflow_rpc_parity.py | — |
 | `workflows.getDefinition` | user action | `packages/client-runtime/src/state/server.ts:1655` | WorkflowDefinitionGetInput | WorkflowDefinitionFiles | session (filesystem:read) | client | validation only | — |
-| `workflows.resume` | user action | `packages/client-runtime/src/state/server.ts:1968` | WorkflowRunResumeInput | void | session (orchestration:operate) | client | validation only | — |
+| `workflows.resume` | user action | `packages/client-runtime/src/state/server.ts:1968` | WorkflowRunResumeInput | void | session (orchestration:operate) | client | workflow_rpc_parity.py | — |
 | `workflows.saveDefinition` | user action | `packages/client-runtime/src/state/server.ts:1979` | WorkflowDefinitionSaveInput | WorkflowDefinitionChangeResult | session (terminal:operate) | client | validation only | — |
 | `workspace.addTaskFolderRepository` | open project/thread | `packages/client-runtime/src/state/filesystem.ts:245` | WorkspaceAddTaskFolderRepositoryInput | TaskFolder | session (source-control:write) | client | validation only | — |
 | `workspace.listFolders` | open project/thread | `packages/client-runtime/src/state/filesystem.ts:234` | WorkspaceListFoldersInput | WorkspaceListFoldersResult | session (filesystem:read) | client | validation only | — |

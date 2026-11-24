@@ -5801,8 +5801,10 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "workflow_rpc_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -5903,8 +5905,10 @@
       "stream": false,
       "auth": "session (orchestration:operate)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "workflow_rpc_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },

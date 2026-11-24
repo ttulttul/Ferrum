@@ -393,6 +393,28 @@ async fn run_call(
             Err(error) => Reply::Failure(json!({"_tag": "Fail", "error": error})),
         };
     }
+    if method == "workflows.resume" {
+        return match crate::workflows::resume_run(
+            state,
+            params["runId"].as_str().unwrap_or_default(),
+        ) {
+            Ok(()) => Reply::Success(Value::Null),
+            Err(error) => Reply::Failure(json!({"_tag": "Fail", "error": error})),
+        };
+    }
+    if method == "workflows.cancel" {
+        let reason = params["reason"].as_str();
+        return match crate::workflows::cancel_run(
+            state,
+            params["runId"].as_str().unwrap_or_default(),
+            reason,
+        )
+        .await
+        {
+            Ok(()) => Reply::Success(Value::Null),
+            Err(error) => Reply::Failure(json!({"_tag": "Fail", "error": error})),
+        };
+    }
     if method == "server.getStorageCleanupReport" {
         let mut reports = state.storage_cleanup.subscribe();
         while let Some(report) = reports.recv().await {

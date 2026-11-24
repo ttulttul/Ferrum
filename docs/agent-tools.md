@@ -314,9 +314,10 @@ schemas.
    and compares every action in the three states and the tables left. The client's
    `workflows.subscribe` (a snapshot of runs and questions, sent again once a burst of run changes
    settles), `workflows.counts` (sent when a count moves), `workflows.get` and
-   `workflows.answer` answer the same way, starting over when workflows are turned on or off;
-   `scripts/workflow_rpc_parity.py` compares them. Not yet: `workflows.resume`,
-   `workflows.cancel` and the definition RPCs; running
+   `workflows.answer` answer the same way, starting over when workflows are turned on or off,
+   and `workflows.resume` (nothing is registered to resume) and `workflows.cancel` act as the
+   tool's resume and cancel do; `scripts/workflow_rpc_parity.py` compares them. Not yet: the
+   definition RPCs; running
    workflows (definitions, triggers, hooks, the sweep), milestone news of answered questions
    and ended runs, and stopping an agent step's thread in a linked environment on cancel.
 5. **Prompt context and capabilities** (served), as above.
