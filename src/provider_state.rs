@@ -5,8 +5,8 @@
 //! into the reference's projection records.
 use crate::workspace::provider::{self, ProviderTurn};
 use crate::workspace::provider::{
-    PlanStep, ProviderEvent, ProviderFailure, ProviderItem, RuntimeRequestOpen, ThreadDisposition,
-    TokenUsage, TurnStatus,
+    OpenCode2Thread, PlanStep, ProviderEvent, ProviderFailure, ProviderItem, RuntimeRequestOpen,
+    ThreadDisposition, TokenUsage, TurnStatus,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -102,6 +102,8 @@ pub struct ThreadRecord {
     /// The background tasks running now (`pendingBackgroundTasks`), each with
     /// the run it first appeared under (`attributePendingBackgroundTasks`).
     pub background_tasks: Vec<(Value, Uuid)>,
+    /// The OpenCode 2 server its turns ran on, as the last one reported it.
+    pub opencode2: Option<OpenCode2Thread>,
 }
 
 /// One run's provider turn.
@@ -225,6 +227,7 @@ impl ProviderState {
                 driver,
                 native_thread_id,
                 resumed,
+                opencode2,
                 ..
             } => {
                 record.driver = driver.clone();
@@ -270,8 +273,12 @@ impl ProviderState {
                     status: "active",
                     conversation_head: None,
                     background_tasks: Vec::new(),
+                    opencode2: None,
                 });
                 thread.native_id = Some(native_thread_id.clone());
+                if opencode2.is_some() {
+                    thread.opencode2 = opencode2.clone();
+                }
                 thread.status = "active";
                 thread.updated_at = at;
                 self.run_threads.insert(run, thread.first_run);
@@ -420,6 +427,7 @@ impl ProviderState {
                     status: "not_loaded",
                     conversation_head: None,
                     background_tasks: Vec::new(),
+                    opencode2: None,
                 });
                 self.terminals.insert(
                     run,
@@ -850,6 +858,7 @@ mod tests {
             native_thread_id: id.into(),
             resumed: false,
             model: None,
+            opencode2: None,
         };
         state.apply(first, &thread(provider::CODEX, "thr_codex"), 1);
         state.apply(second, &thread(provider::CLAUDE_AGENT, "sess_claude"), 2);
@@ -896,6 +905,8 @@ mod tests {
                 native_thread_id: "thr_1".into(),
                 resumed: false,
                 model: None,
+
+                opencode2: None,
             },
             1,
         );

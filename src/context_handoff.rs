@@ -2448,6 +2448,8 @@ mod tests {
                 native_thread_id: "sess-saved".into(),
                 resumed: false,
                 model: Some("claude-opus-5-5".into()),
+
+                opencode2: None,
             },
             10,
         );

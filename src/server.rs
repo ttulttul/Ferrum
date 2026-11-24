@@ -391,6 +391,8 @@ impl AppState {
             local_services::PreviewService::default(),
             local_services::DeviceService::new(settings.clone(), &dir)?,
         ));
+        let provider_status = crate::provider_status::ProviderStatus::new(&paths);
+        local.share_opencode_servers(provider_status.opencode().clone());
         Ok(Arc::new(Self {
             control,
             scheduled_database,
@@ -428,7 +430,7 @@ impl AppState {
             model_manifest: Arc::new(crate::model_manifest::ModelManifest::new(
                 crate::model_manifest::NativeHost::new(&paths.state_dir, settings.clone()),
             )),
-            provider_status: crate::provider_status::ProviderStatus::new(&paths),
+            provider_status,
             background: Default::default(),
             runtime: Arc::default(),
             stopping: Default::default(),
