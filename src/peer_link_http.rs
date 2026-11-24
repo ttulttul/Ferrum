@@ -304,7 +304,10 @@ async fn history(
     let Some(page) = page else {
         return refusal(StatusCode::INTERNAL_SERVER_ERROR, "thread_read_failed");
     };
-    (StatusCode::OK, [("cache-control", "no-store")], Json(page)).into_response()
+    let mut response =
+        (StatusCode::OK, [("cache-control", "no-store")], Json(page)).into_response();
+    crate::mcp_oauth::with_link_expiry(&mut response, admitted.link_expires_ms);
+    response
 }
 
 /// `GET /api/links/thread/item`: one item in full, as `orchestration.getTurnItem` gives it.
