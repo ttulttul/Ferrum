@@ -24,7 +24,7 @@ Based on `main` and the parity test suites:
 - **T3 Connect relay tunnel:** Provisioning, running, and releasing the T3 Connect managed tunnel, plus handing off an active tunnel cleanly across Rust/TypeScript switches.
 - **Environment links (incoming):** Accepting environment links and pairing tokens issued by the TypeScript server on the same home directory, plus pairing-link administration. Sessions the TypeScript server signed in on the same home are listed under Connections and can be revoked there.
 - **Environment links (outgoing):** Linking to another machine, listing and forgetting links (shared with the TypeScript server on the same home), forwarding MCP tool calls to a linked machine, and agents asking you to link one from inside a conversation (`t3_environment_link`), answered in a card.
-- **MCP server and agent tools:** Serving MCP sign-in and the agent tools over `/mcp`, with the original's agent instructions and capabilities. 84 of the original's 94 agent tools are served, including reading pull requests and CI, issues, attachments, worktrees, previews, HTML pages, feedback and secret requests. The [agent tool checklist](docs/agent-tools.md#checklist) tracks each tool.
+- **MCP server and agent tools:** Serving MCP sign-in and the agent tools over `/mcp`, with the original's agent instructions and capabilities. 86 of the original's 94 agent tools are served, including reading pull requests and CI, issues, attachments, worktrees, previews, HTML pages, feedback, secret requests, and listing and closing devices. The [agent tool checklist](docs/agent-tools.md#checklist) tracks each tool.
 - **Login-shell `PATH` discovery:** Reading the login shell's `PATH` at startup and again before source-control discovery, so provider CLIs and tools installed later are found; listing Codex models from its CLI.
 - **Provider status checks:** Every built-in provider (Claude Code, Codex, Cursor, OpenCode, Grok, Pi, fx, Kiro, Antigravity and Muse Code) has its status (installed version, sign-in state, usage and models) checked at startup, on settings changes, every 5 minutes while a client is watching, and on refresh, and pushed to clients. The checks include newer CLI releases and Claude's skills, and Rust can redeem the reset credits a Claude or Codex subscription banks.
 - **Configuration, auth, and desktop adoption:** Shared `userdata/` layout (`settings.json`, secrets, managed policy, `server-owner.sqlite` exclusive lock, `server-runtime.json`), browser session cookies, WebSocket tickets with DPoP checks, CORS, and desktop SSH launcher adoption.
@@ -45,7 +45,7 @@ Most suites match the original exactly; the few expected differences are listed 
 ### Agents and tools
 
 - **Pull request changes.** Agents can read pull requests and CI, but can't open, update, review, respond to or merge one, or re-run CI (`pull_request_create`, `pull_request_update`, `pull_request_review`, `pull_request_respond`, `pull_request_merge`, `ci_rerun`).
-- **Devices.** Agents can't use simulators and emulators yet (the `device_*` tools).
+- **Devices.** Agents can list and close devices, but can't yet open a simulator or emulator or take a screenshot (`device_open`, `device_screenshot`).
 - **Delegated tasks.** A child can't run in its own worktree (`isolation: "worktree"`) or on a linked machine yet.
 - **Codex skills.** `orchestrator_capabilities` doesn't rescan the project's Codex skills, as the original does (upstream #39247).
 - **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing. So are browser setup hints and installing a browser when none is found.
@@ -74,13 +74,13 @@ Most suites match the original exactly; the few expected differences are listed 
 Parity is tested by running the original TypeScript server and the Rust server side by side and comparing what they answer. Each gets a fresh home directory, and both get the same fake provider CLIs that replay recorded Codex and Claude sessions, and local stand-ins for every outside service. No test reaches the network or a real model.
 
 - **Pinned reference:** [upstream commit `fd0331ca`](https://github.com/pingdotgg/t3code/tree/fd0331ca9b1596ed7018c80f52b7e6730014f593) (`fd0331ca9b1596ed7018c80f52b7e6730014f593`). This is the only place the README names it.
-- **Suites:** 47 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
+- **Suites:** 48 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
 - **Client calls:** the [client RPC suite](scripts/client_rpc_cases.json) drives 242 recorded client steps through the original client. 1 check is expected to fail ([list](scripts/client_rpc_parity_xfail.json)).
 - **Live turns:** the client thread suite runs 80 provider scenarios. 34 checks are expected to fail, 4 of them races ([list](scripts/client_thread_parity_xfail.json)).
 - **Shared home:** the server-switch suite has 1 expected failure ([list](scripts/shared_store_parity_xfail.json)).
 - **Provider status:** the [provider status suite](scripts/provider_status_parity.py) has no expected failures.
 - **Other suites:** 1 known difference in the peer link suites ([list](scripts/parity_gaps.json)).
-- **Agent tools:** 84 of 94 served ([checklist](docs/agent-tools.md#checklist)).
+- **Agent tools:** 86 of 94 served ([checklist](docs/agent-tools.md#checklist)).
 
 A suite fails on any difference it doesn't list, and on any listed case that starts to match.
 
