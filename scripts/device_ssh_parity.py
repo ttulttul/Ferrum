@@ -80,13 +80,17 @@ def owner_for(state_dir: Path, host_id: str) -> str:
 
 
 def wait_hosts(url, cookie, ids, seconds=30):
+    """The device state once it lists `ids` and has settled: a host change publishes more than
+    once (removing a host publishes again after the host has stopped)."""
     deadline = monotonic() + seconds
+    previous = None
     while True:
         state = call(url, cookie, "device.list", {})
         listed = [host["id"] for host in state.get("value", {}).get("hosts", [])]
-        if listed == ids or monotonic() > deadline:
+        if (listed == ids and state == previous) or monotonic() > deadline:
             return state
-        sleep(0.2)
+        previous = state if listed == ids else None
+        sleep(0.5)
 
 
 HOSTS = [
