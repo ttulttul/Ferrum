@@ -639,6 +639,18 @@ pub(super) struct FolderScan {
     /// `slashCommandsPending` as the driver set it; `None` takes the machine
     /// check's failure (`status === "error"`).
     pub slash_pending: Option<bool>,
+    /// The folder's own model catalog (`workspaceModels`).
+    pub models: WorkspaceModels,
+}
+
+/// A folder's models against the machine's.
+pub(super) enum WorkspaceModels {
+    /// The machine's catalog: the snapshot carries none.
+    Same,
+    /// The folder's own catalog.
+    Own(Vec<Value>),
+    /// Unread: the snapshot keeps the models found before (`modelsPending`).
+    Pending,
 }
 
 /// `upsertProviderWorkspaceSnapshot`.
@@ -665,6 +677,16 @@ fn upsert_workspace_snapshot(row: &mut Value, cwd: &str, checked_at: &str, scan:
     if let Some(descriptors) = previous.as_ref().and_then(|p| p.get("optionDescriptors")) {
         snapshot["optionDescriptors"] = descriptors.clone();
     }
+    match scan.models {
+        WorkspaceModels::Same => {}
+        WorkspaceModels::Own(models) => snapshot["models"] = json!(models),
+        WorkspaceModels::Pending => {
+            if let Some(models) = previous.as_ref().and_then(|p| p.get("models")) {
+                snapshot["models"] = models.clone();
+            }
+            snapshot["modelsPending"] = json!(true);
+        }
+    }
     let mut all: Vec<Value> = row["workspaceSnapshots"]
         .as_array()
         .map(|all| all.iter().filter(|s| s["cwd"] != cwd).cloned().collect())
@@ -678,7 +700,7 @@ fn upsert_workspace_snapshot(row: &mut Value, cwd: &str, checked_at: &str, scan:
 pub(crate) fn scans_folders(driver: &str) -> bool {
     matches!(
         driver,
-        "codex" | "claudeAgent" | "grok" | "pi" | "fx" | "cursor" | "antigravity"
+        "codex" | "claudeAgent" | "grok" | "pi" | "fx" | "cursor" | "antigravity" | "opencode"
     )
 }
 
@@ -699,12 +721,14 @@ async fn scan_folder(
                 .await?,
             slash_commands: machine_commands(),
             slash_pending: None,
+            models: WorkspaceModels::Same,
         }),
         "claudeAgent" => Some(claude::folder_scan(&instance.config, &env, cwd).await),
         "grok" => Some(FolderScan {
             skills: grok::folder_skills(&instance.config, &env, cwd).await?,
             slash_commands: machine_commands(),
             slash_pending: None,
+            models: WorkspaceModels::Same,
         }),
         "pi" => {
             let (slash_commands, skills) = pi::folder_commands(&instance.config, &env, cwd).await?;
@@ -712,6 +736,7 @@ async fn scan_folder(
                 skills,
                 slash_commands,
                 slash_pending: None,
+                models: WorkspaceModels::Same,
             })
         }
         // Skill folders scanned directly, beside the machine's commands.
@@ -719,11 +744,13 @@ async fn scan_folder(
             skills: fx_skills::discover(cwd, &env),
             slash_commands: machine_commands(),
             slash_pending: None,
+            models: WorkspaceModels::Same,
         }),
         "cursor" => Some(FolderScan {
             skills: cursor_skills::probe(cwd, &env)?,
             slash_commands: machine_commands(),
             slash_pending: None,
+            models: WorkspaceModels::Same,
         }),
         "antigravity" => {
             // agy's user home (`resolveAntigravityUserHome`) and the instance's GEMINI_HOME.
@@ -745,7 +772,20 @@ async fn scan_folder(
                 skills: antigravity_skills::discover(Path::new(cwd), &user_home, &profile).ok()?,
                 slash_commands: machine_commands(),
                 slash_pending: None,
+                models: WorkspaceModels::Same,
             })
+        }
+        "opencode" => {
+            let machine_models = row["models"].as_array().cloned().unwrap_or_default();
+            opencode::folder_scan(
+                &service.opencode,
+                &instance.id,
+                &instance.config,
+                &env,
+                cwd,
+                &machine_models,
+            )
+            .await
         }
         _ => None,
     }
@@ -2024,11 +2064,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_folder_keeps_its_own_models_or_the_ones_found_before() {
+        let scan = |models| FolderScan {
+            skills: vec![],
+            slash_commands: vec![],
+            slash_pending: None,
+            models,
+        };
+        let mut row = json!({"status": "ready"});
+        upsert_workspace_snapshot(
+            &mut row,
+            "/a",
+            "t1",
+            scan(WorkspaceModels::Own(vec![json!({"slug": "m"})])),
+        );
+        assert_eq!(
+            row["workspaceSnapshots"][0]["models"],
+            json!([{"slug": "m"}])
+        );
+        upsert_workspace_snapshot(&mut row, "/a", "t2", scan(WorkspaceModels::Pending));
+        assert_eq!(
+            row["workspaceSnapshots"][0]["models"],
+            json!([{"slug": "m"}])
+        );
+        assert_eq!(row["workspaceSnapshots"][0]["modelsPending"], true);
+        upsert_workspace_snapshot(&mut row, "/a", "t3", scan(WorkspaceModels::Same));
+        assert!(row["workspaceSnapshots"][0].get("models").is_none());
+        assert!(!workspace_snapshot_current(
+            &json!({"checkedAt": "2026-11-23T00:00:00.000Z", "modelsPending": true}),
+            0
+        ));
+    }
+
+    #[test]
     fn workspace_snapshots_are_upserted_kept_and_expire() {
         let scan = |skills: Vec<Value>| FolderScan {
             skills,
             slash_commands: vec![json!({"name": "compact"})],
             slash_pending: None,
+            models: WorkspaceModels::Same,
         };
         let mut row =
             json!({"status": "ready", "slashCommands": [{"name": "compact"}], "models": []});

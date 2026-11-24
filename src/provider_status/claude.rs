@@ -1157,6 +1157,7 @@ pub(super) async fn folder_scan(config: &Value, env: &ProcessEnv, cwd: &str) -> 
         skills,
         slash_commands: dedupe_commands(commands),
         slash_pending: Some(exists && caps.is_none()),
+        models: super::WorkspaceModels::Same,
     }
 }
 

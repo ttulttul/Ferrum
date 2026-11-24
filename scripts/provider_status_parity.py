@@ -969,6 +969,14 @@ SCENARIOS += [
 # Folder scans (`refreshWorkspaceSnapshot` through `server.refreshProviders {instanceId, cwd}`): a
 # project's own skills and commands, scanned in its folder.
 FOLDER_SKILL = "---\ndescription: Ships the project\n---\nDeploy it.\n"
+OC_V2_LOCATION = {"directory": "/w"}
+OC_V2_WORKSPACE = {
+    "GET /api/skill": {"body": {"location": OC_V2_LOCATION, "data": [
+        {"id": "deploy", "name": "Deploy", "path": "/w/.opencode/skill/deploy/SKILL.md", "description": " Ships ",
+         "content": "Deploy it."},
+        {"id": "lint", "name": "lint", "path": "/w/lint.md", "content": "Lint it.", "autoinvoke": True}]}},
+    "GET /api/command": {"body": {"location": OC_V2_LOCATION, "data": [
+        {"name": "review", "description": "Review"}, {"name": "compact"}, {"name": " "}]}}}
 CATALOGS = {"providerCatalogsOnDemand": True, "machineCatalog": True}
 SCENARIOS += [
     {"name": "folder scan codex", "instance": "codex",
@@ -1021,6 +1029,20 @@ SCENARIOS += [
             ".agents/skills.json": json.dumps({"entries": [{"path": "extra", "exclude": ["skipped"]}]}),
             "extra/kept/SKILL.md": "---\nname: kept\n---\n",
             "extra/skipped/SKILL.md": "---\nname: skipped\n---\n"}}),
+    # OpenCode 2.x: the folder's settled catalog, skills and commands, read with its location.
+    opencode("folder scan 2.x", "2.2.5", oc_routes(OC_V2_ROUTES, **OC_V2_WORKSPACE), folder={}),
+    opencode("folder scan 2.x catalog fails", "2.2.5", oc_routes(OC_V2_ROUTES, **OC_V2_WORKSPACE, **{
+        "GET /api/provider": {"status": 500, "body": {}}}), folder={"payload": CATALOGS}),
+    opencode("folder scan 2.x without commands", "2.2.5", oc_routes(OC_V2_ROUTES, **{
+        **OC_V2_WORKSPACE, "GET /api/command": {"body": {"location": OC_V2_LOCATION, "data": []}}}), folder={}),
+    # A skill without its content does not decode, so the scan fails.
+    opencode("folder scan 2.x malformed skill", "2.2.5", oc_routes(OC_V2_ROUTES, **{
+        **OC_V2_WORKSPACE, "GET /api/skill": {"body": {"location": OC_V2_LOCATION, "data": [
+            {"id": "x", "name": "x", "path": "/w/x.md"}]}}}), folder={"payload": CATALOGS}),
+    # OpenCode 1.x: the folder's inventory through its server.
+    opencode("folder scan 1.x", folder={}),
+    opencode("folder scan 1.x skills fail", routes=oc_routes(OC_V1_ROUTES, **{"GET /skill": {"status": 500, "body": {}}}),
+             folder={"payload": CATALOGS}),
     {"name": "folder scan pi", "instance": "pi", "settings": enabled("pi"),
      "fakes": {"pi": {"spec": {"commands": [{"args": ["--version"], **ok("0.85.0")}, PI_TEXT_GENERATION, pi_rpc()]}}},
      "folder": {}},
