@@ -113,8 +113,10 @@ The "Caller check" column is the tool's declaration in the reference's
   served the text is the reference's, unchanged. Every tool those texts name is now served,
   so both go out as the reference sends them. `cli_launch` in
   `scripts/client_thread_parity.py` compares both servers' text, filtered the same way. Not
-  sent yet: the rest of Claude's `initialize` (the `Stop` hook, title, prompt suggestions,
-  dialog kinds), and the Cursor, OpenCode, Pi and ACP variants.
+  sent yet: the rest of Claude's `initialize` (title, prompt suggestions, dialog kinds), and
+  the Cursor, OpenCode, Pi and ACP variants. Claude's `initialize` registers the reference's
+  `Stop` hook (`hook_0`, or `hook_1` after the device hook) on every query; Rust runs no Claude
+  goals, so its callback answers `{}` as the reference's does without an active goal.
 - **`orchestrator_capabilities`** answers as the reference's: every provider instance, with
   its constraints (`providerConstraints`; a Rust instance whose driver it cannot run children
   on says so), its models as `listCapabilityModels` lists them (pinned, favourite, preferred

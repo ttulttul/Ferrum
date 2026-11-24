@@ -452,13 +452,20 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
         or step.get("send", {}).get("subtype") == "init"
     )
     steps = [{"mcp": {"tool": tool, "arguments": arguments}} for tool, arguments in plan]
-    if claude and enable_devices:
-        # A native subagent starting: Claude Code calls the SubagentStart hook the server registered.
+    if claude:
+        # Claude Code calls the hooks the server registered: SubagentStart (hook_0, only with the
+        # device capability) as a native subagent starts, and Stop (after it) as the turn ends.
+        hooks = [("SubagentStart", {"agent_id": "agent-1", "agent_type": "general-purpose"})] if enable_devices else []
+        hooks.append(("Stop", {"stop_hook_active": False}))
         steps[:0] = [
-            {"send": {"type": "control_request", "request_id": "hook-1", "request": {
-                "subtype": "hook_callback", "callback_id": "hook_0", "tool_use_id": None,
-                "input": {"hook_event_name": "SubagentStart", "agent_id": "agent-1", "agent_type": "general-purpose"}}}},
-            {"expect": "control_response"},
+            step
+            for index, (event, extra) in enumerate(hooks)
+            for step in (
+                {"send": {"type": "control_request", "request_id": f"hook-{event}", "request": {
+                    "subtype": "hook_callback", "callback_id": f"hook_{index}", "tool_use_id": None,
+                    "input": {"hook_event_name": event, "session_id": "s", **extra}}}},
+                {"expect": "control_response"},
+            )
         ]
     turn["steps"][started + 1 : started + 1] = steps
     fixture = root / "device-turn.json"
@@ -505,19 +512,17 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
             answers.append(cli_launch(log, Path(directory)))
             plan = [*plan, ("instructions", {})]
         if claude:
-            # Claude Code's initialize hooks and the server's answer to the SubagentStart hook.
+            # Claude Code's initialize hooks and the server's answers to their callbacks.
             seen = []
             for line in Path(f"{log}.messages").read_text().splitlines():
                 message = json.loads(json.loads(line)["line"])
                 request = message.get("request") or {}
                 if request.get("subtype") == "initialize":
-                    # Only the device hook: Rust does not register the reference's Stop hook yet.
-                    hooks = request.get("hooks") or {}
-                    seen.append({"initialize SubagentStart hook": hooks.get("SubagentStart")})
+                    seen.append({"initialize hooks": request.get("hooks")})
                 if message.get("type") == "control_response":
                     seen.append({"control_response": message.get("response")})
             answers.append(seen)
-            plan = [*plan, ("subagent hook", {})]
+            plan = [*plan, ("hooks", {})]
         launched = None
         if configure:
             # Turning agent access off stops the daemon with its own CLI.
