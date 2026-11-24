@@ -30,7 +30,7 @@
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   },
   "claude delegate followup": {
-    "live": "Racy: #39502 (ProviderCommitBatch) sometimes leaves the follow-up task's two subagent snapshots apart in the reference's live stream (seen both matching and differing, on main too).",
+    "live": "Racy: seen both matching and differing (main CI run 45294158798 differed, its re-run and #202's CI matched): that time the reference sent one more subagent.updated, after the first task's context-transfer.created and before the follow-up task's node.updated, which Rust did not. Probably the reference's provider commit batch timing (#39502), which decides whether a subagent's queued updates commit together or one by one.",
     "orchestration.subscribeThread (live turn)": "Racy: the reference's live turn sometimes does not settle before the harness stops waiting (the reference goes silent; Rust answers), seen both matching and differing, on main too."
   },
   "claude delegate live": {
@@ -92,8 +92,5 @@
   },
   "pi title": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "claude delegate followup": {
-    "live": "Racy: seen both matching and differing (main CI run 45294158798 differed, its re-run and #202's CI matched): that time the reference sent one more subagent.updated, after the first task's context-transfer.created and before the follow-up task's node.updated, which Rust did not. Probably the reference's provider commit batch timing (#39502), which decides whether a subagent's queued updates commit together or one by one."
   }
 }
