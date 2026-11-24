@@ -132,6 +132,30 @@ def kept(root):
     return sorted(out, key=lambda e: json.dumps(e, sort_keys=True))
 
 
+# The cards the agent waits on in the background: their calls answer as their waits wake, in an
+# order that races on either server, so they are compared in a fixed order.
+BACKGROUND = ("card-save", "card-file", "card-decline")
+
+
+def background_in_order(answers):
+    """The agent's MCP answers with the background cards' first answers sorted among themselves,
+    each keeping the place one of them had."""
+    def key(entry):
+        found = re.search(r'"clientRequestId": "([^"]+)"', str(entry))
+        return found[1] if found else None
+    places, seen = [], set()
+    for index, entry in enumerate(answers):
+        name = key(entry)
+        if name in BACKGROUND and name not in seen:
+            seen.add(name)
+            places.append(index)
+    ordered = sorted((answers[i] for i in places), key=lambda entry: BACKGROUND.index(key(entry)))
+    answers = list(answers)
+    for index, entry in zip(places, ordered):
+        answers[index] = entry
+    return answers
+
+
 def first_chunk(server, tag):
     """The first value a stream sends, read on a connection of its own."""
     with connect(server.url.replace("http", "ws", 1) + "/ws?orchestrationProtocol=2",
@@ -233,7 +257,8 @@ def main():
         args.dump.write_text(json.dumps({"answers": results, "projections": raws}, indent=1, sort_keys=True))
     failures = 0
     original, rust = results["original"], results["rust"]
-    original["agent mcp"], rust["agent mcp"] = comparable_mcp(original["agent mcp"], rust["agent mcp"])
+    original["agent mcp"], rust["agent mcp"] = comparable_mcp(background_in_order(original["agent mcp"]),
+                                                              background_in_order(rust["agent mcp"]))
     for name in original:
         same = original[name] == rust[name]
         failures += not same
