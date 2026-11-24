@@ -248,7 +248,12 @@ pub(crate) fn list_with(
             row["versionAdvisory"] = json!({"status":"unknown","currentVersion":null,"latestVersion":null,"updateCommand":null,"canUpdate":false,"canInstallVersion":false,"checkedAt":started_at,"message":null});
         }
         let mut row = overlay(id, row);
-        if driver == "antigravity" && options["workspaceSnapshotsOnDemand"] != true {
+        if options["workspaceSnapshotsOnDemand"] == true {
+            // `withoutWorkspaceSnapshots`: on-demand clients fetch a folder's snapshot.
+            if let Some(object) = row.as_object_mut() {
+                object.shift_remove("workspaceSnapshots");
+            }
+        } else if driver == "antigravity" && row.get("workspaceSnapshots").is_none() {
             row["workspaceSnapshots"] = json!([]);
         }
         if driver == "opencode" && row.get("usageLimits").is_none() {

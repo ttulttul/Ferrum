@@ -172,6 +172,7 @@ pub(crate) struct ProviderStatus {
     opencode: opencode::Owners,
     state: Mutex<State>,
     claude_caps: Mutex<HashMap<String, claude::CapabilitiesCache>>,
+    codex_skills: codex::SkillsHelper,
     reset_credits: reset_credits::Coordinator,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     changes: tokio::sync::broadcast::Sender<()>,
@@ -199,6 +200,7 @@ impl ProviderStatus {
             opencode: Default::default(),
             state: Mutex::default(),
             claude_caps: Mutex::default(),
+            codex_skills: Default::default(),
             reset_credits: Default::default(),
             locks: Mutex::default(),
             changes: tokio::sync::broadcast::channel(16).0,
@@ -374,6 +376,14 @@ struct Instance {
     config: Value,
     environment: Vec<(String, String)>,
     fingerprint: Value,
+}
+
+/// The ids of the checked instances in `settings`.
+pub(crate) fn instance_ids(state: &AppState, settings: &Value) -> Vec<String> {
+    instances(state, settings)
+        .into_iter()
+        .map(|i| i.id)
+        .collect()
 }
 
 /// The checked instances in `settings`, in the order of the config's rows.
@@ -595,6 +605,125 @@ pub(crate) async fn refresh(state: &Arc<AppState>, only: Option<&str>) {
         })
         .collect::<Vec<_>>();
     futures_join_all(checks).await;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace snapshots
+
+/// `PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS`.
+const WORKSPACE_SNAPSHOT_TTL_MS: i64 = 5 * 60_000;
+/// `MAX_WORKSPACE_SNAPSHOTS_PER_PROVIDER`.
+const MAX_WORKSPACE_SNAPSHOTS: usize = 16;
+
+/// `isProviderWorkspaceSnapshotCurrent` and not pending.
+fn workspace_snapshot_current(snapshot: &Value, now_ms: i64) -> bool {
+    let pending = snapshot["slashCommandsPending"] == true || snapshot["modelsPending"] == true;
+    let checked = snapshot["checkedAt"]
+        .as_str()
+        .and_then(|at| {
+            time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).ok()
+        })
+        .map(|at| (at.unix_timestamp_nanos() / 1_000_000) as i64);
+    !pending && checked.is_some_and(|at| now_ms - at < WORKSPACE_SNAPSHOT_TTL_MS)
+}
+
+/// `upsertProviderWorkspaceSnapshot` for a scan that found `skills`, with the
+/// machine snapshot's slash commands (Codex's `snapshotForCwd`).
+fn upsert_workspace_snapshot(row: &mut Value, cwd: &str, checked_at: &str, skills: Vec<Value>) {
+    let previous = row["workspaceSnapshots"]
+        .as_array()
+        .and_then(|all| all.iter().find(|s| s["cwd"] == cwd))
+        .cloned();
+    // A machine check that failed leaves the commands pending (`status === "error"`).
+    let pending = row["status"] == "error";
+    let mut snapshot = json!({
+        "cwd": cwd,
+        "checkedAt": checked_at,
+        "slashCommands": if pending {
+            previous.as_ref().map(|p| p["slashCommands"].clone()).unwrap_or_else(|| row["slashCommands"].clone())
+        } else {
+            row["slashCommands"].clone()
+        },
+    });
+    if pending {
+        snapshot["slashCommandsPending"] = json!(true);
+    }
+    snapshot["skills"] = json!(skills);
+    if let Some(descriptors) = previous.as_ref().and_then(|p| p.get("optionDescriptors")) {
+        snapshot["optionDescriptors"] = descriptors.clone();
+    }
+    let mut all: Vec<Value> = row["workspaceSnapshots"]
+        .as_array()
+        .map(|all| all.iter().filter(|s| s["cwd"] != cwd).cloned().collect())
+        .unwrap_or_default();
+    all.push(snapshot);
+    let skip = all.len().saturating_sub(MAX_WORKSPACE_SNAPSHOTS);
+    row["workspaceSnapshots"] = json!(all.into_iter().skip(skip).collect::<Vec<_>>());
+}
+
+/// `refreshWorkspaceSnapshot` (without `fresh`): scan `cwd` for an enabled
+/// instance whose snapshot of it is missing, stale or pending, and publish
+/// the result on its row. Only Codex scans a folder here (its skills, through
+/// the skills helper); other drivers keep their machine catalogs. A failed
+/// scan publishes nothing, as the reference recovers from it.
+pub(crate) async fn refresh_workspace_snapshot(
+    state: &Arc<AppState>,
+    instance_id: &str,
+    cwd: &str,
+) {
+    if state.provider_status.is_disabled() {
+        return;
+    }
+    let Ok(settings) = state.settings.internal() else {
+        return;
+    };
+    let Some(instance) = instances(state, &settings)
+        .into_iter()
+        .find(|instance| instance.id == instance_id)
+    else {
+        return;
+    };
+    if !instance.enabled || instance.driver != "codex" {
+        return;
+    }
+    let service = &state.provider_status;
+    let now_ms = crate::platform::now_ms();
+    let current = service
+        .published_row(&instance.id, &instance.fingerprint)
+        .is_some_and(|row| {
+            row["workspaceSnapshots"]
+                .as_array()
+                .and_then(|all| all.iter().find(|s| s["cwd"] == cwd))
+                .is_some_and(|s| workspace_snapshot_current(s, now_ms))
+        });
+    if current {
+        return;
+    }
+    // Use the scan's start for the TTL, not the machine check's time.
+    let scanned_at = now_iso();
+    let env = base_env(&instance.environment);
+    let Some(skills) = service
+        .codex_skills
+        .probe(&instance.config, &env, cwd)
+        .await
+    else {
+        return;
+    };
+    let changed = {
+        let mut state = service.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.published.get_mut(&instance.id) {
+            Some(published)
+                if published.fingerprint == instance.fingerprint && !published.row.is_null() =>
+            {
+                upsert_workspace_snapshot(&mut published.row, cwd, &scanned_at, skills);
+                true
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        let _ = service.changes.send(());
+    }
 }
 
 /// The rows as the reference's refresh answers them: each checked row is
@@ -967,6 +1096,40 @@ fn merge_snapshot(previous: &Value, mut next: Value) -> Value {
         }
         merged
     };
+    // `mergeProviderSnapshot`: folder snapshots outlive a machine check; when
+    // the machine models changed, each folder's models are rescanned.
+    let models_changed = previous["models"] != json!(&models);
+    let previous_snapshots: Option<Vec<Value>> =
+        previous["workspaceSnapshots"].as_array().map(|all| {
+            all.iter()
+                .map(|snapshot| {
+                    let mut snapshot = snapshot.clone();
+                    if models_changed {
+                        snapshot["modelsPending"] = json!(true);
+                    }
+                    snapshot
+                })
+                .collect()
+        });
+    let replaces = next["enabled"] != true
+        || next["auth"]["status"] == "unauthenticated"
+        || (next["installed"] != true && next["status"] == "error");
+    match (
+        next["workspaceSnapshots"].as_array().cloned(),
+        previous_snapshots,
+    ) {
+        (None, Some(previous)) => next["workspaceSnapshots"] = json!(previous),
+        (Some(own), Some(previous)) if !replaces => {
+            let mut all: Vec<Value> = previous
+                .into_iter()
+                .filter(|p| !own.iter().any(|o| o["cwd"] == p["cwd"]))
+                .collect();
+            all.extend(own);
+            let skip = all.len().saturating_sub(MAX_WORKSPACE_SNAPSHOTS);
+            next["workspaceSnapshots"] = json!(all.into_iter().skip(skip).collect::<Vec<_>>());
+        }
+        _ => {}
+    }
     next["models"] = models.into();
     // `shouldRetainMissingOpenCodeMetadata`: an empty list keeps the last one.
     if next["driver"] == "opencode" && retain {
@@ -1747,6 +1910,51 @@ fn compact_slash_command() -> Value {
 mod tests {
     use super::*;
 
+    #[test]
+    fn workspace_snapshots_are_upserted_kept_and_expire() {
+        let mut row =
+            json!({"status": "ready", "slashCommands": [{"name": "compact"}], "models": []});
+        upsert_workspace_snapshot(
+            &mut row,
+            "/a",
+            "2026-11-23T00:00:00.000Z",
+            vec![json!({"name": "s"})],
+        );
+        upsert_workspace_snapshot(&mut row, "/b", "2026-11-23T00:00:00.000Z", vec![]);
+        upsert_workspace_snapshot(&mut row, "/a", "2026-11-23T00:01:00.000Z", vec![]);
+        let all = row["workspaceSnapshots"].as_array().unwrap();
+        assert_eq!(
+            all.iter()
+                .map(|s| s["cwd"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["/b", "/a"]
+        );
+        assert_eq!(all[1]["slashCommands"], json!([{"name": "compact"}]));
+        let at = |iso: &str| {
+            let t =
+                time::OffsetDateTime::parse(iso, &time::format_description::well_known::Rfc3339)
+                    .unwrap();
+            (t.unix_timestamp_nanos() / 1_000_000) as i64
+        };
+        assert!(workspace_snapshot_current(
+            &all[1],
+            at("2026-11-23T00:05:59.000Z")
+        ));
+        assert!(!workspace_snapshot_current(
+            &all[1],
+            at("2026-11-23T00:06:00.000Z")
+        ));
+        // A machine check keeps the folders, marking them for a models rescan when models changed.
+        let next = json!({"enabled": true, "installed": true, "status": "ready", "auth": {"status": "authenticated"},
+                          "models": [{"slug": "m"}]});
+        let merged = merge_snapshot(&row, next);
+        assert_eq!(merged["workspaceSnapshots"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["workspaceSnapshots"][0]["modelsPending"], true);
+        assert!(!workspace_snapshot_current(
+            &merged["workspaceSnapshots"][0],
+            at("2026-11-23T00:01:00.000Z")
+        ));
+    }
     #[test]
     fn checks_are_off_until_the_binary_turns_them_on() {
         // A server a test builds must never run the host's real provider CLIs.

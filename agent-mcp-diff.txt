@@ -1,0 +1,64 @@
+agent mcp normalized diff
+[16] list_thread_pull_requests original {"answer":{"content":{"chains":[{"kind":"derived","numbers":[3]},{"kind":"derived","numbers":[8]}],"nextCursor":null,"pullRequests":[{"baseBranch":"main","headBranch":"feature","host":"github.com","isDraft":false,"number":3,"repository":"example/parity","source":"agent","stack":null,"state":"open","title":"Work","url":"https://github.com/example/parity/pull/3","watching":false},{"baseBranch":null,"headBranch":null,"host":"bitbucket.org","isDraft":null,"number":8,"repository":"example/repo","source":"agent","stack":null,"state":null,"title":null,"url":"https://bitbucket.org/example/repo/pull-requests/8","watching":false}]},"isError":false},"request":{"arguments":{},"tool":"list_thread_pull_requests"},"status":200}
+[16] list_thread_pull_requests rust     {"answer":{"content":{"chains":[{"kind":"derived","numbers":[3]},{"kind":"derived","numbers":[8]}],"nextCursor":null,"pullRequests":[{"baseBranch":null,"headBranch":null,"host":"github.com","isDraft":null,"number":3,"repository":"example/parity","source":"agent","stack":null,"state":null,"title":null,"url":"https://github.com/example/parity/pull/3","watching":false},{"baseBranch":null,"headBranch":null,"host":"bitbucket.org","isDraft":null,"number":8,"repository":"example/repo","source":"agent","stack":null,"state":null,"title":null,"url":"https://bitbucket.org/example/repo/pull-requests/8","watching":false}]},"isError":false},"request":{"arguments":{},"tool":"list_thread_pull_requests"},"status":200}
+original fake github request log (21 requests):
+  POST /graphql
+  POST /repos/example/parity/issues
+  POST /graphql
+  POST /graphql
+  POST /repos/example/parity/issues/12/comments
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  GET /user
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  GET /repos/example/parity/actions/runs?head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&per_page=100
+  POST /graphql
+  POST /graphql
+  GET /repos/example/parity/actions/runs?head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&per_page=100
+original fake linear request log (8 requests):
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+original server stderr tail:
+<missing>
+rust fake github request log (16 requests):
+  POST /graphql
+  POST /repos/example/parity/issues
+  POST /graphql
+  POST /graphql
+  POST /repos/example/parity/issues/12/comments
+  POST /graphql
+  POST /graphql
+  GET /user
+  POST /graphql
+  GET /user
+  POST /graphql
+  GET /user
+  POST /graphql
+  GET /user
+  POST /graphql
+  GET /user
+rust fake linear request log (8 requests):
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+  POST /graphql
+rust server stderr tail:
+<missing>

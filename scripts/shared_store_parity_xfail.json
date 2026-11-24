@@ -1,5 +1,1 @@
-{
-  "codex agent mcp on the other server (reference -> rust)": {
-    "turn app-servers": "#39247: orchestrator_capabilities rescans the project's Codex skills (refreshWorkspaceSnapshot), starting a skills-helper Codex app-server that Rust does not start."
-  }
-}
+{}

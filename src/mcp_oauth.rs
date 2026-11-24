@@ -136,6 +136,12 @@ pub trait McpHost: AuthHost {
         task_id: String,
         stop: Value,
     ) -> HostFuture<Result<(), Value>>;
+    /// Scans `cwd` for every enabled provider whose snapshot of that folder is
+    /// missing or stale (`refreshWorkspaceSnapshot`), publishing what it finds.
+    /// Hosts without provider status checks leave it a no-op.
+    fn scan_workspace(self: &Arc<Self>, _cwd: String) -> HostFuture<()> {
+        Box::pin(async {})
+    }
     /// Runs a provider RPC used by the MCP issue and pull-request toolkits.
     /// Native hosts provide this through the same provider service as the
     /// websocket RPC layer. Lightweight control-plane hosts may leave it

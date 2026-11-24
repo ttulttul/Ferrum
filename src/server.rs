@@ -1777,6 +1777,24 @@ impl mcp_oauth::McpHost for AppState {
             crate::orchestration::cancel_task(state, &parent_thread_id, &task_id, stop).await
         })
     }
+    fn scan_workspace(self: &Arc<Self>, cwd: String) -> mcp_oauth::HostFuture<()> {
+        let state = self.clone();
+        Box::pin(async move {
+            let Ok(settings) = state.settings.internal() else {
+                return;
+            };
+            let scans = crate::provider_status::instance_ids(&state, &settings)
+                .into_iter()
+                .map(|id| {
+                    let state = state.clone();
+                    let cwd = cwd.clone();
+                    async move {
+                        crate::provider_status::refresh_workspace_snapshot(&state, &id, &cwd).await
+                    }
+                });
+            futures_util::future::join_all(scans).await;
+        })
+    }
     fn provider_dispatch(
         self: &Arc<Self>,
         method: String,

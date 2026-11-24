@@ -821,7 +821,14 @@ pub(super) async fn call<S: McpHost>(
         "t3_project_read" => project_read(&**host, args).await,
         "t3_project_create" => project_create(host, caller, args).await,
         "t3_environment_read" => Ok(environment_read(&**host)),
-        "orchestrator_capabilities" => Ok(capabilities(&**host, caller, args)),
+        "orchestrator_capabilities" => {
+            // #39247: the caller's folder is scanned first, so a provider's
+            // project catalog is current when the agent picks a model.
+            if let Some(cwd) = caller_workspace(&**host, caller).await {
+                host.scan_workspace(cwd).await;
+            }
+            Ok(capabilities(&**host, caller, args))
+        }
         "t3_thread_list" => thread_list(&**host, caller, args).await,
         "t3_thread_read" => thread_read(&**host, caller, args).await,
         "t3_thread_launch" => thread_launch(host, caller, args).await,
@@ -1578,6 +1585,20 @@ fn provider_entries<S: McpHost>(
             Some(entry)
         })
         .collect()
+}
+
+/// `parentWorkspaceCwd`: the folder the composer's model picker scans for the
+/// calling thread, its worktree or else its project's root.
+async fn caller_workspace<S: McpHost>(host: &S, caller: &Caller) -> Option<String> {
+    let thread = caller.thread.as_ref()?;
+    let store = host.control_state().store.read().await;
+    let row = find_thread(&store, &thread.id).ok()?.shell();
+    if let Some(worktree) = row["worktreePath"].as_str().filter(|p| !p.is_empty()) {
+        return Some(worktree.to_owned());
+    }
+    store.project_rows.get(&thread.project_id)?["workspaceRoot"]
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn capabilities<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Value {
