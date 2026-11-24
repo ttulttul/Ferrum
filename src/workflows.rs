@@ -1031,6 +1031,35 @@ pub(crate) fn answer(state: &AppState, params: &Value) -> Result<(), Value> {
         .map_err(request_error)
 }
 
+/// `workflows.resume` (`Workflows.resume`): with nothing registered, a run
+/// that is there answers that its workflow is not registered.
+pub(crate) fn resume_run(state: &AppState, run_id: &str) -> Result<(), Value> {
+    let conn = open(state).map_err(|e| request_error(unavailable(e)))?;
+    let mode = mode(state, &conn);
+    if mode != Mode::History {
+        return Err(request_error(refusal(mode)));
+    }
+    let row = require_run(&conn, run_id).map_err(request_error)?;
+    Err(request_error(not_registered(&text(&row, "engine_tag"))))
+}
+
+/// `workflows.cancel` (`Workflows.cancel`): ends the run as cancelled, with
+/// what it invoked, as `t3_workflow`'s cancel does.
+pub(crate) async fn cancel_run(
+    state: &Arc<AppState>,
+    run_id: &str,
+    reason: Option<&str>,
+) -> Result<(), Value> {
+    let mut conn = open(state).map_err(|e| request_error(unavailable(e)))?;
+    let mode = mode(state, &conn);
+    if mode != Mode::History {
+        return Err(request_error(refusal(mode)));
+    }
+    cancel(state, &mut conn, run_id, reason)
+        .await
+        .map_err(request_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
