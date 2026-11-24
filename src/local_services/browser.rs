@@ -30,6 +30,8 @@ type Cdp = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub(super) struct Browsers {
     processes: HashMap<String, Browser>,
     pages: HashMap<String, Page>,
+    /// Why the last launch failed, when the host is at fault.
+    launch_failure: Option<String>,
 }
 struct Browser {
     child: Child,
@@ -241,7 +243,9 @@ impl Browsers {
                     .map_err(|error| Some(error.message()))?,
             )
         };
-        self.launch(dir, snap, executable).await.ok_or(None)
+        self.launch_failure = None;
+        let page = self.launch(dir, snap, executable).await;
+        page.ok_or_else(|| self.launch_failure.take())
     }
 
     async fn launch(
@@ -269,7 +273,12 @@ impl Browsers {
                 .ok()?
                 .port();
             let origin = format!("http://127.0.0.1:{port}");
-            let mut child = crate::login_shell::tokio_command(executable)
+            let mut command = crate::login_shell::tokio_command(&executable);
+            // Chrome keeps its sandbox unless `T3CODE_SERVER_BROWSER_SANDBOX=0`.
+            if crate::preview_browser_host::sandbox_disabled() {
+                command.arg("--no-sandbox");
+            }
+            let mut child = command
                 .args([
                     "--headless",
                     "--no-first-run",
@@ -287,10 +296,35 @@ impl Browsers {
                 .arg("about:blank")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()
                 .ok()?;
+            // The tail of Chrome's stderr, read for as long as it runs.
+            let stderr_tail: Arc<Mutex<String>> = Arc::default();
+            let (stderr_done, mut stderr_drained) = tokio::sync::watch::channel(false);
+            if let Some(mut stderr) = child.stderr.take() {
+                let tail = stderr_tail.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let _done = stderr_done;
+                    let mut chunk = [0u8; 4096];
+                    while let Ok(n) = stderr.read(&mut chunk).await {
+                        if n == 0 {
+                            break;
+                        }
+                        let mut tail = tail.lock().unwrap();
+                        tail.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                        let excess = tail.len().saturating_sub(2048);
+                        if excess > 0 {
+                            let cut = (excess..=tail.len())
+                                .find(|i| tail.is_char_boundary(*i))
+                                .unwrap_or(0);
+                            tail.drain(..cut);
+                        }
+                    }
+                });
+            }
             let mut ready = false;
             for _ in 0..80 {
                 if child.try_wait().ok()?.is_some() {
@@ -303,6 +337,22 @@ impl Browsers {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             if !ready {
+                if child.try_wait().ok().flatten().is_some() {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(1),
+                        stderr_drained.wait_for(|d| *d),
+                    )
+                    .await;
+                    let stderr = stderr_tail.lock().unwrap().clone();
+                    let setup = crate::preview_browser_host::setup_command(Some(
+                        crate::config::state_base_dir(dir),
+                    ));
+                    let output = crate::preview_browser_host::launcher_output(&stderr);
+                    self.launch_failure =
+                        crate::preview_browser_host::diagnose(&executable, output, &setup)
+                            .await
+                            .map(|error| error.message());
+                }
                 return None;
             }
             self.processes.insert(

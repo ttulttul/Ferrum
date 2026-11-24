@@ -58,6 +58,7 @@ case "$shard" in
     run python3 scripts/preview_provider_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright" --reference-root "$checkout"
     run python3 scripts/html_render_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright" --reference-root "$checkout"
     run python3 scripts/preview_session_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright" --reference-root "$checkout"
+    run python3 scripts/browser_setup_parity.py "${both[@]}" --reference-root "$checkout"
     run python3 scripts/relay_parity.py --checkout "$checkout" --rust "$server"
     run python3 scripts/link_request_parity.py "${both[@]}"
     run python3 scripts/run_output_parity.py "${both[@]}"

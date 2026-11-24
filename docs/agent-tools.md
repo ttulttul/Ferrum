@@ -367,8 +367,17 @@ checked against the pinned size and SHA-256, and a caller waits up to 45 seconds
 the install's progress. `scripts/preview_session_parity.py` compares the tools' answers when the
 download fails.
 
-**Not yet:** the launch-failure diagnosis (`t3 browser setup` hints), and the OpenCode and ACP
-adapters' recorded renders (`recordHtmlRender`).
+When the browser will not start, the tools explain why as the reference's `PreviewBrowserHost`
+does (`src/preview_browser_host.rs`): Chrome refusing its sandbox as root, a host that blocks the
+sandbox (AppArmor's user-namespace restriction), or shared libraries it cannot load (found with
+`--version`, then `ldd`), each naming the command that fixes it. That command is
+`t3code-server browser setup` (`src/browser_setup.rs`, the reference's `t3 browser setup`): as root
+it writes and loads the AppArmor profile and installs the libraries and fonts with apt; otherwise
+it says what is needed. `scripts/preview_session_parity.py` compares the hints with fake browsers
+that fail each way, and `scripts/browser_setup_parity.py` compares the command, with fake
+`apparmor_parser` and apt, as root in a user namespace over an overlay of /etc.
+
+**Not yet:** the OpenCode and ACP adapters' recorded renders (`recordHtmlRender`).
 
 ### 4f. Preview status, dialogs and recordings
 
