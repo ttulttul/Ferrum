@@ -12,6 +12,7 @@ pub(crate) mod named_project;
 mod previews;
 pub(crate) mod provider_turns;
 pub(crate) mod review;
+mod ssh_device_host;
 mod terminals;
 pub(crate) mod vcs;
 mod vcs_upstream;

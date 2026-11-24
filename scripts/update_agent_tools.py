@@ -26,6 +26,11 @@ INSTRUCTIONS = ROOT / "src/mcp_oauth/instructions.json"
 # The reference server browser's recording encoder, which Rust's preview recordings run as it is.
 RECORDING_ENCODER = ROOT / "src/local_services/browser/recording_encoder.js"
 HTML_RENDER = ROOT / "src/html_render/constants.json"
+# The reference's agent-device launcher (AgentDeviceShim.ts) and the value flags it skips past.
+LAUNCHER = ROOT / "src/local_services/agent_device_launcher.mjs"
+VALUE_FLAGS = ROOT / "src/local_services/agent_device_value_flags.txt"
+# The reference's SSH device host scripts (scripts/reference_device_scripts.mjs).
+DEVICE_SSH = ROOT / "src/local_services/device_ssh.json"
 START, END = "<!-- tools:start -->", "<!-- tools:end -->"
 
 LISTED_TO = {
@@ -105,6 +110,33 @@ def recording_encoder(checkout: pathlib.Path) -> str:
     return body + "\n"
 
 
+def agent_device_launcher(checkout: pathlib.Path) -> tuple[str, str]:
+    """`launcherSource`'s template, with its five substitutions as `{{NAME}}` placeholders, and
+    `VALUE_FLAGS`, one per line. Neither is exported, so both are read from the source."""
+    source = (checkout / "apps/server/src/device/AgentDeviceShim.ts").read_text()
+    head = "`import { spawn }"
+    start = source.index(head) + 1
+    end = source.index("`;\n\n/** Writes a launcher", start)
+    body = source[start:end]
+    holes = {
+        "${JSON.stringify(entryPath)}": "{{ENTRY}}",
+        "${JSON.stringify(boundArgs)}": "{{BOUND}}",
+        "${JSON.stringify(VALUE_FLAGS)}": "{{VALUED}}",
+        "${JSON.stringify(STALE_RUNTIME)}": "{{STALE}}",
+        "${JSON.stringify(node)}": "{{NODE}}",
+    }
+    for hole, placeholder in holes.items():
+        if hole not in body:
+            raise SystemExit("launcherSource changed its substitutions; update update_agent_tools.py")
+        body = body.replace(hole, placeholder)
+    if "${" in body:
+        raise SystemExit("launcherSource has a new substitution; update update_agent_tools.py")
+    # The template literal's escapes, as the string it evaluates to.
+    body = re.sub(r"\\(.)", lambda match: match.group(1), body, flags=re.S)
+    flags = re.search(r"const VALUE_FLAGS: ReadonlyArray<string> = \[(.*?)\];", source, re.S).group(1)
+    return body, "\n".join(re.findall(r'"([^"]+)"', flags))
+
+
 def main() -> int:
     checkout = pathlib.Path(sys.argv[1]).resolve()
     check = "--check" in sys.argv[2:]
@@ -143,8 +175,13 @@ def main() -> int:
     html_render_text = subprocess.run(
         ["node", str(ROOT / "scripts/reference_html_render.mjs"), str(checkout)],
         check=True, capture_output=True, text=True).stdout
+    device_ssh_text = subprocess.run(
+        ["node", str(ROOT / "scripts/reference_device_scripts.mjs"), str(checkout)],
+        check=True, capture_output=True, text=True).stdout
+    launcher, value_flags = agent_device_launcher(checkout)
     outputs = ((RECORDING_ENCODER, recording_encoder(checkout)), (TOOLS, tools_text), (DOC, doc_text), (THEMES, themes_text),
-               (INSTRUCTIONS, instructions_text), (HTML_RENDER, html_render_text))
+               (INSTRUCTIONS, instructions_text), (HTML_RENDER, html_render_text), (LAUNCHER, launcher),
+               (VALUE_FLAGS, value_flags), (DEVICE_SSH, device_ssh_text))
     stale = [path for path, text in outputs if not path.exists() or path.read_text() != text]
     if check:
         for path in stale:
