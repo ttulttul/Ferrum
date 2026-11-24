@@ -12,22 +12,6 @@
     "connect.subscribeServerLifecycle": {
       "severity": "low",
       "reason": "The descriptor's capabilities gained previewTunnelSetting (#39415), linkThreadStream (#39406), linkClientPairing and linkPairingForLink (#39439, #40036), agentFeedback (#35871) and issueTrackerAccounts (#39179); Rust has none of these features yet, so it omits them."
-    },
-    "vcs.review.getDiffPreview": {
-      "severity": "low",
-      "reason": "#40216 gives a diff preview's stacked sources their mergeBase, which later per-file reads pass back to skip recomputing it; Rust does not report it (it recomputes the merge base)."
-    },
-    "vcs.stacked.diff": {
-      "severity": "low",
-      "reason": "#40216 gives a diff preview's stacked sources their mergeBase, which later per-file reads pass back to skip recomputing it; Rust does not report it (it recomputes the merge base)."
-    },
-    "vcs.stacked.file": {
-      "severity": "low",
-      "reason": "#40216 gives a diff preview's stacked sources their mergeBase, which later per-file reads pass back to skip recomputing it; Rust does not report it (it recomputes the merge base)."
-    },
-    "vcs.stacked.metadata": {
-      "severity": "low",
-      "reason": "#40216 gives a diff preview's stacked sources their mergeBase, which later per-file reads pass back to skip recomputing it; Rust does not report it (it recomputes the merge base). #40211 also answers an incomplete preview's completionToken, which a later complete read passes back to reuse its tracked-only pass; Rust does not."
     }
   }
 }
