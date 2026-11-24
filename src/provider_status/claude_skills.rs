@@ -23,6 +23,13 @@ struct Root {
 // Paths
 
 /// `path.resolve(base, path)`: lexical, with `.` and `..` folded away.
+/// `path.resolve(path)` as text.
+pub(super) fn resolve_path(path: &str) -> String {
+    resolve(Path::new("."), Path::new(path))
+        .display()
+        .to_string()
+}
+
 fn resolve(base: &Path, path: &Path) -> PathBuf {
     let joined = if path.is_absolute() {
         path.to_path_buf()

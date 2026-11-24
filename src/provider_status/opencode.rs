@@ -1114,6 +1114,17 @@ async fn read_v2_catalog(
     server: &Server,
     directory: Option<&str>,
 ) -> Result<Option<Vec<Value>>, String> {
+    read_v2_catalog_with(server, directory, false).await
+}
+
+/// `readCatalog`: with `names_required` (`loadOpenCode2DirectoryCatalog`) a
+/// provider list that fails fails the read, since missing names would
+/// relabel every model.
+async fn read_v2_catalog_with(
+    server: &Server,
+    directory: Option<&str>,
+    names_required: bool,
+) -> Result<Option<Vec<Value>>, String> {
     let providers = async {
         match tokio::time::timeout(
             Duration::from_secs(3),
@@ -1121,11 +1132,18 @@ async fn read_v2_catalog(
         )
         .await
         {
-            Ok(Ok(Some(body))) => body["data"].as_array().cloned().unwrap_or_default(),
-            _ => vec![],
+            Ok(Ok(Some(body))) => Some(body["data"].as_array().cloned().unwrap_or_default()),
+            _ => None,
         }
     };
     let (models, providers) = tokio::join!(v2_get(server, "/api/model", directory), providers);
+    let providers = match providers {
+        Some(providers) => providers,
+        None if names_required => {
+            return Err("The OpenCode server could not list its models.".into())
+        }
+        None => vec![],
+    };
     let Some(body) =
         models.map_err(|_| "The OpenCode server could not list its models.".to_owned())?
     else {
@@ -1840,6 +1858,310 @@ async fn provider(
         extra: installed_version,
         ..Default::default()
     }
+}
+
+/// `readSettledOpenCode2Catalog` over a folder's catalog: reads every 250 ms
+/// until two non-empty reads agree, for at most 5 s; `None` when a read
+/// fails or they never agree.
+async fn settled_folder_catalog(
+    server: &Server,
+    directory: &str,
+    env: &ProcessEnv,
+) -> Option<Vec<Value>> {
+    let settle = async {
+        let mut previous: Option<String> = None;
+        loop {
+            let models = read_v2_catalog_with(server, Some(directory), true)
+                .await
+                .ok()?
+                .unwrap_or_default();
+            let current = (!models.is_empty()).then(|| fingerprint(&models));
+            if current.is_some() && current == previous {
+                return Some(models);
+            }
+            previous = current;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    tokio::time::timeout(
+        probe_timeout("opencode", CATALOG_SETTLE_TIMEOUT_MS, env),
+        settle,
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
+/// `listOpenCode2Workspace`: a folder's skills and commands. Reading a folder
+/// the server has not loaded starts its scan, so the read waits for the
+/// folder's `command.updated` and `skill.updated` events (subscribed first)
+/// unless the folder was already loaded and lists commands.
+async fn folder_workspace(
+    server: &Server,
+    directory: &str,
+    env: &ProcessEnv,
+) -> Option<(Vec<Value>, Vec<Value>)> {
+    let events = v2_events(server).await.ok();
+    let loaded = match &events {
+        // Without events no scan can be awaited, so the first read stands.
+        None => true,
+        Some(_) => {
+            let read = tokio::time::timeout(
+                Duration::from_secs(2),
+                v2_get(server, "/api/debug/location", None),
+            )
+            .await;
+            match read {
+                Ok(Ok(Some(body))) => body
+                    .as_array()
+                    .is_some_and(|all| all.iter().any(|l| l["directory"] == directory)),
+                _ => true,
+            }
+        }
+    };
+    // OpenCode answers a folder's providers only once its skill scan has ended.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(10),
+        v2_get(server, "/api/provider", Some(directory)),
+    )
+    .await;
+    let read = || async {
+        let (skills, commands) = tokio::join!(
+            v2_get(server, "/api/skill", Some(directory)),
+            v2_get(server, "/api/command", Some(directory))
+        );
+        // `Location.response(Schema.Array(...))`: `{location: {directory}, data}`.
+        let list = |body: Result<Option<Value>, String>, valid: fn(&Value) -> bool| {
+            let body = body.ok().flatten()?;
+            body["location"]["directory"].as_str()?;
+            let data = body["data"].as_array()?;
+            data.iter().all(valid).then(|| data.clone())
+        };
+        Some((
+            list(skills, valid_v2_skill)?,
+            list(commands, valid_v2_command)?,
+        ))
+    };
+    let first = read().await?;
+    if loaded && !first.1.is_empty() {
+        return Some(first);
+    }
+    if let Some(mut events) = events {
+        let mut pending: Vec<&str> = vec!["command.updated", "skill.updated"];
+        let _ = tokio::time::timeout(probe_timeout("opencode", 10_000, env), async {
+            while let Some(event) = events.recv().await {
+                if event["location"]["directory"] == directory {
+                    pending.retain(|kind| event["type"] != *kind);
+                    if pending.is_empty() {
+                        return;
+                    }
+                }
+            }
+            std::future::pending::<()>().await;
+        })
+        .await;
+    }
+    read().await
+}
+
+/// An optional key: absent, or of the given kind.
+fn optional_key(value: &Value, key: &str, kind: fn(&Value) -> bool) -> bool {
+    value.get(key).is_none_or(kind)
+}
+
+/// `Skill.Info`.
+fn valid_v2_skill(skill: &Value) -> bool {
+    skill["id"].is_string()
+        && skill["name"].is_string()
+        && skill["path"].is_string()
+        && skill["content"].is_string()
+        && optional_key(skill, "description", Value::is_string)
+        && optional_key(skill, "autoinvoke", Value::is_boolean)
+}
+
+/// `Command.Info`.
+fn valid_v2_command(command: &Value) -> bool {
+    command["name"].is_string() && optional_key(command, "description", Value::is_string)
+}
+
+/// A folder's models against the machine's (`workspaceModelsFor`).
+fn workspace_models(machine: &[Value], folder: Option<Vec<Value>>) -> super::WorkspaceModels {
+    match folder {
+        None => super::WorkspaceModels::Pending,
+        Some(models) if models == machine => super::WorkspaceModels::Same,
+        Some(models) => super::WorkspaceModels::Own(models),
+    }
+}
+
+/// OpenCode's `snapshotForCwd`: for 2.x the folder's settled catalog, skills
+/// and commands; for 1.x its inventory through a server rooted there. A
+/// failed runtime probe or workspace read fails the scan.
+pub(super) async fn folder_scan(
+    owners: &Owners,
+    instance_id: &str,
+    config: &Value,
+    env: &ProcessEnv,
+    cwd: &str,
+    machine_models: &[Value],
+) -> Option<super::FolderScan> {
+    let settings = Settings::of(config);
+    let probe = probe_env(env);
+    let recorded = owners
+        .probes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(instance_id)
+        .cloned();
+    let probed = match recorded {
+        Some(probed) => probed,
+        None if settings.external() => {
+            probe_server(&settings.server_url, &settings.password, &probe)
+                .await
+                .ok()?
+        }
+        None => probe_binary(&settings.binary, &probe).await.ok()?,
+    };
+    // OpenCode names a location by its resolved path.
+    let directory = super::claude_skills::resolve_path(cwd);
+    let host = std::env::current_dir()
+        .unwrap_or_default()
+        .display()
+        .to_string();
+    if probed.generation == Generation::V2 {
+        let directory = directory.as_str();
+        let scan = with_v2_connection(
+            owners,
+            instance_id,
+            &settings,
+            env,
+            &host,
+            |server| async move {
+                let workspace_timeout = probe_timeout("opencode", 10_000, env) * 2;
+                let (catalog, workspace) = tokio::join!(
+                    settled_folder_catalog(&server, directory, env),
+                    tokio::time::timeout(
+                        workspace_timeout,
+                        folder_workspace(&server, directory, env)
+                    ),
+                );
+                let (skills, commands) = workspace.ok().flatten().ok_or_else(String::new)?;
+                Ok((catalog, skills, commands))
+            },
+        )
+        .await
+        .ok()?;
+        let (catalog, skills, commands) = scan;
+        let models = catalog.map(|catalog| v2_models(&settings.custom, &catalog));
+        let skills: Vec<Value> = {
+            let mut out: Vec<Value> = skills
+                .iter()
+                .map(|skill| {
+                    let mut row =
+                        json!({"name": skill["id"], "path": skill["path"], "enabled": true});
+                    if skill["name"] != skill["id"] {
+                        row["displayName"] = skill["name"].clone();
+                    }
+                    if let Some(description) = trim_optional(&skill["description"]) {
+                        row["description"] = json!(description);
+                        row["shortDescription"] = json!(description);
+                    }
+                    row
+                })
+                .collect();
+            out.sort_by(|a, b| {
+                locale_compare(
+                    a["name"].as_str().unwrap_or(""),
+                    b["name"].as_str().unwrap_or(""),
+                )
+            });
+            out
+        };
+        let mut slash_commands = vec![super::compact_slash_command()];
+        for command in &commands {
+            let Some(name) = trim_optional(&command["name"]) else {
+                continue;
+            };
+            if slash_commands.iter().any(|c| c["name"] == name.as_str()) {
+                continue;
+            }
+            let mut row = json!({"name": name});
+            if let Some(description) = trim_optional(&command["description"]) {
+                row["description"] = json!(description);
+            }
+            slash_commands.push(row);
+        }
+        return Some(super::FolderScan {
+            skills,
+            slash_commands,
+            // A finished scan lists at least the built-ins; none leaves it to health.
+            slash_pending: (!commands.is_empty()).then_some(false),
+            models: workspace_models(machine_models, models),
+        });
+    }
+    // 1.x: the folder's inventory through a server, with the commands bounded.
+    let read = |server: Server| async move {
+        let skills = sdk_get(&server.url, "/skill", &server, &directory).await?;
+        let (commands, catalog) = tokio::join!(
+            tokio::time::timeout(
+                probe_timeout("opencode", 10_000, env),
+                sdk_get(&server.url, "/command", &server, &directory)
+            ),
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let (providers, agents) = tokio::join!(
+                    sdk_get(&server.url, "/provider", &server, &directory),
+                    sdk_get(&server.url, "/agent", &server, &directory)
+                );
+                Some((providers.ok()?, agents.ok()?))
+            })
+        );
+        Ok::<_, String>((skills, commands, catalog))
+    };
+    let (skills, commands, catalog) = if settings.external() {
+        let server = Server {
+            url: settings.server_url.trim().to_owned(),
+            password: (!settings.password.is_empty()).then(|| settings.password.clone()),
+            version: String::new(),
+        };
+        read(server).await.ok()?
+    } else {
+        let password = (!settings.password.is_empty())
+            .then(|| settings.password.clone())
+            .or_else(|| env.get("OPENCODE_SERVER_PASSWORD").cloned());
+        let mut server_env = env.clone();
+        if let Some(password) = &password {
+            server_env.insert("OPENCODE_SERVER_PASSWORD".into(), password.clone());
+        }
+        server_env.insert("OPENCODE_CONFIG_CONTENT".into(), config_content(env));
+        let timeout = probe_timeout("opencode", SERVER_START_TIMEOUT_MS, env);
+        let start = start_server_retrying(
+            &settings.binary,
+            server_env,
+            password,
+            timeout,
+            Generation::V1,
+            &host,
+        );
+        owners
+            .with_server(&format!("{instance_id}\0v1"), start, read)
+            .await
+            .ok()?
+    };
+    let (commands, slash_pending) = match commands {
+        Err(_) => (vec![], Some(true)),
+        Ok(Ok(list)) => (list.as_array().cloned().unwrap_or_default(), Some(false)),
+        // SDK errors leave command discovery to the provider's health.
+        Ok(Err(_)) => (vec![], None),
+    };
+    let models = catalog.ok().flatten().and_then(|(providers, agents)| {
+        let agents = agents.as_array().cloned().unwrap_or_default();
+        v1_models(&settings.custom, &providers, &agents)
+    });
+    Some(super::FolderScan {
+        skills: v1_skills(skills.as_array().map(Vec::as_slice).unwrap_or(&[])),
+        slash_commands: v1_commands(&commands),
+        slash_pending,
+        models: workspace_models(machine_models, models),
+    })
 }
 
 /// `checkOpenCode2` with `makeOpenCode2ModelLoader`'s reads.
