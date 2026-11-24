@@ -221,8 +221,12 @@ schemas.
    message and its turn item keep them, and the run's provider turn carries them in the
    optional `ProviderTurn.attachments` (omitted when empty, so the agentd wire is unchanged
    without attachments). Codex gets the text naming each file and each supported image as a
-   data URL; Claude gets each image as a base64 block, then that text. Not yet: attachments on
-   steers, queued-run edits, runtime-request answers and thread launches, Claude's PDF document
+   data URL; Claude gets each image as a base64 block, then that text. A queued run's edit
+   that names attachments replaces its message's (claiming pending uploads; a thread file that is
+   gone is refused, unless the edit is a retry of one accepted), and a launched thread's first
+   message claims its uploads for the new thread (which then needs its id); a send's copies that
+   no message keeps go again. `scripts/attachment_flows_parity.py` compares both, and what the
+   provider is asked. Not yet: attachments on steers and runtime-request answers, Claude's PDF document
    blocks and its image budget cap, captured-window context, document text extraction, and a
    remote agentd reading the server's attachment files.
 4d. **Secrets** (served): `request_secret` shows a card in the caller's running turn

@@ -2086,26 +2086,45 @@ async fn apply_command<H: CommandHost>(
         }
         "queued-run.edit" => {
             let run_id = command["runId"].as_str().unwrap_or_default();
-            let Some((message_id, thread_id)) = state
+            let Some((message_id, thread_id, wire)) = state
                 .store
                 .read()
                 .await
                 .threads
                 .get(thread_id.unwrap_or_default())
-                .and_then(|thread| thread.runs.iter().find(|run| run.wire_id() == run_id))
-                .filter(|run| run.status == "queued")
-                .and_then(|run| run.user_message_id.clone())
-                .map(|message_id| (message_id, thread_id.unwrap_or_default().to_owned()))
+                .and_then(|thread| {
+                    let run = thread
+                        .runs
+                        .iter()
+                        .find(|run| run.wire_id() == run_id)
+                        .filter(|run| run.status == "queued")?;
+                    let message_id = run.user_message_id.clone()?;
+                    let wire = thread
+                        .messages
+                        .iter()
+                        .find(|message| message.id == message_id)
+                        .and_then(|message| message.wire.as_deref().cloned());
+                    Some((message_id, thread_id.unwrap_or_default().to_owned(), wire))
+                })
             else {
                 return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
             };
+            // The edit's attachments replace the queued ones; absent keeps them.
+            let wire = command
+                .get("attachments")
+                .filter(|a| a.is_array())
+                .map(|attachments| {
+                    let mut wire = wire.unwrap_or_else(|| json!({}));
+                    wire["attachments"] = attachments.clone();
+                    wire
+                });
             return Ok(state
                 .commit_receipted(
                     Event::MessageEdited {
                         thread_id,
                         message_id,
                         content: command["text"].as_str().unwrap_or_default().to_owned(),
-                        wire: None,
+                        wire,
                         notification: None,
                     },
                     Some(receipt.clone()),

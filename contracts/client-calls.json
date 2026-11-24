@@ -1025,6 +1025,7 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "attachment_flows_parity.py",
         "attachment_tools_parity.py",
         "client_initial_sync_parity.py",
         "client_thread_parity.py",
@@ -1252,6 +1253,7 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
+        "attachment_flows_parity.py",
         "attachment_tools_parity.py",
         "client_thread_parity.py",
         "link_request_parity.py",
@@ -1411,6 +1413,7 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "attachment_flows_parity.py",
         "project_clone_parity.py"
       ],
       "validationOnly": false,
