@@ -1,6 +1,6 @@
 //! Device MCP tools (`toolkits/device/handlers.ts` in the reference).
 //!
-//! `device_list` and `device_close` act as the calling thread against the host's
+//! `device_list`, `device_open`, `device_screenshot` and `device_close` act as the calling thread against the host's
 //! device service. They require the `"device"` thread capability (enabled when
 //! both Device support and Agent device access were on when the session started).
 use super::*;
@@ -142,6 +142,80 @@ pub(super) async fn close<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Val
     host.device_tool("close", input)
         .await
         .map_err(|error| Refusal::Text(format_device_error(&error)))
+}
+
+fn trimmed_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(crate::settings::schema::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// `device_open` (`actsAsCaller`): opens a device for the calling thread and
+/// returns the `agent-device` launcher bound to it.
+pub(super) async fn open<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
+    threads::writing_caller(&**host, caller).await?;
+    let thread_id = require_device_access(&**host, caller)?;
+    let mut input = json!({ "threadId": thread_id });
+    for key in ["deviceId", "hostId", "platform"] {
+        if let Some(value) = trimmed_arg(args, key) {
+            input[key] = json!(value);
+        }
+    }
+    host.device_tool("open", input)
+        .await
+        .map_err(|error| Refusal::Text(format_device_error(&error)))
+}
+
+/// `device_screenshot` (`readsAsCaller`, an image tool): the screen of a
+/// device open in the calling thread, as image content.
+pub(super) async fn screenshot<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    args: &Value,
+) -> Outcome {
+    let failed = |error: &Value| {
+        let tag = error["_tag"].as_str().unwrap_or("device_screenshotError");
+        let mut message = format_device_error(error);
+        if error["_tag"] == "DeviceOperationError" && error["reason"] == "hub_rejected" {
+            message.push_str(" Call device_list to check the device state, and device_open if it needs to be reopened.");
+        }
+        html::image_failure_in(tag, "screenshot", message)
+    };
+    let thread_id = match require_device_access(&**host, caller) {
+        Ok(thread_id) => thread_id,
+        Err(_) => {
+            return Ok(failed(&json!({
+                "_tag": "DeviceToolUnavailableError",
+                "reason": ACCESS_OFF_REASON,
+            })))
+        }
+    };
+    let mut input = json!({ "threadId": thread_id });
+    for key in ["deviceId", "hostId"] {
+        if let Some(value) = trimmed_arg(args, key) {
+            input[key] = json!(value);
+        }
+    }
+    match host.device_tool("screenshot", input).await {
+        Err(error) => Ok(failed(&error)),
+        Ok(mut result) => {
+            let shot = result["screenshot"].take();
+            result["screenshot"] = json!({
+                "mimeType": shot["mimeType"],
+                "width": shot["width"],
+                "height": shot["height"],
+            });
+            Ok(json!({html::RAW_RESULT: {
+                "isError": false,
+                "structuredContent": result,
+                "content": [
+                    {"type": "text", "text": result.to_string()},
+                    {"type": "image", "data": shot["data"], "mimeType": shot["mimeType"]},
+                ],
+            }}))
+        }
+    }
 }
 
 #[cfg(test)]

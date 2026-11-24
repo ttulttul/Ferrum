@@ -38,11 +38,16 @@ fn page_source(caller: &Caller, a: &Value) -> Result<Value, Refusal> {
 /// `imageToolFailure`: a failed image tool's answer, its message in both the
 /// text and the structured content.
 pub(super) fn image_failure(tag: &str, message: String) -> Value {
+    image_failure_in(tag, "preview", message)
+}
+
+/// `imageToolFailure` for `operation`.
+pub(super) fn image_failure_in(tag: &str, operation: &str, message: String) -> Value {
     json!({RAW_RESULT: {
         "isError": true,
         "structuredContent": {"error": {
             "_tag": tag,
-            "operation": "preview",
+            "operation": operation,
             "failureCount": 1,
             "message": message,
         }},
