@@ -111,6 +111,8 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("preview_recording_stop", &[]),
     // Device hub and sessions.
     ("device_list", &[]),
+    ("device_open", &[]),
+    ("device_screenshot", &[]),
     ("device_close", &[]),
 ];
 
@@ -217,6 +219,8 @@ const SERVED: &[&str] = &[
     "preview_recording_stop",
     // Device hub and sessions.
     "device_list",
+    "device_open",
+    "device_screenshot",
     "device_close",
 ];
 
@@ -814,6 +818,9 @@ pub(super) async fn call<S: McpHost>(
     if let Some((_, unions)) = CHECKED.iter().find(|(tool, _)| *tool == name) {
         match arguments::check(name, args, unions) {
             // An image tool answers a parameter failure as its own failure.
+            Err(Refusal::Rpc(_, message)) if name == "device_screenshot" => {
+                return Ok(html::image_failure_in("AiError", "screenshot", message))
+            }
             Err(Refusal::Rpc(_, message)) if name == "html_preview" => {
                 return Ok(html::image_failure(
                     "AiError",
@@ -915,6 +922,8 @@ pub(super) async fn call<S: McpHost>(
         "t3_preview_close" => agent_tools::preview_close(host, caller, args).await,
         "device_list" => devices::list(host, caller, args).await,
         "device_close" => devices::close(host, caller, args).await,
+        "device_open" => devices::open(host, caller, args).await,
+        "device_screenshot" => devices::screenshot(host, caller, args).await,
         _ => Err(Refusal::Rpc(-32602, format!("Tool '{name}' not found"))),
     }
 }

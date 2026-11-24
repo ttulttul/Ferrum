@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the device MCP tools (device_list and device_close) on the reference and Rust servers.
+"""Compare the device MCP tools (device_list, device_open, device_screenshot and device_close) on the reference and Rust servers.
 
 Runs both servers side by side on loopback with identical fakes:
 - a fake Android SDK (ANDROID_HOME with platform-tools/adb, emulator/emulator,
@@ -28,8 +28,10 @@ import json
 import os
 from pathlib import Path
 import secrets
+import re
 import shlex
 import stat
+import subprocess
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
 
@@ -147,6 +149,23 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ ok: true, id: serial, serial }));
     return;
   }
+  if (req.method === "POST" && url.pathname.endsWith("/api/screenshot")) {
+    const device = url.searchParams.get("device");
+    log({ kind: "hub.http", method: "POST", path: url.pathname, device });
+    if (device === "emulator-5556") {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "capture failed" }));
+      return;
+    }
+    // A 3x2 PNG with adb warnings around it, as `adb exec-out screencap -p` can print.
+    const png = Buffer.from(
+      "89504e470d0a1a0a0000000d49484452000000030000000208020000001216f14d0000001049444154789c63f8cfc0f01f0418000017f402fe5a7a2d7a0000000049454e44ae426082",
+      "hex",
+    );
+    res.writeHead(200, { "content-type": "image/png" });
+    res.end(Buffer.concat([Buffer.from("WARNING: multiple displays\n"), png, Buffer.from("\ntrailer")]));
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/devices/shutdown") {
     const body = await readBody(req);
     log({ kind: "hub.http", method: "POST", path: "/api/devices/shutdown", body });
@@ -161,6 +180,95 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(port, host);
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
+"""
+
+
+FAKE_AGENT_DEVICE_SOURCE = r"""import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+const args = process.argv.slice(2);
+const logFile = process.env.T3_FAKE_DEVICE_LOG;
+const log = (entry) => {
+  if (logFile) fs.appendFileSync(logFile, JSON.stringify(entry) + "\n");
+};
+const stateDir = process.env.AGENT_DEVICE_STATE_DIR;
+
+if (args[0] === "__daemon") {
+  const dir = args[1];
+  const token = "fake-daemon-token";
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      const entry = { kind: "agent.http", method: req.method, path: req.url };
+      if (req.method === "POST") {
+        entry.authorized = req.headers.authorization === `Bearer ${token}`;
+        try { entry.body = JSON.parse(raw); } catch { entry.body = raw; }
+      }
+      log(entry);
+      if (req.url === "/health") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } else if (req.url === "/rpc") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: entry.body?.id ?? null, result: { ok: true } }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+  });
+  server.listen(0, "127.0.0.1", () => {
+    fs.writeFileSync(
+      path.join(dir, "daemon.json"),
+      JSON.stringify({ httpPort: server.address().port, token, pid: process.pid, version: "0.21.41" }),
+    );
+  });
+  // A backstop; the harness kills the daemon when each phase ends.
+  setTimeout(() => process.exit(0), 300_000).unref();
+} else {
+  const env = {};
+  for (const name of [
+    "AGENT_DEVICE_DAEMON_SERVER_MODE",
+    "AGENT_DEVICE_DAEMON_IDLE_TIMEOUT_MS",
+    "AGENT_DEVICE_NO_UPDATE_NOTIFIER",
+    "AGENT_DEVICE_DAEMON_BASE_URL",
+    "AGENT_DEVICE_CONFIG",
+    "ELECTRON_RUN_AS_NODE",
+    "FORCE_COLOR",
+    "NO_COLOR",
+  ]) env[name] = process.env[name] ?? null;
+  env.hasStateDir = Boolean(stateDir);
+  env.hasAndroidHome = Boolean(process.env.ANDROID_HOME);
+  log({ kind: "agent.cli", args, env });
+  if (args[0] === "devices" && stateDir) {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const file = path.join(stateDir, "daemon.json");
+    if (!fs.existsSync(file)) {
+      spawn(process.execPath, [process.argv[1], "__daemon", stateDir], {
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+      }).unref();
+      const deadline = Date.now() + 10_000;
+      while (!fs.existsSync(file) && Date.now() < deadline) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
+    }
+    console.log(JSON.stringify({ success: true, data: { devices: [] } }));
+  } else if (args[0] === "daemon" && args[1] === "stop") {
+    const dir = args[args.indexOf("--state-dir") + 1];
+    try {
+      const recorded = JSON.parse(fs.readFileSync(path.join(dir, "daemon.json"), "utf8"));
+      process.kill(recorded.pid, "SIGTERM");
+      fs.rmSync(path.join(dir, "daemon.json"), { force: true });
+    } catch {}
+  } else {
+    console.log(JSON.stringify({ success: true, data: { command: args[0] ?? null } }));
+  }
+}
 """
 
 
@@ -230,11 +338,29 @@ def seed_fake_hub(root: Path, version: str):
     (install_dir / ".install-complete").write_text(f"{version}\n")
 
 
+def tool_versions(reference_root: Path) -> dict:
+    return json.loads((reference_root / "apps/server/src/device/deviceToolVersions.json").read_text())
+
+
 def hub_version_for(reference_root: Path) -> str:
-    versions = json.loads(
-        (reference_root / "apps/server/src/device/deviceToolVersions.json").read_text()
-    )
-    return versions["expo-device-hub"]
+    return tool_versions(reference_root)["expo-device-hub"]
+
+
+def seed_fake_agent_device(root: Path, version: str):
+    install_dir = root / "tools" / "agent-device" / version
+    entry = install_dir / "node_modules" / "agent-device" / "bin" / "agent-device.mjs"
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_text(FAKE_AGENT_DEVICE_SOURCE)
+    (install_dir / ".install-complete").write_text(f"{version}\n")
+
+
+def stop_fake_daemons(root: Path):
+    """Kill fake agent-device daemons this phase started (they run detached, as the real one does)."""
+    for daemon in root.rglob("device/agent-device/daemon.json"):
+        try:
+            os.kill(json.loads(daemon.read_text())["pid"], 15)
+        except (OSError, ValueError, KeyError):
+            pass
 
 
 def wait_answers(log: Path, count: int, seconds: int = 120):
@@ -256,12 +382,17 @@ def normalize_answer(answer: dict, home: Path):
     out = {"isError": result.get("isError"), "rpcError": answer.get("error")}
     parts = []
     for part in result.get("content", []):
+        if part.get("type", "text") != "text":
+            parts.append(part)
+            continue
         text = part.get("text", "")
         try:
             parts.append(json.loads(text))
         except json.JSONDecodeError:
             parts.append(text)
     out["content"] = parts
+    if "structuredContent" in result:
+        out["structuredContent"] = result["structuredContent"]
     text = json.dumps(out, sort_keys=True)
     for side in ("original", "rust"):
         text = text.replace(f"{home}/{side}/", "<home>/<server>/")
@@ -269,12 +400,31 @@ def normalize_answer(answer: dict, home: Path):
     return json.loads(text)
 
 
-def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False):
+NODE_IN_LAUNCHER = re.compile(r'const child = spawn\(("(?:[^"\\]|\\.)*")')
+
+
+def launcher_files(root: Path):
+    """Every agent-device launcher a server wrote, with the node it runs as `<node>`."""
+    files = {}
+    for path in sorted(root.rglob("device/bin/*")) + sorted(root.rglob("device/targets/*/*")):
+        text = path.read_text()
+        match = NODE_IN_LAUNCHER.search(text)
+        if match:
+            text = text.replace(match.group(1), '"<node>"')
+        if path.name == "agent-device":
+            node = text.split("\n", 2)[1].split(" ")[2]
+            text = text.replace(node, "'<node>'")
+        files[str(path.relative_to(root))] = text
+    return files
+
+
+def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None):
     root = Path(directory, name, phase)
     root.mkdir(parents=True, exist_ok=True)
     request_log = root / "fake-requests.jsonl"
     sdk, fake_bin = seed_fake_android_sdk(root, request_log)
     seed_fake_hub(root, hub_version_for(reference_root))
+    seed_fake_agent_device(root, tool_versions(reference_root)["agent-device"])
     hub_mode_file = root / "hub-mode.json"
     if avdmanager_failed:
         hub_mode_file.write_text(json.dumps({"avdmanagerFailed": True}))
@@ -334,8 +484,40 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
                     "platform": "android",
                 },
             )
+        if configure:
+            rpc(url, cookie, "device.configure", configure[0])
         rpc(url, cookie, "orchestration.dispatchCommand", seeded["dispatch"])
-        answers = [normalize_answer(a, Path(directory)) for a in wait_answers(log, len(plan))]
+        raw_answers = wait_answers(log, len(plan))
+        answers = [normalize_answer(a, Path(directory)) for a in raw_answers]
+        launched = None
+        if configure:
+            # Turning agent access off stops the daemon with its own CLI.
+            rpc(url, cookie, "device.configure", configure[1])
+            deadline = monotonic() + 15
+            while monotonic() < deadline and not any(
+                '"stop"' in line for line in request_log.read_text().splitlines()
+            ):
+                sleep(0.1)
+        if run_launcher:
+            # Run the first launcher device_open returned, as an agent would.
+            opened = next(
+                json.loads(a["result"]["content"][0]["text"])
+                for (tool, _), a in zip(plan, raw_answers)
+                if tool == "device_open" and not a["result"].get("isError")
+            )
+            launcher = opened["agentDevice"]["command"]
+            if Path(launcher).exists():
+                # parity-env: the agent-device launcher a server wrote, which runs the fake agent-device
+                done = subprocess.run(
+                    [launcher, "snapshot", "-i"], capture_output=True, text=True, timeout=60,
+                    env={k: v for k, v in env.items() if not k.startswith("AGENT_DEVICE_")},
+                )
+                launched = {"code": done.returncode, "stdout": done.stdout, "stderr": done.stderr}
+            else:
+                launched = {"missing": True}
+            launched["files"] = launcher_files(root)
+        elif list_launchers:
+            launched = {"files": launcher_files(root)}
         # Snapshot fake requests before ExitStack sends SIGTERM to the process group
         # (which stops the hub child simultaneously and can trigger the reference's hub supervisor).
         requests = (
@@ -344,6 +526,17 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
             else []
         )
 
+    stop_fake_daemons(root)
+    text = json.dumps(requests)
+    for side in ("original", "rust"):
+        text = text.replace(f"{Path(directory)}/{side}/", "<home>/<server>/")
+    requests = json.loads(text.replace(str(Path(directory)), "<home>"))
+    if launched is not None:
+        text = json.dumps(launched)
+        for side in ("original", "rust"):
+            text = text.replace(f"{Path(directory)}/{side}/", "<home>/<server>/")
+        answers.append(json.loads(text.replace(str(Path(directory)), "<home>")))
+        plan = [*plan, ("launcher", {})]
     return [f"{phase}:{t}" for t, _ in plan], answers, requests
 
 
@@ -351,7 +544,7 @@ def run_server(name, command, reference_root, directory):
     phases = [
         (
             "off",
-            [("device_list", {}), ("device_close", {})],
+            [("device_list", {}), ("device_open", {}), ("device_screenshot", {}), ("device_close", {})],
             dict(enable_devices=False),
         ),
         (
@@ -378,11 +571,50 @@ def run_server(name, command, reference_root, directory):
             dict(enable_devices=True, open_devices=("emulator-5554", "Pixel_Unbooted")),
         ),
         (
+            "agent",
+            [
+                ("device_screenshot", {}),
+                ("device_open", {}),
+                ("device_open", {"deviceId": "emulator-5554", "hostId": "this machine"}),
+                ("device_screenshot", {}),
+                ("device_screenshot", {"deviceId": "emulator-5554", "hostId": "local"}),
+                ("device_screenshot", {"deviceId": "   "}),
+                ("device_open", {"deviceId": "nope"}),
+                ("device_open", {"platform": "ios"}),
+                ("device_list", {}),
+            ],
+            dict(enable_devices=True, run_launcher=True),
+        ),
+        (
+            "agent-close",
+            [
+                ("device_open", {}),
+                ("device_close", {"deviceId": "emulator-5554"}),
+                ("device_screenshot", {"deviceId": "emulator-5554"}),
+                ("device_open", {"deviceId": "Pixel_Unbooted"}),
+                ("device_screenshot", {}),
+                ("device_close", {"shutdown": True}),
+                ("device_list", {}),
+            ],
+            dict(enable_devices=True, list_launchers=True),
+        ),
+        (
+            "agent-access",
+            [("device_list", {})],
+            dict(
+                enable_devices=True,
+                configure=({"agentAccessEnabled": True}, {"agentAccessEnabled": False}),
+            ),
+        ),
+        (
             "fallback",
             [("device_list", {})],
             dict(enable_devices=True, avdmanager_failed=True),
         ),
     ]
+    only = os.environ.get("DEVICE_PARITY_PHASES")
+    if only:
+        phases = [entry for entry in phases if entry[0] in only.split(",")]
     labels, answers, requests = [], [], {}
     for phase, plan, kwargs in phases:
         p_labels, p_answers, p_reqs = run_phase(

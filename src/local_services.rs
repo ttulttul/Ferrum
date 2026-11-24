@@ -1,4 +1,5 @@
 //! Host-backed RPC services. Each service owns the state shared by its clients.
+mod agent_device;
 mod browser;
 mod device_actions;
 mod devices;

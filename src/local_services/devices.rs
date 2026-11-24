@@ -1,3 +1,4 @@
+use super::agent_device::{self, AgentEndpoint, StartError};
 use super::{invalid, string, timestamp, Reply};
 use crate::settings::{
     secrets::{provider_label, ReadMode, Resolver},
@@ -5,7 +6,7 @@ use crate::settings::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     ffi::OsString,
     fs,
@@ -46,6 +47,10 @@ pub struct DeviceService {
     state: Mutex<Value>,
     events: broadcast::Sender<Value>,
     runtime: tokio::sync::Mutex<Option<HubRuntime>>,
+    /// This machine's agent-device daemon, once started (`RunningHost.agentDevice`).
+    agent: Mutex<Option<AgentEndpoint>>,
+    /// Launchers bound since startup, by agent-device session.
+    launchers: tokio::sync::Mutex<HashMap<String, PathBuf>>,
 }
 
 const DEVICE_SETTINGS: [(&str, &str); 3] = [
@@ -60,11 +65,15 @@ impl DeviceService {
             tracing::warn!(%error,"Could not migrate saved device preferences");
         }
         let state = initial(dir, &settings.internal()?);
+        // Sessions live in memory, so this removes every launcher a previous run left behind.
+        agent_device::prune_launchers_now(dir);
         Ok(Self {
             settings,
             state: Mutex::new(state),
             events: broadcast::channel(128).0,
             runtime: Default::default(),
+            agent: Mutex::new(None),
+            launchers: Default::default(),
         })
     }
 }
@@ -237,7 +246,7 @@ fn host(dir: &Path, running: bool) -> Value {
             "agent": {
                 "requiredVersion": AGENT.1,
                 "installedVersions": agent,
-                "runningVersion": null,
+                "runningVersion": if running { agent_device::running_version(dir) } else { None },
             }
         },
         "hubInstalled": hub.iter().any(|v| v == HUB.1),
@@ -1234,56 +1243,7 @@ fn locate_session(
         .flatten()
         .filter(|s| s["threadId"] == thread_id && s["deviceId"] == device_id)
         .collect();
-    let on_host: Vec<&Value> = matches
-        .iter()
-        .copied()
-        .filter(|s| host_id.is_none_or(|h| s["hostId"] == h))
-        .collect();
-    let mut host_ids: Vec<&str> = Vec::new();
-    for s in &on_host {
-        if let Some(id) = s["hostId"].as_str() {
-            if !host_ids.contains(&id) {
-                host_ids.push(id);
-            }
-        }
-    }
-    if host_ids.len() == 1 {
-        return Ok(on_host.last().copied().cloned());
-    }
-    if host_ids.len() > 1 {
-        let names = host_ids
-            .iter()
-            .map(|id| host_display_name(hosts, id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(json!({
-            "_tag": "DeviceToolUnavailableError",
-            "reason": format!("Device {device_id} is on more than one host: {names}. Pass hostId."),
-        }));
-    }
-    let mut elsewhere: Vec<&str> = Vec::new();
-    for s in &matches {
-        if let Some(id) = s["hostId"].as_str() {
-            if !elsewhere.contains(&id) {
-                elsewhere.push(id);
-            }
-        }
-    }
-    if let (Some(wanted), false) = (host_id, elsewhere.is_empty()) {
-        let names = elsewhere
-            .iter()
-            .map(|id| host_display_name(hosts, id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(json!({
-            "_tag": "DeviceToolUnavailableError",
-            "reason": format!(
-                "Device {device_id} is not on {}. It is on {names}; pass that hostId.",
-                host_display_name(hosts, wanted)
-            ),
-        }));
-    }
-    Ok(None)
+    locate(hosts, matches, device_id, host_id)
 }
 
 impl DeviceService {
@@ -1314,7 +1274,9 @@ impl DeviceService {
         ) {
             return None;
         }
-        Some(self.apply(name, input, dir).await)
+        let reply = self.apply(name, input, dir).await;
+        self.prune_launchers(dir).await;
+        Some(reply)
     }
 
     pub async fn tool_call(&self, operation: &str, input: &Value, dir: &Path) -> Reply {
@@ -1402,9 +1364,13 @@ impl DeviceService {
                 if let Some(s) = input["shutdown"].as_bool() {
                     close_input["shutdown"] = json!(s);
                 }
-                self.apply("close", &close_input, dir).await?;
+                let closed = self.apply("close", &close_input, dir).await;
+                self.prune_launchers(dir).await;
+                closed?;
                 Ok(json!({}))
             }
+            "open" => self.tool_open(input, dir).await,
+            "screenshot" => self.tool_screenshot(input, dir).await,
             _ => Err(json!({
                 "_tag": "DeviceToolUnavailableError",
                 "reason": format!("Unknown device tool operation: {operation}"),
@@ -1453,6 +1419,9 @@ impl DeviceService {
             state["hostStatuses"] = json!({});
             state["agentAccessEnabled"] = settings["enableAgentDeviceAccess"].clone();
             state["onboardingCompleted"] = settings["deviceOnboardingCompleted"].clone();
+            if !enabled || input["agentAccessEnabled"] == false {
+                self.stop_agent_locked(dir).await;
+            }
             if !enabled {
                 runtime.take();
                 state["sessions"] = json!([]);
@@ -1462,6 +1431,13 @@ impl DeviceService {
                 state["bootingDevices"] = Value::Null;
             }
             self.publish(&mut state);
+            if enabled
+                && settings["enableAgentDeviceAccess"] == true
+                && input["agentAccessEnabled"] == true
+            {
+                self.agent_readiness_locked(&mut runtime, dir).await?;
+                state = self.snapshot(dir);
+            }
         }
         if name == "list" || name == "configure" {
             if let Some(id) = input["retryHostId"].as_str() {
@@ -1571,6 +1547,26 @@ impl DeviceService {
             } else {
                 closing.clone()
             };
+            // Open publishes under the same lock; an old close must not release a reopened claim.
+            let agent = self.agent.lock().unwrap().clone();
+            if let (Some(endpoint), true) = (agent, runtime.is_some()) {
+                for s in &ending {
+                    let session = agent_device::session_name(
+                        s["threadId"].as_str().unwrap_or(""),
+                        s["hostId"].as_str().unwrap_or(""),
+                        s["deviceId"].as_str().unwrap_or(""),
+                    );
+                    if agent_device::release_session(&endpoint, &session)
+                        .await
+                        .is_err()
+                    {
+                        return Err(op_err("close", "request_failed"));
+                    }
+                }
+            }
+            if do_shutdown {
+                self.release_launchers(&ending).await;
+            }
             if do_shutdown && !closing.is_empty() {
                 let Some(origin) = running_origin(&mut runtime) else {
                     return Err(json!({
@@ -1787,6 +1783,684 @@ impl DeviceService {
                 .join(HUB.1),
         )
         .await
+    }
+}
+
+const AGENT_ACCESS_UNAVAILABLE: &str = "Agent device access requires enabled device support, agent access, and an available simulator platform on this host.";
+const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(20);
+const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+// The hub passes numeric display IDs that Xcode 26 rejects; iOS 27 needs them for multiple displays.
+const DEFAULT_DISPLAY_SCREENSHOT: &str = "f=$(mktemp -t t3-screenshot) || exit 1\ntrap 'rm -f \"$f\"' 0\nxcrun simctl io \"$1\" screenshot --type=png \"$f\" >/dev/null && base64 -i \"$f\"";
+
+fn tool_unavailable(reason: impl Into<String>) -> Value {
+    json!({"_tag": "DeviceToolUnavailableError", "reason": reason.into()})
+}
+
+fn local_unavailable(reason: &str) -> Value {
+    json!({
+        "_tag": "DeviceHostUnavailableError",
+        "hostId": LOCAL_HOST_ID,
+        "hostLabel": LOCAL_HOST_LABEL,
+        "reason": reason,
+    })
+}
+
+/// `locate`: the one match on `host_id` (or on its only host), else the
+/// reference's ambiguous-host and other-host errors.
+fn locate(
+    hosts: &[Value],
+    matches: Vec<&Value>,
+    device_id: &str,
+    host_id: Option<&str>,
+) -> Result<Option<Value>, Value> {
+    let on_host: Vec<&Value> = matches
+        .iter()
+        .copied()
+        .filter(|s| host_id.is_none_or(|h| s["hostId"] == h))
+        .collect();
+    let mut host_ids: Vec<&str> = Vec::new();
+    for s in &on_host {
+        if let Some(id) = s["hostId"].as_str() {
+            if !host_ids.contains(&id) {
+                host_ids.push(id);
+            }
+        }
+    }
+    if host_ids.len() == 1 {
+        return Ok(on_host.last().copied().cloned());
+    }
+    if host_ids.len() > 1 {
+        let names = host_ids
+            .iter()
+            .map(|id| host_display_name(hosts, id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(tool_unavailable(format!(
+            "Device {device_id} is on more than one host: {names}. Pass hostId."
+        )));
+    }
+    let mut elsewhere: Vec<&str> = Vec::new();
+    for s in &matches {
+        if let Some(id) = s["hostId"].as_str() {
+            if !elsewhere.contains(&id) {
+                elsewhere.push(id);
+            }
+        }
+    }
+    if let (Some(wanted), false) = (host_id, elsewhere.is_empty()) {
+        let names = elsewhere
+            .iter()
+            .map(|id| host_display_name(hosts, id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(tool_unavailable(format!(
+            "Device {device_id} is not on {}. It is on {names}; pass that hostId.",
+            host_display_name(hosts, wanted)
+        )));
+    }
+    Ok(None)
+}
+
+/// `hostName` in the device handlers.
+fn handler_host_name(hosts: &[Value], host_id: &str) -> String {
+    host_display_name(hosts, host_id)
+}
+
+/// `failedHosts`' detail for `host_id`.
+fn failed_detail<'a>(state: &'a Value, host_id: &str) -> Option<&'a str> {
+    let status = &state["hostStatuses"][host_id];
+    if status["status"] == "failed" {
+        status["detail"].as_str().filter(|d| !d.is_empty())
+    } else {
+        None
+    }
+}
+
+/// `pickDevice`: the device `device_open` opens.
+fn pick_device(
+    state: &Value,
+    device_id: Option<&str>,
+    platform: Option<&str>,
+    host_id: Option<&str>,
+) -> Result<Value, Value> {
+    let hosts = state["hosts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let devices: Vec<&Value> = state["devices"].as_array().into_iter().flatten().collect();
+    if let Some(device_id) = device_id {
+        let matches = devices
+            .iter()
+            .copied()
+            .filter(|d| d["id"] == device_id)
+            .collect();
+        if let Some(found) = locate(hosts, matches, device_id, host_id)? {
+            return Ok(found);
+        }
+        let mut reason = vec![match host_id {
+            None => format!("No device {device_id} on any host."),
+            Some(h) => format!("No device {device_id} on {}.", handler_host_name(hosts, h)),
+        }];
+        let candidates: Vec<String> = match host_id {
+            Some(h) => vec![h.to_owned()],
+            None => hosts
+                .iter()
+                .filter_map(|h| h["id"].as_str().map(str::to_owned))
+                .collect(),
+        };
+        for candidate in candidates {
+            if let Some(detail) = failed_detail(state, &candidate) {
+                reason.push(format!(
+                    "{} failed to start: {detail}",
+                    handler_host_name(hosts, &candidate)
+                ));
+            }
+        }
+        reason.push("Call device_list for current ids.".to_owned());
+        return Err(tool_unavailable(reason.join(" ")));
+    }
+    let host_id = host_id.unwrap_or(LOCAL_HOST_ID);
+    let candidates: Vec<&Value> = devices
+        .into_iter()
+        .filter(|d| d["hostId"] == host_id && platform.is_none_or(|p| d["platform"] == p))
+        .collect();
+    if candidates.is_empty() {
+        return Err(tool_unavailable(
+            match (failed_detail(state, host_id), platform) {
+                (Some(detail), _) => detail.to_owned(),
+                (None, None) => {
+                    "No simulators or emulators were found. Call device_list to see why.".to_owned()
+                }
+                (None, Some(p)) => format!(
+                    "No {p} devices were found on host {host_id}. Call device_list to see why."
+                ),
+            },
+        ));
+    }
+    let first_platform = &candidates[0]["platform"];
+    if platform.is_none() && candidates.iter().any(|d| &d["platform"] != first_platform) {
+        return Err(tool_unavailable(
+            "Both iOS and Android devices are available; pass platform or deviceId.",
+        ));
+    }
+    Ok(candidates
+        .iter()
+        .find(|d| d["booted"] == true)
+        .copied()
+        .unwrap_or(candidates[0])
+        .clone())
+}
+
+/// `extractPng`: the first complete PNG in `bytes`.
+pub(super) fn extract_png(bytes: &[u8]) -> Option<&[u8]> {
+    let start = bytes.windows(8).position(|w| w == PNG_SIGNATURE)?;
+    let mut chunk = start + 8;
+    while chunk + 12 <= bytes.len() {
+        let length = u32::from_be_bytes(bytes[chunk..chunk + 4].try_into().ok()?) as usize;
+        let end = chunk + 12 + length;
+        if end > bytes.len() {
+            return None;
+        }
+        if &bytes[chunk + 4..chunk + 8] == b"IEND" {
+            return Some(&bytes[start..end]);
+        }
+        chunk = end;
+    }
+    None
+}
+
+/// `pngDimensions`.
+pub(super) fn png_dimensions(png: &[u8]) -> (u32, u32) {
+    let word = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    if png.len() < 24 || word(0) != 0x8950_4e47 || word(4) != 0x0d0a_1a0a || word(12) != 0x4948_4452
+    {
+        return (0, 0);
+    }
+    (word(16), word(20))
+}
+
+fn vendor_prefix(platform: &str) -> &'static str {
+    if platform == "ios" {
+        "/vendor/serve-sim"
+    } else {
+        "/vendor/serve-emu"
+    }
+}
+
+fn runs_on_xcode26_runtime(version: &str) -> bool {
+    // `Number(undefined) <= 26` is false.
+    version
+        .strip_prefix("iOS ")
+        .map(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .filter(|digits| !digits.is_empty())
+        .and_then(|digits| digits.parse::<u64>().ok())
+        .is_some_and(|major| major <= 26)
+}
+
+/// `DeviceHubOperations.screenshot`.
+async fn hub_screenshot(origin: &str, device: &Value) -> Result<Vec<u8>, Value> {
+    let platform = device["platform"].as_str().unwrap_or("");
+    let id = device["id"].as_str().unwrap_or("");
+    let url = format!(
+        "{origin}{}/api/screenshot?device={}",
+        vendor_prefix(platform),
+        agent_device::encode_uri_component(id)
+    );
+    let reason = match hub_client(SCREENSHOT_TIMEOUT).post(url).send().await {
+        Ok(response) if response.status().is_success() => match response.bytes().await {
+            Ok(bytes) => return Ok(bytes.to_vec()),
+            Err(_) => "request_failed",
+        },
+        Ok(_) => "hub_rejected",
+        Err(_) => "request_failed",
+    };
+    if reason == "hub_rejected"
+        && platform == "ios"
+        && runs_on_xcode26_runtime(device["version"].as_str().unwrap_or(""))
+    {
+        return default_display_screenshot(id).await;
+    }
+    Err(op_err("screenshot", reason))
+}
+
+async fn default_display_screenshot(udid: &str) -> Result<Vec<u8>, Value> {
+    use base64::Engine as _;
+    let sdk = sdk_root();
+    let mut command = tokio::process::Command::new("sh");
+    command
+        .args(["-c", DEFAULT_DISPLAY_SCREENSHOT, "sh", udid])
+        .envs(device_host_env(sdk.as_deref()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let failed = |code: i64, stderr: String| {
+        json!({
+            "_tag": "DeviceOperationError",
+            "operation": "screenshot",
+            "reason": "command_failed",
+            "exitCode": code,
+            "cause": stderr.trim(),
+        })
+    };
+    let output = match command.spawn() {
+        Ok(child) => tokio::time::timeout(SCREENSHOT_TIMEOUT, child.wait_with_output()).await,
+        Err(error) => return Err(failed(127, error.to_string())),
+    };
+    let output = match output {
+        Err(_) => return Err(failed(124, String::new())),
+        Ok(Err(error)) => return Err(failed(127, error.to_string())),
+        Ok(Ok(output)) => output,
+    };
+    if !output.status.success() {
+        return Err(failed(
+            i64::from(output.status.code().unwrap_or(127)),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    let text: String = String::from_utf8_lossy(&output.stdout)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    Ok(base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .unwrap_or_default())
+}
+
+impl DeviceService {
+    fn sessions_key(&self) -> HashSet<String> {
+        self.state.lock().unwrap()["sessions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| {
+                agent_device::session_name(
+                    s["threadId"].as_str().unwrap_or(""),
+                    s["hostId"].as_str().unwrap_or(""),
+                    s["deviceId"].as_str().unwrap_or(""),
+                )
+            })
+            .collect()
+    }
+
+    /// `pruneLaunchers`: ends the agent-device sessions of retired device
+    /// sessions, then removes their launchers.
+    pub(super) async fn prune_launchers(&self, dir: &Path) {
+        let mut launchers = self.launchers.lock().await;
+        let live = self.sessions_key();
+        let retired: Vec<String> = launchers
+            .keys()
+            .filter(|session| !live.contains(*session))
+            .cloned()
+            .collect();
+        let mut ending = Vec::new();
+        for session in retired {
+            if let Some(launcher) = launchers.remove(&session) {
+                ending.push(launcher);
+            }
+        }
+        futures_util::future::join_all(ending.iter().map(|l| agent_device::release_launcher(l)))
+            .await;
+        agent_device::prune_launchers(dir, &live).await;
+    }
+
+    /// `releaseLaunchers`: ends the agent-device sessions behind `sessions`' launchers.
+    async fn release_launchers(&self, sessions: &[Value]) {
+        let mut launchers = self.launchers.lock().await;
+        for session in sessions {
+            let name = agent_device::session_name(
+                session["threadId"].as_str().unwrap_or(""),
+                session["hostId"].as_str().unwrap_or(""),
+                session["deviceId"].as_str().unwrap_or(""),
+            );
+            if let Some(launcher) = launchers.get(&name).cloned() {
+                agent_device::release_launcher(&launcher).await;
+                launchers.remove(&name);
+            }
+        }
+    }
+
+    /// `setHostStatus` for the local host.
+    fn set_host_status(&self, status: &str, detail: Option<String>) {
+        let mut state = self.snapshot(Path::new(""));
+        let previous = state["hostStatuses"][LOCAL_HOST_ID].clone();
+        let mut next = json!({});
+        if previous["androidDiscoveryIncomplete"] == true {
+            next["androidDiscoveryIncomplete"] = json!(true);
+        }
+        if !previous["incompletePlatforms"].is_null() {
+            next["incompletePlatforms"] = previous["incompletePlatforms"].clone();
+        }
+        next["status"] = json!(status);
+        state["hostStatus"] = json!(status);
+        match &detail {
+            Some(detail) => {
+                next["detail"] = json!(detail);
+                state["hostStatusDetail"] = json!(detail);
+            }
+            None => {
+                state["hostStatusDetail"] = Value::Null;
+            }
+        }
+        state["hostStatuses"][LOCAL_HOST_ID] = next;
+        self.publish(&mut state);
+    }
+
+    /// `agentReadinessIfSupported`: the agent-device daemon, started if
+    /// needed, or `None` when agent device access is off here.
+    pub(super) async fn agent_readiness(&self, dir: &Path) -> Result<Option<AgentEndpoint>, Value> {
+        let mut runtime = self.runtime.lock().await;
+        self.agent_readiness_locked(&mut runtime, dir).await
+    }
+
+    /// `agentReadinessIfSupported` with the host's start lock held.
+    async fn agent_readiness_locked(
+        &self,
+        runtime: &mut Option<HubRuntime>,
+        dir: &Path,
+    ) -> Result<Option<AgentEndpoint>, Value> {
+        let preferences = self
+            .settings
+            .internal()
+            .map_err(|_| op_err("settings", "settings_failed"))?;
+        if preferences["enableDeviceSupport"] != true
+            || preferences["enableAgentDeviceAccess"] != true
+        {
+            return Ok(None);
+        }
+        let platforms = host(dir, false)["platforms"].clone();
+        if !platforms
+            .as_array()
+            .is_some_and(|p| p.iter().any(|p| p["available"] == true))
+        {
+            return Ok(None);
+        }
+        let started: Result<AgentEndpoint, Value> = async {
+            ensure_hub(runtime, dir).await?;
+            let existing = self.agent.lock().unwrap().clone();
+            let entry = match existing {
+                Some(endpoint) => endpoint.entry,
+                None => install(dir, AGENT).await.map_err(|err| {
+                    if err["reason"] == "package_manager_missing" {
+                        host_err(
+                            "installing agent tools",
+                            Some("Device support needs npm, which is not on the T3 server's PATH. Install npm (it comes with Node.js from nodejs.org), restart T3 Code, then retry.".into()),
+                        )
+                    } else {
+                        host_err("installing agent tools", None)
+                    }
+                })?,
+            };
+            let Some(node) = agent_device::node_executable() else {
+                return Err(local_unavailable(
+                    "Local device support requires Node.js. Install Node.js and make sure node is on PATH, then retry.",
+                ));
+            };
+            let env = device_host_env(sdk_root().as_deref());
+            agent_device::start_daemon(dir, &entry, &node, &env)
+                .await
+                .map_err(|error| match error {
+                    StartError::Host(step) => host_err(step, None),
+                    StartError::Timeout => local_unavailable(&format!(
+                        "Agent tools did not start within {} ms.",
+                        agent_device::DAEMON_READY_TIMEOUT.as_millis()
+                    )),
+                    StartError::Start(message) => local_unavailable(&message),
+                })
+        }
+        .await;
+        match started {
+            Ok(endpoint) => {
+                *self.agent.lock().unwrap() = Some(endpoint.clone());
+                let mut state = self.snapshot(dir);
+                state["hosts"] = json!([host(dir, true)]);
+                self.publish(&mut state);
+                self.set_host_status("ready", None);
+                Ok(Some(endpoint))
+            }
+            Err(error) => {
+                self.set_host_status("failed", Some(error_detail(&error)));
+                Err(error)
+            }
+        }
+    }
+
+    /// `stopAgent`: stops this machine's agent-device daemon.
+    async fn stop_agent_locked(&self, dir: &Path) {
+        let base = super::base_directory(dir);
+        agent_device::stop_daemon(dir, |version| {
+            [version, Some(AGENT.1)]
+                .into_iter()
+                .flatten()
+                .map(|v| {
+                    base.join("tools")
+                        .join(AGENT.0)
+                        .join(v)
+                        .join("node_modules")
+                        .join(AGENT.0)
+                        .join(AGENT.2)
+                })
+                .find(|entry| entry.is_file())
+        })
+        .await;
+        self.agent.lock().unwrap().take();
+    }
+
+    /// `device_open` (the reference's handler, `agentTarget` and `agentLauncher`).
+    pub(super) async fn tool_open(&self, input: &Value, dir: &Path) -> Reply {
+        let thread_id = input["threadId"].as_str().unwrap_or("").to_owned();
+        let state = self.apply("list", &json!({}), dir).await?;
+        self.prune_launchers(dir).await;
+        if state["hostStatus"] == "disabled" {
+            return Err(tool_unavailable(
+                "Device support is off. Ask the user to enable it in the Device panel before installing or starting device tools.",
+            ));
+        }
+        let hosts = state["hosts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let host_id = resolve_host_id(hosts, input["hostId"].as_str())?;
+        let target = pick_device(
+            &state,
+            input["deviceId"].as_str(),
+            input["platform"].as_str(),
+            host_id.as_deref(),
+        )?;
+        // Resolve consent and agent connectivity before booting or registering a session.
+        if self.agent_readiness(dir).await?.is_none() {
+            return Err(tool_unavailable(AGENT_ACCESS_UNAVAILABLE));
+        }
+        let session = self
+            .apply(
+                "open",
+                &json!({
+                    "threadId": thread_id,
+                    "hostId": target["hostId"],
+                    "deviceId": target["id"],
+                    "platform": target["platform"],
+                }),
+                dir,
+            )
+            .await;
+        self.prune_launchers(dir).await;
+        let session = session?;
+        let session_host = session["hostId"]
+            .as_str()
+            .unwrap_or(LOCAL_HOST_ID)
+            .to_owned();
+        let session_device = session["deviceId"].as_str().unwrap_or("").to_owned();
+        let after = self.snapshot(dir);
+        let device = after["devices"]
+            .as_array()
+            .and_then(|devices| {
+                devices.iter().find(|d| {
+                    d["hostId"] == session_host.as_str() && d["id"] == session_device.as_str()
+                })
+            })
+            .cloned()
+            .unwrap_or(target);
+        // agentTarget: the opened device's config and session.
+        let Some(endpoint) = self.agent_readiness(dir).await? else {
+            return Err(json!({
+                "_tag": "DeviceHostUnavailableError",
+                "hostId": session_host,
+                "hostLabel": LOCAL_HOST_LABEL,
+                "reason": AGENT_ACCESS_UNAVAILABLE,
+            }));
+        };
+        let config = agent_device::config_path(dir, &session_host);
+        agent_device::write_config(&config, &endpoint)
+            .await
+            .map_err(|_| op_err("configure agent", "settings_failed"))?;
+        let agent_session = agent_device::session_name(&thread_id, &session_host, &session_device);
+        let mut target_args = agent_device::target_args(
+            device["platform"].as_str().unwrap_or("android"),
+            &session_device,
+        );
+        target_args.extend([
+            "--config".to_owned(),
+            config.to_string_lossy().into_owned(),
+            "--session".to_owned(),
+            agent_session.clone(),
+        ]);
+        // agentLauncher: bound only while the session is still open.
+        let command = {
+            let mut launchers = self.launchers.lock().await;
+            let live = self.state.lock().unwrap()["sessions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|s| {
+                    s["threadId"] == thread_id.as_str()
+                        && s["hostId"] == session_host.as_str()
+                        && s["deviceId"] == session_device.as_str()
+                });
+            if !live {
+                return Err(tool_unavailable(
+                    "The device was closed while device_open was preparing it. Call device_open again only if you still need it.",
+                ));
+            }
+            let Some(node) = agent_device::node_executable() else {
+                return Err(local_unavailable(
+                    "Device automation requires Node.js. Install Node.js and make sure node is on PATH, then retry.",
+                ));
+            };
+            let entry = install(dir, AGENT)
+                .await
+                .map_err(|_| op_err("install agent CLI", "command_failed"))?;
+            let launcher =
+                agent_device::bind_launcher(dir, &node, &entry, &agent_session, &target_args)
+                    .await
+                    .map_err(|_| {
+                        local_unavailable("Could not prepare the agent-device launcher.")
+                    })?;
+            launchers.insert(agent_session.clone(), launcher.clone());
+            launcher.to_string_lossy().into_owned()
+        };
+        Ok(json!({
+            "device": device,
+            "agentDevice": {
+                "command": command,
+                "targetArgs": target_args,
+                "session": agent_session,
+            },
+            "quickStart": agent_device::quick_start(&device, &[], &command),
+        }))
+    }
+
+    /// `device_screenshot`: the PNG of a device open in the calling thread.
+    pub(super) async fn tool_screenshot(&self, input: &Value, dir: &Path) -> Reply {
+        let thread_id = input["threadId"].as_str().unwrap_or("");
+        let state = self.snapshot(dir);
+        let hosts = state["hosts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let host_id = match input["hostId"].as_str() {
+            Some(h) => resolve_host_id(hosts, Some(h))?,
+            None => None,
+        };
+        let target = match input["deviceId"].as_str() {
+            None => state["sessions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .rfind(|s| {
+                    s["threadId"] == thread_id
+                        && host_id.as_deref().is_none_or(|h| s["hostId"] == h)
+                })
+                .cloned(),
+            Some(device_id) => locate_session(&state, thread_id, device_id, host_id.as_deref())?,
+        };
+        let Some(target) = target else {
+            return Err(tool_unavailable(match input["deviceId"].as_str() {
+                None => "No device is open in this thread. Call device_open first.".to_owned(),
+                Some(id) => {
+                    format!("Device {id} is not open in this thread. Call device_open first.")
+                }
+            }));
+        };
+        let target_host = target["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
+        let device_id = target["deviceId"].as_str().unwrap_or("");
+        if target_host != LOCAL_HOST_ID {
+            return Err(bad_host(target_host));
+        }
+        // resolveDevice: a ready host and its device, refreshed if not listed.
+        let enabled = self
+            .settings
+            .internal()
+            .map_err(|_| op_err("settings", "settings_failed"))?["enableDeviceSupport"]
+            == true;
+        if !enabled {
+            return Err(disabled());
+        }
+        let mut runtime = self.runtime.lock().await;
+        let origin = match ensure_hub(&mut runtime, dir).await {
+            Ok(origin) => origin,
+            Err(error) => {
+                drop(runtime);
+                self.set_host_status("failed", Some(error_detail(&error)));
+                return Err(error);
+            }
+        };
+        let find = |state: &Value| {
+            state["devices"]
+                .as_array()
+                .and_then(|ds| {
+                    ds.iter()
+                        .find(|d| d["hostId"] == target_host && d["id"] == device_id)
+                })
+                .cloned()
+        };
+        let device = match find(&self.snapshot(dir)) {
+            Some(device) => device,
+            None => {
+                let listed = list_hub(&origin).await?;
+                let mut state = self.snapshot(dir);
+                apply_list_result(&mut state, dir, listed);
+                self.publish(&mut state);
+                find(&state).ok_or_else(|| {
+                    json!({"_tag":"DeviceNotFoundError","hostId":target_host,"deviceId":device_id})
+                })?
+            }
+        };
+        drop(runtime);
+        let bytes = hub_screenshot(&origin, &device).await?;
+        let Some(png) = extract_png(&bytes) else {
+            return Err(json!({
+                "_tag": "DeviceOperationError",
+                "operation": "screenshot",
+                "reason": "hub_rejected",
+                "cause": format!("The hub returned {} bytes without a complete PNG.", bytes.len()),
+            }));
+        };
+        use base64::Engine as _;
+        let (width, height) = png_dimensions(png);
+        Ok(json!({
+            "device": device,
+            "screenshot": {
+                "mimeType": "image/png",
+                "data": base64::engine::general_purpose::STANDARD.encode(png),
+                "width": width,
+                "height": height,
+            },
+        }))
     }
 }
 
@@ -2141,6 +2815,46 @@ mod tests {
         assert!(locate_session(&state, "t1", "missing", None)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn extracts_the_first_complete_png_and_its_size() {
+        let png = hex::decode("89504e470d0a1a0a0000000d49484452000000030000000208020000001216f14d0000001049444154789c63f8cfc0f01f0418000017f402fe5a7a2d7a0000000049454e44ae426082").unwrap();
+        let mut noisy = b"WARNING: two displays\n".to_vec();
+        noisy.extend(&png);
+        noisy.extend(b"\ntrailer");
+        assert_eq!(extract_png(&noisy), Some(png.as_slice()));
+        assert_eq!(png_dimensions(&png), (3, 2));
+        assert_eq!(extract_png(&png[..png.len() - 4]), None);
+        assert_eq!(png_dimensions(b"short"), (0, 0));
+    }
+
+    #[test]
+    fn picks_the_device_device_open_opens() {
+        let state = json!({
+            "hosts": [{"id": "local", "label": "This machine"}],
+            "hostStatuses": {},
+            "devices": [
+                {"hostId": "local", "id": "a", "platform": "android", "booted": false},
+                {"hostId": "local", "id": "b", "platform": "android", "booted": true},
+            ],
+        });
+        assert_eq!(pick_device(&state, None, None, None).unwrap()["id"], "b");
+        assert_eq!(
+            pick_device(&state, Some("a"), None, None).unwrap()["id"],
+            "a"
+        );
+        assert_eq!(
+            pick_device(&state, Some("z"), None, Some("local")).unwrap_err()["reason"],
+            "No device z on 'This machine' (hostId local). Call device_list for current ids."
+        );
+        assert_eq!(
+            pick_device(&state, None, Some("ios"), None).unwrap_err()["reason"],
+            "No ios devices were found on host local. Call device_list to see why."
+        );
+        assert!(runs_on_xcode26_runtime("iOS 26.1"));
+        assert!(!runs_on_xcode26_runtime("iOS 27.0"));
+        assert!(!runs_on_xcode26_runtime("Android 15"));
     }
 
     #[test]

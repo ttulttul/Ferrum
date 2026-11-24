@@ -136,12 +136,15 @@ fn issue(
                 return expected("a value with a length of at most 128".into());
             }
         }
-        if tool == "device_close" && matches!(path, ["deviceId"] | ["hostId"]) {
+        if matches!(tool, "device_close" | "device_open" | "device_screenshot")
+            && matches!(path, ["deviceId"] | ["hostId"])
+        {
             if trimmed.is_empty() {
                 return expected("a non-blank string".into());
             }
-            if path == ["hostId"] && trimmed.encode_utf16().count() > 128 {
-                return expected("a value with a length of at most 128".into());
+            let max = if path == ["hostId"] { 128 } else { 256 };
+            if trimmed.encode_utf16().count() > max {
+                return expected(format!("a value with a length of at most {max}"));
             }
         }
         let length = text.encode_utf16().count() as f64;
