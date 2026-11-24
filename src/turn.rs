@@ -104,14 +104,18 @@ pub(crate) async fn launch<H: TurnHost>(
     } else {
         None
     };
-    if let Some(prepared) = prepared_handoff.as_ref() {
-        for handoff in &prepared.pending {
-            let _ = host
-                .commit(Event::ContextHandoffUpdated {
-                    thread_id: run.thread_id.clone(),
-                    handoff: handoff.clone(),
-                })
-                .await;
+    if let Some(prepared) = prepared_handoff.as_mut() {
+        // A Codex turn records its handoffs once its app-server has loaded
+        // the native thread (see `record`): the reference prepares them only
+        // after the provider thread loads, so a turn whose CLI cannot start
+        // leaves none.
+        let loads_first = spec
+            .provider
+            .as_ref()
+            .is_some_and(|provider| provider.driver == crate::workspace::provider::CODEX);
+        if !loads_first {
+            commit_handoffs(&*host, &run, prepared.pending.iter().cloned()).await;
+            prepared.recorded = true;
         }
         if !prepared.inline_context.is_empty() {
             spec.prompt =
@@ -135,15 +139,8 @@ pub(crate) async fn launch<H: TurnHost>(
         }
         Err(error) => {
             if let Some(prepared) = prepared_handoff.take() {
-                if !host.stopping() {
-                    for handoff in prepared.into_unsent(crate::now()) {
-                        let _ = host
-                            .commit(Event::ContextHandoffUpdated {
-                                thread_id: run.thread_id.clone(),
-                                handoff,
-                            })
-                            .await;
-                    }
+                if prepared.recorded && !host.stopping() {
+                    commit_handoffs(&*host, &run, prepared.into_unsent(crate::now())).await;
                 }
             }
             Err(error)
@@ -385,6 +382,22 @@ impl StreamedText {
     }
 }
 
+/// Record each of `handoffs` (`context-handoff.updated`).
+async fn commit_handoffs<H: TurnHost>(
+    host: &H,
+    run: &Run,
+    handoffs: impl IntoIterator<Item = Value>,
+) {
+    for handoff in handoffs {
+        let _ = host
+            .commit(Event::ContextHandoffUpdated {
+                thread_id: run.thread_id.clone(),
+                handoff,
+            })
+            .await;
+    }
+}
+
 /// Record `turn`'s events as `run`'s, acknowledging each once it is in the
 /// event log, so a workspace that keeps unacknowledged events redelivers
 /// the rest after a reconnect or a restart.
@@ -444,6 +457,11 @@ async fn record<H: TurnHost>(
         }) = &event
         {
             observed_native_thread = Some(native_thread_id.clone());
+            // The native thread loaded: record handoffs held until it did.
+            if let Some(prepared) = pending_handoff.as_mut().filter(|p| !p.recorded) {
+                commit_handoffs(host, run, prepared.pending.iter().cloned()).await;
+                prepared.recorded = true;
+            }
         }
         let accepted_prompt = matches!(
             &event,
@@ -472,16 +490,9 @@ async fn record<H: TurnHost>(
                     done(position);
                     if accepted_prompt {
                         if let Some(prepared) = pending_handoff.take() {
-                            for handoff in prepared
-                                .into_delivered(observed_native_thread.as_deref(), crate::now())
-                            {
-                                let _ = host
-                                    .commit(Event::ContextHandoffUpdated {
-                                        thread_id: run.thread_id.clone(),
-                                        handoff,
-                                    })
-                                    .await;
-                            }
+                            let delivered = prepared
+                                .into_delivered(observed_native_thread.as_deref(), crate::now());
+                            commit_handoffs(host, run, delivered).await;
                         }
                     }
                 }
@@ -498,15 +509,8 @@ async fn record<H: TurnHost>(
         }
     }
     if let Some(prepared) = pending_handoff.take() {
-        if !host.stopping() {
-            for handoff in prepared.into_unsent(crate::now()) {
-                let _ = host
-                    .commit(Event::ContextHandoffUpdated {
-                        thread_id: run.thread_id.clone(),
-                        handoff,
-                    })
-                    .await;
-            }
+        if prepared.recorded && !host.stopping() {
+            commit_handoffs(host, run, prepared.into_unsent(crate::now())).await;
         }
     }
     let Some((

@@ -80,6 +80,11 @@ pub(crate) struct PreparedHandoff {
     pub unsent: Vec<Value>,
     /// The native thread id known at start time, if any.
     pub native_thread_id: Option<String>,
+    /// Whether [`Self::pending`] was recorded. A Codex turn records it once
+    /// its app-server loaded the native thread, as the reference prepares
+    /// handoffs only after the provider thread loads; a turn that fails first
+    /// leaves none.
+    pub recorded: bool,
 }
 
 impl PreparedHandoff {
@@ -1010,6 +1015,7 @@ pub(crate) fn prepare_for_turn(
             deliverables: Vec::new(),
             unsent: Vec::new(),
             native_thread_id: loaded_native_id.map(str::to_owned),
+            recorded: false,
         });
     }
 
@@ -1239,6 +1245,7 @@ pub(crate) fn prepare_for_turn(
             deliverables: Vec::new(),
             unsent: Vec::new(),
             native_thread_id: loaded_native_id.map(str::to_owned),
+            recorded: false,
         });
     }
 
@@ -1294,6 +1301,7 @@ pub(crate) fn prepare_for_turn(
         deliverables,
         unsent: pending,
         native_thread_id: loaded_native_id.map(str::to_owned),
+        recorded: false,
     })
 }
 
