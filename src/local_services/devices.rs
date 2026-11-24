@@ -1,5 +1,6 @@
 use super::agent_device::{self, AgentEndpoint, StartError};
 use super::eas_device_host::{self as eas, EasConfig, EasState};
+use super::eas_project_id;
 use super::expo_api;
 use super::simlock_device_host::{self as simlock, Lease, SimlockConfig, SimlockState};
 use super::ssh_device_host::{self as ssh_host, SshConfig};
@@ -4149,7 +4150,7 @@ impl DeviceService {
         config: &EasConfig,
         dir: &Path,
         device: &Value,
-        _workspace_root: Option<&str>,
+        workspace_root: Option<&str>,
     ) -> Result<String, Value> {
         let started_in = self
             .with_eas(&config.id, |host| host.epoch)
@@ -4190,7 +4191,14 @@ impl DeviceService {
             return Err(Self::eas_unavailable(config, reason));
         }
         let result = self
-            .eas_start_reserved(config, dir, device, &credential, &name, started_in)
+            .eas_start_reserved(
+                config,
+                dir,
+                device,
+                &credential,
+                (&name, started_in),
+                workspace_root,
+            )
             .await;
         self.with_eas(&config.id, |host| host.starting.remove(&name));
         result
@@ -4202,10 +4210,22 @@ impl DeviceService {
         dir: &Path,
         device: &Value,
         credential: &expo_api::Credential,
-        name: &str,
-        started_in: u64,
+        (name, started_in): (&str, u64),
+        workspace_root: Option<&str>,
     ) -> Result<String, Value> {
-        let Some(app_id) = config.app_id.clone() else {
+        // Without a project set for the host, the thread's app config may name one.
+        let app_id = match (config.app_id.clone(), workspace_root) {
+            (Some(app_id), _) => Some(app_id),
+            (None, Some(root)) if !root.is_empty() => {
+                let root = PathBuf::from(root);
+                tokio::task::spawn_blocking(move || eas_project_id::find_eas_project_id(&root))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            (None, _) => None,
+        };
+        let Some(app_id) = app_id else {
             return Err(Self::eas_unavailable(
                 config,
                 "No Expo project to run the session under. Choose one for this host in Settings, or open the device from a thread whose project names extra.eas.projectId in app.json or its app config.",

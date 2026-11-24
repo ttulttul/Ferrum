@@ -1,0 +1,1271 @@
+[
+ {
+  "case": "a literal project id in an app config below apps",
+  "files": {
+   "apps/mobile/app.config.ts": "import { writeFileSync } from \"node:fs\";\n      writeFileSync(\"/nonexistent/config-ran\", \"\");\n      export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "app.json alone",
+  "files": {
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}"
+  },
+  "expected": "54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9"
+ },
+ {
+  "case": "a computed project id",
+  "files": {
+   "app.config.ts": "const parts = [\"d763fcb8\",\"d37c\",\"41ea\",\"a773\",\"b54a0ab4a454\"];\n      export default { extra: { eas: { projectId: parts.join(\"-\") } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "one project id whatever else the config holds",
+  "files": {
+   "app.config.js": "export default {\n        assetBundlePatterns: [\"**/*\"],\n        extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" }, firebase: { projectId: \"my-app-12345\" } },\n      };\n      /** docs */",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a project only some builds use",
+  "files": {
+   "app.config.ts": "export default ({ config }) =>\n        process.env.APP_VARIANT === \"preview\"\n          ? { ...config, extra: { ...config.extra, eas: { projectId: \"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\" } } }\n          : config;",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a comment keeping an old project id",
+  "files": {
+   "app.config.js": "// projectId: \"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\" (the old production project)\n        export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "one app sets its project from a variable",
+  "files": {
+   "apps/mobile/app.config.ts": "export default {\n        extra: { eas: { projectId: process.env.EAS_PROJECT_ID } },\n      };",
+   "apps/kiosk/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "the id changed after naming it",
+  "files": {
+   "app.config.js": "export default ({ config }) => {\n        config.extra = { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } };\n        if (process.env.APP_ENV === \"development\") {\n          config.extra.eas.projectId = process.env.DEV_PROJECT_ID;\n        }\n        return config;\n      };"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread after the project id",
+  "files": {
+   "apps/mobile/app.config.js": "import { eas } from \"./app.shared.js\";\n        export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", ...eas } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "assigned over after naming the id",
+  "files": {
+   "app.config.js": "export default ({ config }) => {\n        config.extra = { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } };\n        Object.assign(config.extra.eas, JSON.parse(process.env.EAS_OVERRIDES ?? \"{}\"));\n        return config;\n      };"
+  },
+  "expected": null
+ },
+ {
+  "case": "another file spread over app.json",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, ...require(\"./app.local.js\") });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a dynamic config that spreads nothing",
+  "files": {
+   "app.config.js": "export default { name: \"Mobile\", slug: \"mobile\" };",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "more extra entries than are read",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, extra: { ...config.extra, }}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}} } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "extra and eas entries that spread their own",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({\n        ...config,\n        extra: { ...config?.[\"extra\"], eas: { ...config.extra?.eas, build: { experimental: true } }, other: 1 },\n      });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a typed variant config spreading parts",
+  "files": {
+   "app.config.js": "/** @param {import('expo/config').ConfigContext} context */\n      module.exports = ({ config }) => ({\n        ...config,\n        ios: { ...config.ios, infoPlist: { ...config?.ios.infoPlist, CFBundleDisplayName: \"Dev\" } },\n        plugins: [...config.plugins, \"expo-dev-client\"],\n      });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a config typed in JSDoc and line comments",
+  "files": {
+   "app.config.js": "// Types: import('expo/config').ExpoConfig\n      /**\n       * The dev variant of the app.\n       * @param {import('expo/config').ConfigContext} context\n       */\n      module.exports = ({ config }) => ({ ...config, name: \"Dev\" });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a part spread over the top",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, ...config.preview });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}},\"preview\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a part wrapped under expo",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) =>\n        process.env.APP_VARIANT === \"preview\" ? { expo: { ...config.preview } } : { ...config };",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a part spread into an expo entry",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, expo: { ...config.preview.expo } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a part spread into a computed key",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, [[...config.keys]]: config.preview });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a template line that looks like a comment",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => {\n        const banner = `\n/* ${(config.extra = config.preview.extra)} */`;\n        return { ...config, name: banner };\n      };",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a project id that follows spreads",
+  "files": {
+   "app.config.js": "export default ({ config }) => ({\n        ...config,\n        extra: { ...config.extra, eas: { ...(config.extra?.eas ?? {}), projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } },\n      });"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "an app.json only JSON5 reads",
+  "files": {
+   "apps/mobile/app.json": "{\n        // the mobile app\n        \"expo\": { \"extra\": { \"eas\": { \"projectId\": \"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\" } }, },\n      }",
+   "apps/admin/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "only the first static config",
+  "files": {
+   "app.config.json": "{\"expo\":{\"name\":\"Mobile\"}}",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "an unwrapped static config and a wrapped one",
+  "files": {
+   "apps/mobile/app.config.json": "{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}",
+   "apps/kiosk/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json when the config never mentions a project",
+  "files": {
+   "app.config.js": "export default ({ config }) => ({ ...config, name: \"Mobile\" });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}"
+  },
+  "expected": "54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9"
+ },
+ {
+  "case": "a non-LF line terminator inside a joined id",
+  "files": {
+   "apps/mobile/app.config.ts": "export default { extra: { eas: { projectId: \"d763fcb8-\" // prefix + \"d37c-41ea-a773-b54a0ab4a454\" } } };",
+   "apps/kiosk/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "an unreadable app.json",
+  "files": {
+   "apps/two/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}",
+   "apps/one/app.json": {
+    "directory": true
+   }
+  },
+  "expected": null
+ },
+ {
+  "case": "an unreadable app.config.json",
+  "files": {
+   "apps/two/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}",
+   "apps/one/app.config.json": {
+    "directory": true
+   }
+  },
+  "expected": null
+ },
+ {
+  "case": "apps naming different projects",
+  "files": {
+   "apps/one/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}",
+   "apps/two/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "no app",
+  "files": {
+   "README.md": "no app"
+  },
+  "expected": null
+ },
+ {
+  "case": "the same project in several apps",
+  "files": {
+   "apps/one/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}",
+   "packages/two/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"D763FCB8-D37C-41EA-A773-B54A0AB4A454\"}}}}",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a file below apps is not an app",
+  "files": {
+   "apps/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "apps two levels down are not read",
+  "files": {
+   "apps/group/one/app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "apps is a file",
+  "files": {
+   "apps": "not a directory",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "an unreadable dynamic config",
+  "files": {
+   "app.config.ts": {
+    "directory": true
+   },
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "the first dynamic config only",
+  "files": {
+   "app.config.ts": "export default {};",
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "an .mts config",
+  "files": {
+   "app.config.mts": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a .cjs config",
+  "files": {
+   "app.config.cjs": "module.exports = { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "single quotes",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: 'd763fcb8-d37c-41ea-a773-b54a0ab4a454' } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a template literal",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: `d763fcb8-d37c-41ea-a773-b54a0ab4a454` } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "an interpolating template",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: `${process.env.ID}` } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "a quoted key",
+  "files": {
+   "app.config.js": "export default { \"extra\": { \"eas\": { \"projectId\": \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a single-quoted key",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { 'projectId' : 'd763fcb8-d37c-41ea-a773-b54a0ab4a454' } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "mismatched quotes",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454' } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "an upper-case key",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { PROJECTID: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "an upper-case id",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"D763FCB8-D37C-41EA-A773-B54A0AB4A454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a non-ASCII letter folding to the key",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectıd: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "a key inside a longer name",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { myprojectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "a mention as part of a longer name",
+  "files": {
+   "app.config.js": "const projectIds = 1; export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a mention with an underscore suffix",
+  "files": {
+   "app.config.js": "const projectId_x = 1; export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "the id at the end of the file",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\""
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a semicolon after the id",
+  "files": {
+   "app.config.js": "const x = { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a bracket after the id",
+  "files": {
+   "app.config.js": "const x = [{ projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}]"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a parenthesis after the id",
+  "files": {
+   "app.config.js": "f({ projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"})"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a block comment before the separator",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" /* prod */ } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "an unclosed block comment",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" /* prod } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "a line comment before the separator",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" // prod\n      } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a line comment ending the file",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" // prod"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a CR after a line comment",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" // prod\r} } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a U+2029 after a line comment",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" // prod } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a no-break space before the separator",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a byte order mark before the separator",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"﻿} } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a next-line control before the separator",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"} } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "an operator after the id",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" + \"\" } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "a ternary after the id",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" ? \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" : \"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\" } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "a newline inside the quotes",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\n\" } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "a non-UUID quoted id",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"my-project\" } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "a non-UUID id with a spread config",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config.extra, eas: { ...config.extra.eas, projectId: \"dev\" } } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "two different literal ids",
+  "files": {
+   "app.config.js": "export default { a: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" }, b: { projectId: \"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\" } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "the same literal id twice",
+  "files": {
+   "app.config.js": "export default { a: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" }, b: { projectId: \"D763FCB8-D37C-41EA-A773-B54A0AB4A454\" } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a literal id and a different app.json",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "32 mentions",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "33 mentions",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n/* projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\", */\n"
+  },
+  "expected": null
+ },
+ {
+  "case": "a config at the length limit",
+  "files": {
+   "app.config.js": {
+    "pad": [
+     "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };",
+     262144,
+     ""
+    ]
+   }
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a config over the length limit",
+  "files": {
+   "app.config.js": {
+    "pad": [
+     "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };",
+     262145,
+     ""
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "case": "a config at the limit counted in UTF-16",
+  "files": {
+   "app.config.js": {
+    "pad": [
+     "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; //",
+     262142,
+     "😀"
+    ]
+   }
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a config over the limit counted in UTF-16",
+  "files": {
+   "app.config.js": {
+    "pad": [
+     "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; //",
+     262143,
+     "😀"
+    ]
+   }
+  },
+  "expected": null
+ },
+ {
+  "case": "Object.assign spaced",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; Object . assign({}, {});"
+  },
+  "expected": null
+ },
+ {
+  "case": "a bare assign call",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; assign (a, b);"
+  },
+  "expected": null
+ },
+ {
+  "case": "assignment as a word inside another",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; reassign(a);"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a comparison with extra",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; if (a.extra == b) {}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "an assignment to eas",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; x.eas = {};"
+  },
+  "expected": null
+ },
+ {
+  "case": "an assignment to a bracketed eas",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; x[ 'eas' ] = {};"
+  },
+  "expected": null
+ },
+ {
+  "case": "an arrow after extra",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; const f = (o) => o.extra => 1;"
+  },
+  "expected": null
+ },
+ {
+  "case": "a delete",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; delete x.y;"
+  },
+  "expected": null
+ },
+ {
+  "case": "deleted as a word",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; const deleted = 1;"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a require",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; const x = require (\"./x\");"
+  },
+  "expected": null
+ },
+ {
+  "case": "a dynamic import",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; await import(\"./x.js\");"
+  },
+  "expected": null
+ },
+ {
+  "case": "an import of Expo's config type",
+  "files": {
+   "app.config.js": "/** @type {import(\"expo/config\").ExpoConfig} */ export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a spaced import of Expo's config type",
+  "files": {
+   "app.config.js": "/** @type {import ( 'expo/config' ) . ExpoConfig} */ export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "an import of Expo's config with mismatched quotes",
+  "files": {
+   "app.config.js": "/** @type {import(\"expo/config').ExpoConfig} */ export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "an import of Expo's config used lower-case",
+  "files": {
+   "app.config.js": "/** @type {import(\"expo/config\").default} */ export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": null
+ },
+ {
+  "case": "a static import",
+  "files": {
+   "app.config.js": "import x from \"./x\"; export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a later spread anywhere",
+  "files": {
+   "app.config.js": "export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } }; const y = [...x];"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread only before the id",
+  "files": {
+   "app.config.js": "const y = [...x]; export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a spread of config with a comment",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ .../* all */ config, name: \"x\" });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a spread of config in parentheses",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...(config), name: \"x\" });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a spread of config with a line comment",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ... // all\n config, name: \"x\" });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a spread of a longer name",
+  "files": {
+   "app.config.js": "module.exports = ({ configs }) => ({ ...configs });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread of config$",
+  "files": {
+   "app.config.js": "module.exports = ({ config$ }) => ({ ...config$ });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread of a config with a non-ASCII letter",
+  "files": {
+   "app.config.js": "module.exports = ({ configé }) => ({ ...configé });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread of config with an escape",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config\\u0041 });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread of a config call",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config() });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread of config optional",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config?.x });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread of config with a default",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config ?? {} });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a spread of config conditional",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config ? config : {} });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread of config indexed",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config[0] });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread of config.extra at the top",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, ...config.extra });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a spread of config.extra.eas at the top",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, ...config.extra.eas });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a spread of config.extra.other",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config.extra.other } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread of config.extraStuff",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extraStuff: { ...config.extraStuff } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a part spread under another key",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, android: { ...config.ios } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a part spread under its own quoted key",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, \"ios\": { ...config.ios } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a part spread second in its entry",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, ios: { a: 1, ...config.ios } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a deep part spread",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, infoPlist: { ...config.ios.infoPlist } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a part spread with comments",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, ios: { /* keep */ ...config.ios } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a part spread after a newline key",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config,\n  ios:\n  {\n    ...config.ios } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a part with a digit-led name",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, x1: { ...config.x1 } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a part with a dollar name",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, $ios: { ...config.$ios } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a part with a non-ASCII name",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, réglages: { ...config.réglages } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a part opener after a non-brace",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, ios: f({ ...config.ios }) });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a part spread into a plugins array",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, plugins: [ ...config.plugins ] });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "extra spread from config's extra in brackets",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config[\"extra\"] } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "extra spread from optional brackets",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config?.['extra'] } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "extra spread from a spaced holder",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config . extra } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "extra spread from a property of the holder",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config.extra.x } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "extra spread from a holder with a default",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...(config.extra ?? {}) } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "extra spread from a holder called",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config.extra() } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "extra spread from the whole config",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "extra not an object",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: config.extra });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "extra spreading second",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { a: 1, ...config.extra } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "eas spread from extra's holder",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config.extra, eas: { ...config.extra } } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "eas spread in brackets",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { ...config.extra, eas: { ...config[\"extra\"][\"eas\"] } } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a quoted extra key",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, \"extra\": { ...config.extra } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a computed extra key",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, [\"extra\"]: { ...config.extra } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a computed extra key not spreading",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, [\"extra\"]: {} });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a shorthand extra",
+  "files": {
+   "app.config.js": "module.exports = ({ config, extra }) => ({ ...config, extra });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a shorthand eas",
+  "files": {
+   "app.config.js": "module.exports = ({ config, eas }) => ({ ...config, eas, name: \"x\" });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a member named extra",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, name: o.extra, x: 1 });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a word ending in extra",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, name: myextra });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a dollar before eas",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, name: $eas });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "an unclosed comment after a spread",
+  "files": {
+   "app.config.js": "module.exports = ({ config }) => ({ ...config, extra: { .../* x config.extra } });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "a spread with no config at all",
+  "files": {
+   "app.config.js": "module.exports = () => ({ ...defaults });",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json with a byte order mark",
+  "files": {
+   "app.json": "﻿{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a dynamic config with a byte order mark",
+  "files": {
+   "app.config.js": "﻿export default { extra: { eas: { projectId: \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\" } } };"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "app.json that is not UTF-8",
+  "files": {
+   "app.json": {
+    "hex": "7b226578706f223a207b226e616d65223a202278ff222c20226578747261223a207b22656173223a207b2270726f6a6563744964223a202264373633666362382d643337632d343165612d613737332d623534613061623461343534227d7d7d7d"
+   }
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "a dynamic config that is not UTF-8",
+  "files": {
+   "app.config.js": {
+    "hex": "6578706f72742064656661756c74207b2065787472613a207b206561733a207b2070726f6a65637449643a202264373633666362382d643337632d343165612d613737332d62353461306162346134353422207d207d207d3b202f2f20ff"
+   }
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "app.json unwrapped",
+  "files": {
+   "app.json": "{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "app.json with expo and a top-level extra",
+  "files": {
+   "app.json": "{\"expo\":{\"name\":\"x\"},\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json with an invalid top-level extra",
+  "files": {
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}},\"extra\":5}"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json whose project id is a number",
+  "files": {
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":5}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json whose expo is null",
+  "files": {
+   "app.json": "{\"expo\":null,\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json whose expo is an array",
+  "files": {
+   "app.json": "{\"expo\":[],\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json whose extra is an array",
+  "files": {
+   "app.json": "{\"expo\":{\"extra\":[]}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json that is an array",
+  "files": {
+   "app.json": "[]"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json that is null",
+  "files": {
+   "app.json": "null"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json that is a string",
+  "files": {
+   "app.json": "\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\""
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json with a non-UUID id",
+  "files": {
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"my-project\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json with an id and a newline",
+  "files": {
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\\n\"}}}}"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json with duplicate keys",
+  "files": {
+   "app.json": "{\"expo\": {\"extra\": {\"eas\": {\"projectId\": \"54d70eaf-b0a3-477a-a9cd-2cf81a5c84c9\"}}}, \"expo\": {\"extra\": {\"eas\": {\"projectId\": \"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "app.json with trailing text",
+  "files": {
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}} x"
+  },
+  "expected": null
+ },
+ {
+  "case": "app.json with surrounding whitespace",
+  "files": {
+   "app.json": "\n {\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}} \n"
+  },
+  "expected": "d763fcb8-d37c-41ea-a773-b54a0ab4a454"
+ },
+ {
+  "case": "an empty app.json",
+  "files": {
+   "app.json": ""
+  },
+  "expected": null
+ },
+ {
+  "case": "an empty app.config.json before app.json",
+  "files": {
+   "app.config.json": "{}",
+   "app.json": "{\"expo\":{\"extra\":{\"eas\":{\"projectId\":\"d763fcb8-d37c-41ea-a773-b54a0ab4a454\"}}}}"
+  },
+  "expected": null
+ }
+]
