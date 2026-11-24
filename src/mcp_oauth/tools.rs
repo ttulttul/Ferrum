@@ -2366,7 +2366,10 @@ async fn thread_wait<S: McpHost>(host: &S, a: &Value) -> Outcome {
             && status == "completed"
             && run["outputSchema"].is_object()
             && run["output"].is_null();
-        let settled = (TERMINAL.contains(&status.as_str()) || status == "waiting") && !owes_output;
+        // Settled once the run ends (`isTerminalRunStatus`): a run waiting on
+        // a question, an approval or background work is still going, as is one
+        // whose output was submitted while its completion is not yet recorded.
+        let settled = TERMINAL.contains(&status.as_str()) && !owes_output;
         let now = crate::platform::now_ms();
         if settled || now >= deadline {
             let mut answer = json!({
