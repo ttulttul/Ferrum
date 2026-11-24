@@ -294,6 +294,22 @@ pub trait McpHost: AuthHost {
             ))
         })
     }
+    /// `Workflows` for `t3_workflow`, after its caller check: the handler's
+    /// answer for the tool's `input`. `Err` is the failure's code and message,
+    /// `invalid_arguments` with the problem for an argument its schema turns
+    /// down; hosts with no
+    /// workflow store leave it unavailable.
+    fn workflow_tool(
+        self: &Arc<Self>,
+        _input: Value,
+    ) -> HostFuture<Result<Value, (&'static str, String)>> {
+        Box::pin(async {
+            Err((
+                "orchestration_error",
+                "The operation could not be completed.".to_owned(),
+            ))
+        })
+    }
     /// `claimPreviewRecording`: the recording a stopped preview left as a
     /// pending attachment, moved to `thread_id`'s attachments; the artifact,
     /// or the failure's message.

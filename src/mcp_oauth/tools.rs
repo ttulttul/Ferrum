@@ -41,6 +41,7 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("t3_feedback", &[]),
     ("t3_pending_request", &[]),
     ("t3_workflow_stop", &[]),
+    ("t3_workflow", &[]),
     ("t3_thread_search", &[]),
     ("t3_project_update", &[]),
     ("t3_project_delete", &[]),
@@ -136,6 +137,7 @@ const SERVED: &[&str] = &[
     "t3_feedback",
     "t3_pending_request",
     "t3_workflow_stop",
+    "t3_workflow",
     "t3_thread_search",
     "t3_project_update",
     "t3_project_delete",
@@ -279,6 +281,7 @@ fn visible_to<S: McpHost>(host: &S, granted: &McpAccess, listed: &str) -> bool {
         "hiddenWhileFeedbackOff" => host.settings()["agentFeedback"]["mode"]
             .as_str()
             .is_some_and(|mode| mode != "off"),
+        "hiddenFromThreads" => granted.thread.is_none(),
         // `hiddenWithoutBackgroundWait`: a thread whose provider can hold for
         // background work (the reference's `supportsBackgroundWait`). Of the
         // providers this server runs turns for, that is Claude.
@@ -354,7 +357,7 @@ pub(super) fn callable<S: McpHost>(host: &S, caller: &Caller, name: &str) -> Res
         tool["name"] == name
             && matches!(
                 listed.as_str(),
-                "hiddenWithoutBackgroundWait" | "hiddenWhileFeedbackOff"
+                "hiddenWithoutBackgroundWait" | "hiddenWhileFeedbackOff" | "hiddenFromThreads"
             )
             && !visible_to(host, &caller.granted, listed)
     });
@@ -834,6 +837,7 @@ pub(super) async fn call<S: McpHost>(
         "t3_feedback" => threads::feedback(host, caller, args).await,
         "t3_pending_request" => threads::pending_request(host, caller, args).await,
         "t3_workflow_stop" => threads::workflow_stop(host, caller, args).await,
+        "t3_workflow" => workflow(host, caller, args).await,
         "t3_environment_links" => environment_links(host, caller).await,
         "t3_environment_link" => environment_link(host, caller, args).await,
         "t3_environment_unlink" => environment_unlink(host, caller, args).await,
@@ -993,6 +997,29 @@ fn scheduled_task_next_run(schedule: &Value, now_ms: i64) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// `t3_workflow` (`McpToolAccess.either`): its reads check nothing, its
+/// changes (and `hooks`, whose paths hold their secrets) the writer, as
+/// `writes` does. The workflow service answers (`src/workflows.rs`).
+async fn workflow<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
+    const READS: [&str; 4] = ["list", "read", "questions", "store"];
+    if !args["action"]
+        .as_str()
+        .is_some_and(|action| READS.contains(&action))
+    {
+        threads::writing_caller(&**host, caller).await?;
+        assert_not_linked(caller, "change this environment's scheduled tasks")?;
+    }
+    host.workflow_tool(args.clone())
+        .await
+        .map_err(|(code, message)| match code {
+            "invalid_arguments" => Refusal::Rpc(
+                -32602,
+                format!("Invalid parameters for tool 't3_workflow': {message}"),
+            ),
+            _ => failure(code, message),
+        })
 }
 
 async fn schedule_task<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
@@ -2940,6 +2967,7 @@ mod sender_tests {
                             | "hiddenFromOutsideClients"
                             | "hiddenFromSubagents"
                             | "hiddenWithoutForge"
+                            | "hiddenFromThreads"
                             | "hiddenWithoutBackgroundWait"
                             | "hiddenWhileFeedbackOff",
                     )

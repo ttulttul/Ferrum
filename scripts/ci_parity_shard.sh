@@ -59,6 +59,7 @@ case "$shard" in
     run python3 scripts/relay_parity.py --checkout "$checkout" --rust "$server"
     run python3 scripts/link_request_parity.py "${both[@]}"
     run python3 scripts/run_output_parity.py "${both[@]}"
+    run python3 scripts/workflow_parity.py "${both[@]}"
     run python3 scripts/secret_request_parity.py "${both[@]}"
     run python3 scripts/attachment_tools_parity.py "${both[@]}"
     run python3 scripts/feedback_parity.py "${both[@]}"

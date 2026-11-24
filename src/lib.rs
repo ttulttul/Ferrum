@@ -163,6 +163,8 @@ mod source_control_lookup;
 mod startup_trace;
 #[cfg(feature = "native")]
 pub mod statev2;
+#[cfg(feature = "native")]
+mod workflows;
 pub use access_http::{auth_error, trace_id};
 #[cfg(feature = "native")]
 pub use server::*;
