@@ -92,6 +92,35 @@ def owner_for(state_dir: Path, host_id: str) -> str:
     return hashlib.sha256(f"{environment}\0{state_dir}\0{host_id}".encode()).hexdigest()[:24]
 
 
+def tunnels(log: Path):
+    """This server's live `ssh -L` processes (fake_ssh.py, found by the log it writes to)."""
+    found = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            argv = (proc / "cmdline").read_bytes().split(b"\0")
+            environ = (proc / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if any(arg.endswith(b"fake_ssh.py") for arg in argv) and b"-L" in argv and \
+                f"T3_FAKE_SSH_LOG={log}".encode() in environ:
+            found.append(int(proc.name))
+    return found
+
+
+def wait_for_reconnect(log: Path, before: int, seconds=60):
+    """Until the server has opened a new tunnel after `before` of them."""
+    deadline = monotonic() + seconds
+    while monotonic() < deadline:
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        if sum(1 for c in calls if "-L" in c["args"]) > before and tunnels(log):
+            sleep(1)
+            return True
+        sleep(0.2)
+    return False
+
+
 def drop_volatile(value):
     """Session timestamps differ between runs; keep that they are there."""
     if isinstance(value, dict):
@@ -181,6 +210,12 @@ def run_server(name, command, reference_root, directory):
         answers.append(("close with shutdown", call(url, cookie, "device.close", {
             "threadId": "thread-ssh", "hostId": "linux", "deviceId": "emulator-5556", "shutdown": True})))
         answers.append(("list", call(url, cookie, "device.list", {})))
+        # A dropped connection: the host reconnects on its own.
+        opened = sum(1 for line in log.read_text().splitlines() if '"-L"' in line)
+        for pid in tunnels(log):
+            os.kill(pid, 15)
+        answers.append(("reconnected", {"reconnected": wait_for_reconnect(log, opened)}))
+        answers.append(("list after reconnect", call(url, cookie, "device.list", {})))
         answers.append(("retry host", call(url, cookie, "device.list", {"retryHostId": "linux"})))
         answers.append(("disable (stops the host)", call(url, cookie, "device.configure", {"enabled": False})))
     stop_remote_hubs(home)

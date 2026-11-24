@@ -1455,6 +1455,12 @@ where
     cleanup.abort();
     scheduled_tasks.abort();
     state.storage_cleanup.shutdown().await;
+    // Stop what this server started on SSH device hosts, as the reference's host scopes do.
+    state
+        .local
+        .devices
+        .stop_ssh_hosts(&state.local.data_dir)
+        .await;
     manifest_refresh.abort();
     secret_sweep.abort();
     if let Some(startup) = endpoint_startup {

@@ -418,7 +418,7 @@ def launcher_files(root: Path):
     return files
 
 
-def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False):
+def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False, ssh_host=False):
     root = Path(directory, name, phase)
     root.mkdir(parents=True, exist_ok=True)
     request_log = root / "fake-requests.jsonl"
@@ -444,6 +444,25 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
     env["T3_FAKE_HUB_MODE"] = str(hub_mode_file)
     env.pop("EXPO_DEVICE_HUB_EMULATOR_EXTRA_ARGS", None)
     env.pop("SERVE_EMU_FFMPEG", None)
+    remote_home = None
+    if ssh_host:
+        # An SSH device host (scripts/fake_ssh.py) with the same fakes under its own home.
+        from device_ssh_parity import seed_remote_home
+        remote_home = root / "remote-linux"
+        seed_remote_home(remote_home, reference_root, request_log)
+        agent = remote_home / ".t3" / "device" / "tools" / f"agent-device@{tool_versions(reference_root)['agent-device']}"
+        entry = agent / "node_modules" / "agent-device" / "bin" / "agent-device.mjs"
+        entry.parent.mkdir(parents=True)
+        entry.write_text(FAKE_AGENT_DEVICE_SOURCE.replace(
+            "process.env.T3_FAKE_DEVICE_LOG", json.dumps(str(request_log))))
+        (agent / ".install-complete").write_text(tool_versions(reference_root)["agent-device"])
+        ssh_bin = root / "fake-ssh-bin"
+        write_executable(ssh_bin / "ssh", f"#!/bin/sh\nexec python3 {shlex.quote(str(Path(__file__).resolve().parent / 'fake_ssh.py'))} \"$@\"\n")
+        hosts_file = root / "ssh-hosts.json"
+        hosts_file.write_text(json.dumps({"linux-box": {"home": str(remote_home)}}))
+        env["PATH"] = f"{ssh_bin}{os.pathsep}{env['PATH']}"
+        env["T3_FAKE_SSH_HOSTS"] = str(hosts_file)
+        env["T3_FAKE_SSH_LOG"] = str(root / "ssh.jsonl")
 
     turn = json.loads((FIXTURES / scenario["scenario"]).read_text())
     started = next(
@@ -481,6 +500,12 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
             secrets.token_bytes(32),
             env=env,
         )
+        if ssh_host:
+            rpc(url, cookie, "server.updateSettings", {"patch": {"deviceHosts": [
+                {"id": "linux", "label": "Linux box", "target": "linux-box"}]}})
+            deadline = monotonic() + 30
+            while monotonic() < deadline and len(rpc(url, cookie, "device.list", {})["hosts"]) < 2:
+                sleep(0.2)
         if enable_devices:
             rpc(
                 url,
@@ -561,6 +586,25 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
         )
 
     stop_fake_daemons(root)
+    if remote_home is not None:
+        for record in list(remote_home.glob(".t3/device/hosts/*/hub.json")) + list(
+                remote_home.glob(".t3/device/hosts/*/daemon.json")):
+            try:
+                os.kill(json.loads(record.read_text())["pid"], 15)
+            except (OSError, ValueError, KeyError):
+                pass
+        # This machine's hub and the host's list concurrently, so their requests interleave.
+        requests = sorted(requests, key=lambda entry: json.dumps(entry, sort_keys=True))
+        calls = [json.loads(line) for line in (root / "ssh.jsonl").read_text().splitlines()]
+        lookups = {json.dumps(c, sort_keys=True) for c in calls if "-G" in c["args"]}
+        owners = {c["owner"] for c in calls if "owner" in c}
+        requests.append({"ssh calls": sorted(
+            [json.loads(c) for c in lookups] + [c for c in calls if "-G" not in c["args"]],
+            key=lambda entry: json.dumps(entry, sort_keys=True))})
+        text = json.dumps(requests)
+        for owner in owners:
+            text = text.replace(owner, "<owner>")
+        requests = json.loads(text)
     text = json.dumps(requests)
     for side in ("original", "rust"):
         text = text.replace(f"{Path(directory)}/{side}/", "<home>/<server>/")
@@ -654,6 +698,23 @@ def run_server(name, command, reference_root, directory):
             "fallback",
             [("device_list", {})],
             dict(enable_devices=True, avdmanager_failed=True),
+        ),
+        (
+            "ssh",
+            [
+                ("device_list", {"hostId": "Linux box"}),
+                ("device_open", {"hostId": "linux", "deviceId": "emulator-5554"}),
+                ("device_screenshot", {}),
+                ("device_open", {"hostId": "linux", "deviceId": "Pixel_Unbooted"}),
+                ("device_close", {"hostId": "linux", "deviceId": "emulator-5556", "shutdown": True}),
+                ("device_list", {"hostId": "linux"}),
+            ],
+            dict(enable_devices=True, ssh_host=True, run_launcher=True),
+        ),
+        (
+            "ssh-agent-off",
+            [("device_open", {"hostId": "linux", "deviceId": "emulator-5554"})],
+            dict(enable_devices=True, ssh_host=True, configure=({}, {"agentAccessEnabled": False})),
         ),
     ]
     only = os.environ.get("DEVICE_PARITY_PHASES")

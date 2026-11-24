@@ -416,9 +416,19 @@ schemas.
    with `adb` and `emulator` run over SSH from the hub's directory (`run`); opening, booting,
    the ffmpeg check (the reference's `node -e` script on the host's Node), closing, shutting down,
    `retryHostId` and screenshots work on it as on this machine, and turning device support off
-   (or removing the host) stops what this server started there. Not done yet: agent tools on SSH
-   hosts (`device_open` there), the reference's automatic reconnect (a dropped tunnel reconnects
-   on next use instead), device detail and actions on SSH hosts; Expo and Simlock hosts.
+   (or removing the host, or shutting the server down) stops what this server started there.
+
+   Agents use SSH hosts as they use this machine (`ensureAgentReady`, `changeAgent`): the host
+   reconnects with the bootstrap's `agent-start`, the tunnel also forwards its agent-device daemon,
+   the host's agent config names the forwarded daemon, `device_open` binds this machine's
+   agent-device CLI to it, closing releases the session through it, and turning agent access off
+   runs `stop-agent` and reconnects without it. A connected host is supervised as the reference
+   supervises it: a tunnel that exits, or three missed `/readyz`/`/health` probes 10 seconds
+   apart, reconnects ("Reconnecting to device host…"), backing off from 1 to 30 seconds.
+   `scripts/device_tools_parity.py`'s `ssh` phases drive the tools on the fake host and run the
+   returned launcher through the tunnel; `scripts/device_ssh_parity.py` drops the tunnel and
+   compares the reconnect. Not done yet: device detail and actions on SSH hosts; Expo and Simlock
+   hosts.
 5. **Prompt context and capabilities** (served), as above.
 6. **Scheduled tasks**: `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task` and
    `run_scheduled_task_now` share the reference's `scheduled_tasks` table. Thread callers
