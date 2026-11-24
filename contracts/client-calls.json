@@ -1029,6 +1029,7 @@
       "existingCoverage": [
         "attachment_flows_parity.py",
         "attachment_tools_parity.py",
+        "ci_rerun_parity.py",
         "client_initial_sync_parity.py",
         "client_thread_parity.py",
         "device_tools_parity.py",
@@ -1259,6 +1260,7 @@
       "existingCoverage": [
         "attachment_flows_parity.py",
         "attachment_tools_parity.py",
+        "ci_rerun_parity.py",
         "client_thread_parity.py",
         "forge_write_parity.py",
         "link_request_parity.py",
