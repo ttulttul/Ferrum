@@ -4,34 +4,34 @@ The Rust server against the pinned reference, measured by scripts/perf_compare.p
 
 ## Latest
 
-Commit `00b0e0d7bd09`, reference `fd0331ca`, 2026-11-24T20:53:53Z, AMD EPYC 9V45 96-Core Processor (4 CPUs), Linux 7.0.0-1017-azure.
+Commit `e10f06d228a6`, reference `fd0331ca`, 2026-11-24T21:06:21Z, Intel(R) Xeon(R) 6975P-C (4 CPUs), Linux 7.0.0-1014-aws.
 
 Ratio: how many times smaller, faster or lighter the Rust server is (the reference's median over Rust's, or Rust's over the reference's for turns per second). Medians, with the range in brackets.
 
 | Measure | Rust | Reference | Ratio |
 | --- | ---: | ---: | ---: |
 | Installed size | 68.1 MiB | 205 MiB | **3.0×** |
-| Start to first RPC | 63.9 ms <sub>(60.2–76.8)</sub> | 1994 ms <sub>(1957–6043)</sub> | **31.2×** |
-| Memory at idle (RSS) | 40.4 MiB <sub>(39.7–40.8)</sub> | 451 MiB <sub>(450–457)</sub> | **11.2×** |
-| CPU while idle (per 10 s) | 80.0 ms <sub>(70.0–80.0)</sub> | 20.0 ms <sub>(10.00–230)</sub> | **0.3×** |
-| Peak memory, Codex turns | 59.4 MiB <sub>(59.1–60.2)</sub> | 652 MiB <sub>(640–674)</sub> | **11.0×** |
-| Peak memory, Claude turns | 59.1 MiB <sub>(59.0–59.5)</sub> | 660 MiB <sub>(659–708)</sub> | **11.2×** |
-| Codex turns per second | 7.50 /s <sub>(7.28–7.72)</sub> | 2.74 /s <sub>(2.35–2.74)</sub> | **2.7×** |
-| Claude turns per second | 6.32 /s <sub>(6.32–6.33)</sub> | 2.28 /s <sub>(2.18–2.38)</sub> | **2.8×** |
-| CPU per Codex turn | 161 ms <sub>(157–164)</sub> | 500 ms <sub>(496–601)</sub> | **3.1×** |
-| CPU per Claude turn | 216 ms <sub>(214–221)</sub> | 645 ms <sub>(620–677)</sub> | **3.0×** |
-| server.getConfig p50 | 9.24 ms <sub>(8.84–9.30)</sub> | 2.60 ms <sub>(2.59–2.69)</sub> | **0.3×** |
-| server.getConfig p95 | 10.4 ms <sub>(10.3–10.6)</sub> | 3.06 ms <sub>(3.01–3.60)</sub> | **0.3×** |
-| server.getSettings p50 | 0.30 ms <sub>(0.28–0.31)</sub> | 0.40 ms <sub>(0.38–0.40)</sub> | **1.3×** |
-| server.getSettings p95 | 0.32 ms <sub>(0.31–0.33)</sub> | 0.55 ms <sub>(0.50–1.01)</sub> | **1.7×** |
-| orchestration.subscribeShell p50 | 0.89 ms <sub>(0.87–0.91)</sub> | 2.30 ms <sub>(2.29–2.45)</sub> | **2.6×** |
-| orchestration.subscribeShell p95 | 0.94 ms <sub>(0.92–0.95)</sub> | 3.82 ms <sub>(3.63–4.13)</sub> | **4.1×** |
-| orchestration.subscribeThread p50 | 3.00 ms <sub>(2.97–3.08)</sub> | 9.22 ms <sub>(9.19–9.59)</sub> | **3.1×** |
-| orchestration.subscribeThread p95 | 3.24 ms <sub>(3.19–3.26)</sub> | 12.3 ms <sub>(11.5–13.0)</sub> | **3.8×** |
-| orchestration.getThreadProjection p50 | 1.38 ms <sub>(1.38–1.40)</sub> | 7.53 ms <sub>(7.24–8.29)</sub> | **5.5×** |
-| orchestration.getThreadProjection p95 | 1.46 ms <sub>(1.43–1.55)</sub> | 9.10 ms <sub>(8.64–9.45)</sub> | **6.2×** |
-| orchestration.getTurnDiff p50 | 2.44 ms <sub>(2.43–2.45)</sub> | 46.1 ms <sub>(45.3–46.7)</sub> | **18.9×** |
-| orchestration.getTurnDiff p95 | 2.63 ms <sub>(2.56–2.67)</sub> | 56.7 ms <sub>(53.2–58.1)</sub> | **21.6×** |
+| Start to first RPC | 59.8 ms <sub>(56.8–62.4)</sub> | 2175 ms <sub>(2160–2188)</sub> | **36.4×** |
+| Memory at idle (RSS) | 40.6 MiB <sub>(40.3–40.9)</sub> | 451 MiB <sub>(450–452)</sub> | **11.1×** |
+| CPU while idle (per 10 s) | 90.0 ms <sub>(90.0–100.0)</sub> | 290 ms <sub>(20.0–290)</sub> | **3.2×** |
+| Peak memory, Codex turns | 59.8 MiB <sub>(59.2–60.9)</sub> | 655 MiB <sub>(653–656)</sub> | **11.0×** |
+| Peak memory, Claude turns | 59.3 MiB <sub>(57.5–60.1)</sub> | 662 MiB <sub>(662–667)</sub> | **11.2×** |
+| Codex turns per second | 6.86 /s <sub>(6.76–6.93)</sub> | 3.85 /s <sub>(3.80–3.87)</sub> | **1.8×** |
+| Claude turns per second | 5.80 /s <sub>(5.78–5.80)</sub> | 3.35 /s <sub>(3.33–3.36)</sub> | **1.7×** |
+| CPU per Codex turn | 178 ms <sub>(176–180)</sub> | 386 ms <sub>(377–391)</sub> | **2.2×** |
+| CPU per Claude turn | 239 ms <sub>(238–240)</sub> | 464 ms <sub>(461–472)</sub> | **1.9×** |
+| server.getConfig p50 | 8.13 ms <sub>(8.04–8.32)</sub> | 3.60 ms <sub>(3.52–3.67)</sub> | **0.4×** |
+| server.getConfig p95 | 8.54 ms <sub>(8.39–8.66)</sub> | 4.25 ms <sub>(4.08–4.43)</sub> | **0.5×** |
+| server.getSettings p50 | 0.44 ms <sub>(0.37–0.45)</sub> | 0.61 ms <sub>(0.60–0.66)</sub> | **1.4×** |
+| server.getSettings p95 | 0.47 ms <sub>(0.46–0.58)</sub> | 0.83 ms <sub>(0.79–0.83)</sub> | **1.7×** |
+| orchestration.subscribeShell p50 | 1.19 ms <sub>(1.17–1.21)</sub> | 3.11 ms <sub>(3.10–3.12)</sub> | **2.6×** |
+| orchestration.subscribeShell p95 | 1.29 ms <sub>(1.28–1.29)</sub> | 4.83 ms <sub>(4.58–4.84)</sub> | **3.8×** |
+| orchestration.subscribeThread p50 | 4.09 ms <sub>(4.07–4.12)</sub> | 12.2 ms <sub>(12.2–12.3)</sub> | **3.0×** |
+| orchestration.subscribeThread p95 | 4.45 ms <sub>(4.43–4.54)</sub> | 13.9 ms <sub>(13.8–14.3)</sub> | **3.1×** |
+| orchestration.getThreadProjection p50 | 1.95 ms <sub>(1.79–1.97)</sub> | 10.2 ms <sub>(9.97–10.4)</sub> | **5.2×** |
+| orchestration.getThreadProjection p95 | 2.13 ms <sub>(2.05–2.16)</sub> | 11.3 ms <sub>(11.1–11.4)</sub> | **5.3×** |
+| orchestration.getTurnDiff p50 | 1.95 ms <sub>(1.94–1.99)</sub> | 28.1 ms <sub>(28.0–28.1)</sub> | **14.4×** |
+| orchestration.getTurnDiff p95 | 2.12 ms <sub>(2.07–2.12)</sub> | 30.3 ms <sub>(30.2–30.3)</sub> | **14.3×** |
 
 Installed size: Rust is one binary (68.1 MiB). The reference is Node (143.4 MiB), its bundle (22.6 MiB) and 23 external packages (145.2 MiB), 311.2 MiB in all; the table leaves out the 105.8 MiB of packages for features Rust lacks (local speech-to-text, Cursor turns).
 
@@ -43,5 +43,6 @@ Ratios (Rust against the reference, higher is better for Rust) by commit, newest
 
 | Date | Commit | Installed size | Start to first RPC | Memory at idle (RSS) | CPU while idle (per 10 s) | Peak memory, Codex turns | Peak memory, Claude turns | Codex turns per second | Claude turns per second | CPU per Codex turn | CPU per Claude turn |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2026-11-24 | `e10f06d2` | 3.0× | 36.4× | 11.1× | 3.2× | 11.0× | 11.2× | 1.8× | 1.7× | 2.2× | 1.9× |
 | 2026-11-24 | `00b0e0d7` | 3.0× | 31.2× | 11.2× | 0.3× | 11.0× | 11.2× | 2.7× | 2.8× | 3.1× | 3.0× |
 | 2026-11-24 | `ec02f406` | 3.0× | 31.1× | 11.3× | 2.6× | 11.0× | 11.3× | 3.2× | 3.0× | 3.7× | 3.1× |
