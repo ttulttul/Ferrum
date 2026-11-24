@@ -275,6 +275,22 @@ pub trait McpHost: AuthHost {
             ))
         })
     }
+    /// `FeedbackService.submit` for `t3_feedback`, from `thread_id` when a
+    /// thread calls: the report, or a requested one's awaiting-approval note.
+    /// `Err` is the failure's code and message; hosts that keep no feedback
+    /// leave it unavailable.
+    fn feedback_submit(
+        self: &Arc<Self>,
+        _input: Value,
+        _thread_id: Option<String>,
+    ) -> HostFuture<Result<Value, (&'static str, String)>> {
+        Box::pin(async {
+            Err((
+                "orchestration_error",
+                "Could not save agent feedback.".to_owned(),
+            ))
+        })
+    }
     /// `claimPreviewRecording`: the recording a stopped preview left as a
     /// pending attachment, moved to `thread_id`'s attachments; the artifact,
     /// or the failure's message.

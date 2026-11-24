@@ -9,6 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
+mod feedback_request;
 mod secret_request;
 mod steer;
 
@@ -930,6 +931,9 @@ async fn apply_command<H: CommandHost>(
         "link_request.record" => return record_link_request(state, command, receipt).await,
         "run.output.submit" => return submit_run_output(state, command, receipt).await,
         "secret_request.record" => return secret_request::record(state, command, receipt).await,
+        "feedback_request.record" => {
+            return feedback_request::record(state, command, receipt).await
+        }
         "thread.create" => {
             let project_id = command
                 .get("projectId")

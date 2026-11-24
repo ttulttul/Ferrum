@@ -38,6 +38,7 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ),
     ("t3_queue", &[]),
     ("t3_submit_output", &[]),
+    ("t3_feedback", &[]),
     ("t3_pending_request", &[]),
     ("t3_workflow_stop", &[]),
     ("t3_thread_search", &[]),
@@ -129,6 +130,7 @@ const SERVED: &[&str] = &[
     "t3_thread_transfer",
     "t3_queue",
     "t3_submit_output",
+    "t3_feedback",
     "t3_pending_request",
     "t3_workflow_stop",
     "t3_thread_search",
@@ -267,6 +269,10 @@ fn visible_to<S: McpHost>(host: &S, granted: &McpAccess, listed: &str) -> bool {
     match listed {
         LINKS_ONLY => host.linked_environments_enabled(),
         "hiddenFromOutsideClients" => granted.thread.is_some(),
+        // `hiddenWhileFeedbackOff`: listed while agent feedback is on.
+        "hiddenWhileFeedbackOff" => host.settings()["agentFeedback"]["mode"]
+            .as_str()
+            .is_some_and(|mode| mode != "off"),
         // `hiddenWithoutBackgroundWait`: a thread whose provider can hold for
         // background work (the reference's `supportsBackgroundWait`). Of the
         // providers this server runs turns for, that is Claude.
@@ -318,7 +324,10 @@ pub(super) fn callable<S: McpHost>(host: &S, caller: &Caller, name: &str) -> Res
             .any(|(tool, listed)| tool["name"] == name && listed == "hiddenFromOutsideClients");
     let hidden = SERVED_TOOLS.iter().any(|(tool, listed)| {
         tool["name"] == name
-            && listed == "hiddenWithoutBackgroundWait"
+            && matches!(
+                listed.as_str(),
+                "hiddenWithoutBackgroundWait" | "hiddenWhileFeedbackOff"
+            )
             && !visible_to(host, &caller.granted, listed)
     });
     if (thread_only && caller.granted.thread.is_none()) || hidden {
@@ -794,6 +803,7 @@ pub(super) async fn call<S: McpHost>(
         "t3_thread_transfer" => threads::transfer(host, caller, args).await,
         "t3_queue" => threads::queue(host, caller, args).await,
         "t3_submit_output" => threads::submit_output(host, caller, args).await,
+        "t3_feedback" => threads::feedback(host, caller, args).await,
         "t3_pending_request" => threads::pending_request(host, caller, args).await,
         "t3_workflow_stop" => threads::workflow_stop(host, caller, args).await,
         "t3_environment_links" => environment_links(host, caller).await,
@@ -2898,7 +2908,8 @@ mod sender_tests {
                             | LINKS_ONLY
                             | "hiddenFromOutsideClients"
                             | "hiddenFromSubagents"
-                            | "hiddenWithoutBackgroundWait",
+                            | "hiddenWithoutBackgroundWait"
+                            | "hiddenWhileFeedbackOff",
                     )
                 ),
                 "{name} needs listing by caller"

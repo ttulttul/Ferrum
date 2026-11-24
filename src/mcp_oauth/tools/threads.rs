@@ -1235,6 +1235,26 @@ pub(super) async fn submit_output<S: McpHost>(
     Ok(json!({"runId": run_id}))
 }
 
+/// `t3_feedback` (`writes`, `FeedbackService.submit`): a report to the T3
+/// team, scrubbed and stored; one the user asked for shows them a card to
+/// approve first. Its answer carries only the size of any trace.
+pub(super) async fn feedback<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> Outcome {
+    writing_caller(&**host, caller).await?;
+    let thread_id = caller
+        .granted
+        .thread
+        .as_ref()
+        .map(|scope| scope.thread_id.clone());
+    let mut result = host
+        .feedback_submit(a.clone(), thread_id)
+        .await
+        .map_err(|(code, message)| failure(code, message))?;
+    if let Some(trace) = result.get_mut("trace").and_then(Value::as_object_mut) {
+        trace.remove("entries");
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
