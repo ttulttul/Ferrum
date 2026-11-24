@@ -9,6 +9,8 @@ permissions:
   contents: read
 
 jobs:
+  # A pull request, or a push to main, that changes only README.md or docs/ skips the build; the
+  # `workers` check still reports (and passes).
   changes:
     name: changes
     runs-on: ubuntu-24.04
@@ -25,15 +27,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           PULL_REQUEST: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          if [ "$EVENT" != pull_request ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           # Both sides of a rename count.
-          gh api "repos/$REPOSITORY/pulls/$PULL_REQUEST/files" --paginate \
-            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/files"
+          files='.filename, (.previous_filename // empty)'
+          case "$EVENT" in
+            pull_request)
+              gh api "repos/$REPOSITORY/pulls/$PULL_REQUEST/files" --paginate \
+                --jq ".[] | $files" > "$RUNNER_TEMP/files"
+              ;;
+            push)
+              # Only a push that moves main forward from a commit it had is compared: a new branch
+              # (an all-zero `before`), a force push, or a compare that lists its maximum of 300
+              # files runs everything.
+              status=$(gh api "repos/$REPOSITORY/compare/$BEFORE...$AFTER" --jq .status || true)
+              if [ "$status" != ahead ]; then
+                echo "Push not comparable to its previous commit (${status:-no answer}): running everything."
+                echo "code=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              gh api "repos/$REPOSITORY/compare/$BEFORE...$AFTER" --paginate \
+                --jq ".files[] | $files" > "$RUNNER_TEMP/files"
+              if [ "$(grep -c . "$RUNNER_TEMP/files")" -ge 300 ]; then
+                echo "code=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
+            *)
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
           cat "$RUNNER_TEMP/files"
           if [ ! -s "$RUNNER_TEMP/files" ] || grep -qvE '^(README\.md|docs/.*)$' "$RUNNER_TEMP/files"; then
             echo "code=true" >> "$GITHUB_OUTPUT"
