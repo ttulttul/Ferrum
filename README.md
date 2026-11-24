@@ -56,7 +56,7 @@ Most suites match the original exactly; the few expected differences are listed 
 
 - **Pull request changes.** Agents can read pull requests and CI, but can't open, update, review, respond to or merge one, or re-run CI (`pull_request_create`, `pull_request_update`, `pull_request_review`, `pull_request_respond`, `pull_request_merge`, `ci_rerun`).
 - **Devices.** Agents can use simulators and emulators on this machine, on SSH device hosts and from Simlock pools (alpha), and in Expo Simulators sessions (under the host's project, or the one the thread's app config names). Device detail and actions (settings, foreground app) work on this machine only.
-- **Delegated tasks.** On the embeddable control plane a child can't run in its own worktree (`isolation: "worktree"`), and a follow-up sent to a child on a linked machine isn't tracked as a task.
+- **Delegated tasks.** On the embeddable control plane a child can't run in its own worktree (`isolation: "worktree"`).
 - **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing.
 - **Secrets in schedules.** A scheduled task can't use a secret yet, and the embeddable control plane stores no secrets.
 - **Claude workflows.** Rust's Claude sessions run no workflow tasks.
@@ -79,7 +79,7 @@ Parity is tested by running the original TypeScript server and the Rust server s
 - **Pinned reference:** [upstream commit `fd0331ca`](https://github.com/pingdotgg/t3code/tree/fd0331ca9b1596ed7018c80f52b7e6730014f593) (`fd0331ca9b1596ed7018c80f52b7e6730014f593`). This is the only place the README names it.
 - **Suites:** 56 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
 - **Client calls:** the [client RPC suite](scripts/client_rpc_cases.json) drives 242 recorded client steps through the original client. None is expected to fail.
-- **Live turns:** the client thread suite runs 143 provider scenarios. 65 checks are expected to fail, 19 of them races ([list](scripts/client_thread_parity_xfail.json)).
+- **Live turns:** the client thread suite runs 146 provider scenarios. 65 checks are expected to fail, 19 of them races ([list](scripts/client_thread_parity_xfail.json)).
 - **Shared home:** the server-switch suite has 1 expected failure ([list](scripts/shared_store_parity_xfail.json)).
 - **Provider status:** the [provider status suite](scripts/provider_status_parity.py) has no expected failures.
 - **Other suites:** none has a known difference.

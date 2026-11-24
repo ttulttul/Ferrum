@@ -2,7 +2,8 @@
 
 It answers the link's sign-in, the descriptor and `/mcp`, the way a T3 Code environment would for
 a task launched there: `t3_thread_launch` starts its thread, `t3_thread_wait` reports its run
-ended, `t3_thread_read` holds its reply and `t3_thread_interrupt` stops it. Each call is recorded
+ended, `t3_thread_read` holds its reply, `t3_thread_interrupt` stops it and `t3_thread_send` starts its
+next run (a follow-up). Each call is recorded
 (tool, arguments, the caller's mode limit and sender thread) so both servers' calls can be
 compared. All data is fake: loopback addresses and fixture ids, labels and tokens.
 """
@@ -14,49 +15,65 @@ from urllib.parse import urlencode
 LINK_REDIRECT = "http://127.0.0.1/t3code-peer-link"
 PEER_ID = "env-fixture-peer"
 THREAD_THERE = "thread:there"
-RUN_THERE = "run:thread:there:ordinal:1"
 AT = "2026-01-01T00:00:00.000Z"
 REPLY = "Hi from the linked machine."
 
 
-def thread_row(status):
+def run_id(ordinal):
+    return f"run:thread:there:ordinal:{ordinal}"
+
+
+RUN_THERE = run_id(1)
+FOLLOW_UP_REPLY = "Hi again from the linked machine."
+
+
+def thread_row(status, runs, items):
     return dict(threadId=THREAD_THERE, projectId="project:there", title="Greeter", createdBy="agent",
-                creationSource="mcp", status=status, latestRunId=RUN_THERE, activeRunId=None,
+                creationSource="mcp", status=status, latestRunId=runs[-1]["id"], activeRunId=None,
                 providerInstanceId="claudeAgent", model="claude-opus-5-5", runtimeMode="full-access",
                 interactionMode="default", linkedPullRequest=None, titleRegeneration=None, branch=None,
-                worktreePath=None, parentThreadId=None, relationshipToParent=None, runCount=1, itemCount=2,
-                pendingRequestCount=0, archived=False, settled=False, settledAt=None, snoozed=False,
-                snoozedUntil=None, createdAt=AT, updatedAt=AT)
+                worktreePath=None, parentThreadId=None, relationshipToParent=None, runCount=len(runs),
+                itemCount=len(items), pendingRequestCount=0, archived=False, settled=False, settledAt=None,
+                snoozed=False, snoozedUntil=None, createdAt=AT, updatedAt=AT)
 
 
-def item(position, kind, text, created_by):
+def item(position, kind, text, created_by, run):
     return dict(position=position, visibility="local", sourceThreadId=THREAD_THERE,
-                itemId=f"item:there:{position}", runId=RUN_THERE,
+                itemId=f"item:there:{position}", runId=run,
                 messageId=f"message:there:{position}", createdBy=created_by,
                 creationSource="mcp" if created_by == "agent" else "provider", type=kind, status="completed",
                 title=None, text=text, textTruncated=False, updatedAt=AT)
 
 
-def answers(state):
+def run_status(run):
+    return "interrupted" if run["stopped"] else "completed" if run["finished"] else "running"
+
+
+def answers(state, arguments):
     """What each tool answers there, as the task's thread there is now."""
-    ended = state["stopped"] or state["finished"]
-    status = "interrupted" if state["stopped"] else "completed"
-    run = dict(runId=RUN_THERE, ordinal=1, status=status if ended else "running",
-               providerInstanceId="claudeAgent", model="claude-opus-5-5", requestedAt=AT, startedAt=AT,
-               completedAt=AT if ended else None)
-    items = [item(0, "user_message", "Say hi to the parent.", "agent")]
-    if state["finished"] and not state["stopped"]:
-        items.append(item(1, "assistant_message", REPLY, None))
+    runs = state["runs"]
+    wanted = next((r for r in runs if r["id"] == arguments.get("runId")), runs[-1])
+    rows = [dict(runId=r["id"], ordinal=r["ordinal"], status=run_status(r), providerInstanceId="claudeAgent",
+                 model="claude-opus-5-5", requestedAt=AT, startedAt=AT,
+                 completedAt=AT if run_status(r) != "running" else None) for r in runs]
+    items = []
+    for r in runs:
+        items.append(item(len(items), "user_message", r["prompt"], "agent", r["id"]))
+        if r["finished"] and not r["stopped"]:
+            items.append(item(len(items), "assistant_message", r["reply"], None, r["id"]))
+    latest = run_status(runs[-1])
     return {
         "t3_thread_launch": dict(threadId=THREAD_THERE, projectId="project:there",
                                  modelSelection=dict(instanceId="claudeAgent", model="claude-opus-5-5"),
                                  runId=RUN_THERE, status="running"),
-        "t3_thread_wait": dict(threadId=THREAD_THERE, runId=RUN_THERE,
-                               status=run["status"], timedOut=not ended),
-        "t3_thread_read": dict(thread=thread_row(run["status"]), recentRuns=[run], items=items,
+        "t3_thread_wait": dict(threadId=THREAD_THERE, runId=wanted["id"], status=run_status(wanted),
+                               timedOut=run_status(wanted) == "running"),
+        "t3_thread_read": dict(thread=thread_row(latest, runs, items), recentRuns=rows[::-1], items=items,
                                nextPosition=None, hasMore=False),
-        "t3_thread_interrupt": dict(threadId=THREAD_THERE, runId=RUN_THERE if not ended else None,
-                                    status="interrupt_requested" if not ended else "no_active_run"),
+        "t3_thread_interrupt": dict(threadId=THREAD_THERE, runId=runs[-1]["id"] if latest == "running" else None,
+                                    status="interrupt_requested" if latest == "running" else "no_active_run"),
+        "t3_thread_send": dict(threadId=THREAD_THERE, messageId=f"message:there:send:{len(runs)}",
+                               runId=runs[-1]["id"], status="running", delivery="started"),
     }
 
 
@@ -71,7 +88,8 @@ class RemoteTaskPeer:
         self.sessions = set()
         # `finish_after` None: the run there goes on until it is stopped, and a wait on it waits
         # (up to 10 s) as a wait there does.
-        self.state = dict(stopped=False, finished=finish_after == 0, waits_left=finish_after)
+        self.finish_after = finish_after
+        self.state = dict(runs=[self.new_run(1, "Say hi to the parent.", REPLY)])
         peer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -132,18 +150,23 @@ class RemoteTaskPeer:
                     peer.log.append(dict(tool=name, arguments=arguments,
                                          modeLimit=self.headers.get("t3-mode-limit"),
                                          sender=self.headers.get("t3-sender-thread")))
-                    state = peer.state
-                    if name == "t3_thread_interrupt" and not state["finished"]:
-                        state["stopped"] = True
+                    runs = peer.state["runs"]
+                    latest = runs[-1]
+                    if name == "t3_thread_send":
+                        # A follow-up starts the thread's next run there.
+                        runs.append(peer.new_run(len(runs) + 1, arguments.get("message", ""), FOLLOW_UP_REPLY))
+                    if name == "t3_thread_interrupt" and not latest["finished"]:
+                        latest["stopped"] = True
                         peer.changed.notify_all()
-                    if name == "t3_thread_wait" and state["waits_left"] is None:
-                        peer.changed.wait_for(lambda: state["stopped"], timeout=10)
-                    answer = answers(state).get(name)
-                    if name == "t3_thread_wait" and state["waits_left"] is not None \
-                            and not state["finished"] and not state["stopped"]:
-                        state["waits_left"] -= 1
-                        if state["waits_left"] <= 0:
-                            state["finished"] = True
+                    run = next((r for r in runs if r["id"] == arguments.get("runId")), runs[-1])
+                    if name == "t3_thread_wait" and run["waits_left"] is None:
+                        peer.changed.wait_for(lambda: run["stopped"], timeout=10)
+                    answer = answers(peer.state, arguments).get(name)
+                    if name == "t3_thread_wait" and run["waits_left"] is not None \
+                            and not run["finished"] and not run["stopped"]:
+                        run["waits_left"] -= 1
+                        if run["waits_left"] <= 0:
+                            run["finished"] = True
                 if answer is None:
                     text = json.dumps(dict(_tag="OrchestratorMcpFailure", code="invalid_request",
                                            message=f"The fixture peer does not serve {name}."))
@@ -156,6 +179,10 @@ class RemoteTaskPeer:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def new_run(self, ordinal, prompt, reply):
+        return dict(id=run_id(ordinal), ordinal=ordinal, prompt=prompt, reply=reply, stopped=False,
+                    finished=self.finish_after == 0, waits_left=self.finish_after)
 
     def calls(self):
         with self.lock:

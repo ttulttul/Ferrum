@@ -4,6 +4,7 @@
 use super::*;
 
 mod remote;
+pub(super) use remote::follow_up as remote_follow_up;
 
 /// Follows each open task in a linked environment again, after a restart.
 pub(crate) async fn resume_remote_followers<S: McpHost>(host: &Arc<S>) {

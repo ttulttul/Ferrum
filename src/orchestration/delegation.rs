@@ -2346,7 +2346,7 @@ pub(crate) fn delegated_task_result_run(runs: &[Value]) -> Option<Value> {
 }
 
 /// `followUpOwnerRun`: the parent's latest active run, else the last that ran.
-fn follow_up_owner_run(runs: &[Value]) -> Option<Value> {
+pub(crate) fn follow_up_owner_run(runs: &[Value]) -> Option<Value> {
     let active = |run: &&Value| {
         matches!(
             run["status"].as_str(),

@@ -647,8 +647,9 @@ pub(crate) fn provider_instance_enabled(settings: &Value, project: &str, instanc
 pub(crate) mod delegation;
 pub(crate) use delegation::{
     after_remote_complete, after_run, cancel_task, delegated_task_awaits_work,
-    delegated_task_result_run, delegated_task_runs, recover as recover_delegated_tasks,
-    subagent_result, task_node_id, task_thread_id, watch_run_end, RunEnd,
+    delegated_task_result_run, delegated_task_runs, follow_up_owner_run,
+    recover as recover_delegated_tasks, subagent_result, task_node_id, task_thread_id,
+    watch_run_end, RunEnd,
 };
 
 /// The CLI driver a thread's provider instance runs (`codex` or
