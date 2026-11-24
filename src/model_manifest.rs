@@ -462,6 +462,29 @@ fn claude_entry<'a>(manifest: &'a Value, model: &str) -> Option<(&'a Value, &'a 
     Some((entry, &catalog["profiles"][entry["profile"].as_str()?]))
 }
 
+/// Whether two model selections pick the same model with the same options
+/// (`modelSelectionsEqual`): the options compare as sorted id and value pairs.
+pub(crate) fn selections_equal(left: &Value, right: &Value) -> bool {
+    let options = |selection: &Value| {
+        let mut pairs: Vec<(String, String)> = selection["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|option| {
+                (
+                    option["id"].as_str().unwrap_or_default().to_owned(),
+                    option["value"].to_string(),
+                )
+            })
+            .collect();
+        pairs.sort();
+        pairs
+    };
+    left["instanceId"] == right["instanceId"]
+        && left["model"] == right["model"]
+        && options(left) == options(right)
+}
+
 /// What the reference's compileClaudeModelSelection launches a Claude turn
 /// with: the `--effort` level, if any, and the `--settings` it sets
 /// (`fastMode` for models that offer it).
@@ -857,6 +880,26 @@ impl ManifestHost for NativeHost {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selections_are_equal_whatever_the_order_of_their_options() {
+        let a = json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5",
+            "options": [{"id": "effort", "value": "high"}, {"id": "fastMode", "value": true}]});
+        let b = json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5",
+            "options": [{"id": "fastMode", "value": true}, {"id": "effort", "value": "high"}]});
+        assert!(selections_equal(&a, &b));
+        let other_effort = json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5",
+            "options": [{"id": "effort", "value": "low"}, {"id": "fastMode", "value": true}]});
+        assert!(!selections_equal(&a, &other_effort));
+        let no_options = json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5"});
+        let empty_options =
+            json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5", "options": []});
+        assert!(selections_equal(&no_options, &empty_options));
+        assert!(!selections_equal(
+            &no_options,
+            &json!({"instanceId": "codex", "model": "claude-opus-5-5"})
+        ));
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering as AtomicOrdering};
 

@@ -687,6 +687,14 @@ impl Thread {
                 _ => continue,
             };
             merge(&mut item, fields);
+            if message.role == "user" {
+                if let Some(switch) = run
+                    .filter(|(_, run)| !queued(run))
+                    .and_then(|(index, run)| self.model_switch(index, run))
+                {
+                    item["modelSwitch"] = switch;
+                }
+            }
             if let Some(task) = message
                 .scheduled_task_id
                 .as_ref()
@@ -857,6 +865,30 @@ impl Thread {
     }
 
     /// `OrchestrationV2ThreadProjection`, as the reference's getThreadProjection returns it.
+    /// The model change run `index` brings (`modelSwitchSince`): from the
+    /// model of the latest earlier run the timeline shows by its prompt, when
+    /// that differs from the run's own.
+    fn model_switch(&self, index: usize, run: &crate::Run) -> Option<Value> {
+        let to = run.model_selection.as_deref()?;
+        let previous = self.runs[..index].iter().rev().find(|earlier| {
+            !matches!(earlier.status.as_str(), "rolled_back" | "queued")
+                && earlier.user_message_id.as_deref().is_some_and(|id| {
+                    self.messages.iter().any(|message| {
+                        message.id == id
+                            && message.role == "user"
+                            && !message.id.starts_with("async-answer:")
+                            && !(message.content.trim().eq_ignore_ascii_case("/compact")
+                                && message_attachments(message)
+                                    .as_array()
+                                    .is_none_or(Vec::is_empty))
+                    })
+                })
+        })?;
+        let from = previous.model_selection.as_deref()?;
+        (!crate::model_manifest::selections_equal(from, to))
+            .then(|| json!({"from": from, "to": to}))
+    }
+
     pub(crate) fn projection(&self) -> Value {
         self.projection_with(true)
     }

@@ -1185,6 +1185,39 @@ async fn apply_command<H: CommandHost>(
             if let Some(at) = wake_started {
                 delegation::record_work_started_at(&*state, thread_id, at).await?;
             }
+            // A message that picks another model switches the thread to it
+            // before its run, as the reference's dispatch does
+            // (`thread.model-selection-updated` / `thread.provider-switched`).
+            if !queued && command["modelSelection"].is_object() {
+                let current = state
+                    .store
+                    .read()
+                    .await
+                    .threads
+                    .get(thread_id)
+                    .map(|thread| thread.stored_row()["modelSelection"].clone())
+                    .unwrap_or_default();
+                if !crate::model_manifest::selections_equal(&current, &command["modelSelection"]) {
+                    let selection = &command["modelSelection"];
+                    let reason = detach_reason(
+                        "thread.model-selection.set",
+                        command,
+                        &json!({"modelSelection": current}),
+                    );
+                    let at = crate::auth_service::iso(crate::auth_service::now());
+                    let row = json!({"updatedAt": at, "modelSelection": selection,
+                        "providerInstanceId": selection["instanceId"]});
+                    state
+                        .commit(Event::ThreadPatched {
+                            thread_id: thread_id.to_owned(),
+                            patch: json!({"row": row}),
+                        })
+                        .await?;
+                    if let Some(reason) = reason {
+                        detach_session(&state, thread_id, reason).await?;
+                    }
+                }
+            }
             let sequence = start_run(
                 state.clone(),
                 receipt,
