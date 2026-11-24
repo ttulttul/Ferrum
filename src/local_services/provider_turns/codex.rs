@@ -460,6 +460,13 @@ impl Session {
         // with the thread's recovered context ahead of it, as the reference's
         // resumeThread fails into its resume fallback.
         let mut prompt = spec.prompt.as_str();
+        // A fork starts a fresh thread with its source's history: this
+        // server does not fork Codex threads natively (`thread/fork`) yet.
+        if provider.fork_session.is_some() && provider.resume.is_none() {
+            if let Some(recovery) = provider.recovery_prompt.as_deref() {
+                prompt = recovery;
+            }
+        }
         // What the thread was loaded with: a thread still loaded with the
         // same model and runtime policy is not resumed again.
         let load_key = json!({

@@ -688,6 +688,7 @@ pub(crate) fn provider_turn(
         attachments: Vec::new(),
         turn_ordinal: Some(state.provider_turns() as u64 + 1),
         recovery_prompt: None,
+        fork_session: None,
         native_turn: String::new(),
         thread_title: row["title"].as_str().unwrap_or_default().to_owned(),
         context_window: (driver == provider::CLAUDE_AGENT)

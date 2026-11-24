@@ -1009,6 +1009,7 @@ async fn apply_command<H: CommandHost>(
                 context_handoffs: Vec::new(),
                 context_transfers: Vec::new(),
                 handoff_items: Vec::new(),
+                inherited_items: Vec::new(),
                 provider: Default::default(),
                 stored: None,
             };
@@ -2503,37 +2504,44 @@ async fn apply_command<H: CommandHost>(
                 ));
             }
             let at = crate::auth_service::iso(crate::auth_service::now());
-            let mut row = source.stored_row();
-            row["id"] = json!(target_thread_id);
-            row["title"] = command
-                .get("title")
-                .cloned()
-                .unwrap_or_else(|| json!(source.title));
-            row["createdAt"] = json!(at.clone());
-            row["updatedAt"] = json!(at);
-            row["archivedAt"] = Value::Null;
-            row["deletedAt"] = Value::Null;
-            row["lineage"] = json!({"parentThreadId":source_thread_id,"relationshipToParent":"fork","rootThreadId":source.row["lineage"]["rootThreadId"].as_str().unwrap_or(source_thread_id),"sideChat":command.get("sideChat").and_then(Value::as_bool).unwrap_or(false)});
-            let forked_from = source
-                .runs
-                .iter()
-                .rev()
-                .find(|run| run.status == "completed")
-                .map(|run| json!({"type":"run","threadId":source_thread_id,"runId":run.id}))
-                .unwrap_or(Value::Null);
-            row["forkedFrom"] = forked_from;
+            let side_chat = command["sideChat"] == true;
+            let projection = source.full_projection();
+            let source_run =
+                crate::thread_fork::source_run(&projection, &command["sourcePoint"]).cloned();
+            let row = crate::thread_fork::thread_row(
+                &source,
+                source_run.as_ref(),
+                target_thread_id,
+                command["title"].as_str(),
+                side_chat,
+                &command["createdBy"],
+                &command["creationSource"],
+                &at,
+            );
+            let transfer = crate::thread_fork::pending_transfer(
+                &source,
+                &projection,
+                source_run.as_ref(),
+                target_thread_id,
+                &command["createdBy"],
+                &at,
+            );
+            let title = row["title"].as_str().unwrap_or(&source.title).to_owned();
+            let inherited_items = crate::thread_fork::inherited_rows(
+                &projection,
+                source_run.as_ref(),
+                target_thread_id,
+                side_chat,
+                &at,
+            );
             let thread = Thread {
                 row,
                 id: target_thread_id.to_owned(),
                 project_id: source.project_id,
-                title: command
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&source.title)
-                    .to_owned(),
+                title,
                 cwd: source.cwd,
                 status: "idle".into(),
-                messages: source.messages,
+                messages: Vec::new(),
                 runs: vec![],
                 created_at: now(),
                 archived: false,
@@ -2545,8 +2553,9 @@ async fn apply_command<H: CommandHost>(
                 checkpoints: vec![],
                 link_requests: Vec::new(),
                 context_handoffs: Vec::new(),
-                context_transfers: Vec::new(),
+                context_transfers: vec![transfer],
                 handoff_items: Vec::new(),
+                inherited_items,
                 provider: Default::default(),
                 stored: None,
             };

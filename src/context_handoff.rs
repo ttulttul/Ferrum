@@ -88,14 +88,56 @@ pub(crate) struct PreparedHandoff {
     /// The handoffs did not fit the session's budget, so none is delivered
     /// (the reference's ContextHandoffBudgetError).
     pub over_budget: bool,
+    /// A side chat's `manual_context` handoff, recorded as delivered inline
+    /// with the prompt (no item ids).
+    pub side_chat: Option<Value>,
 }
 
 impl PreparedHandoff {
+    /// `user_text` with the inline history and a side chat's context ahead
+    /// of it, in that order.
+    pub(crate) fn prompt(&self, user_text: &str) -> String {
+        let side = self
+            .side_chat
+            .as_ref()
+            .and_then(|handoff| handoff["summaryText"].as_str())
+            .unwrap_or_default();
+        let context = [self.inline_context.as_str(), side]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        with_inline_context(&context, user_text)
+    }
+
+    /// Nothing to deliver but what is added to it.
+    pub(crate) fn empty(native_thread_id: Option<String>) -> Self {
+        PreparedHandoff {
+            inline_context: String::new(),
+            missed_attachments: Vec::new(),
+            pending: Vec::new(),
+            deliverables: Vec::new(),
+            unsent: Vec::new(),
+            native_thread_id,
+            over_budget: false,
+            recorded: true,
+            side_chat: None,
+        }
+    }
+
     /// Handoff records updated to `delivery.status = "inline"` once the provider
     /// accepted the prompt.
     pub(crate) fn into_delivered(self, native_thread_id: Option<&str>, at: u64) -> Vec<Value> {
         let now = iso(at);
         let native = native_thread_id.or(self.native_thread_id.as_deref());
+        let side_chat = self.side_chat.map(|mut handoff| {
+            handoff["updatedAt"] = json!(now);
+            if let Some(native_id) = native {
+                handoff["delivery"] =
+                    json!({"nativeThreadId": native_id, "status": "inline", "itemIds": []});
+            }
+            handoff
+        });
         self.deliverables
             .into_iter()
             .map(|(mut handoff, item_ids, omitted_item_ids)| {
@@ -110,6 +152,7 @@ impl PreparedHandoff {
                 }
                 handoff
             })
+            .chain(side_chat)
             .collect()
     }
 
@@ -738,18 +781,24 @@ pub(crate) struct Recovery {
     /// Its `provider_resume_fallback` context transfer, resolved portably.
     pub transfer: Value,
     /// The "Recovered context" `handoff` turn item at the run's start.
-    pub turn_item: Value,
+    pub turn_item: Option<Value>,
+    /// A notice after the run's prompt (a fork's "Native fork failed").
+    pub notice: Option<Value>,
+    /// For a fork, its transfer as a native fork resolves it, should the
+    /// provider fork the source natively (`providerThreadRef` is filled in
+    /// then).
+    pub native_transfer: Option<Value>,
     /// The handoffs' delivery to the fresh session.
     pub delivery: PreparedHandoff,
     /// The native session the turn asks to resume, which a fresh one
-    /// replaces.
+    /// replaces (empty for a fork).
     pub resumes: String,
 }
 
 impl Recovery {
     /// The prompt the fresh session gets instead of `user_text`.
     pub(crate) fn prompt(&self, user_text: &str) -> String {
-        with_inline_context(&self.delivery.inline_context, user_text)
+        self.delivery.prompt(user_text)
     }
 }
 
@@ -896,10 +945,337 @@ pub(crate) fn prepare_recovery(
     Some(Recovery {
         handoff,
         transfer,
-        turn_item,
+        turn_item: Some(turn_item),
+        notice: None,
+        native_transfer: None,
         delivery,
         resumes: provider.resume.clone().unwrap_or_default(),
     })
+}
+
+/// `compactText`: whitespace collapsed, cut to `max` UTF-16 units with `...`.
+fn compact_text(text: &str, max: usize) -> String {
+    let compacted = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let units: Vec<u16> = compacted.encode_utf16().collect();
+    if units.len() <= max {
+        return compacted;
+    }
+    let mut end = max - 3;
+    if (0xd800..=0xdbff).contains(&units[end - 1]) {
+        end -= 1;
+    }
+    format!("{}...", String::from_utf16_lossy(&units[..end]))
+}
+
+/// `summarizeDeltaItem`: one line of a parent's activity for a side chat.
+fn summarize_delta_item(item: &Value) -> Option<String> {
+    let text = |key: &str| item[key].as_str().unwrap_or_default();
+    match item["type"].as_str()? {
+        "user_message" => Some(format!("- User: {}", compact_text(text("text"), 240))),
+        "assistant_message" => Some(format!("- Assistant: {}", compact_text(text("text"), 240))),
+        "command_execution" => Some(format!("- Command: {}", compact_text(text("input"), 240))),
+        "file_change" => {
+            let paths: Vec<&str> = item["changes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|change| change["path"].as_str())
+                .collect();
+            let named = if paths.is_empty() {
+                text("fileName").to_owned()
+            } else {
+                paths.join(", ")
+            };
+            Some(format!("- File change: {}", compact_text(&named, 240)))
+        }
+        "checkpoint" => Some(format!(
+            "- Checkpoint: {} files",
+            item["files"].as_array().map_or(0, Vec::len)
+        )),
+        "handoff" => Some(format!(
+            "- Handoff: {}",
+            compact_text(item["summary"].as_str().unwrap_or(text("strategy")), 240)
+        )),
+        _ => None,
+    }
+}
+
+const SIDE_CHAT_CONTEXT_MAX_CHARS: usize = 8_000;
+
+/// `makeSideChatContext`: the framing, the parent's activity since the
+/// side chat started (newest kept within the cap), and where to read more.
+fn make_side_chat_context(parent_thread_id: &str, digest: &[&Value]) -> String {
+    let framing = "You are in a side chat beside the main thread. The main thread may still be running in the same worktree. Answer the user's questions; do not continue or redo the main thread's task.";
+    let header = "Main thread activity since this side chat's starting point:";
+    let truncated = "- Earlier items truncated.";
+    let footer = format!(
+        "Use t3_thread_read on thread {parent_thread_id} to see the main thread's live state."
+    );
+    let length = |text: &str| text.encode_utf16().count();
+    let mut remaining = SIDE_CHAT_CONTEXT_MAX_CHARS as isize
+        - length(&[framing, "", header, truncated, "", &footer].join("\n")) as isize;
+    let mut kept: Vec<String> = Vec::new();
+    let mut omitted = false;
+    for item in digest.iter().rev() {
+        let Some(line) = summarize_delta_item(item) else {
+            continue;
+        };
+        if (length(&line) + 1) as isize > remaining {
+            omitted = true;
+            break;
+        }
+        remaining -= (length(&line) + 1) as isize;
+        kept.insert(0, line);
+    }
+    let mut parts: Vec<String> = vec![framing.to_owned()];
+    if !kept.is_empty() {
+        parts.push(String::new());
+        parts.push(header.to_owned());
+        if omitted {
+            parts.push(truncated.to_owned());
+        }
+        parts.extend(kept);
+    }
+    parts.push(String::new());
+    parts.push(footer);
+    parts.join("\n")
+}
+
+/// A side chat's first turn carries the parent's activity since the side
+/// chat's starting point as `manual_context` (`prepareSideChatContext`).
+pub(crate) fn prepare_side_chat(
+    thread: &Thread,
+    source: &Thread,
+    run: &Run,
+    provider: &ProviderTurn,
+    now_secs: u64,
+) -> Option<Value> {
+    if thread.row["lineage"]["sideChat"] != true {
+        return None;
+    }
+    let transfer = thread
+        .context_transfers
+        .iter()
+        .find(|transfer| transfer["type"] == "fork" && transfer["status"] == "pending")?;
+    let projection = thread.full_projection();
+    let run_wire_id = run.wire_id();
+    let run_row = projection["runs"]
+        .as_array()?
+        .iter()
+        .find(|candidate| candidate["id"].as_str() == Some(run_wire_id.as_str()))?;
+    let source_projection = source.full_projection();
+    let source_runs = source_projection["runs"].as_array()?;
+    let fork_ordinal = source_runs
+        .iter()
+        .find(|candidate| candidate["id"] == transfer["sourcePoint"]["runId"])
+        .and_then(|candidate| candidate["ordinal"].as_u64());
+    // The parent's runs after the fork point that reached it (not queued).
+    let after: HashMap<&str, u64> = source_runs
+        .iter()
+        .filter(|candidate| {
+            candidate["status"] != "queued"
+                && candidate["status"] != "rolled_back"
+                && candidate["ordinal"]
+                    .as_u64()
+                    .is_some_and(|ordinal| fork_ordinal.is_none_or(|fork| ordinal > fork))
+        })
+        .filter_map(|candidate| Some((candidate["id"].as_str()?, candidate["ordinal"].as_u64()?)))
+        .collect();
+    let items: Vec<&Value> = source_projection["turnItems"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item["type"]
+                .as_str()
+                .is_some_and(|kind| TURN_START_HISTORY_TYPES.contains(&kind))
+                && item["runId"]
+                    .as_str()
+                    .is_some_and(|id| after.contains_key(id))
+        })
+        .collect();
+    let (from, to) = items
+        .iter()
+        .filter_map(|item| item["runId"].as_str().and_then(|id| after.get(id)))
+        .fold(None, |range: Option<(u64, u64)>, ordinal| {
+            Some(range.map_or((*ordinal, *ordinal), |(from, to)| {
+                (from.min(*ordinal), to.max(*ordinal))
+            }))
+        })
+        .unwrap_or((1, 1));
+    let to_instance = run_row["providerInstanceId"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&provider.instance_id);
+    let from_instance = transfer["sourceProviderInstanceId"]
+        .as_str()
+        .unwrap_or(to_instance);
+    let created_at = iso(now_secs);
+    Some(json!({
+        "id": allocate_handoff_id(&thread.id, from_instance, to_instance),
+        "transferId": transfer["id"],
+        "threadId": thread.id,
+        "targetRunId": run_wire_id,
+        "fromProviderThreadIds": [],
+        "toProviderThreadId": run_row["providerThreadId"],
+        "coveredRunOrdinals": {"from": from, "to": to},
+        "strategy": "manual_context",
+        "status": "ready",
+        "summaryMessageId": Value::Null,
+        "summaryText": make_side_chat_context(&source.id, &items),
+        "createdByProviderInstanceId": Value::Null,
+        "createdAt": created_at,
+        "updatedAt": created_at,
+    }))
+}
+
+/// Prepare a fork's first turn (`ProviderTurnStartService`'s native fork):
+/// the provider forks the source's native session when it can; when it
+/// cannot, the fork starts fresh with the source's history up to the fork
+/// (a `full_thread_summary` handoff resolving the fork transfer portably) and
+/// a "Native fork failed" notice. None when `thread` has no pending fork, or
+/// its source is gone.
+pub(crate) fn prepare_fork(
+    thread: &Thread,
+    source: &Thread,
+    run: &Run,
+    user_text: &str,
+    provider: &ProviderTurn,
+    now_secs: u64,
+) -> Option<(Recovery, Option<String>)> {
+    let transfer = thread.context_transfers.iter().find(|transfer| {
+        transfer["type"] == "fork"
+            && transfer["targetThreadId"] == thread.id.as_str()
+            && transfer["status"] == "pending"
+    })?;
+    let projection = thread.full_projection();
+    let run_wire_id = run.wire_id();
+    let run_row = projection["runs"]
+        .as_array()?
+        .iter()
+        .find(|candidate| candidate["id"].as_str() == Some(run_wire_id.as_str()))?;
+    let provider_thread_id = run_row["providerThreadId"].as_str()?;
+    let source_projection = source.full_projection();
+    let source_runs = source_projection["runs"].as_array()?;
+    let source_run = source_runs
+        .iter()
+        .find(|candidate| candidate["id"] == transfer["sourcePoint"]["runId"])?;
+    let through = source_run["ordinal"].as_u64()?;
+    let ordinals: HashMap<&str, u64> = source_runs
+        .iter()
+        .filter(|candidate| candidate["status"] != "rolled_back")
+        .filter_map(|candidate| Some((candidate["id"].as_str()?, candidate["ordinal"].as_u64()?)))
+        .collect();
+    // `readForkHistoryItems`: the source's conversation through the fork run.
+    let items: Vec<&Value> = source_projection["turnItems"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item["runId"]
+                .as_str()
+                .and_then(|id| ordinals.get(id))
+                .is_some_and(|ordinal| *ordinal <= through)
+        })
+        .collect();
+    let (from, to) = items
+        .iter()
+        .filter_map(|item| item["runId"].as_str().and_then(|id| ordinals.get(id)))
+        .fold(None, |range: Option<(u64, u64)>, ordinal| {
+            Some(range.map_or((*ordinal, *ordinal), |(from, to)| {
+                (from.min(*ordinal), to.max(*ordinal))
+            }))
+        })
+        .unwrap_or((1, 1));
+    let created_at = iso(now_secs);
+    let source_instance = source_run["providerInstanceId"]
+        .as_str()
+        .unwrap_or_default();
+    let to_instance = run_row["providerInstanceId"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&provider.instance_id);
+    let transfer_id = transfer["id"].as_str().unwrap_or_default();
+    let mut handoff = prepare_provider_handoff(
+        "full_thread_summary",
+        Some(transfer_id),
+        &thread.id,
+        &run_wire_id,
+        provider_thread_id,
+        source_instance,
+        to_instance,
+        from,
+        to,
+        source_runs,
+        &items,
+        handoff_token_cap(),
+        &created_at,
+    );
+    let source_provider_thread = source_run["providerThreadId"].clone();
+    handoff["fromProviderThreadIds"] = if source_provider_thread.is_null() {
+        json!([])
+    } else {
+        json!([source_provider_thread])
+    };
+    let delivery = prepare(thread, run, user_text, provider, now_secs, Some(&handoff))?;
+    let mut resolved = transfer.clone();
+    resolved["targetProviderInstanceId"] = json!(to_instance);
+    resolved["targetRunId"] = json!(run_wire_id);
+    resolved["error"] = Value::Null;
+    resolved["updatedAt"] = json!(created_at);
+    let mut native = resolved.clone();
+    native["status"] = json!("resolved_native");
+    native["resolution"] = json!({"strategy": "native_fork", "providerThreadRef": Value::Null});
+    resolved["status"] = json!("resolved_portable");
+    resolved["resolution"] =
+        json!({"strategy": "portable_context", "contextHandoffId": handoff["id"]});
+    let failure = if provider.driver == crate::workspace::provider::CLAUDE_AGENT {
+        "Claude Agent SDK query failed."
+    } else {
+        "The provider could not fork the source thread."
+    };
+    let notice = json!({
+        "id": format!(
+            "turn-item:run:{}:signal:native-fork-fallback",
+            uri_component(&run_wire_id)
+        ),
+        "threadId": thread.id,
+        "runId": run_wire_id,
+        "nodeId": run_row["rootNodeId"],
+        "providerThreadId": provider_thread_id,
+        "providerTurnId": Value::Null,
+        "nativeItemRef": Value::Null,
+        "parentItemId": Value::Null,
+        "ordinal": 0,
+        "status": "completed",
+        "title": "Native fork failed",
+        "startedAt": created_at,
+        "completedAt": created_at,
+        "updatedAt": created_at,
+        "type": "system_notice",
+        "message": format!(
+            "Could not fork the source conversation natively ({failure}). Started a fresh session with its history."
+        ),
+    });
+    let source_native = source_projection["providerThreads"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate["id"] == source_provider_thread)
+        .and_then(|candidate| candidate["nativeThreadRef"]["nativeId"].as_str())
+        .map(str::to_owned);
+    Some((
+        Recovery {
+            handoff,
+            transfer: resolved,
+            turn_item: None,
+            notice: Some(notice),
+            native_transfer: Some(native),
+            delivery,
+            resumes: String::new(),
+        },
+        source_native,
+    ))
 }
 
 /// Prepare and budget any pending or retry context handoffs for `run` before
@@ -1266,6 +1642,7 @@ fn prepare(
             unsent: Vec::new(),
             native_thread_id: loaded_native_id.map(str::to_owned),
             recorded: false,
+            side_chat: None,
             over_budget: false,
         });
     }
@@ -1497,6 +1874,7 @@ fn prepare(
             unsent: Vec::new(),
             native_thread_id: loaded_native_id.map(str::to_owned),
             recorded: false,
+            side_chat: None,
             over_budget: true,
         });
     }
@@ -1555,6 +1933,7 @@ fn prepare(
         native_thread_id: loaded_native_id.map(str::to_owned),
         recorded: false,
         over_budget: false,
+        side_chat: None,
     })
 }
 
@@ -1668,6 +2047,7 @@ mod tests {
             context_handoffs: vec![],
             context_transfers: Vec::new(),
             handoff_items: Vec::new(),
+            inherited_items: Vec::new(),
             provider: Box::default(),
             stored: None,
         };
@@ -1872,6 +2252,7 @@ mod tests {
             context_handoffs: vec![],
             context_transfers: Vec::new(),
             handoff_items: Vec::new(),
+            inherited_items: Vec::new(),
             provider: Box::default(),
             stored: None,
         };
@@ -1941,7 +2322,10 @@ mod tests {
             recovery.transfer["resolution"],
             json!({"strategy": "portable_context", "contextHandoffId": handoff["id"]})
         );
-        let item = &recovery.turn_item;
+        let item = recovery
+            .turn_item
+            .as_ref()
+            .expect("a recovered context item");
         assert_eq!(
             item["id"],
             format!(
@@ -1997,5 +2381,24 @@ mod tests {
                 .unwrap()["summary"],
             handoff["summaryText"]
         );
+    }
+
+    #[test]
+    fn a_side_chat_context_frames_the_parent_and_its_newest_activity() {
+        let framing = "You are in a side chat beside the main thread. The main thread may still be running in the same worktree. Answer the user's questions; do not continue or redo the main thread's task.";
+        let footer = "Use t3_thread_read on thread thread:p to see the main thread's live state.";
+        assert_eq!(
+            make_side_chat_context("thread:p", &[]),
+            format!("{framing}\n\n{footer}")
+        );
+        let user = json!({"type": "user_message", "text": "Fix   the\nbuild"});
+        let command = json!({"type": "command_execution", "input": "cargo test"});
+        let ignored = json!({"type": "dynamic_tool"});
+        assert_eq!(
+            make_side_chat_context("thread:p", &[&user, &ignored, &command]),
+            format!("{framing}\n\nMain thread activity since this side chat's starting point:\n- User: Fix the build\n- Command: cargo test\n\n{footer}")
+        );
+        assert_eq!(compact_text(&"a".repeat(300), 240).len(), 240);
+        assert!(compact_text(&"a".repeat(300), 240).ends_with("..."));
     }
 }

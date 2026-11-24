@@ -136,6 +136,56 @@ pub(crate) async fn launch<H: TurnHost>(
             prepared_handoff = Some(fallback.delivery);
         }
     }
+    // A fork's first turn forks its source natively when the provider can,
+    // else starts fresh with the source's history (see `prepare_fork`).
+    if recovery.is_none() {
+        if let Some(provider) = spec.provider.as_mut() {
+            let store = host.store.read().await;
+            let fork = store.threads.get(&run.thread_id).and_then(|thread| {
+                let transfer = thread.context_transfers.iter().find(|transfer| {
+                    transfer["type"] == "fork" && transfer["status"] == "pending"
+                })?;
+                let source = store.threads.get(transfer["sourceThreadId"].as_str()?)?;
+                crate::context_handoff::prepare_fork(
+                    thread,
+                    source,
+                    &run,
+                    &spec.prompt,
+                    provider,
+                    crate::now(),
+                )
+            });
+            drop(store);
+            if let Some((mut fallback, source_session)) = fork {
+                provider.fork_session = source_session;
+                // A side chat's first turn also carries the parent's activity
+                // since the side chat started.
+                let side_chat = {
+                    let store = host.store.read().await;
+                    store.threads.get(&run.thread_id).and_then(|thread| {
+                        let source = store
+                            .threads
+                            .get(fallback.transfer["sourceThreadId"].as_str()?)?;
+                        crate::context_handoff::prepare_side_chat(
+                            thread,
+                            source,
+                            &run,
+                            provider,
+                            crate::now(),
+                        )
+                    })
+                };
+                if let Some(side_chat) = side_chat {
+                    commit_handoffs(&*host, &run, [side_chat.clone()]).await;
+                    fallback.delivery.side_chat = Some(side_chat.clone());
+                    prepared_handoff
+                        .get_or_insert_with(|| crate::context_handoff::PreparedHandoff::empty(None))
+                        .side_chat = Some(side_chat);
+                }
+                recovery = Some(fallback);
+            }
+        }
+    }
     if let (Some(fallback), Some(provider)) = (recovery.as_ref(), spec.provider.as_mut()) {
         provider.recovery_prompt = Some(fallback.prompt(&spec.prompt));
     }
@@ -152,9 +202,8 @@ pub(crate) async fn launch<H: TurnHost>(
             commit_handoffs(&*host, &run, prepared.pending.iter().cloned()).await;
             prepared.recorded = true;
         }
-        if !prepared.inline_context.is_empty() {
-            spec.prompt =
-                crate::context_handoff::with_inline_context(&prepared.inline_context, &spec.prompt);
+        if !prepared.inline_context.is_empty() || prepared.side_chat.is_some() {
+            spec.prompt = prepared.prompt(&spec.prompt);
         }
         if !prepared.missed_attachments.is_empty() {
             if let Some(provider) = spec.provider.as_mut() {
@@ -576,9 +625,31 @@ async fn commit_recovery<H: TurnHost>(
             thread_id: run.thread_id.clone(),
             handoff: fallback.handoff.clone(),
             transfer: Some(fallback.transfer.clone()),
-            turn_item: Some(fallback.turn_item.clone()),
+            turn_item: fallback.turn_item.clone(),
         })
         .await;
+    // The notice sits right after the run's prompt, ahead of anything its
+    // provider reports.
+    if let Some(notice) = &fallback.notice {
+        let mut items = host
+            .store
+            .read()
+            .await
+            .threads
+            .get(&run.thread_id)
+            .map(|thread| thread.stored_row()["appTurnItems"].clone())
+            .and_then(|items| items.as_array().cloned())
+            .unwrap_or_default();
+        let mut notice = notice.clone();
+        notice[crate::thread_projection::LINK_CARD_POSITION] = json!(0);
+        items.push(notice);
+        let _ = host
+            .commit(Event::ThreadPatched {
+                thread_id: run.thread_id.clone(),
+                patch: json!({"row": {"appTurnItems": items}}),
+            })
+            .await;
+    }
 }
 
 /// Record `turn`'s events as `run`'s, acknowledging each once it is in the
@@ -720,6 +791,25 @@ async fn record<H: TurnHost>(
             // started a fresh one with the recovery prompt: record the
             // fallback, whose delivery replaces the resumed session's.
             match recovery.take() {
+                // The provider forked the source natively: the fork's
+                // transfer resolves to its new session.
+                Some(fallback) if *resumed && fallback.native_transfer.is_some() => {
+                    if let (Some(mut transfer), Some(driver)) =
+                        (fallback.native_transfer, run.driver.as_deref())
+                    {
+                        transfer["resolution"]["providerThreadRef"] = json!({
+                            "driver": driver, "nativeId": native_thread_id, "strength": "strong"
+                        });
+                        let _ = host
+                            .commit(Event::ContextHandoffUpdated {
+                                thread_id: run.thread_id.clone(),
+                                handoff: Value::Null,
+                                transfer: Some(transfer),
+                                turn_item: None,
+                            })
+                            .await;
+                    }
+                }
                 // A provider that reports its running session again (ACP)
                 // names the same one.
                 Some(fallback) if !resumed && *native_thread_id != fallback.resumes => {

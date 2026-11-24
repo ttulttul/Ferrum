@@ -516,6 +516,18 @@ impl Thread {
                     }
                 };
             let metadata = self.claude_native_metadata(&driver);
+            // A fork's portable fallback is the provider thread's handoff.
+            let handoff_ids: Vec<&Value> = self
+                .context_handoffs
+                .iter()
+                .filter(|handoff| {
+                    handoff["toProviderThreadId"] == id.as_str()
+                        && self.context_transfers.iter().any(|transfer| {
+                            transfer["id"] == handoff["transferId"] && transfer["type"] == "fork"
+                        })
+                })
+                .map(|handoff| &handoff["id"])
+                .collect();
             out.provider_threads.push(json!({
                 "id": id,
                 "driver": driver,
@@ -538,7 +550,7 @@ impl Thread {
                 "status": status,
                 "firstRunOrdinal": first_ordinal,
                 "lastRunOrdinal": last_ordinal,
-                "handoffIds": [],
+                "handoffIds": handoff_ids,
                 "forkedFrom": null,
                 "pendingBackgroundTasks": [],
                 "contextUsage": self.context_usage(),
@@ -1601,6 +1613,7 @@ mod tests {
             context_handoffs: Vec::new(),
             context_transfers: Vec::new(),
             handoff_items: Vec::new(),
+            inherited_items: Vec::new(),
             provider: Box::default(),
             stored: None,
         }

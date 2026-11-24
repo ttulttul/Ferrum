@@ -490,6 +490,14 @@ PROVIDER_SCENARIOS = [
     # The follow-up picks another model of the thread's provider: the thread switches to it, the
     # running Claude CLI takes it in place (set_model, apply_flag_settings), Codex resumes its
     # thread with it, and the follow-up's prompt shows the switch (modelSwitch).
+    # The thread is forked after its turn and the fork sent a message: the reference forks the
+    # Claude session natively when it can, else hands the fork the source's history
+    # (full_thread_summary). A side chat also gets the parent's activity since it started as
+    # manual context.
+    {"name": "claude fork", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_fork.json",
+     "fork": {"text": "Continue on the fork"}},
+    {"name": "claude side chat", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_fork.json", "fork": {"text": "Ask on the side", "sideChat": True}},
     {"name": "claude model switch", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_two_turns.json", "followUp": "Now append a line",
      "followUpModel": {"instanceId": "claudeAgent", "model": "claude-sonnet-5-5"}},
@@ -1654,6 +1662,41 @@ def follow_up_turn(args, url, cookie, text, model=None):
     return {step: value for step, value in after["steps"].items() if "live" not in step}
 
 
+FORK = "thread:client-fork"
+
+
+def fork_turn(args, url, cookie, fork):
+    """After the thread's turns: fork it at its latest stable run (`fork["sideChat"]` for a side
+    chat) and send the fork a message, then, with `fork["mergeBack"]`, merge the fork back and
+    send the thread that message. What a client reads of the fork, and of the thread after the
+    merge."""
+    def settled(thread):
+        return lambda p: bool(p.get("runs")) and not any(r.get("status") in ACTIVE_RUN for r in p["runs"])
+
+    def message(thread, command, text):
+        runs = len(thread_projection(url, cookie, thread).get("runs", []))
+        rpc(url, cookie, "orchestration.dispatchCommand", {
+            "type": "message.dispatch", "commandId": command, "threadId": thread,
+            "messageId": f"message:{command}", "text": text, "attachments": [],
+            "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
+        wait_for(url, cookie, lambda p: len(p.get("runs", [])) > runs and settled(thread)(p), 40, thread)
+
+    rpc(url, cookie, "orchestration.dispatchCommand", {
+        "type": "thread.fork", "commandId": "fork-thread", "sourceThreadId": THREAD, "targetThreadId": FORK,
+        "sourcePoint": {"type": "latest_stable"}, "createdBy": "user", "creationSource": "web",
+        **({"sideChat": True} if fork.get("sideChat") else {})})
+    message(FORK, "fork-message", fork["text"])
+    out = {"fork": run_client(args, url, cookie, {"threadId": FORK, "inspect": True})}
+    if fork.get("mergeBack"):
+        rpc(url, cookie, "orchestration.dispatchCommand", {
+            "type": "thread.merge_back", "commandId": "merge-back", "sourceThreadId": FORK,
+            "targetThreadId": THREAD, "sourcePoint": {"type": "latest_stable"},
+            "createdBy": "user", "creationSource": "web"})
+        message(THREAD, "merged-message", fork["mergeBack"])
+        out["merged"] = run_client(args, url, cookie, {"threadId": THREAD, "inspect": True})
+    return out
+
+
 def turn_app_servers(log):
     """How many Codex app-servers a server started for turns (its status probe's aside): the
     reference shares one per instance across turns and threads."""
@@ -1662,17 +1705,17 @@ def turn_app_servers(log):
                if json.loads(line)["argv"][:3] == ["app-server", "-c", "thread_unload_delay_secs=0"])
 
 
-def thread_projection(url, cookie):
-    return rpc(url, cookie, "orchestration.getThreadProjection", {"threadId": THREAD})
+def thread_projection(url, cookie, thread=THREAD):
+    return rpc(url, cookie, "orchestration.getThreadProjection", {"threadId": thread})
 
 
 ACTIVE_RUN = {"preparing", "starting", "running", "waiting"}
 
 
-def wait_for(url, cookie, done, seconds):
+def wait_for(url, cookie, done, seconds, thread=THREAD):
     deadline = time.monotonic() + seconds
     while True:
-        projection = thread_projection(url, cookie)
+        projection = thread_projection(url, cookie, thread)
         if done(projection) or time.monotonic() > deadline:
             return projection
         time.sleep(0.5)
@@ -2059,6 +2102,14 @@ def compare_turn(original, rust):
     for key in rendered[0]:
         if rendered[0][key] != rendered[1][key]:
             problems[key] = [f"original {rendered[0][key]}", f"rust     {rendered[1][key]}"]
+    # A fork of the thread, and the thread after the fork merged back (`fork` scenarios).
+    for part in ("fork", "merged"):
+        if part in original or part in rust:
+            if part not in original or part not in rust:
+                problems[part] = [f"read by original {part in original} rust {part in rust}"]
+                continue
+            for key, lines in compare_turn(original[part], rust[part]).items():
+                problems[f"{part} {key}"] = lines
     return problems
 
 
@@ -2260,6 +2311,8 @@ def provider_turns(args, credentials):
                         # paths hold each server's home: count them as if both homes were "<home>".
                         without_home(outcomes[name], len(str(root)) - len("<home>/<server>"),
                                      len(scenario["uploads"]))
+                    if scenario.get("fork"):
+                        outcomes[name].update(fork_turn(args, url, cookie, scenario["fork"]))
                     if scenario.get("followUp"):
                         outcomes[name]["steps"].update(follow_up_turn(args, url, cookie, scenario["followUp"],
                                                                       scenario.get("followUpModel")))

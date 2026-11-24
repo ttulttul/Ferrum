@@ -1134,12 +1134,26 @@ impl Thread {
                 .map_or(messages.len(), |index| index + 1);
             messages.insert(at, row);
         }
-        let visible = turn_items
+        // A fork shows its source's conversation up to the fork, then its
+        // marker, ahead of its own items (`buildVisibleTurnItems`).
+        let visible = self
+            .inherited_items
             .iter()
-            .enumerate()
-            .map(|(position, item)| {
-                json!({"position":position,"visibility":"local","sourceThreadId":self.id,
+            .map(|row| {
+                let mut row = row.clone();
+                if wire {
+                    row["item"] = crate::wire_items::wire_item(&row["item"]);
+                }
+                row
+            })
+            .chain(turn_items.iter().map(|item| {
+                json!({"visibility":"local","sourceThreadId":self.id,
                     "sourceItemId":item["id"],"item":item})
+            }))
+            .enumerate()
+            .map(|(position, mut row)| {
+                row["position"] = json!(position);
+                row
             })
             .collect::<Vec<_>>();
         let context_handoffs: Vec<Value> = if wire {
@@ -1556,6 +1570,7 @@ impl Thread {
             context_handoffs,
             context_transfers: Vec::new(),
             handoff_items: Vec::new(),
+            inherited_items: Vec::new(),
             provider,
             stored: Some(Box::new(projection)),
             row,
