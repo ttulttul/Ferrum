@@ -224,9 +224,9 @@ schemas.
    parent sends its finished child more work, whose result wakes it), `claude delegate restart` /
    `codex delegate restart` (the server restarts while a child runs), and `claude delegate live` /
    `codex delegate live` (a child that finishes while its parent's turn runs), and
-   `claude delegate worktree` (below), in `scripts/client_thread_parity.py`, with fake CLIs for the
-   parent and the child. Still pending, each its own PR: tasks in a linked environment (refused), a
-   cancelled child's pull request watches, a stop's queued delivery runs
+   `claude delegate worktree` and `claude delegate remote` (below), in
+   `scripts/client_thread_parity.py`, with fake CLIs for the parent and the child. Still pending,
+   each its own PR: a cancelled child's pull request watches, a stop's queued delivery runs
    (the reference cancels a cohort's queued delivery), and recovery on the control plane (only
    the server recovers delegated tasks after a restart). While a Claude turn runs, the reference
    shows its delivery as a queued run at once; Rust, which holds queued runs until a client
@@ -245,6 +245,21 @@ schemas.
    failed branch rename is only logged (the reference adds a "Branch not renamed" notice to the
    run). The control plane still refuses the isolation. Parity: `claude delegate worktree`, in a
    temporary git repository, where the child reads its own `t3_worktree_status`.
+   Tasks in a linked environment (`target.environmentId`, native server only), as the
+   reference's `RemoteDelegation`: the task's thread is launched there through the link
+   (`t3_thread_launch` with `delegatedFrom`, the project matched by repository when
+   `target.projectId` is omitted, the driver's instance found with `orchestrator_capabilities`
+   for `target.driverKind`), and the task is recorded here (`delegated_task.remote.request`: its
+   node and card, no child thread). A follower waits on that thread through the link
+   (`t3_thread_wait`), reads its last reply (`t3_thread_read`) and records it as the result
+   (`delegated_task.remote.complete`), which reaches the parent as a local task's result does: a
+   `wait` reads it, an async task wakes the parent. `task_status` answers from the task's row and
+   the run's status there; `task_cancel` stops the thread there (`t3_thread_interrupt` with
+   `stop`). A gone link, thread or run fails the task; anything else is retried with back-off, and
+   open tasks are followed again after a restart. Pending: a follow-up sent to the thread there
+   with `t3_thread_send` is not recorded as a task, and a task whose thread there waits on its own
+   delegated tasks is reported when its run ends. The control plane still refuses these tasks.
+   Parity: `claude delegate remote`, against a loopback linked environment that records each call.
 4c. **Attachments** (served, native server only): `t3_attachment_prepare_upload` issues an
    upload URL (with `uploadUrl` at the origin the call reached) for an upload its caller owns;
    `t3_attachment_discard` deletes it, for that caller only; `t3_thread_send_attachments` sends

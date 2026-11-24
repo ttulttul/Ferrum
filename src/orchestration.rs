@@ -633,9 +633,9 @@ pub(crate) fn provider_instance_enabled(settings: &Value, project: &str, instanc
 
 pub(crate) mod delegation;
 pub(crate) use delegation::{
-    after_run, cancel_task, delegated_task_awaits_work, delegated_task_result_run,
-    delegated_task_runs, recover as recover_delegated_tasks, subagent_result, task_node_id,
-    task_thread_id, watch_run_end, RunEnd,
+    after_remote_complete, after_run, cancel_task, delegated_task_awaits_work,
+    delegated_task_result_run, delegated_task_runs, recover as recover_delegated_tasks,
+    subagent_result, task_node_id, task_thread_id, watch_run_end, RunEnd,
 };
 
 /// The CLI driver a thread's provider instance runs (`codex` or
@@ -2630,41 +2630,13 @@ async fn apply_command<H: CommandHost>(
                 .id);
         }
         "delegated_task.remote.request" => {
-            let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
-            let task_id = format!(
-                "node:delegated-task:{}",
-                command["commandId"].as_str().unwrap_or_default()
-            );
-            let mut subagents = state
-                .store
-                .read()
-                .await
-                .threads
-                .get(parent_thread_id)
-                .map(|thread| {
-                    thread.row["subagents"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!(format!(
-                        "No orchestration projection exists for thread {parent_thread_id}."
-                    ))
-                })?;
-            subagents.push(json!({"id":task_id,"threadId":parent_thread_id,"runId":command["parentRunId"],"parentNodeId":command["parentNodeId"],"origin":"app_owned","driver":command["driver"],"providerInstanceId":command["modelSelection"]["instanceId"],"providerThreadId":Value::Null,"childThreadId":Value::Null,"remoteChild":command["remoteChild"],"prompt":command["task"],"title":command.get("title").cloned().unwrap_or(Value::Null),"model":command["modelSelection"]["model"],"modelSelection":command["modelSelection"],"completionWake":command.get("completionWake").cloned().unwrap_or(json!("settled_only")),"status":"running","result":Value::Null,"startedAt":crate::auth_service::iso(crate::auth_service::now()),"completedAt":Value::Null,"updatedAt":crate::auth_service::iso(crate::auth_service::now())}));
-            return Ok(state
-                .commit_receipted(
-                    Event::ThreadPatched {
-                        thread_id: parent_thread_id.to_owned(),
-                        patch: json!({"row":{"subagents":subagents}}),
-                    },
-                    Some(receipt.clone()),
-                )
-                .await?
-                .id);
+            return delegation::remote_request(state, command, receipt).await;
         }
-        "delegated_task.remote.complete" | "delegated_task.remote.stop" => {
+        // The follower that reported it then settles the parent (`after_remote_complete`).
+        "delegated_task.remote.complete" => {
+            return delegation::remote_complete(state, command, receipt).await;
+        }
+        "delegated_task.remote.stop" => {
             let parent_thread_id = command["parentThreadId"].as_str().unwrap_or_default();
             let task_id = command["taskId"].as_str().unwrap_or_default();
             let mut subagents = state
