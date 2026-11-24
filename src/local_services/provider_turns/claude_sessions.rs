@@ -21,6 +21,8 @@ pub(crate) struct Sessions(Mutex<HashMap<String, Live>>);
 
 struct Live {
     cli: Cli,
+    /// Prompts the CLI holds queued (steers a turn ended without taking).
+    queued: Vec<String>,
     /// What the CLI was launched with, but for its session.
     launch: String,
     idle: tokio::task::JoinHandle<()>,
@@ -34,19 +36,26 @@ impl Sessions {
     /// The running CLI of `session`, for a turn launched as `launch`: taken
     /// for the turn when it was launched the same way and still runs, else
     /// closed.
-    pub(super) async fn take(&self, session: &str, launch: &str) -> Option<Cli> {
+    /// With it, the prompts it holds queued.
+    pub(super) async fn take(&self, session: &str, launch: &str) -> Option<(Cli, Vec<String>)> {
         let live = self.lock().remove(session)?;
         live.idle.abort();
         let mut cli = live.cli;
         if live.launch == launch && cli.alive() {
-            return Some(cli);
+            return Some((cli, live.queued));
         }
         cli.stop().await;
         None
     }
 
     /// Keep `cli` running for `session`'s next turn.
-    pub(super) fn keep(self: &Arc<Self>, session: String, cli: Cli, launch: String) {
+    pub(super) fn keep(
+        self: &Arc<Self>,
+        session: String,
+        cli: Cli,
+        launch: String,
+        queued: Vec<String>,
+    ) {
         let sessions: Weak<Self> = Arc::downgrade(self);
         let key = session.clone();
         let idle = tokio::spawn(async move {
@@ -58,7 +67,15 @@ impl Sessions {
                 }
             }
         });
-        let previous = self.lock().insert(session, Live { cli, launch, idle });
+        let previous = self.lock().insert(
+            session,
+            Live {
+                cli,
+                queued,
+                launch,
+                idle,
+            },
+        );
         if let Some(previous) = previous {
             previous.idle.abort();
             tokio::spawn(previous.cli.stop());

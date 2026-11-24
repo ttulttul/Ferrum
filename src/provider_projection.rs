@@ -803,8 +803,10 @@ impl Thread {
         // was asked for.
         let request = join("turn-item:run", &[&ids.run]) + ":signal:interrupt-request";
         let requested = self.provider.interrupt_requests.get(&run.id).copied();
+        // Why it was asked to end, which both cards say.
+        let reason = self.provider.interrupt_reasons.get(&run.id).cloned();
         let request_card = |at: u64| {
-            self.run_signal(
+            let mut card = self.run_signal(
                 ids,
                 request.clone(),
                 Value::Null,
@@ -812,7 +814,11 @@ impl Thread {
                 "Interrupt requested",
                 "run_interrupt_request",
                 &iso(at),
-            )
+            );
+            if let Some(reason) = &reason {
+                card["message"] = json!(reason);
+            }
+            card
         };
         for (position, item) in record.items.iter().enumerate() {
             if let Some((at, _)) = requested.filter(|(_, slot)| *slot == position) {
@@ -1017,9 +1023,12 @@ impl Thread {
                     "run_interrupt_result",
                     &at,
                 );
-                if detached {
-                    result["message"] = json!("Stopped by the provider");
-                }
+                // The request's reason, else the provider stopped it
+                // (`makeInterruptResultTurnItem`).
+                result["message"] = match reason.as_deref().filter(|_| !detached) {
+                    Some(reason) => json!(reason),
+                    None => json!("Stopped by the provider"),
+                };
                 out.items.push((index, result));
             }
             TurnStatus::Completed | TurnStatus::Running => {}

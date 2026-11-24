@@ -129,6 +129,11 @@ struct Attempt<'a> {
     /// Steers written to the CLI and not yet taken: their prompt uuid, and
     /// the steer message's id.
     steers: HashMap<String, String>,
+    /// Each steer's text, by prompt uuid.
+    steer_texts: HashMap<String, String>,
+    /// Texts the running CLI already holds as queued prompts: steers an
+    /// earlier turn ended without taking, which Claude runs next on its own.
+    queued: Vec<String>,
     /// A message steered the turn.
     steered: bool,
     /// What the prompt added to the session's attachment budget, reported
@@ -244,9 +249,12 @@ impl<'a> Attempt<'a> {
             "mcp": provider.mcp.as_ref().map(|mcp| (&mcp.url, &mcp.authorization)),
         })
         .to_string();
-        let running = match resume {
-            Some(id) => sessions.take(id, &launch).await,
-            None => None,
+        let (running, queued) = match resume {
+            Some(id) => match sessions.take(id, &launch).await {
+                Some((cli, queued)) => (Some(cli), queued),
+                None => (None, Vec::new()),
+            },
+            None => (None, Vec::new()),
         };
         let reused = running.is_some();
         if let (Some(flag), Some(id)) = (&new_session, &session) {
@@ -315,6 +323,8 @@ impl<'a> Attempt<'a> {
             turn_started: false,
             result: None,
             steers: HashMap::new(),
+            steer_texts: HashMap::new(),
+            queued,
             steered: false,
             delivered: None,
             usage_reported: false,
@@ -347,10 +357,13 @@ impl<'a> Attempt<'a> {
         // does, and a CLI that stopped (or was stopped) is gone.
         let keep = matches!(&outcome, Outcome::Ended(end) if end.status != TurnStatus::Interrupted);
         let Attempt {
-            mut cli, session, ..
+            mut cli,
+            session,
+            queued,
+            ..
         } = attempt;
         match session {
-            Some(session) if keep && cli.alive() => sessions.keep(session, cli, launch),
+            Some(session) if keep && cli.alive() => sessions.keep(session, cli, launch, queued),
             _ => cli.close().await,
         }
         outcome
@@ -437,13 +450,25 @@ impl<'a> Attempt<'a> {
             }
             json!(blocks)
         };
+        // A steer the last turn ended without taking is still queued in the
+        // CLI, which runs it next on its own: the turn that sends that
+        // message again takes it rather than writing it a second time (the
+        // reference's continuation adopts the wake). Its bytes counted with
+        // the steer.
+        let adopted = attachments.is_empty()
+            && self
+                .queued
+                .iter()
+                .position(|text| *text == spec.prompt)
+                .map(|at| self.queued.remove(at))
+                .is_some();
         let prompt = json!({
             "type": "user",
             "session_id": "",
             "message": {"role": "user", "content": content},
             "parent_tool_use_id": null,
         });
-        if self.cli.write(&prompt).await.is_err() {
+        if !adopted && self.cli.write(&prompt).await.is_err() {
             return self.closed().await;
         }
         // What the prompt adds to the session's attachment budget, which
@@ -461,7 +486,7 @@ impl<'a> Attempt<'a> {
                 .collect::<Vec<_>>();
             json!(text).to_string().len() as u64 + image_bytes
         };
-        self.delivered = Some((delivered, 0));
+        self.delivered = (!adopted).then_some((delivered, 0));
         let mut deadline = None;
         loop {
             let line = tokio::select! {
@@ -1089,10 +1114,12 @@ impl<'a> Attempt<'a> {
     async fn steer(&mut self, message_id: &str, text: &str) {
         let uuid = uuid::Uuid::new_v4().to_string();
         self.steers.insert(uuid.clone(), message_id.to_owned());
+        self.steer_texts.insert(uuid.clone(), text.to_owned());
         self.steered = true;
         self.sink.send(ProviderEvent::SteerUpdated {
             message_id: message_id.to_owned(),
             status: "pending".into(),
+            untaken: false,
         });
         let message = json!({
             "type": "user",
@@ -1113,6 +1140,7 @@ impl<'a> Attempt<'a> {
             self.sink.send(ProviderEvent::SteerUpdated {
                 message_id,
                 status: "completed".into(),
+                untaken: false,
             });
         }
     }
@@ -1143,10 +1171,12 @@ impl<'a> Attempt<'a> {
                 .unwrap_or_default()
         };
         for uuid in accepted {
+            self.steer_texts.remove(&uuid);
             if let Some(message_id) = self.steers.remove(&uuid) {
                 self.sink.send(ProviderEvent::SteerUpdated {
                     message_id,
                     status: "completed".into(),
+                    untaken: false,
                 });
             }
         }
@@ -1160,10 +1190,21 @@ impl<'a> Attempt<'a> {
         } else {
             "cancelled"
         };
-        for (_, message_id) in self.steers.drain() {
+        // A turn that completed before Claude took a steer leaves it to be
+        // sent again as its own run, as the reference's steer fails with
+        // `turnCompleted` and its EffectWorker re-dispatches the message.
+        let untaken = status == TurnStatus::Completed;
+        for (uuid, message_id) in self.steers.drain() {
+            // Still queued in the CLI for the turn that sends it again.
+            if untaken {
+                if let Some(text) = self.steer_texts.remove(&uuid) {
+                    self.queued.push(text);
+                }
+            }
             self.sink.send(ProviderEvent::SteerUpdated {
                 message_id,
                 status: settled.into(),
+                untaken,
             });
         }
     }

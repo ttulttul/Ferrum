@@ -60,6 +60,9 @@ pub struct ProviderState {
     /// When a stop or interrupt asked each run to end, by run, and how many
     /// items its turn had reported then (where the request's card goes).
     pub interrupt_requests: HashMap<Uuid, (u64, usize)>,
+    /// Why each of those runs was asked to end: the stop's reason, or
+    /// "Stopped by user" (`USER_STOP_REASON`).
+    pub interrupt_reasons: HashMap<Uuid, String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

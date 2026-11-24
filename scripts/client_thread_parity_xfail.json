@@ -29,12 +29,12 @@
   "claude delegate": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   },
-  "claude delegate cancel": {
-    "agent mcp": "#37859: a stopped delegated task's result ends with the child run's stop notice (\"Stopped by an agent: <reason>\"); Rust's interrupt result does not carry the stop reason, so task_status's summary lacks it."
+  "claude delegate followup": {
+    "live": "Racy: seen both matching and differing (main CI run 45294158798 differed, its re-run and #202's CI matched): that time the reference sent one more subagent.updated, after the first task's context-transfer.created and before the follow-up task's node.updated, which Rust did not. Probably the reference's provider commit batch timing (#39502), which decides whether a subagent's queued updates commit together or one by one.",
+    "orchestration.subscribeThread (live turn)": "Racy: the reference's live turn sometimes does not settle before the harness stops waiting (the reference goes silent; Rust answers), seen both matching and differing, on main too."
   },
   "claude delegate live": {
-    "items": "#39528: the reference steers a delegated result into the parent's running Claude turn (sending it again as a new run if the turn ended first); Rust still queues it for Claude, since it cannot yet send an untaken steer again, so the notification lands outside that turn.",
-    "live": "#39528: the reference steers a delegated result into the parent's running Claude turn (sending it again as a new run if the turn ended first); Rust still queues it for Claude, since it cannot yet send an untaken steer again, so the notification lands outside that turn."
+    "live": "#39502 (ProviderCommitBatch) combines queued snapshots: the reference sends the steered delivery's card once with its message, where Rust also sends its pending and completed updates (two more turn-item.updated notification), and its provider-thread.updated comes a few events earlier. The items, the second run and the attachment budget match."
   },
   "claude in the login shell PATH": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
@@ -92,8 +92,5 @@
   },
   "pi title": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "claude delegate followup": {
-    "live": "Racy: seen both matching and differing (main CI run 45294158798 differed, its re-run and #202's CI matched): that time the reference sent one more subagent.updated, after the first task's context-transfer.created and before the follow-up task's node.updated, which Rust did not. Probably the reference's provider commit batch timing (#39502), which decides whether a subagent's queued updates commit together or one by one."
   }
 }
