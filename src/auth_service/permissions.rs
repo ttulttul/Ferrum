@@ -17,6 +17,8 @@ pub(crate) fn legacy_scope(scope: &str) -> &str {
         | "source-control:write"
         | "filesystem:write" => OPERATE,
         "terminal:read" => "terminal:operate",
+        // Clients with the original scope list read it as the relay write it refines.
+        "relay:configure" => "relay:write",
         s => s,
     }
 }
@@ -107,6 +109,7 @@ pub(crate) fn missing_rpc(session: &Session, rpc: &RpcContract, p: &Value) -> Op
 pub(crate) fn http_scopes(path: &str, method: &str) -> Vec<&'static str> {
     match path {
         "/api/connect/link-state" | "/api/connect/reachability" => vec!["relay:read"],
+        "/api/connect/link-proof" | "/api/connect/relay-config" => vec!["relay:configure"],
         p if p.starts_with("/api/connect/") => vec!["relay:write"],
         "/api/voice/models/link" => vec![SETTINGS, FILES],
         "/api/voice/models/download"

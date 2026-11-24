@@ -36,6 +36,30 @@ pub const STANDARD: &[&str] = &[
     "access:write",
     "relay:write",
 ];
+/// Set up or replace T3 Connect (`AuthRelayConfigureScope`, #37823): link proofs and relay
+/// configuration require it, and only administrative sessions hold it.
+pub const RELAY_CONFIGURE: &str = "relay:configure";
+/// `AuthAdministrativeClientScopes`: the standard scopes and `relay:configure`, held by the
+/// desktop's owner sessions. A credential may be granted any of these it holds itself.
+pub const ADMINISTRATIVE: &[&str] = &[
+    "orchestration:read",
+    "orchestration:operate",
+    "settings:write",
+    "providers:manage",
+    "environment:maintain",
+    "preview:operate",
+    "diagnostics:read",
+    "terminal:read",
+    "terminal:operate",
+    "source-control:write",
+    "filesystem:read",
+    "filesystem:write",
+    "relay:read",
+    "access:read",
+    "access:write",
+    "relay:write",
+    RELAY_CONFIGURE,
+];
 const LEGACY: &[&str] = &[
     "orchestration:read",
     "orchestration:operate",
@@ -319,7 +343,7 @@ impl AuthService {
             let mut connect = false;
             let mut client = crate::access_http::client_metadata();
             let mut permissions = if owner {
-                STANDARD.iter().map(|s| s.to_string()).collect()
+                ADMINISTRATIVE.iter().map(|s| s.to_string()).collect()
             } else {
                 let grant = match records.links.remove(&key(&credential.to_ascii_uppercase())) {
                     Some(grant) => Some(grant)
@@ -541,7 +565,7 @@ impl AuthService {
         if permissions.is_empty()
             || permissions.iter().enumerate().any(|(i, s)| {
                 permissions[..i].contains(s)
-                    || !STANDARD.contains(&s.as_str())
+                    || !ADMINISTRATIVE.contains(&s.as_str())
                     || !session.permissions.contains(s)
             })
         {
