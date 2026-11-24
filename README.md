@@ -1,15 +1,21 @@
-# t3code-rust
+<p align="center">
+  <img src="docs/assets/ferrum-social-card.jpg" alt="Ferrum: an unofficial, independent, high-performance Rust implementation of the T3 Code server and relay" width="100%">
+</p>
+
+# Ferrum
+
+**An unofficial, independent, high-performance Rust implementation of the T3 Code server and relay.**
 
 > [!WARNING]
 > **Alpha-quality software under heavy development.** Do **not** use this for anything important. Expect breaking changes, incomplete features, and data loss.
 
-**No affiliation:** `t3code-rust` is an unofficial, independent Rust port of the headless [T3 Code](https://github.com/pingdotgg/t3code) server (`t3 serve`) and standalone relay. This project has **no affiliation with T3 Code or T3 Tools Inc., and is not endorsed by them in any way**. T3 Code is a product of T3 Tools Inc.
+**No affiliation:** Ferrum is an unofficial, independent Rust port of the headless [T3 Code](https://github.com/pingdotgg/t3code) server (`t3 serve`) and standalone relay. This project has **no affiliation with T3 Code or T3 Tools Inc., and is not endorsed by them in any way**. T3 Code is a product of T3 Tools Inc.
 
 ---
 
 ## Overview
 
-`t3code-rust` reimplements the TypeScript T3 Code environment server and standalone relay in Rust. Compatibility work targets one pinned upstream commit, named under [Parity status](#parity-status). At that commit the server declares 235 WebSocket RPC methods, 86 typed HTTP operations (including 30 relay operations), and 58 orchestration dispatch command types.
+Ferrum reimplements the TypeScript T3 Code environment server and standalone relay in Rust. Compatibility work targets one pinned upstream commit, named under [Parity status](#parity-status). At that commit the server declares 235 WebSocket RPC methods, 86 typed HTTP operations (including 30 relay operations), and 58 orchestration dispatch command types.
 
 ## What works now
 
@@ -89,7 +95,7 @@ From the repository root, use `./install` to temporarily replace a running stand
 ```
 
 How `./install --rust` works:
-- Discovers the live server via `server-runtime.json`, verifies `GET /` answers 2xx, and saves the original command, environment, working directory, and T3 home under `${XDG_STATE_HOME:-~/.local/state}/t3code-rust-switch`.
+- Discovers the live server via `server-runtime.json`, verifies `GET /` answers 2xx, and saves the original command, environment, working directory, and T3 home under `${XDG_STATE_HOME:-~/.local/state}/ferrum-switch` (override the parent directory with `FERRUM_SWITCH_STATE`; a switch saved under the older `t3code-rust-switch` directory is still honored).
 - Installs Rust via `rustup` if `cargo` is missing, builds a locked release binary, and starts `t3code-server` on the same host, port, and data directory.
 - On Linux, stops, disables, and runtime-masks a discovered user `systemd` service while Rust is running; `./install --original` unmasks and restores it.
 - Automatically restores the TypeScript server if the Rust server fails to start.
@@ -208,6 +214,12 @@ The workspace consists of two crates and a WebAssembly host:
 1. Run `cargo test --locked` and the relevant parity scripts in `scripts/` against the pinned reference checkout.
 2. If your change fixes a gap listed in `scripts/client_rpc_parity_xfail.json` or `scripts/client_thread_parity_xfail.json`, remove that entry so the suite enforces it going forward.
 3. Keep changes focused and verify links and formatting before opening a pull request.
+
+## About the name
+
+<img src="docs/assets/ferrum-logo.jpg" alt="Ferrum logo: the Fe element tile, atomic number 26" width="128" align="right">
+
+Ferrum is Latin for iron, element 26 (Fe), and rust is what iron becomes. The project was previously named `t3code-rust`; its repository now lives at [github.com/ttulttul/Ferrum](https://github.com/ttulttul/Ferrum).
 
 ## License
 
