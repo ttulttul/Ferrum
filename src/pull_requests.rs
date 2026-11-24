@@ -15,6 +15,7 @@ mod diff_cache;
 mod discussion;
 mod files;
 mod listing;
+mod rerun;
 mod review;
 pub(crate) mod viewed_files;
 pub(crate) fn handles(method: &str) -> bool {
@@ -39,6 +40,7 @@ pub(crate) fn handles(method: &str) -> bool {
             | "routingIdentity"
             | "diffFileContents"
             | "activity"
+            | "rerunChecks"
             | "checkLogs"
     ) || review::handles(op)
 }
@@ -201,6 +203,9 @@ async fn bitbucket_read(
         .as_u64()
         .filter(|n| *n > 0)
         .ok_or_else(|| error(op, "A pull request number is required."))?;
+    if op == "rerunChecks" {
+        return Err(error(op, "This host cannot re-run checks."));
+    }
     let repository = bitbucket_pr::Repository {
         repository: named,
         host,
@@ -401,6 +406,9 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
     }
     if op == "activity" {
         return activity::read(&gh, named, number).await;
+    }
+    if op == "rerunChecks" {
+        return rerun::run(&state.pull_requests, &gh, &p, named, number, input).await;
     }
     if op == "checkLogs" {
         return detail::logs(&gh, named, number, input).await;

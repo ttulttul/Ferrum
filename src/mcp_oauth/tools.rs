@@ -82,6 +82,7 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("pull_request_list", &[]),
     ("pull_request_read", &[]),
     ("ci_logs", &[]),
+    ("ci_rerun", &[]),
     ("pull_request_create", &[]),
     ("pull_request_update", &[]),
     ("pull_request_merge", &[]),
@@ -193,6 +194,7 @@ const SERVED: &[&str] = &[
     "pull_request_list",
     "pull_request_read",
     "ci_logs",
+    "ci_rerun",
     "pull_request_create",
     "pull_request_update",
     "pull_request_merge",
@@ -913,6 +915,7 @@ pub(super) async fn call<S: McpHost>(
         | "pull_request_list"
         | "pull_request_read"
         | "ci_logs"
+        | "ci_rerun"
         | "pull_request_create"
         | "pull_request_update"
         | "pull_request_merge"
