@@ -104,6 +104,9 @@ class Provider(BaseHTTPRequestHandler):
             self.reply(200, [STACK] if self.path.endswith("pull_request=3") else [])
         elif path == f"/repos/{REPO}/stacks/6":
             self.reply(200, STACK)
+        elif path == f"/repos/{REPO}/pulls/3/merge-async/merge-id":
+            self.server.stack_merges.append(("GET", self.path, None))
+            self.reply(200, {"status": "merged", "details": {}})
         elif path.endswith("/actions/runs"):
             self.reply(200, {"workflow_runs":[], "total_count":0})
         elif path == "/user":
@@ -115,9 +118,15 @@ class Provider(BaseHTTPRequestHandler):
         else:
             self.reply(404, {"message": "Unknown fixture path"})
 
-    def do_POST(self):
-        if hasattr(self.server, "requests"):
-            self.server.requests.append(f"POST {self.path}")
+    def do_PUT(self):
+        if self.path == f"/repos/{REPO}/pulls/3/merge-async":
+            body = self.read_json()
+            self.server.stack_merges.append(("PUT", self.path, body))
+            self.reply(200, {"status": "pending", "details": {"uuid": "merge-id"}})
+        else:
+            self.reply(404, {"message": "Not Found"})
+
+    def read_json(self):
         if self.headers.get("transfer-encoding", "").lower() == "chunked":
             chunks = []
             while True:
@@ -127,9 +136,13 @@ class Provider(BaseHTTPRequestHandler):
                     break
                 chunks.append(self.rfile.read(size))
                 self.rfile.read(2)
-            data = json.loads(b"".join(chunks))
-        else:
-            data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            return json.loads(b"".join(chunks))
+        return json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+
+    def do_POST(self):
+        if hasattr(self.server, "requests"):
+            self.server.requests.append(f"POST {self.path}")
+        data = self.read_json()
         if self.path == f"/repos/{REPO}/issues":
             self.server.creates.append(data)
             self.reply(201, {"number": 12, "html_url": ISSUE["url"]})
@@ -258,6 +271,7 @@ def github_fixture(stack, directory):
     host.repository = deepcopy(REPOSITORY)
     host.actions = []
     host.merge_heads = []
+    host.stack_merges = []
     host.file_writes = []
     host.deleted = 0
     host.ref_oid = "a"*40
@@ -355,6 +369,12 @@ def main():
             case["name"] += " " + action
             cases.append(case)
         cases.append(rpc("pullRequests.runAction",{**ref,"action":"close","stackNumber":2}))
+        for label, head in [("stale stack", "b"*40), ("pinned stack", PR["headRefOid"])]:
+            case = rpc("pullRequests.runAction", {**ref, "action": "merge", "stackNumber": STACK["number"],
+                       "mergeMethod": "squash", "expectedHeadSha": PR["headRefOid"],
+                       "expectedStackHeads": [{"number": 3, "headSha": head}]})
+            case["name"] += " " + label
+            cases.append(case)
         failures = 0
         for case in cases:
             if "frame" in case:
@@ -362,7 +382,7 @@ def main():
                     ws.send(harness.encode(case["frame"]).decode())
                 packets = [harness.recv_frame(ws, timeout=15) for ws in sockets]
                 payload = case["frame"]["payload"]
-                expected_failure = payload.get("scope") == "other/repo" or payload.get("expectedHeadSha") == "abc1234" or "stackNumber" in payload or payload.get("threadId")=="Other"
+                expected_failure = payload.get("scope") == "other/repo" or payload.get("expectedHeadSha") == "abc1234" or ("stackNumber" in payload and not case["name"].endswith("pinned stack")) or payload.get("threadId")=="Other"
                 exits = [json.loads(p)["exit"] for p in packets]
                 ok = packets[0] == packets[1] and all(
                     e["_tag"] == ("Failure" if expected_failure else "Success") for e in exits)
@@ -378,6 +398,13 @@ def main():
             expected_actions = [(m,None,None) for m in ("convertPullRequestToDraft","markPullRequestReadyForReview",
                 "closePullRequest","reopenPullRequest","disablePullRequestAutoMerge","revertPullRequest")]
             expected_actions.extend([("mergePullRequest","SQUASH",None)] * 2)
+            stack_endpoint = f"/repos/{REPO}/pulls/3/merge-async"
+            if provider.stack_merges != [
+                ("PUT", stack_endpoint, {"merge_method": "squash", "merge_action": "default", "sha": PR["headRefOid"]}),
+                ("GET", stack_endpoint + "/merge-id", None),
+            ]:
+                failures += 1
+                print("FAIL asynchronous stack merge requests", provider.stack_merges)
             if provider.merge_heads != [PR["headRefOid"], None]:
                 failures += 1
                 print("FAIL merge head pins", provider.merge_heads)

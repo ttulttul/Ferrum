@@ -6,7 +6,7 @@ fn trimmed(v: &Value) -> Option<&str> {
     v.as_str().map(str::trim).filter(|s| !s.is_empty())
 }
 
-fn stack_layer(pr: &Value) -> Reply {
+pub(super) fn stack_layer(pr: &Value) -> Reply {
     let invalid = || failure("stack", Failure::Invalid);
     let mut layer = json!({"number":pr["number"].as_u64().ok_or_else(invalid)?});
     if let Some(t) = pr["title"].as_str() {

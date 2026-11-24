@@ -85,7 +85,9 @@ pub(super) async fn run(
     let (owner, name) = repo.split_once('/').unwrap();
     let vars = json!({"owner":owner, "name":name, "number":number});
     let action = required(input, "action")?;
-    if !input["stackNumber"].is_null() {
+    if !input["stackNumber"].is_null()
+        && (action != "merge" || !input["expectedStackHeads"].is_array())
+    {
         return Err(error(
             OP,
             "This stack action is not supported or has no expected head revision.",
@@ -136,6 +138,9 @@ pub(super) async fn run(
     } else {
         None
     };
+    if let Some(stack) = input["stackNumber"].as_u64() {
+        return stack_merge::run(gh, repo, number, stack, input).await;
+    }
     if action == "delete-branch" {
         return delete_branch(gh, &vars, number).await;
     }
@@ -307,4 +312,5 @@ async fn delete_branch(gh: &Github<'_>, vars: &Value, number: u64) -> Reply {
     Ok(Value::Null)
 }
 
+mod stack_merge;
 mod workflows;
