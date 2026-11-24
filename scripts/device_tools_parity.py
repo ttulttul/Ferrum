@@ -531,7 +531,7 @@ def launcher_files(root: Path):
     return files
 
 
-def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False, ssh_host=False, simlock_host=False, eas_host=False, hub_requests=()):
+def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False, ssh_host=False, simlock_host=False, eas_host=False, hub_requests=(), workspace_files=None):
     root = Path(directory, name, phase)
     root.mkdir(parents=True, exist_ok=True)
     request_log = root / "fake-requests.jsonl"
@@ -637,8 +637,11 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
             while monotonic() < deadline and not rpc(url, cookie, "device.list", {}).get("simlockHosts"):
                 sleep(0.2)
         if expo is not None:
-            rpc(url, cookie, "server.updateSettings", {"patch": {"easDeviceHosts": [
-                {"kind": "eas", "id": "expo", "label": "Expo cloud", "accessToken": "tok-ok", "appId": "app-1"}]}})
+            # `eas_host="workspace"`: no project set, so one comes from the thread's app config.
+            host = {"kind": "eas", "id": "expo", "label": "Expo cloud", "accessToken": "tok-ok"}
+            if eas_host != "workspace":
+                host["appId"] = "app-1"
+            rpc(url, cookie, "server.updateSettings", {"patch": {"easDeviceHosts": [host]}})
             deadline = monotonic() + 30
             while monotonic() < deadline and not rpc(url, cookie, "device.list", {}).get("easHosts"):
                 sleep(0.2)
@@ -656,6 +659,10 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
                 {"patch": {"enableDeviceSupport": True, "enableAgentDeviceAccess": True}},
             )
         seeded = seed_turn(url, cookie, Path(directory, name, f"{phase}-checkouts"), scenario)
+        for file, content in (workspace_files or {}).items():
+            path = Path(directory, name, f"{phase}-checkouts", "checkout", file)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
         for device_id in open_devices:
             rpc(
                 url,
@@ -744,7 +751,8 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
     if expo is not None:
         expo.close()
         session_hosts.close()
-        expo_requests = [json.loads(line) for line in (root / "expo.jsonl").read_text().splitlines()]
+        expo_log = root / "expo.jsonl"
+        expo_requests = [json.loads(line) for line in expo_log.read_text().splitlines()] if expo_log.exists() else []
         escaped = sorted({entry.split(" ", 1)[1] for entry in expo_proxy.refused} - STARTUP_FETCHES)
         requests.append({"expo": [entry["body"] for entry in expo_requests], "escaped": escaped})
         # A session's name ends in six random hex digits on both servers.
@@ -932,6 +940,25 @@ def run_server(name, command, reference_root, directory):
                 ("device_list", {"hostId": "expo"}),
             ],
             dict(enable_devices=True, eas_host=True, list_launchers=True),
+        ),
+        (
+            "eas-project",
+            [
+                ("device_open", {"hostId": "expo", "deviceId": "eas-android"}),
+                ("device_close", {"hostId": "expo", "shutdown": True}),
+            ],
+            dict(enable_devices=True, eas_host="workspace", workspace_files={
+                "apps/mobile/app.json": json.dumps({"expo": {"extra": {"eas": {
+                    "projectId": "D763FCB8-D37C-41EA-A773-B54A0AB4A454"}}}}),
+                "apps/mobile/app.config.js": "module.exports = ({ config }) => ({ ...config, name: 'Dev' });",
+            }),
+        ),
+        (
+            "eas-no-project",
+            [("device_open", {"hostId": "expo", "deviceId": "eas-ios"})],
+            dict(enable_devices=True, eas_host="workspace", workspace_files={
+                "app.config.js": "export default { extra: { eas: { projectId: process.env.ID } } };",
+            }),
         ),
         (
             "ssh-agent-off",
