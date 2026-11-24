@@ -24,6 +24,11 @@ const MEASURE_CONCURRENCY: usize = 3;
 const SETTLE_EXPRESSION: &str = "document.fonts.ready.then(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))))";
 const MEASURE_EXPRESSION: &str = "(() => { const root = document.documentElement; return root.scrollHeight > root.clientHeight ? root.scrollHeight : root.getBoundingClientRect().height; })()";
 
+/// Why a load failed when Chrome terminated the page's renderer.
+const RENDERER_GONE: &str = "the page's renderer was terminated";
+/// Loads of a page whose renderer Chrome terminated, in all (`Browser::load_page`).
+const LOAD_ATTEMPTS: u32 = 3;
+
 /// `HtmlRenderBrowserError`.
 #[derive(Debug, Clone)]
 pub(crate) struct BrowserError {
@@ -241,6 +246,11 @@ impl Shared {
             "Page.loadEventFired" => {
                 if let Some(loaded) = page.loaded.take() {
                     let _ = loaded.send(Ok(()));
+                }
+            }
+            "Inspector.targetCrashed" => {
+                if let Some(loaded) = page.loaded.take() {
+                    let _ = loaded.send(Err(BrowserError::new(RENDERER_GONE)));
                 }
             }
             "Fetch.requestPaused" => {
@@ -553,6 +563,8 @@ impl Browser {
         shared.send("Page.enable", json!({}), s).await?;
         shared.send("Runtime.enable", json!({}), s).await?;
         shared.send("Log.enable", json!({}), s).await?;
+        // Reports a renderer Chrome terminates, which would otherwise never finish loading.
+        shared.send("Inspector.enable", json!({}), s).await?;
         shared
             .send(
                 "Emulation.setEmulatedMedia",
@@ -587,6 +599,37 @@ impl Browser {
             session,
             width,
         })
+    }
+
+    /// A new page with `body` loaded, and its content height. Chrome can terminate
+    /// a renderer whose new document requests a loopback address while the
+    /// browser still holds its navigation as pending commit (bad IPC message
+    /// `RFH_INACTIVE_CHECK_FROM_PENDING_COMMIT_RFH`, under load). That page never
+    /// finishes loading, so it is closed and the body loaded again in a fresh
+    /// page, up to `LOAD_ATTEMPTS` in all, instead of waiting out the capture's
+    /// timeout.
+    async fn load_page(
+        &self,
+        width: u64,
+        appearance: &str,
+        body: Arc<String>,
+        fragment: &str,
+    ) -> Result<(Page<'_>, u64), BrowserError> {
+        let mut attempt = 1;
+        loop {
+            let page = self.open_page(width, appearance).await?;
+            match page.load(body.clone(), fragment).await {
+                Ok(height) => return Ok((page, height)),
+                Err(error) if error.reason == RENDERER_GONE && attempt < LOAD_ATTEMPTS => {
+                    attempt += 1;
+                    page.close().await;
+                }
+                Err(error) => {
+                    page.close().await;
+                    return Err(error);
+                }
+            }
+        }
     }
 
     /// `fakeIpNote`.
@@ -746,8 +789,9 @@ pub(crate) async fn capture(
 ) -> Result<Capture, BrowserError> {
     let browser = Browser::launch(executable, no_sandbox).await?;
     let run = async {
-        let page = browser.open_page(width, appearance).await?;
-        let content_height = page.load(page_body(html), fragment).await?;
+        let (page, content_height) = browser
+            .load_page(width, appearance, page_body(html), fragment)
+            .await?;
         let captured_height = content_height.clamp(1, MAX_CAPTURE_HEIGHT);
         let png = page.screenshot(captured_height).await?;
         let mut console = page.console();
@@ -787,10 +831,9 @@ pub(crate) async fn measure(
             let browser = &browser;
             let body = body.clone();
             async move {
-                let page = browser.open_page(width, "dark").await?;
-                let height = page.load(body, fragment).await;
+                let (page, height) = browser.load_page(width, "dark", body, fragment).await?;
                 page.close().await;
-                Ok::<_, BrowserError>((width, height?))
+                Ok::<_, BrowserError>((width, height))
             }
         })
         .buffered(MEASURE_CONCURRENCY)
@@ -803,6 +846,55 @@ pub(crate) async fn measure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The blocked-image preview case, looped: a page whose image is on
+    /// loopback renders, and the console says the proxy refused the image.
+    /// Under load Chrome sometimes terminates such a page's renderer
+    /// (`Browser::load_page`). Run with `T3_HEADLESS_SHELL` set to a headless
+    /// shell; `T3_BLOCKED_ROUNDS` and `T3_BLOCKED_PARALLEL` loop it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a headless shell"]
+    async fn a_blocked_loopback_image_renders() {
+        let shell = std::path::PathBuf::from(
+            std::env::var("T3_HEADLESS_SHELL").expect("T3_HEADLESS_SHELL"),
+        );
+        let number = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1usize)
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let html = format!(
+            "<!doctype html><html><body><p>Blocked</p><img src=\"http://127.0.0.1:{port}/blocked.png\"></body></html>"
+        );
+        let mut slowest = Duration::ZERO;
+        for round in 0..number("T3_BLOCKED_ROUNDS") {
+            let runs = (0..number("T3_BLOCKED_PARALLEL")).map(|_| {
+                let (shell, html) = (shell.clone(), html.clone());
+                tokio::spawn(async move {
+                    let started = std::time::Instant::now();
+                    let capture = capture(&shell, false, &html, 800, "", "dark").await;
+                    (started.elapsed(), capture)
+                })
+            });
+            for run in futures_util::future::join_all(runs).await {
+                let (took, capture) = run.unwrap();
+                let capture = capture.unwrap_or_else(|e| panic!("round {round}: {}", e.message()));
+                let console: Vec<&str> = capture.console.iter().map(|m| m.text.as_str()).collect();
+                assert!(
+                    console
+                        .iter()
+                        .any(|t| t.contains("net::ERR_SOCKS_CONNECTION_FAILED")),
+                    "round {round}: {console:?}"
+                );
+                slowest = slowest.max(took);
+            }
+        }
+        eprintln!("slowest capture {slowest:?}");
+        drop(listener);
+    }
 
     #[test]
     fn console_messages_read_as_the_reference_reads_them() {
