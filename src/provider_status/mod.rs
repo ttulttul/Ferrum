@@ -629,26 +629,36 @@ fn workspace_snapshot_current(snapshot: &Value, now_ms: i64) -> bool {
 
 /// `upsertProviderWorkspaceSnapshot` for a scan that found `skills`, with the
 /// machine snapshot's slash commands (Codex's `snapshotForCwd`).
-fn upsert_workspace_snapshot(row: &mut Value, cwd: &str, checked_at: &str, skills: Vec<Value>) {
+/// What a driver's folder scan (`snapshotForCwd`) found.
+pub(super) struct FolderScan {
+    pub skills: Vec<Value>,
+    pub slash_commands: Vec<Value>,
+    /// `slashCommandsPending` as the driver set it; `None` takes the machine
+    /// check's failure (`status === "error"`).
+    pub slash_pending: Option<bool>,
+}
+
+/// `upsertProviderWorkspaceSnapshot`.
+fn upsert_workspace_snapshot(row: &mut Value, cwd: &str, checked_at: &str, scan: FolderScan) {
     let previous = row["workspaceSnapshots"]
         .as_array()
         .and_then(|all| all.iter().find(|s| s["cwd"] == cwd))
         .cloned();
-    // A machine check that failed leaves the commands pending (`status === "error"`).
-    let pending = row["status"] == "error";
-    let mut snapshot = json!({
-        "cwd": cwd,
-        "checkedAt": checked_at,
-        "slashCommands": if pending {
-            previous.as_ref().map(|p| p["slashCommands"].clone()).unwrap_or_else(|| row["slashCommands"].clone())
-        } else {
-            row["slashCommands"].clone()
-        },
-    });
+    let pending = scan.slash_pending.unwrap_or(row["status"] == "error");
+    let slash_commands = if pending {
+        previous
+            .as_ref()
+            .map(|p| p["slashCommands"].clone())
+            .unwrap_or_else(|| json!(scan.slash_commands))
+    } else {
+        json!(scan.slash_commands)
+    };
+    let mut snapshot =
+        json!({"cwd": cwd, "checkedAt": checked_at, "slashCommands": slash_commands});
     if pending {
         snapshot["slashCommandsPending"] = json!(true);
     }
-    snapshot["skills"] = json!(skills);
+    snapshot["skills"] = json!(scan.skills);
     if let Some(descriptors) = previous.as_ref().and_then(|p| p.get("optionDescriptors")) {
         snapshot["optionDescriptors"] = descriptors.clone();
     }
@@ -661,15 +671,58 @@ fn upsert_workspace_snapshot(row: &mut Value, cwd: &str, checked_at: &str, skill
     row["workspaceSnapshots"] = json!(all.into_iter().skip(skip).collect::<Vec<_>>());
 }
 
-/// `refreshWorkspaceSnapshot` (without `fresh`): scan `cwd` for an enabled
-/// instance whose snapshot of it is missing, stale or pending, and publish
-/// the result on its row. Only Codex scans a folder here (its skills, through
-/// the skills helper); other drivers keep their machine catalogs. A failed
-/// scan publishes nothing, as the reference recovers from it.
+/// The drivers whose folders are scanned here (`snapshotForCwd`).
+pub(crate) fn scans_folders(driver: &str) -> bool {
+    matches!(driver, "codex" | "claudeAgent" | "grok" | "pi")
+}
+
+/// A driver's folder scan, against its published (machine) row.
+async fn scan_folder(
+    service: &ProviderStatus,
+    instance: &Instance,
+    row: &Value,
+    cwd: &str,
+) -> Option<FolderScan> {
+    let env = base_env(&instance.environment);
+    let machine_commands = || row["slashCommands"].as_array().cloned().unwrap_or_default();
+    match instance.driver.as_str() {
+        "codex" => Some(FolderScan {
+            skills: service
+                .codex_skills
+                .probe(&instance.config, &env, cwd)
+                .await?,
+            slash_commands: machine_commands(),
+            slash_pending: None,
+        }),
+        "claudeAgent" => Some(claude::folder_scan(&instance.config, &env, cwd).await),
+        "grok" => Some(FolderScan {
+            skills: grok::folder_skills(&instance.config, &env, cwd).await?,
+            slash_commands: machine_commands(),
+            slash_pending: None,
+        }),
+        "pi" => {
+            let (slash_commands, skills) = pi::folder_commands(&instance.config, &env, cwd).await?;
+            Some(FolderScan {
+                skills,
+                slash_commands,
+                slash_pending: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `refreshWorkspaceSnapshot`: scan `cwd` for an enabled instance whose
+/// snapshot of it is missing, stale or pending (or always, with `fresh`,
+/// which first drops other instances' snapshots of it and checks the
+/// instance again), and publish the result on its row. Scans of one folder
+/// run one at a time, so a second request waits for the first's result. A
+/// failed scan publishes nothing, as the reference recovers from it.
 pub(crate) async fn refresh_workspace_snapshot(
     state: &Arc<AppState>,
     instance_id: &str,
     cwd: &str,
+    fresh: bool,
 ) {
     if state.provider_status.is_disabled() {
         return;
@@ -683,30 +736,51 @@ pub(crate) async fn refresh_workspace_snapshot(
     else {
         return;
     };
-    if !instance.enabled || instance.driver != "codex" {
+    let service = &state.provider_status;
+    if fresh {
+        let changed = {
+            let mut state = service.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut changed = false;
+            for (id, published) in state.published.iter_mut() {
+                if id == instance_id {
+                    continue;
+                }
+                if let Some(all) = published.row["workspaceSnapshots"].as_array_mut() {
+                    let before = all.len();
+                    all.retain(|s| s["cwd"] != cwd);
+                    changed |= all.len() != before;
+                }
+            }
+            changed
+        };
+        if changed {
+            let _ = service.changes.send(());
+        }
+    }
+    if !instance.enabled || !scans_folders(&instance.driver) {
         return;
     }
-    let service = &state.provider_status;
-    let now_ms = crate::platform::now_ms();
-    let current = service
+    let lock = service.lock_for(&format!("folder\0{instance_id}\0{cwd}"));
+    let _guard = lock.lock().await;
+    if fresh {
+        refresh(state, Some(instance_id)).await;
+    }
+    // An instance whose row is not published yet is scanned too, though its
+    // result has no row to land on.
+    let row = service
         .published_row(&instance.id, &instance.fingerprint)
-        .is_some_and(|row| {
-            row["workspaceSnapshots"]
-                .as_array()
-                .and_then(|all| all.iter().find(|s| s["cwd"] == cwd))
-                .is_some_and(|s| workspace_snapshot_current(s, now_ms))
-        });
-    if current {
+        .unwrap_or(Value::Null);
+    let now_ms = crate::platform::now_ms();
+    let current = row["workspaceSnapshots"]
+        .as_array()
+        .and_then(|all| all.iter().find(|s| s["cwd"] == cwd))
+        .is_some_and(|s| workspace_snapshot_current(s, now_ms));
+    if current && !fresh {
         return;
     }
     // Use the scan's start for the TTL, not the machine check's time.
     let scanned_at = now_iso();
-    let env = base_env(&instance.environment);
-    let Some(skills) = service
-        .codex_skills
-        .probe(&instance.config, &env, cwd)
-        .await
-    else {
+    let Some(scan) = scan_folder(service, &instance, &row, cwd).await else {
         return;
     };
     let changed = {
@@ -715,7 +789,7 @@ pub(crate) async fn refresh_workspace_snapshot(
             Some(published)
                 if published.fingerprint == instance.fingerprint && !published.row.is_null() =>
             {
-                upsert_workspace_snapshot(&mut published.row, cwd, &scanned_at, skills);
+                upsert_workspace_snapshot(&mut published.row, cwd, &scanned_at, scan);
                 true
             }
             _ => false,
@@ -1912,16 +1986,21 @@ mod tests {
 
     #[test]
     fn workspace_snapshots_are_upserted_kept_and_expire() {
+        let scan = |skills: Vec<Value>| FolderScan {
+            skills,
+            slash_commands: vec![json!({"name": "compact"})],
+            slash_pending: None,
+        };
         let mut row =
             json!({"status": "ready", "slashCommands": [{"name": "compact"}], "models": []});
         upsert_workspace_snapshot(
             &mut row,
             "/a",
             "2026-11-23T00:00:00.000Z",
-            vec![json!({"name": "s"})],
+            scan(vec![json!({"name": "s"})]),
         );
-        upsert_workspace_snapshot(&mut row, "/b", "2026-11-23T00:00:00.000Z", vec![]);
-        upsert_workspace_snapshot(&mut row, "/a", "2026-11-23T00:01:00.000Z", vec![]);
+        upsert_workspace_snapshot(&mut row, "/b", "2026-11-23T00:00:00.000Z", scan(vec![]));
+        upsert_workspace_snapshot(&mut row, "/a", "2026-11-23T00:01:00.000Z", scan(vec![]));
         let all = row["workspaceSnapshots"].as_array().unwrap();
         assert_eq!(
             all.iter()
