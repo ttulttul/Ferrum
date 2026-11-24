@@ -1,4 +1,5 @@
 {
+ "toolGap": 0,
  "steps": [
   {
    "expect": "initialize"
@@ -608,6 +609,9 @@
     },
     "emittedAtMs": 1795225881725
    }
+  },
+  {
+   "sleep": 0.3
   },
   {
    "mcp": {
