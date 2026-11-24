@@ -1,4 +1,6 @@
 use super::agent_device::{self, AgentEndpoint, StartError};
+use super::eas_device_host::{self as eas, EasConfig, EasState};
+use super::expo_api;
 use super::simlock_device_host::{self as simlock, Lease, SimlockConfig, SimlockState};
 use super::ssh_device_host::{self as ssh_host, SshConfig};
 use super::{invalid, string, timestamp, Reply};
@@ -85,6 +87,8 @@ pub struct DeviceService {
     ssh_activated: Mutex<HashSet<String>>,
     /// The SSH hosts agents use (`wantsAgent`), which start with their daemon.
     ssh_wants_agent: Mutex<HashSet<String>>,
+    /// The Expo Simulators hosts from settings (`easDeviceHosts`).
+    eas_hosts: Mutex<Vec<EasState>>,
     /// The Simlock hosts from settings (`simlockDeviceHosts`, when the alpha is on).
     simlock_hosts: Mutex<Vec<SimlockState>>,
     /// Launchers on a session a host leases to every thread (a Simlock
@@ -119,6 +123,7 @@ impl DeviceService {
             ssh_ready: Default::default(),
             ssh_activated: Default::default(),
             ssh_wants_agent: Default::default(),
+            eas_hosts: Default::default(),
             simlock_hosts: Default::default(),
             host_session_launchers: Default::default(),
             reconcile_lock: Default::default(),
@@ -1404,6 +1409,7 @@ impl DeviceService {
                 .iter()
                 .map(|(_, summary)| summary.clone()),
         );
+        hosts.extend(self.eas_hosts.lock().unwrap().iter().map(EasState::summary));
         hosts.extend(
             self.simlock_hosts
                 .lock()
@@ -1743,6 +1749,16 @@ impl DeviceService {
             if enabled && input["inspectOnly"] != true {
                 drop(runtime);
                 self.list_ssh_hosts(dir).await;
+                let eas_hosts: Vec<String> = self
+                    .eas_hosts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|host| host.config.id.clone())
+                    .collect();
+                for id in eas_hosts {
+                    self.list_eas_host(&id, dir).await;
+                }
                 let simlock_hosts: Vec<String> = self
                     .simlock_hosts
                     .lock()
@@ -2968,6 +2984,7 @@ impl DeviceService {
         }
         self.ssh_config(host_id)
             .map(|config| config.label)
+            .or_else(|| self.eas_config(host_id).map(|config| config.label))
             .or_else(|| self.simlock_config(host_id).map(|config| config.label))
             .unwrap_or_else(|| host_id.to_owned())
     }
@@ -3444,6 +3461,96 @@ impl DeviceService {
                 }
             }
         }
+    }
+
+    fn eas_config(&self, host_id: &str) -> Option<EasConfig> {
+        self.eas_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|host| host.config.id == host_id)
+            .map(|host| host.config.clone())
+    }
+
+    fn with_eas<T>(&self, host_id: &str, f: impl FnOnce(&mut EasState) -> T) -> Option<T> {
+        self.eas_hosts
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|host| host.config.id == host_id)
+            .map(f)
+    }
+
+    /// `resolveSavedExpoCredential`: the host's saved token (a secret, read
+    /// now), else `EXPO_TOKEN`, else the `eas login` session.
+    async fn eas_credential(&self, config: &EasConfig) -> Result<expo_api::Credential, String> {
+        let settings = self
+            .settings
+            .internal()
+            .map_err(|_| "Could not read or save device settings.".to_owned())?;
+        let token = device_token(&self.settings.resolver, &settings, &config.access_token).await?;
+        expo_api::resolve_credential(&token, &home())
+    }
+
+    /// Each host's `platformAvailability`: each server signs in on its own,
+    /// so one with no Expo credential answers for itself.
+    async fn refresh_eas_platforms(&self) {
+        let configs: Vec<EasConfig> = self
+            .eas_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|host| host.config.clone())
+            .collect();
+        for config in configs {
+            let available = self.eas_credential(&config).await;
+            let platforms: Vec<Value> = ["ios", "android"]
+                .into_iter()
+                .map(|platform| match &available {
+                    Ok(_) => json!({"platform": platform, "available": true}),
+                    Err(reason) => {
+                        json!({"platform": platform, "available": false, "reason": reason})
+                    }
+                })
+                .collect();
+            self.with_eas(&config.id, |host| host.platforms = Value::Array(platforms));
+        }
+    }
+
+    /// `list` for one Expo host: made ready (its credential need not be
+    /// there yet), then its catalog and running sessions.
+    async fn list_eas_host(&self, host_id: &str, dir: &Path) {
+        if self.eas_config(host_id).is_none() {
+            return;
+        }
+        let enabled = self
+            .settings
+            .internal()
+            .is_ok_and(|settings| settings["enableDeviceSupport"] == true);
+        if !enabled {
+            return;
+        }
+        self.with_eas(host_id, |host| host.ready = true);
+        if self.current()["hostStatuses"][host_id]["status"] != "ready" {
+            self.set_host_status_for(host_id, "ready", None);
+        }
+        self.refresh_eas_platforms().await;
+        let mut state = self.current();
+        if state["hostStatus"] == "disabled" {
+            return;
+        }
+        apply_list_result(
+            &mut state,
+            dir,
+            host_id,
+            HubListResult {
+                devices: eas::catalog(host_id),
+                detail: None,
+                android_discovery_incomplete: false,
+                incomplete_platforms: Vec::new(),
+            },
+        );
+        self.publish(&mut state);
     }
 
     fn simlock_config(&self, host_id: &str) -> Option<SimlockConfig> {
@@ -4282,14 +4389,52 @@ impl DeviceService {
             }
             added
         };
-        // Simlock hosts (alpha) follow the SSH hosts; an id two lists share stays the first one's.
-        let ssh_ids: HashSet<String> = self
+        // Expo hosts, then Simlock hosts (alpha), follow the SSH hosts; an id two lists share
+        // stays the first one's.
+        let mut ssh_ids: HashSet<String> = self
             .ssh_hosts
             .lock()
             .unwrap()
             .iter()
             .map(|(config, _)| config.id.clone())
             .collect();
+        let mut next_eas: Vec<EasConfig> = Vec::new();
+        for config in settings["easDeviceHosts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(EasConfig::from_settings)
+        {
+            if !ssh_ids.contains(&config.id) && !next_eas.iter().any(|c| c.id == config.id) {
+                next_eas.push(config);
+            }
+        }
+        let removed_eas: Vec<String> = {
+            let mut hosts = self.eas_hosts.lock().unwrap();
+            let removed = hosts
+                .iter()
+                .filter(|host| !next_eas.iter().any(|c| c.raw == host.config.raw))
+                .map(|host| host.config.id.clone())
+                .collect::<Vec<_>>();
+            hosts.retain(|host| next_eas.iter().any(|c| c.raw == host.config.raw));
+            removed
+        };
+        if !removed_eas.is_empty() {
+            self.refresh_hosts(dir, &removed_eas);
+        }
+        let mut added_eas = false;
+        {
+            let mut hosts = self.eas_hosts.lock().unwrap();
+            for config in &next_eas {
+                if hosts.iter().any(|host| host.config.id == config.id) {
+                    continue;
+                }
+                added_eas = true;
+                hosts.push(EasState::new(config.clone()));
+            }
+        }
+        self.refresh_eas_platforms().await;
+        ssh_ids.extend(next_eas.iter().map(|config| config.id.clone()));
         let mut next_simlock: Vec<SimlockConfig> = Vec::new();
         if settings["simlockDeviceHostsEnabled"] == true {
             for config in settings["simlockDeviceHosts"]
@@ -4346,8 +4491,9 @@ impl DeviceService {
             }
         }
         let mut removed = removed;
+        removed.extend(removed_eas);
         removed.extend(removed_simlock_ids);
-        if added || !added_simlock.is_empty() || !removed.is_empty() {
+        if added || added_eas || !added_simlock.is_empty() || !removed.is_empty() {
             self.refresh_hosts(dir, &removed);
         }
     }
@@ -4614,82 +4760,37 @@ async fn simlock(input: &Value, settings: &Value, resolver: &Resolver) -> Reply 
     }))
 }
 
+/// `easAccount`: who an Expo credential signs in as, and their apps.
 async fn expo(input: &Value, settings: &Value, resolver: &Resolver) -> Reply {
-    let fail = |s: &str| json!({"_tag":"DeviceEasAccountError","reason":s});
-    let from_session = || -> Option<String> {
-        let state: Value =
-            serde_json::from_slice(&fs::read(home().join(".expo/state.json")).ok()?).ok()?;
-        state["auth"]["sessionSecret"].as_str().map(str::to_owned)
-    };
-    let saved = saved_host(settings, "easDeviceHosts", input);
-    let credential = input
+    let fail = |reason: String| json!({"_tag":"DeviceEasAccountError","reason":reason});
+    let saved = input["hostId"].as_str().map_or(Value::Null, |id| {
+        settings["easDeviceHosts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|host| host["id"] == id)
+            .map(|host| host["accessToken"].clone())
+            .unwrap_or(Value::Null)
+    });
+    let source = input
         .get("accessToken")
         .filter(|v| !v.is_null())
-        .or_else(|| saved.and_then(|h| h.get("accessToken")));
-    let token = device_token(resolver, settings, credential.unwrap_or(&Value::Null))
+        .unwrap_or(&saved);
+    let token = device_token(resolver, settings, source)
         .await
-        .map_err(|reason| fail(&reason))?;
-    let (source, token) = Some(token.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| ("settings", s.to_owned()))
-        .or_else(|| {
-            env::var("EXPO_TOKEN")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| ("env", s.trim().to_owned()))
+        .map_err(fail)?;
+    let credential = expo_api::resolve_credential(&token, &home()).map_err(fail)?;
+    // Only bounded text reaches the browser: the credential errors' own
+    // guidance, or a category for what Expo answered, never Expo's text.
+    let (name, apps) = expo_api::viewer(&credential).await.map_err(|error| {
+        tracing::warn!(error = %error.message(), "Expo account check failed");
+        fail(match error.status {
+            Some(status @ (401 | 403)) => format!("Expo rejected the credential (HTTP {status})."),
+            _ if error.rejected => "Expo refused the account check.".into(),
+            _ => "Could not complete the Expo account check.".into(),
         })
-        .or_else(|| from_session().map(|s| ("eas-login", s)))
-        .ok_or_else(|| {
-            fail("No Expo credential on the server: save an access token for this host, set EXPO_TOKEN, or run `eas login`.")
-        })?;
-    if !token.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
-        return Err(fail(&format!(
-            "{} is not a usable Expo credential. Replace it.",
-            match source {
-                "settings" => "The saved access token",
-                "env" => "EXPO_TOKEN",
-                _ => "The eas login session",
-            }
-        )));
-    }
-    let request = client().post("https://api.expo.dev/graphql").json(&json!({"query":"query T3ExpoViewer {meActor {__typename ... on UserActor {username} ... on Robot {firstName} accounts {name appsPaginated(first:100) {edges {node {id fullName}}}}}}"}));
-    let req = if source == "eas-login" {
-        request.header("expo-session", token)
-    } else {
-        request.bearer_auth(token)
-    };
-    let bad = || fail("Could not complete the Expo account check.");
-    let response = req.send().await.map_err(|_| bad())?;
-    if !response.status().is_success() {
-        return Err(if matches!(response.status().as_u16(), 401 | 403) {
-            fail(&format!(
-                "Expo rejected the credential (HTTP {}).",
-                response.status().as_u16()
-            ))
-        } else {
-            bad()
-        });
-    }
-    let result: Value = response.json().await.map_err(|_| bad())?;
-    if result.get("errors").is_some() {
-        return Err(fail("Expo refused the account check."));
-    }
-    let actor = &result["data"]["meActor"];
-    let name = actor["username"]
-        .as_str()
-        .or(actor["firstName"].as_str())
-        .or(actor["__typename"].as_str())
-        .ok_or_else(bad)?;
-    let mut apps = Vec::new();
-    for account in actor["accounts"].as_array().ok_or_else(bad)? {
-        for edge in account["appsPaginated"]["edges"]
-            .as_array()
-            .ok_or_else(bad)?
-        {
-            apps.push(json!({"id":edge["node"]["id"],"fullName":edge["node"]["fullName"]}));
-        }
-    }
-    Ok(json!({"signedInAs":name,"credentialSource":source,"apps":apps}))
+    })?;
+    Ok(json!({"signedInAs": name, "credentialSource": credential.source, "apps": apps}))
 }
 
 impl DeviceService {

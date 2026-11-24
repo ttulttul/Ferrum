@@ -4,6 +4,8 @@ mod browser;
 mod device_actions;
 mod devices;
 pub(crate) mod discovery;
+mod eas_device_host;
+mod expo_api;
 pub(crate) mod files;
 pub(crate) mod git_workflow;
 pub(crate) mod local_ssh;

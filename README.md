@@ -53,7 +53,7 @@ Most suites match the original exactly; the few expected differences are listed 
 ### Agents and tools
 
 - **Pull request changes.** Agents can read pull requests and CI, but can't open, update, review, respond to or merge one, or re-run CI (`pull_request_create`, `pull_request_update`, `pull_request_review`, `pull_request_respond`, `pull_request_merge`, `ci_rerun`).
-- **Devices.** Agents can use simulators and emulators on this machine, on SSH device hosts and from Simlock pools (alpha), but not on Expo hosts. Device detail and actions (settings, foreground app) work on this machine only.
+- **Devices.** Agents can use simulators and emulators on this machine, on SSH device hosts and from Simlock pools (alpha), but not on Expo hosts yet (they are listed, and accounts can be checked). Device detail and actions (settings, foreground app) work on this machine only.
 - **Delegated tasks.** On the embeddable control plane a child can't run in its own worktree (`isolation: "worktree"`), and a follow-up sent to a child on a linked machine isn't tracked as a task.
 - **Codex skills.** `orchestrator_capabilities` doesn't rescan the project's Codex skills, as the original does (upstream #39247).
 - **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing. So are browser setup hints and installing a browser when none is found.
@@ -74,7 +74,7 @@ Most suites match the original exactly; the few expected differences are listed 
 Parity is tested by running the original TypeScript server and the Rust server side by side and comparing what they answer. Each gets a fresh home directory, and both get the same fake provider CLIs that replay recorded Codex and Claude sessions and scripted ACP sessions (Grok and ACP Registry agents), and local stand-ins for every outside service. No test reaches the network or a real model.
 
 - **Pinned reference:** [upstream commit `fd0331ca`](https://github.com/pingdotgg/t3code/tree/fd0331ca9b1596ed7018c80f52b7e6730014f593) (`fd0331ca9b1596ed7018c80f52b7e6730014f593`). This is the only place the README names it.
-- **Suites:** 54 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
+- **Suites:** 55 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
 - **Client calls:** the [client RPC suite](scripts/client_rpc_cases.json) drives 242 recorded client steps through the original client. None is expected to fail.
 - **Live turns:** the client thread suite runs 120 provider scenarios. 43 checks are expected to fail, 15 of them races ([list](scripts/client_thread_parity_xfail.json)).
 - **Shared home:** the server-switch suite has 1 expected failure ([list](scripts/shared_store_parity_xfail.json)).
