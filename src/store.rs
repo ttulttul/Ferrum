@@ -706,6 +706,10 @@ impl Store {
                     {
                         thread.project_id = value.to_owned();
                     }
+                    // The folder its turns run in, when its workspace changes.
+                    if let Some(value) = patch.get("cwd").and_then(serde_json::Value::as_str) {
+                        thread.cwd = value.to_owned();
+                    }
                     if let Some(value) = patch.get("archived").and_then(serde_json::Value::as_bool)
                     {
                         thread.archived = value;

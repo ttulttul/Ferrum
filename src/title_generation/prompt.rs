@@ -8,6 +8,9 @@ use serde_json::Value;
 /// reference's `toJsonSchemaObject` writes it.
 pub const OUTPUT_SCHEMA: &str = r#"{"type":"object","properties":{"title":{"type":"string"},"needsRefinement":{"type":"boolean"}},"required":["title","needsRefinement"],"additionalProperties":false}"#;
 
+/// JSON Schema of the branch name output (`{branch}`).
+pub const BRANCH_OUTPUT_SCHEMA: &str = r#"{"type":"object","properties":{"branch":{"type":"string"}},"required":["branch"],"additionalProperties":false}"#;
+
 const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT: &str = "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
 const EARLIER_CONTENT_TRUNCATION_MARKER: &str = "[Earlier content truncated]\n\n";
 const MAX_CONTEXT: usize = 8_000;

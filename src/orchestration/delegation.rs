@@ -185,9 +185,13 @@ fn child_thread_row(
     ] {
         row[key] = value;
     }
-    if command.get("workspaceStrategy").is_some() {
+    if let Some(strategy) = command.get("workspaceStrategy") {
         row["branch"] = Value::Null;
         row["worktreePath"] = Value::Null;
+        // The child's first run waits for its worktree (`defer_start`).
+        row["runExtras"] = json!({
+            crate::store::Run::reference_id(child_id, 1): {"workspacePreparation": strategy}
+        });
     }
     row
 }
@@ -341,7 +345,18 @@ pub(super) async fn request<H: CommandHost>(
         id: child_id.clone(),
         project_id: parent.project_id.clone(),
         title: title.clone(),
-        cwd: parent.cwd.clone(),
+        // A child in its own worktree starts in the project's folder until it is prepared.
+        cwd: if command.get("workspaceStrategy").is_some() {
+            state
+                .store
+                .read()
+                .await
+                .projects
+                .get(&parent.project_id)
+                .map_or_else(|| parent.cwd.clone(), |project| project.path.clone())
+        } else {
+            parent.cwd.clone()
+        },
         status: "idle".into(),
         messages: vec![],
         runs: vec![],
@@ -376,7 +391,17 @@ pub(super) async fn request<H: CommandHost>(
         "creationSource": command["creationSource"],
         "senderThreadId": parent_id,
     });
-    let seq = start_child_run(state.clone(), receipt, &child_id, prompt, &message_id, wire).await?;
+    let deferred = command.get("workspaceStrategy").is_some();
+    let seq = start_child_run(
+        state.clone(),
+        receipt,
+        &child_id,
+        prompt,
+        &message_id,
+        wire,
+        deferred,
+    )
+    .await?;
     let child_run = state
         .store
         .read()
@@ -436,7 +461,8 @@ pub(super) async fn request<H: CommandHost>(
 }
 
 /// Starts the child's run on the task, as `message.dispatch` with
-/// `start_immediately` does, with the message's wire fields.
+/// `start_immediately` does, with the message's wire fields; `deferred`, as
+/// `defer_start` does, leaves it preparing its workspace.
 async fn start_child_run<H: CommandHost>(
     state: Arc<H>,
     receipt: &CommandReceipt,
@@ -444,6 +470,7 @@ async fn start_child_run<H: CommandHost>(
     prompt: &str,
     message_id: &Value,
     wire: Value,
+    deferred: bool,
 ) -> anyhow::Result<u64> {
     let seq = start_run(
         state.clone(),
@@ -458,7 +485,7 @@ async fn start_child_run<H: CommandHost>(
         false,
         None,
         Some(wire),
-        false,
+        deferred,
         None,
     )
     .await?;
@@ -2627,6 +2654,26 @@ pub(crate) async fn stop_app_owned<H: CommandHost>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_child_in_its_own_worktree_waits_for_it_on_its_first_run() {
+        let parent = json!({"id": "thread:p", "branch": "main", "worktreePath": "/w/p",
+            "runExtras": {"run:thread:p:ordinal:1": {"x": 1}}});
+        let strategy = json!({"type": "worktree", "baseRef": "abc", "startFromOrigin": false});
+        let command = json!({"modelSelection": {"instanceId": "codex", "model": "m"},
+            "workspaceStrategy": strategy});
+        let row = child_thread_row(&parent, "thread:c", "node:c", &command, "Child", "t");
+        assert_eq!(row["branch"], Value::Null);
+        assert_eq!(row["worktreePath"], Value::Null);
+        assert_eq!(
+            row["runExtras"],
+            json!({"run:thread:thread%3Ac:ordinal:1": {"workspacePreparation": strategy}})
+        );
+        let shared = json!({"modelSelection": {"instanceId": "codex", "model": "m"}});
+        let row = child_thread_row(&parent, "thread:c", "node:c", &shared, "Child", "t");
+        assert_eq!(row["worktreePath"], "/w/p");
+        assert!(row.get("runExtras").is_none());
+    }
 
     #[test]
     fn ids_derive_from_the_command_as_the_reference_joins_them() {

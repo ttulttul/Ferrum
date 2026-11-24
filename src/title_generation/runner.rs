@@ -48,6 +48,37 @@ pub(crate) struct Request<'a> {
     pub attachments: &'a [Value],
     pub selection: Value,
     pub project_id: &'a str,
+    /// What the model is asked to return.
+    pub output: OutputKind,
+}
+
+/// The structured output a text generation asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutputKind {
+    /// `{title, needsRefinement}` (`generateThreadTitle`).
+    Title,
+    /// `{branch}` (`generateBranchName`).
+    Branch,
+}
+
+impl OutputKind {
+    fn schema(self) -> &'static str {
+        match self {
+            OutputKind::Title => super::prompt::OUTPUT_SCHEMA,
+            OutputKind::Branch => super::prompt::BRANCH_OUTPUT_SCHEMA,
+        }
+    }
+
+    /// The output decoded strictly against its schema.
+    fn decode(self, value: &Value) -> Option<Value> {
+        match self {
+            OutputKind::Title => decode_title_value(value),
+            OutputKind::Branch => {
+                value["branch"].as_str()?;
+                Some(value.clone())
+            }
+        }
+    }
 }
 
 fn option_string(selection: &Value, id: &str) -> Option<String> {
@@ -510,7 +541,7 @@ async fn run_codex(
         ));
     }
     let images = image_paths(state, request.attachments);
-    let schema = super::prompt::OUTPUT_SCHEMA;
+    let schema = request.output.schema();
     let pid = std::process::id();
     let (_schema_dir, schema_path) = temp_file(&format!("t3code-codex-schema-{pid}-"), schema)
         .map_err(|_| "Failed to write temp file".to_owned())?;
@@ -638,19 +669,15 @@ async fn run_codex(
     }
     let text = std::fs::read_to_string(&output_path)
         .map_err(|_| "Failed to read Codex output file.".to_owned())?;
-    decode_title(&text).ok_or_else(|| "Codex returned invalid structured output.".into())
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|value| request.output.decode(&value))
+        .ok_or_else(|| "Codex returned invalid structured output.".into())
 }
 
 fn mcp_table() -> &'static regex::Regex {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     PATTERN.get_or_init(|| regex::Regex::new(r"\bmcp_servers\s*=").expect("pattern"))
-}
-
-/// The title output decoded strictly: a string `title`, and
-/// `needsRefinement` a boolean when present.
-fn decode_title(text: &str) -> Option<Value> {
-    let value: Value = serde_json::from_str(text).ok()?;
-    decode_title_value(&value)
 }
 
 /// `extractJsonObject`: the first balanced `{...}` of a model's reply (strings
@@ -687,12 +714,16 @@ pub(crate) fn extract_json_object(raw: &str) -> &str {
     trimmed
 }
 
-/// `decodeJsonReply`: a provider's free-text reply decoded as the title output.
-fn decode_json_reply(provider: &str, text: &str) -> Result<Value, String> {
-    decode_title(extract_json_object(text))
+/// `decodeJsonReply`: a provider's free-text reply decoded as `output`.
+fn decode_json_reply(output: OutputKind, provider: &str, text: &str) -> Result<Value, String> {
+    serde_json::from_str::<Value>(extract_json_object(text))
+        .ok()
+        .and_then(|value| output.decode(&value))
         .ok_or_else(|| format!("{provider} returned invalid structured output."))
 }
 
+/// The title output decoded strictly: a string `title`, and
+/// `needsRefinement` a boolean when present.
 fn decode_title_value(value: &Value) -> Option<Value> {
     value["title"].as_str()?;
     if !value["needsRefinement"].is_null() && !value["needsRefinement"].is_boolean() {
@@ -926,7 +957,7 @@ async fn run_claude(
         }
         args.extend([
             "--json-schema".to_owned(),
-            super::prompt::OUTPUT_SCHEMA.to_owned(),
+            request.output.schema().to_owned(),
         ]);
         args.extend(["--model".to_owned(), api_model.clone()]);
         if let Some(effort) = &effort {
@@ -1021,7 +1052,7 @@ async fn run_claude(
         _ => return Err("Claude CLI returned unexpected output format.".into()),
     };
     envelope
-        .and_then(|envelope| decode_title_value(&envelope["structured_output"]))
+        .and_then(|envelope| request.output.decode(&envelope["structured_output"]))
         .ok_or_else(|| "Claude returned invalid structured output.".into())
 }
 
@@ -1032,6 +1063,33 @@ pub(crate) async fn generate_thread_title(
     settings: &Value,
     request: Request<'_>,
 ) -> Result<String, String> {
+    let output = generate(state, settings, request).await?;
+    let raw = output["title"].as_str().unwrap_or_default();
+    let title = super::prompt::sanitize_thread_title(raw);
+    if title.eq_ignore_ascii_case("title") {
+        return Err("The model returned the placeholder title \"title\".".into());
+    }
+    Ok(title)
+}
+
+/// `TextGeneration.generateBranchName`: the generated name as the model
+/// returned it, before `formatGeneratedBranchName`, or the error's detail.
+pub(crate) async fn generate_branch_name(
+    state: &crate::AppState,
+    settings: &Value,
+    request: Request<'_>,
+) -> Result<String, String> {
+    let output = generate(state, settings, request).await?;
+    Ok(output["branch"].as_str().unwrap_or_default().to_owned())
+}
+
+/// The routed text generation: the decoded output of the provider that
+/// `TextGeneration` picks for the request's selection.
+async fn generate(
+    state: &crate::AppState,
+    settings: &Value,
+    request: Request<'_>,
+) -> Result<Value, String> {
     let snapshots = crate::server_config::providers::list(state, settings, &Value::Null)
         .as_array()
         .cloned()
@@ -1069,7 +1127,7 @@ pub(crate) async fn generate_thread_title(
                 option_string(&selection, "reasoningEffort").as_deref(),
             )
             .await?;
-            decode_json_reply("Grok Agent", &text)?
+            decode_json_reply(request.output, "Grok Agent", &text)?
         }
         "opencode" => {
             let env = crate::provider_status::base_env(&instance_env(&instance));
@@ -1085,7 +1143,7 @@ pub(crate) async fn generate_thread_title(
                 option_string(&selection, "variant").as_deref(),
             )
             .await?;
-            decode_json_reply("OpenCode", &text)?
+            decode_json_reply(request.output, "OpenCode", &text)?
         }
         "antigravity" => {
             let env = crate::provider_status::base_env(&instance_env(&instance));
@@ -1101,7 +1159,7 @@ pub(crate) async fn generate_thread_title(
                 selection["model"].as_str().unwrap_or_default(),
             )
             .await?;
-            decode_json_reply("Antigravity", &text)?
+            decode_json_reply(request.output, "Antigravity", &text)?
         }
         "pi" => {
             let env = crate::provider_status::base_env(&instance_env(&instance));
@@ -1114,7 +1172,7 @@ pub(crate) async fn generate_thread_title(
                 option_string(&selection, "thinking").as_deref(),
             )
             .await?;
-            decode_json_reply("Pi", &text)?
+            decode_json_reply(request.output, "Pi", &text)?
         }
         _ => {
             return Err(format!(
@@ -1122,12 +1180,7 @@ pub(crate) async fn generate_thread_title(
             ))
         }
     };
-    let raw = output["title"].as_str().unwrap_or_default();
-    let title = super::prompt::sanitize_thread_title(raw);
-    if title.eq_ignore_ascii_case("title") {
-        return Err("The model returned the placeholder title \"title\".".into());
-    }
-    Ok(title)
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -1150,11 +1203,12 @@ mod tests {
             "{\"title\": \"open"
         );
         assert_eq!(
-            decode_json_reply("Pi", "{\"title\": \"T\"} trailing").unwrap()["title"],
+            decode_json_reply(OutputKind::Title, "Pi", "{\"title\": \"T\"} trailing").unwrap()
+                ["title"],
             "T"
         );
         assert_eq!(
-            decode_json_reply("Pi", "not json").unwrap_err(),
+            decode_json_reply(OutputKind::Title, "Pi", "not json").unwrap_err(),
             "Pi returned invalid structured output."
         );
     }

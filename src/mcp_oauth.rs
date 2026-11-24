@@ -233,6 +233,21 @@ pub trait McpHost: AuthHost {
     ) -> HostFuture<Result<(), ThemeRefusal>> {
         Box::pin(async { Err(ThemeRefusal::NotSelected) })
     }
+    /// Whether this host gives a delegated child its own worktree (`isolation: "worktree"`):
+    /// it then prepares the child's run with [`McpHost::prepare_delegated_run`].
+    fn prepares_worktrees(&self) -> bool {
+        false
+    }
+    /// `ThreadLaunchService.prepareRun`: in the background, creates the worktree that
+    /// `run_id`, a delegated child's preparing run, asked for (`workspacePreparation`), then
+    /// releases the run into it.
+    fn prepare_delegated_run(
+        self: &Arc<Self>,
+        _command_id: String,
+        _thread_id: String,
+        _run_id: String,
+    ) {
+    }
     /// `sourceControl.cloneRepository`, or the failure's `detail`.
     fn clone_repository(self: &Arc<Self>, _input: Value) -> HostFuture<Result<Value, String>> {
         Box::pin(async { Err("The source control operation could not be completed.".to_owned()) })

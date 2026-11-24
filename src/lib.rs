@@ -140,6 +140,8 @@ mod acp_install;
 mod acp_registry;
 #[cfg(feature = "native")]
 mod bitbucket_credential;
+#[cfg(feature = "native")]
+mod delegated_worktree;
 mod feature_flags;
 #[cfg(feature = "native")]
 mod peer_link_http;

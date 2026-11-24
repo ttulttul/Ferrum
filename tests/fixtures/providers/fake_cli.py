@@ -92,7 +92,8 @@ def title_generation():
     `codex ... mcp list --json` prints the scenario's "mcpServers" (default
     none). `codex exec ... -` and `claude -p ...` read the prompt from standard
     input, append {argv, prompt, schema, env} to FAKE_PROVIDER_LOG.title, and
-    answer the scenario's "title" output ({"title", "needsRefinement"}); a
+    answer the scenario's "title" output ({"title", "needsRefinement"}), or its "branchName"
+    output ({"branch"}) for a branch name prompt; a
     scenario without one fails at once, as a CLI that cannot run. With
     "titleDelayFirst", the first run answers after that many seconds.
     """
@@ -117,9 +118,11 @@ def title_generation():
     if first and scenario.get("titleDelayFirst"):
         time.sleep(scenario["titleDelayFirst"])
     wait_for_title_gate()
-    output = scenario.get("title")
+    # A worktree's branch name ("branchName", {"branch"}) or a thread title ("title").
+    branch_name = prompt.startswith("You generate concise git branch names.")
+    output = scenario.get("branchName" if branch_name else "title")
     if output is None:
-        sys.stderr.write("fake provider: this scenario generates no title\n")
+        sys.stderr.write("fake provider: this scenario generates no " + ("branch name" if branch_name else "title") + "\n")
         sys.exit(1)
     if args[0] == "exec":
         with open(args[args.index("--output-last-message") + 1], "w") as out:

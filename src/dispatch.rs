@@ -606,6 +606,10 @@ pub(crate) async fn mcp_workspace(
     if method == "preview.automation" {
         return workspace.preview("automation", input).await;
     }
+    // Server-internal Git operations, for a delegated task's worktree.
+    if let Some(name @ ("resolveCommit" | "renameBranch")) = method.strip_prefix("vcs.") {
+        return workspace.vcs(name, input, false).await;
+    }
     self::workspace(workspace, host, method, input).await
 }
 
@@ -636,6 +640,8 @@ pub(crate) async fn workspace(
             Some(workspace.pull_request(name, input, &host.git).await)
         }
         "review" => Some(workspace.review(name, input).await),
+        // Server-internal operations, which clients cannot call.
+        "vcs" if matches!(name, "resolveCommit" | "renameBranch") => None,
         "vcs" => {
             workspace
                 .vcs(

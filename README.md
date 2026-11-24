@@ -16,7 +16,7 @@
 Based on `main` and the parity test suites:
 
 - **Codex and Claude Code agent turns:** Launching Codex and Claude Code sessions, streaming responses, tool calls, approvals (allow, allow for session, decline, `approval-required`, `auto-accept-edits`), and user-input / question requests. Each thread keeps its Claude CLI running across turns, and an instance's Codex turns share one app-server, as in the original. You can steer a running Codex or Claude turn with a text message.
-- **Delegated tasks:** An agent can start a child task, wait for it or get its result delivered later, check its progress, cancel it, send a finished child a follow-up, and create new threads. Tasks recover after a restart, and a result can be delivered into the parent's running turn.
+- **Delegated tasks:** An agent can start a child task, wait for it or get its result delivered later, check its progress, cancel it, send a finished child a follow-up, run it in its own worktree, and create new threads. Tasks recover after a restart, and a result can be delivered into the parent's running turn.
 - **Thread titles:** Codex, Claude, Pi, Grok, OpenCode (1.x and 2) and Antigravity text generation models can title threads.
 - **Scheduled tasks:** Agents can manage schedules, and due tasks start on their own.
 - **Checkpoints, interrupts, and token usage:** Reference-compatible checkpoint naming, turn interrupts (including stopping spawned child processes), token usage reporting, model reporting, and usage-limit reset times.
@@ -46,7 +46,7 @@ Most suites match the original exactly; the few expected differences are listed 
 
 - **Pull request changes.** Agents can read pull requests and CI, but can't open, update, review, respond to or merge one, or re-run CI (`pull_request_create`, `pull_request_update`, `pull_request_review`, `pull_request_respond`, `pull_request_merge`, `ci_rerun`).
 - **Devices.** Agents can use simulators and emulators on this machine, but not on SSH, Expo or Simlock device hosts.
-- **Delegated tasks.** A child can't run in its own worktree (`isolation: "worktree"`) or on a linked machine yet.
+- **Delegated tasks.** A child can't run on a linked machine yet, and on the embeddable control plane it can't run in its own worktree (`isolation: "worktree"`).
 - **Codex skills.** `orchestrator_capabilities` doesn't rescan the project's Codex skills, as the original does (upstream #39247).
 - **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing. So are browser setup hints and installing a browser when none is found.
 - **Secrets in schedules.** A scheduled task can't use a secret yet, and the embeddable control plane stores no secrets.

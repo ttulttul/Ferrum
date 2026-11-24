@@ -1654,6 +1654,23 @@ impl mcp_oauth::McpHost for AppState {
             })
         })
     }
+    fn prepares_worktrees(&self) -> bool {
+        true
+    }
+    fn prepare_delegated_run(
+        self: &Arc<Self>,
+        command_id: String,
+        thread_id: String,
+        run_id: String,
+    ) {
+        let state = self.clone();
+        crate::runtime::Runtime::spawn(
+            &*self.runtime.clone(),
+            Box::pin(async move {
+                crate::delegated_worktree::prepare(state, &command_id, &thread_id, &run_id).await;
+            }),
+        );
+    }
     fn clone_repository(
         self: &Arc<Self>,
         input: serde_json::Value,
