@@ -660,6 +660,7 @@ pub(crate) fn provider_turn(
         mcp: None,
         attachments: Vec::new(),
         turn_ordinal: Some(state.provider_turns() as u64 + 1),
+        recovery_prompt: None,
         context_window: (driver == provider::CLAUDE_AGENT)
             .then(|| crate::model_manifest::claude_context_window(manifest, selection))
             .flatten(),

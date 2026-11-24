@@ -107,6 +107,14 @@ pub struct ProviderTurn {
     /// predates it sees the same wire bytes.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_method: String,
+    /// The prompt to send instead when [`ProviderTurn::resume`] names a
+    /// session the CLI cannot resume and a fresh one starts: the turn's prompt
+    /// with the thread's recovered context ahead of it (the reference's
+    /// `full_thread_summary` resume fallback). Optional and omitted when
+    /// unset, so an agentd or control plane that predates it sees the same
+    /// wire bytes; without it the fresh session gets the plain prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_prompt: Option<String>,
 }
 
 /// Where a provider CLI reaches T3's tools for its thread

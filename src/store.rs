@@ -226,6 +226,14 @@ pub struct Thread {
     /// in creation order, holding full `summaryText`, `history`, and `delivery`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_handoffs: Vec<serde_json::Value>,
+    /// Context transfers this server recorded for the thread
+    /// (`OrchestrationV2ContextTransfer`), such as a resume fallback's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_transfers: Vec<serde_json::Value>,
+    /// The `handoff` turn items this server recorded for the thread (a resume
+    /// fallback's "Recovered context"), each ahead of its run's prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handoff_items: Vec<serde_json::Value>,
     /// What provider turns left behind; rebuilt from the log.
     #[serde(skip)]
     pub(crate) provider: Box<crate::provider_state::ProviderState>,
@@ -260,6 +268,12 @@ pub enum Event {
     ContextHandoffUpdated {
         thread_id: String,
         handoff: serde_json::Value,
+        /// The context transfer the handoff resolves, written with it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transfer: Option<serde_json::Value>,
+        /// The `handoff` turn item that shows it on the thread.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_item: Option<serde_json::Value>,
     },
     MessageAdded {
         thread_id: String,
@@ -556,15 +570,19 @@ impl Store {
                     }
                 }
             }
-            Event::ContextHandoffUpdated { thread_id, handoff } => {
+            Event::ContextHandoffUpdated {
+                thread_id,
+                handoff,
+                transfer,
+                turn_item,
+            } => {
                 if let Some(t) = self.threads.get_mut(thread_id) {
-                    match t
-                        .context_handoffs
-                        .iter_mut()
-                        .find(|existing| existing["id"] == handoff["id"])
-                    {
-                        Some(existing) => *existing = handoff.clone(),
-                        None => t.context_handoffs.push(handoff.clone()),
+                    upsert_by_id(&mut t.context_handoffs, handoff);
+                    if let Some(transfer) = transfer {
+                        upsert_by_id(&mut t.context_transfers, transfer);
+                    }
+                    if let Some(item) = turn_item {
+                        upsert_by_id(&mut t.handoff_items, item);
                     }
                 }
             }
@@ -954,6 +972,17 @@ pub(crate) fn older_settled_threads(
     json!({"snapshotSequence":sequence,"threads":threads,"counts":counts.into_iter().map(|(project_id,count)|json!({"projectId":project_id,"count":count})).collect::<Vec<_>>()})
 }
 
+/// Replace the record of `records` with `record`'s id, or add it.
+fn upsert_by_id(records: &mut Vec<serde_json::Value>, record: &serde_json::Value) {
+    match records
+        .iter_mut()
+        .find(|existing| existing["id"] == record["id"])
+    {
+        Some(existing) => *existing = record.clone(),
+        None => records.push(record.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,6 +1050,8 @@ mod tests {
                 checkpoints: vec![],
                 link_requests: Vec::new(),
                 context_handoffs: Vec::new(),
+                context_transfers: Vec::new(),
+                handoff_items: Vec::new(),
                 provider: Box::default(),
                 stored: None,
             },
