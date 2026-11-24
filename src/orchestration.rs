@@ -680,6 +680,7 @@ async fn start_run<H: CommandHost>(
     notification: Option<Value>,
     wire: Option<Value>,
     deferred: bool,
+    output_schema: Option<Value>,
 ) -> anyhow::Result<u64> {
     let (cwd, needs_baseline, wire_id, row) = state
         .store
@@ -701,6 +702,23 @@ async fn start_run<H: CommandHost>(
         .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
     let driver = cli_driver(&*state, &row);
     let baseline = needs_baseline.then(|| cwd.clone());
+    // A run that continues one cut short still owes that run's result.
+    let output_schema = match (output_schema, continues) {
+        (Some(schema), _) => Some(schema),
+        (None, Some(continued)) => state
+            .store
+            .read()
+            .await
+            .threads
+            .get(thread_id)
+            .and_then(|t| {
+                t.runs
+                    .iter()
+                    .find(|run| run.id == continued)
+                    .and_then(|run| run.output_schema.as_deref().cloned())
+            }),
+        (None, None) => None,
+    };
     // A delegated wake queued behind the active run starts when that run
     // ends; other queued messages wait to be sent.
     let wake = wire
@@ -737,6 +755,7 @@ async fn start_run<H: CommandHost>(
         model_selection: row["modelSelection"]
             .is_object()
             .then(|| Box::new(row["modelSelection"].clone())),
+        output_schema: output_schema.map(Box::new),
     };
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),
@@ -909,6 +928,7 @@ async fn apply_command<H: CommandHost>(
     let thread_id = command.get("threadId").and_then(serde_json::Value::as_str);
     match command_type {
         "link_request.record" => return record_link_request(state, command, receipt).await,
+        "run.output.submit" => return submit_run_output(state, command, receipt).await,
         "secret_request.record" => return secret_request::record(state, command, receipt).await,
         "thread.create" => {
             let project_id = command
@@ -993,7 +1013,22 @@ async fn apply_command<H: CommandHost>(
                 .unwrap_or_default()
                 .to_owned();
             let mut queue_steer = false;
-            if command["dispatchMode"]["type"] == "steer_active" {
+            // A message asked for a result must be one the turn can answer
+            // (`outputRequestProblem`), and never joins a running turn: the
+            // result is asked of one whole turn.
+            let asks_output = command.get("outputSchema").is_some_and(Value::is_object);
+            if asks_output {
+                let attachments = command["attachments"].as_array().map_or(0, Vec::len);
+                if let Some(problem) =
+                    crate::run_output::request_problem(&command["outputSchema"], &text, attachments)
+                {
+                    return Err(anyhow::anyhow!(problem));
+                }
+                if command["dispatchMode"]["type"] == "steer_active" {
+                    queue_steer = true;
+                }
+            }
+            if command["dispatchMode"]["type"] == "steer_active" && !asks_output {
                 match steer::plan(&state, thread_id, command).await? {
                     steer::SteerPlan::Start => {}
                     steer::SteerPlan::Queue => queue_steer = true,
@@ -1150,6 +1185,10 @@ async fn apply_command<H: CommandHost>(
                 }),
                 wire,
                 command["dispatchMode"]["type"] == "defer_start",
+                command
+                    .get("outputSchema")
+                    .filter(|schema| schema.is_object())
+                    .cloned(),
             )
             .await?;
             // A message to a delegated child whose task finished starts a follow-up task.
@@ -2968,6 +3007,60 @@ fn asked_for_linked_machine(card: &Value, linked: &Value) -> bool {
     !hint.is_empty() && hint == normal(&linked["hint"]) && hint == normal(&linked["linkedLabel"])
 }
 
+/// `run.output.submit`, internal to the server: keeps the result an agent
+/// submitted, already checked against its run's schema, on the run
+/// (`dispatchRunOutputSubmit`, `run.output-submitted`). A run takes it while
+/// active, or once completed while it still owes it.
+async fn submit_run_output<H: CommandHost>(
+    state: Arc<H>,
+    command: &Value,
+    receipt: &CommandReceipt,
+) -> anyhow::Result<u64> {
+    let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
+    let run_id = command["runId"].as_str().unwrap_or_default();
+    let extras = {
+        let store = state.store.read().await;
+        let thread = store
+            .threads
+            .get(&thread_id)
+            .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+        let run = thread
+            .runs
+            .iter()
+            .find(|run| run.wire_id() == run_id)
+            .filter(|run| run.output_schema.is_some())
+            .ok_or_else(|| anyhow::anyhow!("Run {run_id} was not asked for a result."))?;
+        let mut extras = thread.stored_row()["runExtras"].clone();
+        if !extras.is_object() {
+            extras = json!({});
+        }
+        let status = thread.projected_run_status(run).0;
+        let active = matches!(status, "preparing" | "starting" | "running" | "waiting");
+        let owes = status == "completed" && extras[run_id]["output"].is_null();
+        if !active && !owes {
+            anyhow::bail!("Run {run_id} is {status} and takes no result.");
+        }
+        if !extras[run_id].is_object() {
+            extras[run_id] = json!({});
+        }
+        extras[run_id]["output"] = json!({
+            "value": command["value"],
+            "submittedAt": crate::auth_service::iso(crate::auth_service::now()),
+        });
+        extras
+    };
+    Ok(state
+        .commit_receipted(
+            Event::ThreadPatched {
+                thread_id,
+                patch: json!({"row": {"runExtras": extras}}),
+            },
+            Some(receipt.clone()),
+        )
+        .await?
+        .id)
+}
+
 /// `link_request.record`, internal to the server: records or updates a card
 /// in which an agent asked the user to link another machine, and wakes the
 /// agent with how it ended (`dispatchLinkRequestRecord` in the reference).
@@ -3199,6 +3292,7 @@ async fn record_link_request<H: CommandHost>(
             Some(wake["notification"].clone()),
             None,
             false,
+            None,
         )
         .await?;
     }

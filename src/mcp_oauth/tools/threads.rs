@@ -1156,6 +1156,85 @@ pub(super) async fn workflow_stop<S: McpHost>(
     Err(failure(code, message))
 }
 
+/// `t3_submit_output` (`actsAsCaller`, `ThreadManagementService.submitRunOutput`):
+/// the result the caller's turn was asked for, checked against its run's
+/// schema and kept on that run. The run is the active one when it was asked;
+/// else the newest started run asked for a result, while it completed
+/// without one (an agent may end a turn to wait, and answer from the turn
+/// that woke it).
+pub(super) async fn submit_output<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    a: &Value,
+) -> Outcome {
+    let Some(scope) = caller.granted.thread.as_ref() else {
+        return Err(failure(
+            "thread_credential_required",
+            "This tool acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread.",
+        ));
+    };
+    writing_caller(&**host, caller).await?;
+    let unavailable = || {
+        failure(
+            "orchestration_error",
+            "The operation could not be completed.",
+        )
+    };
+    let json = a["json"].as_str().unwrap_or_default();
+    let thread_id = scope.thread_id.clone();
+    let runs: Vec<Value> = {
+        let store = host.control_state().store.read().await;
+        let thread = store.threads.get(&thread_id).ok_or_else(unavailable)?;
+        thread.projection()["runs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let ordinal = |run: &Value| run["ordinal"].as_u64().unwrap_or(0);
+    let active = runs
+        .iter()
+        .filter(|run| {
+            matches!(
+                run["status"].as_str(),
+                Some("preparing" | "starting" | "running" | "waiting")
+            )
+        })
+        .max_by_key(|run| ordinal(run));
+    let asked = runs
+        .iter()
+        .filter(|run| {
+            run["outputSchema"].is_object()
+                && run["status"] != "queued"
+                && !(run["status"] == "cancelled" && run["startedAt"].is_null())
+        })
+        .max_by_key(|run| ordinal(run));
+    let owed = asked.filter(|run| run["status"] == "completed" && run["output"].is_null());
+    let run = match active {
+        Some(active) if active["outputSchema"].is_object() => Some(active),
+        Some(_) => owed,
+        None => None,
+    };
+    let Some(run) = run else {
+        return Err(failure(
+            "invalid_request",
+            "This turn was not asked for a result. Reply in your message instead.",
+        ));
+    };
+    let value = crate::run_output::check_output(&run["outputSchema"], json)
+        .map_err(|rejection| failure("invalid_request", rejection))?;
+    let run_id = run["id"].clone();
+    host.dispatch(json!({
+        "type": "run.output.submit",
+        "commandId": format!("mcp:{}", crate::platform::uuid_v4()),
+        "threadId": thread_id,
+        "runId": run_id,
+        "value": value,
+    }))
+    .await
+    .map_err(|_| unavailable())?;
+    Ok(json!({"runId": run_id}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

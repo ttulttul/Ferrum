@@ -325,6 +325,9 @@ impl Thread {
                     out["restartContinuationOfRunId"] = json!(source.to_string());
                     out["workStartedAt"] = json!(iso(self.work_started_at(run)));
                 }
+                if let Some(schema) = &run.output_schema {
+                    out["outputSchema"] = (**schema).clone();
+                }
                 if !run.background_work.is_empty() {
                     out["restartCancelledBackgroundWork"] = json!(run.background_work);
                 }
@@ -1474,6 +1477,9 @@ fn stored_runs(thread_id: &str, projection: &Value) -> Vec<crate::Run> {
                 wire_id: uuid::Uuid::parse_str(&wire).is_err().then_some(wire),
                 driver: None,
                 model_selection: None,
+                output_schema: run["outputSchema"]
+                    .is_object()
+                    .then(|| Box::new(run["outputSchema"].clone())),
             })
         })
         .collect()
