@@ -110,8 +110,11 @@ pub(crate) async fn plan<H: CommandHost>(
         )));
     }
     // Rust steers Codex, Claude and Grok turns; another driver's steer
-    // waits for the next turn.
-    if !crate::workspace::provider::runs_turns(&ids.driver) {
+    // waits for the next turn. ACP Registry agents have no active steering
+    // (the reference restarts their turn with the message instead).
+    if !crate::workspace::provider::runs_turns(&ids.driver)
+        || ids.driver == crate::workspace::provider::ACP_REGISTRY
+    {
         return Ok(SteerPlan::Queue);
     }
     // The message it follows: Rust's message times are whole seconds, too

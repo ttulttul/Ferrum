@@ -46,7 +46,7 @@ impl ProviderProcesses {
 pub(crate) use requests::respond;
 
 use crate::workspace::provider::{
-    ProviderFailure, ProviderItem, ThreadDisposition, TurnStatus, CODEX, GROK,
+    ProviderFailure, ProviderItem, ThreadDisposition, TurnStatus, CODEX,
 };
 use crate::workspace::{ProviderEvent, TurnEvent, TurnExit, TurnSpec};
 use std::process::Stdio;
@@ -88,7 +88,7 @@ pub(crate) fn start(
             sink,
             processes.codex.clone(),
         ));
-    } else if provider.driver == GROK {
+    } else if crate::workspace::provider::is_acp(&provider.driver) {
         tokio::spawn(acp::run(
             spec,
             provider,
@@ -159,9 +159,10 @@ impl Sink {
     fn send(&self, event: ProviderEvent) {
         // A Codex or ACP turn's usage goes with its end; Claude's adapter
         // reports it on its own first.
-        if let (ProviderEvent::TurnUsage { .. }, true) =
-            (&event, self.driver == CODEX || self.driver == GROK)
-        {
+        if let (ProviderEvent::TurnUsage { .. }, true) = (
+            &event,
+            self.driver == CODEX || crate::workspace::provider::is_acp(&self.driver),
+        ) {
             if let Ok(mut usage) = self.usage.lock() {
                 *usage = Some(event);
                 return;

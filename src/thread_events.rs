@@ -849,9 +849,9 @@ fn diff_with_command(
         });
     let acp_request = order == Order::RequestOpen
         && collections["runtimeRequests"].iter().any(|(_, request)| {
-            request["id"]
-                .as_str()
-                .is_some_and(|id| id.contains(":provider:grok:"))
+            request["id"].as_str().is_some_and(|id| {
+                id.contains(":provider:grok:") || id.contains(":provider:acpRegistry:")
+            })
         });
     let subagent_start =
         order == Order::Subagent && collections["subagents"].iter().any(|(created, _)| *created);

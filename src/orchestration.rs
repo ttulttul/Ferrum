@@ -572,6 +572,11 @@ pub(crate) async fn detach_session<H: CommandHost>(
                     .resume_for(crate::workspace::provider::CLAUDE_AGENT)
             })
             .or_else(|| thread.provider.resume_for(crate::workspace::provider::GROK))
+            .or_else(|| {
+                thread
+                    .provider
+                    .resume_for(crate::workspace::provider::ACP_REGISTRY)
+            })
             .map(|native| (instance, native));
         (thread.provider.session_live(), run_ids, codex_thread)
     };

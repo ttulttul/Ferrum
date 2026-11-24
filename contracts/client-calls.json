@@ -260,6 +260,7 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "device_ssh_parity.py",
         "host-parity.json"
       ],
       "validationOnly": false,
@@ -282,6 +283,7 @@
       "auth": "session (settings:write)",
       "usage": "client",
       "existingCoverage": [
+        "device_ssh_parity.py",
         "device_tools_parity.py",
         "host-parity.json"
       ],
@@ -353,6 +355,7 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
+        "device_ssh_parity.py",
         "host-parity.json",
         "provider-parity.json"
       ],
@@ -378,6 +381,7 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "device_ssh_parity.py",
         "device_tools_parity.py",
         "host-parity.json"
       ],
@@ -444,6 +448,7 @@
       "auth": "session (settings:write)",
       "usage": "client",
       "existingCoverage": [
+        "device_ssh_parity.py",
         "settings_secrets_parity.py"
       ],
       "validationOnly": false,
@@ -1676,6 +1681,7 @@
       "auth": "session (access:write)",
       "usage": "client",
       "existingCoverage": [
+        "client_thread_parity.py",
         "link_request_parity.py",
         "peer_forwarding_parity.py",
         "peer_link_history_parity.py",
@@ -4808,6 +4814,7 @@
         "client_thread_parity.py",
         "config_parity.py",
         "config_snapshot_parity.py",
+        "device_ssh_parity.py",
         "device_tools_parity.py",
         "feedback_parity.py",
         "managed_policy_parity.py",

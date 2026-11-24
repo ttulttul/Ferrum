@@ -452,6 +452,75 @@ pub(crate) async fn search(caches: &Path, params: &Value) -> Result<Value, AcpEr
     Ok(json!({ "agents": agents }))
 }
 
+/// `AcpRegistryCatalog.resolve` for a registry agent: the agent the index
+/// names, a distribution for this platform, installed (or reused), and how
+/// it is launched.
+pub(crate) async fn resolve_launch(
+    roots: &crate::acp_install::Roots,
+    agent_id: &str,
+    command_override: &str,
+) -> Result<crate::acp_install::AgentLaunch, AcpError> {
+    let id = agent_id.trim();
+    if id.is_empty() {
+        return Err(AcpError::new(
+            "agent_not_configured",
+            "ACP Registry provider requires a registry agent ID.",
+        ));
+    }
+    let index = refresh(&mut *CATALOG.lock().await, &roots.caches).await?;
+    let agent = index.agents.iter().find(|a| a["id"] == id).ok_or_else(|| {
+        AcpError::new(
+            "agent_not_found",
+            format!("ACP Registry does not contain agent '{id}'."),
+        )
+    })?;
+    let Some((kind, _)) = distribution(agent) else {
+        return Err(AcpError::new(
+            "unsupported_distribution",
+            format!("ACP Registry agent {id} has no compatible distribution for this platform."),
+        ));
+    };
+    let binary = crate::acp_install::binary_target(agent).filter(|_| kind == "binary");
+    crate::acp_install::launch(roots, agent, kind, binary, command_override.trim()).await
+}
+
+/// A registry agent's turn launch (`source` other than `local`): the
+/// instance's agent resolved and installed, its command and arguments in
+/// `provider`, its distribution's environment added to `env`, and the folder
+/// its package manager installed into put first on its PATH. The failure's
+/// detail when it cannot be resolved.
+pub(crate) async fn resolve_turn(
+    roots: &crate::acp_install::Roots,
+    settings: &Value,
+    provider: &mut crate::workspace::provider::ProviderTurn,
+    env: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    let config = &settings["providerInstances"][provider.instance_id.as_str()]["config"];
+    if config["source"] == "local" {
+        return Ok(());
+    }
+    let agent_id = config["agentId"].as_str().unwrap_or_default();
+    let launch = resolve_launch(roots, agent_id, &provider.binary_path)
+        .await
+        .map_err(|error| error.detail)?;
+    provider.binary_path = launch.command.display().to_string();
+    provider.launch_args = launch.args;
+    env.extend(launch.env);
+    if let Some(bin) = launch.bin_directory {
+        let path = env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, path)| path.clone())
+            .or_else(|| std::env::var("PATH").ok())
+            .unwrap_or_default();
+        let joined = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)))
+            .map_err(|error| error.to_string())?;
+        env.push(("PATH".into(), joined.to_string_lossy().into_owned()));
+    }
+    Ok(())
+}
+
 /// `server.prepareAcpRegistryAgent`: a fresh index (or the cached one), the agent, a
 /// distribution for this platform, and the agent installed (`acp_install`).
 pub(crate) async fn prepare(

@@ -1,6 +1,7 @@
 //! Turns over the Agent Client Protocol (ACP): newline-delimited JSON-RPC 2.0
 //! with the agent's CLI on its standard streams, as the reference's generic
-//! ACP adapter speaks it, in the Grok flavor (`grok agent stdio`).
+//! ACP adapter speaks it, in its Grok flavor (`grok agent stdio`) or its
+//! generic one for ACP Registry agents ([`Flavor`]).
 //!
 //! A thread keeps its agent process across turns ([`Sessions`]), as the
 //! reference's provider session does: the first turn sends `initialize` and
@@ -18,7 +19,7 @@ use super::{cancelled, next_response, program, requests, Cli, Launch, Sink, Turn
 use crate::thread_projection::uri_component;
 use crate::workspace::provider::{
     ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition, TurnStatus,
-    GROK,
+    ACP_REGISTRY, GROK,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Value};
@@ -43,6 +44,53 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 const METHOD_NOT_FOUND: i64 = -32601;
 /// The error an agent answers a session request with until it is signed in.
 const AUTH_REQUIRED: i64 = -32000;
+
+/// How long a Stop waits for an agent to answer its cancelled prompt.
+const STOP_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Which flavor of the reference's ACP adapter a turn runs in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Flavor {
+    /// Grok (`provider-grok`): its launch modes, `_meta` and extensions.
+    Grok,
+    /// An ACP Registry agent (`provider-acp-registry`), in the generic
+    /// flavor: launched as resolved, cancelled with `session/cancel`.
+    Registry,
+}
+
+impl Flavor {
+    fn of(provider: &ProviderTurn) -> Self {
+        if provider.driver == ACP_REGISTRY {
+            Self::Registry
+        } else {
+            Self::Grok
+        }
+    }
+    fn driver(self) -> &'static str {
+        match self {
+            Self::Grok => GROK,
+            Self::Registry => ACP_REGISTRY,
+        }
+    }
+    /// The harness the runtime notes name (`runtimeHarness ?? driver`).
+    fn harness(self) -> &'static str {
+        match self {
+            Self::Grok => "Grok",
+            Self::Registry => ACP_REGISTRY,
+        }
+    }
+    /// The agent's command line.
+    fn args(self, provider: &ProviderTurn) -> Vec<String> {
+        match self {
+            Self::Grok => {
+                let mut args = grok_args(provider.runtime_mode());
+                args.extend(provider.launch_args.iter().cloned());
+                args
+            }
+            Self::Registry => provider.launch_args.clone(),
+        }
+    }
+}
 
 /// The Grok launch for a runtime mode (`grokAcpSpawnArgs`): its flags
 /// override Grok's own config, so Supervised cannot inherit always-approve.
@@ -163,6 +211,7 @@ struct InstructionState {
 /// One agent process and its ACP session.
 struct Agent {
     cli: Cli,
+    flavor: Flavor,
     /// What it was launched with: a turn launched otherwise starts another.
     launch: String,
     next_id: u64,
@@ -176,10 +225,16 @@ struct Agent {
     can_close: bool,
     /// The agent's `authMethods` ids.
     auth_methods: Vec<String>,
+    /// The method the instance names to sign in with, if any.
+    auth_method: String,
     /// The session's current model (`models.currentModelId`).
     current_model: Option<String>,
     /// The model and effort last applied.
     configured: Option<(String, Option<String>)>,
+    /// The session's models (`models.availableModels`).
+    available_models: Vec<String>,
+    /// The session's config options (`configOptions`).
+    config_options: Vec<Value>,
     /// Prompts sent by this process (`t3-xai-prompt-<n>`).
     prompts: u64,
     /// The instructions the session has, once a turn delivered them.
@@ -194,20 +249,41 @@ impl Agent {
         provider: &ProviderTurn,
         launch: String,
     ) -> std::io::Result<Self> {
-        let mut args = grok_args(provider.runtime_mode());
-        args.extend(provider.launch_args.iter().cloned());
+        let flavor = Flavor::of(provider);
+        let (default, home_var, extra_env) = match flavor {
+            Flavor::Grok => (
+                "grok",
+                "GROK_HOME",
+                vec![("GROK_OAUTH2_REFERRER".into(), "t3code".into())],
+            ),
+            // The generic flavor gives the agent its thread and T3's MCP
+            // endpoint (`processEnvironment`), for the terminal fallback.
+            Flavor::Registry => ("", "", process_environment(provider)),
+        };
+        if flavor == Flavor::Registry && provider.binary_path.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Local ACP provider requires an executable.",
+            ));
+        }
         let cli = Cli::spawn(
             spec,
             Launch {
-                program: program(&provider.binary_path, "grok"),
-                args,
-                home_var: "GROK_HOME",
-                home: &provider.home_path,
-                extra_env: vec![("GROK_OAUTH2_REFERRER".into(), "t3code".into())],
+                program: program(&provider.binary_path, default),
+                args: flavor.args(provider),
+                home_var,
+                home: if flavor == Flavor::Grok {
+                    &provider.home_path
+                } else {
+                    ""
+                },
+                extra_env,
             },
         )?;
         Ok(Self {
             cli,
+            flavor,
+            auth_method: provider.auth_method.trim().to_owned(),
             launch,
             next_id: 1,
             session: String::new(),
@@ -216,6 +292,8 @@ impl Agent {
             auth_methods: Vec::new(),
             current_model: None,
             configured: None,
+            available_models: Vec::new(),
+            config_options: Vec::new(),
             prompts: 0,
             instructions: None,
             notes: None,
@@ -314,26 +392,28 @@ impl Agent {
 
     /// `initialize`, as the reference's runtime negotiates it.
     async fn initialize(&mut self) -> Result<(), AcpError> {
-        let result = self
-            .request(
-                "initialize",
-                json!({
-                    "protocolVersion": 2,
-                    "info": {"name": "t3-code", "version": "0.0.0"},
-                    "capabilities": {"elicitation": {"form": {}}},
-                    // Grok then asks about auto-mode refusals instead of denying them.
-                    "_meta": {"clientType": "extension"},
-                    "clientCapabilities": {
-                        "fs": {"readTextFile": false, "writeTextFile": false},
-                        "terminal": false,
-                        "session": {"notices": {}, "compaction": {}},
-                        "elicitation": {"form": {}},
-                    },
-                    "clientInfo": {"name": "t3-code", "version": "0.0.0"},
-                }),
-                false,
-            )
-            .await?;
+        // A registry agent may also ask the user to sign in at a URL.
+        let elicitation = match self.flavor {
+            Flavor::Grok => json!({"form": {}}),
+            Flavor::Registry => json!({"form": {}, "url": {}}),
+        };
+        let mut params = json!({
+            "protocolVersion": 2,
+            "info": {"name": "t3-code", "version": "0.0.0"},
+            "capabilities": {"elicitation": elicitation},
+            "clientCapabilities": {
+                "fs": {"readTextFile": false, "writeTextFile": false},
+                "terminal": false,
+                "session": {"notices": {}, "compaction": {}},
+                "elicitation": elicitation,
+            },
+            "clientInfo": {"name": "t3-code", "version": "0.0.0"},
+        });
+        if self.flavor == Flavor::Grok {
+            // Grok then asks about auto-mode refusals instead of denying them.
+            params["_meta"] = json!({"clientType": "extension"});
+        }
+        let result = self.request("initialize", params, false).await?;
         self.can_close = !result["agentCapabilities"]["sessionCapabilities"]["close"].is_null();
         self.auth_methods = result["authMethods"]
             .as_array()
@@ -357,16 +437,19 @@ impl Agent {
                 code: AUTH_REQUIRED,
                 ..
             }) => {
-                let method_id = if spec
+                let xai_key = spec
                     .env
                     .iter()
                     .any(|(name, value)| name == "XAI_API_KEY" && !value.trim().is_empty())
-                    || std::env::var("XAI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
-                {
-                    "xai.api_key"
-                } else {
-                    "cached_token"
+                    || std::env::var("XAI_API_KEY").is_ok_and(|key| !key.trim().is_empty());
+                let method_id = match self.flavor {
+                    Flavor::Grok if xai_key => "xai.api_key".to_owned(),
+                    Flavor::Grok => "cached_token".to_owned(),
+                    // The instance's method, else the agent's first.
+                    Flavor::Registry if !self.auth_method.is_empty() => self.auth_method.clone(),
+                    Flavor::Registry => self.auth_methods.first().cloned().unwrap_or_default(),
                 };
+                let method_id = method_id.as_str();
                 if !self.auth_methods.iter().any(|id| id == method_id) {
                     return Err(AcpError::Startup(format!(
                         "ACP agent did not advertise configured authentication method \"{method_id}\""
@@ -383,6 +466,9 @@ impl Agent {
     /// Apply the turn's model and effort (`applyGrokSessionModelSelection`):
     /// `grok-build` keeps the session's model, and any effort is applied.
     async fn configure(&mut self, provider: &ProviderTurn) -> Result<(), AcpError> {
+        if self.flavor == Flavor::Registry {
+            return self.configure_generic(provider).await;
+        }
         let requested = match provider.model.trim() {
             "" => "grok-build",
             model => model,
@@ -430,6 +516,79 @@ impl Agent {
         }
         self.configured = Some(wanted);
         Ok(())
+    }
+
+    /// The generic flavor's model selection (`configureSession`): the
+    /// session's model option when it offers the model, else
+    /// `session/set_model` when its models list it; a model neither offers
+    /// is left to the agent.
+    async fn configure_generic(&mut self, provider: &ProviderTurn) -> Result<(), AcpError> {
+        let requested = provider.model.trim().to_owned();
+        if requested.is_empty() || self.configured.as_ref().map(|c| &c.0) == Some(&requested) {
+            return Ok(());
+        }
+        let option = self
+            .config_options
+            .iter()
+            .find(|option| option["category"] == "model" || option["id"] == "model");
+        let rejected = |error: AcpError| {
+            match error {
+            AcpError::Rpc { code: -32602, .. } => AcpError::Startup(format!(
+                "The agent did not accept the model \"{requested}\". Choose another model for this provider, then retry."
+            )),
+            other => other,
+        }
+        };
+        if let Some(option) = option.filter(|option| option["type"] == "select").cloned() {
+            let offered = option["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|choice| {
+                    choice["value"] == requested.as_str()
+                        || choice["options"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|nested| nested["value"] == requested.as_str())
+                });
+            if offered && option["currentValue"] != requested.as_str() {
+                let params = json!({"sessionId": self.session, "configId": option["id"],
+                    "value": requested});
+                self.request("session/set_config_option", params, false)
+                    .await
+                    .map_err(rejected)?;
+            }
+        } else if self
+            .available_models
+            .iter()
+            .any(|model| model == &requested)
+            && self.current_model.as_deref() != Some(requested.as_str())
+        {
+            let params = json!({"sessionId": self.session, "modelId": requested});
+            self.request("session/set_model", params, false)
+                .await
+                .map_err(rejected)?;
+            self.current_model = Some(requested.clone());
+        }
+        self.configured = Some((requested, None));
+        Ok(())
+    }
+
+    /// Note a session's setup result: its models and config options.
+    fn note_setup(&mut self, setup: &Value) {
+        if let Some(model) = current_model(setup) {
+            self.current_model = Some(model);
+        }
+        if let Some(models) = setup["models"]["availableModels"].as_array() {
+            self.available_models = models
+                .iter()
+                .filter_map(|model| model["modelId"].as_str().map(str::to_owned))
+                .collect();
+        }
+        if let Some(options) = setup["configOptions"].as_array() {
+            self.config_options = options.clone();
+        }
     }
 
     /// Close the session (`session/close`) and the process.
@@ -516,12 +675,30 @@ fn mcp_servers(provider: &ProviderTurn) -> Value {
     }])
 }
 
+/// What the generic flavor adds to its agent's environment
+/// (`processEnvironment`): the thread, so a tool its shell runs can find it,
+/// and T3's MCP endpoint with this executable for the terminal fallback
+/// (`acp-mcp-call`).
+fn process_environment(provider: &ProviderTurn) -> Vec<(String, String)> {
+    let Some(mcp) = &provider.mcp else {
+        return Vec::new();
+    };
+    let exe = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "t3code-server".into());
+    vec![
+        ("T3CODE_THREAD_ID".into(), provider.app_thread_id.clone()),
+        ("T3_ACP_MCP_ENDPOINT".into(), mcp.url.clone()),
+        ("T3_ACP_MCP_AUTHORIZATION".into(), mcp.authorization.clone()),
+        ("T3_ACP_MCP_NODE".into(), exe),
+    ]
+}
+
 /// What a launch is keyed by: a turn launched otherwise needs a new agent.
 fn launch_key(spec: &TurnSpec, provider: &ProviderTurn) -> String {
     json!([
         provider.binary_path,
-        grok_args(provider.runtime_mode()),
-        provider.launch_args,
+        Flavor::of(provider).args(provider),
         provider.home_path,
         spec.env,
         spec.cwd,
@@ -643,7 +820,7 @@ async fn start(
             let created = agent
                 .session_request(spec, "session/new", new_session(agent))
                 .await?;
-            agent.current_model = current_model(&created);
+            agent.note_setup(&created);
             agent.session = stopped.session.clone();
             agent.scoped = stopped.scoped;
             let loaded = agent
@@ -653,9 +830,7 @@ async fn start(
                     json!({"sessionId": stopped.session, "cwd": spec.cwd, "mcpServers": mcp}),
                 )
                 .await?;
-            if let Some(model) = current_model(&loaded) {
-                agent.current_model = Some(model);
-            }
+            agent.note_setup(&loaded);
             true
         }
         // After a server restart, the session is loaded straight away, with
@@ -670,7 +845,7 @@ async fn start(
                     json!({"sessionId": session, "cwd": spec.cwd, "mcpServers": mcp}),
                 )
                 .await?;
-            agent.current_model = current_model(&loaded);
+            agent.note_setup(&loaded);
             true
         }
         (None, None) => {
@@ -683,7 +858,7 @@ async fn start(
                     "ACP session/new returned no sessionId".into(),
                 ));
             }
-            agent.current_model = current_model(&created);
+            agent.note_setup(&created);
             false
         }
     };
@@ -749,6 +924,7 @@ struct Pending {
 const STREAMS: [&str; 2] = ["reasoning", "assistant"];
 
 struct Turn<'a> {
+    flavor: Flavor,
     sink: &'a Sink,
     responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
     instance: String,
@@ -776,6 +952,8 @@ struct Turn<'a> {
     session: String,
     /// Whether the prompt's instructions and notes reached the session.
     delivered: bool,
+    /// The user stopped the turn (the generic flavor's `session/cancel`).
+    interrupting: bool,
 }
 
 impl<'a> Turn<'a> {
@@ -788,10 +966,11 @@ impl<'a> Turn<'a> {
     ) -> Self {
         let ordinal = provider.turn_ordinal.unwrap_or(1);
         Self {
+            flavor: agent.flavor,
             sink,
             responses,
             instance: if provider.instance_id.is_empty() {
-                GROK.to_owned()
+                agent.flavor.driver().to_owned()
             } else {
                 provider.instance_id.clone()
             },
@@ -813,6 +992,7 @@ impl<'a> Turn<'a> {
             scoped: agent.scoped,
             session: agent.session.clone(),
             delivered: false,
+            interrupting: false,
         }
     }
 
@@ -838,7 +1018,7 @@ impl<'a> Turn<'a> {
         // The thread first, as the turn's records hang from it (the
         // reference reports its turn first).
         self.sink.send(ProviderEvent::ProviderThread {
-            driver: GROK.into(),
+            driver: self.flavor.driver().into(),
             native_thread_id: agent.session.clone(),
             resumed,
             model: None,
@@ -851,13 +1031,12 @@ impl<'a> Turn<'a> {
         let (prompt, state, notes) = self.prompt(agent);
         agent.prompts += 1;
         self.prompt_label = format!("t3-xai-prompt-{}", agent.prompts);
-        let sent = agent
-            .send(
-                "session/prompt",
-                json!({"sessionId": agent.session, "prompt": prompt,
-                    "_meta": {"promptId": self.prompt_label, "requestId": self.prompt_label}}),
-            )
-            .await;
+        let mut params = json!({"sessionId": agent.session, "prompt": prompt});
+        if self.flavor == Flavor::Grok {
+            params["_meta"] =
+                json!({"promptId": self.prompt_label, "requestId": self.prompt_label});
+        }
+        let sent = agent.send("session/prompt", params).await;
         let Ok(prompt_rpc) = sent else {
             return Ended::Crashed(AcpError::Closed.failure());
         };
@@ -869,6 +1048,9 @@ impl<'a> Turn<'a> {
                     self.cancel_pending(agent).await;
                     if super::take_detached(&self.sink.turn_id) {
                         break Ended::Detached;
+                    }
+                    if self.flavor == Flavor::Registry {
+                        break self.cancel_prompt(agent).await;
                     }
                     self.finalize(TurnStatus::Interrupted);
                     break Ended::Stopped;
@@ -904,6 +1086,43 @@ impl<'a> Turn<'a> {
             agent.notes = None;
         }
         ended
+    }
+
+    /// The generic flavor's Stop: `session/cancel`, then the prompt's answer
+    /// (any stop reason) ends the turn interrupted, the agent kept for the
+    /// thread's next turn. One that does not answer is stopped.
+    async fn cancel_prompt(&mut self, agent: &mut Agent) -> Ended {
+        self.interrupting = true;
+        let session = agent.session.clone();
+        let _ = agent
+            .cli
+            .write(&json!({"jsonrpc": "2.0", "method": "session/cancel",
+                "params": {"sessionId": session}}))
+            .await;
+        let deadline = Instant::now() + STOP_CONFIRM_TIMEOUT;
+        loop {
+            let line = tokio::select! {
+                line = agent.cli.next_line() => line,
+                _ = tokio::time::sleep_until(deadline) => None,
+            };
+            let Some(line) = line else {
+                self.finalize(TurnStatus::Interrupted);
+                return Ended::Stopped;
+            };
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if message.get("method").is_none() && message["id"].as_u64() == Some(self.prompt_rpc) {
+                self.finalize(TurnStatus::Interrupted);
+                return Ended::Settled(TurnEnd::interrupted(true));
+            }
+            if message.get("id").is_some() && message.get("method").is_some() {
+                agent.refuse(&message).await;
+            } else if message["method"] == "session/update" {
+                let update = message["params"]["update"].clone();
+                self.update(&update);
+            }
+        }
     }
 
     /// The prompt's content blocks (`resolvePromptParts`): the text, with
@@ -942,12 +1161,13 @@ impl<'a> Turn<'a> {
                     "mimeType": mime}));
             }
         }
-        let model = if self.model.is_empty() {
-            "grok-build"
-        } else {
-            self.model.as_str()
+        // The selection's model ("default", the agent's own, says none).
+        let model = match (self.model.as_str(), self.flavor) {
+            ("", Flavor::Grok) => Some("grok-build"),
+            ("", Flavor::Registry) => None,
+            (model, _) => Some(model),
         };
-        let notes = crate::agent_instructions::runtime("Grok", Some(model), None);
+        let notes = crate::agent_instructions::runtime(self.flavor.harness(), model, None);
         if !slash && agent.notes.as_deref() != Some(notes.as_str()) {
             blocks.push(json!({"type": "text", "text": notes}));
         }
@@ -998,6 +1218,9 @@ impl<'a> Turn<'a> {
     /// Grok's prompt-completion notifications, which may settle the prompt
     /// before its response does.
     fn extension(&mut self, method: &str, params: &Value) -> Option<Ended> {
+        if self.flavor != Flavor::Grok {
+            return None;
+        }
         let (stop, prompt, result) = match method.trim_start_matches('_') {
             "x.ai/session/prompt_complete" => (
                 params["stopReason"].as_str(),
@@ -1186,7 +1409,10 @@ impl<'a> Turn<'a> {
         let item = ProviderItem::new(segment.id.clone(), kind, status)
             .with("text", segment.text.clone())
             .with("streaming", !completed)
-            .with("nativeItemRef", native_ref(&segment.native, "weak"));
+            .with(
+                "nativeItemRef",
+                native_ref(self.flavor.driver(), &segment.native, "weak"),
+            );
         self.sink.send(ProviderEvent::TurnItem { item });
     }
 
@@ -1259,8 +1485,11 @@ impl<'a> Turn<'a> {
                 *slot = value.clone();
             }
         }
-        normalize_mcp(tool);
-        normalize_bash(tool);
+        // Grok's own tool shapes (`normalizeXAiAcpToolCallState`).
+        if self.flavor == Flavor::Grok {
+            normalize_mcp(tool);
+            normalize_bash(tool);
+        }
         self.show_tool(&id, false);
     }
 
@@ -1289,13 +1518,17 @@ impl<'a> Turn<'a> {
         let tool = &self.tools[id];
         let status = tool.forced.unwrap_or(match tool.status.as_str() {
             "completed" => "completed",
+            // A call T3 interrupted ends interrupted, whatever the agent says.
+            _ if self.interrupting => "interrupted",
             "failed" => "failed",
             "pending" => "pending",
             _ => "running",
         });
         let native = format!("{}:tool:{id}", self.session);
-        let mut item = ProviderItem::new(self.scoped(&native), "dynamic_tool", status)
-            .with("nativeItemRef", native_ref(id, "strong"));
+        let mut item = ProviderItem::new(self.scoped(&native), "dynamic_tool", status).with(
+            "nativeItemRef",
+            native_ref(self.flavor.driver(), id, "strong"),
+        );
         let command = tool_command(tool);
         let output = text_of(if tool.raw_output.is_null() {
             &tool.content
@@ -1418,7 +1651,7 @@ impl<'a> Turn<'a> {
                 .and_then(|option| option["optionId"].as_str())
                 .map(str::to_owned)
         };
-        match disposition(&self.runtime_mode, &kind) {
+        match disposition(self.flavor, &self.runtime_mode, &kind) {
             Disposition::Allow => {
                 let chosen = option("allow_once").or_else(|| option("allow_always"));
                 return agent.reply(&rpc_id, outcome(chosen)).await;
@@ -1480,7 +1713,11 @@ impl<'a> Turn<'a> {
             &self.runtime_mode,
         );
         open.fields.insert("prompt".into(), json!(prompt));
-        open.fields.insert("options".into(), Value::Array(labels));
+        // Grok labels its options (`grokApprovalOptions`); the generic
+        // flavor offers the default decisions.
+        if self.flavor == Flavor::Grok {
+            open.fields.insert("options".into(), Value::Array(labels));
+        }
         self.pending.insert(
             open.id.clone(),
             Pending {
@@ -1507,7 +1744,12 @@ impl<'a> Turn<'a> {
             return;
         };
         let mut decision = requests::decision(&response);
-        if decision == "acceptForSession" && !pending.offered.contains(&"acceptForSession") {
+        // Grok offers "allow for session" for edits only; the generic flavor
+        // takes the agent's first always-allow option.
+        if decision == "acceptForSession"
+            && self.flavor == Flavor::Grok
+            && !pending.offered.contains(&"acceptForSession")
+        {
             decision = "accept";
         }
         let option = |wanted: &str| {
@@ -1553,11 +1795,14 @@ enum Disposition {
 }
 
 /// Grok has no auto-accept-edits launch mode: a thread in it runs under the
-/// approval policy the reference gives it, so it asks about edits too.
-fn disposition(runtime_mode: &str, kind: &str) -> Disposition {
+/// approval policy the reference gives it, so it asks about edits too. In
+/// auto mode Grok asks only about what its classifier refused, which goes to
+/// the user; the generic flavor lets an agent's requests through.
+fn disposition(flavor: Flavor, runtime_mode: &str, kind: &str) -> Disposition {
     let reads = matches!(kind, "read" | "search" | "think");
     match runtime_mode {
-        "auto" => Disposition::Ask,
+        "auto" if flavor == Flavor::Grok => Disposition::Ask,
+        "auto" => Disposition::Allow,
         "full-access" => Disposition::Allow,
         _ if reads => Disposition::Allow,
         _ => Disposition::Ask,
@@ -1571,8 +1816,8 @@ fn outcome(option: Option<String>) -> Value {
     }
 }
 
-fn native_ref(native: &str, strength: &str) -> Value {
-    json!({"driver": GROK, "nativeId": native, "strength": strength})
+fn native_ref(driver: &str, native: &str, strength: &str) -> Value {
+    json!({"driver": driver, "nativeId": native, "strength": strength})
 }
 
 /// A content block's display text (`displayTextFromContentBlock`).
@@ -1788,12 +2033,17 @@ mod tests {
 
     #[test]
     fn the_runtime_mode_decides_which_requests_ask() {
-        let asks = |mode, kind| matches!(disposition(mode, kind), Disposition::Ask);
-        assert!(!asks("approval-required", "read"));
-        assert!(asks("approval-required", "execute"));
-        assert!(asks("auto-accept-edits", "edit"));
-        assert!(asks("auto", "read"));
-        assert!(!asks("full-access", "execute"));
+        let asks = |flavor, mode, kind| matches!(disposition(flavor, mode, kind), Disposition::Ask);
+        for flavor in [Flavor::Grok, Flavor::Registry] {
+            assert!(!asks(flavor, "approval-required", "read"));
+            assert!(asks(flavor, "approval-required", "execute"));
+            assert!(asks(flavor, "auto-accept-edits", "edit"));
+            assert!(!asks(flavor, "full-access", "execute"));
+        }
+        // Grok's auto mode asks about what its classifier refused; the
+        // generic flavor's lets requests through.
+        assert!(asks(Flavor::Grok, "auto", "read"));
+        assert!(!asks(Flavor::Registry, "auto", "execute"));
     }
 
     #[test]

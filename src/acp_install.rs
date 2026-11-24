@@ -942,7 +942,7 @@ async fn ensure_package(
     agent: &Value,
     distribution: &str,
     spec: &str,
-) -> Result<(), AcpError> {
+) -> Result<Map<String, Value>, AcpError> {
     let id = agent["id"].as_str().unwrap_or_default();
     let manager_name = if distribution == "npx" { "npm" } else { "uv" };
     let environment = host_environment();
@@ -952,8 +952,8 @@ async fn ensure_package(
         )));
     };
     let receipt = read_receipt(roots, agent, distribution, spec, &manager);
-    if receipt.is_some() && distribution == "npx" {
-        return Ok(());
+    if let Some(receipt) = receipt.clone().filter(|_| distribution == "npx") {
+        return Ok(receipt);
     }
     let package_root = package_install_root(roots, agent, distribution);
     std::fs::create_dir_all(&package_root).map_err(|_| {
@@ -988,11 +988,14 @@ async fn ensure_package(
         }
     };
     // A uv receipt counts only while uv still lists the tool.
-    if receipt.is_some() && discover(&package_env).await?.is_some() {
-        return Ok(());
+    if let Some(receipt) = receipt {
+        if discover(&package_env).await?.is_some() {
+            return Ok(receipt);
+        }
     }
     if let Some(existing) = discover(&package_env).await? {
-        return write_receipt(roots, &existing);
+        write_receipt(roots, &existing)?;
+        return Ok(existing);
     }
     let install_env = with_preferred_path(&package_env, &manager_bin_directory(&manager));
     let args: Vec<&str> = if distribution == "npx" {
@@ -1011,11 +1014,99 @@ async fn ensure_package(
     )
     .await?;
     match discover(&package_env).await? {
-        Some(installed) => write_receipt(roots, &installed),
+        Some(installed) => {
+            write_receipt(roots, &installed)?;
+            Ok(installed)
+        }
         None => Err(err(
             "install_failed",
             format!("ACP Registry installed {spec}, but could not resolve its global command."),
         )),
+    }
+}
+
+/// How an installed registry agent is launched: its command, the
+/// distribution's arguments and environment, and the folder its package
+/// manager put the command's siblings in (first on its PATH).
+pub(crate) struct AgentLaunch {
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub bin_directory: Option<PathBuf>,
+}
+
+/// `resolveWithRegistry` once the agent and its distribution are known: the
+/// agent installed (or the install it has reused) and how it is launched.
+/// `command_override` (the instance's `commandPath`) replaces the
+/// distribution's executable, keeping its arguments and environment.
+pub(crate) async fn launch(
+    roots: &Roots,
+    agent: &Value,
+    kind: &str,
+    binary: Option<(&str, &Value)>,
+    command_override: &str,
+) -> Result<AgentLaunch, AcpError> {
+    let id = agent["id"].as_str().unwrap_or_default().to_owned();
+    let source = match (kind, binary) {
+        ("binary", Some((_, target))) => target,
+        _ => &agent["distribution"][kind],
+    };
+    let args: Vec<String> = source["args"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|arg| arg.as_str().map(str::to_owned))
+        .collect();
+    let env: Vec<(String, String)> = source["env"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_owned())))
+        .collect();
+    if !command_override.is_empty() {
+        let command = resolve_executable(command_override, &host_environment()).ok_or_else(|| {
+            err("runner_unavailable", format!(
+                "ACP Registry agent {id} requires '{command_override}', but it is not available on this provider instance's PATH."
+            ))
+        })?;
+        return Ok(AgentLaunch {
+            command,
+            args,
+            env,
+            bin_directory: None,
+        });
+    }
+    let lock = permit(&id);
+    let _permit = lock.lock().await;
+    match (kind, binary) {
+        ("binary", Some((target_name, target))) => {
+            let command = install_binary(roots, agent, target_name, target).await?;
+            Ok(AgentLaunch {
+                command,
+                args,
+                env,
+                bin_directory: None,
+            })
+        }
+        _ => {
+            let spec = source["package"].as_str().unwrap_or_default();
+            let receipt = ensure_package(roots, agent, kind, spec).await?;
+            let path = |key: &str| receipt.get(key).and_then(Value::as_str).map(PathBuf::from);
+            let command = path("executablePath").ok_or_else(|| {
+                err(
+                    "install_failed",
+                    format!(
+                        "ACP Registry installed {spec}, but could not resolve its global command."
+                    ),
+                )
+            })?;
+            Ok(AgentLaunch {
+                command,
+                args,
+                env,
+                bin_directory: path("binDirectory"),
+            })
+        }
     }
 }
 

@@ -32,7 +32,8 @@ Steps:
                              (or that has none), so one Claude CLI can take a
                              first prompt or a later delivery
   {"send": {...}}            write a message; "$id" becomes the remembered
-                             message's id ("$request_id" its control
+                             message's id, "$id:session/prompt" the id of
+                             the last request with that method ("$request_id" its control
                              request_id, "$uuid" its uuid), "$params.x" its params.x, and
                              "$session" the Claude session the CLI was
                              started on
@@ -245,6 +246,10 @@ def answer(message):
         sys.stdout.flush()
 
 
+# The last request read with each method (for "$id:<method>").
+last_by_method = {}
+
+
 def receive():
     line = sys.stdin.readline()
     if not line:
@@ -260,6 +265,8 @@ def receive():
     except ValueError:
         return {}
     note_mcp_server(message)
+    if isinstance(message, dict) and isinstance(message.get("method"), str) and "id" in message:
+        last_by_method[message["method"]] = message
     return message
 
 
@@ -457,6 +464,10 @@ def fill(value):
     if isinstance(value, str):
         if value == "$id":
             return remembered.get("id")
+        if value.startswith("$id:"):
+            # The id of the last request with that method: an ACP prompt's, answered after the
+            # `session/cancel` notification that ends it.
+            return last_by_method.get(value[len("$id:"):], {}).get("id")
         if value.startswith("$params."):
             # A dotted path, with list indices: "$params.input.0.text".
             found = remembered.get("params", {})

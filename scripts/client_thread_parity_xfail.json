@@ -1,4 +1,40 @@
 {
+  "acp approval": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp approval declined": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp approval for session": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp approval interrupted": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp auto": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp failed turn": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp interrupt": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp local turn": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp model": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp registry turn": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp second turn": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
+  "acp stop then turn": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes an ACP agent's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
+  },
   "claude delegate": {
     "live": "Racy: the reference's provider commit batch (#39502) decides by timing whether a subagent's queued updates commit together: in 1 of 8 pinned local rounds it sent one more subagent.updated after the task's context-transfer.created than Rust. Matched in the other rounds."
   },
