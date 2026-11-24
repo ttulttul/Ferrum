@@ -289,14 +289,21 @@ def tool_turn(name, server, fixture, log, dispatch, cases):
             raise RuntimeError(f"{name} {tool}: expected {expected!r}, got {str(actual)[:500]!r}")
 
 
-def expect_viewport(viewer, width, height):
+def expect_viewport(viewer, width, height, pointers=None):
+    """Read the viewer's messages until it gets the viewport; the agent `pointer` messages before
+    it go to `pointers`, their sequence numbers counted from the first."""
     deadline = monotonic() + 30
     while (remaining := deadline - monotonic()) > 0:
         event = viewer.recv(timeout=remaining)
         if isinstance(event, bytes):
             viewer.send('{"type":"ack"}')
             continue
-        if json.loads(event) == {"type": "viewport", "width": width, "height": height}:
+        message = json.loads(event)
+        if message.get("type") == "pointer" and pointers is not None:
+            first = pointers[0]["sequence"] if pointers else message["sequence"]
+            pointers.append({**message, "x": round(message["x"], 1), "y": round(message["y"], 1),
+                             "sequence": message["sequence"] - first})
+        if message == {"type": "viewport", "width": width, "height": height}:
             return
     raise RuntimeError(f"Viewer did not receive a {width} by {height} viewport")
 
@@ -375,8 +382,9 @@ def automation(name, server, page_url, directory, fixture, log, scenario):
          {"value": [351, 199, 4, True, True], "toolIcon": icon}),
     ])
     cases.extend([
-        ("preview_act", {"action": "hover", "selector": "a"}, {"toolIcon": icon}),
-        ("preview_act", {"action": "click", "selector": "a"}, {"toolIcon": icon}),
+        # On the tab a passive viewer watches, which sees the agent's cursor.
+        ("preview_act", {"tabId": tab, "action": "hover", "selector": "a"}, {"toolIcon": icon}),
+        ("preview_act", {"tabId": tab, "action": "click", "selector": "a"}, {"toolIcon": icon}),
         ("preview_wait_for", {"urlIncludes": "#fixture"}, {"toolIcon": icon}),
         ("preview_open", {"url": page_url, "open": False, "reuseExistingTab": False}, {"__status__": True}),
         ("preview_navigate", {"url": page_url}, {"__status__": True}),
@@ -409,13 +417,16 @@ def automation(name, server, page_url, directory, fixture, log, scenario):
         with connect(passive_url, additional_headers={"Cookie": cookie}, open_timeout=60,
                      proxy=None, compression=None) as passive:
             tool_turn(name, server, fixture, log, seed["dispatch"], cases)
-            expect_viewport(passive, 844, 540)
+            # The agent's cursor the viewer saw: the hover's move, then the click's move and ring.
+            pointers = []
+            expect_viewport(passive, 844, 540, pointers)
         sessions = rpc(url, cookie, "preview.list", {"threadId": THREAD})["sessions"]
         if next(item for item in sessions if item["tabId"] == tab)["viewport"] != fixed:
             raise RuntimeError(f"{name}: preview.resize did not persist the viewport setting")
     for thread, target in ((THREAD, human), (THREAD, tab), (THREAD, zoomed), ("other-thread", foreign)):
         rpc(url, cookie, "preview.close", dict(threadId=thread, tabId=target))
     print(f"PASS {name} Chromium MCP evaluation, appearance and resize ({len(cases)} calls)")
+    return pointers
 
 
 def disabled_automation(name, server, directory, fixture, log, scenario):
@@ -454,6 +465,7 @@ def main():
         secret = secrets.token_urlsafe(32)
         signing_key = secrets.token_bytes(32)
         servers = {}
+        pointers = {}
         scenario = {"name": "preview tools", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"}
 
         def start(lifetime, name, cmd):
@@ -474,7 +486,13 @@ def main():
                 server, fixture, log = start(denied_stack, label, cmd)
                 disabled_automation(label, server, Path(directory), fixture, log, scenario)
             servers[name], fixture, log = start(stack, name, cmd)
-            automation(name, servers[name], url + "#fixture", Path(directory), fixture, log, scenario)
+            pointers[name] = automation(name, servers[name], url + "#fixture", Path(directory), fixture, log, scenario)
+        # The reference shows the agent's cursor for the hover and the click; Rust must show the same.
+        phases = [event["phase"] for event in pointers["original"]]
+        pointer_failed = phases != ["move", "move", "click"] or pointers["original"] != pointers["rust"]
+        print(f"{'FAIL' if pointer_failed else 'PASS'} agent pointer")
+        if pointer_failed:
+            print(f"  original {json.dumps(pointers['original'])}\n  rust     {json.dumps(pointers['rust'])}")
         try:
             original = observe_with_retry("original", servers["original"], url, page)
         except FrameStall as stall:
@@ -487,7 +505,7 @@ def main():
         rust = observe_with_retry("rust", servers["rust"], url, page)
         if original is None:
             print("PASS rust preview session (colours, sizes, upload, download, close)")
-            return False
+            return pointer_failed
         failed = 0
         for key in ("control", "viewport", "first paint JPEG", "second paint JPEG",
                     "settled JPEG", "upload", "download", "socket close"):
@@ -499,7 +517,7 @@ def main():
                 if "JPEG" in key:
                     left, right = [f"{len(data)} bytes, SHA256 {sha256(data).hexdigest()}" for data in (left, right)]
                 print(f"FAIL {key}\n  original {left}\n  rust     {right}")
-        return bool(failed)
+        return bool(failed) or pointer_failed
 
 
 if __name__ == "__main__":

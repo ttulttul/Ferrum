@@ -438,13 +438,14 @@ impl Session {
         Ok(point["x"].as_f64().zip(point["y"].as_f64()))
     }
 
-    async fn act(&mut self, args: &Value, deadline: Instant) -> Result<Value, String> {
+    async fn act(&mut self, args: &Value, deadline: Instant, page: &Page) -> Result<Value, String> {
         let action = args["action"].as_str().ok_or("Missing action")?;
         let point = self.target_point(args, "locator").await?;
         if action == "click" {
             let (x, y) = point
                 .or(args["x"].as_f64().zip(args["y"].as_f64()))
                 .ok_or("A locator or x and y are required")?;
+            page.report_pointer(x, y, true).await;
             let button = args["button"].as_str().unwrap_or("left");
             let count = args["clickCount"].as_u64().unwrap_or(1);
             for ty in ["mousePressed", "mouseReleased"] {
@@ -458,6 +459,7 @@ impl Session {
         }
         if action == "hover" {
             let (x, y) = point.ok_or("A locator or x and y are required")?;
+            page.report_pointer(x, y, false).await;
             self.command(
                 "Input.dispatchMouseEvent",
                 json!({"type":"mouseMoved","x":x,"y":y}),
@@ -565,6 +567,7 @@ impl Session {
                 .target_point(&source_args, "locator")
                 .await?
                 .ok_or("Source not found")?;
+            page.report_pointer(a.0, a.1, false).await;
             let b = self
                 .target_point(&target_args, "locator")
                 .await?
@@ -584,6 +587,7 @@ impl Session {
                 json!({"type":"mouseReleased","x":b.0,"y":b.1,"button":"left"}),
             )
             .await?;
+            page.report_pointer(b.0, b.1, false).await;
             return Ok(json!({}));
         }
         let _ = deadline;
@@ -801,7 +805,7 @@ impl Page {
                 }
                 "recordingStop" => session.stop_recording(self).await,
                 "snapshot" => session.snapshot(args, self).await,
-                "act" => session.act(args, deadline).await,
+                "act" => session.act(args, deadline, self).await,
                 "waitFor" => session.wait_for(args, deadline).await,
                 "evaluate" => {
                     session

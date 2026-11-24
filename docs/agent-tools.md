@@ -394,8 +394,14 @@ tab's settled final frame, leaves the video as a pending attachment, and the too
 thread (`claimPreviewRecording`). `scripts/preview_session_parity.py` compares the four tools in a
 real headless Chromium on a loopback page.
 
+The agent's cursor shows where it acts, as the reference's `pointerFor` does: before a click,
+hover or drag, the tab's viewers get `pointer` messages (a move, and for a click its ring) and a
+recording draws the cursor and ring into its frames (`__t3Recorder.cursor`), with the reference's
+pauses so they can be seen. Nothing waits when no one watches or records.
+`scripts/preview_provider_parity.py` compares the messages a passive viewer receives.
+
 **Not yet:** recordings from an agentd workspace on another machine (the claim reads the server's
-attachments directory), and the agent's cursor and click rings drawn into recordings.
+attachments directory).
 
 ### 4g. Run output
 
