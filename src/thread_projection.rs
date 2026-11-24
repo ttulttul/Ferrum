@@ -1058,10 +1058,18 @@ impl Thread {
                     "sourceItemId":item["id"],"item":item})
             })
             .collect::<Vec<_>>();
+        let context_handoffs: Vec<Value> = if wire {
+            self.context_handoffs
+                .iter()
+                .map(crate::context_handoff::project_for_wire)
+                .collect()
+        } else {
+            self.context_handoffs.clone()
+        };
         let mut projection = json!({"thread":app,"runs":self.run_rows(&row),"attempts":with("attempts",provider.attempts),"nodes":with("nodes",provider.nodes),"subagents":array("subagents"),
             "providerSessions":with("providerSessions",provider.provider_sessions),"providerThreads":with("providerThreads",provider.provider_threads),"providerTurns":with("providerTurns",provider.provider_turns),"runtimeRequests":with("runtimeRequests",provider.runtime_requests),
             "messages":messages,"plans":provider.plans,"turnItems":turn_items,"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
-            "contextHandoffs":[],"contextTransfers":array("contextTransfers"),"visibleTurnItems":visible,"updatedAt":row["updatedAt"]});
+            "contextHandoffs":context_handoffs,"contextTransfers":array("contextTransfers"),"visibleTurnItems":visible,"updatedAt":row["updatedAt"]});
         sort_messages_by_turn_item_order(&mut projection);
         projection
     }
@@ -1333,6 +1341,14 @@ fn stored_projection(thread_id: &str, stored: &Value, wire: bool) -> Value {
             .map(crate::wire_items::wire_item)
             .collect();
         projection["turnItems"] = Value::Array(items);
+        if let Some(handoffs) = projection["contextHandoffs"].as_array() {
+            projection["contextHandoffs"] = Value::Array(
+                handoffs
+                    .iter()
+                    .map(crate::context_handoff::project_for_wire)
+                    .collect(),
+            );
+        }
     }
     let visible = crate::projection_shell::visible_turn_items(&projection)
         .into_iter()
@@ -1409,6 +1425,10 @@ impl Thread {
         let thread_id = text("id").unwrap_or_default();
         let runs = stored_runs(&thread_id, &projection);
         let checkpoints = stored_checkpoints(&projection);
+        let context_handoffs = projection["contextHandoffs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let provider = Box::new(stored_provider(&thread_id, &row, &projection));
         Thread {
             id: thread_id,
@@ -1434,6 +1454,7 @@ impl Thread {
                 .collect(),
             checkpoints,
             link_requests: Vec::new(),
+            context_handoffs,
             provider,
             stored: Some(Box::new(projection)),
             row,

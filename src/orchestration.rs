@@ -985,6 +985,7 @@ async fn apply_command<H: CommandHost>(
                 tags: vec![],
                 checkpoints: vec![],
                 link_requests: Vec::new(),
+                context_handoffs: Vec::new(),
                 provider: Default::default(),
                 stored: None,
             };
@@ -2456,6 +2457,7 @@ async fn apply_command<H: CommandHost>(
                 tags: source.tags,
                 checkpoints: vec![],
                 link_requests: Vec::new(),
+                context_handoffs: Vec::new(),
                 provider: Default::default(),
                 stored: None,
             };
