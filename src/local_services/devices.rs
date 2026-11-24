@@ -44,10 +44,22 @@ impl Drop for HubRuntime {
     }
 }
 
+/// What SSH host supervision remembers between ticks.
+#[derive(Default)]
+struct Supervision {
+    ticks: u64,
+    /// Consecutive missed health probes, by host.
+    misses: HashMap<String, u32>,
+    /// Hosts waiting to reconnect: when next, and the current backoff.
+    reconnecting: HashMap<String, (tokio::time::Instant, Duration)>,
+}
+
 /// An SSH host's forwarded hub.
 struct SshReady {
     ctx: HostCtx,
     tunnel: ssh_host::Tunnel,
+    /// Its agent-device daemon, forwarded here, once agents want the host.
+    agent: Option<AgentEndpoint>,
 }
 
 pub struct DeviceService {
@@ -66,6 +78,8 @@ pub struct DeviceService {
     ssh_ready: tokio::sync::Mutex<HashMap<String, SshReady>>,
     /// The SSH hosts this server started something on, which `stop` stops.
     ssh_activated: Mutex<HashSet<String>>,
+    /// The SSH hosts agents use (`wantsAgent`), which start with their daemon.
+    ssh_wants_agent: Mutex<HashSet<String>>,
     /// Serializes host reconciles (the reference's lifecycle lock).
     reconcile_lock: tokio::sync::Mutex<()>,
 }
@@ -94,6 +108,7 @@ impl DeviceService {
             ssh_hosts: Mutex::new(Vec::new()),
             ssh_ready: Default::default(),
             ssh_activated: Default::default(),
+            ssh_wants_agent: Default::default(),
             reconcile_lock: Default::default(),
         })
     }
@@ -1521,6 +1536,18 @@ impl DeviceService {
             if !enabled || input["agentAccessEnabled"] == false {
                 self.stop_agent_locked(dir).await;
             }
+            if enabled && input["agentAccessEnabled"] == false {
+                let hosts: Vec<SshConfig> = self
+                    .ssh_hosts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(config, _)| config.clone())
+                    .collect();
+                for config in &hosts {
+                    self.ssh_stop_agent(config, dir).await;
+                }
+            }
             if !enabled {
                 let hosts: Vec<SshConfig> = self
                     .ssh_hosts
@@ -1557,7 +1584,7 @@ impl DeviceService {
                     // `retryHost`: only that host, made ready and listed again.
                     drop(runtime);
                     if enabled {
-                        self.list_ssh_host(id, dir).await;
+                        self.retry_ssh_host(id, dir).await;
                     }
                     return Ok(self.snapshot(dir));
                 }
@@ -1684,6 +1711,22 @@ impl DeviceService {
                         "hostLabel": self.host_label(session_host),
                         "reason": "Device host is reconnecting. Retry close after it reconnects.",
                     }));
+                }
+            }
+            for s in ending.iter().filter(|s| s["hostId"] != LOCAL_HOST_ID) {
+                let session_host = s["hostId"].as_str().unwrap_or_default();
+                if let Some(endpoint) = self.ssh_agent_endpoint(session_host).await {
+                    let session = agent_device::session_name(
+                        s["threadId"].as_str().unwrap_or(""),
+                        session_host,
+                        s["deviceId"].as_str().unwrap_or(""),
+                    );
+                    if agent_device::release_session(&endpoint, &session)
+                        .await
+                        .is_err()
+                    {
+                        return Err(op_err("close", "request_failed"));
+                    }
                 }
             }
             // Open publishes under the same lock; an old close must not release a reopened claim.
@@ -2415,7 +2458,11 @@ impl DeviceService {
             host_id.as_deref(),
         )?;
         // Resolve consent and agent connectivity before booting or registering a session.
-        if self.agent_readiness(dir).await?.is_none() {
+        let target_host = target["hostId"]
+            .as_str()
+            .unwrap_or(LOCAL_HOST_ID)
+            .to_owned();
+        if self.agent_readiness_for(&target_host, dir).await?.is_none() {
             return Err(tool_unavailable(AGENT_ACCESS_UNAVAILABLE));
         }
         let session = self
@@ -2448,11 +2495,11 @@ impl DeviceService {
             .cloned()
             .unwrap_or(target);
         // agentTarget: the opened device's config and session.
-        let Some(endpoint) = self.agent_readiness(dir).await? else {
+        let Some(endpoint) = self.agent_readiness_for(&session_host, dir).await? else {
             return Err(json!({
                 "_tag": "DeviceHostUnavailableError",
                 "hostId": session_host,
-                "hostLabel": LOCAL_HOST_LABEL,
+                "hostLabel": self.host_label(&session_host),
                 "reason": AGENT_ACCESS_UNAVAILABLE,
             }));
         };
@@ -2819,10 +2866,23 @@ impl DeviceService {
                 Some(ssh_host::install_message("device hub", &hub_tool)),
             );
         }
+        self.ssh_connect_locked(&mut ready, config, dir).await
+    }
+
+    /// `connect`: the bootstrap's start (with the agent daemon when agents
+    /// want this host), the tunnel, and the host's agent config.
+    async fn ssh_connect_locked(
+        &self,
+        ready: &mut HashMap<String, SshReady>,
+        config: &SshConfig,
+        dir: &Path,
+    ) -> Result<HostCtx, ssh_host::HostError> {
+        let owner = ssh_host::owner(dir, &config.id);
+        let agent = self.ssh_wants_agent.lock().unwrap().contains(&config.id);
         self.ssh_activated.lock().unwrap().insert(config.id.clone());
         let mut attempt = 0;
         loop {
-            let started = ssh_host::start(config, &owner, false).await?;
+            let started = ssh_host::start(config, &owner, agent).await?;
             self.set_host_status_for(&config.id, "starting", None);
             let previous_agent = self
                 .ssh_summary(&config.id)
@@ -2838,10 +2898,10 @@ impl DeviceService {
                     false => summary["tools"] = started.tools.clone(),
                 }
                 summary["hubInstalled"] = json!(true);
-                summary["agentDeviceInstalled"] = json!(previous_agent);
+                summary["agentDeviceInstalled"] = json!(agent || previous_agent);
             });
             match ssh_host::open_tunnel(config, &started).await {
-                Ok((tunnel, hub_port, _daemon_port)) => {
+                Ok((tunnel, hub_port, daemon_port)) => {
                     let platform = |name: &str| {
                         started.platforms.as_array().is_some_and(|list| {
                             list.iter()
@@ -2859,11 +2919,33 @@ impl DeviceService {
                         ios: platform("ios"),
                         android: platform("android"),
                     };
+                    let endpoint = match (&started.daemon_port, &started.token, &started.entry_path)
+                    {
+                        (Some(_), Some(token), Some(entry)) => Some(AgentEndpoint {
+                            base_url: format!("http://127.0.0.1:{daemon_port}"),
+                            token: token.clone(),
+                            entry: PathBuf::from(entry),
+                        }),
+                        _ => None,
+                    };
+                    // onReady: agents reach the host's daemon through this tunnel.
+                    if let Some(endpoint) = &endpoint {
+                        agent_device::write_config(
+                            &agent_device::config_path(dir, &config.id),
+                            endpoint,
+                        )
+                        .await
+                        .map_err(|_| ssh_host::HostError {
+                            step: "configuring agent access".into(),
+                            cause: Box::new(ssh_host::Cause::Other),
+                        })?;
+                    }
                     ready.insert(
                         config.id.clone(),
                         SshReady {
                             ctx: ctx.clone(),
                             tunnel,
+                            agent: endpoint,
                         },
                     );
                     self.set_host_status_for(&config.id, "ready", None);
@@ -2882,8 +2964,151 @@ impl DeviceService {
         }
     }
 
+    /// `ensureAgentReady`: the host made ready, then (`changeAgent(true)`)
+    /// reconnected with its agent daemon unless it already has it.
+    async fn ssh_agent_ready(
+        &self,
+        config: &SshConfig,
+        dir: &Path,
+    ) -> Result<AgentEndpoint, ssh_host::HostError> {
+        self.ssh_connect(config, dir).await?;
+        let summary = self.ssh_summary(&config.id).unwrap_or_default();
+        if summary["agentDeviceInstalled"] == true {
+            self.set_host_status_for(&config.id, "starting", None);
+        } else {
+            self.set_host_status_for(
+                &config.id,
+                "installing",
+                Some(ssh_host::install_message(
+                    "agent tools",
+                    &summary["tools"]["agent"],
+                )),
+            );
+        }
+        let mut ready = self.ssh_ready.lock().await;
+        self.ssh_wants_agent
+            .lock()
+            .unwrap()
+            .insert(config.id.clone());
+        if let Some(agent) = ready.get(&config.id).and_then(|entry| entry.agent.clone()) {
+            return Ok(agent);
+        }
+        ready.remove(&config.id);
+        match self.ssh_connect_locked(&mut ready, config, dir).await {
+            Ok(_) => ready
+                .get(&config.id)
+                .and_then(|entry| entry.agent.clone())
+                .ok_or_else(|| ssh_host::HostError {
+                    step: "starting agent tools".into(),
+                    cause: Box::new(ssh_host::Cause::Other),
+                }),
+            Err(error) => {
+                ready.remove(&config.id);
+                let _ =
+                    ssh_host::bootstrap(config, &ssh_host::owner(dir, &config.id), "stop-agent")
+                        .await;
+                Err(error)
+            }
+        }
+    }
+
+    /// `agentReadinessIfSupported` for any host: the agent daemon agents
+    /// reach it through, or `None` when agent device access is off.
+    pub(super) async fn agent_readiness_for(
+        &self,
+        host_id: &str,
+        dir: &Path,
+    ) -> Result<Option<AgentEndpoint>, Value> {
+        if host_id == LOCAL_HOST_ID {
+            return self.agent_readiness(dir).await;
+        }
+        let Some(config) = self.ssh_config(host_id) else {
+            return Err(bad_host(host_id));
+        };
+        let preferences = self
+            .settings
+            .internal()
+            .map_err(|_| op_err("settings", "settings_failed"))?;
+        if preferences["enableDeviceSupport"] != true
+            || preferences["enableAgentDeviceAccess"] != true
+        {
+            return Ok(None);
+        }
+        match self.ssh_agent_ready(&config, dir).await {
+            Ok(endpoint) => {
+                let mut state = self.snapshot(dir);
+                self.publish(&mut state);
+                self.set_host_status_for(host_id, "ready", None);
+                Ok(Some(endpoint))
+            }
+            Err(error) => {
+                let actionable = (error.step == "probe")
+                    .then(|| ssh_host::probe_failure_message(&error))
+                    .flatten();
+                self.set_host_status_for(
+                    host_id,
+                    "failed",
+                    Some(actionable.clone().unwrap_or_else(|| {
+                        format!("Device host {host_id} failed while {}.", error.step)
+                    })),
+                );
+                Err(json!({
+                    "_tag": "DeviceHostUnavailableError",
+                    "hostId": host_id,
+                    "hostLabel": config.label,
+                    "reason": actionable.unwrap_or_else(|| format!("Device support failed during {}.", error.step)),
+                    "cause": error.encoded(host_id),
+                }))
+            }
+        }
+    }
+
+    /// `stopAgent` for an SSH host (`changeAgent(false)`): stops its daemon
+    /// and reconnects without it, if it had one.
+    async fn ssh_stop_agent(&self, config: &SshConfig, dir: &Path) {
+        self.ssh_wants_agent.lock().unwrap().remove(&config.id);
+        let mut ready = self.ssh_ready.lock().await;
+        if ready
+            .get(&config.id)
+            .is_none_or(|entry| entry.agent.is_none())
+        {
+            return;
+        }
+        ready.remove(&config.id);
+        if ssh_host::bootstrap(config, &ssh_host::owner(dir, &config.id), "stop-agent")
+            .await
+            .is_ok()
+        {
+            let _ = self.ssh_connect_locked(&mut ready, config, dir).await;
+        }
+    }
+
+    /// The agent daemon an SSH host's sessions are released on, while connected.
+    async fn ssh_agent_endpoint(&self, host_id: &str) -> Option<AgentEndpoint> {
+        self.ssh_ready
+            .lock()
+            .await
+            .get(host_id)
+            .and_then(|entry| entry.agent.clone())
+    }
+
+    /// Every SSH host stopped, as the server shuts down.
+    pub(crate) async fn stop_ssh_hosts(&self, dir: &Path) {
+        let hosts: Vec<SshConfig> = self
+            .ssh_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(config, _)| config.clone())
+            .collect();
+        futures_util::stream::iter(hosts)
+            .for_each_concurrent(4, |config| async move { self.ssh_stop(&config, dir).await })
+            .await;
+    }
+
     /// `stop` for an SSH host: drops its tunnel and stops what it started there.
     async fn ssh_stop(&self, config: &SshConfig, dir: &Path) {
+        self.ssh_wants_agent.lock().unwrap().remove(&config.id);
         self.ssh_ready.lock().await.remove(&config.id);
         if self.ssh_activated.lock().unwrap().remove(&config.id) {
             let _ = ssh_host::bootstrap(config, &ssh_host::owner(dir, &config.id), "stop").await;
@@ -2904,6 +3129,37 @@ impl DeviceService {
                 self.list_ssh_host(&config.id, dir).await
             })
             .await;
+    }
+
+    /// `retryHost` for an SSH host: its agent tools when agents may use it,
+    /// else the host alone, then its devices; a failure is its status.
+    async fn retry_ssh_host(&self, host_id: &str, dir: &Path) {
+        match self.agent_readiness_for(host_id, dir).await {
+            Ok(None) => self.list_ssh_host(host_id, dir).await,
+            Ok(Some(_)) => {
+                let listed = match self.ssh_current(host_id).await {
+                    Some(ctx) => list_hub(&ctx).await,
+                    None => return,
+                };
+                match listed {
+                    Ok(listed) => {
+                        let mut state = self.snapshot(dir);
+                        apply_list_result(&mut state, dir, host_id, listed);
+                        self.publish(&mut state);
+                    }
+                    Err(error) => self.set_host_status_for(
+                        host_id,
+                        "failed",
+                        Some(crate::mcp_oauth::format_device_error(&error)),
+                    ),
+                }
+            }
+            Err(error) => self.set_host_status_for(
+                host_id,
+                "failed",
+                Some(error["reason"].as_str().unwrap_or_default().to_owned()),
+            ),
+        }
     }
 
     /// One SSH host made ready and listed, or its failure as its status.
@@ -3051,15 +3307,122 @@ impl DeviceService {
 
     /// Reconciles the SSH hosts now and on every settings change, as the
     /// reference's settings subscription does.
+    ///
+    /// It also supervises connected hosts, as each reference host's connection
+    /// does: a tunnel that exits, or three missed health probes 10 seconds
+    /// apart, reconnects, backing off from 1 to 30 seconds between attempts.
     pub(crate) async fn watch_hosts(&self, dir: &Path) {
         let mut changes = self.settings.subscribe();
         self.reconcile_hosts(dir).await;
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut supervision = Supervision::default();
         loop {
-            match changes.recv().await {
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    self.reconcile_hosts(dir).await
+            tokio::select! {
+                change = changes.recv() => match change {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        self.reconcile_hosts(dir).await
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                },
+                _ = tick.tick() => self.supervise_ssh_hosts(dir, &mut supervision).await,
+            }
+        }
+    }
+
+    /// One second of SSH host supervision.
+    async fn supervise_ssh_hosts(&self, dir: &Path, supervision: &mut Supervision) {
+        supervision.ticks += 1;
+        let probe = supervision.ticks.is_multiple_of(10);
+        let mut lost = Vec::new();
+        let mut endpoints = Vec::new();
+        {
+            let mut ready = self.ssh_ready.lock().await;
+            for (id, entry) in ready.iter_mut() {
+                if !entry.tunnel.alive() {
+                    lost.push(id.clone());
+                } else if probe {
+                    endpoints.push((
+                        id.clone(),
+                        entry.ctx.origin.clone(),
+                        entry.agent.as_ref().map(|agent| agent.base_url.clone()),
+                    ));
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+            supervision.misses.retain(|id, _| ready.contains_key(id));
+        }
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        for (id, hub, daemon) in endpoints {
+            let answers = |url: String| {
+                let client = client.clone();
+                async move {
+                    client
+                        .get(url)
+                        .send()
+                        .await
+                        .is_ok_and(|response| response.status().as_u16() == 200)
+                }
+            };
+            let alive = answers(format!("{hub}/readyz")).await
+                && match daemon {
+                    Some(daemon) => answers(format!("{daemon}/health")).await,
+                    None => true,
+                };
+            let misses = supervision.misses.entry(id.clone()).or_default();
+            *misses = if alive { 0 } else { *misses + 1 };
+            // A loaded host can miss a probe or two while still working.
+            if *misses >= 3 {
+                lost.push(id);
+            }
+        }
+        for id in lost {
+            supervision.misses.remove(&id);
+            self.ssh_ready.lock().await.remove(&id);
+            if !self.ssh_activated.lock().unwrap().contains(&id) {
+                continue;
+            }
+            self.set_host_status_for(&id, "starting", Some("Reconnecting to device host…".into()));
+            supervision.reconnecting.insert(
+                id,
+                (
+                    tokio::time::Instant::now() + Duration::from_secs(1),
+                    Duration::from_secs(1),
+                ),
+            );
+        }
+        let due: Vec<String> = supervision
+            .reconnecting
+            .iter()
+            .filter(|(_, (at, _))| *at <= tokio::time::Instant::now())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            let config = self.ssh_config(&id);
+            let stopped = !self.ssh_activated.lock().unwrap().contains(&id);
+            let mut ready = self.ssh_ready.lock().await;
+            let (Some(config), false, false) = (config, stopped, ready.contains_key(&id)) else {
+                supervision.reconnecting.remove(&id);
+                continue;
+            };
+            match self.ssh_connect_locked(&mut ready, &config, dir).await {
+                Ok(_) => {
+                    supervision.reconnecting.remove(&id);
+                }
+                Err(error) => {
+                    ready.remove(&id);
+                    self.set_host_status_for(
+                        &id,
+                        "failed",
+                        Some(format!("Device host {id} failed while {}.", error.step)),
+                    );
+                    if let Some((at, delay)) = supervision.reconnecting.get_mut(&id) {
+                        *delay = (*delay * 2).min(Duration::from_secs(30));
+                        *at = tokio::time::Instant::now() + *delay;
+                    }
+                }
             }
         }
     }
