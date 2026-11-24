@@ -953,7 +953,21 @@ pub(crate) async fn webhook_handler(
             "not_found",
         );
     };
-    let delivery_id = format!("delivery:{}", uuid::Uuid::new_v4());
+    // The relay's delivery id and receive time count only with its signed
+    // proof; the URL can also be called directly (`RelayDeliveryProof`).
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let relay = crate::cloud_link::relay_delivery(
+        &state.paths.secrets,
+        mcp_oauth::McpHost::environment_id(&*state),
+        header("x-t3-relay-delivery"),
+        header("x-t3-relay-delivery-id"),
+        header("x-t3-relay-received-at"),
+        &hook_id,
+    );
+    let delivery_id = match &relay {
+        Some((relayed, _)) => format!("delivery:relay:{relayed}"),
+        None => format!("delivery:{}", uuid::Uuid::new_v4()),
+    };
     let headers_json = headers
         .iter()
         .filter_map(|(name, value)| {
@@ -1026,9 +1040,9 @@ pub(crate) async fn webhook_handler(
     }
     if let (Some(max_age), Some(received)) = (
         task["schedule"]["maxDeliveryAgeMinutes"].as_i64(),
-        headers
-            .get("x-t3-relay-received-at")
-            .and_then(|value| value.to_str().ok())
+        relay
+            .as_ref()
+            .map(|(_, received_at)| received_at.as_str())
             .and_then(|value| {
                 time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
                     .ok()
@@ -1567,6 +1581,22 @@ impl mcp_oauth::McpHost for AppState {
     ) -> mcp_oauth::HostFuture<Result<serde_json::Value, (&'static str, String)>> {
         let state = self.clone();
         Box::pin(async move { crate::workflows::tool(&state, &input).await })
+    }
+    fn scheduled_task_save(
+        self: &Arc<Self>,
+        input: serde_json::Value,
+    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, String>> {
+        let state = self.clone();
+        Box::pin(async move {
+            match crate::rpc::scheduled_task_upsert(&state, &input).await {
+                crate::rpc_protocol::Reply::Success(saved) => Ok(saved["task"].clone()),
+                crate::rpc_protocol::Reply::Failure(failure) => Err(failure["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Could not save schedule task.")
+                    .to_owned()),
+                _ => Err("Could not save schedule task.".to_owned()),
+            }
+        })
     }
     fn claim_preview_recording(
         &self,

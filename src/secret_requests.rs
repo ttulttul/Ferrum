@@ -31,6 +31,7 @@ pub(crate) enum Failure {
     RefExpired,
     ConsumeFailed,
     NotAFileRequest,
+    InvalidRef,
 }
 
 impl Failure {
@@ -48,6 +49,7 @@ impl Failure {
             Failure::RefExpired => "ref_expired",
             Failure::ConsumeFailed => "consume_failed",
             Failure::NotAFileRequest => "not_a_file_request",
+            Failure::InvalidRef => "invalid_ref",
         }
     }
 
@@ -69,6 +71,7 @@ impl Failure {
             }
             Failure::RefExpired => "That secretRef expired. Ask the user again with request_secret.",
             Failure::ConsumeFailed => "Could not use that secretRef. Try again.",
+            Failure::InvalidRef => "That secretRef is not valid.",
             Failure::NotAFileRequest => {
                 "The user did not save this secret for shell use. Ask again with request_secret and delivery: \"file\"."
             }
@@ -225,6 +228,24 @@ impl Store {
             return Err(Failure::RefExpired);
         }
         Ok(decoded["value"].as_str().unwrap_or_default().to_owned())
+    }
+
+    /// `consume`: a live ref's value for its project, used once. The stored
+    /// copy goes first; a value whose copy cannot be removed is not handed out,
+    /// so a ref is never used twice. One consume at a time.
+    pub(crate) fn consume(&self, reference: &str, project_id: &str) -> Result<String, Failure> {
+        static CONSUMING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = CONSUMING.lock().unwrap_or_else(|e| e.into_inner());
+        let hex = reference.strip_prefix(REF_PREFIX).unwrap_or_default();
+        let valid = hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !valid {
+            return Err(Failure::InvalidRef);
+        }
+        let value = self.read(reference, project_id)?;
+        if !self.remove(&Self::store_name(reference)) {
+            return Err(Failure::ConsumeFailed);
+        }
+        Ok(value)
     }
 
     /// Writes `value` to an owner-only file `file` in `files/`, through a
@@ -544,6 +565,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ref_is_consumed_once_for_its_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        store.save("t", "card", "project:a", "s3cret").unwrap();
+        let reference = store.ref_for("t", "card").unwrap();
+        assert_eq!(
+            store.consume("secret-ref:XYZ", "project:a"),
+            Err(Failure::InvalidRef)
+        );
+        assert_eq!(
+            store.consume(&reference, "project:b"),
+            Err(Failure::RefUnavailable)
+        );
+        assert_eq!(
+            store.consume(&reference, "project:a").as_deref(),
+            Ok("s3cret")
+        );
+        assert_eq!(
+            store.consume(&reference, "project:a"),
+            Err(Failure::RefUnavailable)
+        );
+    }
 
     #[test]
     fn a_saved_answer_is_kept_under_its_ref_once_and_moved_to_a_file() {
