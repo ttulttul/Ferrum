@@ -15,8 +15,9 @@ from http.server import ThreadingHTTPServer
 import bitbucket_pull_request_parity as bb
 import github_provider_parity as gh
 import parity_harness as harness
-from client_thread_parity import FIXTURES, git, rpc, scenario_env, seed_turn
+from client_thread_parity import FIXTURES, git, make_checkout, rpc, scenario_env, seed_turn
 from peer_forwarding_parity import McpClient
+from mcp_parity import check_forge_listing
 
 
 def thread_client(server, log):
@@ -68,7 +69,7 @@ def cases(github):
     ]
 
 
-def run(command, root, github):
+def run(command, root, github, *, local_thread=False):
     with ExitStack() as stack:
         root.mkdir()
         home = root / "server"
@@ -96,6 +97,13 @@ def run(command, root, github):
         env.update(credentials, GIT_ALLOW_PROTOCOL="file", FAKE_PROVIDER_SCENARIO=str(playback))
         url, cookie = harness.managed_server(stack, shlex.split(command), home, secrets.token_urlsafe(32),
                                             secrets.token_bytes(32), env=env)
+        if local_thread:
+            other = root / "other"
+            make_checkout(other, remote)
+            rpc(url, cookie, "projects.mutate", {
+                "type": "project.create", "commandId": "other-forge", "projectId": "project:other",
+                "title": "Other checkout", "workspaceRoot": str(other)})
+            remote = str(root / "local.git")
         seed = seed_turn(url, cookie, root, scenario, remote=remote)
         checkout, bare = root / "checkout", root / "fixture.git"
         git("init", "-q", "--bare", str(bare))
@@ -103,6 +111,11 @@ def run(command, root, github):
         git("-C", str(checkout), "switch", "-qc", "work")
         rpc(url, cookie, "orchestration.dispatchCommand", seed["dispatch"])
         agent = thread_client(url, log)
+        status, _, body = agent.post(dict(jsonrpc="2.0", id=1, method="tools/list", params={}))
+        assert status == 200
+        check_forge_listing(json.loads(body)["result"]["tools"], visible=not local_thread)
+        if local_thread:
+            return []
         result = []
         for label, tool, args, success in cases(github):
             seen.clear()
@@ -197,6 +210,9 @@ def main():
                     for side, logs in [("original", requests), ("rust", rust[2])]:
                         print(" ", side, [str(r)[:200] for r in logs])
                 failures += not (good and requests_ok)
+        for side, command in (("original", args.original_command), ("rust", args.rust_command)):
+            run(command, Path(directory) / ("local-" + side), True, local_thread=True)
+        print("PASS local thread with a forge in another project", flush=True)
     harness.assert_nothing_escaped()
     return int(failures != 0)
 

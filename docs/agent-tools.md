@@ -44,7 +44,11 @@ says otherwise ("Listed to" below):
 - **not subagents** (`hiddenFromSubagents`): hidden from a thread whose provider session is a
   subagent's.
 - **links beta on** (`hiddenWhileLinksOff`): hidden while Settings → Labs → Linked environments is
-  off. So a thread lists 79 tools with the beta off and 82 with it on.
+  off.
+- **a forge connected** (`hiddenWithoutForge`): a thread lists these tools when its own project
+  uses a supported forge. The server caches the answer per thread for one minute. Outside clients
+  list these tools even in an environment with no projects. The forge-write and MCP transport
+  parity suites exercise both caller types.
 - `tool_search` is listed only to a provider session that sends the deferred tool exposure
   header; such a session lists `orchestrator_capabilities`, `delegate_task`, `task_status`,
   `tool_search` and whatever its searches loaded (`McpToolExposure.ts`). Calls are never gated
@@ -53,7 +57,7 @@ says otherwise ("Listed to" below):
 Rust lists and refuses tools the same way (`listed` and `callable` in `src/mcp_oauth/tools.rs`):
 a client from outside a thread is neither offered a thread-only tool nor may call one ("Tool
 '...' not found"), and a deferring session lists the direct tools Rust serves plus what its
-`tool_search` loaded. `tool_search` searches the tools Rust serves, not all 82, and a search that
+`tool_search` loaded. `tool_search` searches the served tools, and a search that
 loads tools streams `notifications/tools/list_changed` before its answer, as the reference does.
 
 ## Caller checks
