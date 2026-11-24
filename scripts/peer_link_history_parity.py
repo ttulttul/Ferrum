@@ -135,6 +135,10 @@ def run(command, home):
         record["snapshot: window"] = rows(bounded["visibleTurnItems"])
         record["snapshot: turn items"] = [item["id"] for item in bounded["turnItems"]]
         record["snapshot: messages"] = [message["id"] for message in bounded["messages"]]
+        # The records a window keeps: those its rows name, and the live ones.
+        for key in ("runs", "attempts", "nodes", "subagents", "providerSessions", "providerThreads",
+                    "providerTurns", "plans", "checkpoints", "contextHandoffs", "runtimeRequests"):
+            record[f"snapshot: {key}"] = [entry.get("id") for entry in bounded.get(key, [])]
         record["snapshot: cursor"] = cursor(found["historyCursor"])
         record["snapshot: more history"] = found["hasMoreHistory"]
         record["snapshot: latest local turn ordinal"] = found["latestLocalTurnOrdinal"]
