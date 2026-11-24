@@ -1,0 +1,27 @@
+query PullRequestActivity($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      comments(first: 100) {
+        pageInfo { hasNextPage }
+        nodes {
+          id
+          body
+          createdAt
+          isMinimized
+          author { login ... on User { name } }
+        }
+      }
+      reviews(first: 100) {
+        pageInfo { hasNextPage }
+        nodes {
+          id
+          body
+          submittedAt
+          state
+          isMinimized
+          author { login ... on User { name } }
+        }
+      }
+    }
+  }
+}

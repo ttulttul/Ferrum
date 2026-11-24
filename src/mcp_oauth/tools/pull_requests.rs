@@ -1,5 +1,6 @@
 //! Agent-facing pull-request registration, watch and guide tools.
 use super::{forge::*, *};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 mod list;
 mod target;
 
@@ -14,6 +15,267 @@ fn visible(thread: &Value) -> Vec<&Value> {
 
 fn same(left: &Value, right: &Value) -> bool {
     crate::thread_projection::same_link(left, right, false)
+}
+
+fn cursor_decode(value: &Value) -> Result<Option<Value>, Refusal> {
+    let Some(raw) = value.as_str() else {
+        return Ok(None);
+    };
+    let bytes = URL_SAFE_NO_PAD
+        .decode(raw)
+        .map_err(|_| message("The list could not be carried on from where it left off."))?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| message("The list could not be carried on from where it left off."))
+}
+
+fn require_pull_requests(caller: &Caller) -> Result<(), Refusal> {
+    if caller.granted.thread.is_none() {
+        return Err(message(
+            "MCP credential does not grant the pull-requests capability.",
+        ));
+    }
+    Ok(())
+}
+
+fn cursor_encode(value: &Value) -> Value {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    json!(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+async fn project_for<S: McpHost>(host: &Arc<S>, row: &Value) -> Value {
+    host.control_state()
+        .store
+        .read()
+        .await
+        .project_rows
+        .get(row["projectId"].as_str().unwrap_or_default())
+        .map(|p| host.project_row(p))
+        .unwrap_or(Value::Null)
+}
+
+fn branch_target(row: &Value) -> Option<Value> {
+    row["branchPullRequest"]
+        .as_object()
+        .map(|branch| {
+            fields(
+                &Value::Object(branch.clone()),
+                &["host", "repository", "number", "url"],
+            )
+        })
+        .or_else(|| {
+            rows(&row["pullRequests"])
+                .iter()
+                .rev()
+                .find(|link| {
+                    link["source"] == "created"
+                        && (row["branch"].is_null()
+                            || link["snapshot"]["headBranch"] == row["branch"])
+                })
+                .map(|link| fields(link, &["host", "repository", "number", "url"]))
+        })
+}
+
+async fn resolved_target<S: McpHost>(host: &Arc<S>, row: &Value, args: &Value) -> Outcome {
+    let project = project_for(host, row).await;
+    let input = if args["number"].is_null() {
+        branch_target(row)
+            .ok_or_else(|| message("This thread has no pull request for its branch."))?
+    } else {
+        args.clone()
+    };
+    target::resolve(&input, &project["repositoryIdentity"])
+}
+
+fn activity_conversation(
+    activity: &Value,
+    include: &[Value],
+    include_resolved: bool,
+) -> Option<Value> {
+    let wants_threads = include.iter().any(|v| v == "threads");
+    let wants_comments = include.iter().any(|v| v == "comments");
+    if !wants_threads && !wants_comments {
+        return None;
+    }
+    let threads = rows(&activity["reviewThreads"])
+        .iter()
+        .filter(|thread| include_resolved || thread["isResolved"] != true)
+        .map(|thread| {
+            let comments = rows(&thread["comments"]).iter().map(|comment| json!({
+                "author": comment["author"]["login"].as_str().or_else(|| comment["author"].as_str()),
+                "body": comment["body"], "createdAt": comment["createdAt"]
+            })).collect::<Vec<_>>();
+            json!({"id":thread["id"],"path":thread["path"],"line":thread["line"],"isResolved":thread["isResolved"],"isOutdated":thread["isOutdated"],"comments":comments,"moreComments":false})
+        }).collect::<Vec<_>>();
+    let comments = rows(&activity["comments"]).iter().map(|comment| json!({
+        "id":comment["id"],"kind":comment["kind"],"author":comment["author"]["login"].as_str().or_else(|| comment["author"].as_str()),"body":comment["body"],"createdAt":comment["createdAt"],"path":comment["path"],"reviewState":comment["reviewState"]
+    })).collect::<Vec<_>>();
+    let mut result = json!({
+        "truncated": activity["commentsTruncated"] == true || activity["reviewThreadsTruncated"] == true,
+        "nextCursor": null
+    });
+    if wants_threads {
+        result["reviewThreads"] = Value::Array(threads);
+    }
+    if wants_comments {
+        result["comments"] = Value::Array(comments);
+    }
+    Some(result)
+}
+
+async fn agent_list<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
+    require_pull_requests(caller)?;
+    let row = thread(&**host, caller, args, false, false).await?;
+    let mut input = json!({"projectId":row["projectId"],"state":args["state"].as_str().unwrap_or("open"),"involvement":args["involvement"].as_str().unwrap_or("all"),"limit":args["limit"].as_u64().unwrap_or(30).clamp(1,100)});
+    if let Some(query) = args["query"].as_str() {
+        input["query"] = json!(query);
+    }
+    if let Some(cursor) = cursor_decode(&args["cursor"])? {
+        input["cursors"] = cursor;
+    }
+    let listed = host
+        .provider_dispatch("pullRequests.list".into(), input)
+        .await;
+    let listed = match listed {
+        Some(Ok(value)) => value,
+        Some(Err(error)) => return Err(message(provider_message(&error))),
+        None => return Err(message(provider_message(&Value::Null))),
+    };
+    let entries = rows(&listed["entries"]).iter().map(|entry| json!({
+        "number":entry["number"],"title":entry["title"],"url":entry["url"],"author":entry["author"]["login"].as_str().or_else(|| entry["author"].as_str()),"headBranch":entry["headBranch"],"baseBranch":entry["baseBranch"],"state":entry["state"],"isDraft":entry["isDraft"],"reviewDecision":entry.get("reviewDecision").cloned().unwrap_or(Value::Null),"checksState":entry.get("checksState").cloned().unwrap_or(Value::Null),"updatedAt":entry["updatedAt"]
+    })).collect::<Vec<_>>();
+    if entries.is_empty() && rows(&listed["errors"]).is_empty() {
+        if let Some(link) = visible(&row).first() {
+            let repository = link["repository"].as_str().unwrap_or_default();
+            if !repository.is_empty() {
+                return Err(message(format!("{repository} could not be read.")));
+            }
+        }
+    }
+    let next = if listed["nextCursors"]
+        .as_object()
+        .is_some_and(|m| !m.is_empty())
+    {
+        cursor_encode(&listed["nextCursors"])
+    } else {
+        Value::Null
+    };
+    Ok(json!({"pullRequests":entries,"truncated":listed["truncated"],"nextCursor":next}))
+}
+
+async fn agent_read<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
+    require_pull_requests(caller)?;
+    let row = thread(&**host, caller, args, false, false).await?;
+    let target = resolved_target(host, &row, args).await?;
+    let mut ref_input = fields(&target, &["host", "repository", "number"]);
+    ref_input["projectId"] = row["projectId"].clone();
+    ref_input["allowStale"] = json!(false);
+    let detail = host
+        .provider_dispatch("pullRequests.detail".into(), ref_input.clone())
+        .await;
+    let detail = match detail {
+        Some(Ok(value)) => value,
+        Some(Err(error)) => return Err(message(provider_message(&error))),
+        None => return Err(message(provider_message(&Value::Null))),
+    };
+    let include = args["include"].as_array().cloned().unwrap_or_default();
+    let activity = match host
+        .provider_dispatch("pullRequests.activity".into(), ref_input.clone())
+        .await
+    {
+        Some(Ok(value)) => Some(value),
+        Some(Err(error)) => return Err(message(provider_message(&error))),
+        None => None,
+    };
+    let checks = rows(&detail["checks"]);
+    let mut passed = 0;
+    let mut pending = 0;
+    let mut failed = Vec::new();
+    let mut incomplete = false;
+    for check in checks {
+        match check["status"].as_str() {
+            Some("failure" | "cancelled") => failed.push(check["name"].clone()),
+            Some("pending" | "action-required") => pending += 1,
+            _ => passed += 1,
+        };
+        if check["placeholder"] == true {
+            incomplete = true;
+        }
+    }
+    let mut result = fields(&target, &["host", "repository", "number", "url"]);
+    for key in [
+        "title",
+        "state",
+        "isDraft",
+        "headBranch",
+        "baseBranch",
+        "headSha",
+        "mergeability",
+        "behindBy",
+        "autoMergeEnabled",
+    ] {
+        result[key] = detail.get(key).cloned().unwrap_or(Value::Null);
+    }
+    result["author"] = detail["author"]["login"].clone();
+    result["checks"] = json!({"passed":passed,"pending":pending,"failed":failed});
+    if incomplete {
+        result["checks"]["incomplete"] = json!(true);
+    }
+    let unresolved = activity
+        .as_ref()
+        .map(|a| {
+            rows(&a["reviewThreads"])
+                .iter()
+                .filter(|t| t["isResolved"] != true)
+                .count()
+        })
+        .unwrap_or(0);
+    result["unresolvedThreads"] = json!(unresolved);
+    if include.iter().any(|v| v == "body") {
+        result["body"] = detail["body"].clone();
+    }
+    if include.iter().any(|v| v == "checks") {
+        result["checkRuns"] = detail["checks"].clone();
+    }
+    if let Some(activity) = activity {
+        if let Some(conversation) =
+            activity_conversation(&activity, &include, args["includeResolved"] == true)
+        {
+            result["conversation"] = conversation;
+        }
+    }
+    if include.iter().any(|v| v == "diff") {
+        let diff = host
+            .provider_dispatch("pullRequests.diff".into(), ref_input)
+            .await;
+        if let Some(Ok(value)) = diff {
+            result["diff"] = value;
+        }
+    }
+    Ok(result)
+}
+
+async fn agent_logs<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
+    require_pull_requests(caller)?;
+    let row = thread(&**host, caller, args, false, false).await?;
+    let target = resolved_target(host, &row, args).await?;
+    let mut input = fields(&target, &["host", "repository", "number"]);
+    input["projectId"] = row["projectId"].clone();
+    input["tailLines"] = json!(args["tailLines"].as_u64().unwrap_or(200).clamp(1, 2000));
+    if let Some(check) = args["check"].as_str() {
+        input["check"] = json!(check);
+    }
+    let logs = host
+        .provider_dispatch("pullRequests.checkLogs".into(), input)
+        .await;
+    let logs = match logs {
+        Some(Ok(value)) => value,
+        Some(Err(error)) => return Err(message(provider_message(&error))),
+        None => return Err(message(provider_message(&Value::Null))),
+    };
+    Ok(
+        json!({"host":target["host"],"repository":target["repository"],"number":target["number"],"url":target["url"],"checks":logs}),
+    )
 }
 
 fn group(groups: &mut Vec<Value>, target: &Value, state: Option<&str>) {
@@ -404,6 +666,15 @@ pub(super) async fn call<S: McpHost>(
     name: &str,
     args: &Value,
 ) -> Outcome {
+    if name == "pull_request_list" {
+        return agent_list(host, caller, args).await;
+    }
+    if name == "pull_request_read" {
+        return agent_read(host, caller, args).await;
+    }
+    if name == "ci_logs" {
+        return agent_logs(host, caller, args).await;
+    }
     if matches!(
         name,
         "write_pull_request_guides" | "read_pull_request_guide"

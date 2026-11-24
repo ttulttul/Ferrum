@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 mod actions;
+mod activity;
 pub(crate) mod bitbucket;
 mod bitbucket_pr;
 mod detail;
@@ -35,6 +36,7 @@ pub(crate) fn handles(method: &str) -> bool {
             | "routingIdentity"
             | "diffFileContents"
             | "activity"
+            | "checkLogs"
     ) || review::handles(op)
 }
 
@@ -226,9 +228,6 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
     if let Some((host, own)) = listing::bitbucket_repository(&p) {
         return bitbucket_read(state, &p, &host, &own, op, input).await;
     }
-    if op == "activity" {
-        return Err(unavailable());
-    }
     let named = input["repository"].as_str().unwrap_or("").trim();
     let remote = github_remote(&p).await;
     if input["host"]
@@ -342,6 +341,12 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
     }
     if op == "checks" {
         return detail::read(&gh, &p, op, named, number).await;
+    }
+    if op == "activity" {
+        return activity::read(&gh, named, number).await;
+    }
+    if op == "checkLogs" {
+        return detail::logs(&gh, named, number, input).await;
     }
     if review::handles(op) {
         let result = review::run(&gh, op, named, number, input).await;
