@@ -518,18 +518,37 @@ the wire state, the launcher and every request to a fake gateway on loopback. Th
 stream and input for a lease go through the hub proxy to the gateway's routes for that lease
 (`upstream`), with its token; its `simlock-stream` phase compares them.
 
-**Expo Simulators hosts** (`EasDeviceHost.ts`, started): the hosts in `easDeviceHosts` are listed
+**Expo Simulators hosts** (`EasDeviceHost.ts`): the hosts in `easDeviceHosts` are listed
 (after the SSH hosts) and sent to clients as `easHosts`; each platform is available when this server
 can read an Expo credential for the host (the saved token, then `EXPO_TOKEN`, then the `eas login`
-session), and listing shows the two-entry catalog. `device.easAccount` reads the signed-in account
-with the reference's GraphQL documents (`src/local_services/expo_documents.json`, generated from the
-pinned reference) and its error categories. `scripts/device_eas_parity.py` serves a fake of Expo's
-fixed HTTPS API on loopback with a certificate from a generated test CA, behind its own proxy, which
-tunnels only `api.expo.dev:443` there; the Rust server trusts the CA through
-`T3CODE_TEST_EXTRA_CA_FILE`, which only debug builds read (release builds ignore it).
+session), and listing shows the two-entry catalog plus the host's running sessions.
+`device.easAccount` reads the signed-in account with the reference's GraphQL documents
+(`src/local_services/expo_documents.json`, generated from the pinned reference) and its error
+categories. Opening a catalog entry starts a session under the host's `appId`: it is recorded in the
+host's ledger (`<stateDir>/device/eas/<id>.json`) before Expo creates it, counted against
+`maxConcurrentSessions` (with starts in progress, stops that failed and creates whose outcome is
+unknown), polled every 5 seconds until it runs (15 minutes at most), and tracked by its preview
+host's device id. Listing rechecks sessions older than 15 seconds and drops those Expo ended;
+records a previous server left are counted for 5 minutes and reaped (stopped if Expo still runs
+them, forgotten once too old). Closing with `shutdown` stops the session; removing the host,
+turning device support off and shutting the server down stop all of its sessions. Screenshots come
+from the preview host; `device_open` binds agent-device to the session's own daemon (a per-device
+config, `--udid`/`--serial` from the preview host) with the reference's Expo note in its quick start,
+and closing releases the agent-device session through that daemon. The hub proxy sends the Device
+panel's requests for a session to its preview host, swapping the session id for the preview host's
+device id and adding the preview token (`serve-sim.token.*`/`serve-emu.token.*` on WebSocket
+upgrades).
 
-**Not done yet:** Expo sessions (starting, tracking, stopping and reaping them, the session ledger),
-their devices, screenshots and agent tools, and the hub proxy for them.
+`scripts/device_eas_parity.py` serves a stateful fake of Expo's fixed HTTPS API on loopback with a
+certificate from a generated test CA, behind its own proxy, which tunnels only `api.expo.dev:443`
+there, plus each session's preview host and daemon on loopback HTTP; the Rust server trusts the CA
+through `T3CODE_TEST_EXTRA_CA_FILE`, which only debug builds read (release builds ignore it). It
+compares accounts, hosts, reaping a recorded session, opening, the limit, the ledger, the hub proxy
+(HTTP and WebSocket) and closing. `scripts/device_tools_parity.py`'s `eas` and `eas-close` phases
+compare the device tools on an Expo host, including the launcher.
+
+**Not done yet:** finding a host's project from the thread's app config (`easProjectId.ts`) when the
+host names no `appId`; such a host answers that it has no Expo project to run the session under.
 
 ### 5. Prompt context and capabilities
 

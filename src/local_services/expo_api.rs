@@ -314,6 +314,139 @@ pub(super) async fn viewer(credential: &Credential) -> Result<(String, Vec<Value
     Ok((name, apps))
 }
 
+/// `EasSession`: a session's status, and once its simulator is ready, the
+/// endpoints (and tokens) of its agent-device daemon and its preview host.
+#[derive(Clone, Debug)]
+pub(super) struct Session {
+    pub status: String,
+    pub endpoints: Option<Endpoints>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Endpoints {
+    pub agent_url: String,
+    pub agent_token: String,
+    /// `(url, token)`, when Expo issued the preview host's API URL.
+    pub preview: Option<(String, String)>,
+}
+
+/// `create`: a session started under `app_id`; its id.
+pub(super) async fn create(
+    credential: &Credential,
+    app_id: &str,
+    platform: &str,
+    name: &str,
+    max_run_minutes: u64,
+    max_idle_minutes: u64,
+) -> Result<String, ApiError> {
+    let data = call(
+        credential,
+        "start a simulator session",
+        "T3CreateEasSimulatorSession",
+        Some(json!({"input": {
+            "appId": app_id,
+            "platform": if platform == "ios" { "IOS" } else { "ANDROID" },
+            "type": "AGENT_DEVICE",
+            "name": name,
+            "maxRunTimeMinutes": max_run_minutes,
+            "maxIdleTimeMinutes": max_idle_minutes,
+            // Expo only issues the preview host's API URL when preview access is configured.
+            "corsOrigins": ["http://localhost"],
+        }})),
+    )
+    .await?;
+    data["deviceRunSession"]["createDeviceRunSession"]["id"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| unexpected("start a simulator session"))
+}
+
+fn unexpected(operation: &'static str) -> ApiError {
+    ApiError {
+        operation,
+        detail: Some("unexpected response".into()),
+        rejected: false,
+        status: None,
+    }
+}
+
+/// `session`: one session's status and endpoints (`toSession`).
+pub(super) async fn session(credential: &Credential, id: &str) -> Result<Session, ApiError> {
+    const OPERATION: &str = "read a simulator session";
+    let data = call(
+        credential,
+        OPERATION,
+        "T3EasSimulatorSession",
+        Some(json!({"id": id})),
+    )
+    .await?;
+    let session = &data["deviceRunSessions"]["byId"];
+    let remote = &session["remoteConfig"];
+    let endpoints =
+        (remote["__typename"] == "AgentDeviceRunSessionRemoteConfig").then(|| Endpoints {
+            agent_url: remote["agentDeviceRemoteSessionUrl"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            agent_token: remote["agentDeviceRemoteSessionToken"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            preview: match (
+                remote["previewApiUrl"].as_str(),
+                remote["webPreviewToken"].as_str(),
+            ) {
+                (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => {
+                    Some((url.to_owned(), token.to_owned()))
+                }
+                _ => None,
+            },
+        });
+    Ok(Session {
+        status: session["status"]
+            .as_str()
+            .ok_or_else(|| unexpected(OPERATION))?
+            .to_owned(),
+        endpoints,
+    })
+}
+
+/// `activeSessions`: the app's sessions that are not over (id, status, name).
+pub(super) async fn active_sessions(
+    credential: &Credential,
+    app_id: &str,
+) -> Result<Vec<Value>, ApiError> {
+    let data = call(
+        credential,
+        "list simulator sessions",
+        "T3ActiveEasSimulatorSessions",
+        Some(json!({"appId": app_id, "filter": {"statuses": ["NEW", "QUEUED", "STARTING", "IN_PROGRESS"]}})),
+    )
+    .await?;
+    Ok(data["app"]["byId"]["deviceRunSessionsPaginated"]["edges"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|edge| edge["node"].clone())
+        .collect())
+}
+
+/// `stop`: asks Expo to make sure the session is stopped; its status.
+pub(super) async fn stop(credential: &Credential, id: &str) -> Result<String, ApiError> {
+    const OPERATION: &str = "stop a simulator session";
+    let data = call(
+        credential,
+        OPERATION,
+        "T3StopEasSimulatorSession",
+        Some(json!({"id": id})),
+    )
+    .await?;
+    data["deviceRunSession"]["ensureDeviceRunSessionStopped"]["status"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| unexpected(OPERATION))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

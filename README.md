@@ -53,7 +53,7 @@ Most suites match the original exactly; the few expected differences are listed 
 ### Agents and tools
 
 - **Pull request changes.** Agents can read pull requests and CI, but can't open, update, review, respond to or merge one, or re-run CI (`pull_request_create`, `pull_request_update`, `pull_request_review`, `pull_request_respond`, `pull_request_merge`, `ci_rerun`).
-- **Devices.** Agents can use simulators and emulators on this machine, on SSH device hosts and from Simlock pools (alpha), but not on Expo hosts yet (they are listed, and accounts can be checked). Device detail and actions (settings, foreground app) work on this machine only.
+- **Devices.** Agents can use simulators and emulators on this machine, on SSH device hosts and from Simlock pools (alpha), and in Expo Simulators sessions; an Expo host needs its project set in Settings (it does not yet find one in the thread's app config). Device detail and actions (settings, foreground app) work on this machine only.
 - **Delegated tasks.** On the embeddable control plane a child can't run in its own worktree (`isolation: "worktree"`), and a follow-up sent to a child on a linked machine isn't tracked as a task.
 - **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing. So are the setup hints shown when the browser cannot start.
 - **Secrets in schedules.** A scheduled task can't use a secret yet, and the embeddable control plane stores no secrets.
