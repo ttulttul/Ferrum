@@ -73,9 +73,21 @@ fn main() -> anyhow::Result<()> {
     // An ACP agent runs these for each session and tool call: they speak on
     // standard output, so they start before anything logs there.
     let mut argv = std::env::args().skip(1);
-    if let Some(command @ ("acp-mcp-bridge" | "acp-mcp-call")) = argv.next().as_deref() {
-        let rest: Vec<String> = argv.collect();
-        std::process::exit(t3code_server::acp_mcp_bridge::run(command, &rest));
+    match argv.next().as_deref() {
+        Some(command @ ("acp-mcp-bridge" | "acp-mcp-call")) => {
+            let rest: Vec<String> = argv.collect();
+            std::process::exit(t3code_server::acp_mcp_bridge::run(command, &rest));
+        }
+        // `browser setup`, as the reference's `t3 browser setup`.
+        Some("browser") => {
+            let rest: Vec<String> = argv.collect();
+            if rest.first().map(String::as_str) == Some("setup") {
+                std::process::exit(t3code_server::browser_setup::run(&rest[1..]));
+            }
+            eprintln!("Usage: t3code-server browser setup [--base-dir <dir>]");
+            std::process::exit(2);
+        }
+        _ => {}
     }
     // The reference logs at Info by default; RUST_LOG still overrides.
     tracing_subscriber::fmt()

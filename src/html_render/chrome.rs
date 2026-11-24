@@ -35,6 +35,9 @@ pub(crate) struct BrowserError {
     pub reason: String,
     pub exit_code: Option<i32>,
     pub signal: Option<String>,
+    /// The tail of the browser's stderr when it exited at launch, which
+    /// `preview_browser_host::diagnose` reads.
+    pub output: Option<String>,
 }
 
 impl BrowserError {
@@ -43,6 +46,7 @@ impl BrowserError {
             reason: reason.into(),
             exit_code: None,
             signal: None,
+            output: None,
         }
     }
 
@@ -422,9 +426,11 @@ impl Browser {
         drop(browser_in);
         drop(browser_out);
         let stderr_tail: Arc<Mutex<String>> = Arc::default();
+        let (stderr_done, stderr_drained) = tokio::sync::watch::channel(false);
         if let Some(mut stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
             tokio::spawn(async move {
+                let _done = stderr_done;
                 let mut chunk = [0u8; 4096];
                 while let Ok(n) = stderr.read(&mut chunk).await {
                     if n == 0 {
@@ -478,7 +484,13 @@ impl Browser {
                     }
                 }
             }
-            reading.disconnect(BrowserError::new("the browser exited unexpectedly"));
+            // Startup aborts close the pipe; let stderr drain to recover the reason.
+            let mut drained = stderr_drained;
+            let _ =
+                tokio::time::timeout(Duration::from_secs(1), drained.wait_for(|done| *done)).await;
+            let mut error = BrowserError::new("the browser exited unexpectedly");
+            error.output = Some(stderr_tail.lock().unwrap().clone());
+            reading.disconnect(error);
         });
         let mut browser = Browser {
             shared,

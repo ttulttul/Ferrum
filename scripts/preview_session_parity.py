@@ -17,6 +17,11 @@ Then, on fresh homes with no browser installed: a tab opened, a page previewed, 
 again and a status. Each server tries to install its pinned headless shell, the refusing proxy
 refuses the download, and both must answer with the same install error and leave no tab.
 
+Last, with a fake headless shell that will not start, as a host missing a library, one blocking
+Chrome's sandbox and one running it as root: a tab opened and a page previewed, which both
+servers must explain with the same host hint (`PreviewBrowserHost`), each naming its own
+`browser setup` command (masked).
+
 Compared: every answer, with tab ids, times, ports and homes masked, and for a recording its
 type, size range, the attachment it became and that the file is a playable video container.
 Both servers launch the same headless shell from the Playwright cache, as the preview suite
@@ -42,6 +47,16 @@ from preview_provider_parity import seed_browser
 STARTUP_FETCHES = {"raw.githubusercontent.com:443", "registry.npmjs.org:443"}
 # The pinned headless shell's download, which the no-browser phase starts.
 BROWSER_DOWNLOAD = "storage.googleapis.com:443"
+# Each server's own `browser setup` command, which its hints name.
+SETUP_COMMAND = re.compile(r'sudo (?:env \\"PATH=\$PATH\\" \S+|\S+) browser setup --base-dir [^`]*')
+FAILING_BROWSERS = {
+    "missing a library": 'echo "$0: error while loading shared libraries: libnss3.so: cannot open shared '
+                         'object file: No such file or directory" >&2\nexit 127',
+    "sandbox blocked": 'case "$*" in *--version*) echo "Chrome 158"; exit 0;; esac\necho "[0:FATAL:zygote_host_impl_'
+                       'linux.cc(132)] No usable sandbox! Update your kernel or see https://chromium.googlesource.com" >&2\nexit 1',
+    "running as root": 'case "$*" in *--version*) echo "Chrome 158"; exit 0;; esac\necho "[0:ERROR:zygote_host_impl_'
+                       'linux.cc(105)] Running as root without --no-sandbox is not supported. See https://crbug.com/638180." >&2\nexit 1',
+}
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z")
 
@@ -102,6 +117,23 @@ def no_browser_steps(page):
     ]
 
 
+def failing_browser_steps(page):
+    return [
+        ("preview_open", {"url": page, "open": False}),
+        ("html_preview", {"html": "<!doctype html><p>A browser that will not start</p>"}),
+    ]
+
+
+def seed_failing_browser(root, reference_root, script):
+    """A headless shell at the pinned path that fails as `script` says."""
+    source = (Path(reference_root) / "apps/server/src/preview/PreviewBrowser.ts").read_text()
+    version = re.search(r'export const VERSION = "([^"]+)"', source).group(1)
+    shell = root / "tools/chrome-headless-shell/linux64" / version / "chrome-headless-shell"
+    shell.parent.mkdir(parents=True)
+    shell.write_text(f"#!/bin/sh\n{script}\n")
+    shell.chmod(0o755)
+
+
 def answers(log, count, seconds=240):
     calls = Path(f"{log}.mcp")
     deadline = monotonic() + seconds
@@ -143,6 +175,7 @@ def comparable(answer, home, port, tabs):
     text = json.dumps(out, sort_keys=True)
     for side in ("original", "rust"):
         text = text.replace(f"{home}/{side}/", "<home>/<server>/")
+    text = SETUP_COMMAND.sub("<setup>", text)
     text = text.replace(str(home), "<home>").replace(f":{port}/", ":<port>/")
     # Tab ids, in the order each first appears.
     for tab in re.findall(r'"tabId": "([^"<]+)"', text):
@@ -156,9 +189,11 @@ def comparable(answer, home, port, tabs):
 def run(name, command, args, directory, page, port, plan=None, browser=True):
     root = Path(directory, name)
     (root / ".cache").mkdir(parents=True)
-    if browser:
+    if browser is True:
         (root / ".cache/ms-playwright").symlink_to(args.browser_cache.resolve(), target_is_directory=True)
         seed_browser(root, args.reference_root, args.browser_cache)
+    elif browser:
+        seed_failing_browser(root, args.reference_root, browser)
     scenario = {"name": "preview session tools", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"}
     env, _, log = scenario_env(Path(directory), name, root, scenario, {"codex"})
     plan = plan or steps(page)
@@ -201,6 +236,12 @@ def main():
                 results[f"{name} without a browser"], bare = run(
                     f"{name}-bare", command, args, directory, page, server.server_port,
                     plan=no_browser_steps(page), browser=False)
+            failing = {}
+            for kind, script in FAILING_BROWSERS.items():
+                for name, command in (("original", args.original_command), ("rust", args.rust_command)):
+                    failing[(kind, name)], hints = run(
+                        f"{name}-{kind.replace(' ', '-')}", command, args, directory, page, server.server_port,
+                        plan=failing_browser_steps(page), browser=script)
     finally:
         server.shutdown()
     # Every server (and the browsers they launched) sent its HTTP(S) through the loopback refusing
@@ -218,6 +259,14 @@ def main():
     checks += [(f"without a browser {index + 1} {tool}", left, right)
                for index, ((tool, _), left, right) in enumerate(zip(
                    bare, results["original without a browser"], results["rust without a browser"], strict=True))]
+    for kind in FAILING_BROWSERS:
+        checks += [(f"browser {kind} {index + 1} {tool}", left, right)
+                   for index, ((tool, _), left, right) in enumerate(zip(
+                       hints, failing[(kind, "original")], failing[(kind, "rust")], strict=True))]
+        # The hints must be the host's, not a generic launch failure.
+        if not re.search(r"This host|running as root", json.dumps(failing[(kind, "original")])):
+            failures += 1
+            print(f"FAIL browser {kind}: the reference gave no host hint")
     for name, left, right in checks:
         same = left == right
         failures += not same

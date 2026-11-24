@@ -91,7 +91,11 @@ use orchestration::dispatch_orchestration_command;
 #[cfg(feature = "native")]
 mod background_policy;
 #[cfg(feature = "native")]
+pub mod browser_setup;
+#[cfg(feature = "native")]
 mod preview_browser;
+#[cfg(feature = "native")]
+mod preview_browser_host;
 #[cfg(feature = "native")]
 mod preview_tunnel;
 #[cfg(feature = "native")]

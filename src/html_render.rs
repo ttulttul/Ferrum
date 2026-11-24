@@ -263,7 +263,10 @@ pub(crate) async fn preview(
             appearance,
         )
         .await
-        .map_err(Error::Browser)?
+    };
+    let capture = match capture {
+        Ok(capture) => capture,
+        Err(error) => return Err(diagnosed(&paths.state_dir, &executable, error).await),
     };
     let mut out = json!({
         "width": width,
@@ -281,6 +284,20 @@ pub(crate) async fn preview(
         "height": capture.captured_height,
     });
     Ok(out)
+}
+
+/// A browser that exited at launch, explained by its host when the host is
+/// at fault (`PreviewBrowserHost.diagnoseLaunchFailure`).
+async fn diagnosed(state_dir: &Path, executable: &Path, error: chrome::BrowserError) -> Error {
+    let Some(output) = error.output.as_deref() else {
+        return Error::Browser(error);
+    };
+    let setup =
+        crate::preview_browser_host::setup_command(Some(crate::config::state_base_dir(state_dir)));
+    match crate::preview_browser_host::diagnose(executable, output, &setup).await {
+        Some(host) => Error::NoBrowser(host.message()),
+        None => Error::Browser(error),
+    }
 }
 
 /// `measure`: the page's height at each width a client lays it out at, or
