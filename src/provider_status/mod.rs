@@ -58,13 +58,16 @@
 //! listed here are not checked yet: their rows keep the placeholder.
 mod acp;
 mod antigravity;
+mod antigravity_skills;
 pub(crate) mod antigravity_text;
 pub(crate) mod claude;
 mod claude_credits;
 mod claude_skills;
 mod codex;
 mod cursor;
+mod cursor_skills;
 mod fx;
+mod fx_skills;
 pub(crate) mod grok;
 mod kiro;
 mod maintenance;
@@ -673,7 +676,10 @@ fn upsert_workspace_snapshot(row: &mut Value, cwd: &str, checked_at: &str, scan:
 
 /// The drivers whose folders are scanned here (`snapshotForCwd`).
 pub(crate) fn scans_folders(driver: &str) -> bool {
-    matches!(driver, "codex" | "claudeAgent" | "grok" | "pi")
+    matches!(
+        driver,
+        "codex" | "claudeAgent" | "grok" | "pi" | "fx" | "cursor" | "antigravity"
+    )
 }
 
 /// A driver's folder scan, against its published (machine) row.
@@ -705,6 +711,39 @@ async fn scan_folder(
             Some(FolderScan {
                 skills,
                 slash_commands,
+                slash_pending: None,
+            })
+        }
+        // Skill folders scanned directly, beside the machine's commands.
+        "fx" => Some(FolderScan {
+            skills: fx_skills::discover(cwd, &env),
+            slash_commands: machine_commands(),
+            slash_pending: None,
+        }),
+        "cursor" => Some(FolderScan {
+            skills: cursor_skills::probe(cwd, &env)?,
+            slash_commands: machine_commands(),
+            slash_pending: None,
+        }),
+        "antigravity" => {
+            // agy's user home (`resolveAntigravityUserHome`) and the instance's GEMINI_HOME.
+            let user_home = env
+                .get("HOME")
+                .filter(|h| !h.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(home_dir);
+            let key = hex::encode(sha2::Digest::finalize(sha2::Digest::chain_update(
+                <sha2::Sha256 as sha2::Digest>::new(),
+                instance.id.as_bytes(),
+            )));
+            let profile = service
+                .state_dir
+                .join("providers")
+                .join("antigravity")
+                .join(key);
+            Some(FolderScan {
+                skills: antigravity_skills::discover(Path::new(cwd), &user_home, &profile).ok()?,
+                slash_commands: machine_commands(),
                 slash_pending: None,
             })
         }

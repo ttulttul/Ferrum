@@ -80,7 +80,7 @@ fn js_compare(a: &str, b: &str) -> std::cmp::Ordering {
 /// `localeCompare` on skill names: ICU's root order for the characters a
 /// skill name can hold (`_`, `-`, `:` and other punctuation before digits,
 /// digits before letters, letters case-blind), then lower case before upper.
-fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
+pub(super) fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
     fn weight(c: char) -> (u32, u32) {
         match c {
             '_' => (0, 0),

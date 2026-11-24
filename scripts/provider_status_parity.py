@@ -995,6 +995,32 @@ SCENARIOS += [
      "fakes": {"grok": {"spec": {"commands": [{"args": ["--version"], **ok("grok 1.0.52")}, GROK_MODELS,
                                               {"args": ["inspect", "--json"], **ok("", 1, "boom")}, GROK_ACP]}}},
      "folder": {"payload": CATALOGS}},
+    # fx: its own line-based SKILL.md header, roots in fx's menu order.
+    {"name": "folder scan fx", "instance": "fx", "settings": enabled("fx"), "fakes": {"fx": FX_FAKE},
+     "folder": {"files": {".fx/skills/ship/SKILL.md": "---\nname: \"ship\"\ndescription: >\n  Deploys\n  the app\n---\n",
+                          "skills/plain/SKILL.md": "No header: named by its folder.\n",
+                          ".claude/skills/ship/SKILL.md": "---\nname: ship\n---\n",
+                          ".codex/skills/bad/SKILL.md": "---\nname: a\nname: b\n---\n",
+                          ".agents/skills/open/SKILL.md": "---\nname: open\n",
+                          ".opencode/skills/review/SKILL.md": "---\n# a comment\nname: review\ndescription: |\n  Line one\n  Line two\n---\n",
+                          ".fx/skills/README.md": "not a skill folder"}}},
+    # Cursor: nested skill folders, frontmatter surfaces, and a skill hidden from the CLI.
+    cursor("folder scan", folder={"files": {
+        ".cursor/skills/deploy/SKILL.md": "---\nname: Deploy It\ndescription: Ships\ndisable-model-invocation: yes\n---\n",
+        ".cursor/skills/group/nested/SKILL.md": "---\ndescription: Nested\nuser-invocable: off\n---\n",
+        ".agents/skills/ide-only/SKILL.md": "---\nmetadata:\n  surfaces: [ide]\n---\n",
+        ".claude/skills/deploy/SKILL.md": "---\ndescription: Shadowed\n---\n",
+        ".codex/skills/broken/SKILL.md": "---\n[\n---\n",
+        ".cursor/skills/node_modules/dep/SKILL.md": "---\ndescription: Skipped\n---\n"}}),
+    # Antigravity: project roots, a skills.json with filters, and agy's frontmatter rules.
+    agy("folder scan", files={"fake-bin/agy": AGY_RUNTIME}, executables=["fake-bin/agy"],
+        folder={"files": {
+            ".gemini/skills/ship/SKILL.md": "---\nname: ship\ndescription:  Deploys \n---\n",
+            ".agents/skills/lint/skill.md": "---\ndescription: Lints\n---\n",
+            ".agent/skills/padded/SKILL.md": "---\nname: \" padded\"\n---\n",
+            ".agents/skills.json": json.dumps({"entries": [{"path": "extra", "exclude": ["skipped"]}]}),
+            "extra/kept/SKILL.md": "---\nname: kept\n---\n",
+            "extra/skipped/SKILL.md": "---\nname: skipped\n---\n"}}),
     {"name": "folder scan pi", "instance": "pi", "settings": enabled("pi"),
      "fakes": {"pi": {"spec": {"commands": [{"args": ["--version"], **ok("0.85.0")}, PI_TEXT_GENERATION, pi_rpc()]}}},
      "folder": {}},
