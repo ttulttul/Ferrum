@@ -70,6 +70,13 @@ struct Args {
     provider_command: Option<Vec<String>>,
 }
 fn main() -> anyhow::Result<()> {
+    // An ACP agent runs these for each session and tool call: they speak on
+    // standard output, so they start before anything logs there.
+    let mut argv = std::env::args().skip(1);
+    if let Some(command @ ("acp-mcp-bridge" | "acp-mcp-call")) = argv.next().as_deref() {
+        let rest: Vec<String> = argv.collect();
+        std::process::exit(t3code_server::acp_mcp_bridge::run(command, &rest));
+    }
     // The reference logs at Info by default; RUST_LOG still overrides.
     tracing_subscriber::fmt()
         .with_env_filter(

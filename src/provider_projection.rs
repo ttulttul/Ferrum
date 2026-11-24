@@ -24,9 +24,11 @@ pub(crate) const HIDDEN_ITEM: &str = "\u{0}hidden";
 
 /// The id of the provider session a thread's provider thread names before
 /// its session opens: a Codex instance's shared session, or the thread's own
-/// Claude session, named after the run that opens it.
+/// Claude or ACP session, named after the run that opens it.
 fn pending_session_id(driver: &str, instance: &str, thread_id: &str, run_id: &str) -> String {
-    if driver == provider::CLAUDE_AGENT {
+    if driver == provider::GROK {
+        acp_session_id(instance, thread_id, run_id)
+    } else if driver == provider::CLAUDE_AGENT {
         format!(
             "provider-session:provider-instance:{}:thread:{}:{}",
             uri_component(instance),
@@ -39,6 +41,25 @@ fn pending_session_id(driver: &str, instance: &str, thread_id: &str, run_id: &st
             uri_component(instance)
         )
     }
+}
+
+/// The id of an ACP thread's provider session, which the reference names
+/// after the thread and a random UUID: here a UUID drawn from the run that
+/// opens it, so it stays the same however often it is read.
+fn acp_session_id(instance: &str, thread_id: &str, run_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(run_id.as_bytes());
+    let hex = hex::encode(&hash[..16]);
+    format!(
+        "provider-session:provider-instance:{}:thread:{}:{}-{}-{}-{}-{}",
+        uri_component(instance),
+        uri_component(thread_id),
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 /// The id the reference gives a new provider thread's record: named after
@@ -560,6 +581,9 @@ impl Thread {
     /// A Claude session's metadata: its title (the thread's) and what its
     /// prompts used of its attachment budget.
     fn claude_native_metadata(&self, driver: &str) -> Value {
+        if driver == provider::GROK {
+            return self.acp_native_metadata();
+        }
         if driver != provider::CLAUDE_AGENT {
             return Value::Null;
         }
@@ -586,6 +610,25 @@ impl Thread {
         }
     }
 
+    /// An ACP thread's native metadata: item identity version 2 once a
+    /// session the server created ran on it, whose item ids are scoped to
+    /// the provider instance. The thread keeps it after a restart, whose
+    /// loaded session goes back to the plain ids.
+    fn acp_native_metadata(&self) -> Value {
+        let scoped = self.provider.runs.values().any(|run| {
+            run.driver == provider::GROK
+                && run
+                    .native_turn_id
+                    .as_deref()
+                    .is_some_and(|turn| turn.starts_with("provider-instance:"))
+        });
+        if scoped {
+            json!({"itemIdentityVersion": 2})
+        } else {
+            Value::Null
+        }
+    }
+
     /// The provider session the thread's turns ran in, once one opened: the
     /// shared app-server session of a Codex instance, or the thread's own
     /// Claude session (which the reference opens even when the CLI is
@@ -608,6 +651,8 @@ impl Thread {
         }
         let id = if let Some(id) = &self.provider.prior_session_id {
             id.clone()
+        } else if thread.driver == provider::GROK {
+            acp_session_id(instance, &self.id, &first.wire_id())
         } else if claude {
             format!(
                 "provider-session:provider-instance:{}:thread:{}:{}",
@@ -936,15 +981,15 @@ impl Thread {
         let Some(terminal) = terminal else { return };
         let at = completed.clone().unwrap_or_else(|| started.clone());
         match terminal.status {
-            // A turn whose folder is missing, or a Codex turn whose
-            // app-server never opened a session: the reference reports the
-            // session, not the turn, as failed.
+            // A turn whose folder is missing, or a Codex or Grok turn
+            // whose process never opened a session: the reference reports
+            // the session, not the turn, as failed.
             TurnStatus::Failed
                 if terminal
                     .failure
                     .as_ref()
                     .is_some_and(provider::is_workspace_missing)
-                    || (driver == provider::CODEX
+                    || ((driver == provider::CODEX || driver == provider::GROK)
                         && !record.turn_started
                         && self
                             .provider
@@ -952,7 +997,11 @@ impl Thread {
                             .as_ref()
                             .is_some_and(|thread| thread.native_id.is_none())) =>
             {
-                let session = join("provider-session:provider-instance", &[instance]) + ":shared";
+                let session = if driver == provider::GROK {
+                    acp_session_id(instance, &self.id, &ids.run)
+                } else {
+                    join("provider-session:provider-instance", &[instance]) + ":shared"
+                };
                 let message = match terminal.failure.as_ref() {
                     Some(failure) if provider::is_workspace_missing(failure) => {
                         failure.message.clone()
@@ -1151,7 +1200,13 @@ impl Thread {
         } else {
             &open.native_request_id
         };
-        let reference = native_ref(driver, native_item, "strong");
+        // ACP agents' request ids are not their own (`approvalsHaveNativeRequestIds`).
+        let strength = if driver == provider::GROK {
+            "weak"
+        } else {
+            "strong"
+        };
+        let reference = native_ref(driver, native_item, strength);
         // The node and item end with the answer: completed when accepted or
         // answered, cancelled when declined, withdrawn or expired.
         let done = match state.status {
@@ -1173,7 +1228,7 @@ impl Thread {
             "id": id,
             "nodeId": node_id,
             "providerTurnId": ids.provider_turn,
-            "nativeRequestRef": native_ref(driver, &open.native_request_id, "strong"),
+            "nativeRequestRef": native_ref(driver, &open.native_request_id, strength),
             "kind": open.kind,
             "status": state.status,
             "responseCapability": state.capability,
@@ -1351,7 +1406,13 @@ impl Thread {
             return;
         }
         let node = item_id("node", driver, native);
-        let reference = native_ref(driver, native, "strong");
+        // An ACP item names its native ref itself: its session's tool call
+        // (strong) or its turn's text segment (weak).
+        let reference = item
+            .fields
+            .get("nativeItemRef")
+            .cloned()
+            .unwrap_or_else(|| native_ref(driver, native, "strong"));
         let started = iso(record.first_at);
         // An item a restart cancelled changed then.
         let cancelled_at = cut.filter(|_| status == "cancelled" && item.status != "cancelled");
@@ -1421,8 +1482,11 @@ impl Thread {
                 "reasoning" => "reasoning",
                 _ => "tool_call",
             },
-            "status": status,
-            "countsForRun": false,
+            // A pending tool call's node is running.
+            "status": if status == "pending" { "running" } else { status.as_str() },
+            // An ACP tool call counts toward its run.
+            "countsForRun": driver == provider::GROK
+                && !matches!(item.kind.as_str(), "assistant_message" | "reasoning"),
             "providerThreadId": ids.provider_thread,
             "providerTurnId": ids.provider_turn,
             "nativeItemRef": reference,

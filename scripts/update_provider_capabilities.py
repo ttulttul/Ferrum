@@ -3,7 +3,11 @@
 
 Each provider's capabilities are the reference adapter's
 `... satisfies OrchestrationV2ProviderCapabilities` object (CodexAdapterV2.ts,
-ClaudeAdapterV2.ts), a plain literal Node evaluates.
+ClaudeAdapterV2.ts), a plain literal Node evaluates; Grok's
+(provider-grok's adapter.ts) spreads the generic ACP adapter's
+`AcpProviderCapabilitiesV2`, which Node imports from the reference to
+evaluate it. They are what a Grok session negotiates with an agent that
+can load sessions and not fork them, as Grok can.
 
 Usage: scripts/update_provider_capabilities.py <reference checkout> [--check]
 """
@@ -14,19 +18,27 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "src/provider_capabilities.json"
-ADAPTERS = {"claudeAgent": "ClaudeAdapterV2.ts", "codex": "CodexAdapterV2.ts"}
+ADAPTERS = {"claudeAgent": "apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts",
+            "codex": "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
+            "grok": "packages/provider-grok/src/server/adapter.ts"}
+# What a literal may spread, and the reference module that exports it.
+IMPORTS = {"AcpProviderCapabilitiesV2": "packages/provider-acp/src/server/adapter.ts"}
 
 
 def capabilities(checkout: pathlib.Path) -> dict:
     out = {}
-    for driver, name in ADAPTERS.items():
-        source = (checkout / "apps/server/src/orchestration-v2/Adapters" / name).read_text()
+    for driver, path in ADAPTERS.items():
+        source = (checkout / path).read_text()
         end = source.index("} satisfies OrchestrationV2ProviderCapabilities;")
         start = source.rindex(" = {", 0, end)
         literal = source[start + 3:end + 1]
+        imports = "".join(
+            f"const {{ {name} }} = await import({json.dumps((checkout / module).resolve().as_uri())});"
+            for name, module in IMPORTS.items() if name in literal)
         out[driver] = json.loads(subprocess.run(
-            ["node", "-e", f"process.stdout.write(JSON.stringify(({literal})))"],
-            check=True, capture_output=True, text=True).stdout)
+            ["node", "--input-type=module", "-e",
+             f"{imports}process.stdout.write(JSON.stringify(({literal})))"],
+            check=True, capture_output=True, text=True, cwd=checkout).stdout)
     return out
 
 

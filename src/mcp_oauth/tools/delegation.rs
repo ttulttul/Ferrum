@@ -97,9 +97,10 @@ fn created_thread_title(
 pub(super) fn provider_constraints(provider: &Value) -> Vec<String> {
     let mut out = Vec::new();
     let driver = provider["driver"].as_str().unwrap_or_default();
-    // Rust runs children on Codex and Claude only. A disabled instance says
-    // so first, as every instance the reference lists runs its children.
-    if !matches!(driver, "codex" | "claudeAgent") && provider["enabled"] != false {
+    // Rust runs children on the drivers it runs turns of (Codex, Claude,
+    // Grok). A disabled instance says so first, as every instance the
+    // reference lists runs its children.
+    if !crate::workspace::provider::runs_turns(driver) && provider["enabled"] != false {
         out.push("No V2 provider adapter is registered.".into());
     }
     if provider["available"] == false {

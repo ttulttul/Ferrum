@@ -297,6 +297,54 @@ PROVIDER_SCENARIOS = [
     {"name": "codex missing", "instance": "codex", "model": "fixture", "scenario": None},
     {"name": "codex interrupt", "instance": "codex", "model": "fixture", "scenario": "codex_interrupt.json",
      "interrupt": "command"},
+    # Grok over ACP: its turns run in the `grok agent stdio` session the thread keeps, and stream
+    # reasoning, a command and the reply.
+    {"name": "grok turn", "instance": "grok", "enable": "grok", "model": "grok-build", "scenario": "grok_turn.json"},
+    # The turn calls T3's tools through the stdio MCP bridge (`acp-mcp-bridge`) each server gave it.
+    {"name": "grok agent mcp", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_mcp.json"},
+    # A second turn goes to the agent the thread keeps, on its session, without the instructions.
+    {"name": "grok second turn", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_two_turns.json", "followUp": "Now append a line"},
+    # A model the session is not on is set before the prompt.
+    {"name": "grok model", "instance": "grok", "enable": "grok", "model": "grok-4-fast", "scenario": "grok_turn.json"},
+    # Supervised: Grok asks before it runs a command or edits, and each answer picks one of its options.
+    {"name": "grok approval", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_approval.json", "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
+    {"name": "grok approval declined", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_approval.json", "runtimeMode": "approval-required", "respond": {"decision": "decline"}},
+    {"name": "grok approval cancelled", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_approval.json", "runtimeMode": "approval-required", "respond": {"decision": "cancel"}},
+    # Allowing all edits for the session is offered for Grok's edit approvals only.
+    {"name": "grok edit approval for session", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_edit_approval.json", "runtimeMode": "approval-required",
+     "respond": {"decision": "acceptForSession"}},
+    # Grok has no auto-accept-edits mode: its edits go to the user as in approval-required.
+    {"name": "grok auto-accept-edits", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_edit_approval.json", "runtimeMode": "auto-accept-edits", "respond": {"decision": "accept"}},
+    # Auto: every request Grok makes goes to the user.
+    {"name": "grok auto", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_edit_approval.json", "runtimeMode": "auto", "respond": {"decision": "accept"}},
+    # Stop kills Grok's process (no session/cancel): the running command and a waiting request end.
+    {"name": "grok interrupt", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_interrupt.json", "interrupt": "command"},
+    {"name": "grok approval interrupted", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_approval_interrupt.json", "runtimeMode": "approval-required", "interrupt": "request"},
+    # The turn after a Stop starts a new process, which loads the thread's session.
+    {"name": "grok stop then resume", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_stop_resume.json", "interrupt": "command", "followUp": "Now append a line"},
+    # After a server restart a new turn's process loads the thread's session (no session/new), with
+    # the plain item ids of a session that server did not create.
+    {"name": "grok restart idle", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_restart.json", "restart": {"after": "settled", "followUp": "Now append a line"}},
+    # A message steers the running turn (`_x.ai/interject`), which goes on to take it. This turn
+    # ends with Grok's completion notice, which settles a prompt before its reply does.
+    {"name": "grok steer", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_steer.json", "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}},
+    # A prompt Grok ends with an error fails the turn with Grok's own message.
+    {"name": "grok failed turn", "instance": "grok", "enable": "grok", "model": "grok-build",
+     "scenario": "grok_failed.json"},
+    {"name": "grok missing", "instance": "grok", "enable": "grok", "model": "grok-build", "scenario": None},
     {"name": "claude turn", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_turn.json"},
     # A second turn on the same server runs in the instance's shared app-server, on the thread it
     # still has loaded.
@@ -501,6 +549,20 @@ case "$*" in
 esac
 exit 0
 """
+# The fake Grok: a turn's ACP session (`agent --always-approve stdio` and the other runtime modes'
+# launches) replays the scenario; the status checks (version, models, skills, the plain
+# `agent stdio` probe) answer from GROK_STATUS_SPEC.
+FAKE_GROK = """#!/bin/sh
+case "$*" in
+  "agent --always-approve stdio"|"--permission-mode auto agent stdio"|"--permission-mode default agent stdio")
+    exec python3 "$FAKE_PROVIDER_CLI" "$@";;
+esac
+FAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 "$FAKE_STATUS_CLI" "$FAKE_GROK_STATUS" "$@"
+"""
+GROK_STATUS_SPEC = {"commands": [command for command in GROK_TITLE_SPEC["commands"]
+                                 if command.get("prefix") != ["--permission-mode", "default", "agent", "stdio"]]}
+# Each driver's CLI on PATH, by the thread's provider instance.
+TURN_CLIS = {"codex": "codex", "claudeAgent": "claude", "grok": "grok"}
 THREAD = "thread:client-thread"
 REMOTES = {
     "project:bitbucket": ("Bitbucket checkout", "git@ssh.bitbucket.org:example-org/example-repo.git"),
@@ -706,10 +768,12 @@ def compare_thread(original, rust):
 
 def write_fake_clis(directory, drivers):
     directory.mkdir(parents=True, exist_ok=True)
-    for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE)):
+    for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK)):
         if name in drivers:
             (directory / name).write_text(script)
             (directory / name).chmod(0o755)
+    if "grok" in drivers:
+        (directory / "grok.status.json").write_text(json.dumps(GROK_STATUS_SPEC))
 
 
 def write_text_provider(directory, provider):
@@ -736,6 +800,10 @@ def seed_turn(url, cookie, root, scenario, remote=None):
         {"Cookie": cookie, "Content-Type": "application/json"})
     if status != 200:
         raise RuntimeError(f"project.create failed on {url}: HTTP {status} {body[:400]!r}")
+    if scenario.get("enable"):
+        # A provider instance that is off by default, turned on for the thread's turns.
+        rpc(url, cookie, "server.updateSettings", {"patch": {"providerInstances": {
+            scenario["instance"]: {"driver": scenario["enable"], "enabled": True}}}})
     if scenario.get("textProvider"):
         # Titles come from another provider's instance, which the turn's provider never runs.
         provider = scenario["textProvider"]
@@ -846,7 +914,8 @@ def rendered_turn(projection):
             if record.get(field) not in (None, ""):
                 row.append(f"{field}={str(record[field])[:80]}")
         if record.get("failure"):
-            row.append("failure=" + str(record["failure"].get("message"))[:120])
+            # A provider session's id ends in a UUID each server draws.
+            row.append("failure=" + UUID.sub("<uuid>", str(record["failure"].get("message")))[:120])
         return " ".join(str(part) for part in row)
     return {
         "items": [item(record) for record in items],
@@ -1124,6 +1193,8 @@ def cli_launch(log, root):
             claude_initializes[entry["pid"]] = without_unserved(request.get("appendSystemPrompt", ""), unserved)
         if method in ("thread/start", "thread/resume"):
             sessions.append(entry["pid"])
+        if message.get("jsonrpc") == "2.0" and method in ACP_LAUNCH_METHODS:
+            calls.append(f"acp {method} {json.dumps(mask(acp_params(method, message.get('params'), unserved)), sort_keys=True)}")
         if method in ("thread/start", "thread/resume", "turn/start"):
             params = dict(message.get("params") or {})
             params.pop("input", None)
@@ -1147,6 +1218,28 @@ def cli_launch(log, root):
                      for pid, params in initializes.items() if pid not in sessions})
     out.extend(f"other initialize {params}" for params in others)
     return out
+
+
+# The ACP requests a server sends a turn's agent, compared with their parameters.
+ACP_LAUNCH_METHODS = ("initialize", "authenticate", "session/new", "session/load", "session/set_model",
+                      "session/set_mode", "session/set_config_option", "session/prompt", "session/cancel",
+                      "session/close")
+
+
+def acp_params(method, params, unserved):
+    """An ACP request's parameters as both servers can match them: the T3 MCP server each runs from
+    its own executable (`<self>`), and the prompt's text as Rust sends it, without what names a tool
+    Rust does not serve yet."""
+    params = json.loads(json.dumps(params or {}))
+    for server in params.get("mcpServers") or []:
+        if server.get("name") == "t3-code":
+            server["command"] = "<self>"
+            server["args"] = [arg for arg in server.get("args", []) if arg.startswith("acp-mcp")]
+    if method == "session/prompt":
+        for block in params.get("prompt") or []:
+            if block.get("type") == "text":
+                block["text"] = without_unserved(block["text"], unserved)
+    return params
 
 
 def turn_launches(log):
@@ -1484,7 +1577,7 @@ def restart_turn(args, command, root, credentials, env, checkouts, fake_bin, sce
             failed = wait_for(url, cookie, lambda p: any(
                 r.get("restartContinuationOfRunId") and r.get("status") == "failed"
                 for r in p.get("runs", [])), 30)
-            write_fake_clis(fake_bin, {"codex" if scenario["instance"] == "codex" else "claude"})
+            write_fake_clis(fake_bin, scenario_drivers(scenario))
             source = next((r["id"] for r in failed.get("runs", [])
                            if r.get("restartContinuationOfRunId") and r.get("status") == "failed"), None)
             if clock:
@@ -1781,6 +1874,7 @@ def scenario_env(temporary, name, root, scenario, drivers):
     log = temporary / f"{name}-provider.log"
     env = {**GIT_ISOLATION, **HOST_FAKES, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
            "FAKE_PROVIDER_LOG": str(log), **login_shell,
+           "FAKE_STATUS_CLI": str(FIXTURES / "status_cli.py"), "FAKE_GROK_STATUS": str(fake_bin / "grok.status.json"),
            # "titleAfterTurn": the title CLI answers once the driver saw the turn settle.
            **({"FAKE_TITLE_GATE": str(log) + ".turn-settled"} if scenario.get("titleAfterTurn") else {}),
            "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}
@@ -1788,7 +1882,7 @@ def scenario_env(temporary, name, root, scenario, drivers):
 
 
 def scenario_drivers(scenario):
-    return set() if scenario["scenario"] is None else {"codex" if scenario["instance"] == "codex" else "claude"}
+    return set() if scenario["scenario"] is None else {TURN_CLIS[scenario["instance"]]}
 
 
 def provider_turns(args, credentials):
@@ -1809,7 +1903,7 @@ def provider_turns(args, credentials):
             temporary = Path(temporary)
             if keep:
                 print(f"keeping {scenario['name']} in {temporary}", flush=True)
-            drivers = set() if scenario["scenario"] is None else {"codex" if scenario["instance"] == "codex" else "claude"}
+            drivers = scenario_drivers(scenario)
             fake_hosts, stderr_paths = {}, {}
             for name, command in (("original", shlex.split(args.original_command)),
                                   ("rust", shlex.split(args.rust_command))):
@@ -1827,7 +1921,8 @@ def provider_turns(args, credentials):
                 stderr_paths[name] = stderr_path
                 if "restart" in scenario:
                     outcomes[name] = restart_turn(args, command, root, credentials, env,
-                                                  temporary / f"{name}-checkouts", fake_bin, scenario)
+                                                  temporary / f"{name}-checkouts", fake_bin, scenario,
+                                                  follow_up=scenario["restart"].get("followUp"))
                     outcomes[name]["launches"] = turn_launches(log)
                 else:
                     url, cookie = managed_server(stack, command, root, *credentials, env=env,

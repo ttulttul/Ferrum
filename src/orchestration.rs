@@ -563,6 +563,7 @@ pub(crate) async fn detach_session<H: CommandHost>(
                     .provider
                     .resume_for(crate::workspace::provider::CLAUDE_AGENT)
             })
+            .or_else(|| thread.provider.resume_for(crate::workspace::provider::GROK))
             .map(|native| (instance, native));
         (thread.provider.session_live(), run_ids, codex_thread)
     };
@@ -647,12 +648,7 @@ fn cli_driver<H: CommandHost>(state: &H, row: &Value) -> Option<String> {
     let driver = settings["providerInstances"][instance]["driver"]
         .as_str()
         .unwrap_or(instance);
-    [
-        crate::workspace::provider::CODEX,
-        crate::workspace::provider::CLAUDE_AGENT,
-    ]
-    .contains(&driver)
-    .then(|| driver.to_owned())
+    crate::workspace::provider::runs_turns(driver).then(|| driver.to_owned())
 }
 
 /// Whether a message's run follows the thread's model pick when it starts

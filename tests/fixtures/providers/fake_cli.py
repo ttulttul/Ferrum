@@ -44,8 +44,9 @@ Steps:
   {"mcp": {"tool": "t3_thread_list", "arguments": {...}}}
                              call a tool on the T3 MCP server the client gave
                              this CLI (Codex: `mcp_servers.t3-code` in
-                             thread/start; Claude: `mcp_set_servers`), as the
-                             real CLI would; {"mcp": {"method": "tools/list"}}
+                             thread/start; Claude: `mcp_set_servers`; an ACP
+                             agent: the stdio server `session/new` names, which
+                             it starts), as the real CLI would; {"mcp": {"method": "tools/list"}}
                              lists its tools. The request and the answer are
                              appended to FAKE_PROVIDER_LOG.mcp as JSON. With
                              "as": "name", the tool's answer is kept, and a
@@ -63,6 +64,7 @@ with "silent": true answers nothing, as a CLI that hangs.
 
 After the last step the CLI waits for its input to close, as the real ones do.
 """
+import contextlib
 import json
 import os
 import re
@@ -201,7 +203,9 @@ def answer(message):
         return
     method = message.get("method")
     if "id" in message and method in SIDE_REPLIES:
-        sys.stdout.write(json.dumps({"id": message["id"], "result": SIDE_REPLIES[method]}) + "\n")
+        # A JSON-RPC 2.0 client (ACP) gets the version back.
+        version = {"jsonrpc": message["jsonrpc"]} if "jsonrpc" in message else {}
+        sys.stdout.write(json.dumps({**version, "id": message["id"], "result": SIDE_REPLIES[method]}) + "\n")
         for note in scenario.get("sideNotifications", {}).get(method, []):
             previous = remembered
             remembered = message
@@ -254,6 +258,12 @@ def note_mcp_server(message):
             # thread, so a later thread (a delegated child) does not take its credential.
             if not mcp_server.get("url"):
                 mcp_server.update(entry)
+    if message.get("method") in ("session/new", "session/load") and not mcp_server.get("command"):
+        # An ACP agent runs the stdio MCP servers its client names.
+        for server in (message.get("params") or {}).get("mcpServers") or []:
+            if isinstance(server, dict) and server.get("name") == "t3-code" and server.get("command"):
+                mcp_server.update(command=server["command"], args=server.get("args") or [],
+                                  env={e["name"]: e["value"] for e in server.get("env") or []})
     request = message.get("request") or {}
     if message.get("type") == "control_request" and request.get("subtype") == "mcp_set_servers":
         server = (request.get("servers") or {}).get("t3-code")
@@ -299,11 +309,56 @@ def mcp_post(body, extra=None, server=None):
     return status, received, answer
 
 
+def mcp_stdio(body):
+    """Send one message to the ACP agent's stdio MCP server (started on first use); its answer, or
+    None for a notification."""
+    if "process" not in mcp_server:
+        import subprocess
+        mcp_server["process"] = subprocess.Popen(
+            [mcp_server["command"], *mcp_server["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            env={**os.environ, **mcp_server["env"]}, text=True)
+    process = mcp_server["process"]
+    process.stdin.write(json.dumps(body) + "\n")
+    process.stdin.flush()
+    if "id" not in body:
+        return None
+    while True:
+        line = process.stdout.readline()
+        if not line:
+            return None
+        with contextlib.suppress(ValueError):
+            answer = json.loads(line)
+            if isinstance(answer, dict) and answer.get("id") == body["id"] and "method" not in answer:
+                return answer
+
+
 def mcp_call(step):
     """One call to the client's T3 MCP server, opening a session first."""
     record = {"request": step}
     target = mcp_servers.get(step["thread"], mcp_server) if "thread" in step else mcp_server
-    if not target.get("url"):
+    if target.get("command"):
+        if not mcp_server.get("session"):
+            answer = mcp_stdio({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake-cli", "version": "1"}}})
+            record["initialize"] = "stdio" if answer and "result" in answer else answer
+            mcp_server["session"] = "stdio"
+            mcp_stdio({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        method = step.get("method", "tools/call")
+        params = {"name": step["tool"], "arguments": fill_mcp(step.get("arguments", {}))} \
+            if method == "tools/call" else {}
+        mcp_server["next"] = mcp_server.get("next", 0) + 1
+        answer = mcp_stdio({"jsonrpc": "2.0", "id": mcp_server["next"], "method": method, "params": params})
+        if isinstance(answer, dict):
+            answer = {key: value for key, value in answer.items() if key != "id"}
+        record.update(status="stdio", answer=answer)
+        if "as" in step:
+            result = (answer or {}).get("result") if isinstance(answer, dict) else None
+            text = "".join(part.get("text", "") for part in (result or {}).get("content", []))
+            try:
+                mcp_answers[step["as"]] = json.loads(text)
+            except ValueError:
+                mcp_answers[step["as"]] = None
+    elif not target.get("url"):
         record["error"] = "no T3 MCP server was configured"
     else:
         if not target.get("session"):

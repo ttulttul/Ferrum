@@ -109,11 +109,9 @@ pub(crate) async fn plan<H: CommandHost>(
             run.wire_id()
         )));
     }
-    // Rust steers Codex and Claude turns; another driver's steer waits for
-    // the next turn.
-    if ids.driver != crate::workspace::provider::CODEX
-        && ids.driver != crate::workspace::provider::CLAUDE_AGENT
-    {
+    // Rust steers Codex, Claude and Grok turns; another driver's steer
+    // waits for the next turn.
+    if !crate::workspace::provider::runs_turns(&ids.driver) {
         return Ok(SteerPlan::Queue);
     }
     // The message it follows: Rust's message times are whole seconds, too

@@ -484,6 +484,19 @@ impl ProviderState {
         })
     }
 
+    /// How many provider turns the thread's provider thread ran.
+    pub fn provider_turns(&self) -> usize {
+        let prior = self.prior_turns.map_or(0, |(turns, _)| turns);
+        prior
+            + self
+                .runs
+                .values()
+                .filter(|run| {
+                    run.turn_started || run.native_turn_id.is_some() || !run.items.is_empty()
+                })
+                .count()
+    }
+
     /// The native thread a turn of `driver` resumes.
     pub fn resume_for(&self, driver: &str) -> Option<String> {
         self.native_thread
@@ -592,7 +605,7 @@ pub(crate) fn provider_turn(
     let instance_id = provider_instance_id(row);
     let instance = &settings["providerInstances"][instance_id];
     let driver = instance["driver"].as_str().unwrap_or(instance_id);
-    if driver != provider::CODEX && driver != provider::CLAUDE_AGENT {
+    if !provider::runs_turns(driver) {
         return None;
     }
     let config = &instance["config"];
@@ -646,6 +659,7 @@ pub(crate) fn provider_turn(
         claude_settings: claude_launch.1,
         mcp: None,
         attachments: Vec::new(),
+        turn_ordinal: Some(state.provider_turns() as u64 + 1),
         context_window: (driver == provider::CLAUDE_AGENT)
             .then(|| crate::model_manifest::claude_context_window(manifest, selection))
             .flatten(),

@@ -264,6 +264,26 @@ impl Order {
         Step::Collection("contextHandoffs"),
         Step::Collection("contextTransfers"),
     ];
+    /// An ACP request: its node, the request, then its item; the tool call
+    /// it is about is not reported again.
+    const ACP_REQUEST_OPEN: &'static [Step] = &[
+        Step::ItemNodes,
+        Step::Collection("runtimeRequests"),
+        Step::Items(Phase::All),
+        Step::Collection("runs"),
+        Step::Collection("attempts"),
+        Step::LooseNodes,
+        Step::Collection("checkpointScopes"),
+        Step::LooseMessages,
+        Step::Collection("providerSessions"),
+        Step::Collection("providerThreads"),
+        Step::Collection("providerTurns"),
+        Step::Collection("subagents"),
+        Step::Collection("plans"),
+        Step::Collection("checkpoints"),
+        Step::Collection("contextHandoffs"),
+        Step::Collection("contextTransfers"),
+    ];
     const SESSION_OPEN_FAILURE: &'static [Step] = &[
         Step::Items(Phase::All),
         Step::Collection("runs"),
@@ -827,6 +847,12 @@ fn diff_with_command(
                 .as_str()
                 .is_some_and(|id| id.contains(":provider:claudeAgent:"))
         });
+    let acp_request = order == Order::RequestOpen
+        && collections["runtimeRequests"].iter().any(|(_, request)| {
+            request["id"]
+                .as_str()
+                .is_some_and(|id| id.contains(":provider:grok:"))
+        });
     let subagent_start =
         order == Order::Subagent && collections["subagents"].iter().any(|(created, _)| *created);
     // A queued run leaving the queue: its provider thread, the input it
@@ -850,6 +876,8 @@ fn diff_with_command(
         Order::SUBAGENT_START
     } else if claude_request {
         Order::CLAUDE_REQUEST_OPEN
+    } else if acp_request {
+        Order::ACP_REQUEST_OPEN
     } else {
         order.steps()
     };
@@ -865,7 +893,9 @@ fn diff_with_command(
                 });
                 if turn_reported && !closed {
                     for (_, record) in &collections["providerThreads"] {
-                        if record["driver"] == crate::workspace::provider::CLAUDE_AGENT {
+                        // Claude's and ACP adapters report their thread with
+                        // the turn's end; Codex's shared session does not.
+                        if record["driver"] != crate::workspace::provider::CODEX {
                             out.push(event(
                                 thread_id,
                                 "provider-thread.updated",

@@ -282,6 +282,7 @@
       "auth": "session (settings:write)",
       "usage": "client",
       "existingCoverage": [
+        "device_tools_parity.py",
         "host-parity.json"
       ],
       "validationOnly": false,
@@ -377,6 +378,7 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "device_tools_parity.py",
         "host-parity.json"
       ],
       "validationOnly": false,
@@ -1027,9 +1029,12 @@
       "existingCoverage": [
         "attachment_flows_parity.py",
         "attachment_tools_parity.py",
+        "ci_rerun_parity.py",
         "client_initial_sync_parity.py",
         "client_thread_parity.py",
+        "device_tools_parity.py",
         "feedback_parity.py",
+        "forge_write_parity.py",
         "html_render_parity.py",
         "link_request_parity.py",
         "managed_policy_parity.py",
@@ -1255,7 +1260,9 @@
       "existingCoverage": [
         "attachment_flows_parity.py",
         "attachment_tools_parity.py",
+        "ci_rerun_parity.py",
         "client_thread_parity.py",
+        "forge_write_parity.py",
         "link_request_parity.py",
         "orchestration_parity.py",
         "peer_link_history_parity.py",
@@ -1617,7 +1624,8 @@
       "usage": "client",
       "existingCoverage": [
         "client_initial_sync_parity.py",
-        "client_thread_parity.py"
+        "client_thread_parity.py",
+        "thread_history_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -2278,6 +2286,7 @@
       "usage": "client",
       "existingCoverage": [
         "client_thread_parity.py",
+        "forge_write_parity.py",
         "parity-fixtures.json",
         "project_clone_parity.py",
         "storage_cleanup_parity.py",
@@ -4799,6 +4808,7 @@
         "client_thread_parity.py",
         "config_parity.py",
         "config_snapshot_parity.py",
+        "device_tools_parity.py",
         "feedback_parity.py",
         "managed_policy_parity.py",
         "preview_provider_parity.py",
@@ -6624,7 +6634,8 @@
       "usage": "server-only/unused",
       "existingCoverage": [
         "orchestration_parity.py",
-        "provider-parity.json"
+        "provider-parity.json",
+        "thread_history_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [],
@@ -6647,7 +6658,8 @@
       "usage": "client",
       "existingCoverage": [
         "orchestration_parity.py",
-        "provider-parity.json"
+        "provider-parity.json",
+        "thread_history_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -6673,7 +6685,8 @@
       "usage": "client",
       "existingCoverage": [
         "orchestration_parity.py",
-        "provider-parity.json"
+        "provider-parity.json",
+        "thread_history_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -6698,7 +6711,8 @@
       "usage": "client",
       "existingCoverage": [
         "orchestration_parity.py",
-        "provider-parity.json"
+        "provider-parity.json",
+        "thread_history_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -7403,6 +7417,7 @@
         "source_control_hosts_parity.py",
         "source_control_lookup_parity.py",
         "storage_cleanup_parity.py",
+        "thread_history_parity.py",
         "workflow_rpc_parity.py"
       ],
       "validationOnly": false,

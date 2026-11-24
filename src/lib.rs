@@ -9,6 +9,8 @@
 
 pub mod access_http;
 #[cfg(feature = "native")]
+pub mod acp_mcp_bridge;
+#[cfg(feature = "native")]
 mod agent_instructions;
 pub mod asset_grant;
 #[cfg(feature = "native")]

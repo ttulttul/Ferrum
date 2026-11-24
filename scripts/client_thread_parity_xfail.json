@@ -90,8 +90,54 @@
   "codex turn": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   },
+  "grok agent mcp": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok approval": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok approval cancelled": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok approval declined": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok approval interrupted": {
+    "cli approvals": "Racy: on Stop the reference's cancelPendingRuntimeRequests only resolves the approval's decision to cancel; the permission handler writes the `cancelled` reply on its own fiber, which the process-group kill that follows does not wait for, so the reference's reply reaches the CLI on some runs and not others. Rust writes it before the kill (seen both matching and differing).",
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok auto": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok auto-accept-edits": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok edit approval for session": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok failed turn": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok interrupt": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok model": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok second turn": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok steer": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "grok stop then resume": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
   "grok title": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  },
+  "grok turn": {
+    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
   },
   "opencode title": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."

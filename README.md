@@ -15,7 +15,8 @@
 
 Based on `main` and the parity test suites:
 
-- **Codex and Claude Code agent turns:** Launching Codex and Claude Code sessions, streaming responses, tool calls, approvals (allow, allow for session, decline, `approval-required`, `auto-accept-edits`), and user-input / question requests. Each thread keeps its Claude CLI running across turns, and an instance's Codex turns share one app-server, as in the original. You can steer a running Codex or Claude turn with a text message.
+- **Codex and Claude Code agent turns:** Launching Codex and Claude Code sessions, streaming responses, tool calls, approvals (allow, allow for session, decline, `approval-required`, `auto-accept-edits`), and user-input / question requests. Each thread keeps its Claude CLI running across turns, and an instance's Codex turns share one app-server, as in the original. You can steer a running Codex, Claude or Grok turn with a text message.
+- **Grok agent turns:** Grok turns run over ACP in the `grok agent stdio` process each thread keeps, streaming reasoning, replies and tool calls, with approvals in Grok's own runtime modes. Stop restarts the process, and the next turn loads the session again. Grok reaches T3's tools through a stdio MCP bridge (`acp-mcp-bridge`), and can run delegated tasks.
 - **Delegated tasks:** An agent can start a child task, wait for it or get its result delivered later, check its progress, cancel it, send a finished child a follow-up, run it in its own worktree, and create new threads. Tasks recover after a restart, and a result can be delivered into the parent's running turn.
 - **Thread titles:** Codex, Claude, Pi, Grok, OpenCode (1.x and 2) and Antigravity text generation models can title threads.
 - **Scheduled tasks:** Agents can manage schedules, and due tasks start on their own.
@@ -34,7 +35,7 @@ Based on `main` and the parity test suites:
 
 ## What's still missing compared with the original
 
-Most suites match the original exactly; the few expected differences are listed under [Parity status](#parity-status). The biggest remaining gaps are agent turns for providers other than Codex and Claude, a handful of agent tools, and features that need the desktop app.
+Most suites match the original exactly; the few expected differences are listed under [Parity status](#parity-status). The biggest remaining gaps are agent turns for providers other than Codex, Claude and Grok, a handful of agent tools, and features that need the desktop app.
 
 ### Threads and history
 
@@ -54,7 +55,8 @@ Most suites match the original exactly; the few expected differences are listed 
 
 ### AI providers
 
-- **Other providers' turns.** Only Codex and Claude Code run agent turns. Cursor, OpenCode, Grok, Pi, fx, Kiro, Antigravity, Muse Code and ACP Registry agents get status checks (and some of them thread titles), but can't run a turn yet. Rust installs and removes ACP Registry agents.
+- **Other providers' turns.** Only Codex, Claude Code and Grok run agent turns. Cursor, OpenCode, Pi, fx, Kiro, Antigravity, Muse Code and ACP Registry agents get status checks (and some of them thread titles), but can't run a turn yet. Rust installs and removes ACP Registry agents.
+- **Grok extras.** Grok's questions (`ask_user_question`), plan-mode exit, background tasks and monitors, subagents, `$skill` mentions, context usage and session titles are not ported yet, and a Grok turn that a server restart cuts off mid-turn is not yet compared with the original.
 - **Steering extras.** A steering message that changes the model or carries attachments still behaves differently. Rust also lacks the original's "delivery not confirmed" notice, its handling of Claude's foreground subagents during a steer, and its follow-up turn when a provider refuses a steer.
 - **Titles.** Cursor and Muse Code can't title threads yet. Custom title generators, images in an OpenCode title prompt, and titles that draw on a forked thread's history are missing. Antigravity titles don't yet clean up old temporary folders or wait out a sign-in.
 - **Desktop power reports.** Rust doesn't receive the desktop app's power reports (battery, screen lock, heat), so it never pauses provider checks for them.
@@ -70,12 +72,12 @@ Most suites match the original exactly; the few expected differences are listed 
 
 ## Parity status
 
-Parity is tested by running the original TypeScript server and the Rust server side by side and comparing what they answer. Each gets a fresh home directory, and both get the same fake provider CLIs that replay recorded Codex and Claude sessions, and local stand-ins for every outside service. No test reaches the network or a real model.
+Parity is tested by running the original TypeScript server and the Rust server side by side and comparing what they answer. Each gets a fresh home directory, and both get the same fake provider CLIs that replay recorded Codex and Claude sessions and scripted Grok ACP sessions, and local stand-ins for every outside service. No test reaches the network or a real model.
 
 - **Pinned reference:** [upstream commit `fd0331ca`](https://github.com/pingdotgg/t3code/tree/fd0331ca9b1596ed7018c80f52b7e6730014f593) (`fd0331ca9b1596ed7018c80f52b7e6730014f593`). This is the only place the README names it.
 - **Suites:** 48 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
 - **Client calls:** the [client RPC suite](scripts/client_rpc_cases.json) drives 242 recorded client steps through the original client. 1 check is expected to fail ([list](scripts/client_rpc_parity_xfail.json)).
-- **Live turns:** the client thread suite runs 88 provider scenarios. 40 checks are expected to fail, 9 of them races ([list](scripts/client_thread_parity_xfail.json)).
+- **Live turns:** the client thread suite runs 105 provider scenarios. 53 checks are expected to fail, 10 of them races ([list](scripts/client_thread_parity_xfail.json)).
 - **Shared home:** the server-switch suite has 1 expected failure ([list](scripts/shared_store_parity_xfail.json)).
 - **Provider status:** the [provider status suite](scripts/provider_status_parity.py) has no expected failures.
 - **Other suites:** 1 known difference in the peer link suites ([list](scripts/parity_gaps.json)).

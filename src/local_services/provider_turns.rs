@@ -8,6 +8,7 @@
 //! The thread's runtime mode decides what the CLI may do without asking;
 //! every approval or question it still asks waits for the user (see
 //! [`requests`]).
+mod acp;
 mod claude;
 mod claude_sessions;
 mod codex;
@@ -22,6 +23,7 @@ pub(crate) use codex_server::Registry as CodexServers;
 pub(crate) struct ProviderProcesses {
     codex: std::sync::Arc<CodexServers>,
     claude: std::sync::Arc<claude_sessions::Sessions>,
+    acp: std::sync::Arc<acp::Sessions>,
 }
 
 impl ProviderProcesses {
@@ -30,6 +32,7 @@ impl ProviderProcesses {
     pub(crate) fn unload_thread(&self, instance: &str, thread: &str) {
         codex_server::unload_thread(&self.codex, instance, thread);
         self.claude.close(thread);
+        self.acp.close(thread);
     }
 
     /// Stop them all (the server is shutting down), once their turns ended
@@ -37,12 +40,13 @@ impl ProviderProcesses {
     pub(crate) async fn shutdown(&self, grace: std::time::Duration) {
         codex_server::shutdown(&self.codex, grace).await;
         self.claude.shutdown().await;
+        self.acp.shutdown().await;
     }
 }
 pub(crate) use requests::respond;
 
 use crate::workspace::provider::{
-    ProviderFailure, ProviderItem, ThreadDisposition, TurnStatus, CLAUDE_AGENT, CODEX,
+    ProviderFailure, ProviderItem, ThreadDisposition, TurnStatus, CODEX, GROK,
 };
 use crate::workspace::{ProviderEvent, TurnEvent, TurnExit, TurnSpec};
 use std::process::Stdio;
@@ -63,7 +67,7 @@ pub(crate) fn start(
         .provider
         .clone()
         .ok_or_else(|| anyhow::anyhow!("the turn names no provider"))?;
-    if provider.driver != CODEX && provider.driver != CLAUDE_AGENT {
+    if !crate::workspace::provider::runs_turns(&provider.driver) {
         anyhow::bail!("provider driver `{}` cannot run turns", provider.driver);
     }
     let (events, receiver) = mpsc::unbounded_channel();
@@ -83,6 +87,15 @@ pub(crate) fn start(
             responses,
             sink,
             processes.codex.clone(),
+        ));
+    } else if provider.driver == GROK {
+        tokio::spawn(acp::run(
+            spec,
+            provider,
+            cancel,
+            responses,
+            sink,
+            processes.acp.clone(),
         ));
     } else {
         tokio::spawn(claude::run(
@@ -144,9 +157,11 @@ impl Sink {
         }
     }
     fn send(&self, event: ProviderEvent) {
-        // A Codex turn's usage goes with its end; Claude's adapter reports
-        // it on its own first.
-        if let (ProviderEvent::TurnUsage { .. }, true) = (&event, self.driver == CODEX) {
+        // A Codex or ACP turn's usage goes with its end; Claude's adapter
+        // reports it on its own first.
+        if let (ProviderEvent::TurnUsage { .. }, true) =
+            (&event, self.driver == CODEX || self.driver == GROK)
+        {
             if let Ok(mut usage) = self.usage.lock() {
                 *usage = Some(event);
                 return;
@@ -510,6 +525,20 @@ fn process_exit_status(status: Option<std::process::ExitStatus>) -> String {
         (None, Some(code)) => format!(" with code {code}"),
         _ => String::new(),
     }
+}
+
+/// The reference's failure when an ACP agent's process exits mid-turn: the
+/// transport closed.
+fn acp_crashed(status: Option<std::process::ExitStatus>) -> ProviderFailure {
+    tracing::warn!(?status, "ACP agent exited during a turn");
+    ProviderFailure::new(
+        "provider_error",
+        format!(
+            "The provider event stream closed unexpectedly: the provider process exited{}. {}",
+            process_exit_status(status),
+            "Check the server logs for the provider's output, then retry the turn."
+        ),
+    )
 }
 
 /// The Claude Agent SDK's failure when Claude Code exits mid-turn.
