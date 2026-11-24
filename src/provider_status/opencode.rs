@@ -2213,7 +2213,10 @@ pub(crate) async fn generate_text(
             let probe =
                 probe_server(&settings.server_url, &settings.password, &probe_env(env)).await?;
             if probe.generation == Generation::V2 {
-                return Err(V2_TEXT_GENERATION.to_owned());
+                let version = verify_v2(&server, env).await?;
+                let server = Server { version, ..server };
+                return generate_v2(&server, directory, prompt, (provider_id, model_id), variant)
+                    .await;
             }
             verify_v1(&server, directory, env).await?;
             return generate_on(
@@ -2241,7 +2244,18 @@ pub(crate) async fn generate_text(
             }
         };
         if generation == Generation::V2 {
-            return Err(V2_TEXT_GENERATION.to_owned());
+            // One OpenCode 2 process serves every directory (`OpenCode2Server`).
+            return with_v2_connection(
+                owners,
+                instance_id,
+                &settings,
+                env,
+                &cwd,
+                |server| async move {
+                    generate_v2(&server, directory, prompt, (provider_id, model_id), variant).await
+                },
+            )
+            .await;
         }
         let password = (!settings.password.is_empty())
             .then(|| settings.password.clone())
@@ -2280,9 +2294,238 @@ pub(crate) async fn generate_text(
     }
 }
 
-/// OpenCode 2's text generation (`OpenCode2TextGeneration`) is not ported.
-const V2_TEXT_GENERATION: &str =
-    "Text generation with OpenCode 2 is not supported by this server yet. Select another text generation model.";
+/// The permissions an OpenCode 2 text generation session has: every tool
+/// asks, and each ask is rejected (free models refuse denied read or shell
+/// permissions outright).
+const V2_GENERATION_PERMISSIONS: [(&str, &str, &str); 1] = [("*", "*", "ask")];
+const V2_TOOLS_REFUSED: &str = "Tools are not available while generating text.";
+const V2_FAILED: &str = "OpenCode text generation failed.";
+
+/// One OpenCode 2 request with the server's Basic credentials.
+async fn v2_request(
+    server: &Server,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&Value>,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let url = format!("{}{path}", server.url.trim_end_matches('/'));
+    let mut request = client().request(method, url).timeout(timeout);
+    if let Some(password) = &server.password {
+        request = request.header("authorization", basic(password));
+    }
+    if let Some(body) = body {
+        request = request
+            .header("content-type", "application/json")
+            .body(body.to_string());
+    }
+    let response = request.send().await.map_err(|_| V2_FAILED.to_owned())?;
+    if !response.status().is_success() {
+        return Err(V2_FAILED.to_owned());
+    }
+    let text = response.text().await.map_err(|_| V2_FAILED.to_owned())?;
+    Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+/// OpenCode 2's event stream (`GET /api/event`), once the server accepted
+/// the subscription: each `data:` frame's JSON, until the stream ends.
+async fn v2_events(server: &Server) -> Result<tokio::sync::mpsc::UnboundedReceiver<Value>, String> {
+    let url = format!("{}/api/event", server.url.trim_end_matches('/'));
+    let mut request = client().get(url).header("accept", "text/event-stream");
+    if let Some(password) = &server.password {
+        request = request.header("authorization", basic(password));
+    }
+    let mut response = tokio::time::timeout(Duration::from_secs(10), request.send())
+        .await
+        .map_err(|_| V2_FAILED.to_owned())?
+        .map_err(|_| V2_FAILED.to_owned())?;
+    if !response.status().is_success() {
+        return Err(V2_FAILED.to_owned());
+    }
+    let (events, received) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut pending = String::new();
+        let mut data = String::new();
+        while let Ok(Some(chunk)) = response.chunk().await {
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(end) = pending.find('\n') {
+                let line = pending[..end].trim_end_matches('\r').to_owned();
+                pending.drain(..=end);
+                if line.is_empty() {
+                    if !data.is_empty() {
+                        if let Ok(event) = serde_json::from_str::<Value>(&data) {
+                            if events.send(event).is_err() {
+                                return;
+                            }
+                        }
+                        data.clear();
+                    }
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    if !data.is_empty() {
+                        data.push('\n');
+                    }
+                    data.push_str(value.strip_prefix(' ').unwrap_or(value));
+                }
+            }
+        }
+    });
+    Ok(received)
+}
+
+/// `OpenCode2TextGeneration.runOnServer`: a temporary session on the
+/// OpenCode 2 server, whose tool requests are all refused; the reply is the
+/// text the session ended with, collected from the event stream (subscribed
+/// first, as replies arrive only there). The session is removed afterwards.
+async fn generate_v2(
+    server: &Server,
+    directory: &str,
+    prompt: &str,
+    (provider_id, model_id): (&str, &str),
+    variant: Option<&str>,
+) -> Result<String, String> {
+    let mut events = v2_events(server).await?;
+    let mut session_id: Option<String> = None;
+    let mut model = json!({"providerID": provider_id, "id": model_id});
+    if let Some(variant) = variant {
+        model["variant"] = json!(variant);
+    }
+    let permissions: Vec<Value> = V2_GENERATION_PERMISSIONS
+        .iter()
+        .map(|(action, resource, effect)| json!({"action": action, "resource": resource, "effect": effect}))
+        .collect();
+    let generate = async {
+        let created = v2_request(
+            server,
+            reqwest::Method::POST,
+            "/api/session",
+            // The reference's client sends the optional fields it leaves
+            // out as null.
+            Some(&json!({
+                "id": null,
+                "parentID": null,
+                "title": "T3 Code generateThreadTitle",
+                "agent": null,
+                "model": model,
+                "location": {"directory": directory},
+                "metadata": null,
+                "permissions": permissions,
+            })),
+            TEXT_GENERATION_TIMEOUT,
+        )
+        .await?;
+        let id = created["data"]["id"]
+            .as_str()
+            .ok_or_else(|| V2_FAILED.to_owned())?
+            .to_owned();
+        session_id = Some(id.clone());
+        let session = crate::thread_projection::uri_component(&id);
+        v2_request(
+            server,
+            reqwest::Method::POST,
+            &format!("/api/session/{session}/prompt"),
+            Some(&json!({"id": null, "text": prompt, "delivery": null, "resume": null})),
+            TEXT_GENERATION_TIMEOUT,
+        )
+        .await?;
+        // Texts by assistant message and ordinal, in the order they ended.
+        let mut texts: Vec<(String, String)> = Vec::new();
+        let collected = |texts: &[(String, String)]| {
+            texts
+                .iter()
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_owned()
+        };
+        loop {
+            let Some(event) = events.recv().await else {
+                return Err("The OpenCode event stream was lost.".to_owned());
+            };
+            if event["data"]["sessionID"].as_str() != Some(id.as_str()) {
+                continue;
+            }
+            match event["type"].as_str().unwrap_or_default() {
+                "session.text.ended" => {
+                    let key = format!(
+                        "{}:{}",
+                        event["data"]["assistantMessageID"]
+                            .as_str()
+                            .unwrap_or_default(),
+                        event["data"]["ordinal"]
+                    );
+                    let text = event["data"]["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    match texts.iter_mut().find(|(k, _)| *k == key) {
+                        Some(entry) => entry.1 = text,
+                        None => texts.push((key, text)),
+                    }
+                }
+                "permission.asked" => {
+                    let request = event["data"]["id"].as_str().unwrap_or_default();
+                    let _ = v2_request(
+                        server,
+                        reqwest::Method::POST,
+                        &format!(
+                            "/api/session/{session}/permission/{}/reply",
+                            crate::thread_projection::uri_component(request)
+                        ),
+                        Some(&json!({"decision": "reject", "message": V2_TOOLS_REFUSED})),
+                        Duration::from_secs(10),
+                    )
+                    .await;
+                }
+                "session.execution.succeeded" => return Ok(collected(&texts)),
+                "session.execution.failed" => {
+                    return Err("OpenCode could not generate the text.".to_owned())
+                }
+                "session.execution.interrupted" => {
+                    return Err("OpenCode stopped the generation.".to_owned())
+                }
+                _ => {}
+            }
+        }
+    };
+    // The limit covers creating the session and sending the prompt too.
+    let result = match tokio::time::timeout(TEXT_GENERATION_TIMEOUT, generate).await {
+        Ok(result) => result,
+        Err(_) => {
+            if let Some(id) = &session_id {
+                let _ = v2_request(
+                    server,
+                    reqwest::Method::POST,
+                    &format!(
+                        "/api/session/{}/interrupt",
+                        crate::thread_projection::uri_component(id)
+                    ),
+                    None,
+                    Duration::from_secs(5),
+                )
+                .await;
+            }
+            Err("OpenCode did not finish generating in time.".to_owned())
+        }
+    };
+    if let Some(id) = &session_id {
+        let _ = v2_request(
+            server,
+            reqwest::Method::DELETE,
+            &format!(
+                "/api/session/{}",
+                crate::thread_projection::uri_component(id)
+            ),
+            None,
+            Duration::from_secs(5),
+        )
+        .await;
+    }
+    match result? {
+        text if text.is_empty() => Err("OpenCode returned empty output.".to_owned()),
+        text => Ok(text),
+    }
+}
 
 #[cfg(test)]
 mod tests {

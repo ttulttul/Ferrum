@@ -13,17 +13,22 @@ Usage: fake_opencode.py <spec.json> <arguments...>
 --port=P` listens on H:P, prints OpenCode's "opencode server listening on
 http://H:P" line and answers each `METHOD /path` from "serve.routes" (404
 otherwise) until it is stopped. A route with "sequence": [route, ...] answers
-its successive requests with each entry in turn, the last one repeating. Every launch appends its arguments to
+its successive requests with each entry in turn, the last one repeating. A
+route with "sse": true holds the response open as an event stream (OpenCode
+2's `GET /api/event`), and "serve.events": {"METHOD /path": [event, ...]}
+sends those events on every open stream once that request was answered. Every launch appends its arguments to
 FAKE_PROVIDER_LOG.args (with the port replaced by PORT), and every request
 `METHOD /path` to one of OpenCode's routes (plus " basic" when it carries
-Basic credentials) to FAKE_PROVIDER_LOG.http, and every `/session` request as
-JSON with its query and body.
+Basic credentials) to FAKE_PROVIDER_LOG.http, and every `/session` (OpenCode
+2: `/api/session`) request as JSON with its query and body.
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import queue
 import re
 import sys
+import threading
 import time
 
 spec_path, args = sys.argv[1], sys.argv[2:]
@@ -59,6 +64,8 @@ options = dict(arg[2:].split("=", 1) for arg in args[1:] if arg.startswith("--")
 host, port = options.get("hostname", "127.0.0.1"), int(options.get("port", "0"))
 routes = serve.get("routes", {})
 served = {}
+# Open event streams, each fed its own queue.
+streams, streams_lock = [], threading.Lock()
 OPENCODE_PATH = re.compile(r"^/(?:api/|global/|provider$|agent$|skill$|command$)")
 
 
@@ -84,7 +91,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(log + ".http", "a") as out:
                 out.write(f"{self.command} {path}{' basic' if basic else ''}\n")
         # A session's requests (text generation) with their query and body, as JSON.
-        if log and path.startswith("/session"):
+        if log and (path.startswith("/session") or path.startswith("/api/session")):
             try:
                 body = json.loads(raw) if raw else None
             except ValueError:
@@ -96,9 +103,11 @@ class Handler(BaseHTTPRequestHandler):
                                       "basic": basic, "headers": headers, "body": body}, sort_keys=True) + "\n")
         key = f"{self.command} {path}"
         # A session's prompt is a title being generated.
-        if self.command == "POST" and re.match(r"^/session/[^/]+/message$", path):
+        if self.command == "POST" and re.match(r"^(?:/session/[^/]+/message|/api/session/[^/]+/prompt)$", path):
             wait_for_title_gate()
         route = routes.get(key, {"status": 404, "body": {"error": "not found"}})
+        if route.get("sse"):
+            return self.stream()
         if "sequence" in route:
             count = served.get(key, 0)
             served[key] = count + 1
@@ -113,6 +122,35 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        for event in serve.get("events", {}).get(key, []):
+            with streams_lock:
+                for stream in streams:
+                    stream.put(event)
+
+    def stream(self):
+        """An event stream: each queued event as a `data:` frame, until the client goes."""
+        events = queue.Queue()
+        with streams_lock:
+            streams.append(events)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(b": connected\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    event = events.get(timeout=5)
+                    self.wfile.write(b"data: " + json.dumps(event).encode() + b"\n\n")
+                except queue.Empty:
+                    self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            with streams_lock:
+                streams.remove(events)
 
     do_GET = do_POST = do_DELETE = do_PATCH = answer
 
