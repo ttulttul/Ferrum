@@ -1132,7 +1132,10 @@ def config_socket(url, cookie):
 
 
 def next_provider_event(ws, instance, seconds=15):
-    """The instance's row in the next `providerStatuses` event whose row is checked."""
+    """The instance's row in the next `providerStatuses` event whose row is signed in and `final`.
+    The reference publishes an enriched driver's probe row before its version advisory and
+    debounces events by 200 ms, so whether the advisory-less row reaches a client on its own
+    depends on how long enrichment takes."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
@@ -1148,7 +1151,7 @@ def next_provider_event(ws, instance, seconds=15):
         for event in frame.get("values", []):
             if event.get("type") == "providerStatuses":
                 row = row_of(event["payload"]["providers"], instance)
-                if row is not None and row.get("auth", {}).get("status") == "authenticated":
+                if final(row) and row.get("auth", {}).get("status") == "authenticated":
                     return row
     return None
 
