@@ -96,6 +96,7 @@ pub(crate) struct PeerMcpClient {
 impl PeerMcpClient {
     async fn post(
         links: &PeerLinks,
+        environment_id: &str,
         url: &str,
         token: &str,
         body: &Value,
@@ -111,11 +112,21 @@ impl PeerMcpClient {
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
-        request.send().await
+        let response = request.send().await?;
+        // A peer that renews a used link says when it now ends; one that does not sends nothing.
+        if let Some(expires_at) = response
+            .headers()
+            .get(crate::peer_thread_relay::LINK_EXPIRES_AT_HEADER)
+            .and_then(|v| v.to_str().ok())
+        {
+            links.record_expiry(environment_id, expires_at);
+        }
+        Ok(response)
     }
 
     async fn open_session(
         links: &PeerLinks,
+        environment_id: &str,
         url: &str,
         token: &str,
         limit: &str,
@@ -123,6 +134,7 @@ impl PeerMcpClient {
         let handshake = async {
             let initialized = Self::post(
                 links,
+                environment_id,
                 url,
                 token,
                 &json!({
@@ -162,6 +174,7 @@ impl PeerMcpClient {
             };
             Self::post(
                 links,
+                environment_id,
                 url,
                 token,
                 &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
@@ -248,15 +261,29 @@ impl PeerMcpClient {
                 if let Some(sender) = sender {
                     headers.insert(1, (SENDER_THREAD_HEADER, sender));
                 }
-                Self::post(links, &resolved.url, &resolved.token, body, &headers).await
+                Self::post(
+                    links,
+                    environment_id,
+                    &resolved.url,
+                    &resolved.token,
+                    body,
+                    &headers,
+                )
+                .await
             }
         };
         let existing = self.sessions.lock().unwrap().get(&key).cloned();
         let session = match existing {
             Some(session) => session,
             None => {
-                let session =
-                    Self::open_session(links, &resolved.url, &resolved.token, limit).await?;
+                let session = Self::open_session(
+                    links,
+                    environment_id,
+                    &resolved.url,
+                    &resolved.token,
+                    limit,
+                )
+                .await?;
                 self.sessions
                     .lock()
                     .unwrap()
@@ -267,7 +294,9 @@ impl PeerMcpClient {
         let mut response = call_once(session).await?;
         if response.status().as_u16() == 404 {
             // The peer restarted and forgot the session: start a new one for this call.
-            let renewed = Self::open_session(links, &resolved.url, &resolved.token, limit).await?;
+            let renewed =
+                Self::open_session(links, environment_id, &resolved.url, &resolved.token, limit)
+                    .await?;
             self.sessions.lock().unwrap().insert(key, renewed.clone());
             response = call_once(renewed).await?;
         }

@@ -161,7 +161,7 @@ pub async fn session(
                         if pending.contains_key(&key) { continue; }
                         let method = request["tag"].as_str().unwrap_or("undefined").to_owned();
                         let capacity = match method.as_str() {
-                            "terminal.observe"|"terminal.attach"|"orchestration.subscribeThread"|"orchestration.subscribeShell"|"subscribeServerConfig" => 8,
+                            "terminal.observe"|"terminal.attach"|"orchestration.subscribeThread"|"peerLinks.subscribeThread"|"orchestration.subscribeShell"|"subscribeServerConfig" => 8,
                             _ => 1,
                         };
                         let window=Arc::new(Semaphore::new(capacity));
@@ -279,6 +279,44 @@ async fn run_call(
             let _ = chunks.send((id.clone(), values)).await;
         }
     };
+    if method == "peerLinks.names" {
+        return match state.peer_links.names() {
+            Ok(links) => Reply::Success(json!({"links": links.into_iter()
+                .map(|(id, label)| json!({"environmentId": id, "label": label}))
+                .collect::<Vec<_>>()})),
+            Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e.to_json()})),
+        };
+    }
+    if method == "peerLinks.subscribeThread" {
+        let error =
+            crate::peer_thread_relay::subscribe(state, params, |item| send(json!([item]))).await;
+        return Reply::Failure(json!({"_tag":"Fail","error":error.to_json()}));
+    }
+    if matches!(
+        method,
+        "peerLinks.threadHistoryPage" | "peerLinks.threadItem"
+    ) {
+        let read = if method == "peerLinks.threadItem" {
+            crate::peer_thread_relay::item(state, params).await
+        } else {
+            crate::peer_thread_relay::history_page(state, params).await
+        };
+        return match read {
+            Ok(value) => Reply::Success(value),
+            Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e.to_json()})),
+        };
+    }
+    if matches!(method, "peerLinks.pairClient" | "peerLinks.pairLink") {
+        let asked = if method == "peerLinks.pairClient" {
+            crate::peer_thread_relay::pair_client(state, principal, params).await
+        } else {
+            crate::peer_thread_relay::pair_link(state, principal, params).await
+        };
+        return match asked {
+            Ok(value) => Reply::Success(value),
+            Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e.to_json()})),
+        };
+    }
     if method == "orchestration.searchThreads" {
         let dir = state.data_dir.clone();
         let input = params.clone();

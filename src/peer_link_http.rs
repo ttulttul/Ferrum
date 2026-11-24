@@ -109,6 +109,8 @@ struct Admitted {
     thread_id: String,
     token: String,
     issuer: String,
+    /// When the link's session now ends, renewed by this read.
+    link_expires_ms: Option<i64>,
 }
 
 /// `admitLink`: no browser origin, the link's own bearer, the Linked environments beta on here,
@@ -141,6 +143,7 @@ async fn admit(
         thread_id: thread_id.clone(),
         token: bearer(headers).to_owned(),
         issuer: crate::mcp_oauth::request_origin(headers),
+        link_expires_ms: client.link_expires_ms,
     })
 }
 
@@ -184,6 +187,7 @@ async fn stream(
         Err(_) => return refusal(StatusCode::INTERNAL_SERVER_ERROR, "thread_read_failed"),
     };
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+    let link_expires_ms = admitted.link_expires_ms;
     let task_state = state.clone();
     tokio::spawn(async move {
         let send = |batch: &Value| {
@@ -249,7 +253,7 @@ async fn stream(
         receiver,
         |mut receiver| async move { receiver.recv().await.map(|frame| (frame, receiver)) },
     ));
-    (
+    let mut response = (
         StatusCode::OK,
         [
             ("content-type", "text/event-stream"),
@@ -259,7 +263,9 @@ async fn stream(
         ],
         body,
     )
-        .into_response()
+        .into_response();
+    crate::mcp_oauth::with_link_expiry(&mut response, link_expires_ms);
+    response
 }
 
 /// `GET /api/links/thread/history`: the turns before a snapshot's window. Rust's snapshot always
@@ -296,12 +302,14 @@ async fn item(
         .threads
         .get(&admitted.thread_id)
         .and_then(|thread| thread.turn_item_detail(item_id));
-    (
+    let mut response = (
         StatusCode::OK,
         [("cache-control", "no-store")],
         Json(json!({ "item": item })),
     )
-        .into_response()
+        .into_response();
+    crate::mcp_oauth::with_link_expiry(&mut response, admitted.link_expires_ms);
+    response
 }
 
 fn forbidden(message: &str) -> Response {

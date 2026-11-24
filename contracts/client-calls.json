@@ -1034,6 +1034,7 @@
         "managed_policy_parity.py",
         "orchestration_parity.py",
         "parity-fixtures.json",
+        "peer_link_routes_parity.py",
         "preview_provider_parity.py",
         "preview_session_parity.py",
         "run_output_parity.py",
@@ -1665,7 +1666,8 @@
       "existingCoverage": [
         "link_request_parity.py",
         "peer_forwarding_parity.py",
-        "peer_link_outgoing_parity.py"
+        "peer_link_outgoing_parity.py",
+        "peer_link_relay_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [],
@@ -1689,7 +1691,8 @@
       "existingCoverage": [
         "link_request_parity.py",
         "peer_forwarding_parity.py",
-        "peer_link_outgoing_parity.py"
+        "peer_link_outgoing_parity.py",
+        "peer_link_relay_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -1713,8 +1716,10 @@
       "stream": false,
       "auth": "session (orchestration:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "peer_link_relay_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -1733,8 +1738,10 @@
       "stream": false,
       "auth": "session (access:write)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "peer_link_relay_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -1753,8 +1760,10 @@
       "stream": false,
       "auth": "session (access:write)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "peer_link_relay_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -1773,8 +1782,10 @@
       "stream": true,
       "auth": "session (orchestration:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "peer_link_relay_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -1793,8 +1804,10 @@
       "stream": false,
       "auth": "session (orchestration:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "peer_link_relay_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -1813,8 +1826,10 @@
       "stream": false,
       "auth": "session (orchestration:read)",
       "usage": "client",
-      "existingCoverage": [],
-      "validationOnly": true,
+      "existingCoverage": [
+        "peer_link_relay_parity.py"
+      ],
+      "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
     },
@@ -5043,7 +5058,8 @@
       "existingCoverage": [
         "auth_parity.py",
         "client_initial_sync_parity.py",
-        "client_sessions_parity.py"
+        "client_sessions_parity.py",
+        "peer_link_routes_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -6048,6 +6064,7 @@
         "peer_forwarding_parity.py",
         "peer_link_outgoing_parity.py",
         "peer_link_parity.py",
+        "peer_link_routes_parity.py",
         "workers_initial_sync_parity.py"
       ],
       "validationOnly": false,
@@ -6214,6 +6231,7 @@
         "peer_forwarding_parity.py",
         "peer_link_outgoing_parity.py",
         "peer_link_parity.py",
+        "peer_link_routes_parity.py",
         "source_control_clone_parity.py",
         "workers_peer_link_parity.py"
       ],
@@ -6267,7 +6285,9 @@
         "auth_parity.py",
         "client_sessions_parity.py",
         "peer_forwarding_parity.py",
-        "peer_link_parity.py"
+        "peer_link_parity.py",
+        "peer_link_relay_parity.py",
+        "peer_link_routes_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [],
@@ -6421,6 +6441,7 @@
         "mcp_parity.py",
         "peer_forwarding_parity.py",
         "peer_link_parity.py",
+        "peer_link_routes_parity.py",
         "provider-parity.json"
       ],
       "validationOnly": false,
@@ -6489,7 +6510,8 @@
       "existingCoverage": [
         "mcp_parity.py",
         "peer_forwarding_parity.py",
-        "peer_link_parity.py"
+        "peer_link_parity.py",
+        "peer_link_routes_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [],
@@ -6511,7 +6533,8 @@
       "existingCoverage": [
         "mcp_parity.py",
         "peer_forwarding_parity.py",
-        "peer_link_parity.py"
+        "peer_link_parity.py",
+        "peer_link_routes_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [],
@@ -6682,6 +6705,7 @@
         "cors_parity.py",
         "github_provider_parity.py",
         "linear_provider_parity.py",
+        "peer_link_routes_parity.py",
         "project_clone_parity.py",
         "project_favicon_parity.py",
         "provider-parity.json",
@@ -6717,6 +6741,7 @@
         "client_thread_parity.py",
         "github_provider_parity.py",
         "linear_provider_parity.py",
+        "peer_link_routes_parity.py",
         "project_favicon_parity.py",
         "shared_store_parity.py"
       ],
@@ -7293,7 +7318,9 @@
       "stream": false,
       "auth": "none",
       "usage": "server-only/unused",
-      "existingCoverage": [],
+      "existingCoverage": [
+        "peer_link_routes_parity.py"
+      ],
       "validationOnly": false,
       "clientHarness": [],
       "knownGaps": []
@@ -7333,6 +7360,8 @@
         "orchestration_parity.py",
         "parity-fixtures.json",
         "peer_link_outgoing_parity.py",
+        "peer_link_relay_parity.py",
+        "peer_link_routes_parity.py",
         "preview_provider_parity.py",
         "project_clone_parity.py",
         "project_favicon_parity.py",

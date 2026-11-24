@@ -37,6 +37,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+pub(crate) use transport::with_link_expiry;
 use url::Url;
 
 const SCOPES: [&str; 2] = ["orchestration:read", "orchestration:operate"];
@@ -54,6 +55,8 @@ const UNKNOWN_CLIENT: &str =
 const PEER_LINK_SOFTWARE_ID: &str = "t3code-peer-link";
 const CODE_TTL_MS: i64 = 60_000;
 const TOKEN_TTL_SECS: i64 = 30 * 24 * 3600;
+/// `PEER_LINK_RENEWAL_STEP`: a link in use moves its expiry out at most once a day.
+const PEER_LINK_RENEWAL_STEP_MS: i64 = 24 * 3_600_000;
 const SESSION_TTL_MS: i64 = 1_800_000;
 
 /// The stored link to another environment, as forwarding checks it.
@@ -456,6 +459,9 @@ pub struct McpAccess {
     pub label: String,
     /// The thread a provider session's credential acts as; `None` for a client.
     pub thread: Option<ThreadScope>,
+    /// When a peer link's session now ends, renewed by this use
+    /// (`t3-link-expires-at`); `None` for any other client.
+    pub link_expires_ms: Option<i64>,
 }
 enum Invalid {
     Page(&'static str),
@@ -645,16 +651,32 @@ impl OAuth {
                 session_id: scope.provider_session_id.clone(),
                 label: String::new(),
                 thread: Some(scope),
+                link_expires_ms: None,
             });
         }
-        self.read::<Grant>("tokens", &hashed(token))
+        let name = hashed(token);
+        self.read::<Grant>("tokens", &name)
             .filter(|g| g.expires_ms > now_ms() && g.request.issuer == issuer)
-            .map(|g| McpAccess {
-                access: g.access,
-                peer_link: g.request.peer_link,
-                session_id: hashed(token)[..32].to_owned(),
-                label: g.request.name,
-                thread: None,
+            .map(|mut g| {
+                // A peer link's session renews while it is used, at most once a day.
+                let link_expires_ms = g.request.peer_link.then(|| {
+                    let renewed = now_ms() + TOKEN_TTL_SECS * 1000;
+                    if renewed - g.expires_ms >= PEER_LINK_RENEWAL_STEP_MS {
+                        g.expires_ms = renewed;
+                        if let Err(error) = self.write("tokens", &name, &g) {
+                            tracing::warn!(%error, "Could not renew a peer link session.");
+                        }
+                    }
+                    g.expires_ms
+                });
+                McpAccess {
+                    access: g.access,
+                    peer_link: g.request.peer_link,
+                    session_id: name[..32].to_owned(),
+                    label: g.request.name,
+                    thread: None,
+                    link_expires_ms,
+                }
             })
             .or_else(|| self.reference_access(token))
     }

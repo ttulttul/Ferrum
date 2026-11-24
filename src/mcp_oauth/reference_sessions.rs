@@ -33,6 +33,7 @@ const BEARER: &str = "bearer-access-token";
 const SIGNING_KEY: &str = "server-signing-key.bin";
 /// `MCP_CLIENT_SESSION_TTL` in the reference: thirty days.
 pub(super) const TTL_MS: i64 = 30 * 24 * 3_600_000;
+use super::PEER_LINK_RENEWAL_STEP_MS as RENEWAL_STEP_MS;
 
 /// `SessionClaims` in the reference `SessionStore`, in its field order.
 #[derive(Serialize, Deserialize)]
@@ -213,7 +214,10 @@ impl ReferenceSessions {
         else {
             return Ok(None);
         };
-        if claims.exp <= now_ms as f64 {
+        // A peer link's session renews while it is used and its token is never
+        // reissued, so the session row holds its deadline, not the token.
+        let peer_link = claims.plk == Some(1);
+        if !peer_link && claims.exp <= now_ms as f64 {
             return Ok(None);
         }
         let Some(conn) = self.open()? else {
@@ -221,23 +225,37 @@ impl ReferenceSessions {
         };
         let row = conn
             .query_row(
-                "SELECT scopes, revoked_at, client_label FROM auth_sessions WHERE session_id = ?1",
+                "SELECT scopes, revoked_at, client_label, expires_at FROM auth_sessions WHERE session_id = ?1",
                 [&claims.sid],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((scopes, None, label)) = row else {
+        let Some((scopes, None, label, expires_at)) = row else {
+            return Ok(None);
+        };
+        let Some(expires_ms) = crate::peer_links::iso_ms(&expires_at).filter(|e| *e > now_ms)
+        else {
             return Ok(None);
         };
         if claims.sub != MCP_CLIENT_SUBJECT || claims.method != BEARER {
             return Ok(None);
         }
+        let link_expires_ms = if peer_link {
+            match renew(&conn, &claims.sid, expires_ms, now_ms)? {
+                Some(renewed) => Some(renewed),
+                // A revoke landed between the verification and the update.
+                None => return Ok(None),
+            }
+        } else {
+            None
+        };
         let scopes: Vec<String> = serde_json::from_str(&scopes).unwrap_or_default();
         let access = if scopes.iter().any(|s| s == "orchestration:operate") {
             claims.rtc.unwrap_or_else(|| "approval-required".into())
@@ -250,6 +268,7 @@ impl ReferenceSessions {
             session_id: claims.sid,
             label: label.unwrap_or_default(),
             thread: None,
+            link_expires_ms,
         }))
     }
 
@@ -312,6 +331,46 @@ impl ReferenceSessions {
     }
 }
 
+/// `renewPeerLinkSession`: the expiry of a verified peer link session, moved out
+/// to thirty days from now when that is at least a day later. `None` when the
+/// session ended before it could be renewed.
+fn renew(
+    conn: &Connection,
+    session_id: &str,
+    expires_ms: i64,
+    now_ms: i64,
+) -> anyhow::Result<Option<i64>> {
+    let renewed = now_ms + TTL_MS;
+    if renewed - expires_ms < RENEWAL_STEP_MS {
+        return Ok(Some(expires_ms));
+    }
+    // The step is checked in the update, so of two uses that read the same expiry one writes.
+    let updated = conn.execute(
+        "UPDATE auth_sessions SET expires_at = ?1
+         WHERE session_id = ?2 AND revoked_at IS NULL AND expires_at > ?3 AND expires_at <= ?4",
+        params![
+            crate::auth_service::iso(renewed),
+            session_id,
+            crate::auth_service::iso(now_ms),
+            crate::auth_service::iso(renewed - RENEWAL_STEP_MS),
+        ],
+    )?;
+    if updated > 0 {
+        return Ok(Some(renewed));
+    }
+    let current = conn
+        .query_row(
+            "SELECT expires_at, revoked_at FROM auth_sessions WHERE session_id = ?1",
+            [session_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    Ok(current
+        .filter(|(_, revoked)| revoked.is_none())
+        .and_then(|(expires, _)| crate::peer_links::iso_ms(&expires))
+        .filter(|expires| *expires > now_ms))
+}
+
 /// The claims as the reference encodes them: `iat` and `exp` are integers.
 fn json_claims(claims: &Claims) -> serde_json::Value {
     let mut value = serde_json::to_value(claims).expect("claims serialize");
@@ -365,7 +424,7 @@ pub(crate) mod tests {
             "INSERT INTO auth_sessions (session_id, subject, scopes, method, client_label,
                client_device_type, issued_at, expires_at, revoked_at)
              VALUES (?1, 'mcp-client', ?2, 'bearer-access-token', 'T3 Code · fixture', 'bot',
-               '2026-01-01T00:00:00.000Z', '2027-01-01T00:00:00.000Z', ?3)",
+               '2026-01-01T00:00:00.000Z', '2028-01-01T00:00:00.000Z', ?3)",
             params![sid, scopes, revoked.then_some("2026-01-02T00:00:00.000Z")],
         )
         .unwrap();
@@ -401,8 +460,11 @@ pub(crate) mod tests {
                 .map(|a| (a.access, a.peer_link, a.label)),
             Some(("auto".into(), true, "T3 Code · fixture".into()))
         );
-        // Expired claims, a forged signature and a revoked row are all refused.
-        assert_eq!(sessions.verify(&token, now + 60_000).unwrap(), None);
+        // A peer link's row holds its deadline, so its expired claims still pass;
+        // past the row's deadline, a forged signature and a revoked row are all refused.
+        assert!(sessions.verify(&token, now + 60_000).unwrap().is_some());
+        let after_row = crate::peer_links::iso_ms("2028-01-01T00:00:00.001Z").unwrap();
+        assert_eq!(sessions.verify(&token, after_row).unwrap(), None);
         let forged = reference_token(&[8u8; 32], claims("11111111-1111-4111-8111-111111111111"));
         assert_eq!(sessions.verify(&forged, now).unwrap(), None);
         conn.execute(
@@ -427,6 +489,67 @@ pub(crate) mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn a_peer_link_renews_while_used_and_its_row_holds_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = create_ts_store(dir.path());
+        let sessions = ReferenceSessions::new(dir.path());
+        let now = 1_800_000_000_000i64;
+        let issued = sessions
+            .issue(
+                "T3 Code · fixture",
+                "auto",
+                true,
+                &serde_json::json!({}),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        let expires = |conn: &Connection| -> i64 {
+            let text: String = conn
+                .query_row("SELECT expires_at FROM auth_sessions", [], |r| r.get(0))
+                .unwrap();
+            crate::peer_links::iso_ms(&text).unwrap()
+        };
+        // Fresh: less than a day short of thirty days, so nothing moves.
+        let access = sessions
+            .verify(&issued.token, now + 3_600_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(access.link_expires_ms, Some(now + TTL_MS));
+        assert_eq!(expires(&conn), now + TTL_MS);
+        // Twenty days on: renewed to thirty days from then.
+        let later = now + 20 * 24 * 3_600_000;
+        let access = sessions.verify(&issued.token, later).unwrap().unwrap();
+        assert_eq!(access.link_expires_ms, Some(later + TTL_MS));
+        assert_eq!(expires(&conn), later + TTL_MS);
+        // Past the token's own expiry claim, the row still holds the deadline (and
+        // this use renews it again).
+        let past_claim = now + TTL_MS + 1000;
+        let renewed = sessions
+            .verify(&issued.token, past_claim)
+            .unwrap()
+            .and_then(|a| a.link_expires_ms)
+            .unwrap();
+        assert_eq!(renewed, past_claim + TTL_MS);
+        // Past the row's deadline, it is refused.
+        assert!(sessions
+            .verify(&issued.token, renewed + 1)
+            .unwrap()
+            .is_none());
+        // An ordinary MCP client is not renewed and keeps its claim's expiry.
+        let client = sessions
+            .issue("Fixture agent", "auto", false, &serde_json::json!({}), now)
+            .unwrap()
+            .unwrap();
+        let access = sessions.verify(&client.token, later).unwrap().unwrap();
+        assert_eq!(access.link_expires_ms, None);
+        assert!(sessions
+            .verify(&client.token, now + TTL_MS + 1)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
