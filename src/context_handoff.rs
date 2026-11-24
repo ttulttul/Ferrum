@@ -1687,6 +1687,8 @@ mod tests {
             run1_id,
             &ProviderEvent::ProviderTurn {
                 native_turn_id: None,
+                native_turn_ref: None,
+                conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
             },

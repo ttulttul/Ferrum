@@ -24,14 +24,24 @@ pub const GROK: &str = "grok";
 /// ACP Registry agents, run over ACP in the reference's generic flavor.
 pub const ACP_REGISTRY: &str = "acpRegistry";
 
+/// Pi's CLI, whose turns run over its RPC mode (`pi --mode rpc`).
+pub const PI: &str = "pi";
+
 /// Whether the workspace runs turns of `driver`'s CLI.
 pub fn runs_turns(driver: &str) -> bool {
-    matches!(driver, CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY)
+    matches!(driver, CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI)
 }
 
 /// Whether `driver`'s turns run over ACP.
 pub fn is_acp(driver: &str) -> bool {
     matches!(driver, GROK | ACP_REGISTRY)
+}
+
+/// Whether the reference gives each of `driver`'s threads a provider
+/// session of its own, named after the thread and a random id (the ACP
+/// agents and Pi).
+pub fn thread_session(driver: &str) -> bool {
+    is_acp(driver) || driver == PI
 }
 
 /// How to run one turn of a provider instance.
@@ -115,6 +125,16 @@ pub struct ProviderTurn {
     /// wire bytes; without it the fresh session gets the plain prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_prompt: Option<String>,
+    /// The native turn id a Pi turn is named by before Pi names it
+    /// (`<provider thread>:attempt:<attempt>`), which its items' ids extend.
+    /// Optional and omitted when empty, so an agentd or control plane that
+    /// predates it sees the same wire bytes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub native_turn: String,
+    /// The thread's title, which a Pi session is named after. Optional and
+    /// omitted when empty, likewise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub thread_title: String,
 }
 
 /// Where a provider CLI reaches T3's tools for its thread
@@ -196,6 +216,14 @@ pub enum ProviderEvent {
     ProviderTurn {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         native_turn_id: Option<String>,
+        /// The native turn the provider named once the turn ended (Pi's
+        /// first user entry of the turn, or `null` when it wrote none), and
+        /// the conversation's last entry then. Optional and omitted when
+        /// absent: a reader that predates them skips them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_turn_ref: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_head: Option<String>,
         status: TurnStatus,
         /// The model the turn ran on, once the CLI reports it.
         #[serde(default, skip_serializing_if = "Option::is_none")]

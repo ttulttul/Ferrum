@@ -671,6 +671,8 @@ impl Session {
             self.turn_usage = TurnUsage::new();
             self.sink.send(ProviderEvent::ProviderTurn {
                 native_turn_id: Some(id.to_owned()),
+                native_turn_ref: None,
+                conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
             });

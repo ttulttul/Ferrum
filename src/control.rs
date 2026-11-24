@@ -4290,6 +4290,8 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
         });
         emit(ProviderEvent::ProviderTurn {
             native_turn_id: Some("turn_1".into()),
+            native_turn_ref: None,
+            conversation_head: None,
             status: TurnStatus::Running,
             model: None,
         });

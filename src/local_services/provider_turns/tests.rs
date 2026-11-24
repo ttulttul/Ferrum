@@ -1,7 +1,7 @@
 //! Provider turns against fake CLIs that replay recorded Codex app-server and
 //! Claude Code stream-json transcripts (`tests/fixtures/providers`).
 use super::*;
-use crate::workspace::provider::{ProviderTurn, TurnStatus, ACP_REGISTRY, CLAUDE_AGENT, GROK};
+use crate::workspace::provider::{ProviderTurn, TurnStatus, ACP_REGISTRY, CLAUDE_AGENT, GROK, PI};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -229,10 +229,11 @@ async fn answered_turn(
     // Nothing answers the CLI until the user does.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(
-        !received(&log)
-            .iter()
-            .any(|m| m["id"].is_string() && m.get("method").is_none()
-                || m["type"] == "control_response" && m["response"]["request_id"] == "perm-1"),
+        !received(&log).iter().any(|m| m["id"].is_string()
+            && m.get("method").is_none()
+            && m.get("type").is_none()
+            || m["type"] == "control_response" && m["response"]["request_id"] == "perm-1"
+            || m["type"] == "extension_ui_response"),
         "the request was answered before the user answered it"
     );
     assert!(respond(turn_id, answer(&request)));
@@ -1217,5 +1218,153 @@ async fn acp_registry_auto_mode_answers_requests_itself() {
     assert_eq!(
         answer["result"],
         json!({"outcome": {"outcome": "selected", "optionId": "allow"}})
+    );
+}
+
+#[tokio::test]
+async fn pi_turn_streams_thinking_a_command_and_the_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (events, exit) = run(fake_spec(PI, "pi_turn.json", &log, None)).await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    assert_eq!(
+        native_thread(&events),
+        ("/pi-sessions/session-1.jsonl".into(), false)
+    );
+    assert_eq!(
+        items(&events, "reasoning")
+            .last()
+            .map(|item| &item.fields["text"]),
+        Some(&json!("I'll run the command."))
+    );
+    let command = items(&events, "command_execution");
+    let done = command.last().expect("the command");
+    assert_eq!(
+        (
+            done.status.as_str(),
+            &done.fields["input"],
+            &done.fields["exitCode"]
+        ),
+        ("completed", &json!("echo hi"), &json!(0))
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::CommandOutputDelta { chunk, .. } if chunk == "hi\n"
+    )));
+    assert_eq!(final_text(&events), "Ran echo hi; it printed hi.");
+    // The session's statistics give the turn's usage.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::Usage { usage } if usage.used_tokens == 1814 && usage.max_tokens == Some(400_000)
+    )));
+    let sent: Vec<String> = received(&log)
+        .iter()
+        .filter_map(|m| m["type"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            "get_state",
+            "get_available_models",
+            "get_entries",
+            "prompt",
+            "get_state",
+            "get_entries",
+            "get_session_stats"
+        ]
+    );
+    let prompt = received(&log)
+        .into_iter()
+        .find(|m| m["type"] == "prompt")
+        .unwrap();
+    assert_eq!(
+        (
+            &prompt["message"],
+            &prompt["streamingBehavior"],
+            &prompt["id"]
+        ),
+        (&json!("Say hello"), &json!("steer"), &json!("t3-prompt-0"))
+    );
+}
+
+#[tokio::test]
+async fn pi_turn_fails_with_the_models_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (events, exit) = run(fake_spec(PI, "pi_failed.json", &log, None)).await;
+    assert!(!exit.success);
+    let (status, failure) = terminal(&events);
+    assert_eq!(status, TurnStatus::Failed);
+    assert_eq!(
+        failure.unwrap().message,
+        "429 Too Many Requests: rate limited by the fixture"
+    );
+}
+
+#[tokio::test]
+async fn pi_stop_aborts_and_stops_the_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (cancel, cancelled) = oneshot::channel();
+    let mut events = start(
+        fake_spec(PI, "pi_interrupt.json", &log, None),
+        cancelled,
+        TEST_SERVERS.clone(),
+    )
+    .unwrap();
+    while let Some(event) = events.recv().await {
+        if matches!(&event, TurnEvent::Provider(ProviderEvent::TurnItem { item })
+            if item.kind == "command_execution" && item.status == "running")
+        {
+            break;
+        }
+    }
+    cancel.send(()).unwrap();
+    let (rest, exit) = collect(events).await;
+    assert!(exit.cancelled && !exit.success, "{exit:?}");
+    assert_eq!(terminal(&rest), (TurnStatus::Interrupted, None));
+    let sent: Vec<String> = received(&log)
+        .iter()
+        .filter_map(|m| m["type"].as_str().map(str::to_owned))
+        .collect();
+    let at = sent
+        .iter()
+        .position(|kind| kind == "clear_queue")
+        .expect("the queue was cleared");
+    assert_eq!(
+        &sent[at..at + 4],
+        ["clear_queue", "abort", "get_state", "get_entries"]
+    );
+    assert!(!sent.contains(&"get_session_stats".to_owned()));
+}
+
+#[tokio::test]
+async fn pi_turn_asks_the_user_before_a_command() {
+    let (request, log, exit) = answered_turn(
+        PI,
+        "pi_approval.json",
+        "turn-pi-approval",
+        "approval-required",
+        |request| crate::workspace::provider::RuntimeResponse {
+            id: request.id.clone(),
+            decision: Some("decline".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(
+        (request.kind.as_str(), request.native_request_id.as_str()),
+        ("command", "ui-1")
+    );
+    assert_eq!(request.fields["title"], "Allow bash?");
+    let answer = log
+        .iter()
+        .find(|m| m["type"] == "extension_ui_response")
+        .expect("the dialog was answered");
+    assert_eq!(
+        answer,
+        &json!({"type": "extension_ui_response", "id": "ui-1", "confirmed": false})
     );
 }

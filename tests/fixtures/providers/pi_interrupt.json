@@ -1,0 +1,227 @@
+{
+ "piReplies": {
+  "get_state": {
+   "model": {
+    "provider": "openai",
+    "id": "gpt-5.6",
+    "contextWindow": 400000,
+    "reasoning": true
+   },
+   "thinkingLevel": "minimal",
+   "isStreaming": false,
+   "isCompacting": false,
+   "steeringMode": "one-at-a-time",
+   "followUpMode": "one-at-a-time",
+   "sessionFile": "/pi-sessions/session-1.jsonl",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "autoCompactionEnabled": true,
+   "messageCount": 0,
+   "pendingMessageCount": 0
+  },
+  "get_available_models": {
+   "models": [
+    {
+     "provider": "openai",
+     "id": "gpt-5.6",
+     "contextWindow": 400000,
+     "reasoning": true
+    }
+   ]
+  },
+  "get_entries": {
+   "entries": [
+    {
+     "type": "model_change",
+     "id": "e0",
+     "parentId": null,
+     "timestamp": "2026-01-01T00:00:00.000Z",
+     "provider": "openai",
+     "modelId": "gpt-5.6"
+    },
+    {
+     "type": "message",
+     "id": "u1",
+     "parentId": "e0",
+     "timestamp": "2026-01-01T00:00:01.000Z",
+     "message": {
+      "role": "user"
+     }
+    },
+    {
+     "type": "message",
+     "id": "a2",
+     "parentId": "u1",
+     "timestamp": "2026-01-01T00:00:02.000Z",
+     "message": {
+      "role": "assistant"
+     }
+    }
+   ],
+   "leafId": "a2"
+  },
+  "set_model": {
+   "provider": "openai",
+   "id": "gpt-5.6",
+   "contextWindow": 400000,
+   "reasoning": true
+  },
+  "set_thinking_level": {},
+  "set_session_name": {},
+  "get_session_stats": {
+   "sessionFile": "/pi-sessions/session-1.jsonl",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "userMessages": 1,
+   "assistantMessages": 1,
+   "toolCalls": 1,
+   "toolResults": 1,
+   "totalMessages": 4,
+   "tokens": {
+    "input": 1786,
+    "output": 28,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "total": 1814
+   },
+   "cost": 7.7e-05,
+   "contextUsage": {
+    "tokens": 1814,
+    "contextWindow": 400000,
+    "percent": 0.45
+   }
+  },
+  "clear_queue": {
+   "steering": [],
+   "followUp": []
+  },
+  "abort": {}
+ },
+ "steps": [
+  {
+   "expect": "prompt"
+  },
+  {
+   "send": {
+    "type": "response",
+    "id": "$id",
+    "command": "prompt",
+    "success": true,
+    "data": {
+     "disposition": "started"
+    }
+   }
+  },
+  {
+   "send": {
+    "type": "agent_start"
+   }
+  },
+  {
+   "send": {
+    "type": "message_start",
+    "message": {
+     "role": "assistant"
+    }
+   }
+  },
+  {
+   "send": {
+    "type": "message_update",
+    "message": {
+     "role": "assistant"
+    },
+    "assistantMessageEvent": {
+     "type": "thinking_start",
+     "contentIndex": 0
+    },
+    "usage": {
+     "input": 1786,
+     "output": 28,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "totalTokens": 1814
+    }
+   }
+  },
+  {
+   "send": {
+    "type": "message_update",
+    "message": {
+     "role": "assistant"
+    },
+    "assistantMessageEvent": {
+     "type": "thinking_delta",
+     "contentIndex": 0,
+     "delta": "I'll run "
+    },
+    "usage": {
+     "input": 1786,
+     "output": 28,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "totalTokens": 1814
+    }
+   }
+  },
+  {
+   "send": {
+    "type": "message_update",
+    "message": {
+     "role": "assistant"
+    },
+    "assistantMessageEvent": {
+     "type": "thinking_delta",
+     "contentIndex": 0,
+     "delta": "the command."
+    },
+    "usage": {
+     "input": 1786,
+     "output": 28,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "totalTokens": 1814
+    }
+   }
+  },
+  {
+   "send": {
+    "type": "message_update",
+    "message": {
+     "role": "assistant"
+    },
+    "assistantMessageEvent": {
+     "type": "thinking_end",
+     "contentIndex": 0,
+     "content": "I'll run the command."
+    },
+    "usage": {
+     "input": 1786,
+     "output": 28,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "totalTokens": 1814
+    }
+   }
+  },
+  {
+   "send": {
+    "type": "message_end",
+    "message": {
+     "role": "assistant",
+     "provider": "openai",
+     "model": "gpt-5.6",
+     "stopReason": "toolUse"
+    }
+   }
+  },
+  {
+   "send": {
+    "type": "tool_execution_start",
+    "toolCallId": "call_1",
+    "toolName": "bash",
+    "args": {
+     "command": "echo hi"
+    }
+   }
+  }
+ ]
+}

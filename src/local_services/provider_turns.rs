@@ -13,6 +13,7 @@ mod claude;
 mod claude_sessions;
 mod codex;
 mod codex_server;
+pub(crate) mod pi;
 mod requests;
 
 pub(crate) use codex_server::Registry as CodexServers;
@@ -24,6 +25,7 @@ pub(crate) struct ProviderProcesses {
     codex: std::sync::Arc<CodexServers>,
     claude: std::sync::Arc<claude_sessions::Sessions>,
     acp: std::sync::Arc<acp::Sessions>,
+    pi: std::sync::Arc<pi::Sessions>,
 }
 
 impl ProviderProcesses {
@@ -33,6 +35,7 @@ impl ProviderProcesses {
         codex_server::unload_thread(&self.codex, instance, thread);
         self.claude.close(thread);
         self.acp.close(thread);
+        self.pi.close(thread);
     }
 
     /// Stop them all (the server is shutting down), once their turns ended
@@ -41,6 +44,7 @@ impl ProviderProcesses {
         codex_server::shutdown(&self.codex, grace).await;
         self.claude.shutdown().await;
         self.acp.shutdown().await;
+        self.pi.shutdown().await;
     }
 }
 pub(crate) use requests::respond;
@@ -87,6 +91,15 @@ pub(crate) fn start(
             responses,
             sink,
             processes.codex.clone(),
+        ));
+    } else if provider.driver == crate::workspace::provider::PI {
+        tokio::spawn(pi::run(
+            spec,
+            provider,
+            cancel,
+            responses,
+            sink,
+            processes.pi.clone(),
         ));
     } else if crate::workspace::provider::is_acp(&provider.driver) {
         tokio::spawn(acp::run(

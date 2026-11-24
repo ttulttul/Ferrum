@@ -1,0 +1,11 @@
+{
+ "variants": [
+  {
+   "argsContain": "--session",
+   "scenario": "pi_resume_turn.json"
+  },
+  {
+   "scenario": "pi_interrupt.json"
+  }
+ ]
+}
