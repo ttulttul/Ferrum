@@ -1,33 +1,12 @@
 {
-  "antigravity title": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "antigravity title refused for a broken runtime": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
   "claude agent mcp": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "claude approval": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "claude approval declined": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "claude approval interrupted": {
-    "live": "Racy: #39502 (ProviderCommitBatch) combines an item's queued snapshots when they queue together; whether the command item's update and its approval land in one batch is timing, so the reference sometimes sends one fewer command_execution update than Rust (seen both matching and differing)."
+    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen once in pinned local rounds under heavy machine load) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
   },
   "claude approval-required": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "claude attachments": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "claude auto-accept-edits": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+    "live": "Racy: in 1 of 11 pinned local rounds (under heavy machine load) Rust sent the command item's update between the approval request's records, where the reference's provider commit batch (#39502) held it behind them. Matched in the other rounds."
   },
   "claude delegate": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+    "live": "Racy: the reference's provider commit batch (#39502) decides by timing whether a subagent's queued updates commit together: in 1 of 8 pinned local rounds it sent one more subagent.updated after the task's context-transfer.created than Rust. Matched in the other rounds."
   },
   "claude delegate worktree": {
     "live": "Racy: seen both matching and differing (8 pinned runs: most differed, one matched): #39502 (ProviderCommitBatch) usually combines the parent's tool item snapshots, so the reference's live stream carries it once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated); with the child's worktree preparation in between, the reference sometimes sends both too.",
@@ -46,35 +25,25 @@
     "peer calls": "Racy: seen both matching and differing: when its wait there ends, a server's follower reads the thread's reply only if the cancel has not recorded the task's result yet (the reference races the wait with the task's result, `raceFirst(endedHere)`), so either server may skip that one t3_thread_read."
   },
   "claude delegate followup": {
-    "live": "Racy: seen both matching and differing (main CI run 45294158798 differed, its re-run and #202's CI matched): that time the reference sent one more subagent.updated, after the first task's context-transfer.created and before the follow-up task's node.updated, which Rust did not. Probably the reference's provider commit batch timing (#39502), which decides whether a subagent's queued updates commit together or one by one.",
-    "orchestration.subscribeThread (live turn)": "Racy: the reference's live turn sometimes does not settle before the harness stops waiting (the reference goes silent; Rust answers), seen both matching and differing, on main too."
+    "live": "Racy: the provider commit batch (#39502) decides by timing whether the first task's queued subagent updates commit together, and both sides vary: main's CI run 45294158798 saw the reference send one more subagent.updated after the task's context-transfer.created, and one of 8 pinned local rounds saw Rust send one more there. Matched in the other runs.",
+    "orchestration.subscribeThread (live turn)": "Racy: the reference's live turn sometimes does not settle before the harness stops waiting (the reference goes silent; Rust answers), seen both matching and differing, on main too.",
+    "agent mcp": "Racy: in 1 of 8 pinned local rounds the reference's delivery turn did not settle before the harness stopped waiting (as its live turn sometimes does not, see the orchestration.subscribeThread entry), so its answer list lacks the turn's task_status. Matched in the other rounds."
   },
   "claude delegate live": {
-    "live": "#39502 (ProviderCommitBatch) combines queued snapshots: the reference sends the steered delivery's card once with its message, where Rust also sends its pending and completed updates (two more turn-item.updated notification), and its provider-thread.updated comes a few events earlier. The items, the second run and the attachment budget match."
+    "live": "Racy: matched in 4 of 12 pinned local runs. Otherwise the reference steers the delegated result into the parent's running Claude turn (#39528) and queues the follow-up run while that turn still runs, sending the delivery's card once with its message and the queued run before the turn ends, where Rust also sends the card's pending and completed steer updates and creates the follow-up run after the turn ends. Which way it goes depends on whether the result arrives before the turn's last item.",
+    "items": "Racy: in 1 of 10 pinned local rounds Rust steered the delegated result into the parent's running Claude turn, so its notification item came before the turn's assistant message, where the reference queued it as the follow-up run after the turn. Same race as the live entry: which happens depends on whether the result arrives before the turn's last item. Matched in the other rounds."
   },
   "claude in the login shell PATH": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "claude question": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen under load, 2 of 8 pinned local rounds) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
   },
   "claude second turn": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "claude steer": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen under load, 1 of 8 pinned local rounds) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
   },
   "claude title fallback": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "claude turn": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "codex agent mcp": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen under load, 1 of 8 pinned local rounds) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
   },
   "codex attachments": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen under load, 2 of 8 pinned local rounds) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
   },
   "codex delegate": {
     "agent mcp": "Racy: on a blocking delegate_task wait, the reference's waitForTask races its outbox finalizer, so resultContextTransferId can already be populated on one server while still null on the other (seen both matching and differing).",
@@ -83,81 +52,69 @@
   "codex delegate followup": {
     "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after the first task's context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
   },
-  "codex in the login shell PATH": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "codex second turn": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
   "codex thread tools": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated).",
+    "live": "Racy: the reference's pull-request sync reactor reads a newly linked request on its own schedule, so in 1 of 10 pinned local runs its first link's synced and link-updated events landed a tool call earlier than Rust's. Matched in the other runs.",
     "agent mcp": "Racy: since #197 Rust reads a newly linked pull request right after the link commits, apart from the tool call, so the agent's next list_thread_pull_requests can come before that read and show the link without its branches and draft state (seen both matching and differing)."
   },
-  "codex title": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
   "codex title failed": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
-  },
-  "codex turn": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen once in pinned local rounds under heavy machine load) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
   },
   "grok agent mcp": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok approval": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok approval cancelled": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok approval declined": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok approval interrupted": {
     "cli approvals": "Racy: on Stop the reference's cancelPendingRuntimeRequests only resolves the approval's decision to cancel; the permission handler writes the `cancelled` reply on its own fiber, which the process-group kill that follows does not wait for, so the reference's reply reaches the CLI on some runs and not others. Rust writes it before the kill (seen both matching and differing).",
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok auto": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok auto-accept-edits": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok edit approval for session": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok failed turn": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok interrupt": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok model": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok second turn": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok steer": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok stop then resume": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
-  },
-  "grok title": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "grok turn": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a streamed message or tool item fewer times than Rust, which sends each snapshot (extra node.updated, message.updated and turn-item.updated); and Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
   "opencode title": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen under load, 1 of 8 pinned local rounds) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
   },
-  "opencode2 title": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  "antigravity title refused for a broken runtime": {
+    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen once in pinned local rounds under heavy machine load) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
   },
-  "pi title": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
+  "claude approval declined": {
+    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen once in pinned local rounds under heavy machine load) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
+  },
+  "claude attachments": {
+    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen once in pinned local rounds under heavy machine load) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
   }
 }

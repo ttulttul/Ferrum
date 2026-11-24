@@ -398,6 +398,135 @@ async fn commit_handoffs<H: TurnHost>(
     }
 }
 
+/// How long the reference's provider commit batch is busy committing a
+/// batch: snapshots that arrive meanwhile wait and share the next one.
+const SNAPSHOT_WINDOW: Duration = Duration::from_millis(20);
+/// The most snapshots one batch takes (`MAX_EVENTS`).
+const SNAPSHOT_BATCH: usize = 64;
+
+/// A turn's item and plan snapshots as the reference's `ProviderCommitBatch`
+/// commits a provider stream's: an idle worker takes a snapshot at once and
+/// is busy committing it for [`SNAPSHOT_WINDOW`]; snapshots that arrive
+/// meanwhile queue and commit together when it is done, and within such a
+/// batch a snapshot a later one of the same entity replaces is not sent live
+/// ([`crate::control_state::coalesce`]). Anything else the turn reports
+/// waits for the queue, after which the worker is idle again.
+///
+/// What Rust records but sends nothing live (a model or reasoning note, a
+/// prompt's delivery) has no counterpart in the reference's stream, so it
+/// takes no part: it is recorded at once and leaves the worker as it was.
+/// After the turn's terminal nothing batches.
+#[derive(Default)]
+struct Snapshots {
+    queued: Vec<(Event, Option<StreamPosition>)>,
+    /// When the batch being committed is done: the worker is busy till then.
+    flush_at: Option<crate::runtime::Wait>,
+    /// The turn's terminal was seen: snapshots commit one at a time.
+    terminal_seen: bool,
+}
+
+/// Whether a commit sent any live events.
+fn sent_live(record: &crate::ServerEvent) -> bool {
+    record
+        .thread_events
+        .as_ref()
+        .and_then(|events| events.items.as_ref())
+        .is_some_and(|items| !items.is_empty())
+}
+
+impl Snapshots {
+    fn is_snapshot(&self, event: &TurnEvent) -> bool {
+        !self.terminal_seen
+            && matches!(
+                event,
+                TurnEvent::Provider(ProviderEvent::TurnItem { .. } | ProviderEvent::Plan { .. })
+            )
+    }
+
+    /// A snapshot arrived: an idle worker commits it at once and, if it sent
+    /// anything live, is busy for [`SNAPSHOT_WINDOW`]; a busy one queues it.
+    async fn push<H: TurnHost>(
+        &mut self,
+        host: &H,
+        run: &Run,
+        event: Event,
+        position: Option<StreamPosition>,
+    ) {
+        self.queued.push((event, position));
+        if self.flush_at.is_none() {
+            if self.commit(host, run).await {
+                self.flush_at = Some(host.turn_wait(SNAPSHOT_WINDOW));
+            }
+        } else if self.queued.len() >= SNAPSHOT_BATCH {
+            self.commit(host, run).await;
+        }
+    }
+
+    /// The worker finished its batch: it takes what queued meanwhile, and is
+    /// busy again, or is idle.
+    async fn tick<H: TurnHost>(&mut self, host: &H, run: &Run) {
+        self.flush_at = None;
+        if self.commit(host, run).await {
+            self.flush_at = Some(host.turn_wait(SNAPSHOT_WINDOW));
+        }
+    }
+
+    /// Whether `event`, not a snapshot, would send nothing live, so it takes
+    /// no part in the batch. Only asked while the worker is busy.
+    async fn invisible<H: TurnHost>(host: &H, event: &Event) -> bool {
+        host.dry_run(std::slice::from_ref(event))
+            .await
+            .first()
+            .is_some_and(|(_, sent)| *sent == 0)
+    }
+
+    /// Another event of the turn: it waits for the queued snapshots, and the
+    /// worker is idle after them.
+    async fn flush<H: TurnHost>(&mut self, host: &H, run: &Run) {
+        self.flush_at = None;
+        self.commit(host, run).await;
+    }
+
+    /// Commit the queued snapshots in order, each without the live events a
+    /// later one replaces, acknowledging each once it is recorded. Whether
+    /// any of them sent something live.
+    async fn commit<H: TurnHost>(&mut self, host: &H, run: &Run) -> bool {
+        let queued = std::mem::take(&mut self.queued);
+        if queued.is_empty() {
+            return false;
+        }
+        let events: Vec<Event> = queued.iter().map(|(event, _)| event.clone()).collect();
+        let suppress = if events.len() > 1 {
+            let keys: Vec<Vec<String>> = host
+                .dry_run(&events)
+                .await
+                .into_iter()
+                .map(|(keys, _)| keys)
+                .collect();
+            crate::control_state::coalesce(&keys)
+        } else {
+            vec![Vec::new()]
+        };
+        let mut sent = false;
+        for ((event, position), suppress) in queued.into_iter().zip(suppress) {
+            if host.stopping() {
+                return sent;
+            }
+            // Not acknowledged when it could not be recorded: the workspace
+            // offers it again after a reconnect.
+            let Ok(record) = host.commit_suppressing(event, suppress).await else {
+                return sent;
+            };
+            sent |= sent_live(&record);
+            host.turn_recorded(run, position);
+            if let Some(position) = position {
+                host.workspace().ack(position);
+            }
+        }
+        sent
+    }
+}
+
 /// Record `turn`'s events as `run`'s, acknowledging each once it is in the
 /// event log, so a workspace that keeps unacknowledged events redelivers
 /// the rest after a reconnect or a restart.
@@ -420,22 +549,51 @@ async fn record<H: TurnHost>(
     let mut observed_native_thread: Option<String> = pending_handoff
         .as_ref()
         .and_then(|prepared| prepared.native_thread_id.clone());
+    let mut snapshots = Snapshots::default();
     loop {
-        let next = match text.flush_at.as_mut() {
-            None => turn.recv().await,
-            Some(flush) => {
-                let receive = std::pin::pin!(turn.recv());
-                match futures_util::future::select(receive, flush).await {
-                    futures_util::future::Either::Left((next, _)) => next,
-                    futures_util::future::Either::Right(_) => {
-                        text.flush(host, run, Flush::Window).await;
-                        continue;
+        use futures_util::future::{select, Either};
+        enum Woke {
+            Next(Option<Box<TurnItem>>),
+            Text,
+            Snapshots,
+        }
+        let woke = {
+            let receive = std::pin::pin!(turn.recv());
+            match (text.flush_at.as_mut(), snapshots.flush_at.as_mut()) {
+                (None, None) => Woke::Next(receive.await.map(Box::new)),
+                (Some(flush), None) => match select(receive, flush).await {
+                    Either::Left((next, _)) => Woke::Next(next.map(Box::new)),
+                    Either::Right(_) => Woke::Text,
+                },
+                (None, Some(flush)) => match select(receive, flush).await {
+                    Either::Left((next, _)) => Woke::Next(next.map(Box::new)),
+                    Either::Right(_) => Woke::Snapshots,
+                },
+                (Some(text_flush), Some(flush)) => {
+                    match select(receive, select(flush, text_flush)).await {
+                        Either::Left((next, _)) => Woke::Next(next.map(Box::new)),
+                        Either::Right((Either::Left(_), _)) => Woke::Snapshots,
+                        Either::Right((Either::Right(_), _)) => Woke::Text,
                     }
                 }
             }
         };
+        let next = match woke {
+            Woke::Next(next) => next.map(|item| *item),
+            Woke::Snapshots => {
+                snapshots.tick(host, run).await;
+                continue;
+            }
+            Woke::Text => {
+                // Queued snapshots came before the held text.
+                snapshots.flush(host, run).await;
+                text.flush(host, run, Flush::Window).await;
+                continue;
+            }
+        };
         let Some(TurnItem { event, position }) = next else {
             // Events that stop without the turn's end still report what is held.
+            snapshots.flush(host, run).await;
             text.flush(host, run, Flush::Window).await;
             break;
         };
@@ -452,6 +610,45 @@ async fn record<H: TurnHost>(
         let Some(event) = text.take(host, event, position) else {
             continue;
         };
+        let snapshot = snapshots.is_snapshot(&event);
+        // While the worker is busy, an event that sends nothing live takes
+        // no part in the batch: it is recorded at once.
+        let provider_thread = matches!(
+            &event,
+            TurnEvent::Provider(ProviderEvent::ProviderThread { .. })
+        );
+        let accepted_prompt = matches!(
+            &event,
+            TurnEvent::Provider(
+                ProviderEvent::PromptDelivered { .. } | ProviderEvent::ProviderTurn { .. }
+            )
+        );
+        // A prompt's acceptance and its thread's loading record a pending
+        // handoff; then they end the batch.
+        let records_handoff = pending_handoff.is_some() && (accepted_prompt || provider_thread);
+        if !snapshot && !records_handoff && text.held.is_empty() && snapshots.flush_at.is_some() {
+            if let TurnEvent::Provider(provider) = &event {
+                if !matches!(provider, ProviderEvent::TurnTerminal { .. }) {
+                    let candidate = Event::RunProvider {
+                        run_id: run.id,
+                        thread_id: run.thread_id.clone(),
+                        event: provider.clone(),
+                        position,
+                    };
+                    if Snapshots::invisible(host, &candidate).await {
+                        if host.commit(candidate).await.is_ok() {
+                            done(position);
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        // Held text, newer than any queued snapshot, ends their batch; so
+        // does anything else.
+        if !snapshot || !text.held.is_empty() {
+            snapshots.flush(host, run).await;
+        }
         if let TurnEvent::Provider(ProviderEvent::ProviderThread {
             native_thread_id, ..
         }) = &event
@@ -463,12 +660,6 @@ async fn record<H: TurnHost>(
                 prepared.recorded = true;
             }
         }
-        let accepted_prompt = matches!(
-            &event,
-            TurnEvent::Provider(
-                ProviderEvent::PromptDelivered { .. } | ProviderEvent::ProviderTurn { .. }
-            )
-        );
         // Held text is recorded before any later event: an item's end
         // carries its whole text, but its deltas come first, in order.
         match &event {
@@ -482,7 +673,16 @@ async fn record<H: TurnHost>(
             }
             _ => text.flush(host, run, Flush::Before(None)).await,
         }
+        if matches!(
+            &event,
+            TurnEvent::Provider(ProviderEvent::TurnTerminal { .. })
+        ) {
+            snapshots.terminal_seen = true;
+        }
         match recorded(run, event, position) {
+            Recorded::Event(event) if snapshot => {
+                snapshots.push(host, run, *event, position).await;
+            }
             Recorded::Event(event) => {
                 // An event that could not be recorded is not acknowledged,
                 // so the workspace offers it again after a reconnect.
