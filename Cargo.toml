@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Headless Rust orchestration server for T3 Code"
 license = "MIT"
-repository = "https://github.com/ttulttul/t3code-rust"
+repository = "https://github.com/ttulttul/Ferrum"
 
 [features]
 default = ["native"]

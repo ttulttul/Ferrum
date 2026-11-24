@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Runs a T3 Code workspace (files, git, terminals, processes) for a server that reaches it over a WebSocket"
 license = "MIT"
-repository = "https://github.com/ttulttul/t3code-rust"
+repository = "https://github.com/ttulttul/Ferrum"
 publish = false
 
 [[bin]]

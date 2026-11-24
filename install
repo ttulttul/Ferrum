@@ -19,12 +19,18 @@ from urllib.request import urlopen
 
 
 ROOT = Path(__file__).resolve().parent
-STATE_ROOT = Path(
-    os.environ.get(
-        "T3CODE_RUST_SWITCH_STATE",
-        os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")),
-    )
-) / "t3code-rust-switch"
+_STATE_PARENT = Path(
+    os.environ.get("FERRUM_SWITCH_STATE")
+    # T3CODE_RUST_SWITCH_STATE is the name from before the project became Ferrum.
+    or os.environ.get("T3CODE_RUST_SWITCH_STATE")
+    or os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+)
+STATE_ROOT = _STATE_PARENT / "ferrum-switch"
+# A switch saved before the rename lives in the old directory; keep using it so
+# `--original` can still restore the server it recorded.
+_LEGACY_STATE_ROOT = _STATE_PARENT / "t3code-rust-switch"
+if not STATE_ROOT.exists() and _LEGACY_STATE_ROOT.exists():
+    STATE_ROOT = _LEGACY_STATE_ROOT
 STATE_PATH = STATE_ROOT / "state.json"
 ARGV_PATH = STATE_ROOT / "original.argv"
 ENV_PATH = STATE_ROOT / "original.env"
@@ -515,7 +521,7 @@ def mark_tunnel_handoff(base_dir: object) -> Path | None:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_bytes(b"")
     except OSError as error:
-        print(f"t3code-rust install: could not write {marker} ({error}); the stopping server may release its tunnel", file=sys.stderr)
+        print(f"ferrum install: could not write {marker} ({error}); the stopping server may release its tunnel", file=sys.stderr)
         return None
     return marker
 
@@ -909,5 +915,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except SwitchError as error:
-        print(f"t3code-rust install: {error}", file=sys.stderr)
+        print(f"ferrum install: {error}", file=sys.stderr)
         raise SystemExit(1)
