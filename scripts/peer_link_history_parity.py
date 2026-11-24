@@ -4,6 +4,9 @@ linked to them: the bounded snapshot on `GET /api/links/thread/stream` keeps onl
 user turns and hands out a `historyCursor`, and `GET /api/links/thread/history` reads the turns
 before a cursor, twenty at a time, until no more history is left.
 
+A second server of the same kind then links to the first, and its client reads the same
+snapshot and pages through the link (`peerLinks.subscribeThread`, `peerLinks.threadHistoryPage`).
+
 Each server runs on its own fresh home with the same steps. A thread gets 34 user turns, each sent
 once the one before it has settled. No provider CLI is on PATH, so each turn is the user's
 message and the error its failed run records. The answers are compared by row (item id, position
@@ -27,6 +30,8 @@ from websockets.sync.client import connect
 
 import parity_harness
 from parity_harness import encode, http, managed_server, recv_frame
+from peer_link_outgoing_parity import Server
+from peer_link_relay_parity import stream as relay_stream
 from peer_link_routes_parity import dispatch, link, post, set_linked_environments
 
 TURNS = 34
@@ -147,6 +152,27 @@ def run(command, home):
         record["a cursor the store cannot read"] = history(url, token, "not-a-cursor")[::2]
         record["no cursor"] = http(url, "GET", f"/api/links/thread/history?thread={quote(THREAD)}", None,
                                    {"authorization": f"Bearer {token}"})[0]
+
+        # Through a link: a server of the same kind links here, and its client pages the thread
+        # (`peerLinks.subscribeThread`, then `peerLinks.threadHistoryPage`).
+        local_home = home.parent / "local"
+        set_linked_environments(local_home, True)
+        local = Server(stack, command, local_home, secrets.token_urlsafe(32), secrets.token_bytes(32))
+        code = post(url, cookie, "/api/auth/pairing-token", {})["credential"]
+        made = local.rpc("peerLinks.link", dict(url=url, pairingCode=code, access="auto"))
+        assert made["_tag"] == "Success", made
+        target = dict(environmentId=made["value"]["environmentId"], threadId=THREAD)
+        relayed = relay_stream(local, target)["items"][0]
+        record["through a link: snapshot cursor"] = cursor(relayed.get("historyCursor"))
+        record["through a link: snapshot window"] = rows(relayed["projection"]["visibleTurnItems"])
+        next_cursor, number = relayed.get("historyCursor"), 0
+        while next_cursor is not None:
+            number += 1
+            exit = local.rpc("peerLinks.threadHistoryPage", dict(target, cursor=next_cursor))
+            assert exit["_tag"] == "Success", exit
+            record[f"through a link: page {number}"] = page_summary(exit["value"])
+            next_cursor = exit["value"]["nextCursor"]
+            assert number < 10, "paging did not end"
     return record
 
 
