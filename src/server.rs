@@ -30,6 +30,10 @@ pub struct AppState {
     pub control: crate::control_state::ControlState,
     pub(crate) scheduled_database: Arc<Mutex<crate::statev2::scheduled_tasks::Database>>,
     pub(crate) config_started_at: String,
+    /// What `server.getConfig` looked up on the host (editors, remote open
+    /// targets, whether the base directory is in a git work tree), kept as
+    /// the reference keeps it.
+    pub(crate) config_discovery: crate::config_rpc::Discovery,
     /// What the startup's provider runtime recovery did, for the
     /// `server.startup` trace span ([`crate::startup_trace`]).
     pub(crate) startup_recovery: crate::startup_trace::RecoverySummary,
@@ -391,6 +395,7 @@ impl AppState {
             control,
             scheduled_database,
             config_started_at: auth_service::iso(auth_service::now()),
+            config_discovery: Default::default(),
             startup_recovery,
             environment_id: environment_http::identity(&dir)?,
             oauth,

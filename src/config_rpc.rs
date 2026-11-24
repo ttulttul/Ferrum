@@ -1,5 +1,6 @@
 mod discovery;
 use crate::server_config::{keybindings, providers, DEFAULTS};
+pub(crate) use discovery::Discovery;
 
 use crate::{
     auth_service::{iso, now},
@@ -116,8 +117,8 @@ pub(crate) async fn snapshot(
     let (keybindings, issues) =
         keybindings::read(state.documents.as_ref(), &state.paths.keybindings);
     let ((editors, reveal), targets, direct) = tokio::join!(
-        discovery::editors(),
-        discovery::targets(&hostname),
+        state.config_discovery.editors(),
+        state.config_discovery.targets(&hostname),
         discovery::direct(state)
     );
     let environment = crate::environment_http::descriptor(axum::extract::State(state.clone()))
@@ -153,7 +154,11 @@ pub(crate) async fn snapshot(
         config[key] = true.into();
     }
     config["featureFlags"] = crate::feature_flags::server_feature_flags();
-    if !inside_git_work_tree(&state.paths.base_dir) {
+    if !state
+        .config_discovery
+        .in_work_tree(&state.paths.base_dir)
+        .await
+    {
         config["scratchWorkspaceRoot"] = json!(state.paths.base_dir.join("scratch"));
     }
     config["newProjectsRoot"] = json!(state.paths.base_dir.join("projects"));
@@ -165,18 +170,24 @@ pub(crate) async fn snapshot(
 /// reference server offers them only outside one. It asks git, as
 /// `GitVcsDriver.detectRepository` does: a missing git, a non-zero exit (such
 /// as a repository git refuses for its ownership) or any answer but `true`
-/// means the base directory is not in a work tree.
-fn inside_git_work_tree(dir: &Path) -> bool {
-    crate::login_shell::command("git")
+/// means the base directory is not in a work tree. `Err` when git could not be
+/// asked at all (other than not being installed), which is not an answer to
+/// keep.
+fn inside_git_work_tree(dir: &Path) -> Result<bool, ()> {
+    match crate::login_shell::command("git")
         .arg("rev-parse")
         .arg("--is-inside-work-tree")
         .current_dir(dir)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
-        .is_ok_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
-        })
+    {
+        Ok(output) => {
+            Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(()),
+    }
 }
 
 /// The themes directory and each file in it, as last modified: a theme file
