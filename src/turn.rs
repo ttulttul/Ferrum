@@ -55,6 +55,11 @@ pub(crate) trait TurnHost:
     fn stopping(&self) -> bool {
         false
     }
+    /// Attach local file paths to `attachments` for a provider turn, when this
+    /// host stores uploads locally.
+    fn resolve_attachments(&self, attachments: Vec<Value>) -> Vec<Value> {
+        attachments
+    }
 }
 
 /// Start `spec` for `run` and record it until it ends, recording a failure
@@ -62,7 +67,7 @@ pub(crate) trait TurnHost:
 pub(crate) async fn launch<H: TurnHost>(
     host: Arc<H>,
     run: Run,
-    spec: TurnSpec,
+    mut spec: TurnSpec,
     mut cancel: oneshot::Receiver<()>,
 ) {
     // A run stopped before its provider started abandons that start, as the
@@ -82,15 +87,67 @@ pub(crate) async fn launch<H: TurnHost>(
         }
         return;
     }
+    // Prepare and record any retry/pending context handoffs before starting
+    // the provider turn, prepending inline context to the prompt and carrying
+    // missed attachments forward (`ProviderTurnStartService.prepareRetryHandoff`).
+    let mut prepared_handoff = if let Some(provider) = spec.provider.as_ref() {
+        let store = host.store.read().await;
+        store.threads.get(&run.thread_id).and_then(|thread| {
+            crate::context_handoff::prepare_for_turn(
+                thread,
+                &run,
+                &spec.prompt,
+                provider,
+                crate::now(),
+            )
+        })
+    } else {
+        None
+    };
+    if let Some(prepared) = prepared_handoff.as_ref() {
+        for handoff in &prepared.pending {
+            let _ = host
+                .commit(Event::ContextHandoffUpdated {
+                    thread_id: run.thread_id.clone(),
+                    handoff: handoff.clone(),
+                })
+                .await;
+        }
+        if !prepared.inline_context.is_empty() {
+            spec.prompt =
+                crate::context_handoff::with_inline_context(&prepared.inline_context, &spec.prompt);
+        }
+        if !prepared.missed_attachments.is_empty() {
+            if let Some(provider) = spec.provider.as_mut() {
+                let mut combined = host.resolve_attachments(prepared.missed_attachments.clone());
+                combined.append(&mut provider.attachments);
+                provider.attachments = combined;
+            }
+        }
+    }
     let cwd = spec.cwd.clone();
     let result = match host.workspace().start_tracked_turn(spec, cancel).await {
         Ok(turn) => {
             if let Some(stream) = turn.stream() {
                 host.turn_started(&run, &cwd, stream);
             }
-            record(&host, &run, cwd, turn).await
+            record(&host, &run, cwd, turn, prepared_handoff.take()).await
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            if let Some(prepared) = prepared_handoff.take() {
+                if !host.stopping() {
+                    for handoff in prepared.into_unsent(crate::now()) {
+                        let _ = host
+                            .commit(Event::ContextHandoffUpdated {
+                                thread_id: run.thread_id.clone(),
+                                handoff,
+                            })
+                            .await;
+                    }
+                }
+            }
+            Err(error)
+        }
     };
     if let Err(error) = result {
         fail(&*host, &run, error).await;
@@ -100,7 +157,7 @@ pub(crate) async fn launch<H: TurnHost>(
 /// Record a turn started before a restart, picked up again with
 /// [`crate::workspace::RemoteWorkspace::resume_turn`].
 pub(crate) async fn resume<H: TurnHost>(host: Arc<H>, run: Run, cwd: String, turn: TurnItems) {
-    if let Err(error) = record(&host, &run, cwd, turn).await {
+    if let Err(error) = record(&host, &run, cwd, turn, None).await {
         fail(&*host, &run, error).await;
     }
 }
@@ -336,6 +393,7 @@ async fn record<H: TurnHost>(
     run: &Run,
     cwd: String,
     mut turn: TurnItems,
+    mut pending_handoff: Option<crate::context_handoff::PreparedHandoff>,
 ) -> anyhow::Result<()> {
     let host: &H = owner;
     let done = |position: Option<StreamPosition>| {
@@ -346,6 +404,9 @@ async fn record<H: TurnHost>(
     };
     let mut exit = None;
     let mut text = StreamedText::default();
+    let mut observed_native_thread: Option<String> = pending_handoff
+        .as_ref()
+        .and_then(|prepared| prepared.native_thread_id.clone());
     loop {
         let next = match text.flush_at.as_mut() {
             None => turn.recv().await,
@@ -378,6 +439,18 @@ async fn record<H: TurnHost>(
         let Some(event) = text.take(host, event, position) else {
             continue;
         };
+        if let TurnEvent::Provider(ProviderEvent::ProviderThread {
+            native_thread_id, ..
+        }) = &event
+        {
+            observed_native_thread = Some(native_thread_id.clone());
+        }
+        let accepted_prompt = matches!(
+            &event,
+            TurnEvent::Provider(
+                ProviderEvent::PromptDelivered { .. } | ProviderEvent::ProviderTurn { .. }
+            )
+        );
         // Held text is recorded before any later event: an item's end
         // carries its whole text, but its deltas come first, in order.
         match &event {
@@ -397,6 +470,20 @@ async fn record<H: TurnHost>(
                 // so the workspace offers it again after a reconnect.
                 if host.commit(*event).await.is_ok() {
                     done(position);
+                    if accepted_prompt {
+                        if let Some(prepared) = pending_handoff.take() {
+                            for handoff in prepared
+                                .into_delivered(observed_native_thread.as_deref(), crate::now())
+                            {
+                                let _ = host
+                                    .commit(Event::ContextHandoffUpdated {
+                                        thread_id: run.thread_id.clone(),
+                                        handoff,
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
                 }
             }
             Recorded::Notice(notice) => {
@@ -407,6 +494,18 @@ async fn record<H: TurnHost>(
                 host.cancellations().lock().await.remove(&run.id);
                 exit = Some((status, position));
                 break;
+            }
+        }
+    }
+    if let Some(prepared) = pending_handoff.take() {
+        if !host.stopping() {
+            for handoff in prepared.into_unsent(crate::now()) {
+                let _ = host
+                    .commit(Event::ContextHandoffUpdated {
+                        thread_id: run.thread_id.clone(),
+                        handoff,
+                    })
+                    .await;
             }
         }
     }

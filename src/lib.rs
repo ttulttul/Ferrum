@@ -23,6 +23,7 @@ mod codex_models;
 pub mod config;
 #[cfg(feature = "native")]
 mod config_rpc;
+mod context_handoff;
 mod contracts;
 pub mod control;
 pub mod control_state;

@@ -834,6 +834,7 @@ mod tests {
             tags: vec![],
             checkpoints: vec![],
             link_requests: Vec::new(),
+            context_handoffs: Vec::new(),
             provider: Default::default(),
             stored: None,
         }

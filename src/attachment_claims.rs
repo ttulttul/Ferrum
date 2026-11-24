@@ -153,16 +153,8 @@ pub(crate) fn run_message(store: &crate::store::Store, run: &crate::Run) -> Opti
         .cloned()
 }
 
-/// The attachments of `run`'s message, each with the `path` of its saved
-/// file (`resolveAttachmentPath`), as a provider turn sends them.
-pub(crate) fn turn_attachments(
-    dir: &Path,
-    store: &crate::store::Store,
-    run: &crate::Run,
-) -> Vec<Value> {
-    let attachments = run_message(store, run)
-        .and_then(|message| message["attachments"].as_array().cloned())
-        .unwrap_or_default();
+/// Attach the saved file `path` to each attachment (`resolveAttachmentPath`).
+pub(crate) fn with_paths(dir: &Path, attachments: Vec<Value>) -> Vec<Value> {
     attachments
         .into_iter()
         .map(|mut attachment| {
@@ -173,6 +165,19 @@ pub(crate) fn turn_attachments(
             attachment
         })
         .collect()
+}
+
+/// The attachments of `run`'s message, each with the `path` of its saved
+/// file (`resolveAttachmentPath`), as a provider turn sends them.
+pub(crate) fn turn_attachments(
+    dir: &Path,
+    store: &crate::store::Store,
+    run: &crate::Run,
+) -> Vec<Value> {
+    let attachments = run_message(store, run)
+        .and_then(|message| message["attachments"].as_array().cloned())
+        .unwrap_or_default();
+    with_paths(dir, attachments)
 }
 
 /// `releaseClaimedAttachments`: removes copies a send did not keep.

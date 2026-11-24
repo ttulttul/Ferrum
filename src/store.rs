@@ -198,6 +198,10 @@ pub struct Thread {
     /// holds every field but its ordinal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_requests: Vec<serde_json::Value>,
+    /// Context handoffs prepared for this thread (`OrchestrationV2ContextHandoff`),
+    /// in creation order, holding full `summaryText`, `history`, and `delivery`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_handoffs: Vec<serde_json::Value>,
     /// What provider turns left behind; rebuilt from the log.
     #[serde(skip)]
     pub(crate) provider: Box<crate::provider_state::ProviderState>,
@@ -226,6 +230,12 @@ pub enum Event {
     LinkRequestRecorded {
         thread_id: String,
         card: serde_json::Value,
+    },
+    /// A context handoff was created or its delivery state changed
+    /// (`context-handoff.updated`).
+    ContextHandoffUpdated {
+        thread_id: String,
+        handoff: serde_json::Value,
     },
     MessageAdded {
         thread_id: String,
@@ -366,6 +376,7 @@ impl Event {
             | Event::CheckpointCaptured { thread_id, .. }
             | Event::ThreadPatched { thread_id, .. }
             | Event::LinkRequestRecorded { thread_id, .. }
+            | Event::ContextHandoffUpdated { thread_id, .. }
             | Event::ProviderRuntimeReconciled { thread_id, .. }
             | Event::ProviderSessionDetached { thread_id, .. } => Some(thread_id),
             Event::RunStarted(run) | Event::RunUpdated(run) | Event::RunQueued { run, .. } => {
@@ -504,6 +515,18 @@ impl Store {
                     match t.link_requests.iter_mut().find(|c| c["id"] == card["id"]) {
                         Some(existing) => *existing = card.clone(),
                         None => t.link_requests.push(card.clone()),
+                    }
+                }
+            }
+            Event::ContextHandoffUpdated { thread_id, handoff } => {
+                if let Some(t) = self.threads.get_mut(thread_id) {
+                    match t
+                        .context_handoffs
+                        .iter_mut()
+                        .find(|existing| existing["id"] == handoff["id"])
+                    {
+                        Some(existing) => *existing = handoff.clone(),
+                        None => t.context_handoffs.push(handoff.clone()),
                     }
                 }
             }
@@ -931,6 +954,7 @@ mod tests {
                 tags: vec![],
                 checkpoints: vec![],
                 link_requests: Vec::new(),
+                context_handoffs: Vec::new(),
                 provider: Box::default(),
                 stored: None,
             },

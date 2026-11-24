@@ -669,6 +669,9 @@ impl crate::turn::TurnHost for AppState {
     fn stopping(&self) -> bool {
         self.stopping.load(std::sync::atomic::Ordering::SeqCst)
     }
+    fn resolve_attachments(&self, attachments: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        crate::attachment_claims::with_paths(&self.paths.attachments, attachments)
+    }
     fn turn_stopped(
         self: Arc<Self>,
         run: &Run,

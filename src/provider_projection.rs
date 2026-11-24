@@ -274,10 +274,22 @@ impl Thread {
         let record = self.provider.runs.get(&run.id)?;
         let run_id = run.wire_id();
         let attempt = join("run-attempt:run", &[&run_id]) + ":attempt:1";
-        let native_turn = record
-            .native_turn_id
-            .clone()
-            .unwrap_or_else(|| format!("turn:{attempt}"));
+        // A run that failed before the provider started a turn uses
+        // `failed:<attempt>` as its provider turn id (`RunExecutionService`).
+        let failed_before_start = !record.turn_started
+            && record.native_turn_id.is_none()
+            && self
+                .provider
+                .terminals
+                .get(&run.id)
+                .is_some_and(|terminal| terminal.status == TurnStatus::Failed);
+        let native_turn = record.native_turn_id.clone().unwrap_or_else(|| {
+            if failed_before_start {
+                format!("failed:{attempt}")
+            } else {
+                format!("turn:{attempt}")
+            }
+        });
         Some(RunIds {
             root_node: join("node:run", &[&run_id]) + ":root",
             provider_thread: self.provider_thread_id().unwrap_or_default(),
@@ -1449,6 +1461,7 @@ mod tests {
             tags: vec![],
             checkpoints: vec![],
             link_requests: Vec::new(),
+            context_handoffs: Vec::new(),
             provider: Box::default(),
             stored: None,
         }
