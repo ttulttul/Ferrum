@@ -580,6 +580,20 @@ impl crate::orchestration::CommandHost for AppState {
                                 &run,
                             )
                         };
+                        // Who sent the run's message, when a person did not type
+                        // it (`withMessageSenderNote`), ahead of its text.
+                        let message = {
+                            let store = self.store.read().await;
+                            crate::attachment_claims::run_message(&store, &run)
+                        };
+                        if let Some(message) =
+                            message.filter(|message| message["text"] == spec.prompt.as_str())
+                        {
+                            spec.prompt = crate::thread_projection::with_message_sender_note(
+                                &message,
+                                &spec.prompt,
+                            );
+                        }
                         spec.provider = Some(provider);
                         spec.env = env;
                     }

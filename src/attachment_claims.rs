@@ -142,6 +142,17 @@ pub(crate) struct Claimed {
     pub paths: Vec<PathBuf>,
 }
 
+/// `run`'s message as the thread's projection shows it.
+pub(crate) fn run_message(store: &crate::store::Store, run: &crate::Run) -> Option<Value> {
+    let message_id = run.user_message_id.as_deref()?;
+    let thread = store.threads.get(&run.thread_id)?;
+    thread.projection()["messages"]
+        .as_array()?
+        .iter()
+        .find(|message| message["id"] == message_id)
+        .cloned()
+}
+
 /// The attachments of `run`'s message, each with the `path` of its saved
 /// file (`resolveAttachmentPath`), as a provider turn sends them.
 pub(crate) fn turn_attachments(
@@ -149,18 +160,7 @@ pub(crate) fn turn_attachments(
     store: &crate::store::Store,
     run: &crate::Run,
 ) -> Vec<Value> {
-    let Some(message_id) = run.user_message_id.as_deref() else {
-        return Vec::new();
-    };
-    let Some(thread) = store.threads.get(&run.thread_id) else {
-        return Vec::new();
-    };
-    let projection = thread.projection();
-    let attachments = projection["messages"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|message| message["id"] == message_id)
+    let attachments = run_message(store, run)
         .and_then(|message| message["attachments"].as_array().cloned())
         .unwrap_or_default();
     attachments
