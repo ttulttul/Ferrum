@@ -15,7 +15,7 @@ from threading import Thread
 from urllib.parse import parse_qs, urlsplit
 
 from websockets.sync.client import connect
-from parity_harness import encode, managed_server
+from parity_harness import encode, managed_server, recv_frame
 from git_workflow_parity import git
 
 CLI = """#!/usr/bin/env python3
@@ -73,7 +73,7 @@ def observe(server, root, api):
         def call(host, label, op, payload, success):
             request_id = str(len(results))
             socket.send(encode(dict(_tag="Request", id=request_id, tag=op if "." in op else "git."+op, payload=payload, headers=[])).decode())
-            frame = socket.recv(timeout=20)
+            frame = recv_frame(socket, timeout=20)
             exit = json.loads(frame)["exit"]
             if op=="vcs.refreshStatus":
                 status=exit.get("value", {})

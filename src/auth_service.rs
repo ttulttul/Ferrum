@@ -524,6 +524,15 @@ impl AuthService {
             .map(|v| v.0)
     }
     pub fn pair(&self, session: &Session, input: &Value) -> Result<Value, &'static str> {
+        self.pair_for(session, input, 300_000)
+    }
+    /// [`Self::pair`], with the credential lasting `ttl_ms`.
+    pub(crate) fn pair_for(
+        &self,
+        session: &Session,
+        input: &Value,
+        ttl_ms: i64,
+    ) -> Result<Value, &'static str> {
         let access = input
             .get("access")
             .map(|v| v.as_str().ok_or("invalid_scope"))
@@ -581,7 +590,7 @@ impl AuthService {
             })
             .transpose()?;
         let id = crate::platform::uuid_v4().to_string();
-        let expires = now() + 300_000;
+        let expires = now() + ttl_ms;
         let alphabet = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
         let mut code: String = (0..12)
             .map(|_| alphabet[crate::platform::rng().gen_range(0..alphabet.len())] as char)
@@ -606,7 +615,7 @@ impl AuthService {
                 key(&code),
                 Grant {
                     id,
-                    created: expires - 300_000,
+                    created: expires - ttl_ms,
                     label: label.map(str::to_owned),
                     requested_client: None,
                     expires,

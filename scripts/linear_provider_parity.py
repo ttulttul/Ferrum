@@ -205,7 +205,7 @@ def main():
             data=harness.encode({"_tag":"Request","tag":method,"id":str(i),"headers":[],"payload":payload}).decode()
             for ws in sockets:
                 ws.send(data)
-            results=[ws.recv(timeout=20) for ws in sockets]
+            results=[harness.recv_frame(ws, timeout=20) for ws in sockets]
             ok=results[0]==results[1] and json.loads(results[0])["exit"]["_tag"]==("Success" if success else "Failure")
             print(("PASS" if ok else "FAIL"),method,i)
             if not ok:

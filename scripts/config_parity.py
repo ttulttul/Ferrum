@@ -11,7 +11,7 @@ from tempfile import TemporaryDirectory
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, managed_server
+from parity_harness import encode, managed_server, recv_frame
 from settings_syntax_parity import malformed_settings
 from managed_policy_parity import run_policy
 from settings_secrets_parity import run_secrets
@@ -34,7 +34,7 @@ def socket(stack, base, cookie, references=False):
 
 def frame(ws, label, method, payload):
     ws.send(encode(dict(_tag="Request", id=label, tag=method, payload=payload, headers=[])).decode())
-    return ws.recv(timeout=15).encode()
+    return recv_frame(ws, timeout=15).encode()
 
 
 def identical(label, originals):

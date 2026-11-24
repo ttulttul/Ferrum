@@ -25,7 +25,7 @@ import tempfile
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, http, managed_server, volatile_masked
+from parity_harness import encode, http, managed_server, volatile_masked, recv_frame
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "project:initial-sync"
@@ -44,7 +44,7 @@ def rpc(url, cookie, tag, payload):
     with socket(url, cookie) as ws:
         ws.send(encode({"_tag": "Request", "id": "seed", "tag": tag, "payload": payload, "headers": []}).decode())
         while True:
-            frame = json.loads(ws.recv(timeout=20))
+            frame = json.loads(recv_frame(ws, timeout=20))
             if frame.get("_tag") == "Exit":
                 if frame["exit"]["_tag"] != "Success":
                     raise RuntimeError(f"{tag} failed: {frame}")
@@ -102,7 +102,7 @@ def protocol_frames(url, cookie):
         with socket(url, cookie) as ws:
             ws.send(encode(request).decode())
             try:
-                replies.append(ws.recv(timeout=10))
+                replies.append(recv_frame(ws, timeout=10))
             except TimeoutError:
                 replies.append(NO_REPLY)
     # A stream interrupted by its numeric id ends with an interrupt exit.
@@ -110,12 +110,12 @@ def protocol_frames(url, cookie):
         try:
             ws.send(encode({"_tag": "Request", "id": 4, "tag": "subscribeServerLifecycle", "payload": {},
                             "headers": []}).decode())
-            first = json.loads(ws.recv(timeout=10))
+            first = json.loads(recv_frame(ws, timeout=10))
             replies.append(f"first frame for id 4: {first['_tag']} {first.get('requestId')!r}")
             ws.send(encode({"_tag": "Ack", "requestId": 4}).decode())
             ws.send(encode({"_tag": "Interrupt", "requestId": 4}).decode())
             while True:
-                frame = json.loads(ws.recv(timeout=10))
+                frame = json.loads(recv_frame(ws, timeout=10))
                 if frame["_tag"] == "Exit":
                     # The reference names its runtime's interrupting fiber; the number is not part of the contract.
                     for reason in frame["exit"].get("cause", []):
@@ -131,7 +131,7 @@ def protocol_frames(url, cookie):
         parts, pending = 0, ""
         while True:
             try:
-                text = ws.recv(timeout=10)
+                text = recv_frame(ws, timeout=10)
             except TimeoutError:
                 replies.append(NO_REPLY)
                 break

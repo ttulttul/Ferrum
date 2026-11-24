@@ -33,7 +33,7 @@ import time
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, free_port, ready, run_concurrently, session_cookie, server_env
+from parity_harness import encode, free_port, ready, run_concurrently, session_cookie, server_env, recv_frame
 
 FAKE = Path(__file__).resolve().parent / "fake_cloudflared.py"
 # Shaped like a connector token, but never valid anywhere.
@@ -112,7 +112,7 @@ def rpc(url, cookie, tag, payload=None):
     with connect(url.replace("http", "ws", 1) + "/ws?orchestrationProtocol=2",
                  additional_headers={"Cookie": cookie}, proxy=None, compression=None) as socket:
         socket.send(encode({"_tag": "Request", "id": "1", "tag": tag, "payload": payload or {}, "headers": []}).decode())
-        return json.loads(socket.recv(timeout=20))
+        return json.loads(recv_frame(socket, timeout=20))
 
 
 def read_jsonl(path):

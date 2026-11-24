@@ -8,7 +8,7 @@ import shlex
 from tempfile import TemporaryDirectory
 
 from websockets.sync.client import connect
-from parity_harness import encode, http, managed_server
+from parity_harness import encode, http, managed_server, recv_frame
 
 
 def main():
@@ -108,7 +108,7 @@ def main():
                     frame = encode(dict(_tag="Request", id=str(count), tag=tag, payload=payload, headers=[])).decode()
                     for ws in sockets:
                         ws.send(frame)
-                    reference, rust = [ws.recv(timeout=10) for ws in sockets]
+                    reference, rust = [recv_frame(ws, timeout=10) for ws in sockets]
                     if reference != rust:
                         raise AssertionError(f"Phase {phase+1} {tag} {payload}\n TS {reference}\n RS {rust}")
                     count += 1

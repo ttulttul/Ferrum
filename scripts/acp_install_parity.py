@@ -41,7 +41,7 @@ from urllib.parse import unquote, urlsplit
 from websockets.sync.client import connect
 
 import parity_harness
-from parity_harness import encode, managed_server, path_without
+from parity_harness import encode, managed_server, path_without, recv_frame
 
 TARGET = {("Linux", "x86_64"): "linux-x86_64", ("Linux", "aarch64"): "linux-aarch64"}.get(
     (platform.system(), platform.machine()))
@@ -138,7 +138,7 @@ def call(url, cookie, tag, payload):
                  additional_headers={"Cookie": cookie}, proxy=None, compression=None) as socket:
         socket.send(encode({"_tag": "Request", "id": "acp", "tag": tag, "payload": payload, "headers": []}).decode())
         while True:
-            frame = json.loads(socket.recv(timeout=300))
+            frame = json.loads(recv_frame(socket, timeout=300))
             if frame.get("_tag") == "Ping":
                 socket.send(encode({"_tag": "Pong"}).decode())
             elif frame.get("requestId") == "acp" and "exit" in frame:

@@ -773,6 +773,10 @@ fn resource_matches(value: Option<&str>, issuer: &str) -> bool {
         })
     })
 }
+/// The origin a request was addressed to, which MCP tokens are issued for.
+pub(crate) fn request_origin(headers: &HeaderMap) -> String {
+    origin(headers)
+}
 fn origin(headers: &HeaderMap) -> String {
     let host = headers
         .get("host")

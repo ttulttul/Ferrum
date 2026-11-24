@@ -26,7 +26,7 @@ from websockets.sync.client import connect
 
 from parity_gaps import Gaps
 import parity_harness
-from parity_harness import encode, free_port, http, managed_server
+from parity_harness import encode, free_port, http, managed_server, recv_frame
 
 THIRTY_DAYS_MS = 30 * 86_400_000
 _ids = itertools.count()
@@ -57,7 +57,7 @@ class Server:
         request = f"peer-{next(_ids)}"
         self.socket.send(encode(dict(_tag="Request", id=request, tag=tag, payload=payload, headers=[])).decode())
         while True:
-            frame = json.loads(self.socket.recv(timeout=timeout))
+            frame = json.loads(recv_frame(self.socket, timeout=timeout))
             if frame.get("_tag") == "Ping":
                 self.socket.send(encode({"_tag": "Pong"}).decode())
                 continue

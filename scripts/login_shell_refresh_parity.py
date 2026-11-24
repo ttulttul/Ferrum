@@ -28,7 +28,7 @@ from tempfile import TemporaryDirectory
 import time
 
 from websockets.sync.client import connect
-from parity_harness import encode, managed_server
+from parity_harness import encode, managed_server, recv_frame
 from git_workflow_parity import git
 from source_control_hosts_parity import CLI as GLAB
 
@@ -51,7 +51,7 @@ class Session:
         self.calls += 1
         self.socket.send(encode(dict(_tag="Request", id=str(self.calls), tag=tag, payload=payload,
                                      headers=[])).decode())
-        return json.loads(self.socket.recv(timeout=30))["exit"]
+        return json.loads(recv_frame(self.socket, timeout=30))["exit"]
 
     def jj(self):
         """Discovery's Jujutsu row, with this server's home masked."""

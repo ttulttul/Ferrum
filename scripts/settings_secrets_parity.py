@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, http, managed_server
+from parity_harness import encode, http, managed_server, recv_frame
 from settings_mutation_parity import comparator, paired
 
 
@@ -91,7 +91,7 @@ Host unresolved
             request = encode(dict(_tag="Request", id=str(index), tag=method, payload=value, headers=[])).decode()
             for socket in sockets:
                 socket.send(request)
-            left, right = [socket.recv(timeout=15) for socket in sockets]
+            left, right = [recv_frame(socket, timeout=15) for socket in sockets]
             if left != right:
                 at = next((i for i, (a, b) in enumerate(zip(left, right)) if a != b), min(len(left), len(right)))
                 raise AssertionError(f"{label}: byte mismatch at {at}\noriginal: {left[at:at+240]}\nrust: {right[at:at+240]}")
@@ -261,7 +261,7 @@ Host unresolved
                     path.mkdir()
                     ws.send(encode(dict(_tag="Request", id=slot, tag="server.updateSettings",
                                         payload={"patch": patch_input}, headers=[])).decode())
-                    frame = ws.recv(timeout=15)
+                    frame = recv_frame(ws, timeout=15)
                     result = json.loads(frame)["exit"]
                     assert result["cause"][0]["error"]["operation"] == "read-secret"
                     records.append(frame)

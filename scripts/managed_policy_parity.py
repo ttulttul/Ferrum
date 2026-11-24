@@ -14,7 +14,7 @@ import time
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, free_port, http, managed_server, mask_port, server_env
+from parity_harness import encode, free_port, http, managed_server, mask_port, server_env, recv_frame
 
 def exercise(prefix, root, policy_path, seed, signing):
     with ExitStack() as stack:
@@ -34,7 +34,7 @@ def exercise(prefix, root, policy_path, seed, signing):
         observations={}
         def rpc(name,tag,body):
             ws.send(encode({"_tag":"Request","id":name,"tag":tag,"payload":body,"headers":[]}).decode())
-            wire=ws.recv(timeout=12)
+            wire=recv_frame(ws, timeout=12)
             observations[name]=wire
             return json.loads(wire)["exit"]
         def post(name,path,body):

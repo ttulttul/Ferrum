@@ -27,7 +27,7 @@ from urllib.parse import unquote, urlsplit
 from websockets.sync.client import connect
 
 import parity_harness
-from parity_harness import encode, http, isolated_git_env, managed_server
+from parity_harness import encode, http, isolated_git_env, managed_server, recv_frame
 
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16"/></svg>\n'
 FAKE_SSH = """#!/usr/bin/env python3
@@ -120,7 +120,7 @@ class Server:
         request = f"favicon-{self.sequence}"
         self.socket.send(encode(dict(_tag="Request", id=request, tag=tag, payload=payload, headers=[])).decode())
         while True:
-            frame = json.loads(self.socket.recv(timeout=120))
+            frame = json.loads(recv_frame(self.socket, timeout=120))
             if frame.get("_tag") == "Ping":
                 self.socket.send(encode({"_tag": "Pong"}).decode())
             elif frame.get("requestId") == request and "exit" in frame:

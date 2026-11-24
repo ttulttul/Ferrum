@@ -37,7 +37,7 @@ from urllib.parse import urlsplit
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, http, isolated_git_env, managed_server
+from parity_harness import encode, http, isolated_git_env, managed_server, recv_frame
 
 # Logs the host git asks for, waits as scripted for the repository, then runs
 # git's remote command here. It gives up if git (its parent) goes away.
@@ -131,7 +131,7 @@ class Server:
     def follow(self, watcher):
         try:
             while True:
-                frame = json.loads(watcher.recv())
+                frame = json.loads(recv_frame(watcher, timeout=120))
                 if frame.get("_tag") == "Ping":
                     watcher.send(encode({"_tag": "Pong"}).decode())
                 elif frame.get("_tag") == "Chunk":
@@ -148,7 +148,7 @@ class Server:
             request = f"clone-{self.sequence}"
             self.socket.send(encode(dict(_tag="Request", id=request, tag=tag, payload=payload, headers=[])).decode())
             while True:
-                frame = json.loads(self.socket.recv(timeout=120))
+                frame = json.loads(recv_frame(self.socket, timeout=120))
                 if frame.get("_tag") == "Ping":
                     self.socket.send(encode({"_tag": "Pong"}).decode())
                     continue

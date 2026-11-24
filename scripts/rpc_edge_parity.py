@@ -25,7 +25,7 @@ import threading
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, managed_server
+from parity_harness import encode, managed_server, recv_frame
 
 # A fixture ACP Registry index: an agent with a sha256-pinned Linux binary, one installed with
 # npx, one with uvx, one with only a macOS binary, one whose description mentions the query,
@@ -99,7 +99,7 @@ def call(base, cookie, tag, payload):
     with connect(base.replace("http", "ws", 1) + "/ws?orchestrationProtocol=2",
                  additional_headers={"Cookie": cookie}, proxy=None, compression=None) as socket:
         socket.send(encode({"_tag": "Request", "id": "edge", "tag": tag, "payload": payload, "headers": []}).decode())
-        return socket.recv(timeout=60)
+        return recv_frame(socket, timeout=60)
 
 
 def without_transport_detail(frame):

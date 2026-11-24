@@ -20,7 +20,7 @@ from tempfile import TemporaryDirectory
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, http, managed_server
+from parity_harness import encode, http, managed_server, recv_frame
 from peer_forwarding_parity import mcp_token
 
 # Fields of a listed session that only say who is looking: the server's own
@@ -81,7 +81,7 @@ def initialize_status(url, token):
 
 def next_change(socket):
     while True:
-        frame = json.loads(socket.recv(timeout=10))
+        frame = json.loads(recv_frame(socket, timeout=10))
         if frame.get("_tag") == "Chunk":
             socket.send(encode({"_tag": "Ack", "requestId": "access"}).decode())
             return frame["values"][0]

@@ -133,7 +133,7 @@ def exercise(stack, url, owner_cookie, relay_key):
         return sock
 
     def read_change(sock):
-        wire=sock.recv(timeout=5)
+        wire=harness.recv_frame(sock, timeout=5)
         frame=json.loads(wire)
         assert frame["_tag"]=="Chunk" and len(frame["values"])==1,wire
         sock.send(harness.encode({"_tag":"Ack","requestId":"access"}).decode())
@@ -279,7 +279,7 @@ def exercise(stack, url, owner_cookie, relay_key):
     ws_query = urlencode({"orchestrationProtocol":"2","wsTicket":rpc_ticket,"dpop":device_proof("GET","/ws",rpc_ticket)})
     with connect(url.replace("http:","ws:")+"/ws?"+ws_query, compression=None, proxy=None) as sock:
         sock.send(harness.encode({"_tag":"Request","id":"bound","tag":"server.probe","payload":{},"headers":[]}).decode())
-        observations["bound DPoP RPC probe"] = sock.recv(timeout=5)
+        observations["bound DPoP RPC probe"] = harness.recv_frame(sock, timeout=5)
     record("refuse replay of authenticated HTTP proof",protected("POST",path,proof_header))
     record("Connect session cannot renew",exchange(access,access_type,device_proof("POST","/oauth/token")))
     with access_subscription() as sock:
@@ -354,7 +354,7 @@ def exercise(stack, url, owner_cookie, relay_key):
     for name, payload in [("server.probe", {}),("subscribeAuthAccess",{}), ("terminal.write", {
         "threadId": "test", "terminalId": "default", "data": "unused"})]:
         sock.send(harness.encode({"_tag":"Request","id":name,"tag":name,"payload":payload,"headers":[]}).decode())
-        observations[name] = sock.recv(timeout=5)
+        observations[name] = harness.recv_frame(sock, timeout=5)
     record("revoke other clients", post("/api/auth/clients/revoke-others", {}))
     record("revoked session", post("/api/auth/websocket-ticket/rpc", None, reader))
     record("revoked media ticket", harness.http(url, "GET",

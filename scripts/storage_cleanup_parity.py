@@ -16,7 +16,7 @@ from tempfile import TemporaryDirectory
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, isolated_git_env, managed_server, server_env
+from parity_harness import encode, isolated_git_env, managed_server, server_env, recv_frame
 
 TIME = "2026-01-01T00:00:00.000Z"
 
@@ -88,7 +88,7 @@ def exercise(command, home):
             ws.send(encode({"_tag": "Request", "id": i, "tag": "server.runStorageCleanup", "payload": {}, "headers": []}).decode())
 
         def response():
-            reply = json.loads(ws.recv(timeout=30))["exit"]
+            reply = json.loads(recv_frame(ws, timeout=30))["exit"]
             assert reply["_tag"] == "Success", "storage cleanup RPC failed"
             report = reply["value"]
             assert report.pop("startedAt") <= report.pop("finishedAt")
@@ -100,7 +100,7 @@ def exercise(command, home):
             nonlocal counter
             counter += 1
             ws.send(encode({"_tag": "Request", "id": counter, "tag": tag, "payload": payload, "headers": []}).decode())
-            frame = json.loads(ws.recv(timeout=30))
+            frame = json.loads(recv_frame(ws, timeout=30))
             exit = frame["exit"]
             assert exit["_tag"] == "Success", f"{tag} failed: {exit}"
             return exit["value"]

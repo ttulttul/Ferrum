@@ -10,7 +10,7 @@ import sqlite3
 from tempfile import TemporaryDirectory
 
 from websockets.sync.client import connect
-from parity_harness import encode, managed_server
+from parity_harness import encode, managed_server, recv_frame
 
 
 def run_mutations(compare):
@@ -78,7 +78,7 @@ def comparator(sockets):
         seq+=1
         for socket in sockets:
             socket.send(frame)
-        packets=[socket.recv(timeout=15) for socket in sockets]
+        packets=[recv_frame(socket, timeout=15) for socket in sockets]
         if packets[0]!=packets[1]:
             left,right=packets
             pos=next((i for i,(a,b) in enumerate(zip(left,right)) if a!=b),min(len(left),len(right)))

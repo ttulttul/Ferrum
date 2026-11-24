@@ -399,6 +399,25 @@ _VOLATILE = [
 ]
 
 
+def recv_frame(ws, timeout, keep_alives=False):
+    """The next RPC frame on `ws` that is not a keep-alive. A server's `Ping` is answered with a
+    `Pong`, and both are dropped: when one lands mid-exchange is timing, not part of the answer.
+    With `keep_alives`, for a check of the heartbeat itself, the next frame is returned as is."""
+    deadline = time.monotonic() + timeout
+    while True:
+        raw = ws.recv(timeout=max(0.001, deadline - time.monotonic()))
+        if keep_alives:
+            return raw
+        try:
+            tag = json.loads(raw).get("_tag")
+        except (ValueError, AttributeError):
+            return raw
+        if tag == "Ping":
+            ws.send(encode({"_tag": "Pong"}).decode())
+        elif tag != "Pong":
+            return raw
+
+
 def volatile_masked(value):
     """`value` (text, bytes or anything repr-able as JSON text) with per-process values masked."""
     if isinstance(value, bytes):
@@ -416,13 +435,15 @@ def check(fixture, servers, sockets):
             setup = encode(fixture["setupFrame"]).decode()
             for ws in sockets:
                 ws.send(setup)
-                reply = json.loads(ws.recv(timeout=10))
+                reply = json.loads(recv_frame(ws, timeout=10))
                 if reply.get("exit", {}).get("_tag") != "Success":
                     raise RuntimeError(f"{fixture['name']} setup failed: {reply!r}")
         frame = encode(fixture["frame"]).decode()
         for ws in sockets:
             ws.send(frame)
-        values = [volatile_masked(ws.recv(timeout=10)) for ws in sockets]
+        # A heartbeat fixture checks the keep-alive answer itself.
+        heartbeat = fixture["frame"].get("_tag") in ("Ping", "Pong")
+        values = [volatile_masked(recv_frame(ws, timeout=10, keep_alives=heartbeat)) for ws in sockets]
         return values[0] == values[1], [repr(v)[:1600] for v in values]
     responses = []
     for url, cookie in servers:

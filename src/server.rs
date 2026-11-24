@@ -773,6 +773,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/hooks/:hook_id/:token", any(webhook_handler))
         .merge(asset_http::routes())
         .merge(mcp_oauth::routes::<AppState>())
+        // A linked environment's own MCP session, not an environment session, signs in here.
+        .merge(crate::peer_link_http::routes())
         .merge(access_http::routes())
         .merge(host_rpc::routes())
         .route(
