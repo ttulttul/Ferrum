@@ -539,28 +539,202 @@ pub(crate) fn bounded_projection(projection: &Value, seq: u64) -> (Value, Option
     (bounded, cursor, has_more)
 }
 
-/// The rows a bounded snapshot reads (`readProjection` with `userTurnLimit`): from the
-/// `max_user_turns + 2`th newest user turn on, or the `MAX_RAW_TURNS + 2`th newest turn start when
-/// there are fewer user turns, renumbered from 0. The window then selects within them, so its
-/// cursor's position counts from there.
-fn snapshot_rows(rows: &[Value]) -> Vec<Value> {
+/// `THREAD_HISTORY_SNAPSHOT_ROW_LIMIT`, the snapshot read's row limit.
+const SNAPSHOT_ROW_LIMIT: usize = 75 + 2;
+/// `THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT`: the row limit once the newest user turn fits whole.
+const TURN_SNAPSHOT_ROW_LIMIT: usize = 500 + 2;
+
+fn active(value: &Value, statuses: &[&str]) -> bool {
+    value["status"]
+        .as_str()
+        .is_some_and(|s| statuses.contains(&s))
+}
+
+/// The projection a bounded snapshot reads (`getThreadSnapshotWindow` with `userTurnLimit`):
+///
+/// - rows from the `max_user_turns + 2`th newest user turn on (or the `MAX_RAW_TURNS + 2`th
+///   newest turn start when there are fewer user turns), and of those the newest 502 when the
+///   newest user turn has 1 to 500 rows, else the newest 77;
+/// - the interrupt requests of the results among them, and the thread's newest item;
+/// - those rows renumbered from 0 as its timeline, so the window's cursor counts from there, and
+///   as its turn items with the pending request cards;
+/// - the runs, attempts, nodes, subagents and provider sessions of those rows, and the live ones.
+fn snapshot_read(projection: &Value) -> Value {
+    let rows = array(projection, "visibleTurnItems");
     let limit = PAGE_POLICY.max_user_turns.unwrap_or(0) + 2;
     let items: Vec<&Value> = rows.iter().map(item).collect();
     let starts = turn_starts(&items);
     let user_turns: Vec<usize> = (0..rows.len())
-        .filter(|&i| starts[i] && is_user_turn(items[i]))
+        .filter(|&i| starts[i] && item(&rows[i])["createdBy"] == "user")
         .collect();
     let anchors: Vec<usize> = (0..rows.len()).filter(|&i| starts[i]).collect();
-    let start = if user_turns.len() >= limit {
+    let boundary = if user_turns.len() >= limit {
         user_turns[user_turns.len() - limit]
     } else if anchors.len() >= MAX_RAW_TURNS + 2 {
         anchors[anchors.len() - (MAX_RAW_TURNS + 2)]
     } else {
         0
     };
-    let mut window = rows[start..].to_vec();
-    renumber(&mut window);
-    window
+    let newest_turn_rows = user_turns
+        .last()
+        .map(|&latest| rows.len() - latest.max(boundary));
+    let row_limit = match newest_turn_rows {
+        Some(n) if (1..=PAGE_POLICY.max_turn_items).contains(&n) => TURN_SNAPSHOT_ROW_LIMIT,
+        _ => SNAPSHOT_ROW_LIMIT,
+    };
+    let first = boundary.max(rows.len().saturating_sub(row_limit));
+    let mut kept: Vec<usize> = (first..rows.len()).collect();
+    let results: HashSet<&str> = kept
+        .iter()
+        .filter(|&&i| items[i]["type"] == "run_interrupt_result")
+        .filter_map(|&i| items[i]["runId"].as_str())
+        .collect();
+    kept.extend((0..first).filter(|&i| {
+        items[i]["type"] == "run_interrupt_request"
+            && items[i]["runId"]
+                .as_str()
+                .is_some_and(|run| results.contains(run))
+    }));
+    if !rows.is_empty() {
+        kept.push(rows.len() - 1);
+    }
+    kept.sort_unstable();
+    kept.dedup();
+    let mut visible: Vec<Value> = kept.iter().map(|&i| rows[i].clone()).collect();
+    renumber(&mut visible);
+    let mut turn_items: Vec<Value> = kept.iter().map(|&i| items[i].clone()).collect();
+    // Pending requests outlive their turn's window; clients read their prompt from the card.
+    let pending = pending_request_ids(projection);
+    let in_read: HashSet<&str> = turn_items.iter().filter_map(|i| i["id"].as_str()).collect();
+    let cards: Vec<Value> = array(projection, "turnItems")
+        .iter()
+        .filter(|i| {
+            matches!(
+                i["type"].as_str(),
+                Some("approval_request" | "user_input_request")
+            )
+        })
+        .filter(|i| {
+            i["requestId"]
+                .as_str()
+                .is_some_and(|id| pending.contains(id))
+        })
+        .filter(|i| i["id"].as_str().is_some_and(|id| !in_read.contains(id)))
+        .cloned()
+        .collect();
+    turn_items.extend(cards);
+    turn_items.sort_by(|a, b| {
+        (a["ordinal"].as_u64(), a["id"].as_str()).cmp(&(b["ordinal"].as_u64(), b["id"].as_str()))
+    });
+
+    // The cohort: what the read rows name, and what is live.
+    let cohort_runs: HashSet<String> = kept
+        .iter()
+        .filter_map(|&i| items[i]["runId"].as_str().map(str::to_owned))
+        .collect();
+    let runs = array(projection, "runs");
+    let latest_run = runs
+        .iter()
+        .filter(|run| !(run["status"] == "queued" && run["queueHeld"] == true))
+        .max_by_key(|run| run["ordinal"].as_u64().unwrap_or(0))
+        .and_then(|run| run["id"].as_str());
+    let keep_run = |run: &Value| {
+        active(
+            run,
+            &["queued", "preparing", "starting", "running", "waiting"],
+        ) || run["id"]
+            .as_str()
+            .is_some_and(|id| cohort_runs.contains(id) || Some(id) == latest_run)
+    };
+    let kept_runs: Vec<Value> = runs.iter().filter(|run| keep_run(run)).cloned().collect();
+    let live = ["pending", "starting", "running", "waiting"];
+    let attempts: Vec<Value> = array(projection, "attempts")
+        .iter()
+        .filter(|a| {
+            active(a, &live) || a["runId"].as_str().is_some_and(|r| cohort_runs.contains(r))
+        })
+        .cloned()
+        .collect();
+    let mut node_ids: HashSet<String> = HashSet::new();
+    let mut add = |id: Option<&str>| {
+        if let Some(id) = id {
+            node_ids.insert(id.to_owned());
+        }
+    };
+    for &i in &kept {
+        add(items[i]["nodeId"].as_str());
+    }
+    for node in array(projection, "nodes") {
+        if active(node, &live) {
+            add(node["id"].as_str());
+        }
+    }
+    for attempt in &attempts {
+        add(attempt["rootNodeId"].as_str());
+    }
+    for run in runs {
+        if active(
+            run,
+            &["queued", "preparing", "starting", "running", "waiting"],
+        ) || run["id"]
+            .as_str()
+            .is_some_and(|id| cohort_runs.contains(id))
+        {
+            add(run["rootNodeId"].as_str());
+        }
+    }
+    for request in array(projection, "runtimeRequests") {
+        if active(request, &["pending", "waiting"]) {
+            add(request["nodeId"].as_str());
+        }
+    }
+    for subagent in array(projection, "subagents") {
+        if active(subagent, &live) {
+            add(subagent["parentNodeId"].as_str());
+        }
+    }
+    for turn in array(projection, "providerTurns") {
+        if active(turn, &["starting", "running", "waiting"]) {
+            add(turn["nodeId"].as_str());
+        }
+    }
+    // Every retained node's ancestors.
+    let parents: HashMap<&str, &str> = array(projection, "nodes")
+        .iter()
+        .filter_map(|n| Some((n["id"].as_str()?, n["parentNodeId"].as_str()?)))
+        .collect();
+    let mut frontier: Vec<String> = node_ids.iter().cloned().collect();
+    while let Some(id) = frontier.pop() {
+        if let Some(parent) = parents.get(id.as_str()) {
+            if node_ids.insert((*parent).to_owned()) {
+                frontier.push((*parent).to_owned());
+            }
+        }
+    }
+    let nodes: Vec<Value> = array(projection, "nodes")
+        .iter()
+        .filter(|n| n["id"].as_str().is_some_and(|id| node_ids.contains(id)))
+        .cloned()
+        .collect();
+    let subagents: Vec<Value> = array(projection, "subagents")
+        .iter()
+        .filter(|s| {
+            active(s, &live)
+                || s["runId"].as_str().is_some_and(|r| cohort_runs.contains(r))
+                || s["parentNodeId"]
+                    .as_str()
+                    .is_some_and(|n| node_ids.contains(n))
+        })
+        .cloned()
+        .collect();
+    let mut read = projection.clone();
+    read["runs"] = json!(kept_runs);
+    read["attempts"] = json!(attempts);
+    read["nodes"] = json!(nodes);
+    read["subagents"] = json!(subagents);
+    read["turnItems"] = json!(turn_items);
+    read["visibleTurnItems"] = json!(visible);
+    read
 }
 
 /// A bounded `snapshot` stream item with its projection windowed and its history cursor set, as
@@ -570,8 +744,7 @@ pub(crate) fn bound_snapshot_item(item: &mut Value) {
         return;
     }
     let seq = item["snapshotSequence"].as_u64().unwrap_or(0);
-    let mut read = item["projection"].clone();
-    read["visibleTurnItems"] = json!(snapshot_rows(array(&read, "visibleTurnItems")));
+    let read = snapshot_read(&item["projection"]);
     let (projection, cursor, has_more) = bounded_projection(&read, seq);
     item["projection"] = projection;
     item["historyCursor"] = json!(cursor);
