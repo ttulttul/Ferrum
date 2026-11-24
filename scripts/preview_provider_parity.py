@@ -207,7 +207,7 @@ def observe_with_retry(name, server, page_url, page, attempts=2):
 
 
 def playwright_headless_shell(cache):
-    """The headless shell the Rust server launches from the Playwright cache: the newest
+    """The headless shell both servers launch, from the Playwright cache: the newest
     `chromium*` folder holding `chrome-headless-shell-linux64/chrome-headless-shell`."""
     for folder in sorted((p for p in Path(cache).iterdir() if p.name.startswith("chromium")), reverse=True):
         shell = folder / "chrome-headless-shell-linux64"
@@ -216,13 +216,13 @@ def playwright_headless_shell(cache):
     raise SystemExit(f"no chrome-headless-shell-linux64 in the Playwright cache {cache}")
 
 
-def seed_reference_browser(root, reference_root, cache):
-    """Install a headless shell where the reference looks for its pinned one, so it never
+def seed_browser(root, reference_root, cache):
+    """Install a headless shell where both servers look for their pinned one, so neither
     downloads chrome-headless-shell from storage.googleapis.com.
 
-    The reference uses only `<T3 home>/tools/chrome-headless-shell/<platform>/<VERSION>/` and,
-    once something executable is there, does not check its version. Linking the folder the Rust
-    server launches gives both servers the same browser binary."""
+    Both use only `<T3 home>/tools/chrome-headless-shell/<platform>/<VERSION>/` and, once
+    something executable is there, do not check its version. Linking the Playwright cache's
+    headless shell there gives both servers the same browser binary."""
     if sys.platform != "linux" or platform.machine() not in ("x86_64", "AMD64"):
         raise SystemExit("the preview suite seeds the reference's linux64 headless shell only")
     source = (Path(reference_root) / "apps/server/src/preview/PreviewBrowser.ts").read_text()
@@ -460,8 +460,7 @@ def main():
             root = Path(directory, name)
             (root / ".cache").mkdir(parents=True)
             (root / ".cache/ms-playwright").symlink_to(args.browser_cache.resolve(), target_is_directory=True)
-            if name.startswith("original"):
-                seed_reference_browser(root, args.reference_root, args.browser_cache)
+            seed_browser(root, args.reference_root, args.browser_cache)
             env, _, log = scenario_env(Path(directory), name, root, scenario, {"codex"})
             fixture = root / "preview-turn.json"
             fixture.write_bytes((FIXTURES / "codex_turn.json").read_bytes())

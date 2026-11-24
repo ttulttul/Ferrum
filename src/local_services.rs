@@ -73,10 +73,6 @@ pub(crate) fn claim_preview_recording(
     Ok(out)
 }
 
-/// The headless Chromium this server launches, if one is installed.
-pub(crate) fn browser_executable() -> Option<std::path::PathBuf> {
-    browser::executable()
-}
 pub use previews::PreviewService;
 pub use terminals::TerminalService;
 pub use vcs::VcsService;

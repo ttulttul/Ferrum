@@ -360,8 +360,15 @@ addresses (`publicProxy`). A tool's compact output keeps `htmlRender`, as the cl
 `scripts/html_render_parity.py` compares both tools in a real headless Chromium, screenshots by
 their pixels.
 
-**Not yet:** the launch-failure diagnosis (`t3 browser setup` hints), installing a browser when none
-is found, and the OpenCode and ACP adapters' recorded renders (`recordHtmlRender`).
+The browser, for these tools and the preview tools, is only the reference's pinned Chrome for
+Testing `chrome-headless-shell` (`src/preview_browser.rs`). It is installed in
+`<T3 home>/tools/chrome-headless-shell/<platform>/<version>/` the first time a tool needs it,
+checked against the pinned size and SHA-256, and a caller waits up to 45 seconds before it is told
+the install's progress. `scripts/preview_session_parity.py` compares the tools' answers when the
+download fails.
+
+**Not yet:** the launch-failure diagnosis (`t3 browser setup` hints), and the OpenCode and ACP
+adapters' recorded renders (`recordHtmlRender`).
 
 ### 4f. Preview status, dialogs and recordings
 

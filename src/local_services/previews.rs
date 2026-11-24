@@ -158,6 +158,14 @@ impl PreviewService {
             let tab = if let Some(tab) = existing {
                 tab
             } else {
+                // A tab is only opened once its browser can launch; until the
+                // browser is installed the open fails and leaves no tab.
+                let home = crate::config::state_base_dir(dir);
+                if let Err(error) = crate::preview_browser::for_home(home).executable().await {
+                    return Err(
+                        json!({"message": format!("Preview automation {operation} failed: {}", error.message())}),
+                    );
+                }
                 let mut open = json!({"threadId":thread,"runtime":"server","reveal":false});
                 if let Some(url) = navigation_url(args) {
                     open["url"] = json!(url);
@@ -171,10 +179,12 @@ impl PreviewService {
             let mut browsers = tokio::time::timeout_at(deadline, self.browsers.lock())
                 .await
                 .map_err(|_| json!({"message":format!("Preview automation {operation} timed out after {timeout_ms}ms.")}))?;
-            let page = browsers
-                .open(dir, &tab)
-                .await
-                .ok_or_else(|| json!({"message":"The browser workspace is unavailable."}))?;
+            let page = browsers.open(dir, &tab).await.map_err(|error| {
+                json!({"message": error.map_or_else(
+                    || "The browser workspace is unavailable.".to_owned(),
+                    |message| format!("Preview automation {operation} failed: {message}"),
+                )})
+            })?;
             drop(browsers);
             return page
                 .automate(self, "open", args, deadline, timeout_ms)
@@ -232,7 +242,15 @@ impl PreviewService {
             }));
         }
         let snap = snap.ok_or_else(missing)?;
-        let page = browsers.open(dir, &snap).await.ok_or_else(missing)?;
+        let page = browsers
+            .open(dir, &snap)
+            .await
+            .map_err(|error| match error {
+                Some(message) => {
+                    json!({"message": format!("Preview automation {operation} failed: {message}")})
+                }
+                None => missing(),
+            })?;
         drop(browsers);
         page.automate(self, operation, &input["arguments"], deadline, timeout_ms)
             .await

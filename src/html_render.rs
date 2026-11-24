@@ -46,7 +46,8 @@ pub(crate) enum Error {
     PageTooLarge(u64),
     ViewportHeight(String),
     Store,
-    NoBrowser,
+    /// No browser to launch yet (`PreviewBrowser.executable`).
+    NoBrowser(String),
     Browser(BrowserError),
 }
 
@@ -73,7 +74,7 @@ impl Error {
             Error::PageTooLarge(size) => format!("With its images inlined the page is {}; the limit is {}. Use smaller images.", format_mib(*size), format_mib(MAX_PAGE_BYTES)),
             Error::ViewportHeight(found) => format!("The page uses a viewport height unit ({found}). The frame grows to fit the page, so a size that follows the viewport makes it grow again and again. Let content set the height, or use fixed pixel heights."),
             Error::Store => "The HTML render could not be saved.".into(),
-            Error::NoBrowser => "T3 could not install its headless browser: this server does not download one, and none was found. Try again.".into(),
+            Error::NoBrowser(message) => message.clone(),
             Error::Browser(error) => error.message(),
         }
     }
@@ -190,8 +191,9 @@ fn no_sandbox() -> bool {
     std::env::var("T3CODE_SERVER_BROWSER_SANDBOX").is_ok_and(|v| v == "0")
 }
 
-fn executable() -> Option<PathBuf> {
-    crate::local_services::browser_executable()
+/// The browser of the T3 home that holds `state_dir`.
+fn browser(state_dir: &Path) -> std::sync::Arc<crate::preview_browser::PreviewBrowser> {
+    crate::preview_browser::for_home(crate::config::state_base_dir(state_dir))
 }
 
 /// `clampHtmlRenderHeight`.
@@ -240,12 +242,18 @@ pub(crate) async fn preview(
     let html = read_source(paths, &source)?;
     page::reject_viewport_height(&html)?;
     let inlined = inline(&html)?;
-    let executable = executable().ok_or(Error::NoBrowser)?;
+    let executable = browser(&paths.state_dir)
+        .executable()
+        .await
+        .map_err(|error| Error::NoBrowser(error.message()))?;
     let fragment = CONSTANTS["fragments"][appearance]
         .as_str()
         .unwrap_or_default();
     let capture = {
-        let _permit = BROWSERS.acquire().await.map_err(|_| Error::NoBrowser)?;
+        let _permit = BROWSERS
+            .acquire()
+            .await
+            .map_err(|_| Error::NoBrowser("The headless browser is unavailable.".into()))?;
         chrome::capture(
             &executable,
             no_sandbox(),
@@ -277,8 +285,9 @@ pub(crate) async fn preview(
 
 /// `measure`: the page's height at each width a client lays it out at, or
 /// nothing when no browser can measure it in time.
-async fn measure(html: &str) -> Option<Vec<(u64, u64)>> {
-    let executable = executable()?;
+async fn measure(state_dir: &Path, html: &str) -> Option<Vec<(u64, u64)>> {
+    // Measuring never installs the browser; a render without heights still publishes.
+    let executable = browser(state_dir).installed()?;
     let widths: Vec<u64> = CONSTANTS["measureWidths"]
         .as_array()?
         .iter()
@@ -348,7 +357,7 @@ pub(crate) async fn publish(
         }
     }
     let mut guard = Remove(Some(file));
-    if let Some(heights) = measure(&html).await {
+    if let Some(heights) = measure(&paths.state_dir, &html).await {
         reference["heights"] = json!(heights
             .iter()
             .map(|(w, h)| json!([w, h]))
