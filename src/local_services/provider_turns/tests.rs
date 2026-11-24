@@ -805,18 +805,22 @@ async fn a_claude_thread_sends_its_next_turn_to_its_running_cli() {
     assert_eq!(prompts, 2);
 }
 
-/// A steer the turn completes without taking is reported untaken (#39528);
-/// it stays queued in the running CLI, so the turn that sends its message
-/// again takes it rather than writing it a second time.
+/// A steer the turn completes without taking was still delivered, as the
+/// reference counts an offered steer: Claude answers it next on its own,
+/// which the kept session reports as a wake, and the continuation turn shows
+/// that answer without writing the steer again.
 #[tokio::test]
-async fn an_untaken_claude_steer_is_reported_and_the_next_turn_adopts_it() {
+async fn a_steer_claude_answers_after_its_turn_is_a_wake() {
+    let processes = std::sync::Arc::new(ProviderProcesses::default());
+    let mut wakes = processes.take_wakes().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("in.jsonl");
     let mut spec = fake_spec(CLAUDE_AGENT, "claude_steer_untaken.json", &log, None);
     spec.turn_id = format!("untaken-{}", uuid::Uuid::new_v4());
+    spec.provider.as_mut().unwrap().app_thread_id = "thread:steer".into();
     let turn_id = spec.turn_id.clone();
     let (_cancel, cancelled) = oneshot::channel();
-    let mut events = start(spec.clone(), cancelled, TEST_SERVERS.clone()).unwrap();
+    let mut events = start(spec.clone(), cancelled, processes.clone()).unwrap();
     let mut first = Vec::new();
     loop {
         match events.recv().await.expect("the turn runs") {
@@ -855,7 +859,7 @@ async fn an_untaken_claude_steer_is_reported_and_the_next_turn_adopts_it() {
             _ => None,
         })
         .collect();
-    assert_eq!(settled, [("pending", false), ("completed", true)]);
+    assert_eq!(settled, [("pending", false), ("completed", false)]);
     let session = first
         .iter()
         .rev()
@@ -866,11 +870,19 @@ async fn an_untaken_claude_steer_is_reported_and_the_next_turn_adopts_it() {
             _ => None,
         })
         .unwrap();
-    // The message sent again as its own turn, on the same CLI.
-    spec.turn_id = format!("resent-{}", uuid::Uuid::new_v4());
-    spec.prompt = steer.into();
-    spec.provider.as_mut().unwrap().resume = Some(session);
-    let (second, exit) = run(spec).await;
+    let wake = tokio::time::timeout(std::time::Duration::from_secs(30), wakes.recv())
+        .await
+        .expect("Claude's answer to the steer is a wake")
+        .unwrap();
+    assert_eq!(wake.native_thread_id, session);
+    // The continuation, on the same CLI.
+    spec.turn_id = format!("continuation-{}", uuid::Uuid::new_v4());
+    spec.prompt = crate::provider_continuation::CONTINUATION_MESSAGE_TEXT.into();
+    let provider = spec.provider.as_mut().unwrap();
+    provider.resume = Some(session);
+    provider.continuation = true;
+    let (_cancel, cancelled) = oneshot::channel();
+    let (second, exit) = collect(start(spec, cancelled, processes.clone()).unwrap()).await;
     assert!(exit.success, "{second:#?}");
     let written = received(&log)
         .iter()
@@ -880,61 +892,10 @@ async fn an_untaken_claude_steer_is_reported_and_the_next_turn_adopts_it() {
     assert!(!second
         .iter()
         .any(|event| matches!(event, ProviderEvent::PromptDelivered { .. })));
-}
-
-#[tokio::test]
-async fn a_steer_goes_to_the_running_claude_turn_and_is_pending_until_claude_takes_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("in.jsonl");
-    let mut spec = fake_spec(CLAUDE_AGENT, "claude_steer.json", &log, None);
-    spec.turn_id = format!("steer-{}", uuid::Uuid::new_v4());
-    let turn_id = spec.turn_id.clone();
-    let (_cancel, cancelled) = oneshot::channel();
-    let mut events = start(spec, cancelled, TEST_SERVERS.clone()).unwrap();
-    // Once the turn runs a command, the user steers it.
-    loop {
-        match events.recv().await.expect("the turn runs") {
-            TurnEvent::Provider(ProviderEvent::TurnItem { item })
-                if item.kind == "command_execution" && item.status == "running" =>
-            {
-                break
-            }
-            TurnEvent::Exited(exit) => panic!("the turn ended first: {exit:?}"),
-            _ => {}
-        }
-    }
-    assert!(respond(
-        &turn_id,
-        crate::workspace::provider::RuntimeResponse {
-            id: "message:steer".into(),
-            steer: Some("Also print the date".into()),
-            ..Default::default()
-        }
-    ));
-    let (rest, exit) = collect(events).await;
-    assert!(exit.success, "{rest:#?}");
-    let statuses: Vec<&str> = rest
+    assert!(second
         .iter()
-        .filter_map(|event| match event {
-            ProviderEvent::SteerUpdated {
-                message_id, status, ..
-            } if message_id == "message:steer" => Some(status.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(statuses, ["pending", "completed"]);
-    // Written as the reference writes a steer: priority now, with the uuid
-    // Claude echoed.
-    let steer = received(&log)
-        .into_iter()
-        .find(|message| message["priority"] == "now")
-        .expect("the steer reached the CLI");
-    assert_eq!(steer["type"], "user");
-    assert_eq!(
-        steer["message"],
-        json!({"role": "user", "content": "Also print the date"})
-    );
-    assert!(steer["uuid"].as_str().is_some_and(|uuid| uuid.len() == 36));
+        .any(|event| matches!(event, ProviderEvent::TurnItem { item } if item.kind == "assistant_message")));
+    processes.shutdown(std::time::Duration::from_secs(1)).await;
 }
 
 #[tokio::test]

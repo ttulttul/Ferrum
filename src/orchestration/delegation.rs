@@ -1119,12 +1119,13 @@ pub(crate) async fn after_run<H: CommandHost>(state: Arc<H>, thread_id: &str) {
     start_queued_wake(state, thread_id).await;
 }
 
-/// A delegated delivery steered into a turn that completed before the CLI
-/// took it is sent again as a queued message of its own, so its results
+/// A delegated delivery steered into a turn that ended before the steer
+/// was sent is sent again as a queued message of its own, so its results
 /// still reach the thread: the reference's steer fails with
 /// `turnCompleted` and its EffectWorker dispatches the message again
 /// (`queue_after_active` for a delivery). The command id is the steer's, so
-/// this happens once.
+/// this happens once. (A steer the CLI received is delivered; Claude
+/// answers it as a wake.)
 async fn resend_untaken_deliveries<H: CommandHost>(state: Arc<H>, thread_id: &str) {
     let untaken: Vec<(String, String, Value, Value)> = {
         let store = state.store.read().await;

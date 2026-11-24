@@ -56,8 +56,6 @@ struct Live {
     /// with what it read still to be handled.
     reader: tokio::task::JoinHandle<Cli>,
     control: mpsc::UnboundedSender<Control>,
-    /// Prompts the CLI holds queued (steers a turn ended without taking).
-    queued: Vec<String>,
     /// What the CLI was launched with, but for its session and its model
     /// selection.
     launch: String,
@@ -119,7 +117,6 @@ impl Sessions {
     /// The running CLI of `session`, for a turn launched as `launch`: taken
     /// for the turn when it was launched the same way and still runs, else
     /// closed.
-    /// With it, the prompts it holds queued.
     /// A turn with another model selection takes it too when the CLI can
     /// switch to that one (`canApplyClaudeSelectionLive`), with the selection
     /// it runs, for the turn to switch it.
@@ -128,19 +125,18 @@ impl Sessions {
         session: &str,
         launch: &str,
         selection: &serde_json::Value,
-    ) -> Option<(Cli, Vec<String>, Option<serde_json::Value>)> {
+    ) -> Option<(Cli, Option<serde_json::Value>)> {
         let live = self.lock().remove(session)?;
         live.idle.abort();
-        let queued = live.queued.clone();
         let same = live.launch == launch;
         let running = live.selection.clone();
         let mut cli = live.hand_back().await?;
         if same && cli.alive() {
             if &running == selection {
-                return Some((cli, queued, None));
+                return Some((cli, None));
             }
             if can_apply_live(&running, selection) {
-                return Some((cli, queued, Some(running)));
+                return Some((cli, Some(running)));
             }
         }
         cli.stop().await;
@@ -155,7 +151,6 @@ impl Sessions {
         cli: Cli,
         launch: String,
         selection: serde_json::Value,
-        queued: Vec<String>,
         route: WakeRoute,
     ) {
         let sessions: Weak<Self> = Arc::downgrade(self);
@@ -172,11 +167,8 @@ impl Sessions {
             }
         });
         let (control, commands) = mpsc::unbounded_channel();
-        // A steer the last turn left queued is answered by the turn that
-        // sends it again, so that wake is the turn's, not a continuation's.
-        let wakes = queued.is_empty().then(|| self.wakes.clone());
         let reporter = Reporter {
-            wakes,
+            wakes: self.wakes.clone(),
             route,
             session: session.clone(),
         };
@@ -186,7 +178,6 @@ impl Sessions {
             Live {
                 reader,
                 control,
-                queued,
                 launch,
                 selection,
                 idle,
@@ -239,8 +230,7 @@ impl Live {
 
 /// Reports an idle session's wakes.
 struct Reporter {
-    /// None while a queued steer's turn owns the next wake.
-    wakes: Option<mpsc::UnboundedSender<ProviderWake>>,
+    wakes: mpsc::UnboundedSender<ProviderWake>,
     route: WakeRoute,
     session: String,
 }
@@ -248,9 +238,8 @@ struct Reporter {
 impl Reporter {
     /// Report a wake; its token, once reported.
     fn report(&self) -> Option<u64> {
-        let wakes = self.wakes.as_ref()?;
         let token = WAKE_TOKENS.fetch_add(1, Ordering::Relaxed);
-        wakes
+        self.wakes
             .send(ProviderWake {
                 driver: CLAUDE_AGENT.into(),
                 app_thread_id: self.route.app_thread_id.clone(),

@@ -85,7 +85,9 @@ pub(crate) const USER_STOP_REASON: &str = "Stopped by user";
 /// running turn, when every task it carries wakes the parent always and that
 /// turn's steering does not interrupt its tools, as the reference's
 /// `dispatchMessage` decides; since #39528 that includes Claude turns. A
-/// steer the turn ends without taking is sent again as a run of its own
+/// steer that reaches the CLI is delivered, even when its turn completes
+/// before Claude takes it (Claude answers it next, as a wake); one whose
+/// turn ended before it was sent is sent again as a run of its own
 /// (`delegation::after_run`).
 pub(crate) async fn delivery_steer_target<H: CommandHost>(
     state: &Arc<H>,
