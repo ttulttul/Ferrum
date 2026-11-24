@@ -81,7 +81,8 @@ def snapshot_pair(frames, stream):
     return json.loads(raw[1])
 
 
-def receive(ws, kind):
+def receive(ws, kind, accept=None):
+    """The next `kind` event on the config stream; with `accept`, the next one it accepts."""
     deadline = monotonic() + 15
     while deadline > monotonic():
         packet = recv_frame(ws, timeout=deadline-monotonic()).encode()
@@ -89,7 +90,7 @@ def receive(ws, kind):
         if frame.get("_tag") != "Chunk":
             raise AssertionError(f"expected stream data, got {frame}")
         ws.send(encode({"_tag":"Ack","requestId":"config-stream"}).decode())
-        if frame["values"][0]["type"] == kind:
+        if frame["values"][0]["type"] == kind and (accept is None or accept(frame["values"][0])):
             return packet
     raise AssertionError(f"missing {kind}")
 
@@ -174,7 +175,10 @@ def main():
             samples.append(["ServerConfigStreamEvent",json.loads(packets[1])["values"][0]])
         for home in homes:
             (home/"userdata/settings.json").write_bytes(encode({"hiddenThreadTags":["from-file"]}))
-        packets=[receive(ws,"settingsUpdated") for ws in streams]
+        # The debounced watcher can still publish the last save's settings once more; the edit's
+        # own publication is the one that carries the file's settings.
+        from_file=lambda event: event["payload"]["settings"]["hiddenThreadTags"]==["from-file"]
+        packets=[receive(ws,"settingsUpdated",from_file) for ws in streams]
         identical("external settings edit full event",packets)
         event=json.loads(packets[1])["values"][0]
         assert event["payload"]["settings"]["hiddenThreadTags"]==["from-file"]
