@@ -2247,7 +2247,41 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         // the copies go again if the dispatch is refused.
         let mut command = params.clone();
         let mut claimed = Vec::new();
-        if command["type"] == "message.dispatch" {
+        let claim_failure = |command: &Value, detail: String| {
+            Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"OrchestrationV2DispatchCommandError",
+                "commandId":command["commandId"],"commandType":command["type"],
+                "message":detail,"detail":detail,
+                "cause":{"name":"AttachmentClaimError","message":detail},
+            }}))
+        };
+        // An edit that names attachments keeps only files that are still there,
+        // unless it is a retry of an edit already accepted.
+        let edits_attachments =
+            command["type"] == "queued-run.edit" && command["attachments"].is_array();
+        let accepted_before = state
+            .store
+            .read()
+            .await
+            .command_receipts
+            .contains_key(command["commandId"].as_str().unwrap_or_default());
+        if edits_attachments && !accepted_before {
+            for attachment in command["attachments"].as_array().into_iter().flatten() {
+                if crate::attachment_claims::is_pending(attachment) {
+                    continue;
+                }
+                let gone = crate::attachment_claims::relative_path(attachment)
+                    .is_some_and(|relative| !state.paths.attachments.join(relative).exists());
+                if gone {
+                    let name = attachment["name"].as_str().unwrap_or_default();
+                    return claim_failure(
+                        &command,
+                        format!("Attachment '{name}' cannot be sent: attachment not found."),
+                    );
+                }
+            }
+        }
+        if command["type"] == "message.dispatch" || edits_attachments {
             let attachments = command["attachments"]
                 .as_array()
                 .cloned()
@@ -2264,19 +2298,19 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                     }
                     claimed = done.paths;
                 }
-                Err(detail) => {
-                    return Reply::Failure(json!({"_tag":"Fail","error":{
-                        "_tag":"OrchestrationV2DispatchCommandError",
-                        "commandId":command["commandId"],"commandType":command["type"],
-                        "message":detail,"detail":detail,
-                        "cause":{"_tag":"AttachmentClaimError","message":detail},
-                    }}));
-                }
+                Err(detail) => return claim_failure(&command, detail),
             }
         }
-        let dispatched = dispatch_orchestration_command(state.clone(), command).await;
+        let dispatched = dispatch_orchestration_command(state.clone(), command.clone()).await;
         if dispatched.is_err() {
             crate::attachment_claims::release(&claimed);
+        } else {
+            release_unkept(
+                state,
+                &claimed,
+                command["threadId"].as_str().unwrap_or_default(),
+            )
+            .await;
         }
         return match dispatched {
             Ok(sequence) => Reply::Success(json!({"sequence":sequence})),
@@ -2301,7 +2335,44 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
                     "cause":{"name":"OrchestrationDispatchCommandError","message":refusal}}
             }}));
         }
-        return crate::thread_launch::launch(state, params).await;
+        // `ThreadMessageIntake.launchThread`: the first message's pending uploads
+        // become the new thread's own attachments, and go again if the launch fails.
+        let attachments = params["initialMessage"]["attachments"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let launch_failure = |message: String| {
+            Reply::Failure(json!({"_tag":"Fail","error":{
+                "_tag":"OrchestrationV2ThreadLaunchError","commandId":command_id,"projectId":project_id,
+                "message":message,"cause":{"name":"AttachmentClaimError","message":message},
+            }}))
+        };
+        if let Some(message) = crate::attachment_claims::limit_error(&attachments) {
+            return launch_failure(message);
+        }
+        if !attachments.iter().any(crate::attachment_claims::is_pending) {
+            return crate::thread_launch::launch(state, params).await;
+        }
+        let Some(thread_id) = params["threadId"].as_str() else {
+            return launch_failure("Uploaded attachments need a thread id at launch.".into());
+        };
+        let claimed = match crate::attachment_claims::claim(
+            &state.paths.attachments,
+            thread_id,
+            &attachments,
+        ) {
+            Ok(claimed) => claimed,
+            Err(detail) => return launch_failure(detail),
+        };
+        let mut launched = params.clone();
+        launched["initialMessage"]["attachments"] = json!(claimed.attachments);
+        let reply = crate::thread_launch::launch(state, &launched).await;
+        if matches!(reply, Reply::Failure(_)) {
+            crate::attachment_claims::release(&claimed.paths);
+        } else {
+            release_unkept(state, &claimed.paths, thread_id).await;
+        }
+        return reply;
     }
 
     let store = state.store.read().await;
@@ -2738,6 +2809,45 @@ async fn git_diff_checkpoint(
         end -= 1;
     }
     format!("{}{}", &text[..end], MARKER)
+}
+
+/// `releaseUnusedClaims`: the copies a send claimed that no message of the
+/// thread keeps, such as a retry's copies of an edit already accepted.
+async fn release_unkept(state: &Arc<AppState>, claimed: &[std::path::PathBuf], thread_id: &str) {
+    if claimed.is_empty() {
+        return;
+    }
+    let kept: std::collections::HashSet<std::path::PathBuf> = state
+        .store
+        .read()
+        .await
+        .threads
+        .get(thread_id)
+        .map(|thread| thread.projection())
+        .and_then(|projection| projection["messages"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|message| {
+            message["attachments"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|attachment| crate::attachment_claims::relative_path(&attachment))
+        .flat_map(|relative| {
+            let path = state.paths.attachments.join(relative);
+            [
+                path.clone(),
+                std::path::PathBuf::from(format!("{}.txt", path.display())),
+            ]
+        })
+        .collect();
+    let unkept: Vec<_> = claimed
+        .iter()
+        .filter(|path| !kept.contains(*path))
+        .cloned()
+        .collect();
+    crate::attachment_claims::release(&unkept);
 }
 
 fn scheduled_task_error(message: &str, task_id: Option<&str>) -> Reply {
