@@ -231,7 +231,7 @@ On #92 the server parity wall time was 5 min 14 s. Provider status took 89 s, re
 
 **Step 5 (docs-only changes, nightly run, rebalance).**
 - **Docs-only PRs.** A `changes` job lists the pull request's files. When only `README.md` and `docs/` change, Rust validation and the shards are skipped, and the `parity` check passes without them.
-- **Nightly run.** Pushes to main, the nightly schedule and manual runs always run everything. The nightly run runs every shard twice, with the second round named `… again`, to surface flaky tests.
+- **Nightly run.** The nightly schedule and manual runs always run everything. A push to main that moves main forward and changes only `README.md` and `docs/` (by GitHub's compare of the push's previous and new commits) skips them as a docs-only pull request does, and a new branch, a force push or a compare listing its 300-file maximum runs everything. The nightly run runs every shard twice, with the second round named `… again`, to surface flaky tests.
 - **Rebalance.** The thread scenarios run in 4 shards. `provider-status` and `relay-provisioning` merge into one `status-relay` shard, which also takes `client_rpc` and `relay_client` from `integrations`. That is still 7 shards.
 
 **Step 6 (split `integrations` and `status-relay`, Nov 2026).** With new suites landing, `integrations` hit its 20-minute timeout (#220, job 138183199635: 625 s of suites after a 432 s setup) and `status-relay` came within 32 s of it. The setup's spikes are `playwright-core install --with-deps chromium`, whose apt downloads sometimes crawl (5.5 min at 95 kB/s); only the browser shard pays them. From the CI logs of runs 45315995940, 45313465482, 45314089753 and 45315947765 (suites only, then the whole job):
