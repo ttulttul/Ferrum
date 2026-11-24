@@ -31,7 +31,7 @@ from tempfile import TemporaryDirectory
 from websockets.sync.client import connect
 
 import parity_harness
-from parity_harness import encode, http
+from parity_harness import encode, http, recv_frame
 from peer_link_outgoing_parity import Server, running, set_linked_environments
 from peer_link_routes_parity import PROJECT, THREAD, dispatch, seed, shape
 
@@ -56,10 +56,8 @@ def stream(server, payload, then=None, items=1):
                             headers=[])).decode())
         found = []
         while True:
-            frame = json.loads(ws.recv(timeout=40))
-            if frame.get("_tag") == "Ping":
-                ws.send(encode({"_tag": "Pong"}).decode())
-            elif frame.get("_tag") == "Chunk":
+            frame = json.loads(recv_frame(ws, timeout=40))
+            if frame.get("_tag") == "Chunk":
                 ws.send(encode({"_tag": "Ack", "requestId": "relay"}).decode())
                 found.extend(shape(value) for value in frame["values"])
                 if len(found) >= items and then is not None:
