@@ -73,6 +73,7 @@ mod wire_json;
 #[cfg(feature = "native")]
 pub use settings::policy::ManagedPolicyFileError;
 mod thread_events;
+mod thread_history;
 mod thread_launch;
 mod thread_projection;
 mod title_generation;

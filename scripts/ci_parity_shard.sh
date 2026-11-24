@@ -44,6 +44,7 @@ case "$shard" in
     run python3 scripts/peer_link_parity.py "${both[@]}"
     run python3 scripts/peer_link_routes_parity.py "${both[@]}"
     run python3 scripts/peer_link_relay_parity.py "${both[@]}"
+    run python3 scripts/peer_link_history_parity.py "${both[@]}"
     run python3 scripts/client_sessions_parity.py "${both[@]}"
     run python3 scripts/peer_link_outgoing_parity.py "${both[@]}"
     run python3 scripts/shared_store_parity.py "${both[@]}" --reference-root "$checkout"

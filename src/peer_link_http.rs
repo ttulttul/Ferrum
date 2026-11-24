@@ -190,12 +190,18 @@ async fn stream(
     let link_expires_ms = admitted.link_expires_ms;
     let task_state = state.clone();
     tokio::spawn(async move {
+        // A snapshot carries only the newest window of the timeline and a cursor to the turns
+        // before it, which `/api/links/thread/history` pages.
         let send = |batch: &Value| {
             batch
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(event)
+                .map(|item| {
+                    let mut item = item.clone();
+                    crate::thread_history::bound_snapshot_item(&mut item);
+                    event(&item)
+                })
                 .collect::<Vec<_>>()
         };
         for batch in &opened.first {
@@ -268,20 +274,40 @@ async fn stream(
     response
 }
 
-/// `GET /api/links/thread/history`: the turns before a snapshot's window. Rust's snapshot always
-/// holds the whole timeline, so it hands out no history cursor and no cursor reads a page.
+/// `GET /api/links/thread/history`: the page of turns before `cursor`, which a bounded snapshot or
+/// an earlier page handed out (`getThreadHistoryPage` without a view).
 async fn history(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(response) = admit(&state, &headers, &params).await {
-        return response;
-    }
-    if params.get("cursor").is_none_or(|c| c.is_empty()) {
+    let admitted = match admit(&state, &headers, &params).await {
+        Ok(admitted) => admitted,
+        Err(response) => return response,
+    };
+    let Some(cursor) = params.get("cursor").filter(|c| !c.is_empty()) else {
         return refusal(StatusCode::BAD_REQUEST, "invalid_request");
-    }
-    refusal(StatusCode::INTERNAL_SERVER_ERROR, "thread_read_failed")
+    };
+    let sequence = *state.next_event_id.lock().await;
+    let store = state.store.read().await;
+    let page = store.threads.get(&admitted.thread_id).and_then(|thread| {
+        let projection = thread.snapshot_projection();
+        let rows = projection["visibleTurnItems"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        let subagents = projection["subagents"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        crate::thread_history::history_page(rows, subagents, &admitted.thread_id, cursor, sequence)
+    });
+    // A cursor the store cannot read fails the read, as the reference's history query does.
+    let Some(page) = page else {
+        return refusal(StatusCode::INTERNAL_SERVER_ERROR, "thread_read_failed");
+    };
+    let mut response =
+        (StatusCode::OK, [("cache-control", "no-store")], Json(page)).into_response();
+    crate::mcp_oauth::with_link_expiry(&mut response, admitted.link_expires_ms);
+    response
 }
 
 /// `GET /api/links/thread/item`: one item in full, as `orchestration.getTurnItem` gives it.
