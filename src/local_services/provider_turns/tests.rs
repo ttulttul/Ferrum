@@ -29,6 +29,9 @@ fn fake_spec(driver: &str, scenario: &str, log: &Path, resume: Option<&str>) -> 
             driver: driver.into(),
             binary_path: fixtures().join("fake_cli.py").display().to_string(),
             resume: resume.map(str::to_owned),
+            // Each turn its own thread: a thread keeps its ACP agent (and what
+            // a Stop left) for its next turn, across the tests' shared processes.
+            app_thread_id: format!("thread:{scenario}:{}", log.display()),
             ..ProviderTurn::default()
         }),
         ..TurnSpec::default()
@@ -1025,4 +1028,37 @@ async fn missing_grok_fails_to_start_its_session() {
     assert!(!events
         .iter()
         .any(|e| matches!(e, ProviderEvent::ProviderTurn { .. })));
+}
+
+/// What a Stop leaves is only for a turn that resumes the stopped session:
+/// a later turn on the thread that resumes nothing starts a session of its own.
+#[tokio::test]
+async fn grok_turn_after_a_stop_loads_only_the_session_it_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let stopped_log = dir.path().join("stopped.jsonl");
+    let mut spec = fake_spec(GROK, "grok_interrupt.json", &stopped_log, None);
+    spec.provider.as_mut().unwrap().app_thread_id = "thread:stop-then-new".into();
+    let (cancel, cancelled) = oneshot::channel();
+    let mut events = start(spec, cancelled, TEST_SERVERS.clone()).unwrap();
+    while let Some(event) = events.recv().await {
+        if matches!(&event, TurnEvent::Provider(ProviderEvent::TurnItem { item })
+            if item.kind == "command_execution" && item.status == "running")
+        {
+            break;
+        }
+    }
+    cancel.send(()).unwrap();
+    let (_, exit) = collect(events).await;
+    assert!(exit.cancelled, "{exit:?}");
+    let log = dir.path().join("next.jsonl");
+    let mut spec = fake_spec(GROK, "grok_turn.json", &log, None);
+    spec.provider.as_mut().unwrap().app_thread_id = "thread:stop-then-new".into();
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    let methods: Vec<String> = received(&log)
+        .iter()
+        .filter_map(|m| m["method"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(methods, ["initialize", "session/new", "session/prompt"]);
 }

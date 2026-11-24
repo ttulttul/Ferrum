@@ -605,7 +605,11 @@ async fn open(
     if let Some(agent) = sessions.take(thread, &launch, resume).await {
         return Ok((agent, false));
     }
-    let stopped = sessions.stopped().remove(thread);
+    // What a Stop left, when this turn resumes that same session.
+    let stopped = sessions
+        .stopped()
+        .remove(thread)
+        .filter(|stopped| resume == Some(stopped.session.as_str()));
     let mut agent = Agent::spawn(spec, provider, launch)
         .await
         .map_err(|error| AcpError::Startup(error.to_string()))?;
