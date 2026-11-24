@@ -283,14 +283,15 @@ as the result (`delegated_task.remote.complete`), which reaches the parent as a 
 does: a `wait` reads it, an async task wakes the parent. `task_status` answers from the task's row
 and the run's status there; `task_cancel` stops the thread there (`t3_thread_interrupt` with
 `stop`). A gone link, thread or run fails the task; anything else is retried with back-off, and open
-tasks are followed again after a restart.
+tasks are followed again after a restart. A follow-up sent to a finished task's thread there with
+`t3_thread_send` becomes a task of its own (`RemoteDelegation.followUp`), followed as the first was.
 
-**Pending:** a follow-up sent to the thread there with `t3_thread_send` is not recorded as a task,
-and a task whose thread there waits on its own delegated tasks is reported when its run ends. The
-control plane still refuses these tasks.
+**Pending:** a task whose thread there waits on its own delegated tasks is reported when its run
+ends. The control plane still refuses these tasks.
 
-**Parity:** `claude delegate remote` (a wait) and `claude delegate remote cancel` (cancelled while
-its thread there runs, then cancelled again), against a loopback linked environment that records
+**Parity:** `claude delegate remote` (a wait), `claude delegate remote followup` (a follow-up sent
+there becomes a task; checked before its run there ends) and `claude delegate remote cancel`
+(cancelled while its thread there runs, then cancelled again), against a loopback linked environment that records
 each call (`scripts/remote_task_peer.py`). In the cancel, the result is steered into the parent's
 running Claude turn, which ends before reading it, and the CLI answers it as its next turn. Rust
 sends such an unread steer again as a queued run that adopts the CLI's copy; the reference leaves it

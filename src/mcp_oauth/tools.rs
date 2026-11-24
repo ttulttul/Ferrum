@@ -2687,16 +2687,22 @@ pub(super) async fn forward<S: McpHost>(
         .thread
         .as_ref()
         .map(|thread| (thread.id.as_str(), thread.title.as_str()));
-    forward_as(
+    let request = Value::Object(args);
+    let sent = forward_as(
         host,
         target,
         name,
-        Value::Object(args),
+        request.clone(),
         &caller.request_namespace(),
         &format!("{runtime}/{interaction}"),
         sender,
     )
-    .await
+    .await?;
+    // There the thread's parent is here, so only this side can make a follow-up a task.
+    if name == "t3_thread_send" {
+        return delegation::remote_follow_up(host, caller, target, &request, sent).await;
+    }
+    Ok(sent)
 }
 
 /// Sends `name` to the linked environment `target` as `namespace` (whose retry keys are scoped

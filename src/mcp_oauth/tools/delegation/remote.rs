@@ -848,7 +848,16 @@ async fn follow_once<S: McpHost>(
     if !is_terminal(waited["status"].as_str().unwrap_or_default()) {
         return Ok(false);
     }
-    let (result_run, result_status) = match waited["resultRun"]["runId"].as_str() {
+    // A later run's answer there may be another open follow-up's, or its restart, which no run id
+    // here names: then this task's answer is its own run's.
+    let shared_thread = waited["resultRun"]["runId"]
+        .as_str()
+        .is_some_and(|other| other != run_id)
+        && shares_thread(host, parent_id, task_id, &remote).await;
+    let (result_run, result_status) = match waited["resultRun"]["runId"]
+        .as_str()
+        .filter(|_| !shared_thread)
+    {
         Some(other) => (
             other.to_owned(),
             waited["resultRun"]["status"]
@@ -872,6 +881,131 @@ async fn follow_once<S: McpHost>(
     .map_err(fail)?;
     complete_with(terminal_status(&result_status), text, model).await;
     Ok(settled(host, parent_id, task_id).await)
+}
+
+/// Whether another task of the parent follows the same thread there and was still open when
+/// `task_id` was recorded (`sharedThread`).
+async fn shares_thread<S: McpHost>(
+    host: &Arc<S>,
+    parent_id: &str,
+    task_id: &str,
+    remote: &Value,
+) -> bool {
+    let store = host.control_state().store.read().await;
+    let Some(parent) = store.threads.get(parent_id) else {
+        return false;
+    };
+    let tasks = records(&parent.stored_row(), "subagents");
+    let recorded = tasks
+        .iter()
+        .find(|t| t["id"] == task_id)
+        .and_then(|t| t["startedAt"].as_str().map(str::to_owned));
+    tasks.iter().any(|other| {
+        other["id"] != task_id
+            && other["remoteChild"]["environmentId"] == remote["environmentId"]
+            && other["remoteChild"]["threadId"] == remote["threadId"]
+            && match (&recorded, other["completedAt"].as_str()) {
+                (Some(recorded), Some(completed)) => completed > recorded.as_str(),
+                _ => true,
+            }
+    })
+}
+
+/// `RemoteDelegation.followUp`: a message a thread here sent to a finished task's thread
+/// there becomes a task of its own, followed as the first was (its run there gives its result).
+/// Anything else (a steer, a thread that is no task's) answers as sent.
+pub(in crate::mcp_oauth::tools) async fn follow_up<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    environment: &str,
+    request: &Value,
+    sent: Value,
+) -> Outcome {
+    let Some(scope) = caller.granted.thread.as_ref() else {
+        return Ok(sent);
+    };
+    if !matches!(sent["delivery"].as_str(), Some("started" | "queued")) {
+        return Ok(sent);
+    }
+    let parent_id = scope.thread_id.clone();
+    let there = |task: &Value| {
+        task["remoteChild"]["environmentId"] == environment
+            && task["remoteChild"]["threadId"] == sent["threadId"]
+    };
+    let (finished, parent_run) = {
+        let store = host.control_state().store.read().await;
+        let Some(parent) = store.threads.get(&parent_id) else {
+            return Ok(sent);
+        };
+        let projection = parent.full_projection();
+        let finished = records(&projection, "subagents")
+            .into_iter()
+            .find(|task| there(task) && !task["result"].is_null());
+        (
+            finished,
+            crate::orchestration::follow_up_owner_run(&records(&projection, "runs")),
+        )
+    };
+    let (Some(finished), Some(parent_run)) = (finished, parent_run) else {
+        return Ok(sent);
+    };
+    if finished["model"].is_null() || parent_run["rootNodeId"].is_null() {
+        return Ok(sent);
+    }
+    // The message id there is the send's, so a retry that reached the same send records once.
+    let command_id = format!(
+        "command:remote-followup:{}:{}:{}",
+        encode_component(&parent_id),
+        encode_component(environment),
+        encode_component(sent["messageId"].as_str().unwrap_or_default())
+    );
+    let mut command = json!({
+        "type": "delegated_task.remote.request",
+        "commandId": command_id,
+        "parentThreadId": parent_id,
+        "parentRunId": parent_run["id"],
+        "parentNodeId": parent_run["rootNodeId"],
+        "task": request["message"],
+        "driver": finished["driver"],
+        "modelSelection": {"instanceId": finished["providerInstanceId"], "model": finished["model"]},
+        "remoteChild": {
+            "environmentId": environment,
+            "threadId": sent["threadId"],
+            "label": finished["remoteChild"]["label"],
+            "runId": sent["runId"],
+        },
+        "completionWake": "always",
+    });
+    if !finished["title"].is_null() {
+        command["title"] = finished["title"].clone();
+    }
+    if let Err(error) = host.dispatch(command).await {
+        tracing::warn!(?error, parent = %parent_id, "remote-delegation.followup-record-failed");
+        return Err(failure(
+            "orchestration_error",
+            if request["clientRequestId"].is_string() {
+                "The message was sent, but its task was not recorded; send it again with the same clientRequestId to record it."
+            } else {
+                "The message was sent, but its task was not recorded; read the thread for its answer instead of sending it again."
+            },
+        ));
+    }
+    let task_id = {
+        let store = host.control_state().store.read().await;
+        store.threads.get(&parent_id).and_then(|parent| {
+            records(&parent.stored_row(), "subagents")
+                .into_iter()
+                .find(|task| there(task) && task["remoteChild"]["runId"] == sent["runId"])
+                .and_then(|task| task["id"].as_str().map(str::to_owned))
+        })
+    };
+    let Some(task_id) = task_id else {
+        return Ok(sent);
+    };
+    spawn_follower(host, &parent_id, &task_id);
+    let mut answer = sent;
+    answer["taskId"] = json!(task_id);
+    Ok(answer)
 }
 
 /// Whether the task is done here: its result recorded and nothing left to stop there.
