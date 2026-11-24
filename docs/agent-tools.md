@@ -217,14 +217,28 @@ schemas.
    with its prompt, one left idle), `claude delegate followup` / `codex delegate followup` (the
    parent sends its finished child more work, whose result wakes it), `claude delegate restart` /
    `codex delegate restart` (the server restarts while a child runs), and `claude delegate live` /
-   `codex delegate live` (a child that finishes while its parent's turn runs) in
-   `scripts/client_thread_parity.py`, with fake CLIs for the parent and the child. Still pending,
-   each its own PR: worktree isolation (`isolation: "worktree"` is refused), tasks in a linked
-   environment (refused), a cancelled child's pull request watches, a stop's queued delivery runs
+   `codex delegate live` (a child that finishes while its parent's turn runs), and
+   `claude delegate worktree` (below), in `scripts/client_thread_parity.py`, with fake CLIs for the
+   parent and the child. Still pending, each its own PR: tasks in a linked environment (refused), a
+   cancelled child's pull request watches, a stop's queued delivery runs
    (the reference cancels a cohort's queued delivery), and recovery on the control plane (only
    the server recovers delegated tasks after a restart). While a Claude turn runs, the reference
    shows its delivery as a queued run at once; Rust, which holds queued runs until a client
    starts them, records the delivery's run when the turn ends, so only the final state matches.
+   Worktree isolation (native server only): `isolation: "worktree"` resolves the parent
+   checkout's commit and gives the child its own worktree there, as the reference's
+   `ThreadLaunchService.prepareRun` does. The child's first run waits as `preparing` (its
+   `workspacePreparation` recorded on the run) while the server checks the commit out on a
+   temporary `t3/<hex>` branch, records it on the child thread, renames the branch to one the
+   text generation model names, runs the project's worktree setup script and releases the run
+   into the checkout; `subscribeWorktreeSetup` shows the progress. A failure fails the run and
+   removes a worktree it never recorded. The commit and the rename use two server-internal Git
+   operations (`resolveCommit`, `renameBranch`) that clients cannot call; a t3-agentd workspace
+   serves them too, and an older t3-agentd turns the isolation down as an unresolved commit.
+   Differences: Rust does not wait for a setup script to finish before releasing the run, and a
+   failed branch rename is only logged (the reference adds a "Branch not renamed" notice to the
+   run). The control plane still refuses the isolation. Parity: `claude delegate worktree`, in a
+   temporary git repository, where the child reads its own `t3_worktree_status`.
 4c. **Attachments** (served, native server only): `t3_attachment_prepare_upload` issues an
    upload URL (with `uploadUrl` at the origin the call reached) for an upload its caller owns;
    `t3_attachment_discard` deletes it, for that caller only; `t3_thread_send_attachments` sends

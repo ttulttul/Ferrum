@@ -1767,6 +1767,23 @@ async fn apply_command<H: CommandHost>(
                             row["titleRenamed"] = true.into();
                             row["titleRegeneration"] = Value::Null;
                         }
+                        // Turns run in the thread's worktree, or its project's folder without one.
+                        if let Some(path) = command.get("worktreePath") {
+                            let cwd = match path.as_str() {
+                                Some(path) => Some(path.to_owned()),
+                                None => {
+                                    let store = state.store.read().await;
+                                    store
+                                        .threads
+                                        .get(thread_id)
+                                        .and_then(|thread| store.projects.get(&thread.project_id))
+                                        .map(|project| project.path.clone())
+                                }
+                            };
+                            if let Some(cwd) = cwd {
+                                patch.insert("cwd".into(), json!(cwd));
+                            }
+                        }
                         for field in ["branch", "worktreePath", "linkedPullRequest"] {
                             if let Some(value) = command.get(field) {
                                 row[field] = value.clone();

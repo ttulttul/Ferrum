@@ -16,7 +16,7 @@
 Based on `main` and the parity test suites:
 
 - **Codex and Claude Code agent turns:** Launching Codex and Claude Code sessions, streaming responses, tool calls, approvals (allow, allow for session, decline, `approval-required`, `auto-accept-edits`), and user-input / question requests. Each thread keeps its Claude CLI running across turns, and an instance's Codex turns share one app-server, as in the original. You can steer a running Codex or Claude turn with a text message.
-- **Delegated tasks:** An agent can start a child task, wait for it or get its result delivered later, check its progress, cancel it, send a finished child a follow-up, and create new threads. Tasks recover after a restart, and a result can be delivered into the parent's running turn.
+- **Delegated tasks:** An agent can start a child task, wait for it or get its result delivered later, check its progress, cancel it, send a finished child a follow-up, run it in its own worktree, and create new threads. Tasks recover after a restart, and a result can be delivered into the parent's running turn.
 - **Thread titles:** Codex, Claude, Pi, Grok, OpenCode (1.x and 2) and Antigravity text generation models can title threads.
 - **Scheduled tasks:** Agents can manage schedules, and due tasks start on their own.
 - **Checkpoints, interrupts, and token usage:** Reference-compatible checkpoint naming, turn interrupts (including stopping spawned child processes), token usage reporting, model reporting, and usage-limit reset times.
@@ -46,7 +46,7 @@ Most suites match the original exactly; the few expected differences are listed 
 
 - **Pull request changes.** Agents can read pull requests and CI, but can't open, update, review, respond to or merge one, or re-run CI (`pull_request_create`, `pull_request_update`, `pull_request_review`, `pull_request_respond`, `pull_request_merge`, `ci_rerun`).
 - **Devices.** Agents can use simulators and emulators on this machine, but not on SSH, Expo or Simlock device hosts.
-- **Delegated tasks.** A child can't run in its own worktree (`isolation: "worktree"`) or on a linked machine yet.
+- **Delegated tasks.** A child can't run on a linked machine yet, and on the embeddable control plane it can't run in its own worktree (`isolation: "worktree"`).
 - **Codex skills.** `orchestrator_capabilities` doesn't rescan the project's Codex skills, as the original does (upstream #39247).
 - **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing. So are browser setup hints and installing a browser when none is found.
 - **Secrets in schedules.** A scheduled task can't use a secret yet, and the embeddable control plane stores no secrets.
@@ -75,7 +75,7 @@ Parity is tested by running the original TypeScript server and the Rust server s
 - **Pinned reference:** [upstream commit `fd0331ca`](https://github.com/pingdotgg/t3code/tree/fd0331ca9b1596ed7018c80f52b7e6730014f593) (`fd0331ca9b1596ed7018c80f52b7e6730014f593`). This is the only place the README names it.
 - **Suites:** 48 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
 - **Client calls:** the [client RPC suite](scripts/client_rpc_cases.json) drives 242 recorded client steps through the original client. 1 check is expected to fail ([list](scripts/client_rpc_parity_xfail.json)).
-- **Live turns:** the client thread suite runs 87 provider scenarios. 38 checks are expected to fail, 7 of them races ([list](scripts/client_thread_parity_xfail.json)).
+- **Live turns:** the client thread suite runs 88 provider scenarios. 40 checks are expected to fail, 9 of them races ([list](scripts/client_thread_parity_xfail.json)).
 - **Shared home:** the server-switch suite has 1 expected failure ([list](scripts/shared_store_parity_xfail.json)).
 - **Provider status:** the [provider status suite](scripts/provider_status_parity.py) has no expected failures.
 - **Other suites:** 1 known difference in the peer link suites ([list](scripts/parity_gaps.json)).

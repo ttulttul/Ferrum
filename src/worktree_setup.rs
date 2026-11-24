@@ -139,6 +139,28 @@ impl WorktreeSetupTracker {
         snapshot
     }
 
+    /// Skips `stage_id` with `detail` when it never started.
+    pub fn skip_pending(&self, thread_id: &str, stage_id: &str, detail: &str) -> Option<Value> {
+        self.modify(thread_id, |snapshot| {
+            if let Some(stage) = snapshot["stages"].as_array_mut().and_then(|stages| {
+                stages
+                    .iter_mut()
+                    .find(|stage| stage["id"] == stage_id && stage["status"] == "pending")
+            }) {
+                stage["status"] = json!("skipped");
+                stage["detail"] = json!(detail);
+            }
+        })
+    }
+
+    /// Names the worktree and its branch once it exists.
+    pub fn set_workspace(&self, thread_id: &str, path: &str, branch: &str) -> Option<Value> {
+        self.modify(thread_id, |snapshot| {
+            snapshot["worktreePath"] = json!(path);
+            snapshot["branch"] = json!(branch);
+        })
+    }
+
     /// Names the worktree once it exists.
     pub fn set_worktree_path(&self, thread_id: &str, path: &str) -> Option<Value> {
         self.modify(thread_id, |snapshot| snapshot["worktreePath"] = json!(path))

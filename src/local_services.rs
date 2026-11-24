@@ -179,6 +179,21 @@ mod tests {
         .await;
         let path = wt["worktree"]["path"].as_str().unwrap();
         assert!(std::path::Path::new(path).join(".git").exists());
+        // The server-internal operations a delegated task's worktree uses.
+        let head = call("resolveCommit", json!({"cwd":cwd,"revision":"HEAD"})).await;
+        let sha = head["commitSha"].as_str().unwrap();
+        assert_eq!(sha.len(), 40);
+        let side = call("resolveCommit", json!({"cwd":path,"revision":sha})).await;
+        assert_eq!(side["commitSha"], sha);
+        call("createRef", json!({"cwd":cwd,"refName":"t3/abcdef01"})).await;
+        call("switchRef", json!({"cwd":path,"refName":"t3/abcdef01"})).await;
+        call("createRef", json!({"cwd":cwd,"refName":"t3/greet"})).await;
+        let renamed = call(
+            "renameBranch",
+            json!({"cwd":path,"oldBranch":"t3/abcdef01","newBranch":"t3/greet"}),
+        )
+        .await;
+        assert_eq!(renamed["branch"], "t3/greet-1");
         call("removeWorktree", json!({"cwd":cwd,"path":path})).await;
         assert!(!std::path::Path::new(path).exists());
     }

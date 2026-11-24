@@ -359,12 +359,24 @@ pub(super) async fn delegate_task<S: McpHost>(
     let command_id = stable_command_id(caller, "delegate-task", &key);
     let selection = resolve_target(&providers, &parent, &target)?;
     let (runtime, interaction) = child_modes(&parent, a)?;
-    if a["isolation"] == "worktree" {
+    if a["isolation"] == "worktree" && !host.prepares_worktrees() {
         return Err(failure(
             "invalid_request",
             "Isolation \"worktree\" is not available on this server yet. Use isolation \"shared\".",
         ));
     }
+    let retry = host
+        .control_state()
+        .store
+        .read()
+        .await
+        .command_receipts
+        .contains_key(&command_id);
+    let workspace_strategy = if a["isolation"] == "worktree" && !retry {
+        Some(worktree_strategy(host, &parent).await?)
+    } else {
+        None
+    };
     let wait = a["mode"] == "wait";
     let mut command = json!({
         "type": "delegated_task.request",
@@ -383,6 +395,9 @@ pub(super) async fn delegate_task<S: McpHost>(
     if let Some(title) = arg_str(a, "title")? {
         command["title"] = json!(title);
     }
+    if let Some(strategy) = workspace_strategy {
+        command["workspaceStrategy"] = strategy;
+    }
     let run_end = wait.then(|| {
         crate::orchestration::watch_run_end(&crate::orchestration::task_thread_id(&command_id))
     });
@@ -399,6 +414,25 @@ pub(super) async fn delegate_task<S: McpHost>(
         )
     })?;
     let task_id = crate::orchestration::task_node_id(&command_id);
+    // A child that waits for its worktree is prepared now, in the background.
+    let child_id = crate::orchestration::task_thread_id(&command_id);
+    let preparing = {
+        let store = host.control_state().store.read().await;
+        store.threads.get(&child_id).and_then(|thread| {
+            let row = thread.stored_row();
+            thread
+                .runs
+                .iter()
+                .find(|run| {
+                    run.status == "preparing"
+                        && row["runExtras"][run.wire_id()]["workspacePreparation"].is_object()
+                })
+                .map(|run| run.wire_id())
+        })
+    };
+    if let Some(run_id) = preparing {
+        host.prepare_delegated_run(command_id.clone(), child_id, run_id);
+    }
     if wait {
         let timeout = a["timeoutMs"]
             .as_f64()
@@ -407,6 +441,57 @@ pub(super) async fn delegate_task<S: McpHost>(
         return await_task(host, caller, &task_id, &key, run_end, timeout).await;
     }
     read_task(host, caller, &task_id, false, true).await
+}
+
+/// The worktree a child with `isolation: "worktree"` gets: a checkout of the parent's
+/// commit, made from the project's repository.
+async fn worktree_strategy<S: McpHost>(host: &Arc<S>, parent: &Value) -> Result<Value, Refusal> {
+    let (root, title) = {
+        let store = host.control_state().store.read().await;
+        let project = parent["projectId"]
+            .as_str()
+            .and_then(|id| store.project_rows.get(id))
+            .filter(|row| row["deletedAt"].is_null())
+            .ok_or_else(|| failure("project_not_found", "The project was not found."))?;
+        (
+            project["workspaceRoot"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            project["title"].as_str().unwrap_or_default().to_owned(),
+        )
+    };
+    let resolve = |cwd: String, revision: String| async move {
+        host.workspace_call(
+            "vcs.resolveCommit".into(),
+            json!({"cwd": cwd, "revision": revision}),
+        )
+        .await
+        .ok()
+        .and_then(|reply| reply["commitSha"].as_str().map(str::to_owned))
+    };
+    let parent_checkout = parent["worktreePath"].as_str().map(str::to_owned);
+    let base = resolve(
+        parent_checkout.clone().unwrap_or_else(|| root.clone()),
+        "HEAD".into(),
+    )
+    .await
+    .ok_or_else(|| {
+        failure(
+            "invalid_request",
+            "Unable to resolve the parent checkout commit.",
+        )
+    })?;
+    // The worktree is made from the project's repository, which must hold that commit.
+    if parent_checkout.is_some() && resolve(root.clone(), base.clone()).await.is_none() {
+        return Err(failure(
+            "invalid_request",
+            format!(
+                "Isolation \"worktree\" creates the child checkout in project \"{title}\" ({root}), which does not contain the parent checkout's commit. Use isolation \"shared\" to work in the parent's checkout."
+            ),
+        ));
+    }
+    Ok(json!({"type": "worktree", "baseRef": base, "startFromOrigin": false}))
 }
 
 pub(super) async fn task_status<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> Outcome {

@@ -221,6 +221,11 @@ PROVIDER_SCENARIOS = [
     # per thread on both servers), and its result answers the wait.
     {"name": "claude delegate", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate.json", "awaitStatus": True},
+    # A delegated task in its own worktree (`isolation: "worktree"`): the child waits, preparing,
+    # while the server checks out the parent's commit on a temporary branch and renames it to a
+    # generated name, then runs in that checkout.
+    {"name": "claude delegate worktree", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_worktree.json", "awaitStatus": True},
     # A delegated task that runs on after the parent's turn: its result wakes the idle parent
     # with a delivery turn, which reads it with task_status.
     {"name": "claude delegate async", "instance": "claudeAgent", "model": "claude-opus-5-5",
@@ -930,6 +935,8 @@ def cli_approvals(log):
 
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# A new worktree's folder (`<branch>-<random>`), named apart on each server.
+WORKTREE_DIR = re.compile(r"(/worktrees/[^/\"\s]+/)t3-[0-9a-f]{8}-[0-9a-f]{16}")
 BEARER = re.compile(r"Bearer [A-Za-z0-9_\-.]+")
 MCP_URL = re.compile(r"http://127\.0\.0\.1:\d+/mcp")
 
@@ -982,6 +989,7 @@ def agent_mcp(log, root):
                 value = value.replace(f"{root}/{server}", "<home>/<server>")
             value = value.replace(str(root), "<home>")
             value = re.sub(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z", "<time>", value)
+            value = WORKTREE_DIR.sub(r"\1<worktree>", value)
             return UUID.sub("<uuid>", value)
         if isinstance(value, list):
             return [mask(item) for item in value]
@@ -1076,6 +1084,7 @@ def cli_launch(log, root):
             for server in ("original", "rust"):
                 value = value.replace(f"{root}/{server}", "<home>/<server>")
             value = MCP_URL.sub("http://127.0.0.1:<port>/mcp", BEARER.sub("Bearer <token>", value))
+            value = WORKTREE_DIR.sub(r"\1<worktree>", value)
             return UUID.sub("<uuid>", value.replace(str(root), "<home>"))
         if isinstance(value, list):
             return [mask(item) for item in value]

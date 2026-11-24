@@ -5,6 +5,8 @@
 //! generation model for a title and completes the request with
 //! `thread.title.regeneration.complete`.
 #[cfg(feature = "native")]
+pub(crate) mod branch;
+#[cfg(feature = "native")]
 pub(crate) mod prompt;
 #[cfg(feature = "native")]
 pub(crate) mod runner;
@@ -171,8 +173,23 @@ mod service {
         )
     }
 
+    /// The settings as they apply in `project_id`, with its overrides
+    /// (`resolveProjectSettings`), for the settings read without a special case.
+    pub(crate) fn project_settings(settings: &Value, project_id: &str) -> Value {
+        let mut merged = settings.clone();
+        if let (Some(target), Some(overrides)) = (
+            merged.as_object_mut(),
+            settings["projectSettingsOverrides"][project_id].as_object(),
+        ) {
+            for (key, value) in overrides {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        merged
+    }
+
     /// A project-scoped setting: the project's override when it has one.
-    fn project_setting(settings: &Value, project_id: &str, key: &str) -> Value {
+    pub(crate) fn project_setting(settings: &Value, project_id: &str, key: &str) -> Value {
         let overridden = &settings["projectSettingsOverrides"][project_id][key];
         if key == "textGenerationModelSelection" && overridden.is_object() {
             let instance = overridden["instanceId"].as_str().unwrap_or_default();
@@ -291,6 +308,7 @@ mod service {
                 attachments: &attachments,
                 selection,
                 project_id,
+                output: runner::OutputKind::Title,
             },
         )
         .await?;
@@ -361,6 +379,8 @@ mod service {
 
 #[cfg(feature = "native")]
 pub use service::execute;
+#[cfg(feature = "native")]
+pub(crate) use service::{project_setting, project_settings};
 
 #[cfg(test)]
 mod tests {

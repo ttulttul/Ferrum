@@ -29,6 +29,10 @@
   "claude delegate": {
     "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   },
+  "claude delegate worktree": {
+    "live": "Racy: seen both matching and differing (8 pinned runs: most differed, one matched): #39502 (ProviderCommitBatch) usually combines the parent's tool item snapshots, so the reference's live stream carries it once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated); with the child's worktree preparation in between, the reference sometimes sends both too.",
+    "agent mcp": "Racy: seen both matching and differing (8 pinned runs and the shards matched; a later shard run differed): the reference's task_status sometimes reads the task before its outbox finalizer records the result's context transfer, so its resultContextTransferId is null where Rust's is set, as in codex delegate's agent mcp."
+  },
   "claude delegate followup": {
     "live": "Racy: seen both matching and differing (main CI run 45294158798 differed, its re-run and #202's CI matched): that time the reference sent one more subagent.updated, after the first task's context-transfer.created and before the follow-up task's node.updated, which Rust did not. Probably the reference's provider commit batch timing (#39502), which decides whether a subagent's queued updates commit together or one by one.",
     "orchestration.subscribeThread (live turn)": "Racy: the reference's live turn sometimes does not settle before the harness stops waiting (the reference goes silent; Rust answers), seen both matching and differing, on main too."

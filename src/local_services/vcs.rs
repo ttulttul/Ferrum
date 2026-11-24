@@ -651,6 +651,8 @@ impl VcsService {
                 | "switchRef"
                 | "createWorktree"
                 | "removeWorktree"
+                | "resolveCommit"
+                | "renameBranch"
         ) {
             return None;
         }
@@ -845,6 +847,63 @@ impl VcsService {
             }
             "removeWorktree" => {
                 removal::remove(cwd, string(input, "path")?, input["force"] == true).await
+            }
+            // Server-internal (not client RPCs): a delegated task's worktree preparation.
+            "resolveCommit" => {
+                let revision = format!("{}^{{commit}}", string(input, "revision")?);
+                let sha = checked(
+                    cwd,
+                    "resolveCommit",
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        "--end-of-options",
+                        &revision,
+                    ],
+                    "Unable to resolve the commit.",
+                )
+                .await?;
+                Ok(json!({"commitSha": sha.trim()}))
+            }
+            "renameBranch" => {
+                let old = string(input, "oldBranch")?;
+                let new = string(input, "newBranch")?;
+                if old == new {
+                    return Ok(json!({"branch": new}));
+                }
+                let target = if input["exactName"] == true {
+                    new.to_owned()
+                } else {
+                    let listed = checked(
+                        cwd,
+                        "resolveAvailableBranchName",
+                        &["for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"],
+                        "git for-each-ref failed",
+                    )
+                    .await?;
+                    let branches: Vec<String> = listed
+                        .lines()
+                        .filter(|line| !line.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    crate::title_generation::branch::available_branch_name(&branches, new)
+                        .ok_or_else(|| {
+                            let mut error = failure_context("renameBranch", cwd, &["branch", "-m"]);
+                            error["detail"] = json!(format!(
+                                "Could not find an available branch name for '{new}'."
+                            ));
+                            error
+                        })?
+                };
+                checked(
+                    cwd,
+                    "renameBranch",
+                    &["branch", "-m", "--", old, &target],
+                    "git branch rename failed",
+                )
+                .await?;
+                Ok(json!({"branch": target}))
             }
             _ => unreachable!(),
         }

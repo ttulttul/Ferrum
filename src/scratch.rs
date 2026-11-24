@@ -159,7 +159,7 @@ pub(crate) async fn folder_for_thread(
 }
 
 /// Folds accented Latin letters to ASCII; other scripts pass through.
-fn fold_latin_diacritics(text: &str) -> String {
+pub(crate) fn fold_latin_diacritics(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         let folded: &str = match ch {
