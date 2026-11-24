@@ -1,9 +1,11 @@
 use super::agent_device::{self, AgentEndpoint, StartError};
+use super::ssh_device_host::{self as ssh_host, SshConfig};
 use super::{invalid, string, timestamp, Reply};
 use crate::settings::{
     secrets::{provider_label, ReadMode, Resolver},
     Settings,
 };
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
@@ -51,6 +53,11 @@ pub struct DeviceService {
     agent: Mutex<Option<AgentEndpoint>>,
     /// Launchers bound since startup, by agent-device session.
     launchers: tokio::sync::Mutex<HashMap<String, PathBuf>>,
+    /// The SSH device hosts from settings (`deviceHosts`) that are not this
+    /// machine, in settings order, with each one's latest summary.
+    ssh_hosts: Mutex<Vec<(SshConfig, Value)>>,
+    /// Serializes host reconciles (the reference's lifecycle lock).
+    reconcile_lock: tokio::sync::Mutex<()>,
 }
 
 const DEVICE_SETTINGS: [(&str, &str); 3] = [
@@ -74,6 +81,8 @@ impl DeviceService {
             runtime: Default::default(),
             agent: Mutex::new(None),
             launchers: Default::default(),
+            ssh_hosts: Mutex::new(Vec::new()),
+            reconcile_lock: Default::default(),
         })
     }
 }
@@ -1254,6 +1263,20 @@ impl DeviceService {
         wire(&self.state.lock().unwrap())
     }
     fn publish(&self, state: &mut Value) {
+        // This machine first, then the configured hosts, as the reference's host map orders them.
+        let local = state["hosts"]
+            .as_array()
+            .and_then(|hosts| hosts.iter().find(|h| h["id"] == LOCAL_HOST_ID))
+            .cloned();
+        let mut hosts: Vec<Value> = local.into_iter().collect();
+        hosts.extend(
+            self.ssh_hosts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, summary)| summary.clone()),
+        );
+        state["hosts"] = Value::Array(hosts);
         state["revision"] = json!(state["revision"].as_u64().unwrap_or(0) + 1);
         *self.state.lock().unwrap() = state.clone();
         let _ = self.events.send(wire(state));
@@ -1388,7 +1411,7 @@ impl DeviceService {
                 let settings = self.settings.internal().map_err(|_| json!({"_tag":"DeviceEasAccountError","reason":"Could not read the saved token."}))?;
                 return expo(input, &settings, &self.settings.resolver).await;
             }
-            "testHost" => return ssh_probe(input, dir).await,
+            "testHost" => return test_host(input, dir).await,
             _ => {}
         }
         let mut runtime = self.runtime.lock().await;
@@ -1481,6 +1504,11 @@ impl DeviceService {
             if input["inspectOnly"] == true || input.get("updateTool").is_some() {
                 state["hosts"] = json!([fresh_host.clone()]);
                 self.publish(&mut state);
+            }
+            if input["inspectOnly"] == true && input.get("updateTool").is_none() {
+                drop(runtime);
+                self.inspect_ssh_hosts(dir).await;
+                return Ok(self.snapshot(dir));
             }
             if enabled
                 && input["inspectOnly"] != true
@@ -2464,7 +2492,9 @@ impl DeviceService {
     }
 }
 
-async fn ssh_probe(input: &Value, dir: &Path) -> Reply {
+/// `testHost`: a host's summary from the reference's probe, or this
+/// machine's when the target is this machine.
+async fn test_host(input: &Value, dir: &Path) -> Reply {
     let id = string(input, "id")?;
     let label = string(input, "label")?;
     let target = string(input, "target")?;
@@ -2474,71 +2504,163 @@ async fn ssh_probe(input: &Value, dir: &Path) -> Reply {
     if target.starts_with('-') || target.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err(invalid("target", "Invalid SSH target"));
     }
-    let failed = |reason: &str| json!({"_tag":"DeviceHostUnavailableError","hostId":id,"hostLabel":label,"reason":reason,"cause":null});
-    let mut cmd = crate::login_shell::tokio_command("ssh");
-    cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]);
-    if let Some(port) = input.get("port") {
-        let p = port
-            .as_u64()
-            .filter(|n| (1..=65535).contains(n))
-            .ok_or_else(|| invalid("port", "Invalid port"))?;
-        cmd.args(["-p", &p.to_string()]);
-    }
-    if input.get("identityFile").is_some() {
-        cmd.args(["-i", string(input, "identityFile")?]);
-    }
+    let port = match input.get("port") {
+        Some(port) => Some(
+            port.as_u64()
+                .and_then(|p| u16::try_from(p).ok())
+                .filter(|p| *p >= 1)
+                .ok_or_else(|| invalid("port", "Invalid port"))?,
+        ),
+        None => None,
+    };
+    let identity_file = match input.get("identityFile") {
+        Some(_) => Some(string(input, "identityFile")?.to_owned()),
+        None => None,
+    };
     if super::local_ssh::local_target(input).await {
         return Ok(host(dir, false));
     }
-    // Probe remote capabilities with a fixed script. No request field enters the remote shell.
-    const PROBE: &str = r#"command -v node >/dev/null || exit 42
-uname -s
-command -v xcrun >/dev/null && echo xcrun
-sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}
-test -x "$sdk/platform-tools/adb" && test -x "$sdk/emulator/emulator" && test -x "$sdk/cmdline-tools/latest/bin/avdmanager" && echo android
-command -v expo-device-hub >/dev/null && echo hub
-command -v agent-device >/dev/null && echo agent
-exit 0"#;
-    let output = tokio::time::timeout(
-        Duration::from_secs(15),
-        cmd.args(["--", target, PROBE])
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .ok_or_else(|| failed("Could not connect to this host over SSH."))?;
-    if !output.status.success() {
-        return Err(failed(if output.status.code() == Some(42) {
-            "Connected over SSH, but Node is not on this host's PATH for non-interactive SSH commands."
-        } else {
-            "Could not connect to this host over SSH."
-        }));
+    let config = SshConfig {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        target: target.to_owned(),
+        port,
+        identity_file,
+    };
+    ssh_host::probe(&config, &ssh_host::owner(dir, id))
+        .await
+        .map_err(|error| match ssh_host::probe_failure_message(&error) {
+            Some(reason) => json!({
+                "_tag": "DeviceHostUnavailableError",
+                "hostId": id,
+                "hostLabel": label,
+                "reason": reason,
+                "cause": error.encoded(id),
+            }),
+            None => json!({
+                "_tag": "DeviceOperationError",
+                "operation": "probe host",
+                "reason": "request_failed",
+            }),
+        })
+}
+
+impl DeviceService {
+    /// `inspect` for the SSH hosts: each one's probe, or the reference's
+    /// note that its versions could not be checked.
+    async fn inspect_ssh_hosts(&self, dir: &Path) {
+        let hosts: Vec<SshConfig> = self
+            .ssh_hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(config, _)| config.clone())
+            .collect();
+        let probes = futures_util::stream::iter(hosts)
+            .map(|config| async move {
+                let result = ssh_host::probe(&config, &ssh_host::owner(dir, &config.id)).await;
+                (config, result)
+            })
+            .buffer_unordered(4);
+        futures_util::pin_mut!(probes);
+        while let Some((config, result)) = probes.next().await {
+            {
+                let mut hosts = self.ssh_hosts.lock().unwrap();
+                let Some((_, summary)) = hosts.iter_mut().find(|(c, _)| *c == config) else {
+                    continue;
+                };
+                match result {
+                    Ok(probed) => *summary = probed,
+                    Err(_) => {
+                        summary["toolInspectionError"] = json!("Cannot check versions. Reconnect the host and check again. Installed tools have not been changed.");
+                    }
+                }
+            }
+            let mut state = self.snapshot(dir);
+            self.publish(&mut state);
+        }
     }
-    let output = String::from_utf8_lossy(&output.stdout);
-    let has = |s: &str| output.lines().any(|l| l.trim() == s);
-    let ios = has("Darwin") && has("xcrun");
-    let android = has("android");
-    let mut platforms = vec![
-        json!({"platform":"ios","available":ios}),
-        json!({"platform":"android","available":android}),
-    ];
-    if !ios {
-        platforms[0]["reason"] = json!("iOS Simulators need macOS with Xcode.");
+
+    /// `reconcile`: the SSH hosts in settings that are not this machine.
+    /// A removed or changed host goes (with its devices, sessions, status
+    /// and agent config), and a new one starts unprobed.
+    pub(crate) async fn reconcile_hosts(&self, dir: &Path) {
+        let _lock = self.reconcile_lock.lock().await;
+        let Ok(settings) = self.settings.internal() else {
+            return;
+        };
+        let mut next: Vec<Value> = settings["deviceHosts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        super::local_ssh::retain_remote(&mut next).await;
+        let next: Vec<SshConfig> = next.iter().filter_map(SshConfig::from_settings).collect();
+        let removed: Vec<String> = {
+            let mut hosts = self.ssh_hosts.lock().unwrap();
+            let removed = hosts
+                .iter()
+                .filter(|(config, _)| !next.contains(config))
+                .map(|(config, _)| config.id.clone())
+                .collect::<Vec<_>>();
+            hosts.retain(|(config, _)| next.contains(config));
+            removed
+        };
+        if !removed.is_empty() {
+            self.refresh_hosts(dir, &removed);
+            for id in &removed {
+                let _ = tokio::fs::remove_file(agent_device::config_path(dir, id)).await;
+            }
+        }
+        let added = {
+            let mut hosts = self.ssh_hosts.lock().unwrap();
+            let mut added = false;
+            for config in next {
+                if hosts.iter().any(|(c, _)| c.id == config.id) {
+                    continue;
+                }
+                added = true;
+                let summary = config.unprobed_summary();
+                hosts.push((config, summary));
+            }
+            added
+        };
+        if added || !removed.is_empty() {
+            self.refresh_hosts(dir, &removed);
+        }
     }
-    if !android {
-        platforms[1]["reason"] = json!("Android SDK was not found. Install it with Android Studio or set ANDROID_HOME on the SSH host.");
+
+    /// `refreshHosts`: publishes the hosts, without what removed hosts had.
+    fn refresh_hosts(&self, dir: &Path, removed: &[String]) {
+        let mut state = self.snapshot(dir);
+        let gone = |id: &Value| {
+            id.as_str()
+                .is_some_and(|id| removed.iter().any(|r| r == id))
+        };
+        if let Some(statuses) = state["hostStatuses"].as_object_mut() {
+            statuses.retain(|id, _| !removed.iter().any(|r| r == id));
+        }
+        for key in ["devices", "sessions"] {
+            if let Some(list) = state[key].as_array_mut() {
+                list.retain(|entry| !gone(&entry["hostId"]));
+            }
+        }
+        self.publish(&mut state);
     }
-    Ok(json!({
-        "id": id,
-        "label": label,
-        "platforms": platforms,
-        "hubInstalled": has("hub"),
-        "agentDeviceInstalled": has("agent"),
-        "kind": "ssh",
-    }))
+
+    /// Reconciles the SSH hosts now and on every settings change, as the
+    /// reference's settings subscription does.
+    pub(crate) async fn watch_hosts(&self, dir: &Path) {
+        let mut changes = self.settings.subscribe();
+        self.reconcile_hosts(dir).await;
+        loop {
+            match changes.recv().await {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    self.reconcile_hosts(dir).await
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
 }
 
 fn saved_host<'a>(settings: &'a Value, key: &str, input: &Value) -> Option<&'a Value> {

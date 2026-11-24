@@ -1420,6 +1420,9 @@ where
     });
     // Check the provider CLIs once clients can load, as the reference does.
     tokio::spawn(crate::provider_status::run(state.clone()));
+    // The SSH device hosts in settings, kept in step with them.
+    let devices = state.local.clone();
+    tokio::spawn(async move { devices.devices.watch_hosts(&devices.data_dir).await });
     let (stopping_tx, stopping_rx) = oneshot::channel::<()>();
     let stopping_endpoint = endpoint.clone();
     let stopping_state = state.clone();

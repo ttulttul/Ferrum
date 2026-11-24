@@ -377,8 +377,19 @@ schemas.
    `close`); a shutdown also runs the launcher's `close`. Turning agent access off stops the daemon
    with `daemon stop`. `device_screenshot` is an image tool: hub screenshot, `extractPng`, the Xcode
    26 `simctl` fallback, and the reference's `imageToolFailure` shape. Threads that may use
-   devices get the reference's device instruction text (see above). Not done yet: SSH, Expo and
-   Simlock device hosts.
+   devices get the reference's device instruction text (see above).
+
+   SSH device hosts (`SshDeviceHost.ts`, started): the hosts in `deviceHosts` that are not this
+   machine (`ssh -G`, as `remoteSshDeviceHosts` checks) are listed, kept in step with settings,
+   and dropped with their devices, sessions, status and agent config when removed.
+   `device.testHost` and `device.list` with `inspectOnly` run the reference's probe: `ssh` with
+   its options (`baseSshArgs`, `runSshCommand`), its shell prelude and its Node bootstrap on stdin
+   (`src/local_services/device_ssh.json`, generated from the pinned reference by
+   `scripts/update_agent_tools.py`), under the owner name `ownerFor` gives this server, with its
+   failure messages (connect errors, host keys, Windows hosts) and encoded causes.
+   `scripts/device_ssh_parity.py` compares them against a fake `ssh` that runs a host's commands
+   under its own fake home on this machine. Not done yet: starting a host (its hub and the `ssh -L`
+   tunnels), its devices and agent tools; Expo and Simlock hosts.
 5. **Prompt context and capabilities** (served), as above.
 6. **Scheduled tasks**: `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task` and
    `run_scheduled_task_now` share the reference's `scheduled_tasks` table. Thread callers
