@@ -41,7 +41,7 @@ Steps:
                              and stream output are available in the same read
   {"stderr": "text"}         write a line to standard error
   {"sleep": seconds}                    (a tool call's end also waits "toolGap" seconds,
-                                        0.25 unless the scenario sets it; see TOOL_GAP)
+                                        0.5 unless the scenario sets it; see TOOL_GAP)
   {"exit": code}
   {"mcp": {"tool": "t3_thread_list", "arguments": {...}}}
                              call a tool on the T3 MCP server the client gave
@@ -180,13 +180,14 @@ mcp_servers = {}
 
 # Answers to requests a client may make between the scripted ones.
 # How long a tool runs: the CLI waits this long before it reports a tool call's end
+# (half a second leaves room for a server that lags behind the CLI under load)
 # (a Codex command or file change's item/completed, a Claude tool_result). Well over
 # the time either server takes to commit the call's start (the reference's provider
 # commit batch only combines snapshots that queue while it commits), so neither
 # combines a tool's start with its end, on any run. A scenario sets "toolGap" (0 for
 # none) where something else must happen while its tools run, such as a steer or a
 # delegated task, whose timing the gap would change.
-TOOL_GAP = float(scenario.get("toolGap", 0.25))
+TOOL_GAP = float(scenario.get("toolGap", 0.5))
 
 
 def ends_tool(frame):

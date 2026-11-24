@@ -39,7 +39,8 @@
     "live": "Racy: the reference's provider commit batch (#39502) decides by timing whether a subagent's queued updates commit together: in 1 of 8 pinned local rounds it sent one more subagent.updated after the task's context-transfer.created than Rust. Matched in the other rounds."
   },
   "claude delegate worktree": {
-    "agent mcp": "Racy: seen both matching and differing (8 pinned runs and the shards matched; a later shard run differed): the reference's task_status sometimes reads the task before its outbox finalizer records the result's context transfer, so its resultContextTransferId is null where Rust's is set, as in codex delegate's agent mcp."
+    "agent mcp": "Racy: seen both matching and differing (8 pinned runs and the shards matched; a later shard run differed): the reference's task_status sometimes reads the task before its outbox finalizer records the result's context transfer, so its resultContextTransferId is null where Rust's is set, as in codex delegate's agent mcp.",
+    "live": "Racy: seen both matching and differing (1 of about 15 pinned local rounds differed): whether the child's completion records (subagent.updated, its node and turn item, the context transfer) land before or after the parent's next command starts depends on how fast each server runs the child in its worktree, which the fake CLIs' tool pacing does not fix."
   },
   "claude delegate remote cancel": {
     "attempts": "The cancelled task's result is steered into the parent's running Claude turn on both servers, and this fixture's CLI never reads it before its turn ends. The reference counts that steer delivered; Rust's resend_untaken_deliveries sends it again as a queued wake once the turn ends (a second run, its notification and message). A steering difference of its own, not of tasks in linked environments; the task, its result, its cancel and every call to the linked environment match.",
@@ -116,7 +117,16 @@
   "grok turn": {
     "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
+  "claude steer": {
+    "live": "Racy: seen both matching and differing (one of two full pinned local rounds under load, and on CI): the reference's provider commit batch (#39502) combines a tool call's start and end only when the end arrives while its worker is still committing the start, and this fixture's tools cannot be paced (toolGap 0: the steer must land while a tool runs), so whether the reference sends a tool's running update depends on timing."
+  },
+  "claude approval interrupted": {
+    "live": "Racy: seen both matching and differing (CI jobs 138558658612; 16 of 16 pinned local runs matched): during the approval, the reference sometimes leaves out the requested tool call's second command_execution turn-item.updated after the approval request's records, where Rust always sends it. It comes from the reference's provider commit batch timing around the request (#39502), before any tool call ends, so the fake CLIs' tool pacing does not cover it, nor does waiting for the stream to settle before answering or interrupting (tried)."
+  },
+  "claude auto-accept-edits": {
+    "live": "Racy: seen both matching and differing (CI jobs 138573348421; 16 of 16 pinned local runs matched): during the approval, the reference sometimes leaves out the requested tool call's second command_execution turn-item.updated after the approval request's records, where Rust always sends it. It comes from the reference's provider commit batch timing around the request (#39502), before any tool call ends, so the fake CLIs' tool pacing does not cover it, nor does waiting for the stream to settle before answering or interrupting (tried)."
+  },
   "claude approval-required": {
-    "live": "Racy: in 1 of 11 pinned local rounds (under heavy machine load) Rust sent the command item's update between the approval request's records, where the reference's provider commit batch (#39502) held it behind them. Matched in the other rounds."
+    "live": "Racy: seen both matching and differing (1 of 16 pinned local runs differed, the rest matched): during the approval, the reference sometimes leaves out the requested tool call's second command_execution turn-item.updated after the approval request's records, where Rust always sends it. It comes from the reference's provider commit batch timing around the request (#39502), before any tool call ends, so the fake CLIs' tool pacing does not cover it, nor does waiting for the stream to settle before answering or interrupting (tried)."
   }
 }
