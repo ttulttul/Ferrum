@@ -100,7 +100,9 @@ def unguarded_processes(path):
 
 def main():
     problems = []
-    suites_and_harness = sorted((ROOT / "scripts").glob("*_parity.py")) + [ROOT / "scripts/parity_harness.py"]
+    # The performance comparison starts both servers too, though it runs in no shard.
+    suites_and_harness = sorted((ROOT / "scripts").glob("*_parity.py")) + [ROOT / "scripts/parity_harness.py",
+                                                                          ROOT / "scripts/perf_compare.py"]
     for path in suites_and_harness:
         for where in unguarded_processes(path):
             problems.append(f"{where} starts a process without parity_harness.server_env, so a server could "

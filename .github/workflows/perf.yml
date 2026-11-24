@@ -1,0 +1,133 @@
+name: Performance
+
+# Compares the Rust server with the pinned reference on every push to main (see docs/performance.md),
+# and records the results on the perf-data branch. It never runs on pull requests, and it is its own
+# workflow, so it cannot slow or block the parity checks.
+on:
+  push:
+    branches: [main]
+    # A change to the docs alone changes neither server.
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+  workflow_dispatch:
+
+# One run at a time, queued rather than cancelled: each run adds its results to perf-data.
+concurrency:
+  group: performance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: compare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      # Pushes the results to the perf-data branch (never to main).
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch the pinned public reference
+        run: |
+          # The commit the parity workflow pins, so both compare the same reference.
+          pinned=$(grep -oE 'pingdotgg/t3code\.git [0-9a-f]{40}' .github/workflows/parity.yml | head -n 1 | cut -d' ' -f2)
+          test -n "$pinned"
+          git init --quiet reference
+          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git "$pinned"
+          git -C reference checkout --quiet --detach FETCH_HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.13.1
+      - name: Read cache keys
+        id: keys
+        run: |
+          echo "python=$(python3 -c 'import platform; print(platform.python_version())')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-pnpm-12.14.0-${{ hashFiles('reference/pnpm-lock.yaml') }}
+      - id: python
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/parity-python
+          key: parity-python-ubuntu-24.04-${{ steps.keys.outputs.python }}-${{ hashFiles('scripts/parity-requirements.txt') }}
+      - name: Build the reference's production bundle
+        env:
+          PYTHON_CACHED: ${{ steps.python.outputs.cache-hit }}
+        run: |
+          npm install --global pnpm@12.14.0
+          pnpm --dir reference --filter t3 --filter t3code-relay --filter @t3tools/client-runtime install --frozen-lockfile --prefer-offline
+          # pnpm 12 completes the workspace install on the first `exec`.
+          pnpm --dir reference --filter t3 exec node --version
+          # What `t3 serve` runs: apps/server/dist/bin.mjs, bundled as the release does it.
+          (cd reference/apps/server && node --run build:bundle)
+          test -f reference/apps/server/dist/bin.mjs
+          if [ "$PYTHON_CACHED" != true ]; then
+            python3 -m venv "$RUNNER_TEMP/parity-python"
+            "$RUNNER_TEMP/parity-python/bin/pip" install -r scripts/parity-requirements.txt
+          fi
+          echo "$RUNNER_TEMP/parity-python/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: performance-release
+      - name: Build the Rust server (release)
+        run: cargo build --locked --release
+      - name: Compare both servers
+        run: |
+          python3 scripts/perf_compare.py \
+            --original-command "node $GITHUB_WORKSPACE/reference/apps/server/dist/bin.mjs" \
+            --rust-command "$GITHUB_WORKSPACE/target/release/t3code-server" \
+            --reference-root "$GITHUB_WORKSPACE/reference" \
+            --json "$RUNNER_TEMP/perf.json" --markdown "$RUNNER_TEMP/perf.md"
+          {
+            echo "## Rust server against the reference"
+            echo
+            cat "$RUNNER_TEMP/perf.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the results
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/perf.json
+            ${{ runner.temp }}/perf.md
+      # Results go to the perf-data branch, one file per commit, with a README.md of the latest
+      # numbers and the trend. Nothing is committed to main, and a push to perf-data triggers no
+      # workflow.
+      - name: Record the results on perf-data
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPOSITORY}.git"
+          name="$(date -u +%Y-%m-%dT%H%M%SZ)-${SHA:0:12}.json"
+          for attempt in 1 2 3; do
+            rm -rf "$RUNNER_TEMP/perf-data"
+            if git ls-remote --exit-code --heads "$remote" perf-data > /dev/null; then
+              git clone --quiet --depth 1 --branch perf-data "$remote" "$RUNNER_TEMP/perf-data"
+            else
+              git init --quiet -b perf-data "$RUNNER_TEMP/perf-data"
+              git -C "$RUNNER_TEMP/perf-data" remote add origin "$remote"
+            fi
+            mkdir -p "$RUNNER_TEMP/perf-data/results"
+            cp "$RUNNER_TEMP/perf.json" "$RUNNER_TEMP/perf-data/results/$name"
+            python3 scripts/perf_compare.py --history "$RUNNER_TEMP/perf-data/results" \
+              --markdown "$RUNNER_TEMP/perf-data/README.md"
+            git -C "$RUNNER_TEMP/perf-data" add README.md results
+            git -C "$RUNNER_TEMP/perf-data" -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit --quiet -m "Performance results for ${SHA:0:12}"
+            if git -C "$RUNNER_TEMP/perf-data" push --quiet origin perf-data; then
+              exit 0
+            fi
+            echo "::warning::perf-data moved on; trying again."
+            sleep $((attempt * 5))
+          done
+          exit 1
