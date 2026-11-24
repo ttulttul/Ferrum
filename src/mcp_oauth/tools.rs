@@ -795,7 +795,7 @@ pub(super) async fn call<S: McpHost>(
         "t3_workflow_stop" => threads::workflow_stop(host, caller, args).await,
         "t3_environment_links" => environment_links(host, caller).await,
         "t3_environment_link" => environment_link(host, caller, args).await,
-        "t3_environment_unlink" => environment_unlink(&**host, caller, args),
+        "t3_environment_unlink" => environment_unlink(host, caller, args).await,
         "t3_thread_search" => threads::search(host, caller, args).await,
         "t3_project_update" => projects::update(host, caller, args).await,
         "t3_project_delete" => projects::delete(host, caller, args).await,
@@ -2622,15 +2622,14 @@ async fn environment_links<S: McpHost>(host: &Arc<S>, caller: &Caller) -> Outcom
 }
 
 /// `t3_environment_unlink`: forgets a link here.
-fn environment_unlink<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcome {
+async fn environment_unlink<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> Outcome {
     let environment_id = required(a, "environmentId")?.to_owned();
     writes_environment(caller, Some("change projects or environment settings"))?;
-    let removed = host
-        .unlink_peer(&environment_id)
+    let (removed, ended_there) = host
+        .unlink_peer_ending(&environment_id)
+        .await
         .map_err(|message| failure("orchestration_error", message))?;
-    // Rust forgets the link here only; it does not end the session at the
-    // peer, as the reference's unlink does (#41005).
-    Ok(json!({"environmentId": environment_id, "removed": removed, "endedThere": false}))
+    Ok(json!({"environmentId": environment_id, "removed": removed, "endedThere": ended_there}))
 }
 
 /// The card id a link request gets: turn item ids are global, so the key is

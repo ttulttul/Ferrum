@@ -26,7 +26,7 @@ from tempfile import TemporaryDirectory
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, http, isolated_git_env, managed_server
+from parity_harness import encode, http, isolated_git_env, managed_server, mask_port
 from peer_forwarding_parity import McpClient, mcp_token
 
 FAKE_SSH = """#!/bin/sh
@@ -156,8 +156,9 @@ def main():
                 record["t3_project_clone, a folder that is not empty"] = agent.call("t3_project_clone", {
                     "remoteUrl": str(bare), "destinationPath": str(work / "full")})
                 text = re.sub(r"after \d+ ms", "after <n> ms", json.dumps(record))
-                for path, mark in ((str(home), "<home>"), (str(bare), "<bare>"), (str(tmp), "<tmp>"), (str(port), "<port>")):
+                for path, mark in ((str(home), "<home>"), (str(bare), "<bare>"), (str(tmp), "<tmp>")):
                     text = text.replace(path, mark)
+                text = mask_port(text, port)
                 answers[side] = json.loads(text)
     failures = 0
     for name in answers["original"]:

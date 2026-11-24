@@ -14,7 +14,7 @@ import time
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, free_port, http, managed_server, server_env
+from parity_harness import encode, free_port, http, managed_server, mask_port, server_env
 
 def exercise(prefix, root, policy_path, seed, signing):
     with ExitStack() as stack:
@@ -81,7 +81,7 @@ def exercise(prefix, root, policy_path, seed, signing):
         raw=record_path.read_text()
         record=json.loads(raw)
         observations["runtime record keys"]=list(record)
-        observations["runtime record host and origin"]=(record.get("host"),record["origin"].replace(str(record["port"]),"PORT"))
+        observations["runtime record host and origin"]=(record.get("host"),mask_port(record["origin"],record["port"],"PORT"))
         observations["runtime record serverVersion"]=record["serverVersion"]
         policy_field=raw.split('"managedPolicy":',1)[1]
         _,end=json.JSONDecoder().raw_decode(policy_field)

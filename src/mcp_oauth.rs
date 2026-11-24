@@ -236,6 +236,16 @@ pub trait McpHost: AuthHost {
     fn unlink_peer(&self, _environment_id: &str) -> Result<bool, String> {
         Ok(false)
     }
+    /// Forgets the link to `environment_id` and ends its session at the peer: whether
+    /// there was one, and whether the peer revoked it (`endedThere`). A host that cannot
+    /// reach the peer only forgets the link.
+    fn unlink_peer_ending(
+        self: &Arc<Self>,
+        environment_id: &str,
+    ) -> HostFuture<Result<(bool, bool), String>> {
+        let removed = self.unlink_peer(environment_id);
+        Box::pin(async move { removed.map(|removed| (removed, false)) })
+    }
     /// An agent's thread search over the shared store
     /// (`ThreadSearch.searchThreads`): matches, best first, or `Err` when the
     /// store cannot be searched.

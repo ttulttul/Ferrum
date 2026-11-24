@@ -276,6 +276,13 @@ def assert_nothing_escaped():
     assert not off, f"a server ran without a loopback proxy: {off}"
 
 
+def mask_port(text, port, mark="<port>"):
+    """`text` with `port` masked where it is a port: after the `:` of a host or URL, and not
+    followed by another digit. A plain replace would also mask the same digits inside a hash
+    or an id, which changes from run to run."""
+    return re.sub(rf"(?<=:){int(port)}(?!\d)", mark, text)
+
+
 def offline_env():
     """Variables that keep a server off the network: no telemetry to ingest.t3.codes (the
     reference's T3CODE_TELEMETRY_ENABLED; the Rust server sends none), none from the host CLIs a

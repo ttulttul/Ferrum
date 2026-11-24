@@ -643,9 +643,10 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
         let Some(environment_id) = params["environmentId"].as_str() else {
             return Reply::defect("Missing key\n  at [\"environmentId\"]".into());
         };
-        return match state.peer_links.unlink(environment_id) {
-            // Rust does not end the link's session at the peer (#41005).
-            Ok(removed) => Reply::Success(json!({"removed":removed,"endedThere":false})),
+        return match state.peer_links.unlink_ending(environment_id).await {
+            Ok((removed, ended_there)) => {
+                Reply::Success(json!({"removed":removed,"endedThere":ended_there}))
+            }
             Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e.to_json()})),
         };
     }

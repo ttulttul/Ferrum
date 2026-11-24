@@ -1628,6 +1628,20 @@ impl mcp_oauth::McpHost for AppState {
             .unlink(environment_id)
             .map_err(|error| error.message)
     }
+    fn unlink_peer_ending(
+        self: &Arc<Self>,
+        environment_id: &str,
+    ) -> mcp_oauth::HostFuture<Result<(bool, bool), String>> {
+        let state = self.clone();
+        let environment_id = environment_id.to_owned();
+        Box::pin(async move {
+            state
+                .peer_links
+                .unlink_ending(&environment_id)
+                .await
+                .map_err(|error| error.message)
+        })
+    }
     fn peer_link(&self, environment_id: &str) -> Option<mcp_oauth::PeerLinkInfo> {
         let link = self.peer_links.get(environment_id).ok().flatten()?;
         Some(mcp_oauth::PeerLinkInfo {
