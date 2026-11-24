@@ -354,7 +354,10 @@ schemas.
    or sends to a bound thread, advances interval, fixed-time and one-time schedules, records
    dispatch and provider outcomes, recovers interrupted rows after restart, and rejects relay
    deliveries older than `maxDeliveryAgeMinutes`.
-7. **Pull requests and issues**: the `pullRequests` and `issues` toolkits.
+7. **Pull requests and issues** cover the `pullRequests` and `issues` toolkits. A thread with
+   a connected forge can open a PR from its checkout, edit it, submit a review, reply to a review
+   conversation and merge the reviewed head or stack. `scripts/forge_write_parity.py` compares the
+   tool answers and the requests sent to the GitHub and Bitbucket fixtures.
 8. **Worktrees, previews, devices and HTML**: `t3_worktree_status`, `t3_worktree_handoff`, the
    `previewControls`, `preview`, `device` and `html` toolkits. These drive the desktop's browser
    and device panels; what Rust lacks for them is listed here when that batch starts.

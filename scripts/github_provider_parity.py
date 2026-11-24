@@ -144,6 +144,14 @@ class Provider(BaseHTTPRequestHandler):
             return json.loads(b"".join(chunks))
         return json.loads(self.rfile.read(int(self.headers["Content-Length"])))
 
+    def do_DELETE(self):
+        if hasattr(self.server, "forge_calls"):
+            self.server.forge_calls.append(("DELETE", self.path, None))
+        if self.path == f"/repos/{REPO}/issues/3/labels/old":
+            self.reply(200, [])
+        else:
+            self.reply(404, {"message": "Unknown fixture delete"})
+
     def do_POST(self):
         if hasattr(self.server, "requests"):
             self.server.requests.append(f"POST {self.path}")
@@ -158,6 +166,8 @@ class Provider(BaseHTTPRequestHandler):
             pr["headRepository"] = {**pr["headRepository"], "name": "parity"}
             self.server.status_rows.append(pr)
             self.reply(201, {"number": 3, "html_url": pr["url"]})
+        elif self.path == f"/repos/{REPO}/issues/3/labels":
+            self.reply(200, [LABEL])
         elif self.path == f"/repos/{REPO}/issues":
             self.server.creates.append(data)
             self.reply(201, {"number": 12, "html_url": ISSUE["url"]})
@@ -239,6 +249,9 @@ class Provider(BaseHTTPRequestHandler):
             elif "assignableUsers(" in query and "labels(" in query:
                 result = {"repository": {"labels": {"pageInfo": {"hasNextPage": False}, "nodes": [LABEL]},
                                          "assignableUsers": {"pageInfo": {"hasNextPage": False}, "nodes": [AUTHOR]}}}
+            elif "assignableUsers(" in query and hasattr(self.server, "forge_calls"):
+                result = {"repository": {**self.server.repository, "assignableUsers": {
+                    "pageInfo": {"hasNextPage": False}, "nodes": [{**AUTHOR, "login": "reviewer-one"}]}}}
             elif "threadId" in data.get("variables", {}) and "comments(" in query:
                 variables=data["variables"]
                 pr="PR_3" if variables["threadId"]=="Thread1" else "Wrong"

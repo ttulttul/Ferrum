@@ -48,6 +48,11 @@ def cases(github):
         ("respond needs thread", "respond", dict(body="note", resolved=False), False),
         ("create private", "create", dict(**create, private=True), False),
         ("update fields", "update", dict(number=num, title="Retitled", body="Updated"), True),
+        ("labels", "update", dict(number=num, addLabels=["bug"], removeLabels=["old"]), github),
+        ("reviewers", "update", dict(number=num, requestReviewers=["reviewer-one"]), True),
+        ("missing reviewer", "update", dict(number=num, requestReviewers=["unknown"]), False),
+        *([] if github else [("reply and resolve", "respond",
+            dict(number=num, reviewThreadId="201", body="Follow up", resolved=True), True)]),
         ("respond", "respond", dict(number=num, body="Top level"), True),
         ("review", "review", dict(number=num, verdict="comment", body="Looks good"), True),
         ("inline review", "review", dict(number=num, verdict="comment",
@@ -107,9 +112,11 @@ def run(command, root, github):
                 until = time.monotonic() + 5
                 while time.monotonic() < until:
                     projection = rpc(url, cookie, "orchestration.getThreadProjection", {"threadId": seed["threadId"]})
-                    if any(link.get("snapshot") for link in projection.get("pullRequests", [])):
+                    if any(link.get("snapshot") for link in projection["thread"].get("pullRequests", [])):
                         break
                     time.sleep(.1)
+                else:
+                    raise AssertionError("Created pull request did not acquire a snapshot")
             requests = list(seen)
             result.append((label, answer, requests, success))
         assert bare.joinpath("refs/heads/work").is_file(), "branch did not reach the isolated bare repository"
@@ -143,7 +150,9 @@ def bitbucket_requests(requests):
         ends = sorted(r["path"].rsplit("/", 1)[-1] for r in group)
         if ends == ["7", "conflicts", "diffstat", "diffstat", "repositories", "statuses"]:
             size = 6
-        elif {r["path"].rsplit("/", 1)[-1] for r in requests[i:i + 2]} == {"example-repo", "branching-model"}:
+        elif ([r["method"] for r in requests[i:i + 2]] == ["GET", "GET"]
+              and {r["path"].rsplit("/", 1)[-1] for r in requests[i:i + 2]}
+              in ({"example-repo", "branching-model"}, {"7", "members"})):
             size = 2
         else:
             size = 1

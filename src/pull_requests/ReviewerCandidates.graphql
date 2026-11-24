@@ -12,11 +12,13 @@ query ReviewerCandidates($owner: String!, $name: String!, $number: Int!, $query:
     }
     pullRequest(number: $number) {
       author {
+        __typename
         login
       }
       reviewRequests(first: 100) {
         nodes {
           requestedReviewer {
+            __typename
             ... on User {
               login
               name
