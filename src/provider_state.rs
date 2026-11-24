@@ -663,8 +663,33 @@ pub(crate) fn provider_turn(
         context_window: (driver == provider::CLAUDE_AGENT)
             .then(|| crate::model_manifest::claude_context_window(manifest, selection))
             .flatten(),
+        auth_method: String::new(),
     };
+    let mut turn = turn;
+    if driver == provider::ACP_REGISTRY {
+        acp_registry_launch(&mut turn, config);
+    }
     Some((turn, env))
+}
+
+/// An ACP Registry agent's launch from its instance's settings: a local
+/// agent's executable (`commandPath`) and arguments (`commandArgs`); for a
+/// registry agent, the executable override, its distribution resolved when
+/// the turn launches. The `model` "default" is the agent's own.
+fn acp_registry_launch(turn: &mut ProviderTurn, config: &Value) {
+    let text = |key: &str| config[key].as_str().unwrap_or_default().trim().to_owned();
+    turn.binary_path = text("commandPath");
+    turn.launch_args = if config["source"] == "local" {
+        config["commandArgs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|arg| arg.as_str().map(str::to_owned))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    turn.auth_method = text("authMethodId");
 }
 
 /// Split launch arguments as a shell would split plain words and quoted

@@ -1,0 +1,161 @@
+{
+ "replies": {
+  "authenticate": {},
+  "session/set_model": {},
+  "session/set_mode": {},
+  "session/set_config_option": {
+   "configOptions": []
+  },
+  "session/close": {
+   "_meta": {
+    "x.ai/closeOutcome": "closed"
+   }
+  }
+ },
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "protocolVersion": 1,
+     "agentCapabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+       "image": true,
+       "embeddedContext": true
+      },
+      "sessionCapabilities": {
+       "close": {}
+      }
+     },
+     "agentInfo": {
+      "name": "fixture-acp",
+      "version": "1.2.3"
+     },
+     "authMethods": []
+    }
+   }
+  },
+  {
+   "expect": "session/new"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "sessionId": "acp-session-1",
+     "models": {
+      "currentModelId": "fixture-small",
+      "availableModels": [
+       {
+        "modelId": "fixture-small",
+        "name": "Fixture Small"
+       },
+       {
+        "modelId": "fixture-large",
+        "name": "Fixture Large"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "expect": "session/prompt"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "acp-session-1",
+     "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "content": {
+       "type": "text",
+       "text": "Running it."
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "acp-session-1",
+     "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "call-1",
+      "title": "Run `echo hi`",
+      "kind": "execute",
+      "status": "pending",
+      "rawInput": {
+       "command": "echo hi"
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "acp-session-1",
+     "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "call-1",
+      "status": "in_progress"
+     }
+    }
+   }
+  },
+  {
+   "expect": "session/cancel"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id:session/prompt",
+    "result": {
+     "stopReason": "cancelled"
+    }
+   }
+  },
+  {
+   "expect": "session/prompt"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "acp-session-1",
+     "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "content": {
+       "type": "text",
+       "text": "Appended a line."
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "stopReason": "end_turn"
+    }
+   }
+  }
+ ]
+}

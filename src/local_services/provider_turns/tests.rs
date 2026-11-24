@@ -1,7 +1,7 @@
 //! Provider turns against fake CLIs that replay recorded Codex app-server and
 //! Claude Code stream-json transcripts (`tests/fixtures/providers`).
 use super::*;
-use crate::workspace::provider::{ProviderTurn, TurnStatus, CLAUDE_AGENT, GROK};
+use crate::workspace::provider::{ProviderTurn, TurnStatus, ACP_REGISTRY, CLAUDE_AGENT, GROK};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -1061,4 +1061,84 @@ async fn grok_turn_after_a_stop_loads_only_the_session_it_resumes() {
         .filter_map(|m| m["method"].as_str().map(str::to_owned))
         .collect();
     assert_eq!(methods, ["initialize", "session/new", "session/prompt"]);
+}
+
+#[tokio::test]
+async fn acp_registry_turn_runs_in_the_generic_flavor() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (events, exit) = run(fake_spec(ACP_REGISTRY, "acp_turn.json", &log, None)).await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    assert_eq!(native_thread(&events), ("acp-session-1".into(), false));
+    assert_eq!(final_text(&events), "Ran echo hi; it printed hi.");
+    let sent = received(&log);
+    let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
+    assert_eq!(methods, ["initialize", "session/new", "session/prompt"]);
+    // No Grok `_meta`: neither the client type nor prompt ids.
+    assert!(sent[0]["params"].get("_meta").is_none());
+    assert_eq!(
+        sent[0]["params"]["capabilities"]["elicitation"],
+        json!({"form": {}, "url": {}})
+    );
+    assert!(sent[2]["params"].get("_meta").is_none());
+    assert!(sent[2]["params"]["prompt"][1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("through the acpRegistry harness."));
+}
+
+#[tokio::test]
+async fn acp_registry_stop_cancels_the_prompt_and_keeps_the_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (cancel, cancelled) = oneshot::channel();
+    let mut events = start(
+        fake_spec(ACP_REGISTRY, "acp_interrupt.json", &log, None),
+        cancelled,
+        TEST_SERVERS.clone(),
+    )
+    .unwrap();
+    while let Some(event) = events.recv().await {
+        if matches!(&event, TurnEvent::Provider(ProviderEvent::TurnItem { item })
+            if item.kind == "command_execution" && item.status == "running")
+        {
+            break;
+        }
+    }
+    cancel.send(()).unwrap();
+    let (rest, exit) = collect(events).await;
+    assert!(exit.cancelled && !exit.success, "{exit:?}");
+    assert_eq!(terminal(&rest), (TurnStatus::Interrupted, None));
+    // The agent reported the call cancelled; T3 interrupted it.
+    assert!(items(&rest, "command_execution")
+        .iter()
+        .any(|item| item.status == "interrupted"));
+    let cancels: Vec<Value> = received(&log)
+        .into_iter()
+        .filter(|m| m["method"] == "session/cancel")
+        .collect();
+    assert_eq!(cancels.len(), 1);
+    assert_eq!(cancels[0]["params"], json!({"sessionId": "acp-session-1"}));
+}
+
+#[tokio::test]
+async fn acp_registry_auto_mode_answers_requests_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(ACP_REGISTRY, "acp_approval.json", &log, None);
+    spec.provider.as_mut().unwrap().runtime_mode = "auto".into();
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, ProviderEvent::RuntimeRequestOpened { .. })));
+    let answer = received(&log)
+        .into_iter()
+        .find(|m| m["id"] == "perm-1")
+        .expect("the request was answered");
+    assert_eq!(
+        answer["result"],
+        json!({"outcome": {"outcome": "selected", "optionId": "allow"}})
+    );
 }

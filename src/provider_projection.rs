@@ -26,7 +26,7 @@ pub(crate) const HIDDEN_ITEM: &str = "\u{0}hidden";
 /// its session opens: a Codex instance's shared session, or the thread's own
 /// Claude or ACP session, named after the run that opens it.
 fn pending_session_id(driver: &str, instance: &str, thread_id: &str, run_id: &str) -> String {
-    if driver == provider::GROK {
+    if provider::is_acp(driver) {
         acp_session_id(instance, thread_id, run_id)
     } else if driver == provider::CLAUDE_AGENT {
         format!(
@@ -581,7 +581,7 @@ impl Thread {
     /// A Claude session's metadata: its title (the thread's) and what its
     /// prompts used of its attachment budget.
     fn claude_native_metadata(&self, driver: &str) -> Value {
-        if driver == provider::GROK {
+        if provider::is_acp(driver) {
             return self.acp_native_metadata();
         }
         if driver != provider::CLAUDE_AGENT {
@@ -616,7 +616,7 @@ impl Thread {
     /// loaded session goes back to the plain ids.
     fn acp_native_metadata(&self) -> Value {
         let scoped = self.provider.runs.values().any(|run| {
-            run.driver == provider::GROK
+            provider::is_acp(&run.driver)
                 && run
                     .native_turn_id
                     .as_deref()
@@ -651,7 +651,7 @@ impl Thread {
         }
         let id = if let Some(id) = &self.provider.prior_session_id {
             id.clone()
-        } else if thread.driver == provider::GROK {
+        } else if provider::is_acp(&thread.driver) {
             acp_session_id(instance, &self.id, &first.wire_id())
         } else if claude {
             format!(
@@ -989,7 +989,7 @@ impl Thread {
                     .failure
                     .as_ref()
                     .is_some_and(provider::is_workspace_missing)
-                    || ((driver == provider::CODEX || driver == provider::GROK)
+                    || ((driver == provider::CODEX || provider::is_acp(driver))
                         && !record.turn_started
                         && self
                             .provider
@@ -997,7 +997,7 @@ impl Thread {
                             .as_ref()
                             .is_some_and(|thread| thread.native_id.is_none())) =>
             {
-                let session = if driver == provider::GROK {
+                let session = if provider::is_acp(driver) {
                     acp_session_id(instance, &self.id, &ids.run)
                 } else {
                     join("provider-session:provider-instance", &[instance]) + ":shared"
@@ -1201,7 +1201,7 @@ impl Thread {
             &open.native_request_id
         };
         // ACP agents' request ids are not their own (`approvalsHaveNativeRequestIds`).
-        let strength = if driver == provider::GROK {
+        let strength = if provider::is_acp(driver) {
             "weak"
         } else {
             "strong"
@@ -1485,7 +1485,7 @@ impl Thread {
             // A pending tool call's node is running.
             "status": if status == "pending" { "running" } else { status.as_str() },
             // An ACP tool call counts toward its run.
-            "countsForRun": driver == provider::GROK
+            "countsForRun": provider::is_acp(driver)
                 && !matches!(item.kind.as_str(), "assistant_message" | "reasoning"),
             "providerThreadId": ids.provider_thread,
             "providerTurnId": ids.provider_turn,

@@ -561,6 +561,24 @@ impl crate::orchestration::CommandHost for AppState {
                         Ok(None)
                     }
                 };
+                // An ACP Registry agent from the registry is installed (or
+                // its install reused) and launched as its distribution says.
+                let mut provider = provider;
+                if let Ok(Some((turn, env))) = provider.as_mut() {
+                    if turn.driver == crate::workspace::provider::ACP_REGISTRY {
+                        let roots = crate::acp_install::Roots {
+                            caches: self.paths.caches.clone(),
+                            tools: self.paths.base_dir.join("tools"),
+                        };
+                        let settings = self.settings.internal().unwrap_or_default();
+                        if let Err(detail) =
+                            crate::acp_registry::resolve_turn(&roots, &settings, turn, env).await
+                        {
+                            crate::turn::fail(&*self, &run, anyhow::anyhow!(detail)).await;
+                            return;
+                        }
+                    }
+                }
                 let mut spec = crate::workspace::TurnSpec {
                     prompt: text,
                     cwd,

@@ -21,9 +21,17 @@ pub const CLAUDE_AGENT: &str = "claudeAgent";
 /// Grok's CLI, whose turns run over ACP (`grok agent stdio`).
 pub const GROK: &str = "grok";
 
+/// ACP Registry agents, run over ACP in the reference's generic flavor.
+pub const ACP_REGISTRY: &str = "acpRegistry";
+
 /// Whether the workspace runs turns of `driver`'s CLI.
 pub fn runs_turns(driver: &str) -> bool {
-    matches!(driver, CODEX | CLAUDE_AGENT | GROK)
+    matches!(driver, CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY)
+}
+
+/// Whether `driver`'s turns run over ACP.
+pub fn is_acp(driver: &str) -> bool {
+    matches!(driver, GROK | ACP_REGISTRY)
 }
 
 /// How to run one turn of a provider instance.
@@ -93,6 +101,12 @@ pub struct ProviderTurn {
     /// predates it sees the same wire bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_ordinal: Option<u64>,
+    /// The ACP authentication method the instance names (`authMethodId`),
+    /// used when the agent asks to sign in; empty for the agent's first.
+    /// Optional and omitted when empty, so an agentd or control plane that
+    /// predates it sees the same wire bytes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_method: String,
 }
 
 /// Where a provider CLI reaches T3's tools for its thread

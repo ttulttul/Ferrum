@@ -60,6 +60,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import secrets
 import shlex
@@ -206,6 +207,9 @@ _UPLOADS = [
     {"type": "file", "name": "notes.md", "mimeType": "text/markdown", "content": "# Notes\nFixture file.\n"},
 ]
 
+# A local ACP Registry agent instance, run as `fixture-acp --acp` from PATH.
+_ACP_LOCAL = {"driver": "acpRegistry", "displayName": "Fixture ACP",
+              "config": {"source": "local", "commandPath": "fixture-acp", "commandArgs": ["--acp"]}}
 PROVIDER_SCENARIOS = [
     {"name": "codex turn", "instance": "codex", "model": "fixture", "scenario": "codex_turn.json"},
     # The message carries uploads: claimed for the thread, shown on it, and sent to the CLI.
@@ -307,6 +311,46 @@ PROVIDER_SCENARIOS = [
     {"name": "codex missing", "instance": "codex", "model": "fixture", "scenario": None},
     {"name": "codex interrupt", "instance": "codex", "model": "fixture", "scenario": "codex_interrupt.json",
      "interrupt": "command"},
+    # An ACP Registry agent run from a local command (`source: local`), in the generic ACP flavor.
+    {"name": "acp local turn", "instance": "acp-local", "model": "default", "scenario": "acp_turn.json",
+     "enable": _ACP_LOCAL},
+    # A model the session lists and is not on is set before the prompt (`session/set_model`).
+    {"name": "acp model", "instance": "acp-local", "model": "fixture-large", "scenario": "acp_turn.json",
+     "enable": _ACP_LOCAL},
+    # A second turn prompts the session the thread's agent keeps.
+    {"name": "acp second turn", "instance": "acp-local", "model": "default", "scenario": "acp_two_turns.json",
+     "enable": _ACP_LOCAL, "followUp": "Now append a line"},
+    # Supervised: the agent's permission requests go to the user, with the default decisions.
+    {"name": "acp approval", "instance": "acp-local", "model": "default", "scenario": "acp_approval.json",
+     "enable": _ACP_LOCAL, "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
+    {"name": "acp approval for session", "instance": "acp-local", "model": "default",
+     "scenario": "acp_approval.json", "enable": _ACP_LOCAL, "runtimeMode": "approval-required",
+     "respond": {"decision": "acceptForSession"}},
+    {"name": "acp approval declined", "instance": "acp-local", "model": "default", "scenario": "acp_approval.json",
+     "enable": _ACP_LOCAL, "runtimeMode": "approval-required", "respond": {"decision": "decline"}},
+    # Auto: the generic flavor answers the agent's requests itself (Grok's asks).
+    {"name": "acp auto", "instance": "acp-local", "model": "default", "scenario": "acp_approval.json",
+     "enable": _ACP_LOCAL, "runtimeMode": "auto"},
+    # Stop cancels the prompt (`session/cancel`), and the agent keeps running for the next turn.
+    {"name": "acp interrupt", "instance": "acp-local", "model": "default", "scenario": "acp_interrupt.json",
+     "enable": _ACP_LOCAL, "interrupt": "command"},
+    {"name": "acp approval interrupted", "instance": "acp-local", "model": "default",
+     "scenario": "acp_approval_interrupt.json", "enable": _ACP_LOCAL, "runtimeMode": "approval-required",
+     "interrupt": "request"},
+    {"name": "acp stop then turn", "instance": "acp-local", "model": "default",
+     "scenario": "acp_stop_then_turn.json", "enable": _ACP_LOCAL, "interrupt": "command",
+     "followUp": "Now append a line"},
+    # A prompt the agent fails fails the turn with its message.
+    {"name": "acp failed turn", "instance": "acp-local", "model": "default", "scenario": "acp_failed.json",
+     "enable": _ACP_LOCAL},
+    # A local executable that is not on PATH.
+    {"name": "acp local missing", "instance": "acp-local", "model": "default", "scenario": None,
+     "enable": _ACP_LOCAL},
+    # An agent from the ACP Registry: its downloaded command, with its distribution's arguments
+    # and environment.
+    {"name": "acp registry turn", "instance": "acp-registry", "model": "default", "scenario": "acp_turn.json",
+     "enable": {"driver": "acpRegistry", "displayName": "Fixture Agent",
+                "config": {"source": "registry", "agentId": "fixture-agent"}}, "registryAgent": True},
     # Grok over ACP: its turns run in the `grok agent stdio` session the thread keeps, and stream
     # reasoning, a command and the reply.
     {"name": "grok turn", "instance": "grok", "enable": "grok", "model": "grok-build", "scenario": "grok_turn.json"},
@@ -572,7 +616,33 @@ FAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 "$FAKE_STATUS_CLI" "$FA
 GROK_STATUS_SPEC = {"commands": [command for command in GROK_TITLE_SPEC["commands"]
                                  if command.get("prefix") != ["--permission-mode", "default", "agent", "stdio"]]}
 # Each driver's CLI on PATH, by the thread's provider instance.
-TURN_CLIS = {"codex": "codex", "claudeAgent": "claude", "grok": "grok"}
+# A local ACP Registry agent: the executable its instance names (`commandPath`), which plays the
+# scenario whatever its arguments.
+FAKE_ACP_AGENT = """#!/bin/sh
+exec python3 "$FAKE_PROVIDER_CLI" "$@"
+"""
+TURN_CLIS = {"codex": "codex", "claudeAgent": "claude", "grok": "grok", "acp-local": "fixture-acp",
+             # Installed in the server's home (`registryAgent`), not on PATH.
+             "acp-registry": "registry-agent"}
+# The ACP Registry agent a `registryAgent` scenario's servers find in their cached index, already
+# downloaded into `<home>/tools` (its archive's HTTPS URL is refused), so a turn reuses it.
+REGISTRY_TARGET = {("Linux", "x86_64"): "linux-x86_64", ("Linux", "aarch64"): "linux-aarch64"}.get(
+    (platform.system(), platform.machine()))
+REGISTRY_AGENT = {"id": "fixture-agent", "name": "Fixture Agent", "version": "1.0.0",
+                  "description": "A downloaded fixture agent", "distribution": {"binary": {REGISTRY_TARGET: {
+                      "archive": "https://example.invalid/fixture-agent.tar.gz", "cmd": "./run",
+                      "args": ["--acp", "--registry"], "env": {"FIXTURE_AGENT_MODE": "registry"}}}}}
+
+
+def seed_registry_agent(home):
+    """The cached registry index and the agent's downloaded command (the fake CLI) in `home`."""
+    cache = home / "caches" / "acp-registry"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "registry.json").write_text(json.dumps({"version": "1.0.0", "agents": [REGISTRY_AGENT]}))
+    run = home / "tools" / "fixture-agent" / "1.0.0" / REGISTRY_TARGET / "run"
+    run.parent.mkdir(parents=True, exist_ok=True)
+    run.write_text('#!/bin/sh\nexec python3 "$FAKE_PROVIDER_CLI" "$@"\n')
+    run.chmod(0o755)
 THREAD = "thread:client-thread"
 REMOTES = {
     "project:bitbucket": ("Bitbucket checkout", "git@ssh.bitbucket.org:example-org/example-repo.git"),
@@ -778,7 +848,8 @@ def compare_thread(original, rust):
 
 def write_fake_clis(directory, drivers):
     directory.mkdir(parents=True, exist_ok=True)
-    for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK)):
+    for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK),
+                         ("fixture-acp", FAKE_ACP_AGENT)):
         if name in drivers:
             (directory / name).write_text(script)
             (directory / name).chmod(0o755)
@@ -812,8 +883,10 @@ def seed_turn(url, cookie, root, scenario, remote=None):
         raise RuntimeError(f"project.create failed on {url}: HTTP {status} {body[:400]!r}")
     if scenario.get("enable"):
         # A provider instance that is off by default, turned on for the thread's turns.
-        rpc(url, cookie, "server.updateSettings", {"patch": {"providerInstances": {
-            scenario["instance"]: {"driver": scenario["enable"], "enabled": True}}}})
+        # A driver name, or the instance's settings (an ACP Registry agent's `config`).
+        enable = scenario["enable"]
+        instance = {"driver": enable, "enabled": True} if isinstance(enable, str) else {"enabled": True, **enable}
+        rpc(url, cookie, "server.updateSettings", {"patch": {"providerInstances": {scenario["instance"]: instance}}})
     if scenario.get("textProvider"):
         # Titles come from another provider's instance, which the turn's provider never runs.
         provider = scenario["textProvider"]
@@ -1208,7 +1281,7 @@ def cli_launch(log, root):
         launches[entry.get("pid")] = f"launch {json.dumps(mask(argv))} env {json.dumps(mask(env), sort_keys=True)}"
         order.append(entry.get("pid"))
     messages = Path(str(log) + ".messages")
-    initializes, sessions, calls, claude_initializes = {}, [], [], {}
+    initializes, sessions, calls, claude_initializes, acp_calls = {}, [], [], {}, []
     for line in (messages.read_text().splitlines() if messages.exists() else []):
         entry = json.loads(line)
         try:
@@ -1216,7 +1289,8 @@ def cli_launch(log, root):
         except ValueError:
             continue
         method = message.get("method")
-        if method == "initialize":
+        acp = message.get("jsonrpc") == "2.0"
+        if method == "initialize" and not acp:
             initializes[entry["pid"]] = message.get("params")
         # Claude Code's initialize: Rust sends only the system prompt append of the reference's.
         request = message.get("request") or {}
@@ -1224,14 +1298,19 @@ def cli_launch(log, root):
             claude_initializes[entry["pid"]] = without_unserved(request.get("appendSystemPrompt", ""), unserved)
         if method in ("thread/start", "thread/resume"):
             sessions.append(entry["pid"])
-        if message.get("jsonrpc") == "2.0" and method in ACP_LAUNCH_METHODS:
-            calls.append(f"acp {method} {json.dumps(mask(acp_params(method, message.get('params'), unserved)), sort_keys=True)}")
+        if acp and method in ACP_LAUNCH_METHODS:
+            acp_calls.append((entry["pid"], method,
+                              f"acp {method} {json.dumps(mask(acp_params(method, message.get('params'), unserved)), sort_keys=True)}"))
         if method in ("thread/start", "thread/resume", "turn/start"):
             params = dict(message.get("params") or {})
             params.pop("input", None)
             if "additionalContext" in params:
                 params["additionalContext"] = agent_context(params["additionalContext"], unserved)
             calls.append(f"{method} {json.dumps(mask(params), sort_keys=True)}")
+    # An ACP agent's requests, from the processes that ran a turn (a status check's probes run
+    # none, and Rust does not probe ACP Registry agents yet).
+    prompted = {pid for pid, method, _ in acp_calls if method == "session/prompt"}
+    calls.extend(line for pid, _, line in acp_calls if pid in prompted)
     session = sessions[-1] if sessions else None
     # Claude Code has no thread/start: its turn is the last CLI launched.
     turn_pid = session if session in launches else (order[-1] if order else None)
@@ -1888,6 +1967,8 @@ def shard_scenarios(index, count, real_time=False):
 
 def scenario_env(temporary, name, root, scenario, drivers):
     """The environment a scenario's server runs in, with its fake CLIs: (env, fake bin, log)."""
+    if scenario.get("registryAgent"):
+        seed_registry_agent(root)
     hidden = path_without(PROVIDER_CLIS | RELAY_TOOLS, temporary / "bin")
     login_shell = {}
     if scenario.get("install") == "login-shell":
