@@ -962,6 +962,13 @@ pub(crate) async fn run(state: Arc<AppState>) {
     let mut running: HashMap<String, Reason> = HashMap::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // What the last full pass read (the settings and secret documents, and
+    // the model catalog), and the enabled instances it scheduled. A tick
+    // where none of it changed and no check is due would find nothing to
+    // start, so it skips re-reading the settings and rebuilding every row,
+    // which kept an idle server busy four times a second.
+    let mut last_sources: Option<(Vec<_>, Arc<Value>)> = None;
+    let mut enabled_ids: Vec<String> = Vec::new();
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
@@ -976,15 +983,38 @@ pub(crate) async fn run(state: Arc<AppState>) {
         if *state.closing.borrow() {
             return;
         }
+        let sources = (
+            state.settings.source_revisions(),
+            state.model_manifest.current(),
+        );
+        let now = tokio::time::Instant::now();
+        let due = enabled_ids.iter().any(|id| {
+            [next_refresh.get(id), recheck.get(id)]
+                .into_iter()
+                .flatten()
+                .any(|at| now >= *at)
+        });
+        if !due
+            && last_sources.as_ref().is_some_and(|(documents, manifest)| {
+                *documents == sources.0 && Arc::ptr_eq(manifest, &sources.1)
+            })
+        {
+            continue;
+        }
         let Ok(settings) = state.settings.internal() else {
             continue;
         };
+        last_sources = Some(sources);
         let settings_changed = !last_settings.is_null() && settings != last_settings;
         last_settings = settings.clone();
         let interval_ms = refresh_interval_ms(&settings);
-        let now = tokio::time::Instant::now();
         let mut start = Vec::new();
         let current = instances(&state, &settings);
+        enabled_ids = current
+            .iter()
+            .filter(|instance| instance.enabled)
+            .map(|instance| instance.id.clone())
+            .collect();
         for instance in &current {
             let previous = seen.get(&instance.id).cloned();
             let mut changed = previous.as_ref() != Some(&instance.fingerprint);
