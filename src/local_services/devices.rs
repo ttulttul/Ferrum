@@ -45,6 +45,10 @@ impl Drop for HubRuntime {
     }
 }
 
+/// Where a host that routes its own hub requests sends one: the URL, and the
+/// headers that authorize it.
+pub type HubRoute = (String, Vec<(String, String)>);
+
 /// What SSH host supervision remembers between ticks.
 #[derive(Default)]
 struct Supervision {
@@ -2729,36 +2733,14 @@ impl DeviceService {
     }
 
     /// `device_screenshot`: the PNG of a device open in the calling thread.
-    pub(super) async fn tool_screenshot(&self, input: &Value, dir: &Path) -> Reply {
-        let thread_id = input["threadId"].as_str().unwrap_or("");
-        let state = self.current();
-        let hosts = state["hosts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-        let host_id = match input["hostId"].as_str() {
-            Some(h) => resolve_host_id(hosts, Some(h))?,
-            None => None,
-        };
-        let target = match input["deviceId"].as_str() {
-            None => state["sessions"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .rfind(|s| {
-                    s["threadId"] == thread_id
-                        && host_id.as_deref().is_none_or(|h| s["hostId"] == h)
-                })
-                .cloned(),
-            Some(device_id) => locate_session(&state, thread_id, device_id, host_id.as_deref())?,
-        };
-        let Some(target) = target else {
-            return Err(tool_unavailable(match input["deviceId"].as_str() {
-                None => "No device is open in this thread. Call device_open first.".to_owned(),
-                Some(id) => {
-                    format!("Device {id} is not open in this thread. Call device_open first.")
-                }
-            }));
-        };
-        let target_host = target["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
-        let device_id = target["deviceId"].as_str().unwrap_or("");
+    /// `screenshot`: a device's screen as PNG bytes, through its host's hub
+    /// (`resolveDevice`, then `extractPng`).
+    pub(crate) async fn screenshot(
+        &self,
+        target_host: &str,
+        device_id: &str,
+        dir: &Path,
+    ) -> Result<(Value, Vec<u8>), Value> {
         if self.simlock_config(target_host).is_some() {
             // resolveDevice on a Simlock host, then the lease's screenshot.
             self.simlock_readiness(target_host, dir).await?;
@@ -2789,17 +2771,7 @@ impl DeviceService {
                     "cause": format!("The hub returned {} bytes without a complete PNG.", bytes.len()),
                 }));
             };
-            use base64::Engine as _;
-            let (width, height) = png_dimensions(&png);
-            return Ok(json!({
-                "device": device,
-                "screenshot": {
-                    "mimeType": "image/png",
-                    "data": base64::engine::general_purpose::STANDARD.encode(&png),
-                    "width": width,
-                    "height": height,
-                },
-            }));
+            return Ok((device, png));
         }
         if target_host != LOCAL_HOST_ID && self.ssh_config(target_host).is_none() {
             return Err(bad_host(target_host));
@@ -2849,7 +2821,7 @@ impl DeviceService {
         };
         drop(runtime);
         let bytes = hub_screenshot(&ctx, &device).await?;
-        let Some(png) = extract_png(&bytes) else {
+        let Some(png) = extract_png(&bytes).map(<[u8]>::to_vec) else {
             return Err(json!({
                 "_tag": "DeviceOperationError",
                 "operation": "screenshot",
@@ -2857,6 +2829,41 @@ impl DeviceService {
                 "cause": format!("The hub returned {} bytes without a complete PNG.", bytes.len()),
             }));
         };
+        Ok((device, png))
+    }
+
+    pub(super) async fn tool_screenshot(&self, input: &Value, dir: &Path) -> Reply {
+        let thread_id = input["threadId"].as_str().unwrap_or("");
+        let state = self.snapshot(dir);
+        let hosts = state["hosts"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let host_id = match input["hostId"].as_str() {
+            Some(h) => resolve_host_id(hosts, Some(h))?,
+            None => None,
+        };
+        let target = match input["deviceId"].as_str() {
+            None => state["sessions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .rfind(|s| {
+                    s["threadId"] == thread_id
+                        && host_id.as_deref().is_none_or(|h| s["hostId"] == h)
+                })
+                .cloned(),
+            Some(device_id) => locate_session(&state, thread_id, device_id, host_id.as_deref())?,
+        };
+        let Some(target) = target else {
+            return Err(tool_unavailable(match input["deviceId"].as_str() {
+                None => "No device is open in this thread. Call device_open first.".to_owned(),
+                Some(id) => {
+                    format!("Device {id} is not open in this thread. Call device_open first.")
+                }
+            }));
+        };
+        let target_host = target["hostId"].as_str().unwrap_or(LOCAL_HOST_ID);
+        let device_id = target["deviceId"].as_str().unwrap_or("");
+        let (device, png) = self.screenshot(target_host, device_id, dir).await?;
+        let png = png.as_slice();
         use base64::Engine as _;
         let (width, height) = png_dimensions(png);
         Ok(json!({
@@ -4686,12 +4693,70 @@ async fn expo(input: &Value, settings: &Value, resolver: &Resolver) -> Reply {
 }
 
 impl DeviceService {
+    /// `upstream`: where a host that routes its own requests sends one, with
+    /// the headers that authorize it. `None` for a host whose hub takes every
+    /// request; `Some(None)` for a request it does not route (answered 404).
+    /// A Simlock lease's stream and input go to the gateway's routes for it.
+    pub fn hub_upstream(
+        &self,
+        host: Option<&str>,
+        path: &str,
+        query: &str,
+    ) -> Option<Option<HubRoute>> {
+        let host = host.filter(|h| self.simlock_config(h).is_some())?;
+        const INPUT_PATH: &str = "/vendor/serve-sim/helper/ws";
+        let stream = path
+            .strip_prefix("/vendor/serve-sim/helper/")
+            .and_then(|rest| rest.strip_suffix("/stream.avcc"))
+            .filter(|id| !id.is_empty() && !id.contains('/'));
+        let device = match stream {
+            Some(encoded) => match percent_encoding::percent_decode_str(encoded).decode_utf8() {
+                Ok(id) => Some(id.into_owned()),
+                Err(_) => return Some(None),
+            },
+            None if path == INPUT_PATH => url::form_urlencoded::parse(query.as_bytes())
+                .find(|(k, _)| k == "device")
+                .map(|(_, v)| v.into_owned()),
+            None => None,
+        };
+        let Some(device) = device else {
+            return Some(None);
+        };
+        Some(
+            self.with_simlock(host, |state| {
+                let lease = state.leases.get(&device)?;
+                Some((
+                    format!(
+                        "{}/v1/leases/{}/{}",
+                        state.config.gateway(),
+                        agent_device::encode_uri_component(&lease.lease_id),
+                        if stream.is_some() { "stream" } else { "input" }
+                    ),
+                    vec![(
+                        "authorization".to_owned(),
+                        format!("Bearer {}", lease.token),
+                    )],
+                ))
+            })
+            .flatten(),
+        )
+    }
+
+    /// `currentReadiness`'s hub: this machine's, or an SSH host's through its tunnel.
     pub async fn hub_origin(&self, host: Option<&str>) -> Option<String> {
-        if host.is_some_and(|h| h != LOCAL_HOST_ID) {
-            return None;
+        match host.filter(|h| *h != LOCAL_HOST_ID) {
+            // A Simlock host is ready once its CLI is; its leases route themselves (`hub_upstream`).
+            Some(host) if self.simlock_config(host).is_some() => self
+                .with_simlock(host, |state| {
+                    state.cli.is_some().then(|| state.config.gateway())
+                })
+                .flatten(),
+            Some(host) => self.ssh_current(host).await.map(|ctx| ctx.origin),
+            None => {
+                let mut runtime = self.runtime.lock().await;
+                running_origin(&mut runtime)
+            }
         }
-        let mut runtime = self.runtime.lock().await;
-        running_origin(&mut runtime)
     }
 }
 

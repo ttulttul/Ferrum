@@ -36,7 +36,7 @@ from tempfile import TemporaryDirectory
 from time import monotonic, sleep
 
 from client_thread_parity import FIXTURES, cli_launch, rpc, scenario_env, seed_turn
-from parity_harness import REFUSED, assert_nothing_escaped, managed_server
+from parity_harness import REFUSED, assert_nothing_escaped, http, managed_server
 
 # Startup fetches both servers attempt, which the harness's refusing proxy refuses.
 STARTUP_FETCHES = {"raw.githubusercontent.com:443", "registry.npmjs.org:443"}
@@ -362,6 +362,14 @@ class FakeSimlockGateway:
                         import base64
                         return self.answer(200, {"png": base64.b64encode(b"noise" + gateway.PNG).decode()})
                     return self.answer(200, {"ok": True})
+                if self.path.startswith("/v1/leases/") and self.path.endswith("/stream"):
+                    data = b"avcc-stream-of-" + self.path.split("/")[3].encode()
+                    self.send_response(200)
+                    self.send_header("content-type", "application/octet-stream")
+                    self.send_header("content-length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 if self.path.startswith("/v1/leases/"):
                     return self.answer(200, {"ok": True})
                 return self.answer(404, {"error": "not_found"})
@@ -523,7 +531,7 @@ def launcher_files(root: Path):
     return files
 
 
-def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False, ssh_host=False, simlock_host=False):
+def run_phase(name, phase, command, reference_root, directory, plan, *, enable_devices, open_devices=(), avdmanager_failed=False, run_launcher=False, list_launchers=False, configure=None, provider="codex", launch=False, ssh_host=False, simlock_host=False, hub_requests=()):
     root = Path(directory, name, phase)
     root.mkdir(parents=True, exist_ok=True)
     request_log = root / "fake-requests.jsonl"
@@ -663,6 +671,13 @@ def run_phase(name, phase, command, reference_root, directory, plan, *, enable_d
                     seen.append({"control_response": message.get("response")})
             answers.append(seen)
             plan = [*plan, ("hooks", {})]
+        for route in hub_requests:
+            # The Device panel's requests through the server's device hub proxy.
+            status, headers, body = http(url, "GET", route, headers={"Cookie": cookie}, timeout=60)
+            kind = headers.get("content-type", "").split(";")[0]
+            answers.append({"route": route, "status": status, "type": kind,
+                            "body": body.hex() if kind == "image/png" else body.decode(errors="replace")})
+            plan = [*plan, ("hub proxy", {})]
         if gateway is not None:
             # Clients receive Simlock hosts apart from this machine's and SSH hosts.
             wire = rpc(url, cookie, "device.list", {})
@@ -857,6 +872,16 @@ def run_server(name, command, reference_root, directory):
                 ("device_list", {"hostId": "lab"}),
             ],
             dict(enable_devices=True, simlock_host=True, run_launcher=True),
+        ),
+        (
+            "simlock-stream",
+            [("device_open", {"hostId": "lab", "deviceId": "simlock:android:Pixel 9"})],
+            dict(enable_devices=True, simlock_host=True, hub_requests=(
+                "/api/device-hub/vendor/serve-sim/helper/lease-1/stream.avcc?hostId=lab",
+                "/api/device-hub/vendor/serve-sim/helper/lease-9/stream.avcc?hostId=lab",
+                "/api/device-hub/api/devices?hostId=lab",
+                "/api/device-hub/vendor/serve-emu/api/screenshot?hostId=lab&device=lease-1",
+            )),
         ),
         (
             "ssh-agent-off",

@@ -32,7 +32,7 @@ from time import monotonic, sleep
 from client_initial_sync_parity import socket
 from client_thread_parity import scenario_env
 from device_tools_parity import FAKE_HUB_SOURCE, STARTUP_FETCHES, seed_fake_android_sdk, write_executable
-from parity_harness import REFUSED, assert_nothing_escaped, encode, managed_server, recv_frame
+from parity_harness import REFUSED, assert_nothing_escaped, encode, http, managed_server, recv_frame
 
 HERE = Path(__file__).resolve().parent
 HUB_VERSION = "0.26.1"
@@ -119,6 +119,21 @@ def wait_for_reconnect(log: Path, before: int, seconds=60):
             return True
         sleep(0.2)
     return False
+
+
+def proxied(url, cookie, route):
+    """A device hub request through the server's proxy: its status, type and body (a PNG by its
+    size and digest)."""
+    status, headers, body = http(url, "GET", route, headers={"Cookie": cookie}, timeout=60)
+    kind = headers.get("content-type", "")
+    if kind == "image/png":
+        content = {"png": hashlib.sha256(body).hexdigest()[:16], "bytes": len(body)}
+    else:
+        try:
+            content = json.loads(body)
+        except ValueError:
+            content = body.decode(errors="replace")
+    return {"status": status, "type": kind.split(";")[0], "cache": headers.get("cache-control"), "body": content}
 
 
 def drop_volatile(value):
@@ -210,6 +225,14 @@ def run_server(name, command, reference_root, directory):
         answers.append(("close with shutdown", call(url, cookie, "device.close", {
             "threadId": "thread-ssh", "hostId": "linux", "deviceId": "emulator-5556", "shutdown": True})))
         answers.append(("list", call(url, cookie, "device.list", {})))
+        # The Device panel reaches a host's hub through this server's proxy.
+        for label, route in [
+            ("proxy host devices", "/api/device-hub/api/devices?hostId=linux"),
+            ("proxy host screenshot", "/api/device-hub/vendor/serve-emu/api/screenshot?hostId=linux&device=emulator-5554"),
+            ("proxy missing device screenshot", "/api/device-hub/vendor/serve-emu/api/screenshot?hostId=linux&device=nope"),
+            ("proxy unknown host", "/api/device-hub/api/devices?hostId=nowhere"),
+        ]:
+            answers.append((label, proxied(url, cookie, route)))
         # A dropped connection: the host reconnects on its own.
         opened = sum(1 for line in log.read_text().splitlines() if '"-L"' in line)
         for pid in tunnels(log):

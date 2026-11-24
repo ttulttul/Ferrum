@@ -415,7 +415,9 @@ schemas.
    (retried with fresh ports when the forward fails). Its devices are listed through the tunnel,
    with `adb` and `emulator` run over SSH from the hub's directory (`run`); opening, booting,
    the ffmpeg check (the reference's `node -e` script on the host's Node), closing, shutting down,
-   `retryHostId` and screenshots work on it as on this machine, and turning device support off
+   `retryHostId` and screenshots work on it as on this machine, the Device panel's hub requests reach it
+   through this server's proxy (`/api/device-hub/...?hostId=`, as `DeviceHubProxy` routes them, a
+   screenshot of one device coming from the device service as there), and turning device support off
    (or removing the host, or shutting the server down) stops what this server started there.
 
    Agents use SSH hosts as they use this machine (`ensureAgentReady`, `changeAgent`): the host
@@ -443,8 +445,9 @@ schemas.
    `device_open` binds the lease's own session and per-device config, with the reference's Simlock
    quick-start notes; screenshots go through the lease's session. `scripts/device_tools_parity.py`'s
    `simlock` phase compares the tools, the wire state, the launcher and every request to a fake
-   gateway on loopback. Not done yet: the Device panel's stream and input for a lease through the
-   hub proxy (it follows #266, which routes the proxy per host).
+   gateway on loopback. The Device panel's stream and input for a lease go through the hub proxy
+   to the gateway's routes for that lease (`upstream`), with its token; its `simlock-stream` phase
+   compares them.
 5. **Prompt context and capabilities** (served), as above.
 6. **Scheduled tasks**: `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task` and
    `run_scheduled_task_now` share the reference's `scheduled_tasks` table. Thread callers

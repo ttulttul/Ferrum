@@ -134,15 +134,61 @@ async fn hub(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let Some(origin) = state.local.devices.hub_origin(host.as_deref()).await else {
         return text(StatusCode::SERVICE_UNAVAILABLE, "Device hub is not running");
     };
-    let mut url = format!("{origin}{path}");
-    if !query.is_empty() {
-        url.push('?');
-        url.push_str(&query);
+    // A screenshot of one device comes from the device service, which reads the PNG out of what
+    // the hub returns and falls back as it does for the device tool.
+    let screenshot_device = url::form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == "device")
+        .map(|(_, v)| v.into_owned());
+    if let (Some(device), false, true) = (
+        screenshot_device,
+        upgrade,
+        [
+            "/vendor/serve-sim/api/screenshot",
+            "/vendor/serve-emu/api/screenshot",
+        ]
+        .contains(&path),
+    ) {
+        let host_id = host.as_deref().unwrap_or("local");
+        return match state
+            .local
+            .devices
+            .screenshot(host_id, &device, &state.data_dir)
+            .await
+        {
+            Ok((_, png)) => Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "image/png")
+                .header("cache-control", "no-store, no-transform")
+                .body(Body::from(png))
+                .unwrap(),
+            // The reference's route answers a failed screenshot with a bare 500.
+            Err(error) => {
+                tracing::warn!(error = %crate::mcp_oauth::format_device_error(&error), "device screenshot failed");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        };
     }
+    // Hosts with several upstreams (one per lease) route and authenticate requests themselves.
+    let (url, extra_headers) = match state
+        .local
+        .devices
+        .hub_upstream(host.as_deref(), path, &query)
+    {
+        Some(None) => return text(StatusCode::NOT_FOUND, "Not Found"),
+        Some(Some(route)) => route,
+        None => {
+            let mut url = format!("{origin}{path}");
+            if !query.is_empty() {
+                url.push('?');
+                url.push_str(&query);
+            }
+            (url, Vec::new())
+        }
+    };
     if upgrade {
         let (mut parts, _) = req.into_parts();
         return match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
-            Ok(ws) => ws.on_upgrade(move |client| async move {tokio::select!{_ = state.auth.invalidated(&session)=>{}, _=bridge(client,url.replacen("http","ws",1))=>{}}}),
+            Ok(ws) => ws.on_upgrade(move |client| async move {tokio::select!{_ = state.auth.invalidated(&session)=>{}, _=bridge(client,url.replacen("http","ws",1),extra_headers)=>{}}}),
             Err(e) => e.into_response(),
         };
     }
@@ -169,6 +215,9 @@ async fn hub(State(state): State<Arc<AppState>>, req: Request) -> Response {
             _ => request = request.header(key, value),
         }
     }
+    for (name, value) in &extra_headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
     if !matches!(req.method(), &Method::GET | &Method::HEAD) {
         request = request.body(reqwest::Body::wrap_stream(
             req.into_body().into_data_stream(),
@@ -194,8 +243,21 @@ async fn hub(State(state): State<Arc<AppState>>, req: Request) -> Response {
         .body(Body::from_stream(response.bytes_stream()))
         .unwrap()
 }
-async fn bridge(mut socket: WebSocket, url: String) {
-    let Ok((mut upstream, _)) = tokio_tungstenite::connect_async(url).await else {
+async fn bridge(mut socket: WebSocket, url: String, headers: Vec<(String, String)>) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let Ok(mut request) = url.into_client_request() else {
+        let _ = socket.close().await;
+        return;
+    };
+    for (name, value) in headers {
+        if let (Ok(name), Ok(value)) = (
+            tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes()),
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&value),
+        ) {
+            request.headers_mut().insert(name, value);
+        }
+    }
+    let Ok((mut upstream, _)) = tokio_tungstenite::connect_async(request).await else {
         let _ = socket.close().await;
         return;
     };
