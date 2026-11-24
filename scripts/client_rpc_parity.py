@@ -119,6 +119,13 @@ def seed_fixture(home, isolation):
         "0000000d4944415478da63f8cfc0f01f0005000201a5f1d6a90000000049454e44ae426082"))
     (repo / "src/lib.rs").write_text("fn alpha() {}\nfn beta() {}\nfn gamma() {}\n")
     (repo / "unicode.txt").write_text("é parity\n")
+    # fff ranks grep hits by file mtime when scores tie. The two copies are
+    # seeded independently and their writes can cross different second boundaries.
+    for directory, dirs, files in os.walk(repo):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for name in files:
+            os.utime(Path(directory) / name, (1_700_000_000, 1_700_000_000))
     # Exercise the two list modes in isolation from search, branch and diff fixtures.
     listing = home / "listing"
     git("init", "-q", "-b", "main", str(listing), cwd=home)
