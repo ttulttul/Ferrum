@@ -104,6 +104,10 @@ pub struct Run {
     /// selection changes during the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_selection: Option<Box<serde_json::Value>>,
+    /// The JSON Schema of the result the run was asked to return as data
+    /// (`outputSchema`), which `t3_submit_output` checks a submission against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Box<serde_json::Value>>,
 }
 
 fn is_zero(value: &u32) -> bool {

@@ -1497,6 +1497,7 @@ mod tests {
             wire_id: None,
             driver: None,
             model_selection: None,
+            output_schema: None,
         };
         let mut live = thread(run.clone());
         for event in [

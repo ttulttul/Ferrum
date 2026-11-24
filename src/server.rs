@@ -580,6 +580,11 @@ impl crate::orchestration::CommandHost for AppState {
                                 &run,
                             )
                         };
+                        // A command its provider runs itself takes no output instructions.
+                        let is_command = crate::run_output::is_provider_command(
+                            &spec.prompt,
+                            provider.attachments.len(),
+                        );
                         // Who sent the run's message, when a person did not type
                         // it (`withMessageSenderNote`), ahead of its text.
                         let message = {
@@ -592,6 +597,15 @@ impl crate::orchestration::CommandHost for AppState {
                             spec.prompt = crate::thread_projection::with_message_sender_note(
                                 &message,
                                 &spec.prompt,
+                            );
+                        }
+                        // A run asked for a result tells the agent how to hand it back,
+                        // after the user's words (`outputInstructions`).
+                        if let Some(schema) = run.output_schema.as_deref().filter(|_| !is_command) {
+                            spec.prompt = format!(
+                                "{}\n\n{}",
+                                spec.prompt,
+                                crate::run_output::instructions(schema)
                             );
                         }
                         spec.provider = Some(provider);
