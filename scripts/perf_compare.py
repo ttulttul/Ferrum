@@ -29,6 +29,7 @@ Usage:
       --rust-command target/release/t3code-server --reference-root REF \\
       --json perf.json --markdown perf.md
   scripts/perf_compare.py --history DIR --markdown history.md   # a trend table of results in DIR
+  scripts/perf_compare.py --history DIR --update-doc docs/performance.md   # its generated block
 """
 import argparse
 import contextlib
@@ -811,8 +812,8 @@ def markdown(results):
     return "\n".join(lines) + "\n"
 
 
-def history_markdown(directory, limit=30):
-    """A trend table of the headline ratios in every result file under `directory`, newest first."""
+def load_runs(directory):
+    """Every result file under `directory`, newest first."""
     runs = []
     for path in Path(directory).glob("**/*.json"):
         with contextlib.suppress(ValueError, KeyError, OSError):
@@ -820,16 +821,13 @@ def history_markdown(directory, limit=30):
             if data.get("schema") == SCHEMA:
                 runs.append(data)
     runs.sort(key=lambda data: data["meta"]["date"], reverse=True)
-    if not runs:
-        return "No results yet.\n"
+    return runs
+
+
+def trend_table(runs, limit):
+    """The headline ratios of the newest `limit` runs, one row each."""
     labels = [label for _, _, label, _, _ in METRICS]
-    lines = ["# Performance results", "",
-             "The Rust server against the pinned reference, measured by scripts/perf_compare.py on each push "
-             "to main (.github/workflows/perf.yml); docs/performance.md on main explains the method. One "
-             "file per run is under results/. This file is generated: do not edit it.", "",
-             "## Latest", "", markdown(runs[0]), "## History", "",
-             "Ratios (Rust against the reference, higher is better for Rust) by commit, newest first.", "",
-             "| Date | Commit | " + " | ".join(labels) + " |",
+    lines = ["| Date | Commit | " + " | ".join(labels) + " |",
              "| --- | --- | " + " | ".join("---:" for _ in labels) + " |"]
     for data in runs[:limit]:
         by_label = {row["label"]: row["ratio"] for row in summary_rows(data)}
@@ -837,6 +835,67 @@ def history_markdown(directory, limit=30):
         lines.append(f"| {data['meta']['date'][:10]} | `{commit[:8]}` | " + " | ".join(
             f"{by_label[label]:.1f}×" if by_label.get(label) else "–" for label in labels) + " |")
     return "\n".join(lines) + "\n"
+
+
+def history_markdown(directory, limit=30):
+    """The perf-data branch's README: the latest results and the trend of every run under `directory`."""
+    runs = load_runs(directory)
+    if not runs:
+        return "No results yet.\n"
+    return "\n".join([
+        "# Performance results", "",
+        "The Rust server against the pinned reference, measured by scripts/perf_compare.py on each push "
+        "to main (.github/workflows/perf.yml); docs/performance.md on main explains the method. One "
+        "file per run is under results/. This file is generated: do not edit it.", "",
+        "## Latest", "", markdown(runs[0]), "## History", "",
+        "Ratios (Rust against the reference, higher is better for Rust) by commit, newest first.", "",
+        trend_table(runs, limit)])
+
+
+DOC_BEGIN = "<!-- perf:begin (written by scripts/perf_compare.py --update-doc; edits here are replaced) -->"
+DOC_END = "<!-- perf:end -->"
+
+
+def headline_bullets(data):
+    """One line per headline measure: the ratio, and which server it favors."""
+    lines = []
+    for row in summary_rows(data):
+        if row["section"] == "latency" or not row["ratio"]:
+            continue
+        ratio = row["ratio"]
+        favor = f"**{ratio:.1f}×** in Ferrum's favor" if ratio >= 1 else f"**{1 / ratio:.1f}×** in the reference's favor"
+        lines.append(f"- {row['label']}: {favor} ({cell(row['rust'], row['unit'])} against "
+                     f"{cell(row['original'], row['unit'])}).")
+    latency = [row["ratio"] for row in summary_rows(data) if row["section"] == "latency" and row["ratio"]]
+    if latency:
+        lines.append(f"- RPC latency (p50 and p95 of {len(latency) // 2} RPCs): from "
+                     f"**{min(latency):.1f}×** to **{max(latency):.1f}×** (above 1× favors Ferrum).")
+    return "\n".join(lines) + "\n"
+
+
+def update_doc(path, directory, limit=10):
+    """Replace the generated block of `path` (between DOC_BEGIN and DOC_END) with the newest run
+    under `directory`, and the trend of the last `limit` runs."""
+    runs = load_runs(directory)
+    if not runs:
+        raise SystemExit(f"no results under {directory}")
+    text = Path(path).read_text()
+    if DOC_BEGIN not in text or DOC_END not in text:
+        raise SystemExit(f"{path} has no generated block ({DOC_BEGIN} ... {DOC_END})")
+    latest = runs[0]
+    block = "\n".join([
+        DOC_BEGIN, "",
+        "From the latest CI run, on a GitHub-hosted runner. A ratio above 1× favors Ferrum.", "",
+        headline_bullets(latest),
+        markdown(latest),
+        "### Trend", "",
+        f"Ratios by commit for the last {min(limit, len(runs))} runs, newest first. The "
+        "[`perf-data` branch](https://github.com/ttulttul/Ferrum/tree/perf-data) has every run.", "",
+        trend_table(runs, limit),
+        DOC_END])
+    before, rest = text.split(DOC_BEGIN, 1)
+    after = rest.split(DOC_END, 1)[1]
+    Path(path).write_text(before + block + after)
 
 
 def host():
@@ -864,6 +923,8 @@ def main():
     parser.add_argument("--json", type=Path, help="write the results here")
     parser.add_argument("--markdown", type=Path, help="write the summary (or, with --history, the trend) here")
     parser.add_argument("--history", type=Path, help="summarise the result files in this directory instead")
+    parser.add_argument("--update-doc", type=Path,
+                        help="with --history: rewrite this document's generated block (docs/performance.md)")
     parser.add_argument("--only", nargs="*", choices=["size", "startup", "latency", "codex", "claude"],
                         help="run only these measurements")
     parser.add_argument("--startup-runs", type=int, default=5)
@@ -878,6 +939,9 @@ def main():
     parser.add_argument("--keep", action="store_true", help="keep each server's home (logs) for debugging")
     args = parser.parse_args()
 
+    if args.history and args.update_doc:
+        update_doc(args.update_doc, args.history)
+        return 0
     if args.history:
         text = history_markdown(args.history)
         if args.markdown:
