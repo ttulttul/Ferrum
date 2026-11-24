@@ -2286,6 +2286,7 @@
       "usage": "client",
       "existingCoverage": [
         "client_thread_parity.py",
+        "forge_write_parity.py",
         "parity-fixtures.json",
         "project_clone_parity.py",
         "storage_cleanup_parity.py",
