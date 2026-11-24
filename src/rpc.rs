@@ -642,7 +642,9 @@ async fn run_call(
         }
         "subscribePreviewEvents" => None,
         "subscribeDeviceState" => Some(Reply::Chunk(json!([state.workspace.device_state()]))),
-        _ => Some(dispatch(state, method, params).await),
+        // Boxed: `dispatch`'s future (every method's) is too large to keep
+        // on the session task's stack in a debug build.
+        _ => Some(Box::pin(dispatch(state, method, params)).await),
     };
     let mut last_seq = None;
     match initial {
@@ -3535,4 +3537,104 @@ pub(crate) async fn create_new_project(state: &AppState, name: &str) -> Result<V
         result["commitError"] = json!(error);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Declining a card (`peerLinks.answerRequest`) wakes its agent, inline
+    /// on the RPC's WebSocket task: the RPC's future, the command's and the
+    /// wake run's commit all run on one worker's stack. In a debug build
+    /// that overflowed tokio's default 2 MiB once #244 and #249 together
+    /// grew those futures, so they are boxed and the server's workers get
+    /// [`crate::WORKER_STACK_BYTES`]. This answers a card through the RPC on
+    /// a default-sized worker, leaving the server's extra room for the
+    /// WebSocket session's own frames and later growth.
+    #[test]
+    fn declining_a_card_fits_a_workers_stack() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_stack_size(2 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            // An instance whose driver runs no CLI: its turns run `sh -c 'sleep 30'`.
+            std::fs::write(
+                dir.path().join("settings.json"),
+                json!({"providerInstances": {"fixture": {"driver": "fixture", "enabled": true}}})
+                    .to_string(),
+            )
+            .unwrap();
+            let state = AppState::new(
+                dir.path(),
+                vec!["sh".into(), "-c".into(), "sleep 30".into()],
+            )
+            .await
+            .unwrap();
+            state.store.write().await.projects.insert(
+                "project:p".into(),
+                crate::store::Project {
+                    id: "project:p".into(),
+                    path: dir.path().to_str().unwrap().into(),
+                    name: "P".into(),
+                    created_at: 1,
+                },
+            );
+            let command =
+                |command: Value| crate::dispatch_orchestration_command(state.clone(), command);
+            command(json!({
+                "type": "thread.create", "commandId": "create", "threadId": "thread:t",
+                "projectId": "project:p", "title": "T",
+                "modelSelection": {"instanceId": "fixture", "model": "m"},
+                "runtimeMode": "full-access", "interactionMode": "default",
+                "branch": null, "worktreePath": null, "createdBy": "user", "creationSource": "web",
+            }))
+            .await
+            .unwrap();
+            command(json!({
+                "type": "message.dispatch", "commandId": "send", "threadId": "thread:t",
+                "messageId": "message:m", "text": "Link my vps", "attachments": [],
+                "dispatchMode": {"type": "start_immediately"},
+                "createdBy": "user", "creationSource": "web",
+            }))
+            .await
+            .unwrap();
+            let (run_id, node_id) = {
+                let store = state.store.read().await;
+                let run = &store.threads["thread:t"].runs[0];
+                (
+                    run.id.to_string(),
+                    crate::orchestration::delegation::root_node_id(&run.wire_id()),
+                )
+            };
+            command(json!({
+                "type": "link_request.record", "commandId": "ask", "threadId": "thread:t",
+                "runId": run_id, "nodeId": node_id,
+                "turnItemId": "turn-item:link:card-vps", "reason": "Link the vps",
+                "linkStatus": "pending", "url": "https://vps.example.com",
+            }))
+            .await
+            .unwrap();
+            let declined = {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let params = json!({"threadId": "thread:t",
+                        "turnItemId": "turn-item:link:card-vps", "answer": {"type": "decline"}});
+                    dispatch(&state, "peerLinks.answerRequest", &params).await
+                })
+                .await
+                .unwrap()
+            };
+            assert!(matches!(declined, Reply::Success(_)), "{declined:?}");
+            let store = state.store.read().await;
+            assert_eq!(
+                store.threads["thread:t"].link_requests[0]["linkStatus"],
+                "declined"
+            );
+        });
+    }
 }

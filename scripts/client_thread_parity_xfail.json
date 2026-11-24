@@ -1,19 +1,9 @@
 {
-  "claude agent mcp": {
-    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen once in pinned local rounds under heavy machine load) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
-  },
-  "claude approval-required": {
-    "live": "Racy: in 1 of 11 pinned local rounds (under heavy machine load) Rust sent the command item's update between the approval request's records, where the reference's provider commit batch (#39502) held it behind them. Matched in the other rounds."
-  },
   "claude delegate": {
     "live": "Racy: the reference's provider commit batch (#39502) decides by timing whether a subagent's queued updates commit together: in 1 of 8 pinned local rounds it sent one more subagent.updated after the task's context-transfer.created than Rust. Matched in the other rounds."
   },
   "claude delegate worktree": {
-    "live": "Racy: seen both matching and differing (8 pinned runs: most differed, one matched): #39502 (ProviderCommitBatch) usually combines the parent's tool item snapshots, so the reference's live stream carries it once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated); with the child's worktree preparation in between, the reference sometimes sends both too.",
     "agent mcp": "Racy: seen both matching and differing (8 pinned runs and the shards matched; a later shard run differed): the reference's task_status sometimes reads the task before its outbox finalizer records the result's context transfer, so its resultContextTransferId is null where Rust's is set, as in codex delegate's agent mcp."
-  },
-  "claude delegate remote": {
-    "live": "#39502 (ProviderCommitBatch) combines an item's queued snapshots, so the reference's live stream carries a tool item once, completed, where Rust sends its in-progress update and its completion (an extra node.updated and turn-item.updated)."
   },
   "claude delegate remote cancel": {
     "attempts": "The cancelled task's result is steered into the parent's running Claude turn on both servers, and this fixture's CLI never reads it before its turn ends. The reference counts that steer delivered; Rust's resend_untaken_deliveries sends it again as a queued wake once the turn ends (a second run, its notification and message). A steering difference of its own, not of tasks in linked environments; the task, its result, its cancel and every call to the linked environment match.",
@@ -33,18 +23,6 @@
     "live": "Racy: matched in 4 of 12 pinned local runs. Otherwise the reference steers the delegated result into the parent's running Claude turn (#39528) and queues the follow-up run while that turn still runs, sending the delivery's card once with its message and the queued run before the turn ends, where Rust also sends the card's pending and completed steer updates and creates the follow-up run after the turn ends. Which way it goes depends on whether the result arrives before the turn's last item.",
     "items": "Racy: in 1 of 10 pinned local rounds Rust steered the delegated result into the parent's running Claude turn, so its notification item came before the turn's assistant message, where the reference queued it as the follow-up run after the turn. Same race as the live entry: which happens depends on whether the result arrives before the turn's last item. Matched in the other rounds."
   },
-  "claude in the login shell PATH": {
-    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen under load, 2 of 8 pinned local rounds) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
-  },
-  "claude second turn": {
-    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen under load, 1 of 8 pinned local rounds) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
-  },
-  "claude title fallback": {
-    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen under load, 1 of 8 pinned local rounds) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
-  },
-  "codex attachments": {
-    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen under load, 2 of 8 pinned local rounds) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
-  },
   "codex delegate": {
     "agent mcp": "Racy: on a blocking delegate_task wait, the reference's waitForTask races its outbox finalizer, so resultContextTransferId can already be populated on one server while still null on the other (seen both matching and differing).",
     "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
@@ -55,9 +33,6 @@
   "codex thread tools": {
     "live": "Racy: the reference's pull-request sync reactor reads a newly linked request on its own schedule, so in 1 of 10 pinned local runs its first link's synced and link-updated events landed a tool call earlier than Rust's. Matched in the other runs.",
     "agent mcp": "Racy: since #197 Rust reads a newly linked pull request right after the link commits, apart from the tool call, so the agent's next list_thread_pull_requests can come before that read and show the link without its branches and draft state (seen both matching and differing)."
-  },
-  "codex title failed": {
-    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen once in pinned local rounds under heavy machine load) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
   },
   "grok agent mcp": {
     "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
@@ -105,16 +80,7 @@
   "grok turn": {
     "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes a Grok turn's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   },
-  "opencode title": {
-    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen under load, 1 of 8 pinned local rounds) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
-  },
-  "antigravity title refused for a broken runtime": {
-    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen once in pinned local rounds under heavy machine load) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
-  },
-  "claude approval declined": {
-    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen once in pinned local rounds under heavy machine load) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
-  },
-  "claude attachments": {
-    "live": "Racy: the reference's provider commit batch (#39502) coalesces a tool item's running and completed snapshots only when the completion arrives while its worker is still committing the first; when it is idle by then (seen once in pinned local rounds under heavy machine load) it sends both node.updated and turn-item.updated pairs, where Rust, which models a commit as 20 ms busy, sent one. Matched in the other rounds."
+  "claude approval-required": {
+    "live": "Racy: in 1 of 11 pinned local rounds (under heavy machine load) Rust sent the command item's update between the approval request's records, where the reference's provider commit batch (#39502) held it behind them. Matched in the other rounds."
   }
 }

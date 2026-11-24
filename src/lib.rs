@@ -11,6 +11,11 @@ pub mod access_http;
 #[cfg(feature = "native")]
 pub mod acp_mcp_bridge;
 #[cfg(feature = "native")]
+/// The stack each tokio worker of the server gets: 8 MiB, four times tokio's
+/// default, since a request's future chain is polled on one worker's stack
+/// and a debug build's async frames are large.
+pub const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 mod agent_instructions;
 pub mod asset_grant;
 #[cfg(feature = "native")]
