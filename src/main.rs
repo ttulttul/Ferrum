@@ -97,7 +97,11 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(false),
         );
     }
+    // A worker polls a request's whole future chain on its stack, and a
+    // debug build's async frames are large (answering a link card took
+    // ~2 MiB, tokio's default), so the workers get more room.
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(t3code_server::WORKER_STACK_BYTES)
         .enable_all()
         .build()?;
     match runtime.block_on(serve(args, bootstrap)) {
