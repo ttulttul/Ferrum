@@ -374,6 +374,42 @@
   },
   {
    "await": "task"
+  },
+  {
+   "sleep": 1
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "commandExecution",
+      "id": "exec-parent-stop-1",
+      "pluginId": null,
+      "scriptPath": null,
+      "command": "/bin/bash -lc 'sleep 60'",
+      "cwd": "/workspace",
+      "processId": "16351",
+      "source": "unifiedExecStartup",
+      "status": "inProgress",
+      "commandActions": [
+       {
+        "type": "unknown",
+        "command": "sleep 60"
+       }
+      ],
+      "aggregatedOutput": null,
+      "exitCode": null,
+      "durationMs": null,
+      "startedAtMs": 1795225969430,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225969430
+    },
+    "emittedAtMs": 1795225969431
+   }
   }
  ]
 }

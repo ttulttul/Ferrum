@@ -262,7 +262,7 @@ PROVIDER_SCENARIOS = [
      "scenario": "codex_delegate_cancel.json", "awaitStatus": True},
     {"name": "codex delegate stop", "instance": "codex", "model": "fixture",
      "scenario": "codex_delegate_stop.json", "awaitStatus": True,
-     "change": {"type": "thread.stop"}, "changeAfter": "subagent"},
+     "change": {"type": "thread.stop"}, "changeAfter": "command"},
     {"name": "codex delegate restart", "instance": "codex", "model": "fixture",
      "scenario": "codex_delegate_restart.json", "awaitStatus": True, "settleRuns": 2,
      "restart": {"after": "settled"}},

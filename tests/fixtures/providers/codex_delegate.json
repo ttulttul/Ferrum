@@ -425,6 +425,9 @@
    "await": "task"
   },
   {
+   "sleep": 1
+  },
+  {
    "mcp": {
     "tool": "task_status",
     "arguments": {
