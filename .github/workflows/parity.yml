@@ -122,7 +122,7 @@ jobs:
       fail-fast: false
       matrix:
         # scripts/ci_parity_shard.sh lists each shard's suites.
-        shard: [thread-1-4, thread-2-4, thread-3-4, thread-4-4, core, integrations, status-relay]
+        shard: [thread-1-4, thread-2-4, thread-3-4, thread-4-4, core, integrations, integrations-2, status-1-2, status-2-2]
         # The nightly run runs every shard twice.
         round: ${{ fromJSON(github.event_name == 'schedule' && '[1, 2]' || '[1]') }}
         include:

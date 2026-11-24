@@ -51,6 +51,20 @@ case "$shard" in
     run python3 scripts/login_shell_refresh_parity.py "${both[@]}"
     ;;
   integrations)
+    # The shard with a browser (Playwright, whose install can take minutes when its apt mirror is
+    # slow), so its own suites stay short: the browser suites and the agent tool suites.
+    run python3 scripts/preview_provider_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright" --reference-root "$checkout"
+    run python3 scripts/html_render_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright" --reference-root "$checkout"
+    run python3 scripts/preview_session_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright" --reference-root "$checkout"
+    run python3 scripts/relay_parity.py --checkout "$checkout" --rust "$server"
+    run python3 scripts/link_request_parity.py "${both[@]}"
+    run python3 scripts/run_output_parity.py "${both[@]}"
+    run python3 scripts/secret_request_parity.py "${both[@]}"
+    run python3 scripts/attachment_tools_parity.py "${both[@]}"
+    run python3 scripts/feedback_parity.py "${both[@]}"
+    ;;
+  integrations-2)
+    # Settings, storage, source control hosts and projects, then the relay and client call suites.
     run python3 scripts/storage_cleanup_parity.py "${both[@]}"
     run python3 scripts/config_parity.py "${both[@]}"
     run python3 scripts/github_provider_parity.py "${both[@]}" --faketime-lib "$faketime"
@@ -65,23 +79,15 @@ case "$shard" in
     run python3 scripts/bitbucket_settings_parity.py "${both[@]}"
     run python3 scripts/bitbucket_pull_request_parity.py "${both[@]}"
     run python3 scripts/acp_install_parity.py "${both[@]}"
-    run python3 scripts/preview_provider_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright" --reference-root "$checkout"
-    run python3 scripts/html_render_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright" --reference-root "$checkout"
-    run python3 scripts/preview_session_parity.py "${both[@]}" --browser-cache "$HOME/.cache/ms-playwright" --reference-root "$checkout"
-    run python3 scripts/relay_parity.py --checkout "$checkout" --rust "$server"
-    run python3 scripts/link_request_parity.py "${both[@]}"
-    run python3 scripts/run_output_parity.py "${both[@]}"
-    run python3 scripts/secret_request_parity.py "${both[@]}"
-    run python3 scripts/attachment_tools_parity.py "${both[@]}"
-    run python3 scripts/feedback_parity.py "${both[@]}"
-    ;;
-  status-relay)
-    # Suites that run their servers side by side, so mostly wait on the servers' timers.
-    # provider_status: one scenario per driver and case, several of which wait out the providers' status timeouts.
-    run python3 scripts/provider_status_parity.py "${both[@]}"
     run python3 scripts/relay_provisioning_parity.py "${both[@]}"
     run python3 scripts/client_rpc_parity.py "${both[@]}" --reference-root "$checkout"
     run python3 scripts/relay_client_parity.py "${both[@]}"
+    ;;
+  status-*)
+    # status-I-N: part I of N of provider_status, one scenario per driver and case; several wait
+    # out the providers' status timeouts, so the suite mostly waits on the servers' timers.
+    IFS=- read -r _ index count <<<"$shard"
+    run python3 scripts/provider_status_parity.py "${both[@]}" --shard "$index/$count"
     ;;
   *)
     echo "unknown shard: $shard" >&2

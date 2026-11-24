@@ -1319,10 +1319,19 @@ def main():
     parser.add_argument("--scenario", action="append", help="run only this scenario (repeatable)")
     parser.add_argument("--dump", type=Path, help="write each server's outcome here")
     parser.add_argument("--jobs", type=int, default=4, help="scenarios to run at once (1 runs them one by one)")
+    parser.add_argument("--shard", help="I/N: run only the I-th of N parts of the scenarios (CI splits the suite)")
     args = parser.parse_args()
     xfail = json.loads(XFAIL.read_text()) if XFAIL.exists() else {}
     failures, unexpected_passes = [], []
     selected = [s for s in SCENARIOS if not args.scenario or s["name"] in args.scenario]
+    if args.shard:
+        # Dealt out longest wait first, so each part gets a fair share of the slow scenarios.
+        index, count = (int(part) for part in args.shard.split("/"))
+        if not 1 <= index <= count:
+            parser.error(f"--shard {args.shard}: I must be 1..N")
+        by_wait = sorted(selected, key=lambda scenario: -scenario.get("wait", 20))
+        mine = {id(scenario) for scenario in by_wait[index - 1::count]}
+        selected = [scenario for scenario in selected if id(scenario) in mine]
     def outcomes_of(scenario):
         with tempfile.TemporaryDirectory(prefix="t3-status-") as directory:
             temporary = Path(directory)

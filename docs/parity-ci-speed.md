@@ -233,3 +233,19 @@ On #92 the server parity wall time was 5 min 14 s. Provider status took 89 s, re
 - **Docs-only PRs.** A `changes` job lists the pull request's files. When only `README.md` and `docs/` change, Rust validation and the shards are skipped, and the `parity` check passes without them.
 - **Nightly run.** Pushes to main, the nightly schedule and manual runs always run everything. The nightly run runs every shard twice, with the second round named `… again`, to surface flaky tests.
 - **Rebalance.** The thread scenarios run in 4 shards. `provider-status` and `relay-provisioning` merge into one `status-relay` shard, which also takes `client_rpc` and `relay_client` from `integrations`. That is still 7 shards.
+
+**Step 6 (split `integrations` and `status-relay`, Nov 2026).** With new suites landing, `integrations` hit its 20-minute timeout (#220, job 138183199635: 625 s of suites after a 432 s setup) and `status-relay` came within 32 s of it. The setup's spikes are `playwright-core install --with-deps chromium`, whose apt downloads sometimes crawl (5.5 min at 95 kB/s); only the browser shard pays them. From the CI logs of runs 45315995940, 45313465482, 45314089753 and 45315947765 (suites only, then the whole job):
+
+| Shard | Suites | Job |
+|---|---:|---:|
+| `integrations` | 458–625 s | 605–1204 s (timed out) |
+| `status-relay` | 704–1012 s | 814–1168 s |
+| `core` | 430–659 s | 555–805 s |
+| `thread-1-4` … `thread-4-4` | 288–459 s | 429–620 s |
+
+Now 9 shards:
+- **`integrations`** keeps the browser (Playwright) and only its browser suites (preview provider, HTML render, preview session) plus the short agent tool suites (relay, link and secret requests, run output, attachment tools, feedback): about 250 s of suites at the CI worst case, so a slow browser install still fits.
+- **`integrations-2`** takes settings, storage cleanup, the source control hosts, projects and Bitbucket, and from `status-relay` the relay provisioning, client RPC and relay client suites: about 515 s at the CI worst case.
+- **`status-1-2`, `status-2-2`** each run half of `provider_status_parity.py` (`--shard I/N`, scenarios dealt out longest wait first): about 460 s each at the CI worst case.
+
+Locally (one run, two shards at a time): `integrations` 171 s, `integrations-2` 392 s, `status-1-2` 246 s, `status-2-2` 247 s.
