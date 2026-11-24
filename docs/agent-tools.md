@@ -400,8 +400,12 @@ recording draws the cursor and ring into its frames (`__t3Recorder.cursor`), wit
 pauses so they can be seen. Nothing waits when no one watches or records.
 `scripts/preview_provider_parity.py` compares the messages a passive viewer receives.
 
-**Not yet:** recordings from an agentd workspace on another machine (the claim reads the server's
-attachments directory).
+A recording made in a `t3-agentd` workspace on another machine is left in that machine's
+attachments, where its browser ran. The claim brings it to the server's attachments first
+(`Workspace::fetch_attachment`), through the asset operations agentd already serves (an
+`attachment` grant, `asset.open`, `asset.read`), checks it against the size the stop reported,
+then claims it as a local one. No agentd API changed; the remote copy stays where it was made.
+`agentd/tests/remote.rs` fetches one through agentd.
 
 ### 4g. Run output
 

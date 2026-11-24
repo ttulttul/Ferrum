@@ -353,11 +353,13 @@ pub trait McpHost: AuthHost {
     /// pending attachment, moved to `thread_id`'s attachments; the artifact,
     /// or the failure's message.
     fn claim_preview_recording(
-        &self,
-        _thread_id: &str,
-        _artifact: &Value,
-    ) -> Result<Value, String> {
-        Err("Preview recording could not be saved to the agent environment.".to_owned())
+        self: &Arc<Self>,
+        _thread_id: String,
+        _artifact: Value,
+    ) -> HostFuture<Result<Value, String>> {
+        Box::pin(async {
+            Err("Preview recording could not be saved to the agent environment.".to_owned())
+        })
     }
     /// The HTML toolkit's page work (`HtmlRender`): `"preview"` renders a page
     /// in a headless browser, `"publish"` stores it for its thread to show.

@@ -725,3 +725,37 @@ fn without_digest(
         })
     })
 }
+
+#[tokio::test]
+async fn a_pending_recording_is_fetched_from_the_workspace() {
+    let setup = setup().await;
+    let attachments = setup._dir.path().join("state/attachments");
+    std::fs::create_dir_all(&attachments).unwrap();
+    let id = "pending-0b9c2c7e-6a2b-4b8f-9f1e-2f5b7c3a1d00-mp4";
+    // Larger than one asset chunk, so the body is pulled in several reads.
+    let video: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(attachments.join(format!("{id}.mp4")), &video).unwrap();
+
+    // The server's own workspace keeps its attachments with the server's.
+    assert!(setup.local.fetch_attachment(id, 1 << 20).await.is_none());
+    let fetched = setup.remote.fetch_attachment(id, 1 << 20).await.unwrap();
+    assert_eq!(fetched.unwrap(), video);
+    // Too large, or not there, is refused.
+    let error = setup
+        .remote
+        .fetch_attachment(id, 1000)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.contains("larger than 1000 bytes"), "{error}");
+    let missing = "pending-11111111-2222-4333-8444-555555555555-mp4";
+    assert!(setup
+        .remote
+        .fetch_attachment(missing, 1 << 20)
+        .await
+        .unwrap()
+        .is_err());
+    // The connection still serves requests after an abandoned body.
+    let again = setup.remote.fetch_attachment(id, 1 << 20).await.unwrap();
+    assert_eq!(again.unwrap().len(), video.len());
+}
