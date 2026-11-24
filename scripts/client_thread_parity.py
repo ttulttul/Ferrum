@@ -237,9 +237,12 @@ PROVIDER_SCENARIOS = [
     {"name": "claude delegate remote", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate_remote.json", "awaitStatus": True, "peer": {"finish_after": 1}},
     # A task in a linked environment cancelled while its thread there runs: the thread there is
-    # stopped through the link, and cancelling it again stops it there again.
+    # stopped through the link, and cancelling it again stops it there again. The cancelled result
+    # is steered into the parent's turn, which ends before reading it; the CLI then answers it as
+    # its next turn, as Claude Code does.
     {"name": "claude delegate remote cancel", "instance": "claudeAgent", "model": "claude-opus-5-5",
-     "scenario": "claude_delegate_remote_cancel.json", "awaitStatus": True, "peer": {"finish_after": None}},
+     "scenario": "claude_delegate_remote_cancel.json", "awaitStatus": True, "peer": {"finish_after": None},
+     "settleRuns": 2},
     # A delegated task that runs on after the parent's turn: its result wakes the idle parent
     # with a delivery turn, which reads it with task_status.
     {"name": "claude delegate async", "instance": "claudeAgent", "model": "claude-opus-5-5",

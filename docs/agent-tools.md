@@ -262,8 +262,10 @@ schemas.
    Parity: `claude delegate remote` (a wait) and `claude delegate remote cancel` (cancelled while its
    thread there runs, then cancelled again), against a loopback linked environment that records
    each call (`scripts/remote_task_peer.py`). In the cancel, the result is steered into the parent's
-   running Claude turn, which the fixture never reads: the reference counts that steer delivered and
-   Rust sends it again as a wake when the turn ends (expected failures; a steering difference).
+   running Claude turn, which ends before reading it, and the CLI answers it as its next turn.
+   Rust sends such an unread steer again as a queued run that adopts the CLI's copy; the reference
+   leaves it to the CLI and opens a wake continuation run when Claude answers. Both end in one run
+   with the answer (wake continuations in Rust are still to come).
 4c. **Attachments** (served, native server only): `t3_attachment_prepare_upload` issues an
    upload URL (with `uploadUrl` at the origin the call reached) for an upload its caller owns;
    `t3_attachment_discard` deletes it, for that caller only; `t3_thread_send_attachments` sends
