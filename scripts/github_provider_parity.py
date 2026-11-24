@@ -289,11 +289,11 @@ def rpc(tag, payload):
     return {"name": tag, "frame": {"_tag": "Request", "tag": tag, "id": tag, "headers": [], "payload": payload}}
 
 
-def github_fixture(stack, directory):
+def github_fixture(stack, directory, handler=Provider):
     config = directory
     config.mkdir(mode=0o700)
     endpoint = config / "api.sock"
-    host = stack.enter_context(ThreadingUnixStreamServer(str(endpoint), Provider))
+    host = stack.enter_context(ThreadingUnixStreamServer(str(endpoint), handler))
     host.creates, host.comments, host.pr_writes, host.reviews, host.reviewers = [], [], [], [], []
     host.requests = []
     host.repository = deepcopy(REPOSITORY)

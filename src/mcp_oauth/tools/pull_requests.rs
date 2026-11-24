@@ -2,6 +2,7 @@
 use super::{forge::*, *};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 mod list;
+mod rerun;
 mod target;
 mod writes;
 
@@ -682,6 +683,9 @@ pub(super) async fn call<S: McpHost>(
     }
     if name == "pull_request_read" {
         return agent_read(host, caller, args).await;
+    }
+    if name == "ci_rerun" {
+        return rerun::call(host, caller, args).await;
     }
     if name == "ci_logs" {
         return agent_logs(host, caller, args).await;

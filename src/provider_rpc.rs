@@ -85,6 +85,21 @@ pub(crate) enum Failure {
     Invalid,
 }
 
+pub(super) struct RequestError {
+    pub kind: Failure,
+    pub http_status: Option<u16>,
+    pub response: Option<Value>,
+}
+impl From<Failure> for RequestError {
+    fn from(kind: Failure) -> Self {
+        Self {
+            kind,
+            http_status: None,
+            response: None,
+        }
+    }
+}
+
 // Drain both pipes even after the retained prefix fills so the CLI can finish writing.
 async fn bounded_read(
     mut input: impl tokio::io::AsyncRead + Unpin,
@@ -157,6 +172,18 @@ impl<'a> Github<'a> {
         accept: &str,
         body: Option<Value>,
     ) -> Result<Vec<u8>, Failure> {
+        self.request_with_response(method, endpoint, accept, body)
+            .await
+            .map_err(|e| e.kind)
+    }
+
+    pub(super) async fn request_with_response(
+        &self,
+        method: &str,
+        endpoint: &str,
+        accept: &str,
+        body: Option<Value>,
+    ) -> Result<Vec<u8>, RequestError> {
         let mut command = crate::login_shell::tokio_command(self.cli);
         command
             .current_dir(self.cwd)
@@ -218,21 +245,27 @@ impl<'a> Github<'a> {
                 return Ok(stdout);
             }
             let error = String::from_utf8_lossy(&stderr).to_lowercase();
-            Err(
-                if error.contains("rate limit") || error.contains("http 429") {
-                    Failure::RateLimit
-                } else if status.code() == Some(4)
-                    || error.contains("gh auth login")
-                    || error.contains("http 401")
-                    || error.contains("bad credentials")
-                {
-                    Failure::Auth
-                } else if error.contains("http 404") {
-                    Failure::NotFound
-                } else {
-                    Failure::Refused
-                },
-            )
+            let kind = if error.contains("rate limit") || error.contains("http 429") {
+                Failure::RateLimit
+            } else if status.code() == Some(4)
+                || error.contains("gh auth login")
+                || error.contains("http 401")
+                || error.contains("bad credentials")
+            {
+                Failure::Auth
+            } else if error.contains("http 404") {
+                Failure::NotFound
+            } else {
+                Failure::Refused
+            };
+            let http_status = error
+                .rsplit_once("http ")
+                .and_then(|(_, rest)| rest.trim_end().trim_end_matches(')').parse::<u16>().ok());
+            Err(RequestError {
+                kind,
+                http_status,
+                response: serde_json::from_slice(&stdout).ok(),
+            })
         })
         .await
         .map_err(|_| Failure::Refused)?

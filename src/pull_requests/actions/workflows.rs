@@ -34,7 +34,7 @@ async fn head(gh: &Github<'_>, vars: &Value, number: u64) -> Result<Option<Head>
     }))
 }
 
-async fn pending(gh: &Github<'_>, repo: &str, number: u64, head: &Head) -> Result<Vec<u64>, Value> {
+async fn verify_head(gh: &Github<'_>, repo: &str, number: u64, head: &Head) -> Result<(), Value> {
     let (owner, name) = repo.split_once('/').unwrap();
     let mut vars = json!({"owner":owner,"name":name,"head":head.branch});
     let mut matches = Vec::new();
@@ -81,7 +81,11 @@ async fn pending(gh: &Github<'_>, repo: &str, number: u64, head: &Head) -> Resul
     if matches != [Some(number)] {
         return Err(error(OP,&format!("The head revision matched {} pull requests instead of uniquely matching #{number}.",matches.len())));
     }
-    let mut ids = Vec::new();
+    Ok(())
+}
+
+async fn runs(gh: &Github<'_>, repo: &str, head: &Head) -> Result<Vec<Value>, Value> {
+    let mut found = Vec::new();
     let mut query = reqwest::Url::parse("https://api.github.com").expect("fixed URL");
     query
         .query_pairs_mut()
@@ -100,13 +104,12 @@ async fn pending(gh: &Github<'_>, repo: &str, number: u64, head: &Head) -> Resul
             .as_array()
             .ok_or_else(|| provider_error(Failure::Invalid))?;
         for run in runs {
-            ids.push(
-                run["id"]
-                    .as_u64()
-                    .ok_or_else(|| provider_error(Failure::Invalid))?,
-            );
+            if !run["id"].is_u64() {
+                return Err(provider_error(Failure::Invalid));
+            }
+            found.push(run.clone());
         }
-        if ids.len() > LIMIT {
+        if found.len() > LIMIT {
             return Err(error(
                 OP,
                 &format!("GitHub returned more than {LIMIT} workflow runs awaiting approval."),
@@ -116,7 +119,32 @@ async fn pending(gh: &Github<'_>, repo: &str, number: u64, head: &Head) -> Resul
             break;
         }
     }
-    Ok(ids)
+    Ok(found)
+}
+
+async fn pending(gh: &Github<'_>, repo: &str, number: u64, head: &Head) -> Result<Vec<u64>, Value> {
+    verify_head(gh, repo, number, head).await?;
+    Ok(runs(gh, repo, head)
+        .await?
+        .iter()
+        .filter_map(|r| r["id"].as_u64())
+        .collect())
+}
+
+/// The check reader needs both the fork identity and the names of approval-gated runs.
+pub(in crate::pull_requests) async fn fork_runs(
+    gh: &Github<'_>,
+    repo: &str,
+    number: u64,
+    pr: &Value,
+) -> Result<Vec<Value>, Value> {
+    let head = Head {
+        sha: required(pr, "headRefOid")?.into(),
+        branch: required(pr, "headRefName")?.into(),
+        owner: required(&pr["headRepositoryOwner"], "login")?.into(),
+    };
+    let (_, runs) = tokio::try_join!(verify_head(gh, repo, number, &head), runs(gh, repo, &head))?;
+    Ok(runs)
 }
 
 pub(super) async fn approve(gh: &Github<'_>, repo: &str, vars: &Value, number: u64) -> Reply {

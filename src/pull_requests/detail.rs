@@ -99,7 +99,7 @@ fn permissions(repo: &Value, pr: &Value) -> Value {
     );
     row
 }
-fn check_rows(contexts: Vec<Value>) -> Vec<Value> {
+pub(super) fn check_rows(contexts: Vec<Value>) -> Vec<Value> {
     let mut kept = IndexMap::new();
     for c in contexts {
         let Some(name) = trim(&c["name"]).or_else(|| trim(&c["context"])) else {
@@ -303,6 +303,39 @@ pub(super) async fn read(
     Ok(result)
 }
 
+pub(super) fn select(checks: &[Value], input: &Value, op: &str) -> Result<Vec<Value>, Value> {
+    let wanted = input["check"].as_str();
+    let selected: Vec<_> = checks
+        .iter()
+        .filter(|c| match wanted {
+            Some(name) => c["name"]
+                .as_str()
+                .is_some_and(|n| n.to_lowercase() == name.trim().to_lowercase()),
+            None => matches!(c["status"].as_str(), Some("failure" | "cancelled")),
+        })
+        .cloned()
+        .collect();
+    if let Some(name) = wanted.filter(|_| selected.is_empty()) {
+        let available = checks
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(error(
+            op,
+            &format!(
+                "No check is named {name}. Checks: {}.",
+                if available.is_empty() {
+                    "none"
+                } else {
+                    &available
+                }
+            ),
+        ));
+    }
+    Ok(selected)
+}
+
 /// Read the tail of selected GitHub Actions jobs. Non-Actions checks have no log endpoint and are
 /// reported as a per-check detail, matching the provider contract.
 pub(super) async fn logs(gh: &Github<'_>, repository: &str, number: u64, input: &Value) -> Reply {
@@ -320,38 +353,7 @@ pub(super) async fn logs(gh: &Github<'_>, repository: &str, number: u64, input: 
     )
     .await?;
     let checks = checks["checks"].as_array().cloned().unwrap_or_default();
-    let wanted = input["check"].as_str().map(|s| s.to_ascii_lowercase());
-    let selected: Vec<Value> = checks
-        .iter()
-        .filter(|check| {
-            wanted.as_ref().is_none_or(|w| {
-                check["name"]
-                    .as_str()
-                    .is_some_and(|n| n.to_ascii_lowercase() == *w)
-            })
-        })
-        .filter(|check| {
-            wanted.is_some() || matches!(check["status"].as_str(), Some("failure" | "cancelled"))
-        })
-        .cloned()
-        .collect();
-    if let Some(wanted) = wanted.as_ref() {
-        if selected.is_empty() {
-            return Err(error(
-                "checkLogs",
-                &format!(
-                    "No check is named {}. Checks: {}.",
-                    input["check"].as_str().unwrap_or_default(),
-                    checks
-                        .iter()
-                        .filter_map(|c| c["name"].as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            ));
-        }
-        let _ = wanted;
-    }
+    let selected = select(&checks, input, "checkLogs")?;
     let tail_lines = input["tailLines"].as_u64().unwrap_or(200).clamp(1, 2000) as usize;
     let mut output = Vec::new();
     for check in selected {

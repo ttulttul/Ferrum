@@ -1275,6 +1275,14 @@ pub(crate) fn watch_patch(thread: &Thread, cmd: &Value, at: &str) -> Value {
         watch["remarksThrough"] = json!(at);
         watch["remarkIds"] = json!([]);
         watch["wakes"] = json!(0);
+        let pending = cmd["checksPending"].as_bool().unwrap_or_else(|| {
+            links[index]["snapshot"]["checksState"] == "pending" || watch["checksPending"] == true
+        });
+        if pending {
+            watch["checksPending"] = json!(true);
+        } else {
+            watch.as_object_mut().unwrap().remove("checksPending");
+        }
         if let Some(object) = links[index].as_object_mut() {
             object.remove("endedWatch");
             object.insert("watch".into(), watch);
