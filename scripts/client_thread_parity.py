@@ -495,6 +495,11 @@ PROVIDER_SCENARIOS = [
      "followUpModel": {"instanceId": "claudeAgent", "model": "claude-sonnet-5-5"}},
     {"name": "codex model switch", "instance": "codex", "model": "fixture", "scenario": "codex_model_switch.json",
      "followUp": "Now append a line", "followUpModel": {"instanceId": "codex", "model": "fixture-mini"}},
+    # With no turn running, the thread's Claude CLI wakes on its own and writes a turn of its own:
+    # it opens a continuation run ("Background task completed.", a background-activity
+    # notification from the provider) that shows that turn.
+    {"name": "claude wake", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_wake.json",
+     "settleRuns": 2},
     # A message steers the running turn (Codex `turn/steer`), which then answers it, and Stop
     # interrupts it.
     # A message steers the running Claude turn: it goes to the CLI the turn runs (priority

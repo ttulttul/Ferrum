@@ -665,6 +665,15 @@ fn cli_driver<H: CommandHost>(state: &H, row: &Value) -> Option<String> {
     crate::workspace::provider::runs_turns(driver).then(|| driver.to_owned())
 }
 
+/// A provider's continuation run (`isClaudeProviderContinuationTurn`): an
+/// agent's message from the provider, which shows what the provider's CLI
+/// did on its own rather than sending it a prompt.
+pub(crate) fn is_provider_continuation(command: &Value) -> bool {
+    command["createdBy"] == "agent"
+        && command["creationSource"] == "provider"
+        && command["delegatedCompletion"].is_null()
+}
+
 /// Whether a message's run follows the thread's model pick when it starts
 /// rather than a copy from now: a scheduled delivery or (#40373) a queued
 /// message that names no model, unless it is a delegated completion, a
@@ -737,11 +746,11 @@ async fn start_run<H: CommandHost>(
             }),
         (None, None) => None,
     };
-    // A delegated wake queued behind the active run starts when that run
-    // ends; other queued messages wait to be sent.
-    let wake = wire
-        .as_ref()
-        .is_some_and(|wire| wire["delegatedCompletion"].is_object());
+    // A delegated wake or a provider continuation queued behind the active
+    // run starts when that run ends; other queued messages wait to be sent.
+    let wake = wire.as_ref().is_some_and(|wire| {
+        wire["delegatedCompletion"].is_object() || is_provider_continuation(wire)
+    });
     let run = Run {
         id: wire_id
             .as_deref()
@@ -1124,6 +1133,17 @@ async fn apply_command<H: CommandHost>(
                     "delegatedCompletion": completion,
                 }));
             }
+            // A provider's continuation run is the agent's message, carrying
+            // its notification, and continues the work before it
+            // (`wakeWorkStartedAt`).
+            if wire.is_none() && is_provider_continuation(command) {
+                wake_started = delegation::wake_work_started_at(&*state, thread_id).await;
+                wire = Some(json!({
+                    "createdBy": command["createdBy"],
+                    "creationSource": command["creationSource"],
+                    "notification": command["notification"],
+                }));
+            }
             // An agent's message names the thread that sent it.
             if wire.is_none()
                 && command["createdBy"] == "agent"
@@ -1233,13 +1253,16 @@ async fn apply_command<H: CommandHost>(
                     .map(str::to_owned),
                 command["scheduledTaskId"].as_str().map(str::to_owned),
                 follows_thread_selection(command, queued, wire.as_ref()),
-                // A delegated task delivery shows as its notification.
-                wire.as_ref().and_then(|_| {
-                    command
-                        .get("notification")
-                        .filter(|n| n.is_object())
-                        .cloned()
-                }),
+                // A delegated task delivery shows as its notification, and
+                // so does a provider's continuation run.
+                (wire.is_some() || is_provider_continuation(command))
+                    .then(|| {
+                        command
+                            .get("notification")
+                            .filter(|n| n.is_object())
+                            .cloned()
+                    })
+                    .flatten(),
                 wire,
                 command["dispatchMode"]["type"] == "defer_start",
                 command

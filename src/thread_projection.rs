@@ -140,7 +140,12 @@ fn window_messages(projection: &mut Value) {
         .collect();
     if let Some(messages) = projection["messages"].as_array_mut() {
         messages.retain(|message| {
-            !message["delegatedCompletion"].is_object()
+            let wake = message["delegatedCompletion"].is_object()
+                || (message["role"] == "user"
+                    && message["createdBy"] == "agent"
+                    && message["creationSource"] == "provider"
+                    && message["notification"].is_object());
+            !wake
                 || message["runId"]
                     .as_str()
                     .is_some_and(|run| live.contains(run))
@@ -154,6 +159,19 @@ pub(crate) fn delegated_delivery(message: &crate::ConversationMessage) -> bool {
         .wire
         .as_ref()
         .is_some_and(|wire| wire["delegatedCompletion"].is_object())
+}
+
+/// A provider's continuation run's message (`creationSource: "provider"`),
+/// which the reference records as the agent's user message carrying its
+/// notification.
+pub(crate) fn provider_continuation(message: &crate::ConversationMessage) -> bool {
+    message.role == NOTIFICATION_ROLE && message.creation_source.as_deref() == Some("provider")
+}
+
+/// A notification the reference also records as the agent's message: a
+/// delegated task's delivery or a provider's continuation.
+pub(crate) fn agent_notification(message: &crate::ConversationMessage) -> bool {
+    delegated_delivery(message) || provider_continuation(message)
 }
 
 fn message_role(role: &str) -> &'static str {
@@ -411,9 +429,9 @@ impl Thread {
         self.messages
             .iter()
             // A notification shows as its turn item only, except a delegated
-            // task's delivery, which the reference also records as the
-            // agent's user message carrying `delegatedCompletion`.
-            .filter(|message| message.role != NOTIFICATION_ROLE || delegated_delivery(message))
+            // task's delivery or a provider's continuation, which the
+            // reference also records as the agent's user message.
+            .filter(|message| message.role != NOTIFICATION_ROLE || agent_notification(message))
             .map(|message| {
                 let at = iso(message.created_at);
                 let pending_ids = self
@@ -443,7 +461,7 @@ impl Thread {
                     row["followsThreadSelection"] = json!(true);
                 }
                 // A delegated wake's message stays on its run's root node.
-                if pending_ids.is_none() && delegated_delivery(message) {
+                if pending_ids.is_none() && agent_notification(message) {
                     if let Some(ids) = self.run_of(&message.id).and_then(|(_, run)| {
                         self.provider_run_ids(run)
                             .or_else(|| self.starting_run_ids(run))
@@ -647,7 +665,7 @@ impl Thread {
                 }),
                 // The prompt that continues a run a restart cut off.
                 NOTIFICATION_ROLE => {
-                    let delivery = delegated_delivery(message);
+                    let delivery = agent_notification(message);
                     // A delegated delivery's card waits with its queued run,
                     // as the reference writes it when the run leaves the queue.
                     if delivery && run.is_some_and(|(_, run)| queued(run)) {
@@ -894,8 +912,9 @@ impl Thread {
     }
 
     /// The projection a snapshot gives (`getThreadSnapshotWindow`): a
-    /// delegated wake's message shows only while its run is live, since no
-    /// turn item names it (its card is a notification).
+    /// delegated wake's or a provider continuation's message shows only
+    /// while its run is live, since no turn item names it (its card is a
+    /// notification).
     pub(crate) fn snapshot_projection(&self) -> Value {
         let mut projection = self.projection();
         window_messages(&mut projection);

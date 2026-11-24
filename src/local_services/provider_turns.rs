@@ -41,6 +41,18 @@ impl ProviderProcesses {
         self.opencode.close(thread);
     }
 
+    /// The wakes idle Claude CLIs report; taken once.
+    pub(crate) fn take_wakes(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<crate::workspace::provider::ProviderWake>> {
+        self.claude.take_wakes()
+    }
+
+    /// The continuation for `wake` ended without starting.
+    pub(crate) fn retire_wake(&self, wake: &crate::workspace::provider::ProviderWake) {
+        self.claude.retire_wake(&wake.native_thread_id, wake.token);
+    }
+
     /// Stop them all (the server is shutting down), once their turns ended
     /// or after `grace`.
     pub(crate) async fn shutdown(&self, grace: std::time::Duration) {
@@ -336,6 +348,9 @@ pub(crate) struct Cli {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Lines<BufReader<ChildStdout>>,
+    /// Lines read while no turn ran (an idle Claude CLI's own wake), which
+    /// the next turn handles first.
+    buffered: std::collections::VecDeque<String>,
     /// The end of the CLI's standard error, for recognizing known refusals.
     stderr_tail: std::sync::Arc<std::sync::Mutex<String>>,
     /// The task reading standard error, until it has read all of it.
@@ -400,6 +415,7 @@ impl Cli {
             child,
             stdin,
             lines: BufReader::new(stdout).lines(),
+            buffered: Default::default(),
             stderr_tail,
             stderr_reader,
         })
@@ -413,8 +429,42 @@ impl Cli {
             .unwrap_or(false)
     }
 
-    /// The next protocol line, or `None` once the CLI closed its output.
+    /// The next protocol line, or `None` once the CLI closed its output:
+    /// first those read while it was idle.
     pub(crate) async fn next_line(&mut self) -> Option<String> {
+        if let Some(line) = self.buffered.pop_front() {
+            return Some(line);
+        }
+        self.read_line().await
+    }
+
+    /// Keep a line read while no turn ran, for the next turn.
+    pub(crate) fn buffer_line(&mut self, line: String) {
+        self.buffered.push_back(line);
+    }
+
+    /// The lines read while no turn ran, in order.
+    pub(crate) fn buffered_lines(&self) -> impl Iterator<Item = &str> {
+        self.buffered.iter().map(String::as_str)
+    }
+
+    /// Drop the buffered wake a continuation would have shown: through its
+    /// `result`, or all of it when it has not ended.
+    pub(crate) fn drop_buffered_wake(&mut self) {
+        let end = self.buffered.iter().position(|line| {
+            claude_sessions::wake_boundary(line)
+                && serde_json::from_str::<serde_json::Value>(line)
+                    .is_ok_and(|message| message["type"] == "result")
+        });
+        match end {
+            Some(end) => drop(self.buffered.drain(..=end)),
+            None => self.buffered.clear(),
+        }
+    }
+
+    /// The next line the CLI writes, or `None` once it closed its output.
+    /// Cancel safe.
+    pub(crate) async fn read_line(&mut self) -> Option<String> {
         loop {
             match self.lines.next_line().await {
                 Ok(Some(line)) if line.trim().is_empty() => continue,

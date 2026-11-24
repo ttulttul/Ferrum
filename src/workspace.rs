@@ -331,6 +331,15 @@ pub trait Workspace: MaybeSendSync {
     /// shared app-server once its turn ended, or close its Claude session's
     /// running CLI, as the reference does.
     fn unload_provider_thread(&self, _instance: &str, _thread: &str) {}
+    /// The wakes of provider CLIs this workspace keeps running between
+    /// turns ([`provider::ProviderWake`]); taken once. None for a
+    /// workspace that reports none.
+    fn provider_wakes(&self) -> Option<mpsc::UnboundedReceiver<provider::ProviderWake>> {
+        None
+    }
+    /// The continuation run for `wake` ended without starting: the CLI
+    /// drops what it would have shown, and may report its next wake.
+    fn retire_provider_wake(&self, _wake: &provider::ProviderWake) {}
     /// Stop the provider processes this workspace shares across turns (the
     /// server is shutting down).
     fn stop_providers(&self) -> WorkspaceFuture<'_, ()> {

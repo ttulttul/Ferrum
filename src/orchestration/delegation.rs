@@ -1368,7 +1368,7 @@ async fn start_queued_wake<H: CommandHost>(state: Arc<H>, thread_id: &str) {
                     .messages
                     .iter()
                     .find(|m| Some(&m.id) == run.user_message_id.as_ref())
-                    .is_some_and(crate::thread_projection::delegated_delivery)
+                    .is_some_and(crate::thread_projection::agent_notification)
             })
             .map(|run| run.wire_id())
     };
