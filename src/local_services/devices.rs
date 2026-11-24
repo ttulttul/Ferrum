@@ -1023,7 +1023,7 @@ fn apply_list_result(state: &mut Value, dir: &Path, listed: HubListResult) {
                 obj.insert("hostStatusDetail".into(), json!(detail));
             }
             None => {
-                obj.remove("hostStatusDetail");
+                obj.insert("hostStatusDetail".into(), Value::Null);
             }
         }
     }
@@ -1449,9 +1449,7 @@ impl DeviceService {
                 .map_err(|cause| json!({"_tag":"DeviceOperationError","operation":"configure","reason":"settings_failed","cause":cause}))?;
             enabled = settings["enableDeviceSupport"] == true;
             state["hostStatus"] = json!(if enabled { "idle" } else { "disabled" });
-            if let Some(obj) = state.as_object_mut() {
-                obj.remove("hostStatusDetail");
-            }
+            state["hostStatusDetail"] = Value::Null;
             state["hostStatuses"] = json!({});
             state["agentAccessEnabled"] = settings["enableAgentDeviceAccess"].clone();
             state["onboardingCompleted"] = settings["deviceOnboardingCompleted"].clone();
@@ -1460,6 +1458,8 @@ impl DeviceService {
                 state["sessions"] = json!([]);
                 state["devices"] = json!([]);
                 state["bootingDevices"] = json!([]);
+            } else if state.get("bootingDevices").is_none() {
+                state["bootingDevices"] = Value::Null;
             }
             self.publish(&mut state);
         }
@@ -1488,9 +1488,7 @@ impl DeviceService {
                 if !enabled && state["hostStatus"] != "disabled" {
                     runtime.take();
                     state["hostStatus"] = json!("disabled");
-                    if let Some(obj) = state.as_object_mut() {
-                        obj.remove("hostStatusDetail");
-                    }
+                    state["hostStatusDetail"] = Value::Null;
                     state["hostStatuses"] = json!({});
                     state["devices"] = json!([]);
                     state["sessions"] = json!([]);
