@@ -85,6 +85,11 @@ class Provider(BaseHTTPRequestHandler):
         if hasattr(self.server, "requests"):
             self.server.requests.append(f"GET {self.path}")
         path = urlsplit(self.path).path
+        if hasattr(self.server, "forge_calls"):
+            self.server.forge_calls.append(("GET", self.path, None))
+            if path == f"/repos/{REPO}":
+                return self.reply(200, {"name": "parity", "full_name": REPO, "default_branch": "main",
+                                        "owner": {"login": "example"}, "private": False, "fork": False})
         if path == f"/repos/{REPO}/pulls" and hasattr(self.server, "status_rows"):
             head = parse_qs(urlsplit(self.path).query).get("head", [""])[0]
             pulls = []
@@ -104,6 +109,9 @@ class Provider(BaseHTTPRequestHandler):
             self.reply(200, [STACK] if self.path.endswith("pull_request=3") else [])
         elif path == f"/repos/{REPO}/stacks/6":
             self.reply(200, STACK)
+        elif path == f"/repos/{REPO}/pulls/3/merge-async/merge-id":
+            self.server.stack_merges.append(("GET", self.path, None))
+            self.reply(200, {"status": "merged", "details": {}})
         elif path.endswith("/actions/runs"):
             self.reply(200, {"workflow_runs":[], "total_count":0})
         elif path == "/user":
@@ -115,9 +123,15 @@ class Provider(BaseHTTPRequestHandler):
         else:
             self.reply(404, {"message": "Unknown fixture path"})
 
-    def do_POST(self):
-        if hasattr(self.server, "requests"):
-            self.server.requests.append(f"POST {self.path}")
+    def do_PUT(self):
+        if self.path == f"/repos/{REPO}/pulls/3/merge-async":
+            body = self.read_json()
+            self.server.stack_merges.append(("PUT", self.path, body))
+            self.reply(200, {"status": "pending", "details": {"uuid": "merge-id"}})
+        else:
+            self.reply(404, {"message": "Not Found"})
+
+    def read_json(self):
         if self.headers.get("transfer-encoding", "").lower() == "chunked":
             chunks = []
             while True:
@@ -127,10 +141,34 @@ class Provider(BaseHTTPRequestHandler):
                     break
                 chunks.append(self.rfile.read(size))
                 self.rfile.read(2)
-            data = json.loads(b"".join(chunks))
+            return json.loads(b"".join(chunks))
+        return json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+
+    def do_DELETE(self):
+        if hasattr(self.server, "forge_calls"):
+            self.server.forge_calls.append(("DELETE", self.path, None))
+        if self.path == f"/repos/{REPO}/issues/3/labels/old":
+            self.reply(200, [])
         else:
-            data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if self.path == f"/repos/{REPO}/issues":
+            self.reply(404, {"message": "Unknown fixture delete"})
+
+    def do_POST(self):
+        if hasattr(self.server, "requests"):
+            self.server.requests.append(f"POST {self.path}")
+        data = self.read_json()
+        if hasattr(self.server, "forge_calls"):
+            self.server.forge_calls.append(("POST", self.path, data))
+        if self.path == f"/repos/{REPO}/pulls" and hasattr(self.server, "forge_calls"):
+            pr = deepcopy(PR)
+            pr.update(title=data["title"], body=data["body"], headRefName=data["head"].split(":")[-1],
+                      isDraft=data.get("draft", False), baseRefName=data["base"])
+            pr["headRepositoryOwner"] = {"__typename":"User", "login": "example"}
+            pr["headRepository"] = {**pr["headRepository"], "name": "parity"}
+            self.server.status_rows.append(pr)
+            self.reply(201, {"number": 3, "html_url": pr["url"]})
+        elif self.path == f"/repos/{REPO}/issues/3/labels":
+            self.reply(200, [LABEL])
+        elif self.path == f"/repos/{REPO}/issues":
             self.server.creates.append(data)
             self.reply(201, {"number": 12, "html_url": ISSUE["url"]})
         elif self.path == f"/repos/{REPO}/issues/12/comments":
@@ -184,6 +222,8 @@ class Provider(BaseHTTPRequestHandler):
                         if target["pullRequestId"] != "PR_3":
                             self.reply(422, {"errors":[{"message":"Wrong PR"}]})
                             return
+                        if key == "mergePullRequest":
+                            self.server.merge_heads.append(target.get("expectedHeadOid"))
                         self.server.actions.append((key,target.get("mergeMethod"),target.get("updateMethod")))
                         pr = self.server.repository["pullRequest"]
                         if key == "closePullRequest":
@@ -209,6 +249,9 @@ class Provider(BaseHTTPRequestHandler):
             elif "assignableUsers(" in query and "labels(" in query:
                 result = {"repository": {"labels": {"pageInfo": {"hasNextPage": False}, "nodes": [LABEL]},
                                          "assignableUsers": {"pageInfo": {"hasNextPage": False}, "nodes": [AUTHOR]}}}
+            elif "assignableUsers(" in query and hasattr(self.server, "forge_calls"):
+                result = {"repository": {**self.server.repository, "assignableUsers": {
+                    "pageInfo": {"hasNextPage": False}, "nodes": [{**AUTHOR, "login": "reviewer-one"}]}}}
             elif "threadId" in data.get("variables", {}) and "comments(" in query:
                 variables=data["variables"]
                 pr="PR_3" if variables["threadId"]=="Thread1" else "Wrong"
@@ -255,6 +298,8 @@ def github_fixture(stack, directory):
     host.requests = []
     host.repository = deepcopy(REPOSITORY)
     host.actions = []
+    host.merge_heads = []
+    host.stack_merges = []
     host.file_writes = []
     host.deleted = 0
     host.ref_oid = "a"*40
@@ -344,10 +389,20 @@ def main():
                 payload["replyWithSummary"] = True
             if action == "merge":
                 payload["mergeMethod"] = "squash"
+                for label, sha in [("stale head", "abc1234"), ("abbreviated head", "AAAAAAA")]:
+                    pinned = rpc("pullRequests.runAction", {**payload, "expectedHeadSha": sha})
+                    pinned["name"] += " " + label
+                    cases.append(pinned)
             case=rpc("pullRequests.runAction",payload)
             case["name"] += " " + action
             cases.append(case)
         cases.append(rpc("pullRequests.runAction",{**ref,"action":"close","stackNumber":2}))
+        for label, head in [("stale stack", "b"*40), ("pinned stack", PR["headRefOid"])]:
+            case = rpc("pullRequests.runAction", {**ref, "action": "merge", "stackNumber": STACK["number"],
+                       "mergeMethod": "squash", "expectedHeadSha": PR["headRefOid"],
+                       "expectedStackHeads": [{"number": 3, "headSha": head}]})
+            case["name"] += " " + label
+            cases.append(case)
         failures = 0
         for case in cases:
             if "frame" in case:
@@ -355,7 +410,7 @@ def main():
                     ws.send(harness.encode(case["frame"]).decode())
                 packets = [harness.recv_frame(ws, timeout=15) for ws in sockets]
                 payload = case["frame"]["payload"]
-                expected_failure = payload.get("scope") == "other/repo" or "stackNumber" in payload or payload.get("threadId")=="Other"
+                expected_failure = payload.get("scope") == "other/repo" or payload.get("expectedHeadSha") == "abc1234" or ("stackNumber" in payload and not case["name"].endswith("pinned stack")) or payload.get("threadId")=="Other"
                 exits = [json.loads(p)["exit"] for p in packets]
                 ok = packets[0] == packets[1] and all(
                     e["_tag"] == ("Failure" if expected_failure else "Success") for e in exits)
@@ -370,7 +425,17 @@ def main():
         for provider in providers:
             expected_actions = [(m,None,None) for m in ("convertPullRequestToDraft","markPullRequestReadyForReview",
                 "closePullRequest","reopenPullRequest","disablePullRequestAutoMerge","revertPullRequest")]
-            expected_actions.append(("mergePullRequest","SQUASH",None))
+            expected_actions.extend([("mergePullRequest","SQUASH",None)] * 2)
+            stack_endpoint = f"/repos/{REPO}/pulls/3/merge-async"
+            if provider.stack_merges != [
+                ("PUT", stack_endpoint, {"merge_method": "squash", "merge_action": "default", "sha": PR["headRefOid"]}),
+                ("GET", stack_endpoint + "/merge-id", None),
+            ]:
+                failures += 1
+                print("FAIL asynchronous stack merge requests", provider.stack_merges)
+            if provider.merge_heads != [PR["headRefOid"], None]:
+                failures += 1
+                print("FAIL merge head pins", provider.merge_heads)
             if provider.file_writes != [("lib.rs",True),("README.md",True),("lib.rs",False)]:
                 failures += 1
                 print("FAIL file toggles",provider.file_writes)
@@ -389,6 +454,7 @@ def main():
             if provider.reviews != [{"event":"COMMENT","body":"Reviewed","comments":[{"path":"lib.rs","side":"RIGHT","line":1,"body":"Inline remark"}]}]:
                 failures += 1
                 print("FAIL unexpected submitted review",provider.reviews)
+        harness.assert_nothing_escaped()
         print(f"{len(cases)} client comparisons and two provider write logs checked")
         return 1 if failures else 0
 

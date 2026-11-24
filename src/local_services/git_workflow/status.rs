@@ -265,7 +265,7 @@ impl Cache {
     }
 }
 
-async fn github_target(cwd: &str, remotes: &str, url: &str) -> Option<String> {
+pub(super) async fn github_target(cwd: &str, remotes: &str, url: &str) -> Option<String> {
     let (host, _) = parse_git_remote_host(url)?;
     if let Ok(repo) = std::env::var("GH_REPO") {
         let repo = repo.strip_prefix(&format!("{host}/")).unwrap_or(&repo);

@@ -156,18 +156,14 @@ fn check_rows(contexts: Vec<Value>) -> Vec<Value> {
     result.sort_by_key(|v| !matches!(v["status"].as_str(), Some("failure" | "cancelled")));
     result
 }
-pub(super) async fn read(
+/// The provider's change request read, including subsequent pages of check contexts.
+pub(super) async fn read_core(
     gh: &Github<'_>,
-    p: &Project,
     op: &str,
     named: &str,
     number: u64,
-) -> Reply {
+) -> Result<(Value, Vec<Value>), Value> {
     let (owner, name) = named.split_once('/').unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
     let vars = json!({"owner":owner,"name":name,"number":number,"headRef":format!("refs/pull/{number}/head"),"required":true,"requestedReviewers":100,"mergeQueue":true});
     let data = gh
         .graphql(include_str!("PullRequestCore.graphql"), vars)
@@ -178,12 +174,6 @@ pub(super) async fn read(
     if pr.is_null() {
         return Err(failure(op, Failure::NotFound));
     }
-    let state = match pr["state"].as_str() {
-        Some("MERGED") => "merged",
-        Some("CLOSED") => "closed",
-        Some("OPEN") => "open",
-        _ => return Err(failure(op, Failure::Invalid)),
-    };
     let mut page = pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"].clone();
     let mut contexts = Vec::new();
     let mut seen = HashSet::new();
@@ -211,6 +201,29 @@ pub(super) async fn read(
         }
         page = next_pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"].clone();
     }
+    Ok((data, contexts))
+}
+
+pub(super) async fn read(
+    gh: &Github<'_>,
+    p: &Project,
+    op: &str,
+    named: &str,
+    number: u64,
+) -> Reply {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let (data, contexts) = read_core(gh, op, named, number).await?;
+    let repo = &data["repository"];
+    let pr = &repo["pullRequest"];
+    let state = match pr["state"].as_str() {
+        Some("MERGED") => "merged",
+        Some("CLOSED") => "closed",
+        Some("OPEN") => "open",
+        _ => return Err(failure(op, Failure::Invalid)),
+    };
     let checks = check_rows(contexts);
     if op == "checks" {
         return Ok(json!({"observedAt":now,"state":state,"checks":checks}));

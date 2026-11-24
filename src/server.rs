@@ -1802,6 +1802,10 @@ impl mcp_oauth::McpHost for AppState {
     ) -> mcp_oauth::HostFuture<Option<crate::provider_rpc::Reply>> {
         let state = self.clone();
         Box::pin(async move {
+            if method == "pullRequests.diff" {
+                let cli = state.issues.lock().await.gh.clone();
+                return Some(crate::pull_requests::read(&state, &cli, "diff", &params).await);
+            }
             if method == "issues.projectScopes" {
                 return Some(crate::issues::project_scopes(&state).await);
             }

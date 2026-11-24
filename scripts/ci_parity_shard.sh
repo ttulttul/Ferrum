@@ -73,6 +73,7 @@ case "$shard" in
     # Settings, storage, source control hosts and projects, then the relay and client call suites.
     run python3 scripts/storage_cleanup_parity.py "${both[@]}"
     run python3 scripts/config_parity.py "${both[@]}"
+    run python3 scripts/forge_write_parity.py "${both[@]}"
     run python3 scripts/github_provider_parity.py "${both[@]}" --faketime-lib "$faketime"
     run python3 scripts/linear_provider_parity.py "${both[@]}"
     run python3 scripts/source_control_hosts_parity.py "${both[@]}"

@@ -82,6 +82,11 @@ const CHECKED: &[(&str, &[(&str, &str)])] = &[
     ("pull_request_list", &[]),
     ("pull_request_read", &[]),
     ("ci_logs", &[]),
+    ("pull_request_create", &[]),
+    ("pull_request_update", &[]),
+    ("pull_request_merge", &[]),
+    ("pull_request_review", &[]),
+    ("pull_request_respond", &[]),
     ("list_issues", &[]),
     ("read_issue", &[]),
     ("create_issue", &[]),
@@ -188,6 +193,11 @@ const SERVED: &[&str] = &[
     "pull_request_list",
     "pull_request_read",
     "ci_logs",
+    "pull_request_create",
+    "pull_request_update",
+    "pull_request_merge",
+    "pull_request_review",
+    "pull_request_respond",
     "list_issues",
     "read_issue",
     "create_issue",
@@ -902,7 +912,12 @@ pub(super) async fn call<S: McpHost>(
         | "read_pull_request_guide"
         | "pull_request_list"
         | "pull_request_read"
-        | "ci_logs" => pull_requests::call(host, caller, name, args).await,
+        | "ci_logs"
+        | "pull_request_create"
+        | "pull_request_update"
+        | "pull_request_merge"
+        | "pull_request_review"
+        | "pull_request_respond" => pull_requests::call(host, caller, name, args).await,
         "list_issues" | "read_issue" | "create_issue" | "comment_on_issue" | "set_issue_state"
         | "link_issue" | "unlink_issue" | "list_thread_issues" => {
             issues::call(host, caller, name, args).await

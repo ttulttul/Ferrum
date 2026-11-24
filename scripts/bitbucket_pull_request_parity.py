@@ -163,6 +163,23 @@ def fake_bitbucket(seen):
                 return self.reply(401, {"type": "error"})
             origin = f"http://127.0.0.1:{self.server.server_port}"
             path = unquote(parts.path)
+            if hasattr(self.server, "forge_rows"):
+                base = f"/2.0/repositories/{WRITE}"
+                if path == base:
+                    return self.reply(200, {"full_name": WRITE, "name": "example-repo", "mainbranch": {"name": "main"}})
+                if path == base + "/branching-model":
+                    return self.reply(200, {"development": {"use_mainbranch": True}})
+                if path == base + "/pullrequests":
+                    if method == "GET":
+                        return self.reply(200, {"values": self.server.forge_rows})
+                    if method == "POST":
+                        row = pull_request(WRITE, 7)
+                        content = entry["body"]
+                        row.update(title=content["title"], description=content["description"])
+                        row["source"]["branch"]["name"] = content["source"]["branch"]["name"]
+                        row["links"]["html"]["href"] = f"https://bitbucket.org/{WRITE}/pull-requests/7"
+                        self.server.forge_rows.append(row)
+                        return self.reply(201, row)
             if path == "/2.0/user":
                 return self.reply(200, {"username": "fixture-viewer", "nickname": "fixture-viewer", "display_name": "Fixture Viewer"})
             if path == "/2.0/user/workspaces/example-org/permissions/repositories":
@@ -323,7 +340,8 @@ def scenario(url, cookie, seen, port, home):
     step("react", "pullRequests.setReaction", {**pr, "content": "thumbs-up", "reacted": True})
     step("request a reviewer", "pullRequests.requestReviewers", {**pr, "reviewers": [{"id": "{o}", "kind": "user"}], "requested": True})
     step("withdraw a reviewer request", "pullRequests.requestReviewers", {**pr, "reviewers": [{"id": "{r}", "kind": "user"}], "requested": False})
-    step("merge by squashing", "pullRequests.runAction", {**pr, "action": "merge", "mergeMethod": "squash", "replyWithSummary": True})
+    step("refuse a moved head", "pullRequests.runAction", {**pr, "action": "merge", "expectedHeadSha": "abc1234"})
+    step("merge by squashing", "pullRequests.runAction", {**pr, "action": "merge", "mergeMethod": "squash", "expectedHeadSha": "0000000", "replyWithSummary": True})
     step("merge by rebasing", "pullRequests.runAction", {**pr, "number": 13, "action": "merge", "mergeMethod": "rebase"})
     step("decline", "pullRequests.runAction", {**pr, "number": 14, "action": "close", "replyWithSummary": True})
     step("an action Bitbucket lacks", "pullRequests.runAction", {**pr, "action": "ready"})

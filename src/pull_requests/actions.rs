@@ -85,7 +85,9 @@ pub(super) async fn run(
     let (owner, name) = repo.split_once('/').unwrap();
     let vars = json!({"owner":owner, "name":name, "number":number});
     let action = required(input, "action")?;
-    if !input["stackNumber"].is_null() {
+    if !input["stackNumber"].is_null()
+        && (action != "merge" || !input["expectedStackHeads"].is_array())
+    {
         return Err(error(
             OP,
             "This stack action is not supported or has no expected head revision.",
@@ -128,6 +130,28 @@ pub(super) async fn run(
     }
     if input.get("updateMethod").is_some() && action != "update-branch" {
         return Err(refused("update-branch"));
+    }
+    let pinned = if let Some(expected) = input["expectedHeadSha"].as_str() {
+        let (current, _) = super::detail::read_core(gh, OP, repo, number).await?;
+        let pr = &current["repository"]["pullRequest"];
+        let head = pr["headRefOid"].as_str();
+        // The reference reads unfinished checks with the reviewed head. A rate limit
+        // stops the write just as it does on the core GraphQL read.
+        if let Some(sha) = head.filter(|_| pr["state"] == "OPEN") {
+            let path = format!(
+                "repos/{repo}/actions/runs?head_sha={}&per_page=100",
+                crate::asset_grant::encode_component(sha)
+            );
+            if let Err(Failure::RateLimit) = gh.json("GET", &path, None).await {
+                return Err(provider_error(Failure::RateLimit));
+            }
+        }
+        Some(super::pinned_head(head, expected)?.to_owned())
+    } else {
+        None
+    };
+    if let Some(stack) = input["stackNumber"].as_u64() {
+        return stack_merge::run(gh, repo, number, stack, input).await;
     }
     if action == "delete-branch" {
         return delete_branch(gh, &vars, number).await;
@@ -192,12 +216,11 @@ pub(super) async fn run(
                 } else {
                     ("mergePullRequest", "$input:MergePullRequestInput!")
                 };
-                (
-                    method,
-                    signature,
-                    "$input",
-                    json!({"input":{"pullRequestId":id,"mergeMethod":strategy}}),
-                )
+                let mut merge = json!({"pullRequestId":id,"mergeMethod":strategy});
+                if let Some(head) = pinned {
+                    merge["expectedHeadOid"] = json!(head);
+                }
+                (method, signature, "$input", json!({"input":merge}))
             }
         }
         _ => {
@@ -224,11 +247,15 @@ pub(super) async fn run(
             )
         }
     };
-    let query = format!("mutation({signature}){{{method}(input:{argument}){{pullRequest{{...PullRequestActionSummary}}}}}}\n{SUMMARY}");
+    let operation = format!("{}{}", method[..1].to_ascii_uppercase(), &method[1..]);
+    let query = format!("mutation {operation}({signature}){{{method}(input:{argument}){{pullRequest{{...PullRequestActionSummary}}}}}}\n{SUMMARY}");
     let data = gh
         .graphql(&query, parameters)
         .await
         .map_err(provider_error)?;
+    if action == "merge" && data[method]["pullRequest"]["mergedAt"].is_null() {
+        let _ = super::metadata(gh, "summary", repo, project, number).await;
+    }
     if input["replyWithSummary"] != true {
         return Ok(Value::Null);
     }
@@ -301,4 +328,5 @@ async fn delete_branch(gh: &Github<'_>, vars: &Value, number: u64) -> Reply {
     Ok(Value::Null)
 }
 
+mod stack_merge;
 mod workflows;

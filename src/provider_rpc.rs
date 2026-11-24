@@ -124,6 +124,10 @@ impl<'a> Github<'a> {
             ..Self::new(cli, cwd)
         }
     }
+    pub(crate) fn pinned_token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
     pub async fn pin_credential(&mut self) -> Result<(), Failure> {
         let cmd = crate::login_shell::tokio_command(self.cli)
             .args(["auth", "token", "--hostname", self.host])

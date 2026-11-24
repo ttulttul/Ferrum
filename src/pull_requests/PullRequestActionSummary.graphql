@@ -11,6 +11,7 @@ fragment PullRequestActionSummary on PullRequest {
   closedAt
   headRefOid
   author {
+    __typename
     login
     avatarUrl
     ... on User {

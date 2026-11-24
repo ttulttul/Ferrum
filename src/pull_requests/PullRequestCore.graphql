@@ -29,6 +29,17 @@ query PullRequestCore(
       createdAt
       updatedAt
       mergedAt
+      mergeCommit {
+        oid
+      }
+      mergedBy {
+        __typename
+        login
+        avatarUrl
+        ... on User {
+          name
+        }
+      }
       closedAt
       headRefName
       baseRefName
@@ -65,6 +76,7 @@ query PullRequestCore(
       mergeQueueRemovals: timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT])
         @include(if: $mergeQueue) {
         nodes {
+          __typename
           ... on RemovedFromMergeQueueEvent {
             id
             createdAt
@@ -83,7 +95,7 @@ query PullRequestCore(
       reviewRequests(first: $requestedReviewers) {
         nodes {
           requestedReviewer {
-              __typename
+            __typename
             ... on User {
               login
               name
@@ -115,6 +127,7 @@ query PullRequestCore(
             statusCheckRollup {
               contexts(first: 100) {
                 nodes {
+                  __typename
                   ...CheckContext
                 }
                 pageInfo {
@@ -150,7 +163,10 @@ fragment CheckContext on StatusCheckRollupContext {
     isRequired(pullRequestNumber: $number) @include(if: $required)
     checkSuite {
       workflowRun {
+        event
+        runNumber
         workflow {
+          id
           name
         }
       }

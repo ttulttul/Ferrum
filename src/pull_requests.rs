@@ -9,7 +9,9 @@ mod actions;
 mod activity;
 pub(crate) mod bitbucket;
 mod bitbucket_pr;
+pub(crate) use bitbucket_pr::repository_json as bitbucket_repository_json;
 mod detail;
+mod diff_cache;
 mod discussion;
 mod files;
 mod listing;
@@ -47,9 +49,12 @@ type HeldSummaries = indexmap::IndexMap<SummaryKey, (std::time::Instant, Value)>
 #[derive(Default, Debug)]
 pub struct PullRequestService {
     summaries: tokio::sync::Mutex<HeldSummaries>,
+    diffs: diff_cache::DiffCache,
+    node_ids: tokio::sync::Mutex<indexmap::IndexMap<(String, u64), String>>,
 }
 impl PullRequestService {
     async fn clear(&self, project: &str, repository: &str, number: u64) {
+        self.diffs.clear(project, repository, number).await;
         self.summaries.lock().await.retain(|(p, r, n, _), _| {
             p != project || !r.eq_ignore_ascii_case(repository) || *n != number
         });
@@ -146,6 +151,29 @@ fn valid_sha(v: &str) -> bool {
     (7..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Resolve the caller's reviewed revision to the full head reported by the host.
+fn pinned_head<'a>(current: Option<&'a str>, expected: &str) -> Result<&'a str, Value> {
+    let prefix = expected.len() >= 7 && expected.bytes().all(|b| b.is_ascii_hexdigit());
+    current
+        .filter(|head| {
+            if prefix {
+                head.get(..expected.len())
+                    .is_some_and(|start| start.eq_ignore_ascii_case(expected))
+            } else {
+                *head == expected
+            }
+        })
+        .ok_or_else(|| {
+            error(
+                "runAction",
+                &format!(
+                    "The head is now {}, not {expected}. Review the new commits first.",
+                    current.unwrap_or("unknown")
+                ),
+            )
+        })
+}
+
 /// One pull request of a Bitbucket project (`bitbucket_pr`), its cached summaries cleared
 /// after a write.
 async fn bitbucket_read(
@@ -179,11 +207,32 @@ async fn bitbucket_read(
         project: p,
         state_dir: &state.paths.state_dir,
     };
+    if op == "diff" {
+        if let Ok(credential) = crate::bitbucket_credential::current().await {
+            let scope = state
+                .pull_requests
+                .diffs
+                .scope(&(bitbucket::base_url(), credential));
+            return state
+                .pull_requests
+                .diffs
+                .read(
+                    &p.id,
+                    named,
+                    number,
+                    scope,
+                    input,
+                    bitbucket_pr::run(repository, op, input, number),
+                )
+                .await;
+        }
+    }
     let result = bitbucket_pr::run(repository, op, input, number).await;
     if !matches!(
         op,
         "detail"
             | "preview"
+            | "summary"
             | "checks"
             | "activity"
             | "reviewerCandidates"
@@ -301,6 +350,9 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
         .as_u64()
         .filter(|n| *n > 0)
         .ok_or_else(|| error(op, "A pull request number is required."))?;
+    if op == "summary" && input["allowStale"] == false {
+        return metadata(&gh, op, named, &p.id, number).await;
+    }
     if matches!(op, "summary" | "detail") {
         let viewer = identity(&gh)
             .await
@@ -354,7 +406,7 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
         return detail::logs(&gh, named, number, input).await;
     }
     if review::handles(op) {
-        let result = review::run(&gh, op, named, number, input).await;
+        let result = review::run(&state.pull_requests, &gh, op, named, number, input).await;
         if !matches!(op, "labelCandidates" | "reviewerCandidates") {
             state.pull_requests.clear(&p.id, named, number).await;
         }
@@ -363,6 +415,26 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
     if op == "preview" {
         return metadata(&gh, op, named, &p.id.to_string(), number).await;
     }
+    if op == "diff" && gh.pin_credential().await.is_ok() {
+        let scope = state.pull_requests.diffs.scope(&gh.pinned_token());
+        return state
+            .pull_requests
+            .diffs
+            .read(
+                &p.id,
+                named,
+                number,
+                scope,
+                input,
+                diff(&gh, named, number, op, input),
+            )
+            .await;
+    }
+    diff(&gh, named, number, op, input).await
+}
+
+async fn diff(gh: &Github<'_>, named: &str, number: u64, op: &str, input: &Value) -> Reply {
+    let commit = input["commit"].as_str();
     let repo = format!("repos/{named}");
     let target = match commit {
         Some(sha) => format!("{repo}/commits/{sha}"),
@@ -374,9 +446,9 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
         format!("{target}/files")
     };
     if op == "diffFileContents" {
-        return contents(&gh, input, &repo, &target, &files).await;
+        return contents(gh, input, &repo, &target, &files).await;
     }
-    let page = |page, readable| files_page(&gh, &files, page, commit.is_some(), readable);
+    let page = |page, readable| files_page(gh, &files, page, commit.is_some(), readable);
     if let Some(path) = input["path"].as_str() {
         let data = gh
             .request("GET", &target, "application/vnd.github.diff", None)
