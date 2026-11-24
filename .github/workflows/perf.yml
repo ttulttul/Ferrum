@@ -1,8 +1,9 @@
 name: Performance
 
-# Compares the Rust server with the pinned reference on every push to main (see docs/performance.md),
-# and records the results on the perf-data branch. It never runs on pull requests, and it is its own
-# workflow, so it cannot slow or block the parity checks.
+# Compares the Rust server with the pinned reference after pushes to main, at most once a day (see
+# docs/performance.md); records the results on the perf-data branch and refreshes the numbers in
+# docs/performance.md. It never runs on pull requests, and it is its own workflow, so it cannot slow
+# or block the parity checks.
 on:
   push:
     branches: [main]
@@ -11,6 +12,11 @@ on:
       - "README.md"
       - "docs/**"
   workflow_dispatch:
+    inputs:
+      force:
+        description: Measure even if docs/performance.md changed in the last 24 hours
+        type: boolean
+        default: false
 
 # One run at a time, queued rather than cancelled: each run adds its results to perf-data.
 concurrency:
@@ -21,13 +27,49 @@ permissions:
   contents: read
 
 jobs:
+  # Measures only when docs/performance.md on main is at least 24 hours old. The document's own
+  # commit time is the clock, so the refresh this workflow merges, or a hand edit, restarts it.
+  gate:
+    name: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      measure: ${{ steps.age.outputs.measure }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check when docs/performance.md last changed on main
+        id: age
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          git fetch --quiet origin main
+          changed=$(git log -1 --format=%ct origin/main -- docs/performance.md)
+          age=$(( $(date +%s) - ${changed:-0} ))
+          if [ "$FORCE" = true ]; then
+            echo "Measuring: asked to (force)."
+            echo "measure=true" >> "$GITHUB_OUTPUT"
+          elif [ "$age" -ge 86400 ]; then
+            echo "Measuring: docs/performance.md last changed on main $((age / 3600)) hours ago."
+            echo "measure=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Performance::Not measuring: docs/performance.md changed on main $((age / 3600)) h $((age % 3600 / 60)) min ago, less than 24 hours."
+            echo "measure=false" >> "$GITHUB_OUTPUT"
+          fi
+
   compare:
     name: compare
+    needs: gate
+    if: needs.gate.outputs.measure == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
-      # Pushes the results to the perf-data branch (never to main).
+      # Pushes the results to the perf-data branch, and the refreshed docs/performance.md to the
+      # perf-docs-update branch, whose pull request it opens and merges.
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -131,3 +173,46 @@ jobs:
             sleep $((attempt * 5))
           done
           exit 1
+      # The Headline section of docs/performance.md, rewritten from the results, reaches main through a
+      # pull request (main's ruleset takes changes only through one), which this job merges at once:
+      # the repository has no auto-merge, and nothing needs to check a docs-only change (#283). The
+      # merge is pushed with the GITHUB_TOKEN, which starts no workflow run, and this workflow ignores
+      # docs/ anyway, so there is no loop. Opening the pull request needs "Allow GitHub Actions to
+      # create and approve pull requests"; without it, this step only warns.
+      - name: Refresh docs/performance.md on main
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPOSITORY}.git"
+          branch=perf-docs-update
+          # From the newest main, so the pull request changes nothing but the numbers.
+          git fetch --quiet "$remote" main
+          git checkout --quiet -B "$branch" FETCH_HEAD
+          python3 scripts/perf_compare.py --history "$RUNNER_TEMP/perf-data/results" --update-doc docs/performance.md
+          if git diff --quiet -- docs/performance.md; then
+            echo "docs/performance.md is already current."
+            exit 0
+          fi
+          git add docs/performance.md
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "Refresh the performance numbers from ${SHA:0:12}"
+          # The branch is this workflow's own; replace a copy a failed run left behind, but nothing newer.
+          current=$(git ls-remote "$remote" "refs/heads/$branch" | cut -f1)
+          git push --quiet --force-with-lease="refs/heads/$branch:$current" "$remote" "HEAD:refs/heads/$branch"
+          pr=$(gh pr list --repo "$REPOSITORY" --head "$branch" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            if ! url=$(gh pr create --repo "$REPOSITORY" --base main --head "$branch" \
+                --title "Refresh the performance numbers" \
+                --body "Generated by the Performance workflow from the results of ${SHA:0:12} (run ${GITHUB_SERVER_URL}/${REPOSITORY}/actions/runs/${GITHUB_RUN_ID}). It changes only the Headline section of docs/performance.md."); then
+              echo "::warning title=Performance::Could not open the pull request that refreshes docs/performance.md. Allow GitHub Actions to create pull requests (Settings, Actions, General), or merge the $branch branch by hand."
+              exit 0
+            fi
+            pr=${url##*/}
+          fi
+          if ! gh pr merge "$pr" --repo "$REPOSITORY" --squash --delete-branch; then
+            echo "::warning title=Performance::Could not merge pull request #$pr, which refreshes docs/performance.md."
+          fi

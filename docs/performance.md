@@ -4,45 +4,70 @@ How Ferrum (the Rust server) compares with the TypeScript reference (`t3 serve` 
 
 ## Headline
 
-The first results, from a local run on a 16-core desktop (AMD Ryzen 9 7950X, Linux, Node 26.13.1) that other work was also loading. The [`perf-data` branch](https://github.com/ttulttul/Ferrum/tree/perf-data) has the numbers from CI. A ratio above 1× favors Rust.
+CI writes this section from its measurements. It refreshes the section at most once a day (see [Tracking on main](#tracking-on-main)); the full record is on the [`perf-data` branch](https://github.com/ttulttul/Ferrum/tree/perf-data).
 
-- **About 3× smaller to install** (67 MiB against 205 MiB for comparable features; 311 MiB for everything the reference installs).
-- **About 17× faster to start** (0.11 s against 1.85 s to the first RPC).
-- **About 11× less memory at idle** (40 MiB against 452 MiB), and **about 8.5× less at peak** during turns.
-- **2–3× the turn throughput, for about a third of the CPU per turn**, with 8 threads running fake Codex or Claude turns at once.
-- **2–13× lower latency for the thread and project RPCs**. `server.getConfig` is the exception: it is about 5.7× slower in Rust (see below).
-- **More CPU at idle** in Rust: about 60 ms per 10 s against 10 ms.
+<!-- perf:begin (written by scripts/perf_compare.py --update-doc; edits here are replaced) -->
 
-Commit `560dcd4d`, reference `fd0331ca`, 2026-11-24. Medians, with the range in brackets:
+From the latest CI run, on a GitHub-hosted runner. A ratio above 1× favors Ferrum.
+
+- Installed size: **2.9×** in Ferrum's favor (69.9 MiB against 205 MiB).
+- Start to first RPC: **35.3×** in Ferrum's favor (57.9 ms <sub>(56.5–64.6)</sub> against 2045 ms <sub>(2029–2076)</sub>).
+- Memory at idle (RSS): **11.2×** in Ferrum's favor (40.4 MiB <sub>(40.2–41.1)</sub> against 451 MiB <sub>(450–452)</sub>).
+- CPU while idle (per 10 s): **3.9×** in Ferrum's favor (70.0 ms <sub>(70.0–80.0)</sub> against 270 ms <sub>(200–270)</sub>).
+- Peak memory, Codex turns: **10.9×** in Ferrum's favor (60.1 MiB <sub>(58.3–60.3)</sub> against 655 MiB <sub>(650–692)</sub>).
+- Peak memory, Claude turns: **11.3×** in Ferrum's favor (59.0 MiB <sub>(59.0–60.4)</sub> against 665 MiB <sub>(664–711)</sub>).
+- Codex turns per second: **1.7×** in Ferrum's favor (6.94 /s <sub>(6.94–6.96)</sub> against 4.15 /s <sub>(4.14–4.19)</sub>).
+- Claude turns per second: **1.6×** in Ferrum's favor (5.85 /s <sub>(5.78–5.87)</sub> against 3.62 /s <sub>(3.58–3.71)</sub>).
+- CPU per Codex turn: **2.1×** in Ferrum's favor (174 ms <sub>(174–175)</sub> against 359 ms <sub>(354–362)</sub>).
+- CPU per Claude turn: **1.9×** in Ferrum's favor (235 ms <sub>(234–238)</sub> against 435 ms <sub>(419–437)</sub>).
+- RPC latency (p50 and p95 of 6 RPCs): from **0.4×** to **13.9×** (above 1× favors Ferrum).
+
+Commit `480c40738827`, reference `fd0331ca`, 2026-11-24T21:30:09Z, Intel(R) Xeon(R) 6975P-C (4 CPUs), Linux 7.0.0-1014-aws.
+
+Ratio: how many times smaller, faster or lighter the Rust server is (the reference's median over Rust's, or Rust's over the reference's for turns per second). Medians, with the range in brackets.
 
 | Measure | Rust | Reference | Ratio |
 | --- | ---: | ---: | ---: |
-| Installed size | 67.2 MiB | 205 MiB | **3.1×** |
-| Start to first RPC | 112 ms <sub>(78.5–227)</sub> | 1851 ms <sub>(1515–2592)</sub> | **16.6×** |
-| Memory at idle (RSS) | 39.5 MiB <sub>(39.1–39.8)</sub> | 452 MiB <sub>(449–455)</sub> | **11.4×** |
-| CPU while idle (per 10 s) | 60.0 ms <sub>(60.0–70.0)</sub> | 10.00 ms <sub>(10.00–10.0)</sub> | **0.2×** |
-| Peak memory, Codex turns | 76.9 MiB <sub>(73.3–80.7)</sub> | 655 MiB <sub>(654–681)</sub> | **8.5×** |
-| Peak memory, Claude turns | 76.7 MiB <sub>(74.5–78.3)</sub> | 665 MiB <sub>(663–669)</sub> | **8.7×** |
-| Codex turns per second | 9.59 /s <sub>(6.95–9.72)</sub> | 3.44 /s <sub>(3.43–3.81)</sub> | **2.8×** |
-| Claude turns per second | 6.47 /s <sub>(5.96–7.10)</sub> | 3.01 /s <sub>(2.92–3.01)</sub> | **2.1×** |
-| CPU per Codex turn | 130 ms <sub>(130–133)</sub> | 396 ms <sub>(356–396)</sub> | **3.0×** |
-| CPU per Claude turn | 182 ms <sub>(180–185)</sub> | 495 ms <sub>(491–510)</sub> | **2.7×** |
-| server.getConfig p50 | 14.6 ms <sub>(14.1–15.3)</sub> | 2.57 ms <sub>(2.38–2.77)</sub> | **0.2×** |
-| server.getConfig p95 | 16.2 ms <sub>(16.2–16.7)</sub> | 3.30 ms <sub>(2.82–3.85)</sub> | **0.2×** |
-| server.getSettings p50 | 0.26 ms <sub>(0.25–0.31)</sub> | 0.29 ms <sub>(0.27–0.35)</sub> | **1.1×** |
-| server.getSettings p95 | 0.32 ms <sub>(0.31–0.34)</sub> | 0.35 ms <sub>(0.35–0.47)</sub> | **1.1×** |
-| orchestration.subscribeShell p50 | 0.75 ms <sub>(0.71–0.76)</sub> | 1.82 ms <sub>(1.78–1.93)</sub> | **2.4×** |
-| orchestration.subscribeShell p95 | 0.84 ms <sub>(0.77–1.02)</sub> | 2.69 ms <sub>(2.52–2.80)</sub> | **3.2×** |
-| orchestration.subscribeThread p50 | 2.77 ms <sub>(2.73–2.82)</sub> | 8.24 ms <sub>(7.42–9.30)</sub> | **3.0×** |
-| orchestration.subscribeThread p95 | 3.79 ms <sub>(3.16–3.89)</sub> | 10.0 ms <sub>(8.47–10.5)</sub> | **2.6×** |
-| orchestration.getThreadProjection p50 | 1.33 ms <sub>(1.25–1.39)</sub> | 7.03 ms <sub>(6.42–7.04)</sub> | **5.3×** |
-| orchestration.getThreadProjection p95 | 1.45 ms <sub>(1.41–2.09)</sub> | 7.52 ms <sub>(7.29–8.19)</sub> | **5.2×** |
-| orchestration.getTurnDiff p50 | 2.66 ms <sub>(2.54–2.67)</sub> | 33.0 ms <sub>(28.0–33.9)</sub> | **12.4×** |
-| orchestration.getTurnDiff p95 | 2.92 ms <sub>(2.91–3.08)</sub> | 38.4 ms <sub>(37.9–38.7)</sub> | **13.1×** |
+| Installed size | 69.9 MiB | 205 MiB | **2.9×** |
+| Start to first RPC | 57.9 ms <sub>(56.5–64.6)</sub> | 2045 ms <sub>(2029–2076)</sub> | **35.3×** |
+| Memory at idle (RSS) | 40.4 MiB <sub>(40.2–41.1)</sub> | 451 MiB <sub>(450–452)</sub> | **11.2×** |
+| CPU while idle (per 10 s) | 70.0 ms <sub>(70.0–80.0)</sub> | 270 ms <sub>(200–270)</sub> | **3.9×** |
+| Peak memory, Codex turns | 60.1 MiB <sub>(58.3–60.3)</sub> | 655 MiB <sub>(650–692)</sub> | **10.9×** |
+| Peak memory, Claude turns | 59.0 MiB <sub>(59.0–60.4)</sub> | 665 MiB <sub>(664–711)</sub> | **11.3×** |
+| Codex turns per second | 6.94 /s <sub>(6.94–6.96)</sub> | 4.15 /s <sub>(4.14–4.19)</sub> | **1.7×** |
+| Claude turns per second | 5.85 /s <sub>(5.78–5.87)</sub> | 3.62 /s <sub>(3.58–3.71)</sub> | **1.6×** |
+| CPU per Codex turn | 174 ms <sub>(174–175)</sub> | 359 ms <sub>(354–362)</sub> | **2.1×** |
+| CPU per Claude turn | 235 ms <sub>(234–238)</sub> | 435 ms <sub>(419–437)</sub> | **1.9×** |
+| server.getConfig p50 | 7.74 ms <sub>(7.67–7.76)</sub> | 3.47 ms <sub>(3.43–3.59)</sub> | **0.4×** |
+| server.getConfig p95 | 8.16 ms <sub>(8.14–8.17)</sub> | 4.01 ms <sub>(4.00–4.28)</sub> | **0.5×** |
+| server.getSettings p50 | 0.43 ms <sub>(0.35–0.44)</sub> | 0.61 ms <sub>(0.61–0.63)</sub> | **1.4×** |
+| server.getSettings p95 | 0.52 ms <sub>(0.45–0.53)</sub> | 0.74 ms <sub>(0.71–0.77)</sub> | **1.4×** |
+| orchestration.subscribeShell p50 | 1.24 ms <sub>(1.23–1.26)</sub> | 3.04 ms <sub>(2.93–3.05)</sub> | **2.4×** |
+| orchestration.subscribeShell p95 | 1.29 ms <sub>(1.26–1.29)</sub> | 4.44 ms <sub>(4.09–4.53)</sub> | **3.4×** |
+| orchestration.subscribeThread p50 | 4.08 ms <sub>(4.05–4.10)</sub> | 11.7 ms <sub>(11.7–11.9)</sub> | **2.9×** |
+| orchestration.subscribeThread p95 | 4.38 ms <sub>(4.35–4.43)</sub> | 13.3 ms <sub>(12.8–13.4)</sub> | **3.0×** |
+| orchestration.getThreadProjection p50 | 1.88 ms <sub>(1.84–1.99)</sub> | 9.80 ms <sub>(9.63–9.98)</sub> | **5.2×** |
+| orchestration.getThreadProjection p95 | 2.13 ms <sub>(2.05–2.16)</sub> | 10.7 ms <sub>(10.7–10.7)</sub> | **5.0×** |
+| orchestration.getTurnDiff p50 | 1.88 ms <sub>(1.87–1.89)</sub> | 26.1 ms <sub>(25.9–26.4)</sub> | **13.9×** |
+| orchestration.getTurnDiff p95 | 2.03 ms <sub>(2.02–2.04)</sub> | 28.2 ms <sub>(27.6–28.6)</sub> | **13.9×** |
 
-Installed size: Rust is one binary (67.2 MiB). The reference is Node (143.4 MiB), its bundle (22.6 MiB) and 23 external packages (145.2 MiB), 311.2 MiB in all; the table leaves out the 105.8 MiB of packages for features Rust lacks (local speech-to-text, Cursor turns).
+Installed size: Rust is one binary (69.9 MiB). The reference is Node (143.4 MiB), its bundle (22.6 MiB) and 23 external packages (145.2 MiB), 311.2 MiB in all; the table leaves out the 105.8 MiB of packages for features Rust lacks (local speech-to-text, Cursor turns).
 
 Startup: 5 runs per server after one warm-up; idle measured over 10 s after 3 s. Latency: 3 servers each, 200 calls per RPC after 20 warm-up calls. Turns: 8 threads at once, 5 turns each, 3 runs.
+
+### Trend
+
+Ratios by commit for the last 5 runs, newest first. The [`perf-data` branch](https://github.com/ttulttul/Ferrum/tree/perf-data) has every run.
+
+| Date | Commit | Installed size | Start to first RPC | Memory at idle (RSS) | CPU while idle (per 10 s) | Peak memory, Codex turns | Peak memory, Claude turns | Codex turns per second | Claude turns per second | CPU per Codex turn | CPU per Claude turn |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2026-11-24 | `480c4073` | 2.9× | 35.3× | 11.2× | 3.9× | 10.9× | 11.3× | 1.7× | 1.6× | 2.1× | 1.9× |
+| 2026-11-24 | `52b62924` | 3.0× | 36.2× | 11.1× | 3.1× | 11.0× | 11.2× | 1.7× | 1.6× | 2.1× | 1.9× |
+| 2026-11-24 | `e10f06d2` | 3.0× | 36.4× | 11.1× | 3.2× | 11.0× | 11.2× | 1.8× | 1.7× | 2.2× | 1.9× |
+| 2026-11-24 | `00b0e0d7` | 3.0× | 31.2× | 11.2× | 0.3× | 11.0× | 11.2× | 2.7× | 2.8× | 3.1× | 3.0× |
+| 2026-11-24 | `ec02f406` | 3.0× | 31.1× | 11.3× | 2.6× | 11.0× | 11.3× | 3.2× | 3.0× | 3.7× | 3.1× |
+
+<!-- perf:end -->
 
 ## What is measured
 
@@ -70,17 +95,20 @@ Rust also uses more CPU while idle: about 60 ms in 10 seconds against the refere
 
 ## Tracking on main
 
-[`.github/workflows/perf.yml`](../.github/workflows/perf.yml) runs on pushes to `main` that change more than `README.md` or `docs/`, and on demand. It never runs on pull requests, and it is a separate workflow, so it cannot slow or block the parity shards. It:
+[`.github/workflows/perf.yml`](../.github/workflows/perf.yml) runs on pushes to `main` that change more than `README.md` or `docs/`, and on demand. It never runs on pull requests, and it is a separate workflow, so it cannot slow or block the parity shards.
+
+It measures at most once a day. Its first step reads when `docs/performance.md` last changed on `main` (`git log -1 --format=%ct -- docs/performance.md`). If that was less than 24 hours ago, the job ends there, successfully, and says why. Because it uses the document's own commit time, a hand edit also restarts the clock. A manual run can pass `force` to measure anyway. Otherwise it:
 
 1. fetches the reference at the commit `parity.yml` pins, installs it as the parity jobs do, and builds its production bundle;
 2. builds the Rust server in release mode;
 3. runs `scripts/perf_compare.py`, and shows the summary on the run's page;
 4. uploads `perf.json` and `perf.md` as the run's artifact;
-5. adds `perf.json` to the `perf-data` branch as `results/<date>-<commit>.json`, and regenerates that branch's `README.md` (`perf_compare.py --history`): the latest results and a table of the headline ratios for the last 30 runs.
+5. adds `perf.json` to the `perf-data` branch as `results/<date>-<commit>.json`, and regenerates that branch's `README.md` (`perf_compare.py --history`): the latest results and a table of the headline ratios for the last 30 runs;
+6. rewrites the [Headline](#headline) section of this file from those results (`perf_compare.py --history … --update-doc`), and brings the change onto `main` through a pull request from the `perf-docs-update` branch, which the workflow merges itself.
 
-The results live on their own branch, so CI never commits to `main`. A push to `perf-data` triggers no workflow, so there is no loop. Runs are queued, not cancelled, and a run whose push loses a race fetches the branch again and retries. The JSON keeps every sample, so a later change to the report can be applied to old runs.
+Why a pull request: `main`'s ruleset requires every change to arrive through one, so the workflow cannot commit to it directly. The repository does not allow auto-merge, so the workflow merges the pull request itself as soon as it is open. The pull request changes only `docs/performance.md`, and nothing needs to check it: the parity and workers workflows skip a docs-only change (#283), and the merge is pushed with the workflow's `GITHUB_TOKEN`, which by GitHub's rules starts no other workflow run. So the update cannot start another measurement, and there is no loop. This uses only the `GITHUB_TOKEN`; it needs the repository setting "Allow GitHub Actions to create and approve pull requests" (Settings → Actions → General). Without it, the measurement and the `perf-data` record still happen, and the step only warns.
 
-The headline numbers in this file are updated by hand from a run. CI does not keep them current. Keeping this file current automatically would need CI to write to `main`, for example by opening a pull request that updates the headline after each run. That is not enabled.
+The results live on their own branch. A push to `perf-data` triggers no workflow. Runs are queued, not cancelled, and a run whose push loses a race fetches the branch again and retries. The JSON keeps every sample, so a later change to the report can be applied to old runs.
 
 ## Running it locally
 
