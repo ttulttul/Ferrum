@@ -169,6 +169,7 @@ else:
 remembered = {}
 # The T3 MCP server the client configured: {"url", "authorization"}, and its session.
 mcp_server = {}
+mcp_servers = {}
 
 # Answers to requests a client may make between the scripted ones.
 SIDE_REPLIES = {
@@ -192,11 +193,19 @@ CONTROL_REPLIES = {
 
 def answer(message):
     """Reply to an unscripted request this CLI knows an answer to."""
+    global remembered
     if scenario.get("silent"):
         return
     method = message.get("method")
     if "id" in message and method in SIDE_REPLIES:
         sys.stdout.write(json.dumps({"id": message["id"], "result": SIDE_REPLIES[method]}) + "\n")
+        for note in scenario.get("sideNotifications", {}).get(method, []):
+            previous = remembered
+            remembered = message
+            try:
+                sys.stdout.write(json.dumps(fill(note)) + "\n")
+            finally:
+                remembered = previous
         sys.stdout.flush()
     subtype = (message.get("request") or {}).get("subtype")
     if message.get("type") == "control_request":
@@ -230,12 +239,18 @@ def note_mcp_server(message):
     if not isinstance(message, dict):
         return
     if message.get("method") in ("thread/start", "thread/resume"):
-        server = ((message.get("params") or {}).get("config") or {}).get("mcp_servers.t3-code")
-        # A shared app-server keeps each thread's MCP server apart; the steps act as the first
-        # thread, so a later thread (a delegated child) does not take its credential.
-        if isinstance(server, dict) and not mcp_server.get("url"):
-            mcp_server.update(url=server.get("url"),
-                              authorization=(server.get("http_headers") or {}).get("Authorization"))
+        params = message.get("params") or {}
+        server = (params.get("config") or {}).get("mcp_servers.t3-code")
+        if isinstance(server, dict):
+            entry = {"url": server.get("url"),
+                     "authorization": (server.get("http_headers") or {}).get("Authorization")}
+            thread_id = params.get("threadId")
+            if thread_id:
+                mcp_servers[thread_id] = dict(entry)
+            # A shared app-server keeps each thread's MCP server apart; the steps act as the first
+            # thread, so a later thread (a delegated child) does not take its credential.
+            if not mcp_server.get("url"):
+                mcp_server.update(entry)
     request = message.get("request") or {}
     if message.get("type") == "control_request" and request.get("subtype") == "mcp_set_servers":
         server = (request.get("servers") or {}).get("t3-code")
@@ -243,15 +258,16 @@ def note_mcp_server(message):
             mcp_server.update(url=server.get("url"), authorization=(server.get("headers") or {}).get("Authorization"))
 
 
-def mcp_post(body, extra=None):
+def mcp_post(body, extra=None, server=None):
+    target = mcp_server if server is None else server
     headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
     headers.update(extra or {})
-    if mcp_server.get("authorization"):
-        headers["authorization"] = mcp_server["authorization"]
-    if mcp_server.get("session"):
-        headers["mcp-session-id"] = mcp_server["session"]
+    if target.get("authorization"):
+        headers["authorization"] = target["authorization"]
+    if target.get("session"):
+        headers["mcp-session-id"] = target["session"]
         headers["mcp-protocol-version"] = "2025-06-18"
-    request = urllib.request.Request(mcp_server["url"], data=json.dumps(body).encode(), headers=headers, method="POST")
+    request = urllib.request.Request(target["url"], data=json.dumps(body).encode(), headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             status, received, text = response.status, dict(response.headers), response.read().decode()
@@ -283,21 +299,23 @@ def mcp_post(body, extra=None):
 def mcp_call(step):
     """One call to the client's T3 MCP server, opening a session first."""
     record = {"request": step}
-    if not mcp_server.get("url"):
+    target = mcp_servers.get(step["thread"], mcp_server) if "thread" in step else mcp_server
+    if not target.get("url"):
         record["error"] = "no T3 MCP server was configured"
     else:
-        if not mcp_server.get("session"):
+        if not target.get("session"):
             status, headers, answer = mcp_post({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-                "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake-cli", "version": "1"}}})
+                "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake-cli", "version": "1"}}},
+                server=target)
             record["initialize"] = status
             if status == 200:
-                mcp_server["session"] = headers.get("mcp-session-id")
-                mcp_post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+                target["session"] = headers.get("mcp-session-id")
+                mcp_post({"jsonrpc": "2.0", "method": "notifications/initialized"}, server=target)
         method = step.get("method", "tools/call")
         arguments = fill_mcp(step.get("arguments", {}))
         params = {"name": step["tool"], "arguments": arguments} if method == "tools/call" else {}
         status, received, answer = mcp_post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-                                            step.get("headers"))
+                                            step.get("headers"), server=target)
         record.update(status=status, answer=answer)
         if received.get("x-notifications"):
             record["notifications"] = received["x-notifications"]
@@ -324,6 +342,8 @@ def fill_mcp(value):
     if isinstance(value, str):
         if value.startswith("$match:"):
             content = (remembered.get("message") or {}).get("content")
+            if content is None:
+                content = (remembered.get("params") or {}).get("input")
             found = re.search(value[len("$match:"):], content if isinstance(content, str) else json.dumps(content))
             return found.group(1) if found else value
         if value.startswith("$env."):
