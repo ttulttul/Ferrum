@@ -34,7 +34,7 @@ from websockets.sync.client import connect
 
 from client_thread_parity import (FAKE_CLAUDE, FIXTURES, GIT_ISOLATION, THREAD, agent_mcp, comparable_mcp,
                                   seed_turn)
-from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, http, isolated_git_env, managed_server, path_without
+from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, http, isolated_git_env, managed_server, path_without, recv_frame
 from peer_forwarding_parity import FAKE_PEER_ID, FakePeer
 from peer_link_outgoing_parity import set_linked_environments
 
@@ -60,7 +60,7 @@ class Server:
         request = f"link-{self.sequence}"
         self.socket.send(encode(dict(_tag="Request", id=request, tag=tag, payload=payload, headers=[])).decode())
         while True:
-            frame = json.loads(self.socket.recv(timeout=timeout))
+            frame = json.loads(recv_frame(self.socket, timeout=timeout))
             if frame.get("_tag") == "Ping":
                 self.socket.send(encode({"_tag": "Pong"}).decode())
                 continue

@@ -353,7 +353,7 @@ def main():
             if "frame" in case:
                 for ws in sockets:
                     ws.send(harness.encode(case["frame"]).decode())
-                packets = [ws.recv(timeout=15) for ws in sockets]
+                packets = [harness.recv_frame(ws, timeout=15) for ws in sockets]
                 payload = case["frame"]["payload"]
                 expected_failure = payload.get("scope") == "other/repo" or "stackNumber" in payload or payload.get("threadId")=="Other"
                 exits = [json.loads(p)["exit"] for p in packets]

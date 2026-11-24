@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from websockets.sync.client import connect
 
 import parity_harness
-from parity_harness import encode, http, isolated_git_env, managed_server
+from parity_harness import encode, http, isolated_git_env, managed_server, recv_frame
 
 TOKEN = "fixture-bitbucket-token"
 WRITE, READ = "example-org/example-repo", "example-org/readonly"
@@ -236,7 +236,7 @@ def call(url, cookie, tag, payload):
                  additional_headers={"Cookie": cookie}, proxy=None, compression=None) as ws:
         ws.send(encode({"_tag": "Request", "id": "r", "tag": tag, "payload": payload, "headers": []}).decode())
         while True:
-            frame = json.loads(ws.recv(timeout=90))
+            frame = json.loads(recv_frame(ws, timeout=90))
             if frame.get("_tag") == "Ping":
                 ws.send(encode({"_tag": "Pong"}).decode())
             elif frame.get("requestId") == "r" and "exit" in frame:

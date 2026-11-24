@@ -26,7 +26,7 @@ from tempfile import TemporaryDirectory
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, http, isolated_git_env, managed_server, mask_port
+from parity_harness import encode, http, isolated_git_env, managed_server, mask_port, recv_frame
 from peer_forwarding_parity import McpClient, mcp_token
 
 FAKE_SSH = """#!/bin/sh
@@ -80,7 +80,7 @@ class Server:
         request = f"clone-{self.sequence}"
         self.socket.send(encode(dict(_tag="Request", id=request, tag=tag, payload=payload, headers=[])).decode())
         while True:
-            frame = json.loads(self.socket.recv(timeout=timeout))
+            frame = json.loads(recv_frame(self.socket, timeout=timeout))
             if frame.get("_tag") == "Ping":
                 self.socket.send(encode({"_tag": "Pong"}).decode())
                 continue

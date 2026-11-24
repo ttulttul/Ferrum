@@ -15,7 +15,7 @@ from threading import Thread
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, managed_server
+from parity_harness import encode, managed_server, recv_frame
 from github_provider_parity import Provider, PR, REPO, REPOSITORY
 
 DATE = "2026-01-01T00:00:00+00:00"
@@ -48,7 +48,7 @@ def observe(server, root, provider):
                                     payload=dict(cwd=str(repo), **params), headers=[])).decode())
             frames = []
             while True:
-                raw = socket.recv(timeout=20)
+                raw = recv_frame(socket, timeout=20)
                 frames.append(raw)
                 if json.loads(raw)["_tag"] == "Exit":
                     break
@@ -209,7 +209,7 @@ def observe(server, root, provider):
                      additional_headers={"Cookie":cookie}, proxy=None, compression=None) as stream:
             stream.send(encode(dict(_tag="Request",id="1",tag="subscribeVcsStatus",
                                     payload=dict(cwd=str(repo),includeRemote=False),headers=[])).decode())
-            snapshot=json.loads(stream.recv(timeout=20))["values"][0]
+            snapshot=json.loads(recv_frame(stream, timeout=20))["values"][0]
             assert snapshot["remote"]["pr"]==expected_pr
             received["cached subscription"] = snapshot["remote"]
         git(repo, "switch", "-qc", "renamed")

@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from websockets.sync.client import connect
 
 import parity_harness
-from parity_harness import encode, http, managed_server
+from parity_harness import encode, http, managed_server, recv_frame
 
 LINK_REDIRECT = "http://127.0.0.1/t3code-peer-link"
 PROJECT, THREAD = "project:link-routes", "thread:link-routes"
@@ -84,7 +84,7 @@ def dispatch(url, cookie, command):
         ws.send(encode({"_tag": "Request", "id": "command", "tag": "orchestration.dispatchCommand", "headers": [],
                         "payload": command}).decode())
         while True:
-            frame = json.loads(ws.recv(timeout=20))
+            frame = json.loads(recv_frame(ws, timeout=20))
             if frame.get("_tag") == "Exit":
                 assert frame["exit"]["_tag"] == "Success", frame
                 return
@@ -188,7 +188,7 @@ def listed_pairings(url, cookie):
         ws.send(encode({"_tag": "Request", "id": "access", "tag": "subscribeAuthAccess",
                         "payload": {}, "headers": []}).decode())
         while True:
-            frame = json.loads(ws.recv(timeout=10))
+            frame = json.loads(recv_frame(ws, timeout=10))
             if frame.get("_tag") == "Chunk":
                 rows = frame["values"][0]["payload"]["pairingLinks"]
                 return sorted(json.dumps({k: row.get(k) for k in ("label", "scopes", "purpose", "access")},

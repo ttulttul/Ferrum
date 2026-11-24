@@ -30,7 +30,7 @@ import threading
 
 from websockets.sync.client import connect
 
-from parity_harness import encode, isolated_git_env, managed_server
+from parity_harness import encode, isolated_git_env, managed_server, recv_frame
 
 FAKE_CLI = """#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -109,7 +109,7 @@ class Server:
         request = f"lookup-{self.sequence}"
         self.socket.send(encode(dict(_tag="Request", id=request, tag=tag, payload=payload, headers=[])).decode())
         while True:
-            frame = json.loads(self.socket.recv(timeout=120))
+            frame = json.loads(recv_frame(self.socket, timeout=120))
             if frame.get("_tag") == "Ping":
                 self.socket.send(encode({"_tag": "Pong"}).decode())
                 continue

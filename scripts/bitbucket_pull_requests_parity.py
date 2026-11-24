@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from websockets.sync.client import connect
 
 import parity_harness
-from parity_harness import encode, http, isolated_git_env, managed_server
+from parity_harness import encode, http, isolated_git_env, managed_server, recv_frame
 
 CASES = ("401", "404", "500", "dropped connection", "closed port", "an account with no name")
 TOKEN = "fixture-bitbucket-token"
@@ -172,7 +172,7 @@ def list_pull_requests(url, cookie, payload):
         ws.send(encode({"_tag": "Request", "id": "list", "tag": "pullRequests.list", "payload": payload,
                         "headers": []}).decode())
         while True:
-            frame = json.loads(ws.recv(timeout=90))
+            frame = json.loads(recv_frame(ws, timeout=90))
             if frame.get("_tag") == "Ping":
                 ws.send(encode({"_tag": "Pong"}).decode())
             elif frame.get("requestId") == "list" and "exit" in frame:

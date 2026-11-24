@@ -45,7 +45,7 @@ from websockets.sync.client import connect
 
 from client_initial_sync_parity import rpc
 from fake_https_proxy import FakeHttpsProxy
-from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, managed_server, path_without, run_concurrently
+from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, encode, managed_server, path_without, run_concurrently, recv_frame
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/providers"
@@ -1096,7 +1096,7 @@ def next_provider_event(ws, instance, seconds=15):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
-            frame = json.loads(ws.recv(timeout=max(0.1, deadline - time.monotonic())))
+            frame = json.loads(recv_frame(ws, timeout=max(0.1, deadline - time.monotonic())))
         except TimeoutError:
             break
         if frame.get("_tag") == "Ping":
@@ -1123,7 +1123,7 @@ def redeem(url, cookie, payload):
                         "payload": payload, "headers": []}).decode())
         deadline = time.monotonic() + 120
         while True:
-            frame = json.loads(ws.recv(timeout=max(1, deadline - time.monotonic())))
+            frame = json.loads(recv_frame(ws, timeout=max(1, deadline - time.monotonic())))
             if frame.get("_tag") == "Exit" and frame.get("requestId") == "redeem":
                 return frame["exit"]
 
@@ -1136,7 +1136,7 @@ def report_activity(url, cookie, report):
     ws.send(encode({"_tag": "Request", "id": "activity", "tag": "server.reportClientActivity", "payload": report,
                     "headers": []}).decode())
     while True:
-        frame = json.loads(ws.recv(timeout=20))
+        frame = json.loads(recv_frame(ws, timeout=20))
         if frame.get("_tag") == "Exit" and frame.get("requestId") == "activity":
             if frame["exit"]["_tag"] != "Success":
                 raise RuntimeError(f"server.reportClientActivity failed: {frame}")

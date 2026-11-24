@@ -11,7 +11,7 @@ from tempfile import TemporaryDirectory
 from time import monotonic
 
 from config_parity import frame, identical, socket
-from parity_harness import encode, managed_server
+from parity_harness import encode, managed_server, recv_frame
 
 
 def parts(raw):
@@ -84,7 +84,7 @@ def snapshot_pair(frames, stream):
 def receive(ws, kind):
     deadline = monotonic() + 15
     while deadline > monotonic():
-        packet = ws.recv(timeout=deadline-monotonic()).encode()
+        packet = recv_frame(ws, timeout=deadline-monotonic()).encode()
         frame = json.loads(packet)
         if frame.get("_tag") != "Chunk":
             raise AssertionError(f"expected stream data, got {frame}")

@@ -40,7 +40,7 @@ import tempfile
 import time
 import urllib.request
 
-from parity_harness import RELAY_TOOLS, encode, isolated_git_env, managed_server, path_without, run_concurrently, session_cookie
+from parity_harness import RELAY_TOOLS, encode, isolated_git_env, managed_server, path_without, run_concurrently, session_cookie, recv_frame
 
 ROOT = Path(__file__).resolve().parents[1]
 GIT_ENV = {"GIT_AUTHOR_NAME": "Parity", "GIT_AUTHOR_EMAIL": "parity@example.test",
@@ -350,7 +350,7 @@ def raw_frames(url, cookie, variables, normalizer_args):
             ws.send(encode({"_tag": "Request", "id": index + 1, "tag": tag, "payload": payload,
                             "headers": []}).decode())
             try:
-                frame = json.loads(ws.recv(timeout=15))
+                frame = json.loads(recv_frame(ws, timeout=15))
                 for reason in frame.get("exit", {}).get("cause", []) if isinstance(frame.get("exit"), dict) else []:
                     reason.pop("fiberId", None)
                 replies.append((f"raw.{tag}#{index + 1}", Normalizer(*normalizer_args)(frame)))
