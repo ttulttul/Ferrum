@@ -32,6 +32,9 @@ few seconds later, so a client sees the closed output, not a failed write;
 "closeInputAfter": n closes standard input before the nth reply instead,
 so every later write fails while the output is still open.
 
+An entry with "afterLaunch": "<args prefix>" first waits until a launch whose arguments start with
+it has been logged.
+
 Every launch appends its arguments to FAKE_PROVIDER_LOG.args (and, with the
 variables a spec lists in "logEnv", both as JSON to FAKE_PROVIDER_LOG.launch);
 requests are appended to FAKE_PROVIDER_LOG.
@@ -78,6 +81,19 @@ def matches(entry):
 
 
 entry = next((e for e in spec.get("commands", []) if matches(e)), {})
+
+# "afterLaunch" waits (up to 20 s) until another launch whose arguments start with it is logged, so
+# a check that runs two launches side by side reaches both before this one answers.
+if entry.get("afterLaunch") and log_path:
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        try:
+            with open(log_path + ".args") as launches:
+                if any(line.startswith(entry["afterLaunch"]) for line in launches):
+                    break
+        except FileNotFoundError:
+            pass
+        time.sleep(0.02)
 
 
 def write(stream, text):

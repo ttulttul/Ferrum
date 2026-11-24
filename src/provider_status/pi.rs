@@ -679,6 +679,16 @@ async fn text_generation_slugs(
     }
 }
 
+/// A spawned task that is aborted when dropped, as a scoped fiber is
+/// interrupted when its scope closes.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 struct Discovery {
     models: Vec<Value>,
     slash_commands: Vec<Value>,
@@ -695,12 +705,15 @@ async fn discover(
     cwd: &Path,
     timeout: Duration,
 ) -> Result<Discovery, RpcError> {
-    let side = tokio::spawn(text_generation_slugs(
+    // The reference forks this probe into discovery's scope, so a failed
+    // discovery interrupts it (and stops its Pi). Dropping the guard on an
+    // early return does the same; an unaborted task would launch Pi anyway.
+    let mut side = AbortOnDrop(tokio::spawn(text_generation_slugs(
         binary.to_owned(),
         env.clone(),
         launch_args.to_vec(),
         cwd.to_path_buf(),
-    ));
+    )));
     let inventory = match read_inventory(binary, env, launch_args, timeout, cwd).await {
         Err(RpcError::Closed)
             if !launch_args
@@ -715,7 +728,7 @@ async fn discover(
     }?;
     let discovered = parse_models(&inventory.models, &inventory.state).ok_or(RpcError::Failed)?;
     let (slash_commands, skills) = parse_commands(&inventory.commands);
-    let text_generation = side.await.ok().flatten();
+    let text_generation = (&mut side.0).await.ok().flatten();
     let active = record_field(&inventory.state, "model");
     let active_provider = record_string(active, "provider");
     let active_id = record_string(active, "id");

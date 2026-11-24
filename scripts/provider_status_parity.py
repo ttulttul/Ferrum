@@ -313,6 +313,8 @@ PI_COMMANDS = {"commands": [
     {"name": " "}]}
 PI_TEXT_GENERATION = {"prefix": ["--mode", "rpc", "--no-session", "--offline", "--no-extensions"],
                       "pi": {"get_available_models": {"models": [{"provider": "openai", "id": "gpt-5.6"}]}}}
+# The launch of Pi's text generation probe, which discovery runs beside its inventory read.
+PI_PROBE_LAUNCH = "--mode rpc --no-session --offline --no-extensions"
 def pi_rpc(**data):
     return {"prefix": ["--mode", "rpc"], "pi": {"get_state": PI_STATE, "get_available_models": PI_MODELS,
                                                   "get_commands": PI_COMMANDS, **data}}
@@ -323,7 +325,10 @@ SCENARIOS += driver_scenarios("pi", "pi", "0.85.0", [PI_TEXT_GENERATION, pi_rpc(
     "default model unavailable": ([PI_TEXT_GENERATION, pi_rpc(get_state={"model": {"provider": "google", "id": "g-1"}}),
                                    {"args": ["auth", "check", "--provider", "google", "--json", "--no-refresh"],
                                     **ok('{"reason": "credentials_not_configured"}')}], {}),
-    "discovery fails": ([pi_rpc(get_available_models=None) | {"piErrors": ["get_available_models"]}], {}),
+    # Discovery starts Pi's text generation probe beside its inventory read and stops it when the
+    # read fails; the failing read waits for the probe's launch, so both servers always make it.
+    "discovery fails": ([pi_rpc(get_available_models=None) | {"piErrors": ["get_available_models"],
+                                                               "afterLaunch": PI_PROBE_LAUNCH}], {}),
     "discovery exits then declines project trust": ([PI_TEXT_GENERATION,
         {"prefix": ["--mode", "rpc", "--no-session", "--no-approve"], "pi": pi_rpc()["pi"]},
         # Pi's output closes after its state: both servers see a closed output (not a failed write).
@@ -331,7 +336,8 @@ SCENARIOS += driver_scenarios("pi", "pi", "0.85.0", [PI_TEXT_GENERATION, pi_rpc(
     # Pi stops reading after its state while its output stays open: the next request fails to
     # write, which neither server retries.
     "discovery stops reading": ([PI_TEXT_GENERATION,
-        {"prefix": ["--mode", "rpc"], "pi": {"get_state": PI_STATE}, "closeInputAfter": 1}], {}),
+        {"prefix": ["--mode", "rpc"], "pi": {"get_state": PI_STATE}, "closeInputAfter": 1,
+         "afterLaunch": PI_PROBE_LAUNCH}], {}),
     "text generation has no models": ([{**PI_TEXT_GENERATION, "pi": {"get_available_models": {"models": []}}},
                                        pi_rpc()], {}),
     "bad launch arguments": ([pi_rpc()], {"settings": enabled("pi", launchArgs="--mode json")}),
