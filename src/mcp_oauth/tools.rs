@@ -292,6 +292,54 @@ static TOOL_SEARCH: LazyLock<Value> = LazyLock::new(|| {
     reference["toolSearch"].clone()
 });
 
+/// The reference checks the calling thread's project at authentication and caches
+/// the answer for one minute. An outside client has no project restriction.
+pub(super) async fn thread_has_forge<S: McpHost>(host: &S, granted: &McpAccess) -> bool {
+    let Some(scope) = &granted.thread else {
+        return true;
+    };
+    let key = &scope.thread_id;
+    let now = crate::platform::now_ms();
+    let cache = &host.oauth().thread_forges;
+    {
+        let mut cache = cache.lock().expect("thread forge cache");
+        if let Some(entry) = cache.shift_remove(key) {
+            if entry.0 > now {
+                cache.insert(key.clone(), entry);
+                return entry.1;
+            }
+        }
+    }
+
+    let store = host.control_state().store.read().await;
+    let Some(thread) = store.threads.get(key) else {
+        return true;
+    };
+    let project = store.project_rows.get(&thread.project_id).cloned();
+    drop(store);
+    let supported = project.is_some_and(|project| {
+        let row = host.project_row(&project);
+        matches!(
+            row["repositoryIdentity"]["provider"].as_str(),
+            Some(
+                "github"
+                    | "bitbucket"
+                    | "gitlab"
+                    | "forgejo"
+                    | "azure-devops"
+                    | "gitcafe"
+                    | "cursor-origin"
+            )
+        )
+    });
+    let mut cache = cache.lock().expect("thread forge cache");
+    if cache.len() >= 1000 {
+        cache.shift_remove_index(0);
+    }
+    cache.insert(key.clone(), (now + 60_000, supported));
+    supported
+}
+
 /// Whether `caller` may see a tool listed to `listed` (its `McpSchema.EnabledWhen`):
 /// thread-only tools need a thread credential; links tools, the beta on.
 /// This server issues no credential to a subagent, so `hiddenFromSubagents`
@@ -316,28 +364,6 @@ fn visible_to<S: McpHost>(host: &S, granted: &McpAccess, listed: &str) -> bool {
                 .to_owned();
             driver == crate::workspace::provider::CLAUDE_AGENT
         }),
-        "hiddenWithoutForge" => host
-            .control_state()
-            .store
-            .try_read()
-            .map(|store| {
-                store.project_rows.values().any(|row| {
-                    let row = host.project_row(row);
-                    matches!(
-                        row["repositoryIdentity"]["provider"].as_str(),
-                        Some(
-                            "github"
-                                | "bitbucket"
-                                | "gitlab"
-                                | "forgejo"
-                                | "azure-devops"
-                                | "gitcafe"
-                                | "cursor-origin"
-                        )
-                    )
-                })
-            })
-            .unwrap_or(false),
         _ => true,
     }
 }
@@ -346,7 +372,12 @@ fn visible_to<S: McpHost>(host: &S, granted: &McpAccess, listed: &str) -> bool {
 /// each tool's `EnabledWhen`, and for a provider session that sends
 /// `t3-tool-exposure: deferred`, only the direct tools and those its
 /// `tool_search` calls loaded.
-pub(super) fn listed<S: McpHost>(host: &S, granted: &McpAccess, deferred: bool) -> Value {
+pub(super) fn listed<S: McpHost>(
+    host: &S,
+    granted: &McpAccess,
+    deferred: bool,
+    forge: bool,
+) -> Value {
     let session = granted
         .thread
         .as_ref()
@@ -354,7 +385,9 @@ pub(super) fn listed<S: McpHost>(host: &S, granted: &McpAccess, deferred: bool) 
         .map(|scope| scope.provider_session_id.as_str());
     let mut tools: Vec<Value> = SERVED_TOOLS
         .iter()
-        .filter(|(_, listed)| visible_to(host, granted, listed))
+        .filter(|(_, listed)| {
+            (forge || listed != "hiddenWithoutForge") && visible_to(host, granted, listed)
+        })
         .filter(|(tool, _)| {
             session.is_none_or(|session| {
                 session::is_listed(session, tool["name"].as_str().unwrap_or_default())

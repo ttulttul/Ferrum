@@ -445,6 +445,8 @@ pub struct OAuth {
     dir: PathBuf,
     /// Serializes spending a code, so one code never yields two tokens.
     spend: Mutex<()>,
+    /// Per-thread forge visibility, in lookup order, with its expiry in milliseconds.
+    thread_forges: Mutex<indexmap::IndexMap<String, (i64, bool)>>,
     /// The TypeScript server's session store in the same home, which holds
     /// the MCP client sessions (and so the peer links) it issued.
     #[cfg(feature = "native")]
@@ -562,6 +564,7 @@ impl OAuth {
             documents,
             dir: dir.join("mcp-oauth"),
             spend: Mutex::new(()),
+            thread_forges: Mutex::default(),
             #[cfg(feature = "native")]
             reference: reference_sessions::ReferenceSessions::new(dir),
             threads: Default::default(),

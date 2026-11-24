@@ -13,6 +13,15 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from client_initial_sync_parity import rpc
 from parity_harness import encode, http, managed_server
+from update_agent_tools import TOOLS, served
+
+
+def check_forge_listing(tools, *, visible):
+    gates = json.loads(TOOLS.read_text())["listedTo"]
+    forge_tools = {name for name in served() if gates[name] == "hiddenWithoutForge"}
+    listed = {t["name"] for t in tools} & forge_tools
+    expected = forge_tools if visible else set()
+    assert listed == expected, f"forge listing: missing {expected - listed}, unexpected {listed - expected}"
 
 
 def observations(url, cookie, root):
@@ -44,6 +53,10 @@ def observations(url, cookie, root):
         return h
     h=call("initialize",dict(protocolVersion="2025-06-18",capabilities={},clientInfo=dict(name="Fixture",version="1")))
     headers["mcp-session-id"]=h["mcp-session-id"]
+    listing = dict(jsonrpc="2.0", id=1, method="tools/list", params={})
+    status, _, body = http(url, "POST", "/mcp", encode(listing), headers)
+    assert status == 200
+    check_forge_listing(json.loads(body)["result"]["tools"], visible=True)
     call("ping",{})
     call("tools/call",dict(name="t3_project_list",arguments={}))
     call("tools/call",dict(name="t3_project_read",arguments=dict(projectId="missing")))

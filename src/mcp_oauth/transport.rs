@@ -75,6 +75,7 @@ pub(super) async fn handle<S: McpHost>(
         )
             .into_response();
     }
+    let forge = super::tools::thread_has_forge(&*s, &granted).await;
     let link_expires_ms = granted.link_expires_ms;
     let mut response: Response = async {
     let sid = h.get("mcp-session-id").and_then(|v| v.to_str().ok());
@@ -124,7 +125,7 @@ pub(super) async fn handle<S: McpHost>(
                 .get("t3-tool-exposure")
                 .and_then(|v| v.to_str().ok())
                 .is_some_and(|v| v == "deferred");
-            json!({"tools":super::tools::listed(&*s, &granted, deferred)})
+            json!({"tools":super::tools::listed(&*s, &granted, deferred, forge)})
         }
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or("");
