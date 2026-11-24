@@ -399,9 +399,17 @@ async fn dispatch_command<H: CommandHost>(
         thread_id: id.to_string(),
         command_type: kind.to_string(),
     };
-    let mut seq = apply_command(state.clone(), &command, &receipt, continuation_of)
-        .await
-        .map_err(|e| dispatch_error(e.to_string()))?;
+    // Boxed: the command's future is large (hundreds of KB in a debug
+    // build), and a caller that awaits it inline, such as an RPC on its
+    // WebSocket task, would otherwise hold it on a worker's stack.
+    let mut seq = Box::pin(apply_command(
+        state.clone(),
+        &command,
+        &receipt,
+        continuation_of,
+    ))
+    .await
+    .map_err(|e| dispatch_error(e.to_string()))?;
     if kind == "thread.pull-request.link" {
         state
             .clone()
