@@ -190,18 +190,14 @@ async fn stream(
     let link_expires_ms = admitted.link_expires_ms;
     let task_state = state.clone();
     tokio::spawn(async move {
-        // A snapshot carries only the newest window of the timeline and a cursor to the turns
-        // before it, which `/api/links/thread/history` pages.
+        // A bounded snapshot carries only the newest window of the timeline and a cursor to the
+        // turns before it, which `/api/links/thread/history` pages.
         let send = |batch: &Value| {
             batch
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|item| {
-                    let mut item = item.clone();
-                    crate::thread_history::bound_snapshot_item(&mut item);
-                    event(&item)
-                })
+                .map(event)
                 .collect::<Vec<_>>()
         };
         for batch in &opened.first {
@@ -298,7 +294,14 @@ async fn history(
         let subagents = projection["subagents"]
             .as_array()
             .map_or(&[][..], Vec::as_slice);
-        crate::thread_history::history_page(rows, subagents, &admitted.thread_id, cursor, sequence)
+        crate::thread_history::history_page(
+            rows,
+            subagents,
+            &admitted.thread_id,
+            cursor,
+            sequence,
+            crate::thread_history::PageOptions::default(),
+        )
     });
     // A cursor the store cannot read fails the read, as the reference's history query does.
     let Some(page) = page else {

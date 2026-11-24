@@ -264,21 +264,72 @@ fn default_row_cost(row: &Value) -> usize {
     bytes_of(row)
 }
 
-/// `getThreadHistoryPage` without a target entry or a view: the page of `rows` (the thread's
-/// whole visible timeline) before `cursor`, as `OrchestrationV2ThreadHistoryPage`. `None` for a
-/// cursor the reference cannot read.
+/// `isConversationHistoryItem`: anything but work rows.
+fn is_conversation_item(item: &Value) -> bool {
+    !matches!(
+        item["type"].as_str(),
+        Some("command_execution" | "reasoning" | "file_change" | "dynamic_tool")
+    )
+}
+
+/// What a history page asks beyond its cursor.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PageOptions<'a> {
+    /// `throughEntryId`: widen the page until it reaches this entry (a message or item id).
+    pub through_entry_id: Option<&'a str>,
+    /// `view=conversation`: only conversation rows, once the history has a user turn.
+    pub conversation_only: bool,
+}
+
+/// `olderHistoryPagePolicy`: older pages allow twice a snapshot's turns, and a targeted page
+/// widens further so it reaches its entry.
+fn older_policy(rows: &[Value], cursor: &Cursor, through_entry_id: Option<&str>) -> Policy {
+    let policy = Policy {
+        max_user_turns: Some(OLDER_USER_TURN_LIMIT),
+        ..PAGE_POLICY
+    };
+    let Some(target) = through_entry_id else {
+        return policy;
+    };
+    let anchor = cursor_end(rows, cursor);
+    let Some(index) = rows.iter().position(|row| {
+        item(row)["messageId"]
+            .as_str()
+            .or_else(|| item(row)["id"].as_str())
+            == Some(target)
+    }) else {
+        return policy;
+    };
+    if index >= anchor {
+        return policy;
+    }
+    let turns = rows[index..anchor]
+        .iter()
+        .filter(|row| is_user_turn(item(row)))
+        .count();
+    let extra = usize::from(!is_user_turn(item(&rows[index])));
+    Policy {
+        max_user_turns: Some(
+            (OLDER_USER_TURN_LIMIT * 2).min(OLDER_USER_TURN_LIMIT.max(turns + extra)),
+        ),
+        max_items: policy.max_items * 2,
+        max_turn_items: policy.max_turn_items * 2,
+        ..policy
+    }
+}
+
+/// `getThreadHistoryPage` (without deferred work): the page of `rows` (the thread's whole
+/// visible timeline) before `cursor`, as `OrchestrationV2ThreadHistoryPage`. `None` for a cursor
+/// the reference cannot read.
 pub(crate) fn history_page(
     rows: &[Value],
     subagents: &[Value],
     thread_id: &str,
     cursor: &str,
     seq: u64,
+    options: PageOptions<'_>,
 ) -> Option<Value> {
     let decoded = decode_cursor(cursor)?;
-    let policy = Policy {
-        max_user_turns: Some(OLDER_USER_TURN_LIMIT),
-        ..PAGE_POLICY
-    };
     let indexed: Vec<Value> = rows
         .iter()
         .enumerate()
@@ -288,15 +339,32 @@ pub(crate) fn history_page(
             row
         })
         .collect();
+    let policy = older_policy(&indexed, &decoded, options.through_entry_id);
     let end = cursor_end(&indexed, &decoded);
     let (items, page_cursor, page_more) = select_older(&indexed, end, seq, policy, &|_| 0);
+    // A conversation view drops work rows once the history up to the page has a user turn.
+    let page_end = items.last().map_or(0, |row| position(row) as usize + 1);
+    let has_user_turns = options.conversation_only
+        && indexed[..page_end.min(indexed.len())]
+            .iter()
+            .any(|row| is_user_turn(item(row)));
+    let items: Vec<Value> = if has_user_turns {
+        items
+            .into_iter()
+            .filter(|row| is_conversation_item(item(row)))
+            .collect()
+    } else {
+        items
+    };
     // The rows again within the byte budget, as the reference bounds what it read.
-    let bounded_end = items.len();
     let (bounded, bounded_cursor, bounded_more) =
-        select_older(&items, bounded_end, seq, policy, &default_row_cost);
+        select_older(&items, items.len(), seq, policy, &default_row_cost);
     let requests = missing_interrupt_requests(&indexed, &bounded);
     let mut page: Vec<Value> = requests.into_iter().chain(bounded).collect();
     renumber(&mut page);
+    if options.conversation_only {
+        page.retain(|row| is_conversation_item(item(row)));
+    }
     let wanted: HashSet<&str> = page
         .iter()
         .filter(|row| item(row)["type"] == "subagent" && row["sourceThreadId"] == thread_id)
@@ -737,18 +805,10 @@ fn snapshot_read(projection: &Value) -> Value {
     read
 }
 
-/// A bounded `snapshot` stream item with its projection windowed and its history cursor set, as
-/// the reference's `buildBoundedThreadStreamSnapshot` gives it. Any other item is left alone.
-pub(crate) fn bound_snapshot_item(item: &mut Value) {
-    if item["kind"] != "snapshot" || item.get("historyCursor").is_none() {
-        return;
-    }
-    let seq = item["snapshotSequence"].as_u64().unwrap_or(0);
-    let read = snapshot_read(&item["projection"]);
-    let (projection, cursor, has_more) = bounded_projection(&read, seq);
-    item["projection"] = projection;
-    item["historyCursor"] = json!(cursor);
-    item["hasMoreHistory"] = json!(has_more);
+/// A bounded snapshot's projection (`getThreadSnapshotWindow`, then
+/// `buildBoundedThreadProjection`), with the cursor to the turns before it and whether there are any.
+pub(crate) fn bounded_snapshot(projection: &Value, seq: u64) -> (Value, Option<String>, bool) {
+    bounded_projection(&snapshot_read(projection), seq)
 }
 
 #[cfg(test)]
@@ -816,22 +876,13 @@ mod tests {
         // 34 turns: the read starts at the 12th newest user turn (turn 22, row 44), so the
         // window's oldest row (turn 24, row 48) is at position 4 there, as the reference says.
         let rows = turns(34);
-        let mut item = json!({"kind": "snapshot", "snapshotSequence": 3, "projection": {
-            "thread": {"id": "thread:t"}, "visibleTurnItems": rows, "turnItems": [], "messages": [],
-            "plans": [], "contextHandoffs": [], "runs": []},
-            "historyCursor": null, "hasMoreHistory": false, "latestLocalTurnOrdinal": null});
-        bound_snapshot_item(&mut item);
-        assert_eq!(item["hasMoreHistory"], true);
-        let cursor = decode_cursor(item["historyCursor"].as_str().unwrap()).unwrap();
+        let projection = json!({"thread": {"id": "thread:t"}, "visibleTurnItems": rows,
+            "turnItems": [], "messages": [], "plans": [], "contextHandoffs": [], "runs": []});
+        let (bounded, cursor, more) = bounded_snapshot(&projection, 3);
+        assert!(more);
+        let cursor = decode_cursor(&cursor.unwrap()).unwrap();
         assert_eq!((cursor.si.as_str(), cursor.p), ("item:48", 4));
-        assert_eq!(
-            item["projection"]["visibleTurnItems"][0]["sourceItemId"],
-            "item:48"
-        );
-        // An unbounded snapshot (no historyCursor field) is left alone.
-        let mut plain = json!({"kind": "snapshot", "projection": {"visibleTurnItems": []}});
-        bound_snapshot_item(&mut plain);
-        assert!(plain.get("historyCursor").is_none());
+        assert_eq!(bounded["visibleTurnItems"][0]["sourceItemId"], "item:48");
     }
 
     #[test]
@@ -848,7 +899,8 @@ mod tests {
         let rows = turns(30);
         // The snapshot's cursor: before the newest ten turns.
         let cursor = encode_cursor(9, "thread:t", "item:40", 40);
-        let page = history_page(&rows, &[], "thread:t", &cursor, 9).unwrap();
+        let page =
+            history_page(&rows, &[], "thread:t", &cursor, 9, PageOptions::default()).unwrap();
         let items = page["items"].as_array().unwrap();
         // Older pages allow twenty user turns.
         assert_eq!(items.len(), 40);
@@ -857,12 +909,13 @@ mod tests {
         assert_eq!(page["hasMoreHistory"], false);
         assert_eq!(page["nextCursor"], Value::Null);
         let cursor = encode_cursor(9, "thread:t", "item:50", 50);
-        let page = history_page(&rows, &[], "thread:t", &cursor, 9).unwrap();
+        let page =
+            history_page(&rows, &[], "thread:t", &cursor, 9, PageOptions::default()).unwrap();
         assert_eq!(page["items"][0]["sourceItemId"], "item:10");
         assert_eq!(page["hasMoreHistory"], true);
         let next = decode_cursor(page["nextCursor"].as_str().unwrap()).unwrap();
         assert_eq!((next.si.as_str(), next.p), ("item:10", 10));
-        assert!(history_page(&rows, &[], "thread:t", "bad", 9).is_none());
+        assert!(history_page(&rows, &[], "thread:t", "bad", 9, PageOptions::default()).is_none());
     }
 
     #[test]
@@ -873,7 +926,8 @@ mod tests {
         rows[45]["item"]["type"] = json!("run_interrupt_result");
         rows[45]["item"]["runId"] = json!("run:x");
         let cursor = encode_cursor(1, "thread:t", "item:48", 48);
-        let page = history_page(&rows, &[], "thread:t", &cursor, 1).unwrap();
+        let page =
+            history_page(&rows, &[], "thread:t", &cursor, 1, PageOptions::default()).unwrap();
         assert_eq!(page["items"][0]["sourceItemId"], "item:5");
     }
 }

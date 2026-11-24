@@ -1074,8 +1074,8 @@ impl Thread {
     }
 
     /// One `snapshot` item of `orchestration.subscribeThread`, shaped by the options the
-    /// client sent as the reference's ThreadStream shapes it. The whole timeline always fits
-    /// one window, so a bounded snapshot has no earlier history.
+    /// client sent as the reference's ThreadStream shapes it. A bounded snapshot holds only the
+    /// newest window of the timeline and a cursor to the turns before it.
     pub(crate) fn stream_snapshot(&self, sequence: u64, options: &Value) -> Value {
         let mut projection = self.snapshot_projection();
         if options["acceptBoundedSnapshot"] != true {
@@ -1095,6 +1095,11 @@ impl Thread {
             .filter_map(|item| item["ordinal"].as_u64())
             .chain(queued)
             .max();
+        // Only the newest window of the timeline, with a cursor to the turns before it, as the
+        // reference's getThreadSnapshotWindow and buildBoundedThreadProjection give it.
+        let (bounded, history_cursor, has_more_history) =
+            crate::thread_history::bounded_snapshot(&projection, sequence);
+        projection = bounded;
         if options["acceptDedupedBodies"] == true {
             dedupe_bodies(&mut projection);
         }
@@ -1112,7 +1117,7 @@ impl Thread {
         }
         // The reference's field order (ThreadStream.boundedSnapshotResponseFields).
         let mut item = json!({"kind":"snapshot","snapshotSequence":sequence,"projection":projection,
-            "historyCursor":null,"hasMoreHistory":false,"latestLocalTurnOrdinal":latest_local_turn_ordinal});
+            "historyCursor":history_cursor,"hasMoreHistory":has_more_history,"latestLocalTurnOrdinal":latest_local_turn_ordinal});
         if omitted {
             item["turnItemsOmitLocalVisible"] = json!(true);
         }
