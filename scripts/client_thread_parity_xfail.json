@@ -123,5 +123,35 @@
   },
   "claude approval-required": {
     "live": "Racy: seen both matching and differing (1 of 16 pinned local runs differed, the rest matched): during the approval, the reference sometimes leaves out the requested tool call's second command_execution turn-item.updated after the approval request's records, where Rust always sends it. It comes from the reference's provider commit batch timing around the request (#39502), before any tool call ends, so the fake CLIs' tool pacing does not cover it, nor does waiting for the stream to settle before answering or interrupting (tried)."
+  },
+  "pi approval": {
+    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
+  },
+  "pi approval declined": {
+    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
+  },
+  "pi approval for session": {
+    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
+  },
+  "pi failed turn": {
+    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
+  },
+  "pi interrupt": {
+    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
+  },
+  "pi model": {
+    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
+  },
+  "pi second turn": {
+    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
+  },
+  "pi steer": {
+    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
+  },
+  "pi stop then resume": {
+    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
+  },
+  "pi turn": {
+    "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
   }
 }

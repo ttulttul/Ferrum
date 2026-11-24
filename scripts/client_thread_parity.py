@@ -354,6 +354,35 @@ PROVIDER_SCENARIOS = [
     {"name": "acp registry turn", "instance": "acp-registry", "model": "default", "scenario": "acp_turn.json",
      "enable": {"driver": "acpRegistry", "displayName": "Fixture Agent",
                 "config": {"source": "registry", "agentId": "fixture-agent"}}, "registryAgent": True},
+    # Pi over its RPC mode: a turn streams thinking, a bash command and the reply, and settles once
+    # Pi is idle; the session file is the native thread.
+    {"name": "pi turn", "instance": "pi", "enable": "pi", "model": "default", "scenario": "pi_turn.json"},
+    # A second turn prompts the process the thread keeps.
+    {"name": "pi second turn", "instance": "pi", "enable": "pi", "model": "default",
+     "scenario": "pi_two_turns.json", "followUp": "Now append a line"},
+    # A selected model is set before the first prompt (`set_model`).
+    {"name": "pi model", "instance": "pi", "enable": "pi", "model": "openai/gpt-5.6", "scenario": "pi_turn.json"},
+    # Stop: Pi's queue is cleared and its run aborted, then the process is stopped; the next turn's
+    # process resumes the session file (`--session`).
+    {"name": "pi interrupt", "instance": "pi", "enable": "pi", "model": "default", "scenario": "pi_interrupt.json",
+     "interrupt": "command"},
+    {"name": "pi stop then resume", "instance": "pi", "enable": "pi", "model": "default",
+     "scenario": "pi_stop_resume.json", "interrupt": "command", "followUp": "Now append a line"},
+    # Supervised: T3's extension asks before a command runs (`extension_ui_request` confirm), and
+    # the answer goes back as `extension_ui_response`.
+    {"name": "pi approval", "instance": "pi", "enable": "pi", "model": "default", "scenario": "pi_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
+    {"name": "pi approval declined", "instance": "pi", "enable": "pi", "model": "default",
+     "scenario": "pi_approval.json", "runtimeMode": "approval-required", "respond": {"decision": "decline"}},
+    {"name": "pi approval for session", "instance": "pi", "enable": "pi", "model": "default",
+     "scenario": "pi_approval.json", "runtimeMode": "approval-required", "respond": {"decision": "acceptForSession"}},
+    # A message steers the running turn: another prompt (`streamingBehavior: "steer"`) Pi reads at
+    # its next step.
+    {"name": "pi steer", "instance": "pi", "enable": "pi", "model": "default", "scenario": "pi_steer.json",
+     "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}},
+    # A model error fails the turn with Pi's message.
+    {"name": "pi failed turn", "instance": "pi", "enable": "pi", "model": "default", "scenario": "pi_failed.json"},
+    {"name": "pi missing", "instance": "pi", "enable": "pi", "model": "default", "scenario": None},
     # Grok over ACP: its turns run in the `grok agent stdio` session the thread keeps, and stream
     # reasoning, a command and the reply.
     {"name": "grok turn", "instance": "grok", "enable": "grok", "model": "grok-build", "scenario": "grok_turn.json"},
@@ -634,12 +663,23 @@ FAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 "$FAKE_STATUS_CLI" "$FA
 GROK_STATUS_SPEC = {"commands": [command for command in GROK_TITLE_SPEC["commands"]
                                  if command.get("prefix") != ["--permission-mode", "default", "agent", "stdio"]]}
 # Each driver's CLI on PATH, by the thread's provider instance.
+# The fake Pi: a turn's RPC session (`--mode rpc` without `--no-session`) replays the scenario; the
+# status checks (version, the `--no-session` probes) answer from PI_STATUS_SPEC.
+FAKE_PI = """#!/bin/sh
+case "$*" in
+  *--no-session*|--version*) ;;
+  "--mode rpc"*) exec python3 "$FAKE_PROVIDER_CLI" "$@";;
+esac
+FAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 "$FAKE_STATUS_CLI" "$FAKE_PI_STATUS" "$@"
+"""
+PI_STATUS_SPEC = {"commands": [command for command in PI_TITLE_SPEC["commands"]
+                               if command.get("prefix") == ["--mode", "rpc"] or command.get("args") == ["--version"]]}
 # A local ACP Registry agent: the executable its instance names (`commandPath`), which plays the
 # scenario whatever its arguments.
 FAKE_ACP_AGENT = """#!/bin/sh
 exec python3 "$FAKE_PROVIDER_CLI" "$@"
 """
-TURN_CLIS = {"codex": "codex", "claudeAgent": "claude", "grok": "grok", "acp-local": "fixture-acp",
+TURN_CLIS = {"codex": "codex", "claudeAgent": "claude", "grok": "grok", "pi": "pi", "acp-local": "fixture-acp",
              # Installed in the server's home (`registryAgent`), not on PATH.
              "acp-registry": "registry-agent"}
 # The ACP Registry agent a `registryAgent` scenario's servers find in their cached index, already
@@ -867,12 +907,14 @@ def compare_thread(original, rust):
 def write_fake_clis(directory, drivers):
     directory.mkdir(parents=True, exist_ok=True)
     for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK),
-                         ("fixture-acp", FAKE_ACP_AGENT)):
+                         ("fixture-acp", FAKE_ACP_AGENT), ("pi", FAKE_PI)):
         if name in drivers:
             (directory / name).write_text(script)
             (directory / name).chmod(0o755)
     if "grok" in drivers:
         (directory / "grok.status.json").write_text(json.dumps(GROK_STATUS_SPEC))
+    if "pi" in drivers:
+        (directory / "pi.status.json").write_text(json.dumps(PI_STATUS_SPEC))
 
 
 def write_text_provider(directory, provider):
@@ -1117,6 +1159,10 @@ def cli_approvals(log):
         elif method is None and isinstance(message.get("id"), str) and ("result" in message or "error" in message):
             out.append(f"reply {message['id']} " + json.dumps(message.get("result", message.get("error")),
                                                               sort_keys=True))
+        elif message.get("type") == "extension_ui_response":
+            # Pi's answer to an extension's dialog.
+            out.append(f"ui_response {message.get('id')} "
+                       + json.dumps({k: v for k, v in message.items() if k not in ("type", "id")}, sort_keys=True))
         elif message.get("type") == "control_response":
             response = message.get("response") or {}
             if str(response.get("request_id", "")).startswith("perm-"):
@@ -2023,6 +2069,7 @@ def scenario_env(temporary, name, root, scenario, drivers):
     env = {**GIT_ISOLATION, **HOST_FAKES, "PATH": path, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
            "FAKE_PROVIDER_LOG": str(log), **login_shell,
            "FAKE_STATUS_CLI": str(FIXTURES / "status_cli.py"), "FAKE_GROK_STATUS": str(fake_bin / "grok.status.json"),
+           "FAKE_PI_STATUS": str(fake_bin / "pi.status.json"),
            # "titleAfterTurn": the title CLI answers once the driver saw the turn settle.
            **({"FAKE_TITLE_GATE": str(log) + ".turn-settled"} if scenario.get("titleAfterTurn") else {}),
            "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}

@@ -62,7 +62,7 @@ Steps:
                              text, up to n more times ("retried" in the log).
 
 A request the scenario does not expect is answered from SIDE_REPLIES (or the
-scenario's own "replies" by method), so a client that reads its config or
+scenario's own "replies" by method; a Pi RPC command from "piReplies" by type), so a client that reads its config or
 account first still reaches the scripted steps. A Claude control request is
 answered from CONTROL_REPLIES (or "controlReplies" by subtype). A scenario
 with "silent": true answers nothing, as a CLI that hangs.
@@ -229,6 +229,13 @@ def answer(message):
     if scenario.get("silent"):
         return
     method = message.get("method")
+    kind = message.get("type")
+    if method is None and isinstance(kind, str) and kind in scenario.get("piReplies", {}):
+        # Pi's RPC mode: a {"type": ..., "id": ...} command answered with a response record.
+        sys.stdout.write(json.dumps({"type": "response", "id": message.get("id"), "command": kind,
+                                     "success": True, "data": scenario["piReplies"][kind]}) + "\n")
+        sys.stdout.flush()
+        return
     if "id" in message and method in SIDE_REPLIES:
         # A JSON-RPC 2.0 client (ACP) gets the version back.
         version = {"jsonrpc": message["jsonrpc"]} if "jsonrpc" in message else {}

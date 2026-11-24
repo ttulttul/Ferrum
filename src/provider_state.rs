@@ -89,12 +89,17 @@ pub struct ThreadRecord {
     pub native_id: Option<String>,
     /// `not_loaded`, `active`, `idle` or `error`.
     pub status: &'static str,
+    /// The conversation's last entry when its last turn ended (Pi).
+    pub conversation_head: Option<String>,
 }
 
 /// One run's provider turn.
 #[derive(Clone, Debug)]
 pub struct RunRecord {
     pub driver: String,
+    /// The native turn the provider named at the turn's end (Pi): a ref, or
+    /// `null` when the turn wrote no entry.
+    pub native_turn_ref: Option<Value>,
     pub started_at: u64,
     /// The CLI started the turn (`provider_turn.updated`), so the run has a
     /// provider turn record.
@@ -188,6 +193,7 @@ impl ProviderState {
         };
         let record = self.runs.entry(run).or_insert_with(|| RunRecord {
             driver: driver.clone(),
+            native_turn_ref: None,
             started_at: at,
             turn_started: false,
             native_turn_id: None,
@@ -229,6 +235,7 @@ impl ProviderState {
                     updated_at: at,
                     native_id: None,
                     status: "active",
+                    conversation_head: None,
                 });
                 thread.native_id = Some(native_thread_id.clone());
                 thread.status = "active";
@@ -236,10 +243,18 @@ impl ProviderState {
             }
             ProviderEvent::ProviderTurn {
                 native_turn_id,
+                native_turn_ref,
+                conversation_head,
                 model,
                 ..
             } => {
                 record.turn_started = true;
+                if native_turn_ref.is_some() {
+                    record.native_turn_ref = native_turn_ref.clone();
+                }
+                if let (Some(head), Some(thread)) = (conversation_head, self.thread.as_mut()) {
+                    thread.conversation_head = Some(head.clone());
+                }
                 if model.is_some() {
                     if record.driver == provider::CLAUDE_AGENT {
                         record.reported_model = model.clone();
@@ -347,6 +362,7 @@ impl ProviderState {
                     updated_at: at,
                     native_id: None,
                     status: "not_loaded",
+                    conversation_head: None,
                 });
                 self.terminals.insert(
                     run,
@@ -610,10 +626,16 @@ pub(crate) fn provider_turn(
     }
     let config = &instance["config"];
     let text = |key: &str| config[key].as_str().unwrap_or_default().trim().to_owned();
+    // Pi's thinking level is its "thinking" option.
+    let effort_option = if driver == provider::PI {
+        "thinking"
+    } else {
+        "reasoningEffort"
+    };
     let reasoning_effort = selection["options"].as_array().and_then(|options| {
         options
             .iter()
-            .find(|option| option["id"] == "reasoningEffort")
+            .find(|option| option["id"] == effort_option)
             .and_then(|option| option["value"].as_str())
             .map(str::to_owned)
     });
@@ -661,6 +683,8 @@ pub(crate) fn provider_turn(
         attachments: Vec::new(),
         turn_ordinal: Some(state.provider_turns() as u64 + 1),
         recovery_prompt: None,
+        native_turn: String::new(),
+        thread_title: row["title"].as_str().unwrap_or_default().to_owned(),
         context_window: (driver == provider::CLAUDE_AGENT)
             .then(|| crate::model_manifest::claude_context_window(manifest, selection))
             .flatten(),

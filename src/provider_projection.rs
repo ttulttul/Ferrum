@@ -26,7 +26,7 @@ pub(crate) const HIDDEN_ITEM: &str = "\u{0}hidden";
 /// its session opens: a Codex instance's shared session, or the thread's own
 /// Claude or ACP session, named after the run that opens it.
 fn pending_session_id(driver: &str, instance: &str, thread_id: &str, run_id: &str) -> String {
-    if provider::is_acp(driver) {
+    if provider::thread_session(driver) {
         acp_session_id(instance, thread_id, run_id)
     } else if driver == provider::CLAUDE_AGENT {
         format!(
@@ -512,7 +512,13 @@ impl Thread {
                 "appThreadId": self.id,
                 "ownerNodeId": null,
                 "nativeThreadRef": native_thread_ref,
-                "nativeConversationHeadRef": null,
+                // The conversation's last entry (Pi), once a turn ended.
+                "nativeConversationHeadRef": self
+                    .provider
+                    .thread
+                    .as_ref()
+                    .and_then(|thread| thread.conversation_head.as_deref())
+                    .map_or(Value::Null, |head| native_ref(&driver, head, "strong")),
                 "status": status,
                 "firstRunOrdinal": first_ordinal,
                 "lastRunOrdinal": last_ordinal,
@@ -651,7 +657,7 @@ impl Thread {
         }
         let id = if let Some(id) = &self.provider.prior_session_id {
             id.clone()
-        } else if provider::is_acp(&thread.driver) {
+        } else if provider::thread_session(&thread.driver) {
             acp_session_id(instance, &self.id, &first.wire_id())
         } else if claude {
             format!(
@@ -671,12 +677,22 @@ impl Thread {
             .iter()
             .rev()
             .find_map(|run| self.provider.terminals.get(&run.id));
+        // A Pi session ends in error with any failed turn, and stopped with
+        // a stopped one (its process is stopped).
+        let pi = thread.driver == provider::PI;
         let crash = last
             .and_then(|t| t.failure.as_ref())
-            .filter(|failure| !claude && provider::stream_closed(&failure.message));
+            .filter(|failure| pi || (!claude && provider::stream_closed(&failure.message)));
         let crashed = crash.is_some();
         // A restart stops a session that has not failed.
-        let stopped = self.provider.session_stopped_at.filter(|_| !crashed);
+        let stopped = self
+            .provider
+            .session_stopped_at
+            .filter(|_| !crashed)
+            .or_else(|| {
+                last.filter(|t| pi && t.status == TurnStatus::Interrupted)
+                    .map(|_| thread.updated_at)
+            });
         let capabilities: Value =
             serde_json::from_str(include_str!("provider_capabilities.json")).unwrap_or_default();
         let row = self.stored_row();
@@ -825,6 +841,18 @@ impl Thread {
         if detached && terminal.is_some() {
             turn["status"] = json!("interrupted");
         }
+        // Pi's turn is named by its provider thread and attempt (weak) until
+        // its end names its first user entry (strong), or none; its records
+        // also carry the session file.
+        if driver == provider::PI {
+            turn["nativeTurnRef"] = record
+                .native_turn_ref
+                .clone()
+                .unwrap_or_else(|| native_ref(driver, &native_turn, "weak"));
+            if let Some(file) = &record.native_thread_id {
+                turn["nativeThreadRef"] = native_ref(driver, file, "strong");
+            }
+        }
         if let Some((usage, at)) = &record.usage {
             turn["tokenUsage"] = json!({
                 "usedTokens": usage.used_tokens,
@@ -835,6 +863,12 @@ impl Thread {
                 "reasoningOutputTokens": usage.reasoning_output_tokens,
                 "updatedAt": iso(*at)
             });
+            // Pi reports no reasoning tokens.
+            if driver == provider::PI {
+                if let Some(usage) = turn["tokenUsage"].as_object_mut() {
+                    usage.remove("reasoningOutputTokens");
+                }
+            }
             if let Some(ttl) = usage.prompt_cache_ttl_ms {
                 turn["tokenUsage"]["promptCacheTtlMs"] = json!(ttl);
             }
@@ -989,7 +1023,7 @@ impl Thread {
                     .failure
                     .as_ref()
                     .is_some_and(provider::is_workspace_missing)
-                    || ((driver == provider::CODEX || provider::is_acp(driver))
+                    || ((driver == provider::CODEX || provider::thread_session(driver))
                         && !record.turn_started
                         && self
                             .provider
@@ -997,7 +1031,7 @@ impl Thread {
                             .as_ref()
                             .is_some_and(|thread| thread.native_id.is_none())) =>
             {
-                let session = if provider::is_acp(driver) {
+                let session = if provider::thread_session(driver) {
                     acp_session_id(instance, &self.id, &ids.run)
                 } else {
                     join("provider-session:provider-instance", &[instance]) + ":shared"
@@ -1210,8 +1244,11 @@ impl Thread {
         // The node and item end with the answer: completed when accepted or
         // answered, cancelled when declined, withdrawn or expired.
         let done = match state.status {
+            // Pi's adapter resolves its own dialogs: answered is completed.
             "resolved" => Some(
-                if matches!(request.decision.as_deref(), Some("decline" | "cancel")) {
+                if driver != provider::PI
+                    && matches!(request.decision.as_deref(), Some("decline" | "cancel"))
+                {
                     "cancelled"
                 } else {
                     "completed"
@@ -1235,7 +1272,8 @@ impl Thread {
             "createdAt": created,
             "resolvedAt": state.resolved_at.map(iso)
         });
-        if state.status == "resolved" {
+        // Pi's resolution records no decision.
+        if state.status == "resolved" && driver != provider::PI {
             for (key, value) in [
                 ("decision", &request.decision),
                 ("feedback", &request.feedback),
@@ -1588,6 +1626,8 @@ mod tests {
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
+                native_turn_ref: None,
+                conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
             },
@@ -1752,6 +1792,8 @@ mod tests {
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
+                native_turn_ref: None,
+                conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
             },

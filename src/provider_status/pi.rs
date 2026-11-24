@@ -119,7 +119,12 @@ fn binary(config: &Value) -> String {
 
 /// `resolvePiLaunchArgs`.
 fn resolve_launch_args(launch_args: &str) -> Result<Vec<String>, String> {
-    let args: Vec<String> = crate::provider_state::split_args(launch_args)
+    resolve_launch_tokens(crate::provider_state::split_args(launch_args))
+}
+
+/// [`resolve_launch_args`] for arguments already split as a shell would.
+pub(crate) fn resolve_launch_tokens(tokens: Vec<String>) -> Result<Vec<String>, String> {
+    let args: Vec<String> = tokens
         .into_iter()
         .flat_map(|arg| match arg.find('=') {
             Some(at) if at > 0 && WITH_VALUES.contains(&&arg[..at]) => {

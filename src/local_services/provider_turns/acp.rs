@@ -1025,6 +1025,8 @@ impl<'a> Turn<'a> {
         });
         self.sink.send(ProviderEvent::ProviderTurn {
             native_turn_id: Some(self.scoped(&self.native_turn)),
+            native_turn_ref: None,
+            conversation_head: None,
             status: TurnStatus::Running,
             model: None,
         });

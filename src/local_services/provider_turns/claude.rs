@@ -790,6 +790,8 @@ impl<'a> Attempt<'a> {
                 self.turn_started = true;
                 self.sink.send(ProviderEvent::ProviderTurn {
                     native_turn_id: None,
+                    native_turn_ref: None,
+                    conversation_head: None,
                     status: TurnStatus::Running,
                     model: None,
                 });
@@ -940,6 +942,8 @@ impl<'a> Attempt<'a> {
             }
             self.sink.send(ProviderEvent::ProviderTurn {
                 native_turn_id: None,
+                native_turn_ref: None,
+                conversation_head: None,
                 status: TurnStatus::Running,
                 model: Some(model.to_owned()),
             });

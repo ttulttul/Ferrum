@@ -854,6 +854,8 @@ mod tests {
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: None,
+                native_turn_ref: None,
+                conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
             },
@@ -1120,6 +1122,8 @@ mod tests {
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn-1".into()),
+                native_turn_ref: None,
+                conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
             },

@@ -578,6 +578,33 @@ impl crate::orchestration::CommandHost for AppState {
                             return;
                         }
                     }
+                    // A Pi turn loads the reference's extension (T3's tools,
+                    // the runtime mode's approvals) from this server's caches,
+                    // and is named after its provider thread and attempt
+                    // until Pi names it.
+                    if turn.driver == crate::workspace::provider::PI {
+                        use crate::local_services::provider_turns::pi;
+                        match pi::materialize_extension(&self.paths.caches) {
+                            Ok(path) => env
+                                .push((pi::EXTENSION_PATH_ENV.into(), path.display().to_string())),
+                            Err(error) => {
+                                crate::turn::fail(&*self, &run, error.into()).await;
+                                return;
+                            }
+                        }
+                        let store = self.store.read().await;
+                        if let Some(thread) = store.threads.get(&run.thread_id) {
+                            let ids = thread
+                                .runs
+                                .iter()
+                                .find(|known| known.id == run.id)
+                                .and_then(|known| thread.starting_run_ids(known));
+                            if let Some(ids) = ids {
+                                turn.native_turn =
+                                    format!("{}:attempt:{}", ids.provider_thread, ids.attempt);
+                            }
+                        }
+                    }
                 }
                 let mut spec = crate::workspace::TurnSpec {
                     prompt: text,

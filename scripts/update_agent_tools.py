@@ -23,6 +23,8 @@ DOC = ROOT / "docs/agent-tools.md"
 THEMES = ROOT / "src/mcp_oauth/themes.json"
 # The reference's agent instructions its provider adapters send (scripts/reference_agent_instructions.mjs).
 INSTRUCTIONS = ROOT / "src/mcp_oauth/instructions.json"
+# The reference's Pi extension a Pi turn loads (scripts/reference_pi_extension.mjs).
+PI_EXTENSION = ROOT / "src/local_services/provider_turns/pi_extension.ts"
 # The reference server browser's recording encoder, which Rust's preview recordings run as it is.
 RECORDING_ENCODER = ROOT / "src/local_services/browser/recording_encoder.js"
 HTML_RENDER = ROOT / "src/html_render/constants.json"
@@ -174,6 +176,9 @@ def main() -> int:
     instructions_text = subprocess.run(
         ["node", str(ROOT / "scripts/reference_agent_instructions.mjs"), str(checkout)],
         check=True, capture_output=True, text=True).stdout
+    pi_extension_text = subprocess.run(
+        ["node", str(ROOT / "scripts/reference_pi_extension.mjs"), str(checkout)],
+        check=True, capture_output=True, text=True).stdout
     html_render_text = subprocess.run(
         ["node", str(ROOT / "scripts/reference_html_render.mjs"), str(checkout)],
         check=True, capture_output=True, text=True).stdout
@@ -186,6 +191,7 @@ def main() -> int:
     launcher, value_flags = agent_device_launcher(checkout)
     outputs = ((RECORDING_ENCODER, recording_encoder(checkout)), (TOOLS, tools_text), (DOC, doc_text), (THEMES, themes_text),
                (INSTRUCTIONS, instructions_text), (HTML_RENDER, html_render_text), (LAUNCHER, launcher),
+               (PI_EXTENSION, pi_extension_text),
                (VALUE_FLAGS, value_flags), (DEVICE_SSH, device_ssh_text), (EXPO_DOCUMENTS, expo_text))
     stale = [path for path, text in outputs if not path.exists() or path.read_text() != text]
     if check:

@@ -1677,6 +1677,9 @@ fn stored_provider(
             created_at: iso_seconds(&record["createdAt"]),
             updated_at: iso_seconds(&record["updatedAt"]),
             native_id,
+            conversation_head: record["nativeConversationHeadRef"]["nativeId"]
+                .as_str()
+                .map(str::to_owned),
             status: match record["status"].as_str() {
                 Some("active") => "active",
                 Some("idle") => "idle",
