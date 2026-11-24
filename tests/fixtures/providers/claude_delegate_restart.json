@@ -1,4 +1,5 @@
 {
+ "toolGap": 0,
  "variants": [
   {
    "argsContain": "--resume",

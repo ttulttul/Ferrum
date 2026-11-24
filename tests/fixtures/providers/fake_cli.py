@@ -39,7 +39,8 @@ Steps:
   {"sendTogether": [...]}    write several protocol lines together so a control callback
                              and stream output are available in the same read
   {"stderr": "text"}         write a line to standard error
-  {"sleep": seconds}
+  {"sleep": seconds}                    (a tool call's end also waits "toolGap" seconds,
+                                        0.25 unless the scenario sets it; see TOOL_GAP)
   {"exit": code}
   {"mcp": {"tool": "t3_thread_list", "arguments": {...}}}
                              call a tool on the T3 MCP server the client gave
@@ -177,6 +178,27 @@ mcp_server = {}
 mcp_servers = {}
 
 # Answers to requests a client may make between the scripted ones.
+# How long a tool runs: the CLI waits this long before it reports a tool call's end
+# (a Codex command or file change's item/completed, a Claude tool_result). Well over
+# the time either server takes to commit the call's start (the reference's provider
+# commit batch only combines snapshots that queue while it commits), so neither
+# combines a tool's start with its end, on any run. A scenario sets "toolGap" (0 for
+# none) where something else must happen while its tools run, such as a steer or a
+# delegated task, whose timing the gap would change.
+TOOL_GAP = float(scenario.get("toolGap", 0.25))
+
+
+def ends_tool(frame):
+    """Whether `frame` reports the end of a tool call."""
+    if frame.get("method") == "item/completed":
+        return (frame.get("params") or {}).get("item", {}).get("type") in ("commandExecution", "fileChange")
+    if frame.get("type") == "user":
+        content = (frame.get("message") or {}).get("content")
+        return isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "tool_result" for part in content)
+    return False
+
+
 SIDE_REPLIES = {
     "account/read": {"account": {"type": "apiKey"}, "requiresOpenaiAuth": False},
     "config/read": {"config": {}, "origins": {}},
@@ -522,6 +544,8 @@ while index < len(steps):
             answer(message)
     elif "send" in step or "sendTogether" in step:
         frames = [step["send"]] if "send" in step else step["sendTogether"]
+        if any(ends_tool(frame) for frame in frames):
+            time.sleep(TOOL_GAP)
         sys.stdout.write("".join(json.dumps(fill(frame)) + "\n" for frame in frames))
         sys.stdout.flush()
     elif "stderr" in step:
