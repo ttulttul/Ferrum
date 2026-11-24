@@ -10,7 +10,7 @@ Usage: fake_opencode.py <spec.json> <arguments...>
              "silent": true}}                          # never report the URL
 
 `opencode --version` answers from "version". `opencode serve --hostname=H
---port=P` listens on H:P, prints OpenCode's "opencode server listening on
+--port=P` listens on H:P (or another port when P is taken), prints OpenCode's "opencode server listening on
 http://H:P" line and answers each `METHOD /path` from "serve.routes" (404
 otherwise) until it is stopped. A route with "sequence": [route, ...] answers
 its successive requests with each entry in turn, the last one repeating. A
@@ -158,7 +158,13 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-server = ThreadingHTTPServer((host, port), Handler)
+try:
+    server = ThreadingHTTPServer((host, port), Handler)
+except OSError:
+    # Both servers pick the port by binding port 0 and releasing it, so a process of another
+    # scenario can take it before this one binds. Listen elsewhere instead: both servers read the
+    # address from the line below, and a lost port is not what any scenario tests.
+    server = ThreadingHTTPServer((host, 0), Handler)
 server.daemon_threads = True
 if not serve.get("silent"):
     emit(sys.stdout, f"opencode server listening on http://{host}:{server.server_address[1]}")

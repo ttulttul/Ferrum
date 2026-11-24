@@ -1157,7 +1157,7 @@ def interval_checks(url, cookie, log, interval):
     """Whether a periodic check ran in a 12 s window after a client reported `interval["report"]`
     (none when it is None; the socket closes first with "disconnect"; `interval["then"]` is a
     second report from another socket; the window starts `interval["settle"]` seconds after the
-    reports)."""
+    reports, once no check started earlier is still launching)."""
     with contextlib.ExitStack() as stack:
         if interval["report"] is not None:
             ws = report_activity(url, cookie, interval["report"])
@@ -1169,7 +1169,14 @@ def interval_checks(url, cookie, log, interval):
         if interval.get("then") is not None:
             stack.callback(report_activity(url, cookie, interval["then"]).close)
         time.sleep(interval.get("settle", 0))
-        before = version_launches(log)
+        # A check started under an earlier report can log its launch a moment after the last
+        # report: the window starts once the count has held still for 2 s (at most 8 s).
+        before, steady, deadline = version_launches(log), time.monotonic(), time.monotonic() + 8
+        while time.monotonic() - steady < 2 and time.monotonic() < deadline:
+            time.sleep(0.25)
+            now = version_launches(log)
+            if now != before:
+                before, steady = now, time.monotonic()
         time.sleep(12)
         return version_launches(log) > before
 
