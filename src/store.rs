@@ -136,6 +136,15 @@ pub struct Run {
     /// session, without the thread's earlier conversation (`freshContext`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fresh_context: bool,
+    /// The run's ordinal when it is not its id's: a queued run that started
+    /// after a newer run moves past it (`nextRunOrdinal`), as the reference
+    /// renumbers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<u32>,
+    /// Cancelled while it waited in the queue, so it never started
+    /// (`cancelledBeforeStart`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled_in_queue: bool,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -162,6 +171,17 @@ impl Run {
     }
 
     /// The reference's id for the `ordinal`th run of `thread_id`.
+    /// The ordinal a reference run id names (`run:thread:<thread>:ordinal:<n>`).
+    pub(crate) fn id_ordinal(id: &str) -> Option<u32> {
+        id.rsplit_once(":ordinal:")?.1.parse().ok()
+    }
+    /// The run's ordinal: as it was renumbered, else its id's, else its
+    /// place in the thread (a run from before reference ids).
+    pub(crate) fn ordinal_at(&self, index: usize) -> u64 {
+        self.ordinal
+            .or_else(|| self.wire_id.as_deref().and_then(Self::id_ordinal))
+            .map_or(index as u64 + 1, u64::from)
+    }
     pub(crate) fn reference_id(thread_id: &str, ordinal: usize) -> String {
         format!(
             "run:thread:{}:ordinal:{ordinal}",
@@ -652,7 +672,9 @@ impl Store {
                     if let Some(existing) =
                         t.runs.iter_mut().find(|candidate| candidate.id == run.id)
                     {
+                        let unstarted = existing.status == "queued" && run.status == "cancelled";
                         *existing = run.clone();
+                        existing.cancelled_in_queue |= unstarted;
                     } else {
                         t.runs.push(run.clone());
                     }
@@ -743,6 +765,9 @@ impl Store {
                         status.clone()
                     };
                     if let Some(run) = t.runs.iter_mut().find(|r| r.id == *run_id) {
+                        if run.status == "queued" && status == "cancelled" {
+                            run.cancelled_in_queue = true;
+                        }
                         run.status = status.clone();
                         run.error = error.clone();
                         run.finished_at = Some(at);

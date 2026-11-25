@@ -289,7 +289,56 @@ pub(crate) fn created(command: &Value, at: &str) -> Value {
     row
 }
 
+/// A prompt's item fields, with who sent it.
+#[inline(never)]
+fn user_message_fields(message: &crate::ConversationMessage) -> Value {
+    let mut fields = json!({
+        "type": "user_message",
+        "createdBy": "user",
+        "creationSource": message.creation_source.as_deref().unwrap_or("web"),
+        "messageId": message.id,
+        "inputIntent": "turn_start",
+        "text": message.content,
+        "attachments": message_attachments(message)
+    });
+    sent_by(&mut fields, message);
+    fields
+}
+
+/// Who sent a user message, on its item: an agent's message names itself and
+/// the thread it came from, as the reference's item records them.
+fn sent_by(fields: &mut Value, message: &crate::ConversationMessage) {
+    let Some(wire) = message.wire.as_deref() else {
+        return;
+    };
+    if wire["createdBy"].is_string() {
+        fields["createdBy"] = wire["createdBy"].clone();
+    }
+    for key in ["senderThreadId", "linkedSender"] {
+        if !wire[key].is_null() {
+            fields[key] = wire[key].clone();
+        }
+    }
+}
+
 impl Thread {
+    /// The ordinal the thread's next run takes: one past its highest
+    /// (`nextRunOrdinal`), so a run's number is never reused.
+    pub(crate) fn next_run_ordinal(&self) -> usize {
+        self.runs
+            .iter()
+            .enumerate()
+            .map(|(index, run)| run.ordinal_at(index))
+            .max()
+            .unwrap_or(0) as usize
+            + 1
+    }
+
+    /// A run cancelled while it waited in the queue (`cancelledBeforeStart`):
+    /// it has no start, and a snapshot leaves it out.
+    pub(crate) fn cancelled_before_start(&self, run: &crate::Run) -> bool {
+        run.status == "cancelled" && run.cancelled_in_queue
+    }
     /// Each run as `OrchestrationV2Run`. Runs have no provider records here, so the ids of
     /// those (provider thread, root node, attempt, checkpoint) are null.
     fn run_rows(&self, row: &Value) -> Vec<Value> {
@@ -314,7 +363,7 @@ impl Thread {
                 let mut out = json!({
                     "id": run.wire_id(),
                     "threadId": self.id,
-                    "ordinal": index + 1,
+                    "ordinal": run.ordinal_at(index),
                     // Each run names the instance it ran on (a switch changes it).
                     "providerInstanceId": run
                         .model_selection
@@ -329,7 +378,11 @@ impl Thread {
                     "status": status,
                     "queuePosition": null,
                     "requestedAt": iso(requested_at),
-                    "startedAt": if waiting { Value::Null } else { iso(run.started_at).into() },
+                    "startedAt": if waiting || self.cancelled_before_start(run) {
+                        Value::Null
+                    } else {
+                        iso(run.started_at).into()
+                    },
                     "completedAt": ended_at.map(iso),
                     "checkpointId": null,
                     "contextHandoffId": null
@@ -518,6 +571,10 @@ impl Thread {
         let mut items = Vec::new();
         let mut steers: Vec<(usize, u64, Value)> = Vec::new();
         let mut ordinal: u64 = 0;
+        // The next free ordinal of each run's slot: a message takes its run's,
+        // whenever it was sent, so a prompt queued early and run late still
+        // sits with its run.
+        let mut slots: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
         for message in &self.messages {
             // A steer takes the next free slot of the run it joined, as a
             // link card does (`nextTurnItemOrdinal`).
@@ -594,8 +651,19 @@ impl Thread {
                 continue;
             }
             let run = self.run_of(&message.id);
+            // A prompt cancelled in the queue never reached the timeline.
+            if run.is_some_and(|(_, run)| {
+                self.cancelled_before_start(run)
+                    && run.user_message_id.as_deref() == Some(message.id.as_str())
+            }) {
+                continue;
+            }
             ordinal = match run {
-                Some((index, _)) => ((index as u64 + 1) * 1_000_000).max(ordinal) + 1,
+                Some((index, _)) => {
+                    let slot = slots.entry(index).or_insert((index as u64 + 1) * 1_000_000);
+                    *slot += 1;
+                    *slot
+                }
                 None => ordinal + 1,
             };
             // A handoff recorded at its run's start (a resume fallback's
@@ -619,6 +687,10 @@ impl Thread {
                     }
                     items.push(handoff);
                 }
+            }
+            // A handoff placed ahead of the prompt takes a slot of its run.
+            if let Some((index, _)) = run {
+                slots.insert(index, ordinal);
             }
             let run_id = run.map(|(_, run)| run.wire_id());
             let at = iso(message.created_at);
@@ -675,15 +747,7 @@ impl Thread {
                 }
             }
             let fields = match message.role.as_str() {
-                "user" => json!({
-                    "type": "user_message",
-                    "createdBy": "user",
-                    "creationSource": message.creation_source.as_deref().unwrap_or("web"),
-                    "messageId": message.id,
-                    "inputIntent": "turn_start",
-                    "text": message.content,
-                    "attachments": message_attachments(message)
-                }),
+                "user" => user_message_fields(message),
                 "assistant" => json!({
                     "type": "assistant_message",
                     "messageId": message.id,
@@ -954,6 +1018,21 @@ impl Thread {
     pub(crate) fn snapshot_projection(&self) -> Value {
         let mut projection = self.projection();
         window_messages(&mut projection);
+        // A run cancelled in the queue has nothing in the window: no prompt
+        // reached the timeline.
+        let never_started: Vec<String> = self
+            .runs
+            .iter()
+            .filter(|run| self.cancelled_before_start(run))
+            .map(crate::Run::wire_id)
+            .collect();
+        if let Some(runs) = projection["runs"].as_array_mut() {
+            runs.retain(|run| {
+                !run["id"]
+                    .as_str()
+                    .is_some_and(|id| never_started.iter().any(|gone| gone == id))
+            });
+        }
         projection
     }
 
@@ -1747,6 +1826,13 @@ fn stored_runs(thread_id: &str, projection: &Value) -> Vec<crate::Run> {
                     .is_object()
                     .then(|| Box::new(run["outputSchema"].clone())),
                 fresh_context: run["freshContext"] == true,
+                ordinal: run["ordinal"]
+                    .as_u64()
+                    .map(|ordinal| ordinal as u32)
+                    .filter(|ordinal| {
+                        run["id"].as_str().and_then(crate::Run::id_ordinal) != Some(*ordinal)
+                    }),
+                cancelled_in_queue: run["status"] == "cancelled" && run["startedAt"].is_null(),
             })
         })
         .collect()
