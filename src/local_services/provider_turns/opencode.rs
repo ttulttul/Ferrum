@@ -1142,6 +1142,7 @@ impl<'a> Turn<'a> {
             native_title: None,
             native_updated_at: None,
             context_usage: None,
+            session_started: None,
         });
         let rules = permission_rules(provider.runtime_mode());
         if let Err(detail) = oc.apply_permission(&rules).await {

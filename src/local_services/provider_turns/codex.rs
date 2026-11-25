@@ -647,6 +647,7 @@ impl Session {
             native_title: None,
             native_updated_at: None,
             context_usage: None,
+            session_started: None,
         });
         // The context handoff's history goes to the thread as native items
         // before the prompt (the reference's injectHistory); a Codex that

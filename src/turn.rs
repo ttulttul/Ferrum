@@ -55,6 +55,10 @@ pub(crate) trait TurnHost:
     fn stopping(&self) -> bool {
         false
     }
+    /// A provider session `run`'s turn opened reported what it started with
+    /// (Antigravity's `onSessionStarted`): a host that keeps provider status
+    /// takes its models from it.
+    fn provider_session_started(self: Arc<Self>, _run: &Run, _started: Value) {}
     /// Attach local file paths to `attachments` for a provider turn, when this
     /// host stores uploads locally.
     fn resolve_attachments(&self, attachments: Vec<Value>) -> Vec<Value> {
@@ -783,7 +787,11 @@ async fn record<H: TurnHost>(
                 continue;
             }
         };
-        let Some(TurnItem { event, position }) = next else {
+        let Some(TurnItem {
+            mut event,
+            position,
+        }) = next
+        else {
             // Events that stop without the turn's end still report what is held.
             snapshots.flush(host, run).await;
             text.flush(host, run, Flush::Window).await;
@@ -791,6 +799,16 @@ async fn record<H: TurnHost>(
         };
         if host.stopping() {
             return Ok(());
+        }
+        // A session's start goes to the instance's provider status; the
+        // thread's records keep none of it.
+        if let TurnEvent::Provider(ProviderEvent::ProviderThread {
+            session_started, ..
+        }) = &mut event
+        {
+            if let Some(started) = session_started.take() {
+                owner.clone().provider_session_started(run, *started);
+            }
         }
         if matches!(&event, TurnEvent::Provider(ProviderEvent::TurnItemDelta { delta, .. })
             if delta.is_empty() && text.held.is_empty())

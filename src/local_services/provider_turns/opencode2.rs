@@ -1417,16 +1417,17 @@ impl Turn<'_> {
             native_thread_id: self.state.session.clone(),
             resumed,
             model: None,
-            opencode2: Some(OpenCode2Thread {
+            opencode2: Some(Box::new(OpenCode2Thread {
                 version: self.shared.version.clone(),
                 model_selection: model_selection(
                     &self.provider.instance_id,
                     self.state.model.as_ref(),
                 ),
-            }),
+            })),
             native_title: None,
             native_updated_at: None,
             context_usage: None,
+            session_started: None,
         });
     }
 

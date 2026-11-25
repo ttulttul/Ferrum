@@ -828,6 +828,7 @@ impl<'a> Turn<'a> {
             native_title: None,
             native_updated_at: None,
             context_usage: None,
+            session_started: None,
         });
         let launch = provider.muse.clone().unwrap_or_default();
         if let Some(target) = start_model(provider, &launch) {
@@ -1280,6 +1281,7 @@ impl<'a> Turn<'a> {
             native_title: None,
             native_updated_at: None,
             context_usage: Some(Box::new(context)),
+            session_started: None,
         });
         let mut usage = self.token_usage.clone().unwrap_or_default();
         usage.used_tokens = used;

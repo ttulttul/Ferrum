@@ -870,6 +870,14 @@ impl crate::turn::TurnHost for AppState {
     fn resolve_attachments(&self, attachments: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
         crate::attachment_claims::with_paths(&self.paths.attachments, attachments)
     }
+    fn provider_session_started(self: Arc<Self>, run: &Run, started: serde_json::Value) {
+        let _ = run;
+        tokio::spawn(async move {
+            if let Some(instance) = started["instanceId"].as_str() {
+                crate::provider_status::session_started(&self, instance, &started).await;
+            }
+        });
+    }
     fn turn_stopped(
         self: Arc<Self>,
         run: &Run,

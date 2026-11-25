@@ -303,7 +303,7 @@ impl ProviderState {
                 });
                 thread.native_id = Some(native_thread_id.clone());
                 if opencode2.is_some() {
-                    thread.opencode2 = opencode2.clone();
+                    thread.opencode2 = opencode2.as_deref().cloned();
                 }
                 if native_title.is_some() {
                     thread.native_title = native_title.clone();
@@ -928,6 +928,7 @@ mod tests {
             native_title: None,
             native_updated_at: None,
             context_usage: None,
+            session_started: None,
         };
         state.apply(first, &thread(provider::CODEX, "thr_codex"), 1);
         state.apply(second, &thread(provider::CLAUDE_AGENT, "sess_claude"), 2);
@@ -979,6 +980,7 @@ mod tests {
                 native_title: None,
                 native_updated_at: None,
                 context_usage: None,
+                session_started: None,
             },
             1,
         );
@@ -1019,6 +1021,7 @@ mod tests {
             native_title: None,
             native_updated_at: None,
             context_usage: None,
+            session_started: None,
         };
         state.apply(first, &thread("sess-old"), 1);
         assert_eq!(

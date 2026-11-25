@@ -315,6 +315,10 @@ struct Agent {
     /// Kiro and fx: a `config_option_update` arrived while a request was in
     /// flight, which the request's result does not replace.
     config_pushed: bool,
+    /// Antigravity: what the session it opened started with (`initialize`'s
+    /// agent info, the setup result and its folder), until a turn reports it
+    /// to the instance's status (`onSessionStarted`).
+    session_started: Option<Value>,
     /// fx: what its session options were last set for (the model, effort,
     /// runtime and interaction modes); they are set again when that changes.
     fx_configured: Option<String>,
@@ -417,6 +421,7 @@ impl Agent {
             cloud_tools: HashSet::new(),
             config_pushed: false,
             fx_configured: None,
+            session_started: None,
             mode_written: false,
         })
     }
@@ -1298,6 +1303,9 @@ impl Agent {
 
     /// Note a session's setup result: its models and config options.
     fn note_setup(&mut self, setup: &Value) {
+        if self.flavor == Flavor::Antigravity {
+            self.session_started = Some(setup.clone());
+        }
         if let Some(model) = current_model(setup) {
             self.current_model = Some(model);
         }
@@ -1659,6 +1667,15 @@ async fn start(
             false
         }
     };
+    // What the session started with, for the instance's status, with the
+    // folder it runs in.
+    if let Some(setup) = agent.session_started.take() {
+        agent.session_started = Some(json!({
+            "initialize": {"agentInfo": {"version": agent.agent_version}},
+            "setup": setup,
+            "cwd": spec.cwd,
+        }));
+    }
     // fx enforces its saved mode until the new or loaded session's is written.
     agent.mode_written = false;
     agent.configure(spec, provider).await?;
@@ -2097,11 +2114,15 @@ impl<'a> Turn<'a> {
             native_thread_id: agent.session.clone(),
             resumed,
             model: None,
-
             opencode2: None,
             native_title: None,
             native_updated_at: None,
             context_usage: None,
+            // The session it opened, once, for the instance's models.
+            session_started: agent.session_started.take().map(|mut started| {
+                started["instanceId"] = json!(self.instance);
+                Box::new(started)
+            }),
         });
         self.sink.send(ProviderEvent::ProviderTurn {
             native_turn_id: Some(self.scoped(&self.native_turn)),
@@ -2733,6 +2754,7 @@ impl<'a> Turn<'a> {
             native_title: self.native_title.clone(),
             native_updated_at: self.native_updated_at.as_deref().map(Box::from),
             context_usage: self.context_usage.clone().map(Box::new),
+            session_started: None,
         });
     }
 
