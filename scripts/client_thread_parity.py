@@ -2299,12 +2299,16 @@ def print_mcp_diagnostics(outcomes, fake_hosts, stderr_paths):
     print(f"agent mcp diagnostics: {artifact}")
 
 
-# Rough seconds the seeded thread checks take on shard 1, for balancing shards.
-THREAD_CHECKS_COST = 20
+# Seconds the seeded thread checks take on shard 1, for balancing shards (measured in CI).
+THREAD_CHECKS_COST = 30
+
+# Seconds each scenario took in CI on main, which waits out the restart timers in real time
+# (scripts/thread_shard_durations.py regenerates the file from parity runs).
+MEASURED_COSTS = json.loads((ROOT / "scripts/client_thread_parity_durations.json").read_text())["seconds"]
 
 
-def scenario_cost(scenario, real_time=False):
-    """Rough seconds a scenario takes on both servers in CI, for balancing shards."""
+def estimated_cost(scenario, real_time=False):
+    """Rough seconds a scenario takes on both servers, for one no CI run has measured yet."""
     restart = scenario.get("restart")
     if not restart:
         return 9
@@ -2315,6 +2319,32 @@ def scenario_cost(scenario, real_time=False):
     # A live subscription waits for the watcher to see the stop; real time adds the 8 s floor on
     # each server.
     return (25 if restart.get("live") else 11) + (16 if real_time else 0)
+
+
+def real_time_extra(scenario):
+    """The seconds of fixed waits a real-time run adds over a faketime one."""
+    return estimated_cost(scenario, True) - estimated_cost(scenario, False)
+
+
+def _calibration():
+    """How much longer than estimated measured scenarios run, for scenarios not measured yet."""
+    ratios = sorted(MEASURED_COSTS[s["name"]] / estimated_cost(s, True)
+                    for s in PROVIDER_SCENARIOS if s["name"] in MEASURED_COSTS)
+    return ratios[len(ratios) // 2] if ratios else 1
+
+
+def scenario_cost(scenario, real_time=False):
+    """Seconds a scenario takes on both servers in CI, for balancing shards: as measured on
+    main (real time), less the fixed waits faketime skips on a pull request."""
+    measured = MEASURED_COSTS.get(scenario["name"])
+    if measured is None:
+        return estimated_cost(scenario, real_time) * CALIBRATION
+    if real_time:
+        return measured
+    return max(measured - real_time_extra(scenario), estimated_cost(scenario))
+
+
+CALIBRATION = _calibration()
 
 
 def shard_scenarios(index, count, real_time=False):
