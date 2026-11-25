@@ -426,6 +426,7 @@ impl<'a> Attempt<'a> {
                 model: Some(provider.model.clone()).filter(|model| !model.trim().is_empty()),
 
                 opencode2: None,
+                native_title: None,
             });
         }
         // The reference marks only a turn that resumes an interrupted one
@@ -852,6 +853,7 @@ impl<'a> Attempt<'a> {
                     model: message["model"].as_str().map(str::to_owned),
 
                     opencode2: None,
+                    native_title: None,
                 };
                 // A new session keeps the id it was given until the turn
                 // ends, as the reference's thread does; then it names the

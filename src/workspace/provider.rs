@@ -31,18 +31,20 @@ pub const PI: &str = "pi";
 pub const OPENCODE: &str = "opencode";
 /// Antigravity's `agy` CLI, whose turns run over ACP (`agy acp`).
 pub const ANTIGRAVITY: &str = "antigravity";
+/// Kiro's CLI, whose turns run over ACP (`kiro-cli acp --agent-engine=v3`).
+pub const KIRO: &str = "kiro";
 
 /// Whether the workspace runs turns of `driver`'s CLI.
 pub fn runs_turns(driver: &str) -> bool {
     matches!(
         driver,
-        CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI | OPENCODE | ANTIGRAVITY
+        CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI | OPENCODE | ANTIGRAVITY | KIRO
     )
 }
 
 /// Whether `driver`'s turns run over ACP.
 pub fn is_acp(driver: &str) -> bool {
-    matches!(driver, GROK | ACP_REGISTRY | ANTIGRAVITY)
+    matches!(driver, GROK | ACP_REGISTRY | ANTIGRAVITY | KIRO)
 }
 
 /// Whether the reference gives each of `driver`'s threads a provider
@@ -168,6 +170,12 @@ pub struct ProviderTurn {
     /// predates it sees the same wire bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub antigravity: Option<AntigravityLaunch>,
+    /// What a Kiro turn's session is set to besides its model: the thread's
+    /// agent and Kiro's own id for its "default" model. Optional and omitted
+    /// when absent, so an agentd or control plane that predates it sees the
+    /// same wire bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kiro: Option<KiroLaunch>,
     /// The turn is a continuation run (`creationSource: "provider"`): it
     /// shows what the thread's running CLI did on its own while idle
     /// rather than sending its prompt, as the reference's Claude adapter
@@ -214,6 +222,19 @@ pub struct OpenCodeLaunch {
     pub server_password: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent: String,
+}
+
+/// A Kiro turn's session settings beyond the model: the thread's agent
+/// (the model selection's `mode` option, Kiro's agent picker) and the model
+/// id Kiro's "default" stands for (its `--list-models` default, from the
+/// instance's status check; `auto` when unknown). Each is omitted when empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KiroLaunch {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_model: String,
 }
 
 /// An Antigravity launch's installed `agy` version (empty when unknown),
@@ -344,6 +365,12 @@ pub enum ProviderEvent {
         /// a reader that predates it ignores it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         opencode2: Option<OpenCode2Thread>,
+        /// The title the agent gave its session (an ACP `session_info_update`
+        /// title: Kiro's focus), the provider thread's `nativeMetadata.title`.
+        /// Additive and skippable: absent until an agent names its session,
+        /// and a reader that predates it ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_title: Option<String>,
     },
     /// The turn started running in the CLI.
     #[serde(rename = "provider_turn.updated", rename_all = "camelCase")]

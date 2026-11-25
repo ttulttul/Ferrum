@@ -2450,6 +2450,7 @@ mod tests {
                 model: Some("claude-opus-5-5".into()),
 
                 opencode2: None,
+                native_title: None,
             },
             10,
         );

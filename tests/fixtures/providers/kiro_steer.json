@@ -1,0 +1,556 @@
+{
+ "replies": {
+  "session/set_config_option": {
+   "configOptions": [
+    {
+     "type": "select",
+     "id": "mode",
+     "name": "Mode",
+     "currentValue": "vibe",
+     "options": [
+      {
+       "value": "vibe",
+       "name": "Vibe"
+      },
+      {
+       "value": "spec",
+       "name": "Spec"
+      },
+      {
+       "value": "plan",
+       "name": "Plan"
+      }
+     ],
+     "category": "mode"
+    },
+    {
+     "type": "select",
+     "id": "autopilot",
+     "name": "Autopilot",
+     "currentValue": "on",
+     "options": [
+      {
+       "value": "on",
+       "name": "On"
+      },
+      {
+       "value": "off",
+       "name": "Off"
+      }
+     ]
+    }
+   ]
+  },
+  "session/close": {},
+  "session/load": {
+   "configOptions": [
+    {
+     "type": "select",
+     "id": "mode",
+     "name": "Mode",
+     "currentValue": "vibe",
+     "options": [
+      {
+       "value": "vibe",
+       "name": "Vibe"
+      },
+      {
+       "value": "spec",
+       "name": "Spec"
+      },
+      {
+       "value": "plan",
+       "name": "Plan"
+      }
+     ],
+     "category": "mode"
+    },
+    {
+     "type": "select",
+     "id": "autopilot",
+     "name": "Autopilot",
+     "currentValue": "on",
+     "options": [
+      {
+       "value": "on",
+       "name": "On"
+      },
+      {
+       "value": "off",
+       "name": "Off"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "toolGap": 0,
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "protocolVersion": 2,
+     "agentCapabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+       "image": true,
+       "embeddedContext": true
+      },
+      "mcpCapabilities": {
+       "http": true,
+       "sse": true
+      },
+      "sessionCapabilities": {
+       "list": {},
+       "close": {},
+       "delete": {},
+       "fork": {
+        "_meta": {
+         "kiro": {
+          "messageId": true
+         }
+        }
+       }
+      },
+      "_meta": {
+       "kiro": {
+        "checkpoints": true,
+        "sessionList": true,
+        "policyNotifications": true,
+        "extensionMethods": [
+         "_kiro/session/compact",
+         "_kiro/config/template"
+        ],
+        "replayMarking": true
+       }
+      }
+     },
+     "authMethods": [
+      {
+       "id": "aws-builder-id",
+       "name": "AWS Builder ID"
+      },
+      {
+       "id": "aws-iam-identity-center",
+       "name": "AWS IAM Identity Center"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "expect": "session/new"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "available_commands_update",
+      "availableCommands": []
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "_meta": {
+      "schemaVersion": "1.0.0",
+      "id": "sess_00000000-0000-4000-8000-000000000001",
+      "title": "New Session",
+      "agentMode": "vibe"
+     },
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "modes": {
+      "currentModeId": "vibe",
+      "availableModes": [
+       {
+        "id": "vibe",
+        "name": "Default"
+       },
+       {
+        "id": "spec",
+        "name": "Spec"
+       },
+       {
+        "id": "plan",
+        "name": "Plan"
+       }
+      ]
+     },
+     "configOptions": [
+      {
+       "type": "select",
+       "id": "mode",
+       "name": "Mode",
+       "currentValue": "vibe",
+       "options": [
+        {
+         "value": "vibe",
+         "name": "Vibe"
+        },
+        {
+         "value": "spec",
+         "name": "Spec"
+        },
+        {
+         "value": "plan",
+         "name": "Plan"
+        }
+       ],
+       "category": "mode"
+      },
+      {
+       "type": "select",
+       "id": "autopilot",
+       "name": "Autopilot",
+       "currentValue": "on",
+       "options": [
+        {
+         "value": "on",
+         "name": "On"
+        },
+        {
+         "value": "off",
+         "name": "Off"
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "expect": "session/prompt"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "_meta": {
+       "kiro": {
+        "kind": "user_message_id_assigned",
+        "userMessageId": "00000000-0000-4000-9000-000000000101"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "title": "Run echo hi",
+      "_meta": {
+       "kiro": {
+        "kind": "focus_update",
+        "title": "Run echo hi"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "_meta": {
+       "kiro": {
+        "kind": "turn_start",
+        "turnStart": true,
+        "messageId": "00000000-0000-4000-9000-000000000201-turn-start"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "run_command_tooluse_1",
+      "title": "Run echo hi",
+      "kind": "execute",
+      "status": "pending",
+      "rawInput": {
+       "command": "echo hi",
+       "description": "Run echo hi"
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "run_command_tooluse_1",
+      "status": "in_progress"
+     }
+    }
+   }
+  },
+  {
+   "expect": "_session/steer"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "_meta": {
+       "kiro": {
+        "kind": "steering_queued",
+        "messageId": "steer-00000000-0000-4000-9000-000000000401",
+        "content": "Also print the date"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "queued": true,
+     "messageId": "steer-00000000-0000-4000-9000-000000000401"
+    }
+   }
+  },
+  {
+   "sleep": 0.5
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "run_command_tooluse_1",
+      "status": "completed",
+      "rawOutput": {
+       "output": "hi\n",
+       "exitCode": 0,
+       "message": "Output:\nhi\n\nExit Code: 0"
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "_meta": {
+       "kiro": {
+        "kind": "steering_injected",
+        "messageId": "steer-00000000-0000-4000-9000-000000000401"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "content": {
+       "type": "text",
+       "text": "Steered: printing the date too"
+      },
+      "_meta": {
+       "kiro": {
+        "replayId": "00000000-0000-4000-9000-000000000004-say"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "content": {
+       "type": "text",
+       "text": "\n\n["
+      },
+      "_meta": {
+       "kiro": {
+        "replayId": "00000000-0000-4000-9000-000000000004-say"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "content": {
+       "type": "text",
+       "text": "STEERING steer-0000"
+      },
+      "_meta": {
+       "kiro": {
+        "replayId": "00000000-0000-4000-9000-000000000004-say"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "content": {
+       "type": "text",
+       "text": "0000-0000-4000-9000-000000000401: Updated response]"
+      },
+      "_meta": {
+       "kiro": {
+        "replayId": "00000000-0000-4000-9000-000000000004-say"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "_meta": {
+       "kiro": {
+        "kind": "turn_completion",
+        "promptTurnSummaries": [
+         {
+          "unit": "credit",
+          "unitPlural": "credits",
+          "usage": 0.02
+         }
+        ],
+        "elapsedTime": 1433,
+        "status": "success"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "_meta": {
+       "kiro": {
+        "kind": "turn_end",
+        "stopReason": "end_turn"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "_meta": {
+       "kiro": {
+        "kind": "steering_cleared",
+        "messageIds": [
+         "steer-00000000-0000-4000-9000-000000000401"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id:session/prompt",
+    "result": {
+     "stopReason": "end_turn"
+    }
+   }
+  }
+ ]
+}

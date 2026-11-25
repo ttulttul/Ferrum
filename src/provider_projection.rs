@@ -897,10 +897,23 @@ impl Thread {
                     .as_deref()
                     .is_some_and(|turn| turn.starts_with("provider-instance:"))
         });
+        let mut metadata = Map::new();
         if scoped {
-            json!({"itemIdentityVersion": 2})
-        } else {
+            metadata.insert("itemIdentityVersion".into(), json!(2));
+        }
+        // The title the agent gave its session (`SessionInfoUpdated`).
+        if let Some(title) = self
+            .provider
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.native_title.as_deref())
+        {
+            metadata.insert("title".into(), json!(title));
+        }
+        if metadata.is_empty() {
             Value::Null
+        } else {
+            Value::Object(metadata)
         }
     }
 
@@ -1968,6 +1981,7 @@ mod tests {
                 model: None,
 
                 opencode2: None,
+                native_title: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
@@ -2081,6 +2095,7 @@ mod tests {
                 model: None,
 
                 opencode2: None,
+                native_title: None,
             },
             item("msg", "assistant_message", "running", Some("")),
             item("patch", "file_change", "running", None),
@@ -2148,6 +2163,7 @@ mod tests {
             resumed: false,
             model: None,
             opencode2: None,
+            native_title: None,
         };
         let monitor = json!({"taskId": "m1", "kind": "monitor", "nativeItemId": "toolu_m1",
             "command": "tail -f build.log", "awaited": true});
@@ -2209,6 +2225,7 @@ mod tests {
                 model: None,
 
                 opencode2: None,
+                native_title: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
@@ -2357,6 +2374,7 @@ mod tests {
                 model: None,
 
                 opencode2: None,
+                native_title: None,
             },
             2,
         );
@@ -2417,6 +2435,7 @@ mod tests {
                     version: "2.2.6".into(),
                     model_selection: json!({"instanceId": "opencode", "model": "a/m", "options": []}),
                 }),
+                native_title: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("ses_1:attempt:a".into()),
