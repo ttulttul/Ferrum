@@ -336,6 +336,17 @@ class Client:
                     raise RuntimeError(f"{tag} failed: {json.dumps(frame)[:800]}")
                 return frame["exit"]["value"]
 
+    def pump(self, stop):
+        """Read every frame and acknowledge each chunk, as a connected desktop client does."""
+        while not stop.is_set():
+            try:
+                frame = self.frame(0.5)
+            except Exception:  # a timeout, or the socket closing at the end
+                continue
+            if frame.get("_tag") == "Chunk":
+                with contextlib.suppress(Exception):
+                    self.ws.send(encode({"_tag": "Ack", "requestId": frame["requestId"]}).decode())
+
     def stream_until(self, tag, payload, done, timeout=30):
         """Subscribe, and end the stream once `done(value)` holds for a streamed value."""
         request = self.send(tag, payload)
@@ -504,6 +515,75 @@ class Bench:
                     result[side]["idle_cpu_ms"].append(idle_cpu * 1000 * 10 / self.args.idle)
                     print(f"startup {side}: listen {server.listen_s * 1000:.0f} ms, first RPC "
                           f"{server.rpc_s * 1000:.0f} ms, idle RSS {rss / 1024:.1f} MiB", flush=True)
+        return result
+
+    def large(self):
+        """Idle CPU after start-up on a large database, with desktop-like clients connected.
+
+        Each side seeds `--large-threads` threads through its own commands, stops, and starts again
+        on that database. Two clients then hold what a desktop window holds open: the shell, a few
+        threads, VCS status and branch streams on the project's checkout, and local server
+        discovery. The server process's own CPU is measured while they sit idle.
+        """
+        result = {side: {"idle_cpu_ms": [], "idle_rss_kb": [], "seed_s": []} for side in SIDES}
+        for order in self.orders(self.args.large_runs):
+            for side in order:
+                self.count += 1
+                root = self.temporary / f"{side}-large-{self.count}"
+                root.mkdir()
+                env = {**GIT_ISOLATION, "PATH": os.pathsep.join([str(self.fake_bin), self.hidden]),
+                       "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
+                       "FAKE_PROVIDER_LOG": str(self.temporary / f"{side}-large-{self.count}-provider.log"),
+                       "FAKE_PROVIDER_SCENARIO": str(self.scenario)}
+                checkout = self.temporary / f"{side}-large-{self.count}-checkout"
+                make_checkout(checkout)
+                thread_ids = [f"thread:large-{n}" for n in range(self.args.large_threads)]
+                started = time.monotonic()
+                server = Server(self.commands[side], root, env).start()
+                try:
+                    create_project(server, checkout)
+                    with server.connect() as client:
+                        for thread_id in thread_ids:
+                            create_thread(client, thread_id, "codex", "fixture")
+                finally:
+                    server.stop()
+                seed_s = time.monotonic() - started
+                server = Server(self.commands[side], root, env).start()
+                clients = []
+                try:
+                    for n in range(2):
+                        client = server.connect()
+                        clients.append(client)
+                        client.send("orchestration.subscribeShell", {"requestCompletionMarker": True})
+                        for thread_id in thread_ids[n * 3:n * 3 + 3]:
+                            client.send("orchestration.subscribeThread", {"threadId": thread_id, **THREAD_INPUT})
+                        client.send("subscribeVcsStatus", {"cwd": str(checkout)})
+                        client.send("subscribeVcsBranch", {"cwd": str(checkout)})
+                        client.send("subscribeDiscoveredLocalServers", {})
+                    stop = threading.Event()
+                    pumps = [threading.Thread(target=client.pump, args=(stop,), daemon=True) for client in clients]
+                    for pump in pumps:
+                        pump.start()
+                    time.sleep(self.args.settle)
+                    before = server.cpu()[0]
+                    time.sleep(self.args.idle)
+                    idle_cpu = server.cpu()[0] - before
+                    rss = proc_memory(server.process.pid)["rss"]
+                    stop.set()
+                    for pump in pumps:
+                        pump.join(5)
+                finally:
+                    for client in clients:
+                        with contextlib.suppress(Exception):
+                            client.ws.close()
+                    server.stop()
+                    if not self.args.keep:
+                        shutil.rmtree(root, ignore_errors=True)
+                result[side]["idle_cpu_ms"].append(idle_cpu * 1000 * 10 / self.args.idle)
+                result[side]["idle_rss_kb"].append(rss)
+                result[side]["seed_s"].append(seed_s)
+                print(f"large {side}: {self.args.large_threads} threads seeded in {seed_s:.0f} s, idle CPU "
+                      f"{idle_cpu * 1000 * 10 / self.args.idle:.0f} ms per 10 s, RSS {rss / 1024:.1f} MiB", flush=True)
         return result
 
     def latency(self):
@@ -712,6 +792,8 @@ METRICS = [
     ("startup", "first_rpc_ms", "Start to first RPC", "ms", True),
     ("startup", "idle_rss_kb", "Memory at idle (RSS)", "MiB", True),
     ("startup", "idle_cpu_ms", "CPU while idle (per 10 s)", "ms", True),
+    ("large", "idle_cpu_ms", "CPU while idle, large database with clients (per 10 s)", "ms", True),
+    ("large", "idle_rss_kb", "Memory at idle, large database", "MiB", True),
     ("turns:codex", "peak_rss_kb", "Peak memory, Codex turns", "MiB", True),
     ("turns:claude", "peak_rss_kb", "Peak memory, Claude turns", "MiB", True),
     ("turns:codex", "turns_per_s", "Codex turns per second", "/s", False),
@@ -928,7 +1010,7 @@ def main():
     parser.add_argument("--history", type=Path, help="summarise the result files in this directory instead")
     parser.add_argument("--update-doc", type=Path,
                         help="with --history: rewrite this document's generated block (docs/performance.md)")
-    parser.add_argument("--only", nargs="*", choices=["size", "startup", "latency", "codex", "claude"],
+    parser.add_argument("--only", nargs="*", choices=["size", "startup", "latency", "codex", "claude", "large"],
                         help="run only these measurements")
     parser.add_argument("--startup-runs", type=int, default=5)
     parser.add_argument("--latency-runs", type=int, default=3)
@@ -940,6 +1022,10 @@ def main():
     parser.add_argument("--settle", type=float, default=3.0, help="seconds to let a server settle before measuring")
     parser.add_argument("--idle", type=float, default=10.0, help="seconds over which idle CPU is measured")
     parser.add_argument("--keep", action="store_true", help="keep each server's home (logs) for debugging")
+    parser.add_argument("--large-runs", type=int, default=2, help="large-database idle runs per server")
+    parser.add_argument("--large-threads", type=int, default=2000, help="threads in the large database")
+    parser.add_argument("--max-large-idle-cpu", type=float, metavar="PERCENT",
+                        help="fail if Rust's median idle CPU on the large database is over this % of one core")
     args = parser.parse_args()
 
     if args.history and args.update_doc:
@@ -954,11 +1040,12 @@ def main():
         return 0
     if not (args.original_command and args.rust_command and args.reference_root):
         parser.error("--original-command, --rust-command and --reference-root are required")
-    only = set(args.only or ["size", "startup", "latency", "codex", "claude"])
+    only = set(args.only or ["size", "startup", "latency", "codex", "claude", "large"])
     meta = {"commit": os.environ.get("GITHUB_SHA") or commit_of(ROOT), "reference": commit_of(args.reference_root),
             "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "host": host(),
             "config": {name: getattr(args, name) for name in (
-                "startup_runs", "latency_runs", "turn_runs", "samples", "warmup", "lanes", "turns", "settle", "idle")}}
+                "startup_runs", "latency_runs", "turn_runs", "samples", "warmup", "lanes", "turns", "settle", "idle",
+                "large_runs", "large_threads")}}
     results = {"schema": SCHEMA, "meta": meta}
     if "size" in only:
         rust = shlex.split(args.rust_command)[0]
@@ -980,6 +1067,8 @@ def main():
         for provider in ("codex", "claude"):
             if provider in only:
                 results.setdefault("turns", {})[provider] = bench.turns(provider)
+        if "large" in only:
+            results["large"] = bench.large()
     parity_harness.assert_nothing_escaped()
     results["summary"] = summary_rows(results)
     if args.json:
@@ -988,6 +1077,14 @@ def main():
     if args.markdown:
         args.markdown.write_text(text)
     sys.stdout.write("\n" + text)
+    if args.max_large_idle_cpu is not None and "large" in results:
+        # ms of CPU per 10 s of idling, as a percentage of one core.
+        percent = statistics.median(results["large"]["rust"]["idle_cpu_ms"]) / 100
+        if percent > args.max_large_idle_cpu:
+            print(f"::error title=Idle CPU::Rust used {percent:.1f}% of one core while idle on a large database "
+                  f"with clients connected, over the {args.max_large_idle_cpu}% limit.", flush=True)
+            return 1
+        print(f"Idle CPU on a large database: {percent:.1f}% of one core, within {args.max_large_idle_cpu}%.")
     return 0
 
 
