@@ -77,6 +77,7 @@ pub(super) async fn run(
         pending: HashMap::new(),
         file_changes: HashMap::new(),
         subagents: Default::default(),
+        child_reads: HashMap::new(),
         usage_baseline: None,
         rate_limits: None,
         turn_usage: TurnUsage::default(),
@@ -198,6 +199,9 @@ struct Session {
     file_changes: HashMap<String, Value>,
     /// The native subagents the turn spawned, by their child thread.
     subagents: super::codex_subagents::Subagents,
+    /// Requests reading a child's model (`thread/read`, then `thread/resume`), by request id:
+    /// the child and whether this is the resume.
+    child_reads: HashMap<u64, (String, bool)>,
     /// The rate limits Codex last reported (`account/rateLimits/updated`).
     rate_limits: Option<Value>,
     /// The thread-wide token totals Codex last reported.
@@ -1050,6 +1054,50 @@ impl Session {
             .await;
     }
 
+    /// Asks Codex for a child's model without waiting on it: `thread/read`, or once that names
+    /// none, `thread/resume` (`registerSubagentThread`).
+    async fn read_child(&mut self, native: String, resume: bool) {
+        let id = self.cli.next_id();
+        let (method, params) = if resume {
+            (
+                "thread/resume",
+                json!({"threadId": native, "excludeTurns": true}),
+            )
+        } else {
+            (
+                "thread/read",
+                json!({"threadId": native, "includeTurns": false}),
+            )
+        };
+        if self
+            .cli
+            .write(&json!({"id": id, "method": method, "params": params}))
+            .await
+            .is_ok()
+        {
+            self.child_reads.insert(id, (native, resume));
+        }
+    }
+
+    /// What Codex answered about a child's model.
+    async fn child_selection(&mut self, native: String, resumed: bool, result: &Value) {
+        let thread = &result["thread"];
+        let (model, effort) = if resumed {
+            (&result["model"], &result["reasoningEffort"])
+        } else {
+            (&thread["model"], &thread["reasoningEffort"])
+        };
+        match model.as_str().filter(|m| !m.trim().is_empty()) {
+            Some(model) if thread["id"] == native.as_str() => {
+                if let Some(item) = self.subagents.selected(&native, model, effort.as_str()) {
+                    self.sink.send(ProviderEvent::TurnItem { item });
+                }
+            }
+            _ if !resumed => self.read_child(native, true).await,
+            _ => {}
+        }
+    }
+
     async fn notify(&mut self, method: &str) -> Result<(), Failed> {
         self.cli
             .write(&json!({"method": method}))
@@ -1101,6 +1149,13 @@ impl Session {
 
     async fn handle(&mut self, message: Value) {
         let Some(method) = message["method"].as_str() else {
+            // A child's model, which nothing waits for.
+            if let Some(id) = message["id"].as_u64() {
+                if let Some((native, resumed)) = self.child_reads.remove(&id) {
+                    self.child_selection(native, resumed, &message["result"])
+                        .await;
+                }
+            }
             return; // A reply to a request nobody waits for.
         };
         let params = &message["params"];
@@ -1166,7 +1221,18 @@ impl Session {
                 }
                 // A native subagent's spawn and the calls that follow it show as
                 // its subagent item.
-                if native["type"] == "collabAgentToolCall" {
+                if native["type"] == "subAgentActivity" {
+                    if native["kind"] == "started" {
+                        self.turn_usage.has_subagents = true;
+                    }
+                    let (item, read) = self.subagents.activity(native);
+                    if let Some(item) = item {
+                        self.sink.send(ProviderEvent::TurnItem { item });
+                    }
+                    if let Some(child) = read {
+                        self.read_child(child, false).await;
+                    }
+                } else if native["type"] == "collabAgentToolCall" {
                     if native["tool"] == "spawnAgent" {
                         self.turn_usage.has_subagents = true;
                     }

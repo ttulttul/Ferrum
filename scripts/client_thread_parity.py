@@ -289,6 +289,10 @@ PROVIDER_SCENARIOS = [
     # spawnAgent), waits for it and reports its answer.
     {"name": "codex native subagent", "instance": "codex", "model": "fixture",
      "scenario": "codex_subagent.json"},
+    # The same as Codex 0.170 reports it: subAgentActivity started and completed around a wait
+    # that names no agents, the child's own notifications going to its thread only.
+    {"name": "codex native subagent activity", "instance": "codex", "model": "fixture",
+     "scenario": "codex_subagent_activity.json"},
     # Codex delegation counterparts: parent and child share the instance's app-server.
     {"name": "codex delegate", "instance": "codex", "model": "fixture",
      "scenario": "codex_delegate.json", "awaitStatus": True},
