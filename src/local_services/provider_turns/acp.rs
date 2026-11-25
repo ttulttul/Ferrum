@@ -2411,15 +2411,21 @@ enum Disposition {
 /// Grok has no auto-accept-edits launch mode: a thread in it runs under the
 /// approval policy the reference gives it, so it asks about edits too. In
 /// auto mode Grok asks only about what its classifier refused, which goes to
-/// the user; the generic flavor lets an agent's requests through.
+/// the user; the generic flavor lets an agent's requests through. In
+/// auto-accept-edits the generic flavor (and Antigravity's, which keeps its
+/// disposition there) lets edits through without asking, as it reads
+/// (`acpOperationDisposition` with no sandbox: a mutation is allowed, any
+/// other operation asks).
 fn disposition(flavor: Flavor, runtime_mode: &str, kind: &str) -> Disposition {
     let reads = matches!(kind, "read" | "search" | "think");
+    let edits = matches!(kind, "edit" | "delete" | "move");
     match runtime_mode {
         // agy's own Auto already decided what it asks (`antigravityPermissionDisposition`).
         "auto" if matches!(flavor, Flavor::Grok | Flavor::Antigravity) => Disposition::Ask,
         "auto" => Disposition::Allow,
         "full-access" => Disposition::Allow,
         _ if reads => Disposition::Allow,
+        "auto-accept-edits" if edits && flavor != Flavor::Grok => Disposition::Allow,
         _ => Disposition::Ask,
     }
 }
@@ -2649,11 +2655,20 @@ mod tests {
     #[test]
     fn the_runtime_mode_decides_which_requests_ask() {
         let asks = |flavor, mode, kind| matches!(disposition(flavor, mode, kind), Disposition::Ask);
-        for flavor in [Flavor::Grok, Flavor::Registry] {
+        for flavor in [Flavor::Grok, Flavor::Registry, Flavor::Antigravity] {
             assert!(!asks(flavor, "approval-required", "read"));
             assert!(asks(flavor, "approval-required", "execute"));
-            assert!(asks(flavor, "auto-accept-edits", "edit"));
+            assert!(asks(flavor, "approval-required", "edit"));
+            assert!(!asks(flavor, "auto-accept-edits", "read"));
+            assert!(asks(flavor, "auto-accept-edits", "execute"));
             assert!(!asks(flavor, "full-access", "execute"));
+        }
+        // Auto-accept-edits lets edits through (`acpOperationDisposition`
+        // with no sandbox), save Grok's, which runs under its default mode.
+        for kind in ["edit", "delete", "move"] {
+            assert!(!asks(Flavor::Registry, "auto-accept-edits", kind));
+            assert!(!asks(Flavor::Antigravity, "auto-accept-edits", kind));
+            assert!(asks(Flavor::Grok, "auto-accept-edits", kind));
         }
         // Grok's auto mode asks about what its classifier refused; the
         // generic flavor's lets requests through.
