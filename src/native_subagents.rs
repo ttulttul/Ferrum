@@ -1,0 +1,336 @@
+//! The child threads of provider-native subagents (a Codex agent's `spawnAgent` or
+//! `subAgentActivity`), as the reference's adapter creates them (`registerSubagentThread`,
+//! `makeSubagentChildThread`): when a parent's turn first reports a native subagent, its child
+//! app thread is created, a subagent thread of the parent titled after the subagent's path,
+//! prompt or ordinal, with the root node its turns hang from and, when Codex named one, the
+//! prompt the parent gave it. The child's model, once Codex reports it, becomes the child
+//! thread's (`updateSubagentSelection`).
+use crate::control_state::ControlState;
+use crate::provider_projection::item_id;
+use crate::store::{Event, Thread};
+use crate::workspace::provider::ProviderItem;
+use serde_json::{json, Value};
+
+/// A native subagent's item, by its fields: the child app thread, its native thread, model
+/// and effort.
+struct Subagent<'a> {
+    child_id: &'a str,
+    native_thread: &'a str,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
+}
+
+fn subagent(item: &ProviderItem) -> Option<Subagent<'_>> {
+    if item.kind != "subagent" || item.fields.get("origin") != Some(&json!("provider_native")) {
+        return None;
+    }
+    let text = |key: &str| {
+        item.fields
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    Some(Subagent {
+        child_id: text("childThreadId")?,
+        native_thread: text("nativeThreadId")?,
+        model: text("model"),
+        effort: text("reasoningEffort"),
+    })
+}
+
+/// The child's model selection: the one Codex reported, else the parent's with the subagent's
+/// model and no effort (a child's effort can differ from its parent's).
+fn selection(instance: &str, parent: &Value, model: Option<&str>, effort: Option<&str>) -> Value {
+    match model {
+        Some(model) => {
+            let mut selection = json!({"instanceId": instance, "model": model});
+            if let Some(effort) = effort {
+                selection["options"] = json!([{"id": "reasoningEffort", "value": effort}]);
+            }
+            selection
+        }
+        None => {
+            let mut selection = parent.clone();
+            if let Some(options) = selection.get_mut("options").and_then(Value::as_array_mut) {
+                options.retain(|option| option["id"] != "reasoningEffort");
+            }
+            selection
+        }
+    }
+}
+
+/// Before `parent_thread_id`'s turn records `item`: the child thread a native subagent runs on,
+/// created when it is new, or its model once Codex reported it.
+pub(crate) async fn record_child(
+    state: &ControlState,
+    parent_thread_id: &str,
+    driver: &str,
+    item: &ProviderItem,
+) {
+    let Some(subagent) = subagent(item) else {
+        return;
+    };
+    let at = crate::auth_service::iso(crate::auth_service::now());
+    let event = {
+        let store = state.store.read().await;
+        let Some(parent) = store.threads.get(parent_thread_id) else {
+            return;
+        };
+        let parent_row = parent.stored_row();
+        let instance = parent_row["providerInstanceId"]
+            .as_str()
+            .or(parent_row["modelSelection"]["instanceId"].as_str())
+            .unwrap_or(driver)
+            .to_owned();
+        if let Some(child) = store.threads.get(subagent.child_id) {
+            // Codex reported the child's model after the child was made.
+            let Some(model) = subagent.model else {
+                return;
+            };
+            let current = &child.stored_row()["modelSelection"];
+            let selected = selection(&instance, current, Some(model), subagent.effort);
+            if *current == selected {
+                return;
+            }
+            Event::ThreadPatched {
+                thread_id: subagent.child_id.to_owned(),
+                patch: json!({"row": {"modelSelection": selected, "updatedAt": at}}),
+            }
+        } else {
+            let ordinal = store
+                .threads
+                .values()
+                .filter(|t| t.stored_row()["lineage"]["parentThreadId"] == parent_thread_id)
+                .count()
+                + 1;
+            let prompt = item
+                .fields
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let title = crate::orchestration::delegation::subagent_thread_title(
+                &parent.title,
+                item.title.as_deref(),
+                prompt,
+                ordinal,
+            );
+            let child = child_thread(
+                parent, &subagent, item, driver, &instance, &title, prompt, &at,
+            );
+            Event::ThreadCreated(child)
+        }
+    };
+    if let Err(error) = state.commit(event).await {
+        tracing::warn!(%error, parent_thread_id, "failed to record a native subagent's thread");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn child_thread(
+    parent: &Thread,
+    subagent: &Subagent<'_>,
+    item: &ProviderItem,
+    driver: &str,
+    instance: &str,
+    title: &str,
+    prompt: &str,
+    at: &str,
+) -> Thread {
+    let parent_row = parent.stored_row();
+    let native_item = item.id.as_str();
+    let subagent_node = item_id("node", driver, native_item);
+    let root_node = item_id("node", driver, &format!("{native_item}:thread-root"));
+    let provider_thread = format!(
+        "provider-thread:provider:{}:native-thread:{}",
+        crate::thread_projection::uri_component(driver),
+        crate::thread_projection::uri_component(subagent.native_thread)
+    );
+    let strong = |native: &str| json!({"driver": driver, "nativeId": native, "strength": "strong"});
+    // The parent's app thread, as the child's (`makeSubagentChildThread`): the remote parent
+    // delegated the parent thread, not its subagents.
+    let mut row = parent_row.clone();
+    if let Some(fields) = row.as_object_mut() {
+        for key in [
+            "delegatedFrom",
+            "historyOrigin",
+            "issues",
+            "linkedPullRequest",
+            "branchPullRequest",
+            "nodes",
+            "appTurnItems",
+            "runExtras",
+            "subagents",
+        ] {
+            fields.remove(key);
+        }
+    }
+    for (key, value) in [
+        ("id", json!(subagent.child_id)),
+        ("title", json!(title)),
+        ("createdBy", json!("agent")),
+        ("creationSource", json!("provider")),
+        ("titleRegeneration", Value::Null),
+        ("titleRenamed", json!(false)),
+        ("linkedPullRequest", Value::Null),
+        ("pullRequests", json!([])),
+        ("providerInstanceId", json!(instance)),
+        (
+            "modelSelection",
+            selection(
+                instance,
+                &parent_row["modelSelection"],
+                subagent.model,
+                subagent.effort,
+            ),
+        ),
+        ("activeProviderThreadId", json!(provider_thread)),
+        (
+            "lineage",
+            json!({
+                "parentThreadId": parent.id,
+                "relationshipToParent": "subagent",
+                "rootThreadId": parent_row["lineage"]["rootThreadId"].as_str().unwrap_or(&parent.id),
+            }),
+        ),
+        (
+            "forkedFrom",
+            json!({"type": "node", "nodeId": subagent_node}),
+        ),
+        ("createdAt", json!(at)),
+        ("updatedAt", json!(at)),
+        ("archivedAt", Value::Null),
+        ("settledOverride", Value::Null),
+        ("settledAt", Value::Null),
+        ("snoozedUntil", Value::Null),
+        ("snoozedAt", Value::Null),
+        ("pinnedAt", Value::Null),
+        ("pinOrderKey", Value::Null),
+        ("autoSettleDisabledAt", Value::Null),
+        ("guestShare", Value::Null),
+        ("lastVisitedAt", Value::Null),
+        ("deletedAt", Value::Null),
+    ] {
+        row[key] = value;
+    }
+    // The root node the child's turns hang from.
+    row["nodes"] = json!([{
+        "id": root_node,
+        "threadId": subagent.child_id,
+        "runId": null,
+        "parentNodeId": null,
+        "rootNodeId": root_node,
+        "kind": "root_turn",
+        "status": "running",
+        "countsForRun": false,
+        "providerThreadId": provider_thread,
+        "providerTurnId": null,
+        "nativeItemRef": strong(native_item),
+        "runtimeRequestId": null,
+        "checkpointScopeId": null,
+        "startedAt": at,
+        "completedAt": null
+    }]);
+    // The prompt the parent gave it (`makeSubagentConversationArtifacts`).
+    if !prompt.is_empty() {
+        let native_prompt = format!("{native_item}:prompt");
+        let message_id = item_id("message", driver, &native_prompt);
+        row["nativeMessages"] = json!([{
+            "createdBy": "agent",
+            "creationSource": "provider",
+            "id": message_id,
+            "threadId": subagent.child_id,
+            "runId": null,
+            "nodeId": root_node,
+            "role": "user",
+            "text": prompt,
+            "attachments": [],
+            "senderThreadId": parent.id,
+            "streaming": false,
+            "createdAt": at,
+            "updatedAt": at
+        }]);
+        row["nativeTurnItems"] = json!([{
+            "id": item_id("turn-item", driver, &native_prompt),
+            "threadId": subagent.child_id,
+            "runId": null,
+            "nodeId": root_node,
+            "providerThreadId": provider_thread,
+            "providerTurnId": null,
+            "nativeItemRef": strong(&native_prompt),
+            "parentItemId": null,
+            "ordinal": 1,
+            "status": "completed",
+            "title": null,
+            "startedAt": at,
+            "completedAt": at,
+            "updatedAt": at,
+            "type": "user_message",
+            "messageId": message_id,
+            "text": prompt,
+            "attachments": [],
+            "createdBy": "agent",
+            "creationSource": "provider",
+            "senderThreadId": parent.id,
+            "inputIntent": "turn_start"
+        }]);
+    }
+    Thread {
+        row,
+        id: subagent.child_id.to_owned(),
+        project_id: parent.project_id.clone(),
+        title: title.to_owned(),
+        cwd: parent.cwd.clone(),
+        status: "idle".into(),
+        messages: vec![],
+        runs: vec![],
+        created_at: crate::now(),
+        archived: false,
+        settled: false,
+        snoozed_until: None,
+        pinned: false,
+        unread: false,
+        tags: vec![],
+        checkpoints: vec![],
+        link_requests: Vec::new(),
+        context_handoffs: Vec::new(),
+        context_transfers: Vec::new(),
+        handoff_items: Vec::new(),
+        inherited_items: Vec::new(),
+        provider: Default::default(),
+        stored: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_child_runs_the_model_codex_reported_else_its_parents_without_effort() {
+        let parent = json!({"instanceId": "codex", "model": "gpt-a",
+            "options": [{"id": "reasoningEffort", "value": "high"}, {"id": "fastMode", "value": true}]});
+        assert_eq!(
+            selection("codex", &parent, None, None),
+            json!({"instanceId": "codex", "model": "gpt-a", "options": [{"id": "fastMode", "value": true}]})
+        );
+        assert_eq!(
+            selection("codex", &parent, Some("gpt-b"), Some("low")),
+            json!({"instanceId": "codex", "model": "gpt-b",
+                "options": [{"id": "reasoningEffort", "value": "low"}]})
+        );
+    }
+
+    #[test]
+    fn only_a_provider_native_subagent_has_a_child_thread() {
+        let mut item = ProviderItem::new("call_1:c1", "subagent", "running")
+            .with("origin", "provider_native")
+            .with("childThreadId", "thread:subagent:abc")
+            .with("nativeThreadId", "c1");
+        assert_eq!(
+            subagent(&item).map(|s| s.child_id),
+            Some("thread:subagent:abc")
+        );
+        item.fields.insert("origin".into(), json!("app_owned"));
+        assert!(subagent(&item).is_none());
+    }
+}

@@ -802,6 +802,16 @@ async fn record<H: TurnHost>(
         let Some(event) = text.take(host, event, position) else {
             continue;
         };
+        // A native subagent's child thread exists before its parent reports it.
+        if let TurnEvent::Provider(ProviderEvent::TurnItem { item }) = &event {
+            crate::native_subagents::record_child(
+                host,
+                &run.thread_id,
+                run.driver.as_deref().unwrap_or("codex"),
+                item,
+            )
+            .await;
+        }
         let snapshot = snapshots.is_snapshot(&event);
         // While the worker is busy, an event that sends nothing live takes
         // no part in the batch: it is recorded at once.

@@ -65,6 +65,7 @@ pub mod mcp_oauth;
 mod model_manifest;
 #[cfg(feature = "native")]
 mod native_child_work;
+pub(crate) mod native_subagents;
 #[cfg(feature = "native")]
 mod npm_release;
 mod orchestration;
