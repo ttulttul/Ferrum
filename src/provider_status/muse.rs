@@ -473,6 +473,73 @@ pub(super) async fn check(config: &Value, env: &ProcessEnv) -> Draft {
     snapshot(true, version, "ready", None, models)
 }
 
+/// What a Muse turn resolves from the instance's status row (the
+/// reference adapter's `resolveModel` and `selectionEffort`): the model
+/// "default" stands for (the catalog's default model that is not custom;
+/// empty when none), and the effort the turn is sent: `selected` when the
+/// turn's model lists it, else that model's default (from
+/// `museModelCapabilities` when the catalog lacks the model; empty when it
+/// has no tiers).
+pub(crate) fn turn_launch(
+    row: Option<&Value>,
+    model: &str,
+    selected: Option<&str>,
+) -> (String, String) {
+    let models: Vec<&Value> = row
+        .and_then(|row| row["models"].as_array())
+        .into_iter()
+        .flatten()
+        .collect();
+    let default_model = models
+        .iter()
+        .find(|entry| entry["isDefault"] == true && entry["isCustom"] != true)
+        .and_then(|entry| entry["slug"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let resolved = if model.is_empty() || model == "default" {
+        default_model.as_str()
+    } else {
+        model
+    };
+    let fallback = fallback_capabilities();
+    let capabilities = models
+        .iter()
+        .find(|entry| !resolved.is_empty() && entry["slug"] == resolved)
+        .map(|entry| &entry["capabilities"])
+        .filter(|capabilities| !capabilities.is_null())
+        .unwrap_or(&fallback);
+    let effort = capabilities["optionDescriptors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|descriptor| descriptor["id"] == "reasoningEffort" && descriptor["type"] == "select")
+        .map(|descriptor| {
+            let options: Vec<&str> = descriptor["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|option| option["id"].as_str())
+                .collect();
+            match selected.filter(|selected| options.contains(selected)) {
+                Some(selected) => selected.to_owned(),
+                None => descriptor["currentValue"]
+                    .as_str()
+                    .or_else(|| {
+                        descriptor["options"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|option| option["isDefault"] == true)
+                            .and_then(|option| option["id"].as_str())
+                    })
+                    .unwrap_or_default()
+                    .to_owned(),
+            }
+        })
+        .unwrap_or_default();
+    (default_model, effort)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +566,34 @@ mod tests {
                 .len(),
             5
         );
+    }
+
+    #[test]
+    fn a_turn_resolves_default_and_its_effort_from_the_catalog() {
+        let row = json!({"models": [
+            {"slug": "custom", "isDefault": true, "isCustom": true},
+            {"slug": "spark", "isDefault": true, "isCustom": false,
+             "capabilities": model_capabilities(Some(&json!({"variants": ["low", "high", "max"], "defaultReasoningEffort": "high"})))},
+            {"slug": "pro", "isDefault": false, "isCustom": false,
+             "capabilities": model_capabilities(Some(&json!({"variants": ["medium", "max"], "defaultReasoningEffort": "medium"})))}]});
+        assert_eq!(
+            turn_launch(Some(&row), "", None),
+            ("spark".into(), "high".into())
+        );
+        assert_eq!(
+            turn_launch(Some(&row), "pro", Some("max")),
+            ("spark".into(), "max".into())
+        );
+        // An effort the model does not list falls back to its default.
+        assert_eq!(
+            turn_launch(Some(&row), "pro", Some("xhigh")),
+            ("spark".into(), "medium".into())
+        );
+        // A model the catalog lacks takes the standard tiers.
+        assert_eq!(
+            turn_launch(None, "other", Some("low")),
+            (String::new(), "low".into())
+        );
+        assert_eq!(turn_launch(None, "", None), (String::new(), "high".into()));
     }
 }

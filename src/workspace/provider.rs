@@ -35,12 +35,14 @@ pub const ANTIGRAVITY: &str = "antigravity";
 pub const KIRO: &str = "kiro";
 /// fx's CLI, whose turns run over ACP (`fx acp`).
 pub const FX: &str = "fx";
+/// Muse Code, whose turns run over its own protocol (MSP) on `muse serve`.
+pub const MUSE: &str = "muse";
 
 /// Whether the workspace runs turns of `driver`'s CLI.
 pub fn runs_turns(driver: &str) -> bool {
     matches!(
         driver,
-        CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI | OPENCODE | ANTIGRAVITY | KIRO | FX
+        CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI | OPENCODE | ANTIGRAVITY | KIRO | FX | MUSE
     )
 }
 
@@ -51,9 +53,9 @@ pub fn is_acp(driver: &str) -> bool {
 
 /// Whether the reference gives each of `driver`'s threads a provider
 /// session of its own, named after the thread and a random id (the ACP
-/// agents, Pi and OpenCode 1.x).
+/// agents, Pi, OpenCode 1.x and Muse).
 pub fn thread_session(driver: &str) -> bool {
-    is_acp(driver) || driver == PI || driver == OPENCODE
+    is_acp(driver) || driver == PI || driver == OPENCODE || driver == MUSE
 }
 
 /// Whether `driver`'s adapter resolves the requests it asks itself, with no
@@ -191,6 +193,13 @@ pub struct ProviderTurn {
     /// same wire bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kiro: Option<KiroLaunch>,
+    /// What a Muse turn resolved from the instance's model catalog (the
+    /// model "default" stands for and the reasoning effort it is sent) and
+    /// the provider thread its items are named under. Optional and omitted
+    /// when absent, so an agentd or control plane that predates it sees the
+    /// same wire bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muse: Option<MuseLaunch>,
     /// The turn is a continuation run (`creationSource: "provider"`): it
     /// shows what the thread's running CLI did on its own while idle
     /// rather than sending its prompt, as the reference's Claude adapter
@@ -250,6 +259,23 @@ pub struct KiroLaunch {
     pub agent: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub default_model: String,
+}
+
+/// A Muse turn's launch data from the instance's status check: the model
+/// "default" stands for (the catalog's default, not custom, model; empty
+/// when none), the reasoning effort the turn is sent (the selection's when
+/// that model lists it, else its default; empty when it has none), and the
+/// provider thread record the turn runs on, whose id its items' ids carry.
+/// Each is omitted when empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MuseLaunch {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning_effort: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider_thread: String,
 }
 
 /// An Antigravity launch's installed `agy` version (empty when unknown),

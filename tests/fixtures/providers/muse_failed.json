@@ -1,0 +1,183 @@
+{
+ "replies": {
+  "initialize": {
+   "serverInfo": {
+    "name": "muse",
+    "version": "1.4.3"
+   },
+   "userAgent": "muse-build/1.4.3 (non-interactive; linux-x86_64; build fixture)",
+   "museHome": "~/.local/share/muse",
+   "platformFamily": "unix",
+   "platformOs": "linux",
+   "schema": {
+    "version": 1,
+    "fingerprint": "sha256:fixture"
+   },
+   "grantedCapabilities": [
+    "sessionMcp"
+   ],
+   "experimentalApi": false,
+   "sessionDurability": "durable"
+  },
+  "session/setModel": {
+   "status": "accepted"
+  },
+  "session/setApprovalMode": {
+   "status": "accepted"
+  },
+  "turn/interrupt": {
+   "status": "accepted"
+  }
+ },
+ "steps": [
+  {
+   "expect": "session/start"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/started",
+    "params": {
+     "session": {
+      "sessionId": "$params.sessionId",
+      "status": "idle",
+      "activeTurnId": null,
+      "workspaceRoot": "$params.workspaceRoot",
+      "providerId": "meta",
+      "modelId": "$params.modelId",
+      "turnCount": 0,
+      "kind": "root"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "session": {
+      "sessionId": "$params.sessionId",
+      "status": "idle",
+      "activeTurnId": null,
+      "workspaceRoot": "$params.workspaceRoot",
+      "providerId": "meta",
+      "modelId": "$params.modelId",
+      "turnCount": 0,
+      "kind": "root"
+     },
+     "viewCursor": "v:1"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/approvalModeChanged",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "mode": "$params.approvalMode",
+     "source": "approvalReconfigure"
+    }
+   }
+  },
+  {
+   "expect": "turn/start"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "commandId": "$params.commandId",
+     "status": "accepted",
+     "turnId": "$params.commandId",
+     "startedNewTurn": true,
+     "disposition": "started"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/statusChanged",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "status": "running"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "turn/started",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "turnId": "$params:turn/start.commandId",
+     "commandId": "$params:turn/start.commandId"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "item/completed",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "item": {
+      "turnId": "$params:turn/start.commandId",
+      "itemId": "user-1",
+      "kind": "userMessage",
+      "revision": 1,
+      "status": "completed",
+      "text": "$params.displayText"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "item/started",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "item": {
+      "turnId": "$params:turn/start.commandId",
+      "itemId": "reminder-1",
+      "kind": "reminderChild",
+      "revision": 1,
+      "status": "inProgress",
+      "fallbackText": "Reminder child session",
+      "reminderAgentId": "skill-reminder"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/statusChanged",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "status": "idle"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "turn/completed",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "turnId": "$params:turn/start.commandId",
+     "terminal": "failed",
+     "reason": "model request failed",
+     "error": {
+      "message": "Muse model request failed: upstream returned 500"
+     },
+     "durationMs": 900
+    }
+   }
+  }
+ ]
+}

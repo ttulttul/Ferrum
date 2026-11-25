@@ -141,6 +141,9 @@ pub(crate) enum Protocol {
     /// `makeAcpNativeLoggerFactory`: each request the client makes, when it
     /// starts and when it is answered, summarized.
     Acp { provider: String },
+    /// The Muse adapter's native logger: each notification `muse serve`
+    /// sends (`{provider, method, params}`), but its streamed deltas.
+    Muse,
 }
 
 /// One provider process's frames: its protocol, the thread they belong to
@@ -804,6 +807,18 @@ fn render_frame(
                 session,
                 event,
             ))
+        }
+        Protocol::Muse => {
+            let frame = decoded.ok()?;
+            let method = frame.get("method").and_then(Value::as_str)?;
+            if direction != Direction::Incoming
+                || frame.get("id").is_some_and(|id| !id.is_null())
+                || method == "item/delta"
+            {
+                return None;
+            }
+            Some(json!({"provider": "muse", "method": method,
+                "params": frame.get("params").cloned().unwrap_or(Value::Null)}))
         }
         Protocol::Acp { provider } => {
             let frame = decoded.ok()?;

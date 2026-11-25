@@ -37,7 +37,9 @@ Steps:
   {"send": {...}}            write a message; "$id" becomes the remembered
                              message's id, "$id:session/prompt" the id of
                              the last request with that method ("$request_id" its control
-                             request_id, "$uuid" its uuid), "$params.x" its params.x, and
+                             request_id, "$uuid" its uuid), "$params.x" its params.x,
+                             "$params:<method>.x" params.x of the last request with that
+                             method (a Muse turn's id after later requests), and
                              "$session" the Claude session the CLI was
                              started on
   {"sendTogether": [...]}    write several protocol lines together so a control callback
@@ -49,7 +51,8 @@ Steps:
   {"mcp": {"tool": "t3_thread_list", "arguments": {...}}}
                              call a tool on the T3 MCP server the client gave
                              this CLI (Codex: `mcp_servers.t3-code` in
-                             thread/start; Claude: `mcp_set_servers`; an ACP
+                             thread/start; Muse: `config.mcpServers.t3-code` in
+                             session/start; Claude: `mcp_set_servers`; an ACP
                              agent: the stdio server `session/new` names, which
                              it starts), as the real CLI would; {"mcp": {"method": "tools/list"}}
                              lists its tools. The request and the answer are
@@ -151,7 +154,8 @@ if args[:1] in (["exec"], ["-p"]) or ("mcp" in args and "--json" in args and "ap
 with open(log_path + ".args", "a") as out:
     out.write(" ".join(args) + "\n")
 # The launch as JSON: the arguments and the environment a server sets for its CLIs.
-LAUNCH_ENV = ("T3CODE_THREAD_ID", "CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CODEX_INTERNAL_", "ENABLE_CLAUDEAI_")
+LAUNCH_ENV = ("T3CODE_THREAD_ID", "CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CODEX_INTERNAL_", "ENABLE_CLAUDEAI_",
+              "MUSE_", "META_API_KEY")
 with open(log_path + ".launch", "a") as out:
     env = {k: v for k, v in os.environ.items() if k.startswith(LAUNCH_ENV)}
     # A login-shell scenario also records the PATH the server gave its CLI.
@@ -201,7 +205,9 @@ TOOL_GAP = float(scenario.get("toolGap", 0.5))
 def ends_tool(frame):
     """Whether `frame` reports the end of a tool call."""
     if frame.get("method") == "item/completed":
-        return (frame.get("params") or {}).get("item", {}).get("type") in ("commandExecution", "fileChange")
+        item = (frame.get("params") or {}).get("item", {})
+        # A Codex command or file change; a Muse tool call.
+        return item.get("type") in ("commandExecution", "fileChange") or item.get("kind") == "toolCall"
     if frame.get("type") == "user":
         content = (frame.get("message") or {}).get("content")
         return isinstance(content, list) and any(
@@ -303,6 +309,12 @@ def note_mcp_server(message):
             # thread, so a later thread (a delegated child) does not take its credential.
             if not mcp_server.get("url"):
                 mcp_server.update(entry)
+    if message.get("method") in ("session/start", "session/resume") and not mcp_server.get("url"):
+        # Muse: its session's config names the streamable HTTP server.
+        server = (((message.get("params") or {}).get("config") or {}).get("mcpServers") or {}).get("t3-code")
+        if isinstance(server, dict):
+            mcp_server.update(url=server.get("url"),
+                              authorization=(server.get("headers") or {}).get("Authorization"))
     if message.get("method") in ("session/new", "session/load") and not mcp_server.get("command"):
         # An ACP agent runs the stdio MCP servers its client names.
         for server in (message.get("params") or {}).get("mcpServers") or []:
@@ -494,10 +506,15 @@ def fill(value):
             # The id of the last request with that method: an ACP prompt's, answered after the
             # `session/cancel` notification that ends it.
             return last_by_method.get(value[len("$id:"):], {}).get("id")
-        if value.startswith("$params."):
-            # A dotted path, with list indices: "$params.input.0.text".
-            found = remembered.get("params", {})
-            for key in value[len("$params."):].split("."):
+        if value.startswith("$params.") or value.startswith("$params:"):
+            # A dotted path, with list indices: "$params.input.0.text"; "$params:<method>.<path>"
+            # reads the last request with that method instead of the remembered one.
+            if value.startswith("$params:"):
+                method, _, path = value[len("$params:"):].partition(".")
+                found = last_by_method.get(method, {}).get("params", {})
+            else:
+                found, path = remembered.get("params", {}), value[len("$params."):]
+            for key in path.split("."):
                 if isinstance(found, list) and key.isdigit() and int(key) < len(found):
                     found = found[int(key)]
                 elif isinstance(found, dict):

@@ -1,0 +1,496 @@
+{
+ "replies": {
+  "initialize": {
+   "serverInfo": {
+    "name": "muse",
+    "version": "1.4.3"
+   },
+   "userAgent": "muse-build/1.4.3 (non-interactive; linux-x86_64; build fixture)",
+   "museHome": "~/.local/share/muse",
+   "platformFamily": "unix",
+   "platformOs": "linux",
+   "schema": {
+    "version": 1,
+    "fingerprint": "sha256:fixture"
+   },
+   "grantedCapabilities": [
+    "sessionMcp"
+   ],
+   "experimentalApi": false,
+   "sessionDurability": "durable"
+  },
+  "session/setModel": {
+   "status": "accepted"
+  },
+  "session/setApprovalMode": {
+   "status": "accepted"
+  },
+  "turn/interrupt": {
+   "status": "accepted"
+  }
+ },
+ "steps": [
+  {
+   "expect": "session/start"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/started",
+    "params": {
+     "session": {
+      "sessionId": "$params.sessionId",
+      "status": "idle",
+      "activeTurnId": null,
+      "workspaceRoot": "$params.workspaceRoot",
+      "providerId": "meta",
+      "modelId": "$params.modelId",
+      "turnCount": 0,
+      "kind": "root"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "session": {
+      "sessionId": "$params.sessionId",
+      "status": "idle",
+      "activeTurnId": null,
+      "workspaceRoot": "$params.workspaceRoot",
+      "providerId": "meta",
+      "modelId": "$params.modelId",
+      "turnCount": 0,
+      "kind": "root"
+     },
+     "viewCursor": "v:1"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/approvalModeChanged",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "mode": "$params.approvalMode",
+     "source": "approvalReconfigure"
+    }
+   }
+  },
+  {
+   "expect": "turn/start"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "commandId": "$params.commandId",
+     "status": "accepted",
+     "turnId": "$params.commandId",
+     "startedNewTurn": true,
+     "disposition": "started"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/statusChanged",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "status": "running"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "turn/started",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "turnId": "$params:turn/start.commandId",
+     "commandId": "$params:turn/start.commandId"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "item/completed",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "item": {
+      "turnId": "$params:turn/start.commandId",
+      "itemId": "user-1",
+      "kind": "userMessage",
+      "revision": 1,
+      "status": "completed",
+      "text": "$params.displayText"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "item/started",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "item": {
+      "turnId": "$params:turn/start.commandId",
+      "itemId": "reminder-1",
+      "kind": "reminderChild",
+      "revision": 1,
+      "status": "inProgress",
+      "fallbackText": "Reminder child session",
+      "reminderAgentId": "skill-reminder"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "approval/request",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "approvalId": "01a11a6d-4730-7000-8000-00000000a001",
+     "turnId": "$params:turn/start.commandId",
+     "taskId": "task-1",
+     "itemId": "01a11a6d-4730-7000-8000-00000000a001",
+     "toolCallId": "call_1",
+     "toolName": "bash",
+     "rawArgs": "{\"command\": \"touch notes.txt\", \"description\": \"Create the notes file\"}",
+     "subject": {
+      "kind": "shell",
+      "command": "touch notes.txt",
+      "workspaceRoot": "<workspace>",
+      "stages": [
+       {
+        "requirementId": {
+         "approvalId": "01a11a6d-4730-7000-8000-00000000a001",
+         "sourceIndex": 0
+        },
+        "position": 1,
+        "totalStages": 1,
+        "argv": [
+         "touch",
+         "notes.txt"
+        ],
+        "argvComplete": true,
+        "resolution": {
+         "kind": "unresolved"
+        },
+        "suggestedPrefix": {
+         "argvPrefix": [
+          "touch"
+         ],
+         "label": "Always allow in this workspace: touch ..."
+        }
+       }
+      ]
+     },
+     "currentRequirementId": {
+      "approvalId": "01a11a6d-4730-7000-8000-00000000a001",
+      "sourceIndex": 0
+     },
+     "availableChoices": [
+      {
+       "choiceId": "allow_once",
+       "label": "Allow once",
+       "decision": "approved",
+       "scope": "once"
+      },
+      {
+       "choiceId": "allow_local_prefix",
+       "label": "Always allow in this workspace: touch ...",
+       "decision": "approvedPolicyAmendment",
+       "scope": "localPersistent",
+       "rulePreview": "touch *"
+      },
+      {
+       "choiceId": "abort",
+       "label": "Reject",
+       "decision": "abort",
+       "scope": "once",
+       "acceptsFeedback": true
+      }
+     ],
+     "protectedWrite": false,
+     "judgeEscalated": false
+    }
+   }
+  },
+  {
+   "expectReply": 1
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "approval/requested",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "approvalId": "01a11a6d-4730-7000-8000-00000000a001",
+     "turnId": "$params:turn/start.commandId",
+     "taskId": "task-1",
+     "itemId": "01a11a6d-4730-7000-8000-00000000a001",
+     "toolCallId": "call_1",
+     "toolName": "bash",
+     "rawArgs": "{\"command\": \"touch notes.txt\", \"description\": \"Create the notes file\"}",
+     "subject": {
+      "kind": "shell",
+      "command": "touch notes.txt",
+      "workspaceRoot": "<workspace>",
+      "stages": [
+       {
+        "requirementId": {
+         "approvalId": "01a11a6d-4730-7000-8000-00000000a001",
+         "sourceIndex": 0
+        },
+        "position": 1,
+        "totalStages": 1,
+        "argv": [
+         "touch",
+         "notes.txt"
+        ],
+        "argvComplete": true,
+        "resolution": {
+         "kind": "unresolved"
+        },
+        "suggestedPrefix": {
+         "argvPrefix": [
+          "touch"
+         ],
+         "label": "Always allow in this workspace: touch ..."
+        }
+       }
+      ]
+     },
+     "currentRequirementId": {
+      "approvalId": "01a11a6d-4730-7000-8000-00000000a001",
+      "sourceIndex": 0
+     },
+     "availableChoices": [
+      {
+       "choiceId": "allow_once",
+       "label": "Allow once",
+       "decision": "approved",
+       "scope": "once"
+      },
+      {
+       "choiceId": "allow_local_prefix",
+       "label": "Always allow in this workspace: touch ...",
+       "decision": "approvedPolicyAmendment",
+       "scope": "localPersistent",
+       "rulePreview": "touch *"
+      },
+      {
+       "choiceId": "abort",
+       "label": "Reject",
+       "decision": "abort",
+       "scope": "once",
+       "acceptsFeedback": true
+      }
+     ],
+     "protectedWrite": false,
+     "judgeEscalated": false
+    }
+   }
+  },
+  {
+   "expect": "approval/decide"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "commandId": "$params.commandId",
+     "status": "accepted",
+     "approvalId": "$params.approvalId",
+     "terminal": true
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "approval/resolved",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "approvalId": "01a11a6d-4730-7000-8000-00000000a001",
+     "itemId": "01a11a6d-4730-7000-8000-00000000a001",
+     "turnId": "$params:turn/start.commandId",
+     "decision": "approved",
+     "policyResult": "allow",
+     "resolvedBy": "user"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "item/started",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "item": {
+      "turnId": "$params:turn/start.commandId",
+      "itemId": "01a11a6d-4730-7000-8000-00000000a001",
+      "kind": "toolCall",
+      "revision": 1,
+      "status": "inProgress",
+      "tool": "bash",
+      "callId": "call_1",
+      "args": "{\"command\": \"touch notes.txt\", \"description\": \"Create the notes file\"}"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "item/completed",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "item": {
+      "turnId": "$params:turn/start.commandId",
+      "itemId": "01a11a6d-4730-7000-8000-00000000a001",
+      "kind": "toolCall",
+      "revision": 2,
+      "status": "completed",
+      "tool": "bash",
+      "callId": "call_1",
+      "args": "{\"command\": \"touch notes.txt\", \"description\": \"Create the notes file\"}",
+      "visibleOutput": "{\n  \"command\": \"touch notes.txt\",\n  \"exit_code\": 0,\n  \"terminal_status\": \"completed\",\n  \"output\": \"\",\n  \"truncated\": false\n}"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "item/started",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "item": {
+      "turnId": "$params:turn/start.commandId",
+      "itemId": "message-1",
+      "kind": "agentMessage",
+      "revision": 1,
+      "status": "inProgress",
+      "text": ""
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "item/delta",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "itemId": "message-1",
+     "field": "text",
+     "delta": "Created notes.txt."
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "item/completed",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "item": {
+      "turnId": "$params:turn/start.commandId",
+      "itemId": "message-1",
+      "kind": "agentMessage",
+      "revision": 2,
+      "status": "completed",
+      "text": "Created notes.txt."
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/tokenUsage",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "turnId": "$params:turn/start.commandId",
+     "modelId": "muse-spark-1.3-contributor",
+     "usage": {
+      "inputTokens": 32350,
+      "outputTokens": 24,
+      "cachedTokens": 0,
+      "cacheWriteTokens": 0,
+      "cacheReadTokens": 0,
+      "reasoningTokens": 11
+     },
+     "promptTokens": 32350,
+     "totalTokens": 32374,
+     "durationMs": 1865
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/contextUsage",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "windowTokens": 1007997,
+     "usedTokens": 32374,
+     "pressure": "normal"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "item/completed",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "item": {
+      "turnId": "$params:turn/start.commandId",
+      "itemId": "reminder-1",
+      "kind": "reminderChild",
+      "revision": 2,
+      "status": "completed",
+      "fallbackText": "Reminder child session",
+      "reminderAgentId": "skill-reminder"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/statusChanged",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "status": "idle"
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "turn/completed",
+    "params": {
+     "sessionId": "$params:session/start.sessionId",
+     "turnId": "$params:turn/start.commandId",
+     "terminal": "completed",
+     "durationMs": 1200
+    }
+   }
+  }
+ ]
+}

@@ -26,6 +26,7 @@ ADAPTERS = {"antigravity": "apps/server/src/orchestration-v2/Adapters/Antigravit
             "fx": "packages/provider-fx/src/server/adapter.ts",
             "grok": "packages/provider-grok/src/server/adapter.ts",
             "kiro": "packages/provider-kiro/src/server/adapter.ts",
+            "muse": "packages/provider-muse/src/server/adapter.ts",
             "opencode": "packages/provider-opencode/src/server/adapter.ts",
             # OpenCode 2's adapter, whose capabilities an OpenCode 2 thread's session reports.
             "opencode2": "packages/provider-opencode/src/server/v2/adapter.ts",

@@ -545,6 +545,61 @@ PROVIDER_SCENARIOS = [
     {"name": "fx failed turn", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_failed.json"},
     {"name": "fx signed out", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_signed_out.json"},
     {"name": "fx missing", "instance": "fx", "enable": "fx", "model": "default", "scenario": None},
+    # Muse Code's `muse serve` over MSP, in Full access: the session starts on the catalog's default
+    # model (`allowAll`, `:unrestricted`, T3's MCP server optional), and the turn carries the runtime
+    # notes and the model's default effort. Reminder children stay hidden. Each waits for the status
+    # check, whose catalog resolves "default".
+    {"name": "muse turn", "instance": "muse", "enable": "muse", "model": "default", "scenario": "muse_turn.json",
+     "statusBeforeTurn": True},
+    # A second turn goes to the host the thread keeps, with its runtime notes again.
+    {"name": "muse second turn", "instance": "muse", "enable": "muse", "model": "default",
+     "scenario": "muse_two_turns.json", "followUp": "Now append a line", "statusBeforeTurn": True},
+    # A named model and effort start the session; a follow-up on Default switches the model back.
+    {"name": "muse model and effort", "instance": "muse", "enable": "muse", "model": "muse-spark-pro",
+     "modelOptions": [{"id": "reasoningEffort", "value": "max"}], "scenario": "muse_two_turns.json",
+     "followUp": "Now append a line", "followUpModel": {"instanceId": "muse", "model": "default"},
+     "statusBeforeTurn": True},
+    # An effort the model does not list falls back to the model's default.
+    {"name": "muse effort unlisted", "instance": "muse", "enable": "muse", "model": "muse-spark-pro",
+     "modelOptions": [{"id": "reasoningEffort", "value": "xhigh"}], "scenario": "muse_turn.json",
+     "statusBeforeTurn": True},
+    # Supervised: `promptUnmatched` and `:ask-me`, no `--disable-sandbox`; Muse's shell approval goes
+    # to the user with its own choices (no separate cancel), and the answer is `approval/decide`.
+    {"name": "muse approval", "instance": "muse", "enable": "muse", "model": "default",
+     "scenario": "muse_approval.json", "runtimeMode": "approval-required", "respond": {"decision": "accept"},
+     "statusBeforeTurn": True},
+    {"name": "muse approval declined", "instance": "muse", "enable": "muse", "model": "default",
+     "scenario": "muse_approval_declined.json", "runtimeMode": "approval-required",
+     "respond": {"decision": "decline"}, "statusBeforeTurn": True},
+    {"name": "muse approval always", "instance": "muse", "enable": "muse", "model": "default",
+     "scenario": "muse_approval.json", "runtimeMode": "approval-required",
+     "respond": {"decision": "acceptAlways"}, "statusBeforeTurn": True},
+    # Muse's card offers no "this session": the answer is refused, nothing is decided, and Muse
+    # settles the approval itself.
+    {"name": "muse approval for session", "instance": "muse", "enable": "muse", "model": "default",
+     "scenario": "muse_approval_session.json", "runtimeMode": "approval-required",
+     "respond": {"decision": "acceptForSession"}, "statusBeforeTurn": True},
+    # Auto runs as Supervised.
+    {"name": "muse auto", "instance": "muse", "enable": "muse", "model": "default", "scenario": "muse_approval.json",
+     "runtimeMode": "auto", "respond": {"decision": "accept"}, "statusBeforeTurn": True},
+    # Stop mid-command: `turn/interrupt`, Muse's cancelled end, and the host is kept.
+    {"name": "muse interrupt", "instance": "muse", "enable": "muse", "model": "default",
+     "scenario": "muse_interrupt.json", "interrupt": "command", "statusBeforeTurn": True},
+    # A message steers the running turn (`turn/steer` with the turn's id).
+    {"name": "muse steer", "instance": "muse", "enable": "muse", "model": "default", "scenario": "muse_steer.json",
+     "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}, "statusBeforeTurn": True},
+    {"name": "muse failed turn", "instance": "muse", "enable": "muse", "model": "default",
+     "scenario": "muse_failed.json", "statusBeforeTurn": True},
+    # A 429 refusal with its quota: a usage limit, with when it resets.
+    {"name": "muse usage limit", "instance": "muse", "enable": "muse", "model": "default",
+     "scenario": "muse_usage_limit.json", "statusBeforeTurn": True},
+    # Muse exits mid-turn: the host fails, and the turn with it, broken.
+    {"name": "muse crash", "instance": "muse", "enable": "muse", "model": "default", "scenario": "muse_crash.json",
+     "statusBeforeTurn": True},
+    {"name": "muse missing", "instance": "muse", "enable": "muse", "model": "default", "scenario": None},
+    # The turn calls T3's tools on the MCP server its session's config names.
+    {"name": "muse agent mcp", "instance": "muse", "enable": "muse", "model": "default", "scenario": "muse_mcp.json",
+     "statusBeforeTurn": True},
     # Grok over ACP: its turns run in the `grok agent stdio` session the thread keeps, and stream
     # reasoning, a command and the reply.
     {"name": "grok turn", "instance": "grok", "enable": "grok", "model": "grok-build", "scenario": "grok_turn.json"},
@@ -957,11 +1012,31 @@ FX_STATUS_SPEC = {"commands": [
     _fx_ok(["status", "--json"], '{"auth": "chatgpt"}', "codex"),
     _fx_ok(["models", "--json"], json.dumps({"ids": ["gpt-6.1-sol", "gpt-6-astra"]}), "codex"),
     _fx_ok(["status", "--json"], '{"auth": "missing"}', "grok")]}
+# The fake Muse: a turn's host runs `muse serve --trust-workspace [...]`, which replays the scenario
+# (the reference gives Muse no T3CODE_THREAD_ID, so its argv tells them apart); the status check's
+# version and read-only `serve --disable-shell ...` answer from MUSE_STATUS_SPEC: two models, the
+# first the default.
+FAKE_MUSE = """#!/bin/sh
+case "$*" in
+  "serve --trust-workspace"*) exec python3 "$FAKE_PROVIDER_CLI" "$@";;
+esac
+FAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 "$FAKE_STATUS_CLI" "$FAKE_MUSE_STATUS" "$@"
+"""
+MUSE_STATUS_SPEC = {"commands": [
+    {"args": ["--version"], "stdout": "muse 1.4.3-R5018.1", "stderr": "", "exit": 0},
+    {"prefix": ["serve", "--disable-shell"], "rpc": {
+        "initialize": {"schema": {"version": 1, "fingerprint": "sha256:fixture"}, "grantedCapabilities": []},
+        "model/list": {"providerId": "meta", "models": [
+            {"modelId": "muse-spark-1.3-contributor", "displayLabel": "Muse Spark", "providerId": "meta",
+             "isDefault": True, "variants": ["low", "medium", "high", "xhigh", "max"], "defaultReasoningEffort": "high"},
+            {"modelId": "muse-spark-pro", "displayLabel": "Muse Spark Pro", "providerId": "meta", "isDefault": False,
+             "variants": ["medium", "high", "max"], "defaultReasoningEffort": "medium"}]}}}]}
 TURN_CLIS = {"codex": "codex", "claudeAgent": "claude", "grok": "grok", "pi": "pi", "acp-local": "fixture-acp",
              "opencode": "opencode",
              "antigravity": "agy",
              "kiro": "kiro-cli",
              "fx": "fx",
+             "muse": "muse",
              # Installed in the server's home (`registryAgent`), not on PATH.
              "acp-registry": "registry-agent"}
 # The ACP Registry agent a `registryAgent` scenario's servers find in their cached index, already
@@ -1190,7 +1265,8 @@ def write_fake_clis(directory, drivers):
     directory.mkdir(parents=True, exist_ok=True)
     for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK),
                          ("fixture-acp", FAKE_ACP_AGENT), ("pi", FAKE_PI), ("opencode", FAKE_OPENCODE),
-                         ("agy", FAKE_AGY), ("kiro-cli", FAKE_KIRO), ("fx", FAKE_FX)):
+                         ("agy", FAKE_AGY), ("kiro-cli", FAKE_KIRO), ("fx", FAKE_FX),
+                         ("muse", FAKE_MUSE)):
         if name in drivers:
             (directory / name).write_text(script)
             (directory / name).chmod(0o755)
@@ -1204,6 +1280,8 @@ def write_fake_clis(directory, drivers):
         (directory / "kiro-cli.status.json").write_text(json.dumps(KIRO_STATUS_SPEC))
     if "fx" in drivers:
         (directory / "fx.status.json").write_text(json.dumps(FX_STATUS_SPEC))
+    if "muse" in drivers:
+        (directory / "muse.status.json").write_text(json.dumps(MUSE_STATUS_SPEC))
 
 
 def write_text_provider(directory, provider):
@@ -1451,6 +1529,10 @@ def cli_approvals(log):
         if isinstance(request, dict) and request.get("subtype") in ("set_model", "apply_flag_settings"):
             # A running Claude CLI switched to another model selection.
             out.append("control " + json.dumps(request, sort_keys=True))
+        elif method == "approval/decide":
+            # A Muse decision: the choice the server picked for the user's answer.
+            params = {k: v for k, v in (message.get("params") or {}).items() if k not in ("sessionId", "commandId")}
+            out.append("approval/decide " + json.dumps(params, sort_keys=True))
         elif method == "thread/inject_items":
             # A context handoff's history Codex took as native items.
             # Handoff ids end in a UUID each server draws.
@@ -1649,7 +1731,7 @@ def cli_launch(log, root):
         launches[entry.get("pid")] = f"launch {json.dumps(mask(argv))} env {json.dumps(mask(env), sort_keys=True)}"
         order.append(entry.get("pid"))
     messages = Path(str(log) + ".messages")
-    initializes, sessions, calls, claude_initializes, acp_calls = {}, [], [], {}, []
+    initializes, sessions, calls, claude_initializes, acp_calls, muse_calls = {}, [], [], {}, [], []
     for line in (messages.read_text().splitlines() if messages.exists() else []):
         entry = json.loads(line)
         try:
@@ -1666,7 +1748,10 @@ def cli_launch(log, root):
             claude_initializes[entry["pid"]] = without_unserved(request.get("appendSystemPrompt", ""), unserved)
         if method in ("thread/start", "thread/resume"):
             sessions.append(entry["pid"])
-        if acp and method in ACP_LAUNCH_METHODS:
+        if acp and method in MUSE_LAUNCH_METHODS:
+            muse_calls.append((entry["pid"], method,
+                               f"muse {method} {json.dumps(mask(muse_params(method, message.get('params'), unserved)), sort_keys=True)}"))
+        elif acp and method in ACP_LAUNCH_METHODS:
             acp_calls.append((entry["pid"], method,
                               f"acp {method} {json.dumps(mask(acp_params(method, message.get('params'), unserved)), sort_keys=True)}"))
         if method in ("thread/start", "thread/resume", "turn/start"):
@@ -1679,6 +1764,9 @@ def cli_launch(log, root):
     # none, and Rust does not probe ACP Registry agents yet).
     prompted = {pid for pid, method, _ in acp_calls if method == "session/prompt"}
     calls.extend(line for pid, _, line in acp_calls if pid in prompted)
+    # A Muse host's requests, from the hosts that started a turn (the status check's runs none).
+    started = {pid for pid, method, _ in muse_calls if method == "turn/start"}
+    calls.extend(line for pid, _, line in muse_calls if pid in started)
     session = sessions[-1] if sessions else None
     # Claude Code has no thread/start: its turn is the last CLI launched.
     turn_pid = session if session in launches else (order[-1] if order else None)
@@ -1749,6 +1837,23 @@ def acp_params(method, params, unserved):
         for block in params.get("prompt") or []:
             if block.get("type") == "text":
                 block["text"] = without_unserved(block["text"], unserved)
+    return params
+
+
+# The MSP requests a server sends a turn's Muse host, compared with their parameters (the ids T3
+# mints are UUIDs, masked).
+MUSE_LAUNCH_METHODS = ("initialize", "session/start", "session/resume", "session/setApprovalMode",
+                       "session/setModel", "turn/start", "turn/steer", "turn/interrupt", "approval/decide")
+
+
+def muse_params(method, params, unserved):
+    """A Muse request's parameters as both servers can match them: the turn's text parts as Rust
+    sends them, without what names a tool Rust does not serve yet."""
+    params = json.loads(json.dumps(params or {}))
+    if method in ("turn/start", "turn/steer"):
+        for part in params.get("input") or []:
+            if isinstance(part, dict) and part.get("type") == "text":
+                part["text"] = without_unserved(part["text"], unserved)
     return params
 
 
@@ -2489,6 +2594,7 @@ def scenario_env(temporary, name, root, scenario, drivers):
            "FAKE_AGY_STATUS": str(fake_bin / "agy.status.json"),
            "FAKE_KIRO_STATUS": str(fake_bin / "kiro-cli.status.json"),
            "FAKE_FX_STATUS": str(fake_bin / "fx.status.json"),
+           "FAKE_MUSE_STATUS": str(fake_bin / "muse.status.json"),
            # "titleAfterTurn": the title CLI answers once the driver saw the turn settle.
            **({"FAKE_TITLE_GATE": str(log) + ".turn-settled"} if scenario.get("titleAfterTurn") else {}),
            "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}
@@ -2558,6 +2664,10 @@ def provider_turns(args, credentials):
                         rpc(url, cookie, "peerLinks.link", {"url": peer.url, "pairingCode": "fixture-code",
                                                             "access": "full-access"})
                     seeded = seed_turn(url, cookie, temporary / f"{name}-checkouts", scenario)
+                    if scenario.get("statusBeforeTurn"):
+                        # The turn reads the instance's checked status (its model catalog), so
+                        # both servers send it once the check the seed's settings started ended.
+                        provider_status(url, cookie, scenario["instance"], temporary)
                     if scenario.get("titleAfterTurn"):
                         seeded["settledFile"] = str(log) + ".turn-settled"
                     outcomes[name] = run_client(args, url, cookie, seeded)

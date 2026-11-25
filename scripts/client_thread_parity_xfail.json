@@ -312,5 +312,51 @@
   },
   "codex native subagent activity": {
     "live": "Codex reports a subagent's completion as both item/started and item/completed of its subAgentActivity, and the reference updates the subagent for each; Rust's subagent item does not change the second time, so its parent's stream reports the completion once. Everything else the stream carries matches."
+  },
+  "muse turn": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together."
+  },
+  "muse second turn": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together."
+  },
+  "muse model and effort": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together."
+  },
+  "muse effort unlisted": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together."
+  },
+  "muse agent mcp": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together."
+  },
+  "muse approval": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together. During the approval the reference also sends the request's runtime-request.updated with the session's `waiting` update, and the request's records again once Muse settles it, where Rust sends each once."
+  },
+  "muse approval always": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together. During the approval the reference also sends the request's runtime-request.updated with the session's `waiting` update, and the request's records again once Muse settles it, where Rust sends each once."
+  },
+  "muse auto": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together. During the approval the reference also sends the request's runtime-request.updated with the session's `waiting` update, and the request's records again once Muse settles it, where Rust sends each once."
+  },
+  "muse approval declined": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together. During the approval the reference also sends the request's runtime-request.updated with the session's `waiting` update, and the request's records again once Muse settles it, where Rust sends each once."
+  },
+  "muse interrupt": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live."
+  },
+  "muse steer": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together."
+  },
+  "muse failed turn": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. Rust also sends the turn's failure row (the adapter's `failure:<turn>` item) with the provider turn's start, ahead of the session updates (`ready` or `error`, with the last error) that the reference sends first."
+  },
+  "muse usage limit": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. Rust also sends the turn's failure row (the adapter's `failure:<turn>` item) with the provider turn's start, ahead of the session updates (`ready` or `error`, with the last error) that the reference sends first."
+  },
+  "muse crash": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. Rust also sends the turn's failure row (the adapter's `failure:<turn>` item) with the provider turn's start, ahead of the session updates (`ready` or `error`, with the last error) that the reference sends first."
+  },
+  "muse approval for session": {
+    "live": "Rust does not stream the reference Muse adapter's provider session updates (`running` as the turn starts and once it is reported) or its provider thread's `active` update when the turn starts, as Rust's projection sends neither live. It also sends an assistant message's node update before its message.updated, where the reference sends the message first, and reports a model step's token usage and the context usage as provider turn and thread updates of their own, where the reference's provider commit batch takes them together. During the approval the reference also sends the request's runtime-request.updated with the session's `waiting` update, and the request's records again once Muse settles it, where Rust sends each once.",
+    "runtimeRequests": "The reference refuses an answer Muse's card did not offer (`acceptForSession`) and records the request as Muse then settles it (`cancel`, from Muse's `abort`), where Rust records the user's answer as the client sends it, before the workspace refuses it; both send Muse nothing and say the answer was not delivered."
   }
 }
