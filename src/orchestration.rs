@@ -220,7 +220,7 @@ async fn dispatch_command<H: CommandHost>(
         && command["freshContext"] == true
         && !thread_has_active_run(&state, id).await
     {
-        detach_session(&state, id, "Fresh scheduled session.")
+        detach_session(&state, id, FRESH_CONTEXT_DETACH_REASON)
             .await
             .map_err(|error| {
                 json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":command_id,"commandType":kind,"message":error.to_string()})
@@ -861,6 +861,63 @@ async fn start_run<H: CommandHost>(
     Ok(seq)
 }
 
+/// The reason a fresh context detaches the thread's provider session with.
+const FRESH_CONTEXT_DETACH_REASON: &str = "Started a fresh session.";
+
+/// The reason a restart stops the running turn with.
+const RESTART_STOP_REASON: &str = "Stopped to send a new message";
+
+/// Puts a restart's queued run (`message_id`'s) first in the queue and
+/// stops the run it restarts; that run's end starts it.
+async fn restart_run<H: CommandHost>(
+    state: &Arc<H>,
+    receipt: &CommandReceipt,
+    thread_id: &str,
+    message_id: &Value,
+    target: &str,
+) -> anyhow::Result<()> {
+    let reorder = state
+        .store
+        .read()
+        .await
+        .threads
+        .get(thread_id)
+        .and_then(|thread| {
+            let queued: Vec<&Run> = thread
+                .runs
+                .iter()
+                .filter(|run| run.status == "queued")
+                .collect();
+            let own = queued
+                .iter()
+                .position(|run| run.user_message_id.as_deref() == message_id.as_str())?;
+            (own > 0).then(|| (queued[own].id, queued[0].id))
+        });
+    if let Some((run_id, before)) = reorder {
+        state
+            .commit(Event::RunReordered {
+                thread_id: thread_id.to_owned(),
+                run_id,
+                before_run_id: Some(before),
+            })
+            .await?;
+    }
+    let stop = json!({
+        "type": "run.interrupt",
+        "commandId": format!("{}:restart-stop", receipt.command_id),
+        "threadId": thread_id,
+        "runId": target,
+        "reason": RESTART_STOP_REASON,
+    });
+    let stop_receipt = CommandReceipt {
+        command_id: format!("{}:restart-stop", receipt.command_id),
+        thread_id: thread_id.to_owned(),
+        command_type: "run.interrupt".into(),
+    };
+    Box::pin(apply_command(state.clone(), &stop, &stop_receipt, None)).await?;
+    Ok(())
+}
+
 /// A run that holds the thread: those after it queue (`isActiveRun`).
 pub(crate) fn is_live(status: &str) -> bool {
     matches!(status, "preparing" | "starting" | "running" | "waiting")
@@ -1150,6 +1207,34 @@ async fn apply_command<H: CommandHost>(
             {
                 start_next_queued(&state, receipt, thread_id).await?;
             }
+            // A restart of a running turn stops it and runs the message
+            // next, ahead of anything queued, as the reference does for a
+            // provider that cannot restart a turn with new input (Claude's
+            // `queuedRunStop`). A turn that already ended leaves the message
+            // to start as a turn of its own.
+            let mut restart_target = None;
+            if command["dispatchMode"]["type"] == "restart_active" && !asks_output {
+                let target = command["dispatchMode"]["targetRunId"]
+                    .as_str()
+                    .unwrap_or_default();
+                let running =
+                    state
+                        .store
+                        .read()
+                        .await
+                        .threads
+                        .get(thread_id)
+                        .is_some_and(|thread| {
+                            thread
+                                .runs
+                                .iter()
+                                .any(|run| run.wire_id() == target && run.status == "running")
+                        });
+                if running {
+                    restart_target = Some(target.to_owned());
+                    queue_steer = true;
+                }
+            }
             if command["dispatchMode"]["type"] == "steer_active" && !asks_output {
                 match steer::plan(&state, thread_id, command).await? {
                     steer::SteerPlan::Start => {}
@@ -1361,6 +1446,9 @@ async fn apply_command<H: CommandHost>(
             )
             .await?;
             // A message to a delegated child whose task finished starts a follow-up task.
+            if let Some(target) = restart_target {
+                restart_run(&state, receipt, thread_id, &command["messageId"], &target).await?;
+            }
             delegation::record_followup(&state, thread_id, command).await?;
             // Its effect runs once the message it titles is recorded.
             if let Some(effect) = title_effect {
