@@ -39,12 +39,12 @@ const MAX_LABEL_LENGTH: usize = 160;
 /// many lost processes in a row (the reference's `MAX_CONTINUATION_CHAIN`).
 const MAX_PROCESS_LOSSES: u32 = 3;
 /// Without a loss count, a chain of continuations this long within
-/// [`CONTINUATION_LOOP_WINDOW`] seconds stops.
-const CONTINUATION_LOOP_WINDOW: u64 = 5 * 60;
+/// [`CONTINUATION_LOOP_WINDOW`] milliseconds stops.
+const CONTINUATION_LOOP_WINDOW: u64 = 5 * 60 * 1000;
 
-/// Seconds before a continuation that failed to start is tried again, by
-/// how many have failed in a row (`continuationStartRetryDelayMs`).
-const CONTINUATION_START_RETRY_DELAYS: [u64; 2] = [60, 180];
+/// Milliseconds before a continuation that failed to start is tried again,
+/// by how many have failed in a row (`continuationStartRetryDelayMs`).
+const CONTINUATION_START_RETRY_DELAYS: [u64; 2] = [60_000, 180_000];
 
 /// A scheduled prompt whose start restarts cut off this many times is not
 /// sent again (the reference's `MAX_RESENDS`).
@@ -247,7 +247,7 @@ fn work_note(work: &[Value]) -> String {
 }
 
 /// The events that reconcile every thread's provider runtime after a
-/// restart's `trigger` (`shutdown` or `startup`) at `at` (seconds).
+/// restart's `trigger` (`shutdown` or `startup`) at `at` (milliseconds).
 /// `now_iso` is the time a snooze is compared with; `settings` are the
 /// effective settings.
 pub(crate) fn reconcile(
@@ -605,7 +605,7 @@ pub(crate) struct Continuation {
     pub source: Uuid,
     /// The `message.dispatch` command.
     pub command: Value,
-    /// When to send it (seconds).
+    /// When to send it (milliseconds since the epoch).
     pub due: u64,
 }
 
@@ -1234,7 +1234,7 @@ mod tests {
         });
         let commands = continuations(&store(a.clone()), &json!({}), "2026-01-01T00:00:00Z");
         assert_eq!(commands.len(), 1);
-        assert_eq!((commands[0].source, commands[0].due), (failed.id, 160));
+        assert_eq!((commands[0].source, commands[0].due), (failed.id, 60_100));
         // The retry carries its source's losses: a crash under it counts on.
         assert_eq!(effect_losses(&a, failed.id), Some(1));
         // A second failure waits three minutes; a third is final.
@@ -1242,7 +1242,7 @@ mod tests {
         second.restart_continuation_of = Some(failed.id);
         second.finished_at = Some(200);
         a.runs.push(second.clone());
-        assert_eq!(retry_delay(&a, &second), Some(180));
+        assert_eq!(retry_delay(&a, &second), Some(180_000));
         let mut third = run("failed");
         third.restart_continuation_of = Some(second.id);
         a.runs.push(third.clone());

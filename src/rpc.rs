@@ -2089,7 +2089,7 @@ async fn dispatch_method(state: &Arc<AppState>, method: &str, params: &Value) ->
     if method == "server.getHostResources" {
         let (available_memory, total_memory) = proc_memory();
         return Reply::Success(
-            json!({"sampledAt":crate::now()*1000,"cpuUtilization":0.0,"cpuCount":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1),"availableMemoryBytes":available_memory,"totalMemoryBytes":total_memory}),
+            json!({"sampledAt":crate::now(),"cpuUtilization":0.0,"cpuCount":std::thread::available_parallelism().map(|n|n.get()).unwrap_or(1),"availableMemoryBytes":available_memory,"totalMemoryBytes":total_memory}),
         );
     }
     if method == "server.retryResourceTelemetry" {
@@ -3574,7 +3574,7 @@ pub(crate) async fn create_new_project(state: &AppState, name: &str) -> Result<V
         id: id.clone(),
         name: name.into(),
         path: created.workspace_root.to_string_lossy().into_owned(),
-        created_at: crate::store::project_now(),
+        created_at: crate::now(),
     };
     let row = crate::projects::wire(&project);
     if state

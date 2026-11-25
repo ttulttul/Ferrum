@@ -832,7 +832,7 @@ pub(crate) fn prepare_recovery(
     run: &Run,
     user_text: &str,
     provider: &ProviderTurn,
-    now_secs: u64,
+    now_ms: u64,
 ) -> Option<Recovery> {
     let projection = thread.full_projection();
     let run_wire_id = run.wire_id();
@@ -858,7 +858,7 @@ pub(crate) fn prepare_recovery(
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let created_at = iso(now_secs);
+    let created_at = iso(now_ms);
     let transfer_id = format!(
         "context-transfer:type:provider_resume_fallback:source-thread:{}:target-thread:{}:{}",
         uri_component(&thread.id),
@@ -904,7 +904,7 @@ pub(crate) fn prepare_recovery(
         handoff_token_cap(),
         &created_at,
     );
-    let delivery = prepare(thread, run, user_text, provider, now_secs, Some(&handoff))?;
+    let delivery = prepare(thread, run, user_text, provider, now_ms, Some(&handoff))?;
     if delivery.over_budget {
         return None;
     }
@@ -1070,7 +1070,7 @@ pub(crate) fn prepare_side_chat(
     source: &Thread,
     run: &Run,
     provider: &ProviderTurn,
-    now_secs: u64,
+    now_ms: u64,
 ) -> Option<Value> {
     if thread.row["lineage"]["sideChat"] != true {
         return None;
@@ -1132,7 +1132,7 @@ pub(crate) fn prepare_side_chat(
     let from_instance = transfer["sourceProviderInstanceId"]
         .as_str()
         .unwrap_or(to_instance);
-    let created_at = iso(now_secs);
+    let created_at = iso(now_ms);
     Some(json!({
         "id": allocate_handoff_id(&thread.id, from_instance, to_instance),
         "transferId": transfer["id"],
@@ -1189,7 +1189,7 @@ pub(crate) fn prepare_merge_back(
     source: &Thread,
     run: &Run,
     provider: &ProviderTurn,
-    now_secs: u64,
+    now_ms: u64,
 ) -> Option<Recovery> {
     let transfer = thread.context_transfers.iter().find(|transfer| {
         transfer["type"] == "merge_back"
@@ -1239,7 +1239,7 @@ pub(crate) fn prepare_merge_back(
         .filter_map(|item| historical_message(item, None))
         .collect();
     let selected = select_history(&messages, &coverage, 0, &[], handoff_token_cap());
-    let created_at = iso(now_secs);
+    let created_at = iso(now_ms);
     let source_instance = source_run["providerInstanceId"]
         .as_str()
         .unwrap_or_default();
@@ -1330,7 +1330,7 @@ pub(crate) fn prepare_provider_switch(
     thread: &Thread,
     run: &Run,
     provider: &ProviderTurn,
-    now_secs: u64,
+    now_ms: u64,
 ) -> Option<Recovery> {
     let active = thread.provider.thread.as_ref()?;
     let driver = run.driver.as_deref()?;
@@ -1411,7 +1411,7 @@ pub(crate) fn prepare_provider_switch(
                 .is_some_and(|id| covered_ids.contains(id))
         })
         .collect();
-    let created_at = iso(now_secs);
+    let created_at = iso(now_ms);
     let from_instance = latest["providerInstanceId"].as_str().unwrap_or_default();
     let to_instance = run_row["providerInstanceId"]
         .as_str()
@@ -1547,7 +1547,7 @@ pub(crate) fn prepare_fork(
     run: &Run,
     user_text: &str,
     provider: &ProviderTurn,
-    now_secs: u64,
+    now_ms: u64,
 ) -> Option<(Recovery, Option<String>)> {
     let transfer = thread.context_transfers.iter().find(|transfer| {
         transfer["type"] == "fork"
@@ -1593,7 +1593,7 @@ pub(crate) fn prepare_fork(
             }))
         })
         .unwrap_or((1, 1));
-    let created_at = iso(now_secs);
+    let created_at = iso(now_ms);
     let source_instance = source_run["providerInstanceId"]
         .as_str()
         .unwrap_or_default();
@@ -1623,7 +1623,7 @@ pub(crate) fn prepare_fork(
     } else {
         json!([source_provider_thread])
     };
-    let delivery = prepare(thread, run, user_text, provider, now_secs, Some(&handoff))?;
+    let delivery = prepare(thread, run, user_text, provider, now_ms, Some(&handoff))?;
     let mut resolved = transfer.clone();
     resolved["targetProviderInstanceId"] = json!(to_instance);
     resolved["targetRunId"] = json!(run_wire_id);
@@ -1692,9 +1692,9 @@ pub(crate) fn prepare_for_turn(
     run: &Run,
     user_text: &str,
     provider: &ProviderTurn,
-    now_secs: u64,
+    now_ms: u64,
 ) -> Option<PreparedHandoff> {
-    prepare(thread, run, user_text, provider, now_secs, None)
+    prepare(thread, run, user_text, provider, now_ms, None)
 }
 
 /// [`prepare_for_turn`], or with `recovery` (a resume fallback's
@@ -1707,7 +1707,7 @@ fn prepare(
     run: &Run,
     user_text: &str,
     provider: &ProviderTurn,
-    now_secs: u64,
+    now_ms: u64,
     recovery: Option<&Value>,
 ) -> Option<PreparedHandoff> {
     let projection = thread.full_projection();
@@ -1934,7 +1934,7 @@ fn prepare(
         .collect();
 
     let token_cap = handoff_token_cap();
-    let now_iso = iso(now_secs);
+    let now_iso = iso(now_ms);
     let mut retry_handoffs = Vec::new();
     // A resume fallback's summary already covers every earlier run in order;
     // a retry copy after it would rank older missed requests as the newest.

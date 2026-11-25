@@ -273,7 +273,12 @@ mod tests {
             random: Arc::new(SystemRandom),
         };
         scoped(platform, || {
-            assert_eq!(crate::store::now(), 1_700_000_000);
+            // Event times keep the clock's milliseconds, as the reference's do.
+            assert_eq!(crate::store::now(), 1_700_000_000_123);
+            assert_eq!(
+                crate::thread_projection::iso(crate::store::now()),
+                "2023-11-14T22:13:20.123Z"
+            );
             assert_eq!(crate::auth_service::now(), 1_700_000_000_123);
             assert_eq!(
                 crate::auth_service::iso(crate::auth_service::now()),

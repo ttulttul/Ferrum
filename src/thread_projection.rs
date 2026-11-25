@@ -69,8 +69,11 @@ pub(crate) fn message_attachments(message: &crate::ConversationMessage) -> Value
         .unwrap_or_else(|| json!([]))
 }
 
-pub(crate) fn iso(seconds: u64) -> String {
-    auth_service::iso((seconds as i64).saturating_mul(1000))
+/// An event time (milliseconds since the epoch) as the reference writes it:
+/// ISO 8601 with three digits of milliseconds and `Z`, as Effect's
+/// `DateTime.formatIso` gives.
+pub(crate) fn iso(millis: u64) -> String {
+    auth_service::iso(i64::try_from(millis).unwrap_or(i64::MAX))
 }
 
 /// JavaScript's encodeURIComponent, which the reference uses to nest ids in ids.
@@ -955,7 +958,7 @@ impl Thread {
         }
         // A thread logged without its row; a patch may since have set a few
         // fields on it, which win over the defaults.
-        let at = auth_service::iso((self.created_at as i64).saturating_mul(1000));
+        let at = iso(self.created_at);
         let mut row = self.default_row(&at);
         if let (Some(row), Some(set)) = (row.as_object_mut(), self.row.as_object()) {
             for (key, value) in set {
@@ -1239,8 +1242,8 @@ impl Thread {
             .collect();
         keyed.sort_by_key(|(index, _)| *index);
         let mut messages: Vec<Value> = keyed.into_iter().map(|(_, message)| message).collect();
-        // Rust's message times are whole seconds, so a steer goes right
-        // after the message that was last when it arrived.
+        // Message times can tie (older logs hold whole seconds), so a steer
+        // goes right after the message that was last when it arrived.
         for message in self.messages.iter().filter(|m| m.steer.is_some()) {
             let Some(from) = messages.iter().position(|m| m["id"] == message.id.as_str()) else {
                 continue;
@@ -1670,14 +1673,17 @@ fn slim_shell(thread_id: &str, slim: &crate::stored_projection::SlimView<'_>) ->
     shell
 }
 
-/// Seconds since the epoch of an ISO timestamp, 0 when it does not parse.
-fn iso_seconds(value: &Value) -> u64 {
+/// Milliseconds since the epoch of an ISO timestamp, 0 when it does not
+/// parse.
+pub(crate) fn iso_millis(value: &Value) -> u64 {
     value
         .as_str()
         .and_then(|text| {
             time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
         })
-        .map_or(0, |at| at.unix_timestamp().max(0) as u64)
+        .map_or(0, |at| {
+            (at.unix_timestamp_nanos() / 1_000_000).max(0) as u64
+        })
 }
 
 impl Thread {
@@ -1742,7 +1748,7 @@ impl Thread {
                 }
                 .to_owned(),
                 content: message["text"].as_str().unwrap_or_default().to_owned(),
-                created_at: iso_seconds(&message["createdAt"]),
+                created_at: iso_millis(&message["createdAt"]),
                 creation_source: message["creationSource"].as_str().map(str::to_owned),
                 scheduled_task_id: message["scheduledTaskId"].as_str().map(str::to_owned),
                 follows_thread_selection: message["followsThreadSelection"] == true,
@@ -1769,7 +1775,7 @@ impl Thread {
             status: if active { "running" } else { "idle" }.into(),
             messages,
             runs,
-            created_at: iso_seconds(&row["createdAt"]),
+            created_at: iso_millis(&row["createdAt"]),
             archived: !row["archivedAt"].is_null(),
             settled: !row["settledAt"].is_null(),
             snoozed_until: text("snoozedUntil"),
@@ -1816,9 +1822,9 @@ fn stored_runs(thread_id: &str, projection: &Value) -> Vec<crate::Run> {
                 thread_id: thread_id.to_owned(),
                 provider: "default".into(),
                 status: run["status"].as_str().unwrap_or("failed").to_owned(),
-                started_at: iso_seconds(started),
+                started_at: iso_millis(started),
                 finished_at: (!run["completedAt"].is_null())
-                    .then(|| iso_seconds(&run["completedAt"])),
+                    .then(|| iso_millis(&run["completedAt"])),
                 error: None,
                 user_message_id: run["userMessageId"].as_str().map(str::to_owned),
                 queue_held: run["queueHeld"] == true,
@@ -1871,7 +1877,7 @@ fn stored_checkpoints(projection: &Value) -> Vec<crate::CheckpointRecord> {
                 .and_then(|scope| scope["cwd"].as_str())
                 .unwrap_or_default()
                 .to_owned(),
-            captured_at: iso_seconds(&checkpoint["capturedAt"]),
+            captured_at: iso_millis(&checkpoint["capturedAt"]),
             ready: checkpoint["status"] == "ready",
         })
         .collect()
@@ -1897,7 +1903,7 @@ fn stored_provider(
             threads
                 .iter()
                 .filter(|t| t["appThreadId"] == thread_id && t["ownerNodeId"].is_null())
-                .max_by_key(|t| iso_seconds(&t["updatedAt"]))
+                .max_by_key(|t| iso_millis(&t["updatedAt"]))
         });
     let Some(record) = record else {
         return state;
@@ -1938,16 +1944,16 @@ fn stored_provider(
         .into_iter()
         .flatten()
         .filter(|session| session["providerInstanceId"] == instance)
-        .max_by_key(|session| iso_seconds(&session["updatedAt"]));
+        .max_by_key(|session| iso_millis(&session["updatedAt"]));
     state.prior_session_id = session.and_then(|session| session["id"].as_str().map(str::to_owned));
     // No session of the thread is live when the database holds none, or its
     // latest is stopped: a restart then has none to stop, as the reference's
     // recovery selects only threads with a live session.
     match session {
         Some(session) if session["status"] == "stopped" => {
-            state.session_stopped_at = Some(iso_seconds(&session["updatedAt"]));
+            state.session_stopped_at = Some(iso_millis(&session["updatedAt"]));
         }
-        None => state.session_stopped_at = Some(iso_seconds(&record["updatedAt"])),
+        None => state.session_stopped_at = Some(iso_millis(&record["updatedAt"])),
         Some(_) => {}
     }
     state.prior_usage = projection["providerTurns"]
@@ -2004,8 +2010,8 @@ fn stored_provider(
                 .flatten(),
             driver,
             first_run: crate::Run::uuid_for(&first_run),
-            created_at: iso_seconds(&record["createdAt"]),
-            updated_at: iso_seconds(&record["updatedAt"]),
+            created_at: iso_millis(&record["createdAt"]),
+            updated_at: iso_millis(&record["updatedAt"]),
             native_id,
             conversation_head: record["nativeConversationHeadRef"]["nativeId"]
                 .as_str()

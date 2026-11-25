@@ -118,9 +118,9 @@ pub(crate) async fn plan<H: CommandHost>(
     {
         return Ok(SteerPlan::Queue);
     }
-    // The message it follows: Rust's message times are whole seconds, too
-    // coarse to order it among the provider's messages as the reference
-    // does (by creation time).
+    // The message it follows: message times can tie (older logs hold whole
+    // seconds), too coarse to order it among the provider's messages as the
+    // reference does (by creation time).
     let after_message = thread.projection()["messages"]
         .as_array()
         .and_then(|messages| messages.last())

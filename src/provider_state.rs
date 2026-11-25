@@ -194,7 +194,7 @@ pub struct PlanRecord {
 }
 
 impl ProviderState {
-    /// Apply `run`'s provider `event`, recorded at `at` (seconds).
+    /// Apply `run`'s provider `event`, recorded at `at` (milliseconds).
     pub(crate) fn apply(&mut self, run: Uuid, event: &ProviderEvent, at: u64) {
         if let ProviderEvent::TurnTerminal { closing, .. } = event {
             for event in closing {

@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// Seconds since the epoch, from the platform clock.
+/// Milliseconds since the epoch, from the platform clock: the time an event
+/// commits at, as the reference's `DateTime.now` keeps it. Logs written
+/// before carry whole seconds, which read as milliseconds ([`millis`]).
 pub(crate) fn now() -> u64 {
-    crate::platform::now_secs()
+    crate::platform::now_ms().max(0) as u64
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -17,34 +19,44 @@ pub struct Project {
     /// When the project was created, in milliseconds since the epoch, as
     /// the reference stores it, so projects created within one second keep
     /// their order. Logs written before carry whole seconds, which read as
-    /// milliseconds too ([`project_millis`]).
-    #[serde(deserialize_with = "project_millis")]
+    /// milliseconds too ([`millis`]).
+    #[serde(deserialize_with = "millis")]
     pub created_at: u64,
 }
 
-/// Below this, a project's `created_at` is whole seconds (until the year
-/// 5138); at or above it, milliseconds (since March 1973).
+/// Below this, a logged time is whole seconds (until the year 5138); at or
+/// above it, milliseconds (since March 1973).
 const MILLIS_FROM: u64 = 100_000_000_000;
 
-/// A project's creation time in milliseconds, from either unit.
-fn project_millis<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
-    let value = u64::deserialize(deserializer)?;
-    Ok(if value < MILLIS_FROM {
+/// A logged time in milliseconds, from either unit: logs written before
+/// event times moved to milliseconds hold whole seconds.
+pub(crate) fn as_millis(value: u64) -> u64 {
+    if value < MILLIS_FROM {
         value.saturating_mul(1000)
     } else {
         value
-    })
+    }
 }
 
-/// The time a new project is created at (milliseconds).
-pub(crate) fn project_now() -> u64 {
-    crate::platform::now_ms().max(0) as u64
+/// Deserializes a logged time in milliseconds, from either unit ([`as_millis`]).
+pub(crate) fn millis<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    u64::deserialize(deserializer).map(as_millis)
 }
+
+/// As [`millis`], for a time that may be absent.
+pub(crate) fn option_millis<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(deserializer).map(|value| value.map(as_millis))
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ConversationMessage {
     pub id: String,
     pub role: String,
     pub content: String,
+    /// Milliseconds since the epoch (whole seconds in older logs).
+    #[serde(deserialize_with = "millis")]
     pub created_at: u64,
     /// Where a user's message came from (`creationSource`), when not the
     /// web client.
@@ -78,7 +90,11 @@ pub struct Run {
     pub thread_id: String,
     pub provider: String,
     pub status: String,
+    /// Milliseconds since the epoch (whole seconds in older logs), as are
+    /// the run's other times.
+    #[serde(deserialize_with = "millis")]
     pub started_at: u64,
+    #[serde(default, deserialize_with = "option_millis")]
     pub finished_at: Option<u64>,
     pub error: Option<String>,
     #[serde(default)]
@@ -93,7 +109,11 @@ pub struct Run {
     pub restart_continuation_of: Option<Uuid>,
     /// When a restart put the run back in the queue, because its provider
     /// never took its prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "option_millis"
+    )]
     pub requeued_at: Option<u64>,
     /// Background work a restart cut off that the run's next turn is told
     /// about (`restartCancelledBackgroundWork`).
@@ -202,7 +222,8 @@ pub struct RestartCut {
     /// The reconcile's trigger: `shutdown` (the server stopped) or `startup`
     /// (it started again after stopping without one).
     pub trigger: String,
-    /// When it was cut off (seconds).
+    /// When it was cut off (milliseconds; whole seconds in older logs).
+    #[serde(deserialize_with = "millis")]
     pub at: u64,
     /// When the run's turn should continue after the restart: how many
     /// processes in a row ended under it (the reference's
@@ -216,6 +237,7 @@ pub struct CheckpointRecord {
     pub turn_count: u64,
     pub tree: String,
     pub cwd: String,
+    #[serde(deserialize_with = "millis")]
     pub captured_at: u64,
     #[serde(default)]
     pub ready: bool,
@@ -231,6 +253,8 @@ pub struct Thread {
     pub status: String,
     pub messages: Vec<ConversationMessage>,
     pub runs: Vec<Run>,
+    /// Milliseconds since the epoch (whole seconds in older logs).
+    #[serde(deserialize_with = "millis")]
     pub created_at: u64,
     pub archived: bool,
     pub settled: bool,
@@ -428,6 +452,9 @@ pub enum Event {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerEvent {
     pub id: u64,
+    /// When the event committed, in milliseconds since the epoch. Logs
+    /// written before carry whole seconds, which read as milliseconds.
+    #[serde(deserialize_with = "millis")]
     pub at: u64,
     pub event: Event,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -579,7 +606,7 @@ impl Store {
         }
     }
 
-    /// Apply `event`, committed at `at` (seconds).
+    /// Apply `event`, committed at `at` (milliseconds).
     fn apply_at(&mut self, event: &Event, at: u64) {
         match event {
             Event::ProjectCreated(p) => {
@@ -942,7 +969,7 @@ impl Store {
                         }) {
                             task["completionWake"] = serde_json::json!("always");
                             task["updatedAt"] =
-                                serde_json::json!(crate::auth_service::iso(at as i64 * 1000));
+                                serde_json::json!(crate::thread_projection::iso(at));
                         }
                     }
                     for (run, item) in stale_items {
@@ -1073,6 +1100,74 @@ mod tests {
         assert_eq!(
             wire_project(&project)["createdAt"],
             "2026-11-18T11:06:40.123Z"
+        );
+    }
+
+    #[test]
+    fn a_log_written_in_whole_seconds_reads_in_milliseconds() {
+        // Records from before event times moved to milliseconds: every time
+        // they hold is whole seconds.
+        let run_id = Uuid::new_v4();
+        let old_run = json!({
+            "id": run_id, "thread_id": "t1", "provider": "codex",
+            "status": "cancelled", "started_at": 1_795_000_000,
+            "finished_at": 1_795_000_002, "error": null,
+            "requeued_at": 1_795_000_003,
+            "restart_cut": {"trigger": "shutdown", "at": 1_795_000_004}
+        });
+        let old_thread = json!({
+            "id": "t1", "project_id": "p1", "title": "T", "cwd": "/w",
+            "status": "idle", "runs": [old_run], "created_at": 1_795_000_000,
+            "messages": [{"id": "m1", "role": "user", "content": "hi",
+                          "created_at": 1_795_000_001}],
+            "archived": false, "settled": false, "snoozed_until": null,
+            "pinned": false, "unread": false, "tags": [],
+            "checkpoints": [{"turn_count": 1, "tree": "x", "cwd": "/w",
+                             "captured_at": 1_795_000_005}]
+        });
+        let line = json!({"id": 1, "at": 1_795_000_006,
+                          "event": {"type": "ThreadCreated", "data": old_thread}});
+        let records = crate::event_log::parse_ndjson(&line.to_string());
+        let [record] = records.as_slice() else {
+            panic!("one record: {records:?}");
+        };
+        assert_eq!(record.at, 1_795_000_006_000);
+        let Event::ThreadCreated(thread) = &record.event else {
+            panic!("a thread");
+        };
+        assert_eq!(thread.created_at, 1_795_000_000_000);
+        assert_eq!(thread.messages[0].created_at, 1_795_000_001_000);
+        assert_eq!(thread.checkpoints[0].captured_at, 1_795_000_005_000);
+        let run = &thread.runs[0];
+        assert_eq!(run.started_at, 1_795_000_000_000);
+        assert_eq!(run.finished_at, Some(1_795_000_002_000));
+        assert_eq!(run.requeued_at, Some(1_795_000_003_000));
+        assert_eq!(
+            run.restart_cut.as_ref().map(|cut| cut.at),
+            Some(1_795_000_004_000)
+        );
+        // A run not finished, logged without the optional times.
+        let open: Run = serde_json::from_value(json!({
+            "id": run_id, "thread_id": "t1", "provider": "codex",
+            "status": "running", "started_at": 1_795_000_000_123u64, "error": null
+        }))
+        .unwrap();
+        assert_eq!(
+            (open.started_at, open.finished_at),
+            (1_795_000_000_123, None)
+        );
+        assert_eq!(open.requeued_at, None);
+        // A record written now keeps its milliseconds through the log.
+        let mut written = record.clone();
+        written.at = 1_795_000_006_789;
+        let line = serde_json::to_string(&written).unwrap();
+        assert_eq!(
+            crate::event_log::parse_ndjson(&line)[0].at,
+            1_795_000_006_789
+        );
+        assert_eq!(
+            crate::thread_projection::iso(written.at),
+            "2026-11-18T11:06:46.789Z"
         );
     }
 

@@ -199,7 +199,7 @@ impl AppState {
             if due > now && only.is_none() {
                 let state = self.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(due - now)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(due - now)).await;
                     state.continue_restarted(Some(source)).await;
                 });
                 continue;
