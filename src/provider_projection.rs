@@ -703,6 +703,20 @@ impl Thread {
             .sort_by(|a, b| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()));
         out.items
             .retain(|(_, item)| item.get("requestSlot").is_none());
+        // A later proposed plan supersedes the thread's earlier ones, as the
+        // reference marks the previous plan of a kind (`latestPlanByKind`).
+        let proposed: Vec<usize> = out
+            .plans
+            .iter()
+            .enumerate()
+            .filter(|(_, plan)| plan["kind"] == "proposed_plan")
+            .map(|(index, _)| index)
+            .collect();
+        if let Some((_, earlier)) = proposed.split_last() {
+            for index in earlier {
+                out.plans[*index]["status"] = json!("superseded");
+            }
+        }
         out
     }
 
@@ -1741,6 +1755,7 @@ impl Thread {
             return;
         }
         let node = item_id("node", driver, native);
+        let plan = item.kind == "proposed_plan";
         // An ACP item names its native ref itself: its session's tool call
         // (strong) or its turn's text segment (weak).
         let reference = item
@@ -1775,6 +1790,35 @@ impl Thread {
         }
         for (key, value) in &item.fields {
             row.insert(key.clone(), value.clone());
+        }
+        // A proposed plan (Claude's ExitPlanMode) is a plan artifact as well
+        // as its turn item (`emitClaudePlanProjection`): its id is the
+        // reference's random plan id, made stable from the native item.
+        if plan {
+            let digest = {
+                use sha2::Digest;
+                sha2::Sha256::digest(format!("{}:{native}", self.id).as_bytes())
+            };
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&digest[..16]);
+            let plan_id = format!(
+                "plan:thread:{}:provider:{}:run:{}:{}",
+                uri_component(&self.id),
+                uri_component(driver),
+                uri_component(&ids.run),
+                uuid::Builder::from_random_bytes(bytes).into_uuid()
+            );
+            row.insert("planId".into(), json!(plan_id));
+            row.insert("title".into(), Value::Null);
+            out.plans.push(json!({
+                "id": plan_id,
+                "threadId": self.id,
+                "runId": ids.run,
+                "nodeId": node,
+                "kind": "proposed_plan",
+                "status": "active",
+                "markdown": item.fields.get("markdown").cloned().unwrap_or(json!("")),
+            }));
         }
         let streams = matches!(item.kind.as_str(), "assistant_message" | "reasoning");
         if streams {
@@ -1815,6 +1859,7 @@ impl Thread {
             "kind": match item.kind.as_str() {
                 "assistant_message" => "assistant_message",
                 "reasoning" => "reasoning",
+                "proposed_plan" => "plan",
                 _ => "tool_call",
             },
             // A pending tool call's node is running.

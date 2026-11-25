@@ -654,6 +654,10 @@ PROVIDER_SCENARIOS = [
     {"name": "claude runtime mode change mid-turn", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_interrupt.json", "change": {"type": "thread.runtime-mode.set",
                                                      "runtimeMode": "approval-required"}, "changeAfter": "quiet"},
+    # Plan mode: Claude proposes its plan with ExitPlanMode, which T3 denies ("The client captured
+    # your proposed plan"), showing the plan as a proposed_plan item, as the reference does.
+    {"name": "claude plan mode", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_plan.json", "interactionMode": "plan"},
     {"name": "claude approval", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_approval.json", "respond": {"decision": "accept"}},
     {"name": "claude approval declined", "instance": "claudeAgent", "model": "claude-opus-5-5",
@@ -1092,7 +1096,8 @@ def seed_turn(url, cookie, root, scenario, remote=None):
         "type": "thread.create", "commandId": "seed-thread", "threadId": THREAD, "projectId": "project:github",
         "title": "New thread" if scenario.get("title") else "Thread",
         "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"]},
-        "runtimeMode": scenario.get("runtimeMode", "full-access"), "interactionMode": "default", "branch": None,
+        "runtimeMode": scenario.get("runtimeMode", "full-access"),
+        "interactionMode": scenario.get("interactionMode", "default"), "branch": None,
         "worktreePath": None, "createdBy": "user", "creationSource": "web"})
     if scenario["name"] == "codex thread tools":
         from linear_provider_parity import TOKEN

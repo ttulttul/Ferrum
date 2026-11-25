@@ -1,0 +1,612 @@
+{
+ "steps": [
+  {
+   "expect": "user"
+  },
+  {
+   "send": {
+    "type": "system",
+    "subtype": "init",
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "model": "claude-opus-5-5",
+    "cwd": "/workspace",
+    "permissionMode": "plan",
+    "uuid": "e8e2820b-f799-46f9-8b58-53a4265d5318",
+    "tools": [
+     "Bash",
+     "Edit",
+     "Read",
+     "Write",
+     "TodoWrite"
+    ]
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_start",
+     "message": {
+      "model": "claude-opus-5-5",
+      "id": "msg_011ChFEg9s1kxigLKHKfMEBF",
+      "type": "message",
+      "role": "assistant",
+      "content": [],
+      "container": null,
+      "stop_reason": null,
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+       "input_tokens": 2,
+       "cache_creation_input_tokens": 30021,
+       "cache_read_input_tokens": 0,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 30021
+       },
+       "output_tokens": 8,
+       "service_tier": "standard",
+       "inference_geo": "global",
+       "speed": "standard"
+      },
+      "input_transformations": [],
+      "diagnostics": null,
+      "context_management": null
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "b9a0b1b4-741a-4318-b5bb-ecbf78bda37e",
+    "ttft_ms": 1758,
+    "thinking_display": "updates",
+    "api_message_id": "msg_011ChFEg9s1kxigLKHKfMEBF"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_start",
+     "index": 0,
+     "content_block": {
+      "type": "thinking",
+      "thinking": "",
+      "signature": ""
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "01572283-9854-4788-b7fb-38fa6056398c",
+    "thinking_display": "updates",
+    "api_message_id": "msg_011ChFEg9s1kxigLKHKfMEBF"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_delta",
+     "index": 0,
+     "delta": {
+      "type": "thinking_delta",
+      "thinking": "",
+      "estimated_tokens": 50
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "c88290c0-bb5f-415d-bfdf-0a7856d76335",
+    "thinking_display": "updates",
+    "api_message_id": "msg_011ChFEg9s1kxigLKHKfMEBF"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_delta",
+     "index": 0,
+     "delta": {
+      "type": "thinking_delta",
+      "thinking": "",
+      "estimated_tokens": null
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "dedb0d8e-afb4-4d3e-9504-f8f41b8970e1",
+    "thinking_display": "updates",
+    "api_message_id": "msg_011ChFEg9s1kxigLKHKfMEBF"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_delta",
+     "index": 0,
+     "delta": {
+      "type": "signature_delta",
+      "signature": ""
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "4d017c9a-8fcd-4ef2-aa51-4ec70116da76",
+    "api_message_id": "msg_011ChFEg9s1kxigLKHKfMEBF"
+   }
+  },
+  {
+   "send": {
+    "type": "assistant",
+    "message": {
+     "model": "claude-opus-5-5",
+     "id": "msg_011ChFEg9s1kxigLKHKfMEBF",
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "thinking",
+       "thinking": "",
+       "signature": ""
+      }
+     ],
+     "container": null,
+     "stop_reason": null,
+     "stop_sequence": null,
+     "stop_details": null,
+     "usage": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 30021,
+      "cache_read_input_tokens": 0,
+      "cache_creation": {
+       "ephemeral_5m_input_tokens": 0,
+       "ephemeral_1h_input_tokens": 30021
+      },
+      "output_tokens": 8,
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+     },
+     "input_transformations": [],
+     "diagnostics": null,
+     "context_management": null
+    },
+    "parent_tool_use_id": null,
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "uuid": "f425d4d9-1193-4e53-b493-f0f09a12a589",
+    "thinking_duration_ms": 1793,
+    "thinking_display": "updates"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_stop",
+     "index": 0
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "cc146b79-7b0b-4768-8614-aef3c7bf6057",
+    "api_message_id": "msg_011ChFEg9s1kxigLKHKfMEBF"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_start",
+     "index": 1,
+     "content_block": {
+      "type": "tool_use",
+      "id": "toolu_01PlanExitPlanModeFixture01",
+      "name": "ExitPlanMode",
+      "input": {},
+      "caller": {
+       "type": "direct"
+      }
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "api_message_id": "msg_011ChFEg9s1kxigLKHKfMEBF"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_delta",
+     "index": 1,
+     "delta": {
+      "type": "input_json_delta",
+      "partial_json": "{\"plan\": \"## Plan\\n\\n1. Add `divide(a, b)` to calc.py, raising ZeroDivisionError on b == 0.\\n2. Add a unit test for it.\\n3. Run the tests.\"}"
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "api_message_id": "msg_011ChFEg9s1kxigLKHKfMEBF"
+   }
+  },
+  {
+   "send": {
+    "type": "assistant",
+    "message": {
+     "model": "claude-opus-5-5",
+     "id": "msg_011ChFEg9s1kxigLKHKfMEBF",
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_01PlanExitPlanModeFixture01",
+       "name": "ExitPlanMode",
+       "input": {
+        "plan": "## Plan\n\n1. Add `divide(a, b)` to calc.py, raising ZeroDivisionError on b == 0.\n2. Add a unit test for it.\n3. Run the tests."
+       },
+       "caller": {
+        "type": "direct"
+       }
+      }
+     ],
+     "container": null,
+     "stop_reason": null,
+     "stop_sequence": null,
+     "stop_details": null,
+     "usage": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 30021,
+      "cache_read_input_tokens": 0,
+      "cache_creation": {
+       "ephemeral_5m_input_tokens": 0,
+       "ephemeral_1h_input_tokens": 30021
+      },
+      "output_tokens": 8,
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+     },
+     "input_transformations": [],
+     "diagnostics": null,
+     "context_management": null
+    },
+    "parent_tool_use_id": null,
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "wire_tool_inputs": {
+     "toolu_01PlanExitPlanModeFixture01": {
+      "plan": "## Plan\n\n1. Add `divide(a, b)` to calc.py, raising ZeroDivisionError on b == 0.\n2. Add a unit test for it.\n3. Run the tests."
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_stop",
+     "index": 1
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "api_message_id": "msg_011ChFEg9s1kxigLKHKfMEBF"
+   }
+  },
+  {
+   "send": {
+    "type": "control_request",
+    "request_id": "perm-plan-1",
+    "request": {
+     "subtype": "can_use_tool",
+     "tool_name": "ExitPlanMode",
+     "input": {
+      "plan": "## Plan\n\n1. Add `divide(a, b)` to calc.py, raising ZeroDivisionError on b == 0.\n2. Add a unit test for it.\n3. Run the tests."
+     },
+     "tool_use_id": "toolu_01PlanExitPlanModeFixture01"
+    }
+   }
+  },
+  {
+   "expect": "control_response"
+  },
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "tool_use_id": "toolu_01PlanExitPlanModeFixture01",
+       "type": "tool_result",
+       "content": "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.",
+       "is_error": true
+      }
+     ]
+    },
+    "parent_tool_use_id": null,
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "tool_use_result": {
+     "stdout": "hi",
+     "stderr": "",
+     "interrupted": false,
+     "isImage": false,
+     "noOutputExpected": false
+    },
+    "tool_result_meta": [
+     {
+      "id": "toolu_01Gdtg31JFfSUakpshuZEu7j",
+      "permission_decision": {
+       "decision": "accept",
+       "source": "config",
+       "reason_type": "mode"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_delta",
+     "delta": {
+      "stop_reason": "tool_use",
+      "stop_sequence": null,
+      "stop_details": null,
+      "container": null
+     },
+     "usage": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 442,
+      "cache_read_input_tokens": 30021,
+      "output_tokens": 122,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 122,
+        "cache_read_input_tokens": 30021,
+        "cache_creation_input_tokens": 442,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 442
+        },
+        "type": "message"
+       }
+      ]
+     },
+     "context_management": {
+      "applied_edits": []
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "19c58c7e-fd03-4275-99f9-b503fc3825f2",
+    "api_message_id": "msg_011ChFEgWvYGBhmYj5EAJKWZ"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_stop"
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "952c7c61-25f5-4286-b335-cc6e5a36b28c",
+    "api_message_id": "msg_011ChFEgWvYGBhmYj5EAJKWZ"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_start",
+     "message": {
+      "model": "claude-opus-5-5",
+      "id": "msg_011ChFEghw5FpbXN4qScgXHm",
+      "type": "message",
+      "role": "assistant",
+      "content": [],
+      "container": null,
+      "stop_reason": null,
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+       "input_tokens": 2,
+       "cache_creation_input_tokens": 170,
+       "cache_read_input_tokens": 30463,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 170
+       },
+       "output_tokens": 64,
+       "service_tier": "standard",
+       "inference_geo": "global",
+       "speed": "standard"
+      },
+      "input_transformations": [],
+      "diagnostics": null,
+      "context_management": null
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "8db21e9d-68bb-4d44-b531-fbe5d4d14e7a",
+    "ttft_ms": 1543,
+    "thinking_display": "updates",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_start",
+     "index": 0,
+     "content_block": {
+      "type": "text",
+      "text": ""
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "6162b7b5-ddba-414a-969b-4e0e42d03261",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_delta",
+     "index": 0,
+     "delta": {
+      "type": "text_delta",
+      "text": "I proposed a plan for adding divide(); approve it to have me implement it."
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "c7f8a9d7-77e8-45c4-8330-0e872482db02",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "assistant",
+    "message": {
+     "model": "claude-opus-5-5",
+     "id": "msg_011ChFEghw5FpbXN4qScgXHm",
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "I proposed a plan for adding divide(); approve it to have me implement it."
+      }
+     ],
+     "container": null,
+     "stop_reason": null,
+     "stop_sequence": null,
+     "stop_details": null,
+     "usage": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 170,
+      "cache_read_input_tokens": 30463,
+      "cache_creation": {
+       "ephemeral_5m_input_tokens": 0,
+       "ephemeral_1h_input_tokens": 170
+      },
+      "output_tokens": 64,
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+     },
+     "input_transformations": [],
+     "diagnostics": null,
+     "context_management": null
+    },
+    "parent_tool_use_id": null,
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "uuid": "3c80fc8e-9566-4dd5-b100-626ecf498b1b"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_stop",
+     "index": 0
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "266a9a46-2c98-45eb-90ca-8f8a20aa4acf",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_delta",
+     "delta": {
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "container": null
+     },
+     "usage": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 170,
+      "cache_read_input_tokens": 30463,
+      "output_tokens": 64,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 64,
+        "cache_read_input_tokens": 30463,
+        "cache_creation_input_tokens": 170,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 170
+        },
+        "type": "message"
+       }
+      ]
+     },
+     "context_management": {
+      "applied_edits": []
+     }
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "c4198b32-0c39-4c24-b9f0-f2c3b88ebd5b",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_stop"
+    },
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "parent_tool_use_id": null,
+    "uuid": "4e161250-0be0-45ac-813b-203dd3ce7aff",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "duration_ms": 9621,
+    "num_turns": 4,
+    "result": "I proposed a plan for adding divide(); approve it to have me implement it.",
+    "stop_reason": "end_turn",
+    "session_id": "f08d1fde-31e8-4c68-b2d8-16f3882beb56",
+    "usage": {
+     "input_tokens": 6,
+     "cache_creation_input_tokens": 30633,
+     "cache_read_input_tokens": 60484,
+     "output_tokens": 536
+    },
+    "modelUsage": {
+     "claude-opus-5-5": {
+      "inputTokens": 8,
+      "outputTokens": 728,
+      "contextWindow": 1000000
+     }
+    },
+    "uuid": "91b67c58-116d-4ed8-b82c-4df34db2990c"
+   }
+  }
+ ]
+}

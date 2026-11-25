@@ -208,9 +208,31 @@ pub enum Order {
     Subagent,
     /// A stop closed delegated task cohorts: each run, then its tasks.
     CohortStop,
+    /// A proposed plan (Claude's ExitPlanMode): its node, the plan, then
+    /// its turn item (`emitClaudePlanProjection`).
+    Plan,
 }
 
 impl Order {
+    const PLAN: &'static [Step] = &[
+        Step::ItemNodes,
+        Step::Collection("plans"),
+        Step::Items(Phase::All),
+        Step::PlannedToolCall,
+        Step::Collection("runs"),
+        Step::Collection("attempts"),
+        Step::LooseNodes,
+        Step::Collection("checkpointScopes"),
+        Step::LooseMessages,
+        Step::Collection("providerSessions"),
+        Step::Collection("providerThreads"),
+        Step::Collection("providerTurns"),
+        Step::Collection("runtimeRequests"),
+        Step::Collection("subagents"),
+        Step::Collection("checkpoints"),
+        Step::Collection("contextHandoffs"),
+        Step::Collection("contextTransfers"),
+    ];
     const SUBAGENT_START: &'static [Step] = &[
         Step::ItemNodes,
         Step::Collection("subagents"),
@@ -338,6 +360,10 @@ impl Order {
                 event: ProviderEvent::ProviderThread { .. },
                 ..
             } => Order::Start,
+            crate::Event::RunProvider {
+                event: ProviderEvent::TurnItem { item },
+                ..
+            } if item.kind == "proposed_plan" => Order::Plan,
             _ => Order::Default,
         }
     }
@@ -450,6 +476,7 @@ impl Order {
                 Collection("contextHandoffs"),
                 Collection("contextTransfers"),
             ],
+            Order::Plan => Self::PLAN,
             Order::CohortStop => &[
                 Collection("runs"),
                 Collection("subagents"),
@@ -528,6 +555,10 @@ enum Step {
     /// adapter reports it again once the stream it held back while the
     /// permission callback ran comes through, changed or not.
     RequestedToolCall,
+    /// The tool call a proposed plan came from (Claude's ExitPlanMode),
+    /// reported again after its plan, as the reference's adapter reports
+    /// the denied call once the plan it held is out.
+    PlannedToolCall,
 }
 
 /// Which of a commit's changed turn items a step takes.
@@ -920,6 +951,23 @@ fn diff_with_command(
                             nodes.remove(index),
                             occurred_at,
                         ));
+                    }
+                }
+            }
+            Step::PlannedToolCall => {
+                for item in items.iter().filter(|item| item["type"] == "proposed_plan") {
+                    let native = &item["nativeItemRef"]["nativeId"];
+                    let tool = after["turnItems"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|tool| {
+                            !native.is_null()
+                                && tool["nativeItemRef"]["nativeId"] == *native
+                                && tool["type"] != "proposed_plan"
+                        });
+                    if let Some(tool) = tool {
+                        out.push(event(thread_id, "turn-item.updated", tool, occurred_at));
                     }
                 }
             }
