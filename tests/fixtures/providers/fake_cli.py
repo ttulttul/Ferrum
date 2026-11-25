@@ -30,7 +30,10 @@ Steps:
                              read until a user message, then play the steps
                              of the first case whose text is in its content
                              (or that has none), so one Claude CLI can take a
-                             first prompt or a later delivery
+                             first prompt or a later delivery; with
+                             "resume": true, the steps after this one play
+                             once the case's steps end (so a repeated
+                             branchOnUser takes prompts in any order)
   {"send": {...}}            write a message; "$id" becomes the remembered
                              message's id, "$id:session/prompt" the id of
                              the last request with that method ("$request_id" its control
@@ -59,7 +62,8 @@ Steps:
                              later steps play; {"await": "<as>"} waits for it.
                              With "retryWhenText": "..." and "retries": n, the
                              call is made again while its answer holds that
-                             text, up to n more times ("retried" in the log).
+                             text, up to n more times ("retried" in the log),
+                             "retryDelay" seconds apart (default none).
 
 A request the scenario does not expect is answered from SIDE_REPLIES (or the
 scenario's own "replies" by method; a Pi RPC command from "piReplies" by type), so a client that reads its config or
@@ -419,6 +423,7 @@ def mcp_call(step):
         for _ in range(step.get("retries", 0) if step.get("retryWhenText") else 0):
             if step["retryWhenText"] not in json.dumps(answer):
                 break
+            time.sleep(step.get("retryDelay", 0))
             status, received, answer = mcp_post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                                                 step.get("headers"), server=target)
             record["retried"] = record.get("retried", 0) + 1
@@ -519,10 +524,17 @@ def load(name):
 
 
 index = 0
-while index < len(steps):
+# The steps a branchOnUser case with "resume" returns to once its own end.
+resumes = []
+while index < len(steps) or resumes:
+    if index >= len(steps):
+        steps, index = resumes.pop()
+        if index >= len(steps) and repeat:
+            index = 0
+        continue
     step = steps[index]
     index += 1
-    if index >= len(steps) and repeat:
+    if index >= len(steps) and repeat and not resumes:
         index = 0
     if "branch" in step:
         while True:
@@ -553,6 +565,8 @@ while index < len(steps):
             answer(message)
         content = json.dumps((message.get("message") or {}).get("content"))
         case = next(c for c in step["branchOnUser"] if c.get("contains", "") in content)
+        if step.get("resume"):
+            resumes.append((steps, index))
         steps, index = case["steps"], 0
     elif "expect" in step:
         while True:

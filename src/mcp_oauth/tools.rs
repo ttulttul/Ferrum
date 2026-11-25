@@ -2399,6 +2399,61 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
     }))
 }
 
+/// The thread's latest run whose provider turn is running, which a steer or
+/// a restart can join (`latestSteerableRun`).
+fn steerable_run(projection: &Value) -> Option<String> {
+    let turns = projection["providerTurns"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    runs(projection)
+        .into_iter()
+        .filter(|run| {
+            run["status"] == "running"
+                && !run["activeAttemptId"].is_null()
+                && turns.iter().any(|turn| {
+                    turn["runAttemptId"] == run["activeAttemptId"] && turn["status"] == "running"
+                })
+        })
+        .max_by_key(|run| run["ordinal"].as_u64())
+        .and_then(|run| run["id"].as_str().map(str::to_owned))
+}
+
+/// Whether `sender`'s own earlier message still waits in the thread's
+/// queue: an automatic send then queues behind it rather than overtake it.
+fn own_queued_message(projection: &Value, sender: Option<&str>) -> bool {
+    let Some(sender) = sender else {
+        return false;
+    };
+    let messages = projection["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    runs(projection)
+        .iter()
+        .filter(|run| run["status"] == "queued" && run["queueHeld"] != true)
+        .any(|run| {
+            messages.iter().any(|message| {
+                message["id"] == run["userMessageId"]
+                    && message["createdBy"] == "agent"
+                    && message["senderThreadId"] == sender
+            })
+        })
+}
+
+/// How a send reached its thread (`ThreadManagementSendResult.delivery`):
+/// joined the running turn, queued, started, or (a restart) stopped the
+/// running turn to run next.
+fn delivery(mode: &str, steered: bool, run: &Value) -> &'static str {
+    match (steered, run["status"].as_str()) {
+        (true, _) if mode == "restart" => "restarted",
+        (true, _) => "steered",
+        (false, Some("queued")) if mode == "restart" => "restarted",
+        (false, Some("queued")) => "queued",
+        _ => "started",
+    }
+}
+
 fn dispatch_message(error: &Value) -> String {
     error["message"]
         .as_str()
@@ -2434,18 +2489,13 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
     if !matches!(mode, "auto" | "queue" | "steer" | "restart") {
         return Err(invalid_arguments());
     }
-    // A send that asks for a result never joins a running turn.
+    // A fresh send, or one that asks for a result, never joins a running turn.
     let output_schema = a.get("outputSchema").filter(|s| s.is_object()).cloned();
-    if output_schema.is_some() && matches!(mode, "steer" | "restart") {
+    let fresh = arg_bool(a, "freshContext")? == Some(true);
+    if (output_schema.is_some() || fresh) && matches!(mode, "steer" | "restart") {
         mode = "queue";
     }
-    if matches!(mode, "steer" | "restart") || arg_bool(a, "freshContext")? == Some(true) {
-        return Err(failure(
-            "invalid_request",
-            "This server starts or queues messages only: use mode \"auto\" or \"queue\", without freshContext.",
-        ));
-    }
-    let (busy, title, selection) = {
+    let (busy, steerable, own_queued, title, selection) = {
         let store = host.control_state().store.read().await;
         let thread = find_thread(&store, &id)?;
         let row = thread.stored_row();
@@ -2457,9 +2507,12 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
         {
             return Err(failure("invalid_request", problem));
         }
-        let projection = thread.projection();
+        let projection = thread.full_projection();
+        let sender = caller.granted.thread.as_ref().map(|t| t.thread_id.as_str());
         (
             active(&runs(&projection)).is_some(),
+            steerable_run(&projection),
+            own_queued_message(&projection, sender),
             thread.title.clone(),
             row["modelSelection"].clone(),
         )
@@ -2478,13 +2531,37 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
     };
     let message_id = stable("message");
     let command_id = stable("command");
-    let queued = busy;
     let already = {
         let store = host.control_state().store.read().await;
         find_thread(&store, &id)?
             .messages
             .iter()
             .any(|m| m.id == message_id)
+    };
+    // A steer or a restart goes to the running turn, and so does an
+    // automatic send unless the sender's own earlier message still waits in
+    // the queue (`latestSteerableRun`, `resolveMessageDispatch`).
+    let explicit = matches!(mode, "steer" | "restart");
+    if explicit && steerable.is_none() && !already {
+        let verb = if mode == "steer" {
+            "steered"
+        } else {
+            "restarted"
+        };
+        return Err(failure(
+            "thread_not_sendable",
+            format!(
+                "Thread {id} has no running turn that can be {verb}. Send with mode: \"auto\" or \"queue\" to start a new turn there."
+            ),
+        ));
+    }
+    let dispatch_mode = match &steerable {
+        Some(target) if explicit || (mode == "auto" && !own_queued) => json!({
+            "type": if mode == "restart" { "restart_active" } else { "steer_active" },
+            "targetRunId": target,
+        }),
+        _ if mode == "queue" || busy => json!({"type": "queue_after_active"}),
+        _ => json!({"type": "start_immediately"}),
     };
     if !already {
         let mut dispatch = json!({
@@ -2494,10 +2571,13 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
             "messageId": message_id,
             "text": text,
             "attachments": [],
-            "dispatchMode": {"type": if queued { "queue_after_active" } else { "start_immediately" }},
+            "dispatchMode": dispatch_mode,
             "createdBy": "agent",
             "creationSource": "mcp",
         });
+        if fresh {
+            dispatch["freshContext"] = json!(true);
+        }
         // A thread's agent names itself as the sender.
         if let Some(sender) = caller.granted.thread.as_ref() {
             dispatch["senderThreadId"] = json!(sender.thread_id);
@@ -2517,9 +2597,25 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
     }
     let store = host.control_state().store.read().await;
     let thread = find_thread(&store, &id)?;
-    let run = runs(&thread.projection())
-        .into_iter()
+    let all = runs(&thread.projection());
+    // A steered message joins its target's run; any other has its own.
+    let steered_into = thread
+        .messages
+        .iter()
+        .find(|m| m.id == message_id)
+        .and_then(|m| m.steer.as_ref())
+        .and_then(|steer| steer["runId"].as_str().map(str::to_owned));
+    let own = all
+        .iter()
         .find(|run| run["userMessageId"] == message_id.as_str())
+        .cloned();
+    let run = own
+        .clone()
+        .or_else(|| {
+            steered_into
+                .as_deref()
+                .and_then(|target| all.iter().find(|run| run["id"] == target).cloned())
+        })
         .ok_or_else(|| {
             failure(
                 "orchestration_error",
@@ -2538,7 +2634,7 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
         } else {
             run["status"].clone()
         },
-        "delivery": if queued { "queued" } else { "started" },
+        "delivery": delivery(mode, own.is_none(), &run),
     });
     // A send that started follow-up work names the task it became.
     let task_id = thread.full_projection()["runs"]
@@ -3473,5 +3569,58 @@ mod pull_request_tests {
                     "state": "open", "watching": false, "watchStartedAt": null}),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod send_mode_tests {
+    use super::*;
+
+    fn projection(turn_status: &str) -> Value {
+        json!({
+            "runs": [
+                {"id": "run:1", "ordinal": 1, "status": "completed", "activeAttemptId": "attempt:1"},
+                {"id": "run:2", "ordinal": 2, "status": "running", "activeAttemptId": "attempt:2"},
+                {"id": "run:3", "ordinal": 3, "status": "queued", "activeAttemptId": null,
+                 "userMessageId": "message:3"},
+            ],
+            "providerTurns": [
+                {"runAttemptId": "attempt:1", "status": "completed"},
+                {"runAttemptId": "attempt:2", "status": turn_status},
+            ],
+            "messages": [
+                {"id": "message:3", "createdBy": "agent", "senderThreadId": "thread:sender"},
+            ],
+        })
+    }
+
+    #[test]
+    fn only_a_run_whose_provider_turn_runs_can_be_steered() {
+        assert_eq!(
+            steerable_run(&projection("running")).as_deref(),
+            Some("run:2")
+        );
+        assert_eq!(steerable_run(&projection("completed")), None);
+        assert_eq!(steerable_run(&json!({"runs": []})), None);
+    }
+
+    #[test]
+    fn an_automatic_send_waits_behind_its_own_queued_message_only() {
+        let queued = projection("running");
+        assert!(own_queued_message(&queued, Some("thread:sender")));
+        assert!(!own_queued_message(&queued, Some("thread:other")));
+        assert!(!own_queued_message(&queued, None));
+    }
+
+    #[test]
+    fn a_send_reports_how_it_reached_the_thread() {
+        let queued = json!({"status": "queued"});
+        let running = json!({"status": "running"});
+        assert_eq!(delivery("steer", true, &running), "steered");
+        assert_eq!(delivery("auto", true, &running), "steered");
+        assert_eq!(delivery("restart", true, &running), "restarted");
+        assert_eq!(delivery("restart", false, &queued), "restarted");
+        assert_eq!(delivery("queue", false, &queued), "queued");
+        assert_eq!(delivery("auto", false, &running), "started");
     }
 }
