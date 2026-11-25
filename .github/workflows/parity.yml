@@ -2,6 +2,13 @@ name: Server parity
 
 on:
   pull_request:
+    # A pull request that changes only docs/performance.md (the Performance workflow's own refresh,
+    # opened by github-actions[bot]) creates no run. GitHub would otherwise create one and hold it
+    # for approval before any job, so the job-level docs-only skip below could not report, and the
+    # run would end red. No status check is required to merge, so this blocks nothing; other
+    # docs-only pull requests still run and pass.
+    paths-ignore:
+      - "docs/performance.md"
   push:
     branches: [main]
   # Nightly: the whole matrix twice, to surface flaky tests, with the restart scenarios in real time
