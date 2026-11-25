@@ -5,6 +5,7 @@ import base64
 from contextlib import ExitStack
 import hashlib
 import json
+import re
 from pathlib import Path
 import secrets
 import shlex
@@ -22,6 +23,19 @@ def check_forge_listing(tools, *, visible):
     listed = {t["name"] for t in tools} & forge_tools
     expected = forge_tools if visible else set()
     assert listed == expected, f"forge listing: missing {expected - listed}, unexpected {listed - expected}"
+
+
+def stable(body):
+    """A tool answer about this server's own thread, without its times and environment id."""
+    text = re.sub(rb"\d{4}-\d\d-\d\dT[0-9:.]+Z", b"<time>", body)
+    text = re.sub(rb"/threads/[0-9a-f-]{36}/", b"/threads/<environment>/", text)
+    text = re.sub(rb"t3-thread://v2/[^/]+/", b"t3-thread://v2/<environment>/", text)
+    # Compared as data, whatever order each server writes its fields in.
+    answer = json.loads(text)
+    for part in answer.get("result", {}).get("content", []):
+        if part.get("type") == "text":
+            part["text"] = json.loads(part["text"])
+    return json.dumps(answer, sort_keys=True).encode()
 
 
 def observations(url, cookie, root):
@@ -130,6 +144,28 @@ def observations(url, cookie, root):
     ]:
         call("tools/call", dict(name=name, arguments=arguments))
     call("tools/call",dict(name="missing-tool",arguments={}))
+    # A thread with linked pull requests, listed and read: each shows as its summary (key, URL,
+    # source, state, watch), up to 5 open ones, with how many are linked and open; a dismissed
+    # stack link is not counted.
+    (root / "prs").mkdir(parents=True, exist_ok=True)
+    post("/api/projects/mutate", {"type":"project.create","commandId":"create-prs","projectId":"project:prs",
+                                  "title":"Pull requests","workspaceRoot":str(root / "prs")})
+    rpc(url, cookie, "orchestration.dispatchCommand", {
+        "type":"thread.create","commandId":"create-pr-thread","threadId":"thread:prs","projectId":"project:prs",
+        "title":"Linked pull requests","modelSelection":{"instanceId":"codex","model":"fixture"},
+        "runtimeMode":"full-access","interactionMode":"default","branch":None,"worktreePath":None,
+        "createdBy":"user","creationSource":"web"})
+    for number, source in [(23, "manual"), (24, "created"), (25, "stack-dismissed")]:
+        rpc(url, cookie, "orchestration.dispatchCommand", {
+            "type":"thread.pull-request.link","commandId":f"link-pr-{number}","threadId":"thread:prs",
+            "host":"github.com","repository":"Example/Repo","number":number,
+            "url":f"https://github.com/Example/Repo/pull/{number}","source":source})
+    for name, arguments in [("t3_thread_list", dict(projectId="project:prs")),
+                            ("t3_thread_list", dict(projectId="project:prs", includeSubagents=False)),
+                            ("t3_thread_read", dict(threadId="thread:prs"))]:
+        call("tools/call", dict(name=name, arguments=arguments))
+        method, status, kind, body = results.pop()
+        results.append((method, status, kind, stable(body)))
     status, _, body = http(url, "DELETE", "/mcp", headers=headers)
     results.append(("close",status,body))
     status, _, body = http(url, "POST","/mcp",encode(dict(jsonrpc="2.0",id=1,method="ping",params={})),headers)

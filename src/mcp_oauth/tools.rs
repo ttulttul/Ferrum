@@ -737,6 +737,92 @@ fn snoozed(row: &Value) -> bool {
     })
 }
 
+/// `THREAD_PULL_REQUEST_PREVIEW_LIMIT`.
+const THREAD_PULL_REQUEST_PREVIEW_LIMIT: usize = 5;
+
+/// `threadPullRequests`: a thread's linked pull requests as T3's tools show
+/// them: up to 5 open ones, watched first, then the latest updated, each as
+/// its key, URL, source, state and watch; with how many are linked (not
+/// dismissed) and how many of those are open.
+fn thread_pull_requests(links: &Value) -> (Vec<Value>, usize, usize) {
+    // `visibleThreadPullRequests`: a dismissed stack link is not shown.
+    let visible: Vec<&Value> = links
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|link| link["source"] != "stack-dismissed")
+        .collect();
+    let mut open: Vec<&Value> = visible
+        .iter()
+        .copied()
+        .filter(|link| {
+            !matches!(
+                link["snapshot"]["state"].as_str(),
+                Some("merged" | "closed")
+            )
+        })
+        .collect();
+    // `threadPullRequestUpdatedAtMs`.
+    let updated_ms = |link: &Value| {
+        link["snapshot"]["updatedAt"]
+            .as_str()
+            .or(link["linkedAt"].as_str())
+            .and_then(|at| {
+                time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).ok()
+            })
+            .map_or(0, |at| at.unix_timestamp_nanos() / 1_000_000)
+    };
+    open.sort_by(|left, right| {
+        let watched = |link: &Value| link.get("watch").is_some_and(|w| !w.is_null());
+        watched(right)
+            .cmp(&watched(left))
+            .then_with(|| updated_ms(right).cmp(&updated_ms(left)))
+    });
+    let shown = open
+        .iter()
+        .take(THREAD_PULL_REQUEST_PREVIEW_LIMIT)
+        .map(|link| {
+            let watch = link.get("watch").filter(|w| !w.is_null());
+            json!({
+                "host": pull_request_host(link),
+                "repository": link["repository"],
+                "number": link["number"],
+                "url": link["url"],
+                "source": link["source"],
+                "state": link["snapshot"]["state"],
+                "watching": watch.is_some(),
+                "watchStartedAt": watch.map_or(Value::Null, |w| w["startedAt"].clone()),
+            })
+        })
+        .collect();
+    (shown, visible.len(), open.len())
+}
+
+/// `normalizeThreadPullRequestKey`'s host: the link's own authority, taken from
+/// its URL when that URL names the same repository and number, lowercased.
+fn pull_request_host(link: &Value) -> String {
+    let host = link["host"].as_str().unwrap_or_default();
+    let authority = link["authority"].as_str().or_else(|| {
+        let url = link["url"].as_str()?;
+        let rest = url.split_once("://")?.1;
+        let (authority, path) = rest.split_once('/')?;
+        let number = link["number"].as_u64()?.to_string();
+        // Compared without regard to case below, in every build.
+        let repository = link["repository"].as_str()?.trim();
+        let path = path.trim_end_matches('/');
+        let named = [
+            format!("{repository}/pull/{number}"),
+            format!("{repository}/pull-requests/{number}"),
+            format!("{repository}/-/merge_requests/{number}"),
+        ];
+        named
+            .iter()
+            .any(|form| path.eq_ignore_ascii_case(form))
+            .then_some(authority)
+    });
+    authority.unwrap_or(host).trim().to_lowercase()
+}
+
 /// The fields a thread list item and a thread read share.
 fn thread_summary<S: McpHost>(host: &S, caller: &Caller, thread: &crate::Thread) -> Value {
     let row = thread.shell();
@@ -752,6 +838,7 @@ fn thread_summary<S: McpHost>(host: &S, caller: &Caller, thread: &crate::Thread)
         .as_str()
         .or(selection["instanceId"].as_str())
         .unwrap_or("codex");
+    let pull_requests = thread_pull_requests(&row["pullRequests"]);
     json!({
         "threadId": thread.id,
         "projectId": thread.project_id,
@@ -766,11 +853,9 @@ fn thread_summary<S: McpHost>(host: &S, caller: &Caller, thread: &crate::Thread)
         "runtimeMode": row["runtimeMode"].as_str().unwrap_or("full-access"),
         "interactionMode": row["interactionMode"].as_str().unwrap_or("default"),
         "linkedPullRequest": null,
-        "pullRequests": row["pullRequests"].as_array().cloned().unwrap_or_default(),
-        "pullRequestCount": row["pullRequests"].as_array().map_or(0, Vec::len),
-        "openPullRequestCount": row["pullRequests"].as_array().map_or(0, |prs| {
-            prs.iter().filter(|pr| pr["state"] == "open").count()
-        }),
+        "pullRequests": pull_requests.0,
+        "pullRequestCount": pull_requests.1,
+        "openPullRequestCount": pull_requests.2,
         "settled": thread.settled,
         "settledAt": row["settledAt"],
         "snoozed": snoozed(&row),
@@ -1709,6 +1794,8 @@ async fn thread_list<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
     let project =
         arg_str(a, "projectId")?.or(caller.thread.as_ref().map(|t| t.project_id.as_str()));
     let title = arg_str(a, "titleContains")?.map(str::to_lowercase);
+    // Subagent threads are listed unless the caller asks not to (`includeSubagents`).
+    let subagents = arg_bool(a, "includeSubagents")? != Some(false);
     let settled = arg_bool(a, "settled")?;
     let snoozed_only = arg_bool(a, "snoozed")?;
     let cursor = arg_count(a, "cursor", 0)?.unwrap_or(0) as usize;
@@ -1740,6 +1827,7 @@ async fn thread_list<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
         .filter(|t| t.stored_row()["deletedAt"].is_null())
         .filter(|t| all || Some(t.project_id.as_str()) == project)
         .filter(|t| settled.is_none_or(|s| t.settled == s))
+        .filter(|t| subagents || t.stored_row()["lineage"]["relationshipToParent"] != "subagent")
         .filter(|t| {
             title
                 .as_deref()
@@ -3308,5 +3396,47 @@ mod catalogue_tests {
         let (ordered, _) = capability_models(&provider, &prefs, &[], |_| false);
         assert_eq!(ordered[0]["slug"], "m5");
         assert!(ordered.iter().all(|m| m["slug"] != "m0"));
+    }
+}
+
+#[cfg(test)]
+mod pull_request_tests {
+    use super::*;
+
+    #[test]
+    fn a_thread_shows_its_open_pull_requests_watched_first_without_dismissed_ones() {
+        let link = |number: u64, source: &str, state: Option<&str>, updated: &str| {
+            json!({"host": "GitHub.com", "repository": "Example/Repo", "number": number,
+                "url": format!("https://github.com/Example/Repo/pull/{number}"), "source": source,
+                "linkedAt": "2026-01-01T00:00:00.000Z",
+                "snapshot": state.map(|s| json!({"state": s, "updatedAt": updated}))})
+        };
+        let mut watched = link(4, "manual", Some("open"), "2026-01-02T00:00:00.000Z");
+        watched["watch"] = json!({"startedAt": "2026-01-03T00:00:00.000Z"});
+        let links = json!([
+            link(1, "manual", Some("open"), "2026-01-05T00:00:00.000Z"),
+            link(2, "created", Some("merged"), "2026-01-06T00:00:00.000Z"),
+            link(
+                3,
+                "stack-dismissed",
+                Some("open"),
+                "2026-01-07T00:00:00.000Z"
+            ),
+            watched,
+        ]);
+        let (shown, linked, open) = thread_pull_requests(&links);
+        assert_eq!((linked, open), (3, 2));
+        assert_eq!(
+            shown,
+            vec![
+                json!({"host": "github.com", "repository": "Example/Repo", "number": 4,
+                    "url": "https://github.com/Example/Repo/pull/4", "source": "manual",
+                    "state": "open", "watching": true,
+                    "watchStartedAt": "2026-01-03T00:00:00.000Z"}),
+                json!({"host": "github.com", "repository": "Example/Repo", "number": 1,
+                    "url": "https://github.com/Example/Repo/pull/1", "source": "manual",
+                    "state": "open", "watching": false, "watchStartedAt": null}),
+            ]
+        );
     }
 }
