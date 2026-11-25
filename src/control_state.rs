@@ -350,12 +350,35 @@ impl ControlState {
         self.commit_with(event, receipt, &[]).await
     }
 
+    /// Reads whole, on a blocking thread and without holding the store, each
+    /// of `thread_ids` whose slim records alone are loaded
+    /// (`stored_projection`), so no lock is held for the seconds a long
+    /// thread takes to read. Concurrent callers share one read. A thread that
+    /// fails to read is left for the caller, which reads it again and reports it.
+    pub(crate) async fn load_whole(&self, thread_ids: impl IntoIterator<Item = String>) {
+        let pending: Vec<crate::stored_projection::Stored> = {
+            let store = self.store.read().await;
+            thread_ids
+                .into_iter()
+                .filter_map(|id| store.threads.get(&id)?.stored.clone())
+                .filter(crate::stored_projection::Stored::needs_read)
+                .collect()
+        };
+        for stored in pending {
+            let _ = tokio::task::spawn_blocking(move || stored.try_get().map(|_| ())).await;
+        }
+    }
+
     async fn commit_with(
         &self,
         event: Event,
         receipt: Option<CommandReceipt>,
         suppress: &[String],
     ) -> anyhow::Result<ServerEvent> {
+        // Read the threads this commit plans from before taking the store
+        // for writing, which every reader would wait for meanwhile.
+        let touched = crate::shared_store::touched_threads(&*self.store.read().await, &event);
+        self.load_whole(touched).await;
         let mut store = self.store.write().await;
         let mut next_event_id = self.next_event_id.lock().await;
         let mut shared = self.shared.lock().await;

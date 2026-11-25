@@ -18,6 +18,22 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
+/// Runs `read`, a blocking database read, without holding up a runtime
+/// worker's other tasks (`tokio::task::block_in_place`). Off a multi-thread
+/// runtime it just runs.
+pub(crate) fn blocking<T>(read: impl FnOnce() -> T) -> T {
+    // The workers build has one thread and no blocking pool.
+    #[cfg(not(feature = "native"))]
+    return read();
+    #[cfg(feature = "native")]
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(read)
+        }
+        _ => read(),
+    }
+}
+
 /// Reads one thread's records from the database.
 pub(crate) trait Hydrate: Send + Sync {
     /// The whole projection (`statev2::read::thread_projection`).
@@ -74,12 +90,16 @@ struct Lazy {
     thread_id: String,
     slim: Slim,
     whole: OnceLock<Box<Value>>,
+    /// Held while the whole projection is read, so callers that need it at
+    /// the same time wait for the one read instead of each reading it.
+    reading: std::sync::Mutex<()>,
     source: Arc<dyn Hydrate>,
 }
 
 #[derive(Clone)]
 enum Repr {
-    Whole(Box<Value>),
+    /// Shared, so copying a thread (a commit plans on a copy) does not copy it.
+    Whole(Arc<Value>),
     Lazy(Arc<Lazy>),
 }
 
@@ -110,7 +130,7 @@ impl Stored {
     /// A projection read (or planned) whole.
     pub(crate) fn whole(projection: Value) -> Self {
         Stored(
-            Repr::Whole(Box::new(projection)),
+            Repr::Whole(Arc::new(projection)),
             Arc::new(AtomicU64::new(now_ms())),
         )
     }
@@ -122,6 +142,7 @@ impl Stored {
                 thread_id,
                 slim,
                 whole: OnceLock::new(),
+                reading: std::sync::Mutex::new(()),
                 source,
             })),
             Arc::new(AtomicU64::new(now_ms())),
@@ -139,6 +160,19 @@ impl Stored {
         if let Some(projection) = lazy.whole.get() {
             return Ok(projection);
         }
+        // Reading a long thread takes seconds of database reads and parsing.
+        // On a runtime worker, hand its other tasks to another worker first,
+        // or they (an HTTP accept, a health check) wait for the read.
+        blocking(|| Self::read_once(lazy))?;
+        Ok(lazy.whole.get().expect("just read"))
+    }
+
+    /// Reads `lazy` whole unless another caller just did.
+    fn read_once(lazy: &Lazy) -> anyhow::Result<()> {
+        let _reading = lazy.reading.lock().unwrap_or_else(|e| e.into_inner());
+        if lazy.whole.get().is_some() {
+            return Ok(());
+        }
         let started = std::time::Instant::now();
         let projection = lazy.source.read(&lazy.thread_id)?.ok_or_else(|| {
             anyhow::anyhow!(
@@ -153,9 +187,13 @@ impl Stored {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "read a thread's projection from the shared orchestration database"
         );
-        // Another reader may have set it meanwhile; both read the same rows.
         let _ = lazy.whole.set(Box::new(projection));
-        Ok(lazy.whole.get().expect("just set"))
+        Ok(())
+    }
+
+    /// Whether the whole projection is still to be read from the database.
+    pub(crate) fn needs_read(&self) -> bool {
+        matches!(&self.0, Repr::Lazy(lazy) if lazy.whole.get().is_none())
     }
 
     /// The whole projection; see [`Stored::try_get`]. A database that fails
@@ -222,4 +260,59 @@ pub(crate) struct SlimView<'a> {
     pub projection: &'a Value,
     pub message_ordinals: &'a HashMap<String, i64>,
     pub unloaded_items: &'a [(Option<String>, u64)],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A slow database: counts its reads, each taking a while.
+    struct Slow(AtomicUsize);
+    impl Hydrate for Slow {
+        fn read(&self, thread_id: &str) -> anyhow::Result<Option<Value>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            Ok(Some(serde_json::json!({"thread": {"id": thread_id}})))
+        }
+        fn read_both(&self, _: &str) -> anyhow::Result<Option<(Value, Slim)>> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn callers_that_need_a_thread_at_once_share_one_read() {
+        let source = Arc::new(Slow(AtomicUsize::new(0)));
+        let stored = Stored::lazy("t".into(), Slim::default(), source.clone());
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let stored = stored.clone();
+                scope.spawn(move || assert_eq!(stored.get()["thread"]["id"], "t"));
+            }
+        });
+        assert_eq!(source.0.load(Ordering::SeqCst), 1);
+        assert!(!stored.needs_read());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_read_on_a_worker_leaves_the_runtime_answering() {
+        let source = Arc::new(Slow(AtomicUsize::new(0)));
+        let stored = Stored::lazy("t".into(), Slim::default(), source);
+        // Many reads of a slow thread at once, on the runtime's two workers...
+        let reads: Vec<_> = (0..6)
+            .map(|_| {
+                let stored = stored.clone();
+                tokio::spawn(async move {
+                    let _ = stored.get();
+                })
+            })
+            .collect();
+        // ...and a task that only needs a worker still runs at once.
+        let started = std::time::Instant::now();
+        tokio::spawn(async {}).await.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_millis(150));
+        for read in reads {
+            read.await.unwrap();
+        }
+    }
 }

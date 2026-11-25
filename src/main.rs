@@ -109,6 +109,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(false),
         );
     }
+    tune_allocator();
     // A worker polls a request's whole future chain on its stack, and a
     // debug build's async frames are large (answering a link card took
     // ~2 MiB, tokio's default), so the workers get more room.
@@ -205,4 +206,25 @@ async fn serve(args: Args, bootstrap: Option<Bootstrap>) -> anyhow::Result<()> {
     .await?;
     state.enable_provider_status_checks();
     run_server_owned(state, listen, Some(ownership)).await
+}
+
+/// Keeps freed memory from piling up in glibc's allocator. A long thread's
+/// projection is hundreds of MB of small allocations, built and dropped on
+/// whichever worker serves it: with an arena per thread, each worker kept
+/// what it freed, and after a burst of large buffers glibc raises its mmap
+/// threshold (up to 32 MiB), so later ones fragment the heap. Two arenas and
+/// a fixed 1 MiB threshold took a server opening eight long threads for three
+/// clients from 2.7 to 1.9 GB at its peak. A `MALLOC_ARENA_MAX` or
+/// `MALLOC_MMAP_THRESHOLD_` in the environment wins.
+fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: mallopt only sets allocator parameters, before any other thread exists.
+        if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+            unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) };
+        }
+        if std::env::var_os("MALLOC_MMAP_THRESHOLD_").is_none() {
+            unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 1024 * 1024) };
+        }
+    }
 }

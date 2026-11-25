@@ -377,7 +377,7 @@ pub(crate) fn detach_reason(event: &Event) -> Option<&str> {
 }
 
 /// The thread a commit touches and the threads it deletes.
-fn touched_threads(store: &Store, event: &Event) -> Vec<String> {
+pub(crate) fn touched_threads(store: &Store, event: &Event) -> Vec<String> {
     let mut ids: Vec<String> = event.thread_id().map(str::to_owned).into_iter().collect();
     match event {
         Event::ThreadDeleted { thread_id } => ids.push(thread_id.clone()),
