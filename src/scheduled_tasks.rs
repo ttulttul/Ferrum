@@ -350,7 +350,12 @@ async fn dispatch_to_thread(
         .await
         .threads
         .get(&thread_id)
-        .is_some_and(|thread| thread.runs.iter().any(|run| run.status == "running"));
+        .is_some_and(|thread| {
+            thread
+                .runs
+                .iter()
+                .any(|run| orchestration::is_live(&run.status))
+        });
     let mut dispatch = json!({
         "type":"message.dispatch", "commandId":format!("{command_id}:message"),
         "threadId":thread_id, "messageId":message_id, "text":task["prompt"],

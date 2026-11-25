@@ -969,7 +969,7 @@ async fn start_queued_run<H: CommandHost>(
     thread_id: &str,
     run_id: &str,
 ) -> anyhow::Result<u64> {
-    start_existing_run(state, receipt, thread_id, run_id, "running").await
+    start_existing_run(state, receipt, thread_id, run_id).await
 }
 
 async fn start_existing_run<H: CommandHost>(
@@ -977,7 +977,6 @@ async fn start_existing_run<H: CommandHost>(
     receipt: &CommandReceipt,
     thread_id: &str,
     run_id: &str,
-    start_status: &str,
 ) -> anyhow::Result<u64> {
     let (mut run, cwd, text) = {
         let store = state.store.read().await;
@@ -1015,7 +1014,7 @@ async fn start_existing_run<H: CommandHost>(
             .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} has no queued message.")))?;
         (run, thread.cwd.clone(), text)
     };
-    run.status = start_status.into();
+    run.status = "running".into();
     run.queue_held = false;
     let sequence = state
         .commit_receipted(Event::RunStarted(run.clone()), Some(receipt.clone()))
@@ -2247,14 +2246,10 @@ async fn apply_command<H: CommandHost>(
                     "Run {run_id} is not awaiting workspace preparation."
                 )));
             }
-            return start_existing_run(
-                state,
-                receipt,
-                thread_id.unwrap_or_default(),
-                run_id,
-                "starting",
-            )
-            .await;
+            // A released run has started: like any other, it reads as
+            // starting until its provider turn runs (the projection's
+            // `starting`), and can be stopped, steered and restarted.
+            return start_existing_run(state, receipt, thread_id.unwrap_or_default(), run_id).await;
         }
         "prepared-run.fail" => {
             let run_id = command["runId"].as_str().unwrap_or_default();
@@ -2501,7 +2496,6 @@ async fn apply_command<H: CommandHost>(
                         },
                         thread_id,
                         &run.wire_id(),
-                        "running",
                     )
                     .await?;
                 }

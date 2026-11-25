@@ -63,7 +63,8 @@ Steps:
                              With "retryWhenText": "..." and "retries": n, the
                              call is made again while its answer holds that
                              text, up to n more times ("retried" in the log),
-                             "retryDelay" seconds apart (default none).
+                             "retryDelay" seconds apart (default none); with
+                             "retryUntilText" instead, while it does not.
 
 A request the scenario does not expect is answered from SIDE_REPLIES (or the
 scenario's own "replies" by method; a Pi RPC command from "piReplies" by type), so a client that reads its config or
@@ -420,8 +421,9 @@ def mcp_call(step):
                                             step.get("headers"), server=target)
         # "retryWhenText": the same call again, up to "retries" more times, while its answer
         # holds that text (a known flake of one server); the record counts the retries.
-        for _ in range(step.get("retries", 0) if step.get("retryWhenText") else 0):
-            if step["retryWhenText"] not in json.dumps(answer):
+        retrying = step.get("retryWhenText") or step.get("retryUntilText")
+        for _ in range(step.get("retries", 0) if retrying else 0):
+            if ("retryWhenText" in step) == (retrying not in json.dumps(answer)):
                 break
             time.sleep(step.get("retryDelay", 0))
             status, received, answer = mcp_post({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
