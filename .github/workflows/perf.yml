@@ -120,12 +120,19 @@ jobs:
       - name: Build the Rust server (release)
         run: cargo build --locked --release
       - name: Compare both servers
+        id: compare
         run: |
+          # The idle-CPU gate's verdict is kept for the last step, so a run over the limit is
+          # still recorded on perf-data before the job fails.
+          gate=0
           python3 scripts/perf_compare.py \
             --original-command "node $GITHUB_WORKSPACE/reference/apps/server/dist/bin.mjs" \
             --rust-command "$GITHUB_WORKSPACE/target/release/t3code-server" \
             --reference-root "$GITHUB_WORKSPACE/reference" \
-            --json "$RUNNER_TEMP/perf.json" --markdown "$RUNNER_TEMP/perf.md"
+            --max-large-idle-cpu 3 \
+            --json "$RUNNER_TEMP/perf.json" --markdown "$RUNNER_TEMP/perf.md" || gate=$?
+          test -s "$RUNNER_TEMP/perf.json"
+          echo "gate=$gate" >> "$GITHUB_OUTPUT"
           {
             echo "## Rust server against the reference"
             echo
@@ -216,3 +223,12 @@ jobs:
           if ! gh pr merge "$pr" --repo "$REPOSITORY" --squash --delete-branch; then
             echo "::warning title=Performance::Could not merge pull request #$pr, which refreshes docs/performance.md."
           fi
+      # Idle CPU after start-up on a large database, with clients connected, must stay under 3% of
+      # one core (perf_compare.py's `large` section). It fails the job after the results are kept.
+      - name: Check idle CPU on a large database
+        if: steps.compare.outputs.gate != '0'
+        env:
+          GATE: ${{ steps.compare.outputs.gate }}
+        run: |
+          echo "::error title=Performance::perf_compare.py exited with $GATE: Rust's idle CPU on a large database with clients connected is over 3% of one core, or the comparison failed after writing its results. See the Compare both servers step."
+          exit 1

@@ -188,12 +188,37 @@ pub fn path() -> Option<OsString> {
     current().path.clone()
 }
 
-/// A command for `program` with the current login-shell environment. With
-/// `PATH` set on the command, a bare `program` is looked up on that `PATH`.
-/// Later `env` and `env_remove` calls on it still win.
+/// The login-shell variables a child must be given explicitly: those whose
+/// value differs from this process's own. A child inherits the rest, so its
+/// environment is the same either way.
+///
+/// Leaving an unchanged `PATH` off the command matters: the standard library
+/// starts a command that sets `PATH` and names a bare program with `fork` and
+/// `execvp`, which copies this whole process's page tables, and that costs
+/// more the more memory the server holds. Without it, a command is started
+/// with `posix_spawn`, which does not copy them. `fix_path` gives this process
+/// the login `PATH` at start-up, so usually only a later refresh sets it here.
+fn differing_variables() -> Vec<(&'static str, OsString)> {
+    differing(&current(), |name| std::env::var_os(name))
+}
+
+fn differing(
+    environment: &LoginEnvironment,
+    own: impl Fn(&str) -> Option<OsString>,
+) -> Vec<(&'static str, OsString)> {
+    environment
+        .variables()
+        .filter(|(name, value)| own(name).as_deref() != Some(*value))
+        .map(|(name, value)| (name, value.to_os_string()))
+        .collect()
+}
+
+/// A command for `program` with the current login-shell environment. A bare
+/// `program` is looked up on that environment's `PATH`. Later `env` and
+/// `env_remove` calls on it still win.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
-    for (name, value) in current().variables() {
+    for (name, value) in differing_variables() {
         command.env(name, value);
     }
     command
@@ -202,7 +227,7 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 /// [`command`] for tokio.
 pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(program);
-    for (name, value) in current().variables() {
+    for (name, value) in differing_variables() {
         command.env(name, value);
     }
     command
@@ -928,12 +953,15 @@ mod tests {
 
     #[test]
     fn commands_carry_the_snapshot_and_later_env_calls_win() {
+        // A command's PATH is the snapshot's: set on it, or inherited when this
+        // process already has the same one.
         let command = command("true");
         let path = command
             .get_envs()
             .find(|(name, _)| *name == "PATH")
-            .and_then(|(_, value)| value);
-        assert_eq!(path, current().path.as_deref());
+            .and_then(|(_, value)| value.map(OsStr::to_os_string))
+            .or_else(|| std::env::var_os("PATH"));
+        assert_eq!(path, current().path);
         let mut overridden = self::command("true");
         overridden.env("PATH", "/explicit");
         assert_eq!(
@@ -942,6 +970,29 @@ mod tests {
                 .find(|(name, _)| *name == "PATH")
                 .and_then(|(_, value)| value),
             Some(OsStr::new("/explicit"))
+        );
+    }
+
+    #[test]
+    fn only_variables_this_process_lacks_are_set_on_a_command() {
+        let environment = LoginEnvironment {
+            path: Some("/login/bin:/usr/bin".into()),
+            java_home: Some("/jdk".into()),
+            ..LoginEnvironment::default()
+        };
+        let own = |path: &'static str| {
+            move |name: &str| match name {
+                "PATH" => Some(OsString::from(path)),
+                "JAVA_HOME" => Some(OsString::from("/jdk")),
+                _ => None,
+            }
+        };
+        // The same PATH is inherited, so the command can start with posix_spawn.
+        assert!(differing(&environment, own("/login/bin:/usr/bin")).is_empty());
+        // A different one is set, so the child still gets the login PATH.
+        assert_eq!(
+            differing(&environment, own("/usr/bin")),
+            vec![("PATH", OsString::from("/login/bin:/usr/bin"))]
         );
     }
 
