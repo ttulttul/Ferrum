@@ -1230,9 +1230,18 @@ impl Thread {
             }
             card
         };
+        let at = completed.clone().unwrap_or_else(|| started.clone());
+        // Whether a retry the turn failed in became its failure row.
+        let mut failure_placed = false;
         for (position, item) in record.items.iter().enumerate() {
             if let Some((at, _)) = requested.filter(|(_, slot)| *slot == position) {
                 out.items.push((index, request_card(at)));
+            }
+            if item.item.kind == "error" && item.item.fields.contains_key("retry") {
+                let row = self.retry_item(ids, item, terminal, cut, &at);
+                failure_placed |= row["status"] == "failed";
+                out.items.push((index, row));
+                continue;
             }
             if matches!(
                 item.item.kind.as_str(),
@@ -1332,7 +1341,6 @@ impl Thread {
                 .push((index, self.restart_notice(run, restart, Some(ids))));
         }
         let Some(terminal) = terminal else { return };
-        let at = completed.clone().unwrap_or_else(|| started.clone());
         match terminal.status {
             // A turn whose folder is missing, or a Codex or Grok turn
             // whose process never opened a session: the reference reports
@@ -1388,11 +1396,27 @@ impl Thread {
                     }
                 })));
             }
+            // A retry the turn failed in already shows its failure.
+            TurnStatus::Failed if failure_placed => {}
             TurnStatus::Failed => {
                 let failure = terminal.failure.clone().unwrap_or_else(|| {
                     provider::ProviderFailure::new("unknown", "Provider turn failed.")
                 });
-                let native = format!("terminal-failure:{}", ids.provider_turn);
+                // A turn that recovered from retries fails in a row of its
+                // own, after them (`codexFailureItemKey`).
+                let recovered = record
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        item.item.kind == "error"
+                            && item.item.fields.contains_key("retry")
+                            && item.item.status == "completed"
+                    })
+                    .count();
+                let mut native = format!("terminal-failure:{}", ids.provider_turn);
+                if recovered > 0 {
+                    native = format!("{native}:{recovered}");
+                }
                 out.items.push((index, json!({
                     "id": item_id("turn-item", driver, &native),
                     "threadId": self.id,
@@ -1450,6 +1474,78 @@ impl Thread {
             }
             TurnStatus::Completed | TurnStatus::Running => {}
         }
+    }
+
+    /// A provider retry item (the reference's makeProviderRetryTurnItem):
+    /// running while the provider retries, then recovered, stopped, or the
+    /// turn's failure row when the turn failed in it
+    /// (makeProviderFailureTurnItem with its `retry`).
+    fn retry_item(
+        &self,
+        ids: &RunIds,
+        record: &ItemRecord,
+        terminal: Option<&Terminal>,
+        cut: Option<u64>,
+        ended_at: &str,
+    ) -> Value {
+        let driver = ids.driver.as_str();
+        let item = &record.item;
+        // `terminal-failure`, or `terminal-failure:N` after N recoveries.
+        let suffix = item
+            .id
+            .strip_prefix(provider::PROVIDER_RETRY_ITEM)
+            .unwrap_or_default();
+        let native = format!("terminal-failure:{}{suffix}", ids.provider_turn);
+        let open = matches!(item.status.as_str(), "running" | "failed");
+        let ended = terminal.map(|terminal| terminal.status);
+        let status = match (item.status.as_str(), ended) {
+            (_, Some(TurnStatus::Failed)) if open => "failed",
+            ("running", _) if cut.is_some() => "cancelled",
+            ("running", Some(TurnStatus::Interrupted)) => "interrupted",
+            ("running", Some(TurnStatus::Completed)) => "completed",
+            (status, _) => status,
+        };
+        let mut failure = item.fields.get("failure").cloned().unwrap_or(Value::Null);
+        let started = iso(record.first_at);
+        let mut updated = iso(cut
+            .filter(|_| status == "cancelled")
+            .unwrap_or(record.updated_at));
+        let title = match status {
+            "running" => "Provider retry",
+            "completed" => "Provider recovered",
+            "failed" => {
+                // The turn's failure, as its end reported it.
+                if let Some(turn_failure) = terminal.and_then(|t| t.failure.as_ref()) {
+                    failure = failure_json(turn_failure);
+                }
+                updated = ended_at.to_owned();
+                if failure["class"] == "usage_limit" {
+                    "Usage limit reached"
+                } else {
+                    "Provider error"
+                }
+            }
+            _ => "Provider retry stopped",
+        };
+        json!({
+            "id": item_id("turn-item", driver, &native),
+            "threadId": self.id,
+            "runId": ids.run,
+            "nodeId": ids.root_node,
+            "providerThreadId": ids.provider_thread,
+            "providerTurnId": ids.provider_turn,
+            "nativeItemRef": null,
+            "parentItemId": null,
+            "ordinal": 0,
+            "status": status,
+            "title": title,
+            "startedAt": started,
+            "completedAt": if status == "running" { Value::Null } else { json!(updated) },
+            "updatedAt": updated,
+            "type": "error",
+            "failure": failure,
+            "retry": item.fields.get("retry").cloned().unwrap_or(Value::Null)
+        })
     }
 
     /// A run's interrupt request or result card.
@@ -2238,6 +2334,97 @@ mod tests {
             live.provider.apply(run_id, &event, 2);
         }
         live
+    }
+
+    fn retry(id: &str, status: &str, attempt: u64) -> ProviderEvent {
+        let ProviderEvent::TurnItem { mut item } = item(id, "error", status, None) else {
+            unreachable!()
+        };
+        item.fields.insert(
+            "failure".into(),
+            json!({"class": "transport_error", "message": "dropped", "code": null, "retryable": true}),
+        );
+        item.fields.insert(
+            "retry".into(),
+            json!({"attempt": attempt, "maxAttempts": 5, "retryDelayMs": null}),
+        );
+        ProviderEvent::TurnItem { item }
+    }
+
+    #[test]
+    fn a_provider_retry_shows_in_its_slot_and_a_failure_after_a_recovery_gets_its_own_row() {
+        let run_id = Uuid::new_v4();
+        let mut live = running_codex_thread(run_id);
+        live.provider
+            .apply(run_id, &retry("terminal-failure", "running", 1), 3);
+        let rows = |live: &Thread| -> Vec<Value> {
+            live.projection()["turnItems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["type"] == "error")
+                .cloned()
+                .collect()
+        };
+        let row = &rows(&live)[0];
+        assert_eq!(row["status"], "running");
+        assert_eq!(row["title"], "Provider retry");
+        assert_eq!(row["completedAt"], Value::Null);
+        let first = row["id"].as_str().unwrap().to_owned();
+        assert!(first
+            .ends_with("terminal-failure%3Aprovider-turn%3Aprovider%3Acodex%3Anative-turn%3Aturn"));
+        live.provider
+            .apply(run_id, &retry("terminal-failure", "completed", 1), 4);
+        assert_eq!(rows(&live)[0]["title"], "Provider recovered");
+        let mut failed = terminal(TurnStatus::Failed);
+        if let ProviderEvent::TurnTerminal { failure, .. } = &mut failed {
+            *failure = Some(crate::workspace::provider::ProviderFailure::new(
+                "provider_error",
+                "boom",
+            ));
+        }
+        live.provider.apply(run_id, &failed, 5);
+        let rows = rows(&live);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["status"], "completed");
+        assert_eq!(rows[1]["status"], "failed");
+        assert_eq!(rows[1]["id"], format!("{first}%3A1"));
+        assert_eq!(rows[1]["failure"]["message"], "boom");
+    }
+
+    #[test]
+    fn a_turn_that_fails_in_its_retry_makes_the_retry_its_failure_row() {
+        let run_id = Uuid::new_v4();
+        let mut live = running_codex_thread(run_id);
+        live.provider
+            .apply(run_id, &retry("terminal-failure", "running", 2), 3);
+        let mut failed = terminal(TurnStatus::Failed);
+        if let ProviderEvent::TurnTerminal {
+            failure, closing, ..
+        } = &mut failed
+        {
+            *failure = Some(crate::workspace::provider::ProviderFailure::new(
+                "transport_error",
+                "Connection lost.",
+            ));
+            closing.push(retry("terminal-failure", "failed", 2));
+        }
+        live.provider.apply(run_id, &failed, 7);
+        let projection = live.projection();
+        let rows: Vec<&Value> = projection["turnItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["type"] == "error")
+            .collect();
+        assert_eq!(rows.len(), 1);
+        let row = rows[0];
+        assert_eq!(row["status"], "failed");
+        assert_eq!(row["title"], "Provider error");
+        assert_eq!(row["failure"]["message"], "Connection lost.");
+        assert_eq!(row["retry"]["attempt"], 2);
+        assert_eq!(row["startedAt"], crate::thread_projection::iso(3));
+        assert_eq!(row["completedAt"], crate::thread_projection::iso(7));
     }
 
     #[test]

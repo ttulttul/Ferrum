@@ -6,7 +6,7 @@ use super::{
 };
 use crate::workspace::provider::{
     PlanStep, ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition,
-    TokenUsage, TurnStatus, CODEX,
+    TokenUsage, TurnStatus, CODEX, PROVIDER_RETRY_ITEM,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Value};
@@ -24,6 +24,26 @@ const SERVER_VERSION: &str = "0.1.11";
 
 /// How long an interrupted turn may take to report that it stopped.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+
+/// The reference's PROVIDER_RETRY_BUDGET_MS: the longest a turn may stay in
+/// provider retries before it is stopped as failed. Codex waits for the
+/// network without limit, so counting attempts alone never ends a turn.
+const PROVIDER_RETRY_BUDGET: Duration = Duration::from_secs(10 * 60);
+
+/// The retry budget of `spec`'s turn; tests shorten it.
+fn retry_budget(spec: &TurnSpec) -> Duration {
+    #[cfg(test)]
+    if let Some(ms) = spec
+        .env
+        .iter()
+        .find(|(key, _)| key == "TEST_PROVIDER_RETRY_BUDGET_MS")
+        .and_then(|(_, ms)| ms.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    let _ = spec;
+    PROVIDER_RETRY_BUDGET
+}
 
 pub(super) async fn run(
     spec: TurnSpec,
@@ -63,6 +83,10 @@ pub(super) async fn run(
         turn_id: None,
         terminal: None,
         last_error: None,
+        retry: None,
+        recovered_retries: 0,
+        retry_budget: retry_budget(&spec),
+        stalled: None,
     };
     let end = session.turn(&spec, &provider).await;
     // A thread whose turn failed resumes on its next turn, as the
@@ -179,8 +203,64 @@ struct Session {
     turn_id: Option<String>,
     /// `turn/completed` for our turn, once it arrived.
     terminal: Option<Value>,
-    /// The last error Codex reported without retrying.
-    last_error: Option<String>,
+    /// The last error Codex reported without retrying
+    /// (`latestProviderFailure`).
+    last_error: Option<Notice>,
+    /// The retry Codex is in, shown as a provider retry item.
+    retry: Option<ProviderRetry>,
+    /// How many retries the turn recovered from; each later retry gets its
+    /// own item.
+    recovered_retries: u32,
+    /// How long a retry may last before the turn fails.
+    retry_budget: Duration,
+    /// The failure a retry that outlasted its budget ends the turn with,
+    /// once it asked Codex to stop.
+    stalled: Option<ProviderFailure>,
+}
+
+/// An `error` notification's failure, with what Codex said
+/// (`latestProviderFailure`).
+#[derive(Clone)]
+struct Notice {
+    native_message: String,
+    native_code: Option<String>,
+    error_info: Value,
+    failure: ProviderFailure,
+}
+
+/// The reference's ActiveCodexProviderRetry: a retry Codex announced
+/// (`error` with `willRetry`) and has not recovered from.
+struct ProviderRetry {
+    notice: Notice,
+    /// The notice's details, which a turn that fails with them repeats.
+    native_details: String,
+    attempt: u64,
+    max_attempts: Option<u64>,
+    /// The turn item's id ([`PROVIDER_RETRY_ITEM`]), one per retry the turn
+    /// recovered from before, which the projection names as the reference
+    /// does (`codexFailureItemKey`).
+    item_id: String,
+    /// When the retry fails the turn (`failStalledProviderRetry`): its budget
+    /// counts from the first notice, which later notices cannot extend.
+    deadline: tokio::time::Instant,
+}
+
+impl ProviderRetry {
+    /// The reference's codexRetryTurnItem, which the projection completes.
+    fn item(&self, status: &str) -> ProviderItem {
+        let failure = &self.notice.failure;
+        ProviderItem::new(&self.item_id, "error", status)
+            .with(
+                "failure",
+                json!({"class": failure.class, "message": failure.message,
+                    "code": failure.code, "retryable": failure.retryable}),
+            )
+            .with(
+                "retry",
+                json!({"attempt": self.attempt, "maxAttempts": self.max_attempts,
+                    "retryDelayMs": null}),
+            )
+    }
 }
 
 /// Token counts as Codex reports them (`total` or `last`).
@@ -353,6 +433,20 @@ enum Failed {
 impl Session {
     async fn turn(&mut self, spec: &TurnSpec, provider: &ProviderTurn) -> TurnEnd {
         let end = self.drive_turn(spec, provider).await;
+        // A retry still running ends with its turn; a failed turn's end
+        // fails it with the turn's failure, which it then shows.
+        if let Some(retry) = self.retry.take() {
+            let status = match end.status {
+                TurnStatus::Completed => Some("completed"),
+                TurnStatus::Interrupted => Some("interrupted"),
+                _ => None,
+            };
+            if let Some(status) = status {
+                self.sink.send(ProviderEvent::TurnItem {
+                    item: retry.item(status),
+                });
+            }
+        }
         // A turn Codex started and ended reports what it used, as the
         // reference does; one whose app-server closed never ends there.
         let crashed = end
@@ -604,6 +698,13 @@ impl Session {
         // Wait for the turn to end; a cancel interrupts it.
         let mut interrupt_deadline = None;
         while self.terminal.is_none() {
+            // A retry that outlasts its budget fails the turn, unless the
+            // turn is already being stopped.
+            let retry_deadline = self
+                .retry
+                .as_ref()
+                .filter(|_| !self.cancelled && self.stalled.is_none())
+                .map(|retry| retry.deadline);
             let line = tokio::select! {
                 line = self.cli.next_line() => line,
                 _ = cancelled(&mut self.cancel), if !self.cancelled => {
@@ -613,7 +714,16 @@ impl Session {
                     continue;
                 }
                 _ = sleep_until(interrupt_deadline) => {
+                    if let Some(failure) = self.stalled.take() {
+                        return Ok(TurnEnd::failed(failure, ThreadDisposition::Reusable));
+                    }
                     return Ok(TurnEnd::interrupted(true));
+                }
+                _ = sleep_until(retry_deadline) => {
+                    self.fail_stalled_retry();
+                    self.interrupt().await;
+                    interrupt_deadline = Some(tokio::time::Instant::now() + INTERRUPT_GRACE);
+                    continue;
                 }
                 response = next_response(&mut self.responses) => {
                     self.respond(response).await;
@@ -621,6 +731,9 @@ impl Session {
                 }
             };
             let Some(line) = line else {
+                if let Some(failure) = self.stalled.take() {
+                    return Ok(TurnEnd::failed(failure, ThreadDisposition::Reusable));
+                }
                 if self.cancelled {
                     return Ok(TurnEnd::interrupted(true));
                 }
@@ -631,24 +744,202 @@ impl Session {
         Ok(self.end().await)
     }
 
+    /// The reference's failStalledProviderRetry: a retry that outlasted its
+    /// budget fails the turn with the retry's failure, no longer retryable
+    /// (a usage limit when its last attempt got a 429), unless Codex
+    /// reported a failure of its own first. The turn is then stopped.
+    fn fail_stalled_retry(&mut self) {
+        let Some(retry) = &self.retry else { return };
+        let mut failure = retry.notice.failure.clone();
+        failure.retryable = Some(false);
+        if http_status(&retry.notice.error_info) == Some(429) {
+            failure.class = "usage_limit".into();
+        }
+        let failure = match &self.last_error {
+            Some(notice) => notice.failure.clone(),
+            None => failure,
+        };
+        self.stalled = Some(failure);
+    }
+
     async fn end(&mut self) -> TurnEnd {
         let turn = self.terminal.take().unwrap_or_default();
+        if let Some(mut failure) = self.stalled.take() {
+            if failure.class == "usage_limit" {
+                failure.reset_at = self.usage_limit_reset().await;
+            }
+            return TurnEnd::failed(failure, ThreadDisposition::Reusable);
+        }
         match turn["status"].as_str() {
             Some("completed") => TurnEnd::completed(),
             Some("interrupted") => TurnEnd::interrupted(self.cancelled),
             _ => {
-                let message = turn["error"]["message"]
-                    .as_str()
-                    .map(str::to_owned)
-                    .or_else(|| self.last_error.clone())
-                    .unwrap_or_else(|| "Codex turn failed.".into());
-                let mut failure = ProviderFailure::new(failure_class(&turn["error"]), message);
-                failure.code = error_code(&turn["error"]["codexErrorInfo"]);
+                let mut failure = self.turn_failure(&turn["error"]);
                 if failure.class == "usage_limit" {
                     failure.reset_at = self.usage_limit_reset().await;
                 }
                 TurnEnd::failed(failure, ThreadDisposition::Reusable)
             }
+        }
+    }
+
+    /// The failure of a turn that ended with `error`, as the reference's
+    /// makeRootTerminalEvent finds it: what an `error` notification (or the
+    /// retry still running) said, when the turn's own error repeats it,
+    /// else the turn's error.
+    fn turn_failure(&self, error: &Value) -> ProviderFailure {
+        let message = error["message"].as_str();
+        let info = &error["codexErrorInfo"];
+        let code = error_code(info);
+        let class = failure_class(info, code.as_deref());
+        let retry = self.retry.as_ref();
+        let previous = self
+            .last_error
+            .as_ref()
+            .or(retry.map(|retry| &retry.notice));
+        // Retry exhaustion without a status cannot replace the notice's evidence.
+        let has_class = code
+            .as_deref()
+            .is_some_and(|code| !needs_evidence(info, code));
+        let mut failure = match previous {
+            Some(previous)
+                if message.is_none_or(|message| message == previous.native_message)
+                    && (code.is_none() || code == previous.native_code)
+                    && (!has_class || previous.failure.class == class) =>
+            {
+                previous.failure.clone()
+            }
+            _ => {
+                let mut failure =
+                    ProviderFailure::new(class, message.unwrap_or("Provider turn failed."));
+                failure.code = code.clone();
+                failure
+            }
+        };
+        // Codex reports an exhausted stream error as `other` with the same details.
+        let notification = self.last_error.as_ref();
+        if failure.class == "provider_error"
+            && failure
+                .code
+                .as_deref()
+                .is_some_and(|code| needs_evidence(info, code))
+            && notification.is_none_or(|notice| {
+                notice.failure.class == "transport_error"
+                    || notice
+                        .native_code
+                        .as_deref()
+                        .is_some_and(|code| needs_evidence(&notice.error_info, code))
+            })
+            && (retry.is_some_and(|retry| {
+                message == Some(retry.native_details.as_str())
+                    && failure_class(
+                        &retry.notice.error_info,
+                        retry.notice.native_code.as_deref(),
+                    ) == "transport_error"
+            }) || notification.is_some_and(|notice| {
+                notice.failure.class == "transport_error"
+                    && message == Some(notice.native_message.as_str())
+            }))
+        {
+            failure.class = "transport_error".into();
+        }
+        failure
+    }
+
+    /// Codex's `error` notification: one it will not retry is the failure
+    /// its turn ends with; one it retries shows as a provider retry item
+    /// until the turn makes progress or ends.
+    fn error_notice(&mut self, params: &Value) {
+        // A turn already failing for its stalled retry ignores later notices.
+        if self.stalled.is_some() {
+            return;
+        }
+        let error = &params["error"];
+        let native_message = error["message"].as_str().unwrap_or_default().to_owned();
+        let info = error["codexErrorInfo"].clone();
+        let code = error_code(&info);
+        let details = error["additionalDetails"]
+            .as_str()
+            .map(str::trim)
+            .filter(|details| !details.is_empty());
+        if params["willRetry"] != true {
+            let mut failure = ProviderFailure::new(
+                failure_class(&info, code.as_deref()),
+                details.unwrap_or(&native_message),
+            );
+            failure.code = code.clone();
+            self.last_error = Some(Notice {
+                native_message,
+                native_code: code,
+                error_info: info,
+                failure,
+            });
+            return;
+        }
+        let class = if usage_limit_error(code.as_deref(), &info) {
+            "usage_limit"
+        } else if code
+            .as_deref()
+            .is_some_and(|code| code.starts_with("http") || code.starts_with("responseStream"))
+        {
+            "transport_error"
+        } else {
+            "provider_error"
+        };
+        let mut failure = ProviderFailure::new(class, details.unwrap_or(&native_message));
+        failure.code = code.clone();
+        failure.retryable = Some(true);
+        let previous = self.retry.take();
+        let progress = retry_progress(&native_message);
+        let retry = ProviderRetry {
+            attempt: progress.map_or_else(
+                || previous.as_ref().map_or(0, |retry| retry.attempt) + 1,
+                |(attempt, _)| attempt,
+            ),
+            // Codex drops the count once it waits for the network, which has no limit.
+            max_attempts: progress.map(|(_, max)| max),
+            native_details: match details {
+                Some(_) => error["additionalDetails"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                None => native_message.clone(),
+            },
+            notice: Notice {
+                native_message,
+                native_code: code,
+                error_info: info,
+                failure,
+            },
+            item_id: previous.as_ref().map_or_else(
+                || match self.recovered_retries {
+                    0 => PROVIDER_RETRY_ITEM.to_owned(),
+                    n => format!("{PROVIDER_RETRY_ITEM}:{n}"),
+                },
+                |retry| retry.item_id.clone(),
+            ),
+            deadline: previous.as_ref().map_or_else(
+                || tokio::time::Instant::now() + self.retry_budget,
+                |retry| retry.deadline,
+            ),
+        };
+        self.sink.send(ProviderEvent::TurnItem {
+            item: retry.item("running"),
+        });
+        self.retry = Some(retry);
+    }
+
+    /// New model output proves Codex recovered from its retry
+    /// (`completeProviderRetry`).
+    fn complete_retry(&mut self) {
+        if self.stalled.is_some() {
+            return;
+        }
+        if let Some(retry) = self.retry.take() {
+            self.recovered_retries += 1;
+            self.sink.send(ProviderEvent::TurnItem {
+                item: retry.item("completed"),
+            });
         }
     }
 
@@ -806,6 +1097,16 @@ impl Session {
             }
             "item/started" | "item/completed" => {
                 let native = &params["item"];
+                // Only new model output proves recovery; an item's end can
+                // arrive while Codex still retries.
+                if method == "item/started"
+                    && !matches!(
+                        native["type"].as_str(),
+                        Some("contextCompaction" | "userMessage" | "subAgentActivity")
+                    )
+                {
+                    self.complete_retry();
+                }
                 if let (Some("fileChange"), Some(id)) =
                     (native["type"].as_str(), native["id"].as_str())
                 {
@@ -835,6 +1136,13 @@ impl Session {
                 if let (Some(item_id), Some(delta)) =
                     (params["itemId"].as_str(), params["delta"].as_str())
                 {
+                    // An empty reasoning delta is no progress.
+                    if method == "item/agentMessage/delta"
+                        || method == "item/plan/delta"
+                        || !delta.is_empty()
+                    {
+                        self.complete_retry();
+                    }
                     self.sink.send(ProviderEvent::TurnItemDelta {
                         held: false,
                         item_id: item_id.into(),
@@ -853,6 +1161,7 @@ impl Session {
                 }
             }
             "turn/plan/updated" => {
+                self.complete_retry();
                 let steps = params["plan"]
                     .as_array()
                     .into_iter()
@@ -904,11 +1213,7 @@ impl Session {
                 }
                 self.rate_limits = Some(merged);
             }
-            "error" if params["willRetry"] != true => {
-                if let Some(message) = params["error"]["message"].as_str() {
-                    self.last_error = Some(message.into());
-                }
-            }
+            "error" => self.error_notice(params),
             _ => {}
         }
     }
@@ -1303,17 +1608,93 @@ fn error_code(info: &Value) -> Option<String> {
     }
 }
 
-/// The reference's failure class for a Codex turn error.
-fn failure_class(error: &Value) -> &'static str {
-    match error_code(&error["codexErrorInfo"]).as_deref() {
-        Some("usageLimitExceeded") => "usage_limit",
-        Some("unauthorized") => "permission_error",
-        Some("httpConnectionFailed")
-        | Some("responseStreamConnectionFailed")
-        | Some("responseStreamDisconnected") => "transport_error",
-        Some("badRequest") | Some("contextWindowExceeded") => "validation_error",
-        _ => "provider_error",
+/// The HTTP status of a Codex error's details, if it names one
+/// (`codexErrorHttpStatus`).
+fn http_status(info: &Value) -> Option<u64> {
+    info.as_object()?.values().next()?["httpStatusCode"].as_u64()
+}
+
+/// The reference's codexUsageLimitError: a usage or rate limit, or retries
+/// that ran out on a 429.
+fn usage_limit_error(code: Option<&str>, info: &Value) -> bool {
+    matches!(code, Some("usageLimitExceeded" | "rateLimitExceeded"))
+        || info["responseTooManyFailedAttempts"]["httpStatusCode"].as_u64() == Some(429)
+}
+
+/// The reference's codexTerminalFailureClass for a Codex error.
+fn failure_class(info: &Value, code: Option<&str>) -> &'static str {
+    if usage_limit_error(code, info) {
+        return "usage_limit";
     }
+    let transport = [
+        "responseStreamDisconnected",
+        "responseStreamConnectionFailed",
+        "httpConnectionFailed",
+    ]
+    .iter()
+    .find_map(|key| info.get(key));
+    if transport.is_some_and(|transport| transport["httpStatusCode"].is_null()) {
+        return "transport_error";
+    }
+    "provider_error"
+}
+
+/// The reference's codexTerminalErrorNeedsEvidence: a code that says
+/// nothing of why the turn failed.
+fn needs_evidence(info: &Value, code: &str) -> bool {
+    code == "other"
+        || (code == "responseTooManyFailedAttempts"
+            && info["responseTooManyFailedAttempts"]["httpStatusCode"]
+                .as_u64()
+                .is_none())
+}
+
+/// The reference's parseCodexRetryProgress: the attempt and the most there
+/// are, from a notice such as "Reconnecting... 2/5".
+fn retry_progress(message: &str) -> Option<(u64, u64)> {
+    let bytes = message.as_bytes();
+    let digits = |from: usize| {
+        let end = bytes[from..]
+            .iter()
+            .position(|b| !b.is_ascii_digit())
+            .map_or(bytes.len(), |n| from + n);
+        (end, &message[from..end])
+    };
+    let word = |at: usize| {
+        bytes
+            .get(at)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        // `\b(\d+)`: digits that start a word.
+        if !bytes[i].is_ascii_digit() || (i > 0 && word(i - 1)) {
+            i += 1;
+            continue;
+        }
+        let (end, first) = digits(i);
+        let mut j = end;
+        while bytes.get(j).is_some_and(u8::is_ascii_whitespace) {
+            j += 1;
+        }
+        if bytes.get(j) == Some(&b'/') {
+            j += 1;
+            while bytes.get(j).is_some_and(u8::is_ascii_whitespace) {
+                j += 1;
+            }
+            if bytes.get(j).is_some_and(u8::is_ascii_digit) {
+                let (last, second) = digits(j);
+                // `(\d+)\b`: digits that end a word.
+                if !word(last) {
+                    let attempt = first.parse().ok()?;
+                    let max = second.parse().ok()?;
+                    return (attempt >= 1 && max >= 1).then_some((attempt, max));
+                }
+            }
+        }
+        i = end;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1334,6 +1715,39 @@ mod tests {
             None
         );
         assert_eq!(usage_limit_reset_at(&json!({"limitId": "other"})), None);
+    }
+
+    #[test]
+    fn reads_retry_progress_as_the_reference_does() {
+        assert_eq!(retry_progress("Reconnecting... 2/5"), Some((2, 5)));
+        assert_eq!(
+            retry_progress("Reconnecting... 3 / 10 attempts"),
+            Some((3, 10))
+        );
+        assert_eq!(retry_progress("Reconnecting... waiting for network"), None);
+        assert_eq!(retry_progress("Reconnecting... 0/5"), None);
+        assert_eq!(retry_progress("v2/5"), None);
+        assert_eq!(retry_progress("2/5x"), None);
+        assert_eq!(retry_progress("a 1/2b then 4/7"), Some((4, 7)));
+    }
+
+    #[test]
+    fn classes_codex_errors_as_the_reference_does() {
+        let class = |info: Value| failure_class(&info, error_code(&info).as_deref());
+        assert_eq!(class(json!("usageLimitExceeded")), "usage_limit");
+        assert_eq!(
+            class(json!({"responseTooManyFailedAttempts": {"httpStatusCode": 429}})),
+            "usage_limit"
+        );
+        assert_eq!(
+            class(json!({"responseStreamDisconnected": {"httpStatusCode": null}})),
+            "transport_error"
+        );
+        assert_eq!(
+            class(json!({"responseStreamDisconnected": {"httpStatusCode": 529}})),
+            "provider_error"
+        );
+        assert_eq!(class(json!("other")), "provider_error");
     }
 
     #[test]

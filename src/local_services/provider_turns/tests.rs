@@ -404,6 +404,95 @@ async fn codex_turn_reports_a_failed_turn() {
 }
 
 #[tokio::test]
+async fn codex_retry_shows_then_recovers_when_output_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (events, _) = run(fake_spec(CODEX, "codex_retry_recovers.json", &log, None)).await;
+    let retries = items(&events, "error");
+    let shown: Vec<_> = retries
+        .iter()
+        .map(|item| {
+            (
+                item.id.as_str(),
+                item.status.as_str(),
+                item.fields["retry"].clone(),
+            )
+        })
+        .collect();
+    let retry = |attempt: u64| json!({"attempt": attempt, "maxAttempts": 5, "retryDelayMs": null});
+    assert_eq!(
+        shown,
+        [
+            ("terminal-failure", "running", retry(1)),
+            ("terminal-failure", "running", retry(2)),
+            ("terminal-failure", "completed", retry(2)),
+        ]
+    );
+    assert_eq!(
+        retries[0].fields["failure"],
+        json!({"class": "transport_error", "message": "The response stream disconnected.",
+            "code": "responseStreamDisconnected", "retryable": true})
+    );
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+}
+
+#[tokio::test]
+async fn codex_retry_that_fails_ends_the_turn_with_codexs_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (events, _) = run(fake_spec(CODEX, "codex_retry_fails.json", &log, None)).await;
+    let (status, failure) = terminal(&events);
+    assert_eq!(status, TurnStatus::Failed);
+    let failure = failure.unwrap();
+    assert_eq!(failure.class, "transport_error");
+    assert_eq!(failure.code.as_deref(), Some("responseStreamDisconnected"));
+    assert_eq!(
+        failure.message,
+        "stream disconnected before completion: Connection lost."
+    );
+    // The retry, still open, ends with the turn: it is the turn's failure row.
+    let closing = match events.last() {
+        Some(ProviderEvent::TurnTerminal { closing, .. }) => closing,
+        _ => unreachable!(),
+    };
+    assert!(closing.iter().any(|event| matches!(event,
+        ProviderEvent::TurnItem { item } if item.kind == "error" && item.status == "failed")));
+}
+
+#[tokio::test]
+async fn codex_retry_that_outlasts_its_budget_fails_and_stops_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(CODEX, "codex_retry_stall.json", &log, None);
+    spec.env
+        .push(("TEST_PROVIDER_RETRY_BUDGET_MS".into(), "1500".into()));
+    let started = std::time::Instant::now();
+    let (events, _) = run(spec).await;
+    // The budget counts from the first notice; the second does not extend it.
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    let (status, failure) = terminal(&events);
+    assert_eq!(status, TurnStatus::Failed);
+    let failure = failure.unwrap();
+    // Its last attempt got a 429, so it is a usage limit, as the reference
+    // reports retries that ran out on one.
+    assert_eq!(failure.class, "usage_limit");
+    assert_eq!(failure.code.as_deref(), Some("responseStreamDisconnected"));
+    assert_eq!(
+        failure.message,
+        "exceeded retry limit, last status: 429 Too Many Requests"
+    );
+    assert_eq!(failure.retryable, Some(false));
+    assert_eq!(
+        failure.reset_at.as_deref(),
+        Some("2026-11-21T05:46:40.000Z")
+    );
+    assert!(received(&log)
+        .iter()
+        .any(|m| m["method"] == "turn/interrupt"));
+    assert_eq!(items(&events, "error")[1].fields["retry"]["attempt"], 2);
+}
+
+#[tokio::test]
 async fn missing_clis_fail_with_the_reference_errors() {
     for (driver, message) in [
         (CODEX, "Failed to spawn Codex App Server process for command: /nonexistent/codex app-server"),

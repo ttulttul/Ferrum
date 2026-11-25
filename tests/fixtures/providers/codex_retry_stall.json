@@ -1,0 +1,184 @@
+{
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "codexHome": "/tmp/codex-home",
+     "platformFamily": "unix",
+     "platformOs": "linux",
+     "userAgent": "codex_cli_rs/0.170.0"
+    }
+   }
+  },
+  {
+   "expect": "thread/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     },
+     "model": "gpt-6.1-sol",
+     "cwd": "/workspace",
+     "approvalPolicy": "never",
+     "sandbox": {
+      "type": "dangerFullAccess"
+     },
+     "approvalsReviewer": "user",
+     "modelProvider": "openai"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "thread/started",
+    "params": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     }
+    }
+   }
+  },
+  {
+   "expect": "turn/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "error",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "willRetry": true,
+     "error": {
+      "message": "Reconnecting... 1/5",
+      "additionalDetails": "exceeded retry limit, last status: 429 Too Many Requests",
+      "codexErrorInfo": {
+       "responseStreamDisconnected": {
+        "httpStatusCode": 429
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "sleep": 0.1
+  },
+  {
+   "send": {
+    "method": "error",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "willRetry": true,
+     "error": {
+      "message": "Reconnecting... 2/5",
+      "additionalDetails": "exceeded retry limit, last status: 429 Too Many Requests",
+      "codexErrorInfo": {
+       "responseStreamDisconnected": {
+        "httpStatusCode": 429
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "expect": "turn/interrupt"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {}
+   }
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "interrupted",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": 1795225891,
+      "durationMs": 10000
+     }
+    }
+   }
+  }
+ ],
+ "replies": {
+  "account/rateLimits/read": {
+   "rateLimits": {
+    "limitId": "codex",
+    "primary": {
+     "usedPercent": 100,
+     "windowDurationMins": 300,
+     "resetsAt": 1795240000
+    },
+    "secondary": {
+     "usedPercent": 40,
+     "windowDurationMins": 10080,
+     "resetsAt": 1795800000
+    }
+   }
+  }
+ }
+}
