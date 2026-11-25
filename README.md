@@ -58,7 +58,7 @@ Most suites match the original exactly; the few expected differences are listed 
 - **Pull request changes.** Agents can read pull requests and CI, but can't open, update, review, respond to or merge one, or re-run CI (`pull_request_create`, `pull_request_update`, `pull_request_review`, `pull_request_respond`, `pull_request_merge`, `ci_rerun`).
 - **Devices.** Agents can use simulators and emulators on this machine, on SSH device hosts and from Simlock pools (alpha), and in Expo Simulators sessions (under the host's project, or the one the thread's app config names). Device detail and actions (settings, foreground app) work on this machine only.
 - **Delegated tasks.** On the embeddable control plane a child can't run in its own worktree (`isolation: "worktree"`).
-- **Previews and pages.** Recordings from a workspace on another machine, and the agent's cursor drawn into recordings, are missing.
+- **Previews and pages.** Recordings from a workspace on another machine are missing.
 - **Secrets in schedules.** A scheduled task can't use a secret yet, and the embeddable control plane stores no secrets.
 - **Claude workflows.** Rust's Claude sessions run no workflow tasks.
 

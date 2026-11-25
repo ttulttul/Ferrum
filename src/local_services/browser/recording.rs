@@ -139,6 +139,17 @@ pub(super) struct Recording {
     deliverer: tokio::task::JoinHandle<()>,
 }
 
+impl Recording {
+    /// Draws the agent's cursor at a page point, with a click's ring
+    /// (`__t3Recorder.cursor`); a recording that fails to take it goes on.
+    pub(super) async fn cursor(&self, x: f64, y: f64, click: bool) {
+        let _ = self
+            .encoder
+            .evaluate(&format!("window.__t3Recorder.cursor({x}, {y}, {click})"))
+            .await;
+    }
+}
+
 impl Drop for Recording {
     fn drop(&mut self) {
         self.forwarder.abort();

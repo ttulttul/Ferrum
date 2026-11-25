@@ -67,6 +67,8 @@ pub(super) struct Page {
     downloads: Arc<Mutex<HashMap<String, String>>>,
     chooser: Arc<Mutex<Option<(Uuid, Uuid, u64)>>>,
     chooser_updates: watch::Sender<Option<Uuid>>,
+    /// The agent's pointer, as the viewers' `pointer` messages.
+    pointer: tokio::sync::broadcast::Sender<Value>,
 }
 /// The JavaScript dialog a tab shows, as the reference reports it
 /// (`dialogStatus`): its type, message and default prompt text.
@@ -121,7 +123,42 @@ struct Control {
     generation: u64,
     events: watch::Sender<u64>,
 }
+/// How long the agent's cursor shows at a point before its action, and how
+/// long a click's ring leads the click (`AGENT_CURSOR_MOVE_MS`,
+/// `AGENT_CURSOR_CLICK_LEAD_MS`).
+const AGENT_CURSOR_MOVE: Duration = Duration::from_millis(160);
+const AGENT_CURSOR_CLICK_LEAD: Duration = Duration::from_millis(40);
+/// Orders pointer messages across every tab, as the reference's `pointerSequence`.
+static POINTER_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl Page {
+    /// `pointerFor`: shows the agent's cursor at a point it is about to act
+    /// on, to the tab's viewers and in its recording, then gives them time to
+    /// see it; a click also shows its ring. Nothing waits when nobody watches.
+    pub(super) async fn report_pointer(&self, x: f64, y: f64, click: bool) {
+        let watched = self.activity.lock().unwrap().viewers > 0;
+        let recording = self.recording.lock().await.is_some();
+        if !watched && !recording {
+            return;
+        }
+        let show = |phase: &'static str| async move {
+            let sequence = POINTER_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let _ = self
+                .pointer
+                .send(json!({"type":"pointer","phase":phase,"x":x,"y":y,"sequence":sequence}));
+            if let Some(recording) = self.recording.lock().await.as_ref() {
+                recording.cursor(x, y, phase == "click").await;
+            }
+        };
+        show("move").await;
+        tokio::time::sleep(AGENT_CURSOR_MOVE).await;
+        if !click {
+            return;
+        }
+        show("click").await;
+        tokio::time::sleep(AGENT_CURSOR_CLICK_LEAD).await;
+    }
+
     fn set_controller(&self, id: Uuid, take: bool) {
         let mut c = self.control.lock().unwrap();
         if (take && c.owner.is_none()) || (!take && c.owner == Some(id)) {
@@ -403,6 +440,7 @@ impl Browsers {
             downloads: Default::default(),
             chooser: Default::default(),
             chooser_updates: watch::channel(None).0,
+            pointer: tokio::sync::broadcast::channel(64).0,
             control: Arc::new(Mutex::new(Control {
                 owner: None,
                 requested_size: None,
@@ -619,6 +657,7 @@ async fn stream(
         drop(page.automation.lock().await);
     }
     let mut control = page.control.lock().unwrap().events.subscribe();
+    let mut pointer = page.pointer.subscribe();
     let owns = page.control.lock().unwrap().owner == Some(viewer);
     command(
         &mut cdp,
@@ -694,6 +733,9 @@ async fn stream(
             _=layout.changed()=>{
                 let event = layout.borrow_and_update().event();
                 socket.send(Message::Text(event)).await.map_err(|_| ())?;
+            }
+            shown=pointer.recv()=>{
+                if let Ok(shown)=shown{socket.send(Message::Text(shown.to_string())).await.map_err(|_|())?;}
             }
             _=control.changed()=>{
                 let owns=page.control.lock().unwrap().owner==Some(viewer);
