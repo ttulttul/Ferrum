@@ -31,9 +31,19 @@ pub(crate) struct ProviderProcesses {
     acp: std::sync::Arc<acp::Sessions>,
     pi: std::sync::Arc<pi::Sessions>,
     opencode: std::sync::Arc<opencode::Sessions>,
+    /// Where the provider processes' protocol frames are recorded.
+    events: ProviderEventLog,
 }
 
 impl ProviderProcesses {
+    /// Processes whose protocol frames go to `events`' per-thread logs.
+    pub(crate) fn with_event_log(events: ProviderEventLog) -> Self {
+        Self {
+            events,
+            ..Self::default()
+        }
+    }
+
     /// Run OpenCode turns on the managed servers `owners` keeps (the status
     /// checks'), as the reference has one OpenCode 2 server per instance.
     pub(crate) fn share_opencode_servers(&self, owners: crate::provider_status::opencode::Owners) {
@@ -70,10 +80,12 @@ impl ProviderProcesses {
         self.acp.shutdown().await;
         self.pi.shutdown().await;
         self.opencode.shutdown().await;
+        self.events.flush().await;
     }
 }
 pub(crate) use requests::respond;
 
+use super::provider_event_log::{Direction, Protocol, ProtocolLog, ProviderEventLog};
 use crate::workspace::provider::{
     ProviderFailure, ProviderItem, ThreadDisposition, TurnStatus, CODEX,
 };
@@ -100,7 +112,12 @@ pub(crate) fn start(
         anyhow::bail!("provider driver `{}` cannot run turns", provider.driver);
     }
     let (events, receiver) = mpsc::unbounded_channel();
-    let sink = Sink::new(events, provider.driver.clone(), spec.turn_id.clone());
+    let sink = Sink::new(
+        events,
+        provider.driver.clone(),
+        spec.turn_id.clone(),
+        processes.events.clone(),
+    );
     // As the reference opens a session: only in a folder that exists.
     if !std::path::Path::new(&spec.cwd).is_dir() {
         let failure = crate::workspace::provider::workspace_missing(&spec.cwd);
@@ -187,19 +204,32 @@ pub(crate) struct Sink {
     /// The background tasks the turn's end reports (Claude's completed
     /// provider thread lists them).
     tasks_report: std::sync::Arc<std::sync::Mutex<Option<ProviderEvent>>>,
+    /// The provider event logs the turn's protocol frames go to.
+    log: ProviderEventLog,
 }
 
 impl Sink {
-    fn new(events: mpsc::UnboundedSender<TurnEvent>, driver: String, turn_id: String) -> Self {
+    fn new(
+        events: mpsc::UnboundedSender<TurnEvent>,
+        driver: String,
+        turn_id: String,
+        log: ProviderEventLog,
+    ) -> Self {
         Self {
             events,
             driver,
             turn_id,
+            log,
             open: std::sync::Arc::default(),
             usage: std::sync::Arc::default(),
             thread_report: std::sync::Arc::default(),
             tasks_report: std::sync::Arc::default(),
         }
+    }
+    /// The recorder for a provider process this turn starts, speaking
+    /// `protocol` for `thread`; `None` when no logs are kept.
+    fn protocol_log(&self, protocol: Protocol, thread: &str) -> Option<ProtocolLog> {
+        self.log.protocol(protocol, Some(thread))
     }
     /// Report `event` (a `provider_thread.updated`) with the turn's end.
     fn report_thread_at_end(&self, event: ProviderEvent) {
@@ -378,6 +408,8 @@ pub(crate) struct Cli {
     stderr_tail: std::sync::Arc<std::sync::Mutex<String>>,
     /// The task reading standard error, until it has read all of it.
     stderr_reader: Option<tokio::task::JoinHandle<()>>,
+    /// Where the lines it reads and writes are recorded.
+    log: Option<ProtocolLog>,
 }
 
 /// What a CLI is launched with.
@@ -388,6 +420,8 @@ pub(crate) struct Launch<'a> {
     pub home_var: &'static str,
     pub home: &'a str,
     pub extra_env: Vec<(String, String)>,
+    /// Where its protocol lines are recorded.
+    pub log: Option<ProtocolLog>,
 }
 
 impl Cli {
@@ -442,7 +476,13 @@ impl Cli {
             background: Default::default(),
             stderr_tail,
             stderr_reader,
+            log: launch.log,
         })
+    }
+
+    /// Where the CLI's protocol lines are recorded.
+    pub(crate) fn log(&self) -> Option<&ProtocolLog> {
+        self.log.as_ref()
     }
 
     /// Whether the CLI's standard error so far contains `needle`.
@@ -492,7 +532,13 @@ impl Cli {
         loop {
             match self.lines.next_line().await {
                 Ok(Some(line)) if line.trim().is_empty() => continue,
-                Ok(line) => return line,
+                Ok(Some(line)) => {
+                    if let Some(log) = &self.log {
+                        log.line(Direction::Incoming, &line);
+                    }
+                    return Some(line);
+                }
+                Ok(None) => return None,
                 Err(_) => return None,
             }
         }
@@ -504,6 +550,9 @@ impl Cli {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         };
         let mut line = message.to_string();
+        if let Some(log) = &self.log {
+            log.line(Direction::Outgoing, &line);
+        }
         line.push('\n');
         stdin.write_all(line.as_bytes()).await?;
         stdin.flush().await
@@ -529,6 +578,9 @@ impl Cli {
 
     /// Stop the CLI and everything it started.
     pub(crate) async fn stop(mut self) {
+        if let Some(log) = &self.log {
+            log.closing();
+        }
         drop(self.stdin.take());
         #[cfg(unix)]
         if let Some(pid) = self.child.id().and_then(|pid| i32::try_from(pid).ok()) {
@@ -671,6 +723,23 @@ fn claude_startup_exit(status: Option<std::process::ExitStatus>, eperm: bool) ->
     );
     failure.code = Some("process_exited_nonzero".into());
     failure
+}
+
+/// The provider session a turn opening its provider process names, as the
+/// projection names it (Codex's instance-wide one, else the thread's own,
+/// named after the opening run).
+fn provider_session_id(
+    spec: &TurnSpec,
+    provider: &crate::workspace::provider::ProviderTurn,
+    opencode2: bool,
+) -> String {
+    crate::provider_projection::opened_session_id(
+        &provider.driver,
+        &provider.instance_id,
+        &provider.app_thread_id,
+        &spec.turn_id,
+        opencode2,
+    )
 }
 
 /// The program a driver runs by default, or the configured one.

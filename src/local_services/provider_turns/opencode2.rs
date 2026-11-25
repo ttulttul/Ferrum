@@ -967,6 +967,7 @@ pub(super) async fn run(
         totals: Totals::default(),
         last_step: None,
         models: Vec::new(),
+        log: opencode::ProtocolRecorder::new(&sink, &spec, &provider, true),
     };
     let end = turn.run(&spec, events, &mut cancel).await;
     let state = std::mem::take(&mut turn.state);
@@ -1081,6 +1082,30 @@ struct Turn<'a> {
     totals: Totals,
     last_step: Option<Step>,
     models: Vec<String>,
+    /// Where the turn's session calls and events are recorded.
+    log: Option<opencode::ProtocolRecorder>,
+}
+
+/// A session call's name in the provider event log: `session`, the
+/// path's words (not its ids), then the verb unless it posts
+/// (`session.permission.reply`, `session.get`).
+fn session_call_name(method: &reqwest::Method, rest: &str) -> String {
+    let mut name = String::from("session");
+    for segment in rest.split('/').filter(|s| !s.is_empty()) {
+        if segment.bytes().all(|b| b.is_ascii_lowercase()) {
+            name.push('.');
+            name.push_str(segment);
+        }
+    }
+    match method.as_str() {
+        "POST" => {}
+        "PATCH" => name.push_str(".update"),
+        verb => {
+            name.push('.');
+            name.push_str(&verb.to_ascii_lowercase());
+        }
+    }
+    name
 }
 
 impl Turn<'_> {
@@ -1098,9 +1123,18 @@ impl Turn<'_> {
         body: Option<&Value>,
         timeout: Duration,
     ) -> Result<Value, CallError> {
-        self.shared
+        let name = session_call_name(&method, rest);
+        if let Some(log) = &self.log {
+            log.call(&name, body);
+        }
+        let reply = self
+            .shared
             .call(method, &self.sessions_path(rest), None, body, timeout)
-            .await
+            .await;
+        if let (Some(log), Ok(_)) = (&self.log, &reply) {
+            log.reply(&name);
+        }
+        reply
     }
 
     fn fail(failure: ProviderFailure) -> TurnEnd {
@@ -1621,6 +1655,9 @@ impl Turn<'_> {
             };
             match message {
                 Some(Stream::Event(event)) => {
+                    if let Some(log) = &self.log {
+                        log.event(&event);
+                    }
                     if let Some(end) = self.handle(&event).await {
                         return end;
                     }

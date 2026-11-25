@@ -2,7 +2,8 @@
 //! Claude Agent SDK speaks and the reference's Claude adapter runs through.
 use super::requests;
 use super::{
-    cancelled, claude_crashed, next_response, program, sleep_until, Cli, Launch, Sink, TurnEnd,
+    cancelled, claude_crashed, next_response, program, sleep_until, Cli, Direction, Launch,
+    Protocol, Sink, TurnEnd,
 };
 use crate::workspace::provider::{
     PlanStep, ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition,
@@ -432,6 +433,50 @@ impl<'a> Attempt<'a> {
         // The reference marks only a turn that resumes an interrupted one
         // without a prompt (`resumeTurn`), which this server does not send;
         // a turn in a resumed session is not marked.
+        // The options the reference's SDK query logs when it opens
+        // (`loggedClaudeQueryOptions`).
+        let query_open = (!reused).then(|| {
+            let mut options = serde_json::Map::new();
+            if !provider.model.trim().is_empty() {
+                options.insert("model".into(), provider.model.clone().into());
+            }
+            options.insert("permissionMode".into(), mode.into());
+            if new_session.is_some() {
+                options.insert("sessionId".into(), session.clone().into());
+            }
+            if let Some(resume) = resume {
+                options.insert("resume".into(), resume.into());
+            }
+            options.insert("cwd".into(), spec.cwd.clone().into());
+            if provider.mcp.is_some() {
+                options.insert("allowedTools".into(), json!(["mcp__t3-code__*"]));
+            }
+            options.insert(
+                "settingKeys".into(),
+                json!(provider
+                    .claude_settings
+                    .as_object()
+                    .map(|settings| settings.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default()),
+            );
+            if let Some(effort) = &provider.reasoning_effort {
+                options.insert("effort".into(), effort.clone().into());
+            }
+            options.insert("includePartialMessages".into(), true.into());
+            options.insert("pathToClaudeCodeExecutable".into(), binary.clone().into());
+            if !provider.launch_args.is_empty() {
+                options.insert("hasExtraArgs".into(), true.into());
+            }
+            if mode == "bypassPermissions" {
+                options.insert("allowDangerouslySkipPermissions".into(), true.into());
+            }
+            options.insert("hasCanUseTool".into(), true.into());
+            options.insert("hasEnvironment".into(), true.into());
+            if provider.mcp.is_some() {
+                options.insert("hasMcpServers".into(), true.into());
+            }
+            json!({"type": "query.open", "options": options})
+        });
         let cli = match running {
             Some(cli) => Ok(cli),
             None => Cli::spawn(
@@ -442,9 +487,21 @@ impl<'a> Attempt<'a> {
                     home_var: "CLAUDE_CONFIG_DIR",
                     home: &provider.home_path,
                     extra_env,
+                    // The thread's own provider session, opened by this turn.
+                    log: sink.protocol_log(
+                        Protocol::Claude {
+                            session: super::provider_session_id(spec, provider, false),
+                        },
+                        &provider.app_thread_id,
+                    ),
                 },
             ),
         };
+        if let (Ok(cli), Some(open)) = (&cli, query_open) {
+            if let Some(log) = cli.log() {
+                log.decoded(Direction::Outgoing, open);
+            }
+        }
         let cli = match cli {
             Ok(cli) => cli,
             Err(_) => {

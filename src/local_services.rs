@@ -13,6 +13,7 @@ pub(crate) mod local_ssh;
 pub(crate) mod media;
 pub(crate) mod named_project;
 mod previews;
+pub(crate) mod provider_event_log;
 pub(crate) mod provider_turns;
 pub(crate) mod review;
 mod simlock_device_host;
