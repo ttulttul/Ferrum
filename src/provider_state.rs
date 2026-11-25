@@ -325,6 +325,13 @@ impl ProviderState {
                 model,
                 ..
             } => {
+                // Pi's adapter touches the provider thread as its turn
+                // starts (`updateThread` after `turn.started`).
+                if !record.turn_started && record.driver == provider::PI {
+                    if let Some(thread) = self.thread.as_mut() {
+                        thread.updated_at = at;
+                    }
+                }
                 record.turn_started = true;
                 if native_turn_ref.is_some() {
                     record.native_turn_ref = native_turn_ref.clone();
