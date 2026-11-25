@@ -1022,6 +1022,8 @@ impl<'a> Turn<'a> {
             native_thread_id: agent.session.clone(),
             resumed,
             model: None,
+
+            opencode2: None,
         });
         self.sink.send(ProviderEvent::ProviderTurn {
             native_turn_id: Some(self.scoped(&self.native_turn)),

@@ -851,6 +851,8 @@ mod tests {
                 native_thread_id: "sess-1".into(),
                 resumed: false,
                 model: None,
+
+                opencode2: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: None,
@@ -1050,6 +1052,8 @@ mod tests {
                 native_thread_id: "thr-1".into(),
                 resumed: false,
                 model: None,
+
+                opencode2: None,
             },
             11,
         );
@@ -1119,6 +1123,8 @@ mod tests {
                 native_thread_id: "thr-1".into(),
                 resumed: false,
                 model: None,
+
+                opencode2: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn-1".into()),

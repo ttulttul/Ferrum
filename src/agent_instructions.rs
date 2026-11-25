@@ -156,6 +156,32 @@ pub(crate) fn opencode_system(has_mcp: bool, device: bool, model: &str) -> Strin
         .join("\n\n")
 }
 
+/// An OpenCode 2 session's T3 instructions entry (`prepareTurn`): the
+/// runtime text naming the model's slug, then for a thread whose MCP server
+/// OpenCode took the orchestration text (`t3OrchestrationSystemPrompt`, with
+/// the device tool text for a thread that may use devices) and the line
+/// about waiting for background shells.
+pub(crate) fn opencode2_instructions(mcp: bool, device: bool, model: &str) -> String {
+    let mut parts = vec![runtime("OpenCode", Some(model), None)];
+    if mcp {
+        let orchestration = if device {
+            format!("{}\n{}\n", text("orchestration"), text("deviceTools"))
+        } else {
+            text("orchestration").to_owned()
+        };
+        parts.push(without_unserved(&orchestration, &unserved()));
+        parts.push(without_unserved(OPENCODE2_BACKGROUND_WAIT, &unserved()));
+    }
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The OpenCode 2 adapter's own line about background shells.
+const OPENCODE2_BACKGROUND_WAIT: &str = "To wait for a background shell you started (tests, a build), call `t3_background_wait` with its shell ID before you end your turn. Do not mark work you leave running, or PRs.";
+
 /// The device tool text a Claude subagent starts with, as the reference's
 /// `SubagentStart` hook adds it.
 pub(crate) fn claude_subagent_device_context() -> String {

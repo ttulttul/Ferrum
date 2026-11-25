@@ -14,6 +14,7 @@ mod claude_sessions;
 mod codex;
 mod codex_server;
 mod opencode;
+mod opencode2;
 pub(crate) mod pi;
 mod requests;
 
@@ -31,6 +32,12 @@ pub(crate) struct ProviderProcesses {
 }
 
 impl ProviderProcesses {
+    /// Run OpenCode turns on the managed servers `owners` keeps (the status
+    /// checks'), as the reference has one OpenCode 2 server per instance.
+    pub(crate) fn share_opencode_servers(&self, owners: crate::provider_status::opencode::Owners) {
+        self.opencode.share_servers(owners);
+    }
+
     /// Unload a detached thread's native thread or session: its Codex thread
     /// from its instance's app-server, its Claude CLI closed.
     pub(crate) fn unload_thread(&self, instance: &str, thread: &str) {

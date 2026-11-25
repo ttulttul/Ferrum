@@ -13,7 +13,8 @@
 //! the turn, once OpenCode took the prompt (a stale idle from the previous
 //! run does not). Stop aborts the session's run (`POST /session/<id>/abort`)
 //! and the turn ends when OpenCode reports the session idle; the server keeps
-//! running. OpenCode 2 servers run no turns yet.
+//! running. An OpenCode 2 CLI or server runs its turns in [`super::opencode2`].
+use super::opencode2;
 use super::{cancelled, next_response, program, Sink, TurnEnd};
 use crate::provider_status::opencode as status;
 use crate::workspace::provider::{
@@ -44,7 +45,7 @@ const STREAM_GONE: &str =
 const NO_ERROR_PAYLOAD: &str = "OpenCode session failed without an error payload.";
 
 /// Where a provider session's events come from.
-enum Stream {
+pub(super) enum Stream {
     Event(Value),
     /// The stream ended, or the server exited: every turn fails.
     Ended(ProviderFailure),
@@ -54,6 +55,11 @@ enum Stream {
 #[derive(Default)]
 pub(crate) struct Sessions {
     live: Mutex<HashMap<String, Live>>,
+    /// The OpenCode 2 provider sessions, one per instance.
+    pub(super) v2: opencode2::Instances,
+    /// The managed servers, shared with the status checks and text
+    /// generation once [`Sessions::share_servers`] hands them over.
+    owners: Mutex<status::Owners>,
 }
 
 struct Live {
@@ -62,6 +68,19 @@ struct Live {
 }
 
 impl Sessions {
+    /// Run turns on the managed servers the status checks use: an OpenCode
+    /// 2 instance has one `opencode serve` for everything (`OpenCode2Server`).
+    pub(crate) fn share_servers(&self, owners: status::Owners) {
+        *self.owners.lock().unwrap_or_else(|e| e.into_inner()) = owners;
+    }
+
+    pub(super) fn owners(&self) -> status::Owners {
+        self.owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn live(&self) -> std::sync::MutexGuard<'_, HashMap<String, Live>> {
         self.live.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -98,8 +117,9 @@ impl Sessions {
     }
 
     /// Close the session holding the native `session`, if one is open (a
-    /// detach).
+    /// detach); an OpenCode 2 session forgets the thread.
     pub(crate) fn close(&self, session: &str) {
+        self.v2.unload(session);
         let mut live = self.live();
         let threads: Vec<String> = live
             .iter()
@@ -115,6 +135,7 @@ impl Sessions {
     }
 
     pub(crate) async fn shutdown(&self) {
+        self.v2.shutdown().await;
         let all: Vec<Live> = self.live().drain().map(|(_, live)| live).collect();
         for live in all {
             live.idle.abort();
@@ -343,7 +364,7 @@ impl OpenCode {
     }
 }
 
-fn encode(value: &str) -> String {
+pub(super) fn encode(value: &str) -> String {
     crate::thread_projection::uri_component(value)
 }
 
@@ -392,7 +413,7 @@ fn permission_rules(runtime_mode: &str) -> Value {
 }
 
 /// `openCodePermissionRequestKind`.
-fn request_kind(permission: &str, tool: &str) -> &'static str {
+pub(super) fn request_kind(permission: &str, tool: &str) -> &'static str {
     let permission = permission.to_lowercase();
     let tool = tool.to_lowercase();
     let edits = ["edit", "write", "patch", "apply_patch"];
@@ -429,7 +450,7 @@ fn launch_key(spec: &TurnSpec, provider: &ProviderTurn) -> String {
 
 /// The server's environment: this process's, less what the turn removes,
 /// with the instance's.
-fn server_env(spec: &TurnSpec) -> crate::provider_status::ProcessEnv {
+pub(super) fn server_env(spec: &TurnSpec) -> crate::provider_status::ProcessEnv {
     let mut env: crate::provider_status::ProcessEnv = std::env::vars()
         .filter(|(name, _)| {
             !spec
@@ -543,18 +564,8 @@ async fn open(
     spec: &TurnSpec,
     provider: &ProviderTurn,
     launch: String,
+    server: status::TurnServer,
 ) -> Result<(OpenCode, bool), ProviderFailure> {
-    let settings = provider.opencode.clone().unwrap_or_default();
-    let binary = program(&provider.binary_path, "opencode");
-    let server = status::connect_turn_server(
-        &binary,
-        &settings.server_url,
-        &settings.server_password,
-        server_env(spec),
-        &spec.cwd,
-    )
-    .await
-    .map_err(|detail| ProviderFailure::new("provider_error", detail))?;
     let (events, stream) = mpsc::unbounded_channel();
     // A managed server's exit fails the session's turns.
     let stop_server = server.child.map(|mut child| {
@@ -684,6 +695,13 @@ async fn open(
     }
 }
 
+/// What opening a turn's provider session gave.
+enum Opened {
+    /// A 1.x session, and whether it resumed the thread's.
+    V1(OpenCode, bool),
+    V2(opencode2::Shared),
+}
+
 pub(super) async fn run(
     spec: TurnSpec,
     provider: ProviderTurn,
@@ -695,10 +713,37 @@ pub(super) async fn run(
     let mut cancel = Some(cancel);
     let thread = provider.app_thread_id.clone();
     let launch = launch_key(&spec, &provider);
+    // The instance's OpenCode 2 session, when one is open, runs the turn.
+    if let Some(shared) = sessions
+        .v2
+        .open_session(&provider.instance_id, &spec, &provider)
+    {
+        return opencode2::run(spec, provider, cancel, responses, sink, sessions, shared).await;
+    }
     let opened = async {
-        match sessions.take(&thread, &launch).await {
-            Some(oc) => Ok((oc, true)),
-            None => open(&spec, &provider, launch).await,
+        if let Some(oc) = sessions.take(&thread, &launch).await {
+            return Ok(Opened::V1(oc, true));
+        }
+        let settings = provider.opencode.clone().unwrap_or_default();
+        let binary = program(&provider.binary_path, "opencode");
+        let connection = status::connect_turn_server(
+            &sessions.owners(),
+            &provider.instance_id,
+            &binary,
+            &settings.server_url,
+            &settings.server_password,
+            server_env(&spec),
+            &spec.cwd,
+        )
+        .await
+        .map_err(|detail| ProviderFailure::new("provider_error", detail))?;
+        match connection {
+            status::TurnConnection::V1(server) => open(&spec, &provider, launch, server)
+                .await
+                .map(|(oc, resumed)| Opened::V1(oc, resumed)),
+            status::TurnConnection::V2(server) => opencode2::Shared::open(&spec, &provider, server)
+                .await
+                .map(Opened::V2),
         }
     };
     let opened = tokio::select! {
@@ -706,7 +751,11 @@ pub(super) async fn run(
         _ = cancelled(&mut cancel) => return sink.finish(TurnEnd::interrupted(true)),
     };
     let (mut oc, resumed) = match opened {
-        Ok(opened) => opened,
+        Ok(Opened::V1(oc, resumed)) => (oc, resumed),
+        Ok(Opened::V2(shared)) => {
+            let shared = sessions.v2.keep(&provider.instance_id, shared);
+            return opencode2::run(spec, provider, cancel, responses, sink, sessions, shared).await;
+        }
         Err(failure) => return sink.finish(TurnEnd::failed(failure, ThreadDisposition::Reusable)),
     };
     let mut turn = Turn::new(&provider, &oc, &sink, &mut responses);
@@ -923,6 +972,8 @@ impl<'a> Turn<'a> {
             native_thread_id: oc.session.clone(),
             resumed,
             model: None,
+
+            opencode2: None,
         });
         let rules = permission_rules(provider.runtime_mode());
         if let Err(detail) = oc.apply_permission(&rules).await {
@@ -1532,7 +1583,7 @@ impl<'a> Turn<'a> {
     }
 }
 
-fn weak_ref(id: &str) -> Value {
+pub(super) fn weak_ref(id: &str) -> Value {
     json!({"driver": OPENCODE, "nativeId": id, "strength": "weak"})
 }
 
@@ -1625,7 +1676,7 @@ fn prompt_parts(text: &str, attachments: &[Value]) -> Vec<Value> {
 }
 
 /// A tool part's item (`openCodeToolTurnItem`), by the tool's name.
-fn tool_item(id: &str, name: &str, state: &Value, interrupted: bool) -> ProviderItem {
+pub(super) fn tool_item(id: &str, name: &str, state: &Value, interrupted: bool) -> ProviderItem {
     let input = if state["input"].is_object() {
         state["input"].clone()
     } else {

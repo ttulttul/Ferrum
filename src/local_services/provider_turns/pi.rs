@@ -642,6 +642,8 @@ impl<'a> Turn<'a> {
             native_thread_id: pi.session_file.clone(),
             resumed,
             model: None,
+
+            opencode2: None,
         });
         if let Err(failure) = pi.apply_selection(provider).await {
             return Ended::Settled(TurnEnd::failed(failure, ThreadDisposition::Reusable));

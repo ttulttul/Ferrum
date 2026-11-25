@@ -5,8 +5,8 @@
 //! into the reference's projection records.
 use crate::workspace::provider::{self, ProviderTurn};
 use crate::workspace::provider::{
-    PlanStep, ProviderEvent, ProviderFailure, ProviderItem, RuntimeRequestOpen, ThreadDisposition,
-    TokenUsage, TurnStatus,
+    OpenCode2Thread, PlanStep, ProviderEvent, ProviderFailure, ProviderItem, RuntimeRequestOpen,
+    ThreadDisposition, TokenUsage, TurnStatus,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -91,6 +91,8 @@ pub struct ThreadRecord {
     pub status: &'static str,
     /// The conversation's last entry when its last turn ended (Pi).
     pub conversation_head: Option<String>,
+    /// The OpenCode 2 server its turns ran on, as the last one reported it.
+    pub opencode2: Option<OpenCode2Thread>,
 }
 
 /// One run's provider turn.
@@ -214,6 +216,7 @@ impl ProviderState {
                 driver,
                 native_thread_id,
                 resumed,
+                opencode2,
                 ..
             } => {
                 record.driver = driver.clone();
@@ -236,8 +239,12 @@ impl ProviderState {
                     native_id: None,
                     status: "active",
                     conversation_head: None,
+                    opencode2: None,
                 });
                 thread.native_id = Some(native_thread_id.clone());
+                if opencode2.is_some() {
+                    thread.opencode2 = opencode2.clone();
+                }
                 thread.status = "active";
                 thread.updated_at = at;
             }
@@ -363,6 +370,7 @@ impl ProviderState {
                     native_id: None,
                     status: "not_loaded",
                     conversation_head: None,
+                    opencode2: None,
                 });
                 self.terminals.insert(
                     run,
@@ -792,6 +800,8 @@ mod tests {
                 native_thread_id: "thr_1".into(),
                 resumed: false,
                 model: None,
+
+                opencode2: None,
             },
             1,
         );

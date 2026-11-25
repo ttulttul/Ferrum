@@ -523,6 +523,7 @@ impl Session {
                 .as_str()
                 .map(str::to_owned)
                 .or(model.clone()),
+            opencode2: None,
         });
 
         let (approval_policy, reviewer, sandbox_policy) = runtime_mode_policy(&self.runtime_mode);

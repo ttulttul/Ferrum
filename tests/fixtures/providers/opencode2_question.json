@@ -1,0 +1,684 @@
+{
+ "version": {
+  "stdout": "2.2.6"
+ },
+ "serve": {
+  "routes": {
+   "GET /api/info": {
+    "body": {
+     "version": "2.2.6",
+     "pid": 4242,
+     "urls": [],
+     "paths": {
+      "tmp": "/tmp"
+     }
+    }
+   },
+   "GET /api/model": {
+    "body": {
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": [
+      {
+       "id": "claude-opus-5-5",
+       "modelID": "claude-opus-5-5",
+       "providerID": "anthropic",
+       "name": "Claude Opus 5.5",
+       "capabilities": {
+        "tools": true,
+        "input": [
+         "text"
+        ],
+        "output": [
+         "text"
+        ]
+       },
+       "variants": [
+        {
+         "id": "high"
+        }
+       ],
+       "time": {
+        "released": 1767225600000
+       },
+       "cost": [],
+       "status": "active",
+       "enabled": true,
+       "limit": {
+        "context": 200000,
+        "input": 180000,
+        "output": 32000
+       }
+      }
+     ]
+    }
+   },
+   "GET /api/provider": {
+    "body": {
+     "location": {
+      "directory": "/"
+     },
+     "data": [
+      {
+       "id": "anthropic",
+       "name": "Anthropic",
+       "activation": "auto",
+       "package": ""
+      }
+     ]
+    }
+   },
+   "GET /api/agent": {
+    "body": {
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": [
+      {
+       "id": "build",
+       "name": "Build",
+       "description": "The default agent.",
+       "request": {
+        "settings": {},
+        "headers": {},
+        "body": {}
+       },
+       "mode": "primary",
+       "hidden": false,
+       "permissions": [
+        {
+         "action": "*",
+         "resource": "*",
+         "effect": "allow"
+        },
+        {
+         "action": "external_directory",
+         "resource": "/tmp/opencode/*",
+         "effect": "allow"
+        }
+       ]
+      },
+      {
+       "id": "plan",
+       "name": "Plan",
+       "description": "Plans.",
+       "request": {
+        "settings": {},
+        "headers": {},
+        "body": {}
+       },
+       "mode": "primary",
+       "hidden": false,
+       "permissions": [
+        {
+         "action": "*",
+         "resource": "*",
+         "effect": "allow"
+        },
+        {
+         "action": "edit",
+         "resource": "*",
+         "effect": "deny"
+        },
+        {
+         "action": "edit",
+         "resource": "/tmp/plans/*",
+         "effect": "allow"
+        }
+       ]
+      }
+     ]
+    }
+   },
+   "GET /api/event": {
+    "sse": true
+   },
+   "POST /api/session": {
+    "body": {
+     "data": {
+      "id": "ses_1",
+      "projectID": "global",
+      "model": {
+       "providerID": "anthropic",
+       "id": "claude-opus-5-5"
+      },
+      "cost": 0,
+      "tokens": {
+       "input": 0,
+       "output": 0,
+       "reasoning": 0,
+       "cache": {
+        "read": 0,
+        "write": 0
+       }
+      },
+      "time": {
+       "created": 1767225600000,
+       "updated": 1767225600000
+      },
+      "title": "Thread",
+      "location": {
+       "directory": "/tmp"
+      }
+     }
+    }
+   },
+   "GET /api/session/ses_1": {
+    "body": {
+     "data": {
+      "id": "ses_1",
+      "projectID": "global",
+      "model": {
+       "providerID": "anthropic",
+       "id": "claude-opus-5-5"
+      },
+      "cost": 0,
+      "tokens": {
+       "input": 0,
+       "output": 0,
+       "reasoning": 0,
+       "cache": {
+        "read": 0,
+        "write": 0
+       }
+      },
+      "time": {
+       "created": 1767225600000,
+       "updated": 1767225600000
+      },
+      "title": "Thread",
+      "location": {
+       "directory": "/tmp"
+      }
+     }
+    }
+   },
+   "PATCH /api/session/ses_1": {
+    "status": 204,
+    "body": null
+   },
+   "POST /api/session/ses_1/agent": {
+    "status": 204,
+    "body": null
+   },
+   "POST /api/session/ses_1/model": {
+    "status": 204,
+    "body": null
+   },
+   "PUT /api/experimental/session/ses_1/instructions/entries/t3-code": {
+    "status": 204,
+    "body": null
+   },
+   "PUT /api/experimental/mcp/t3-code-thread_client-thread": {
+    "status": 204,
+    "body": null
+   },
+   "DELETE /api/experimental/mcp/t3-code-thread_client-thread": {
+    "status": 204,
+    "body": null
+   },
+   "POST /api/session/ses_1/prompt": {
+    "body": {
+     "data": {
+      "id": "msg_inbox",
+      "sessionID": "ses_1",
+      "time": {
+       "created": 1767225600000
+      },
+      "type": "user",
+      "payload": {
+       "text": "prompt"
+      },
+      "delivery": "steer"
+     }
+    }
+   },
+   "POST /api/session/ses_1/synthetic": {
+    "status": 204,
+    "body": null
+   },
+   "POST /api/session/ses_1/interrupt": {
+    "body": {
+     "interrupted": true
+    }
+   },
+   "GET /api/session/active": {
+    "body": {
+     "data": {}
+    }
+   },
+   "POST /api/session/ses_1/permission/per_1/reply": {
+    "status": 204,
+    "body": null
+   },
+   "POST /api/session/ses_1/form/frm_1/reply": {
+    "status": 204,
+    "body": null
+   },
+   "DELETE /api/session/ses_1/form/frm_1": {
+    "status": 204,
+    "body": null
+   }
+  },
+  "events": {
+   "POST /api/session/ses_1/prompt": [
+    {
+     "id": "evt_fixture0123",
+     "created": 1767225600123,
+     "type": "session.execution.started",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 123,
+      "version": 1
+     },
+     "data": {
+      "sessionID": "ses_1"
+     }
+    },
+    {
+     "id": "evt_fixture0124",
+     "created": 1767225600124,
+     "type": "session.step.started",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 124,
+      "version": 1
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "agent": "build",
+      "model": {
+       "providerID": "anthropic",
+       "id": "claude-opus-5-5"
+      },
+      "assistantMessageID": "msg_a11",
+      "snapshot": "99482b54df6361365fa0ed7363ccf07edaa7fc93",
+      "started": 1767225600000
+     }
+    },
+    {
+     "id": "evt_fixture0125",
+     "created": 1767225600125,
+     "type": "session.text.started",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 125,
+      "version": 1
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a11",
+      "ordinal": 0
+     }
+    },
+    {
+     "id": "evt_fixture0126",
+     "created": 1767225600126,
+     "type": "session.text.delta",
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a11",
+      "ordinal": 0,
+      "delta": "I'll a"
+     }
+    },
+    {
+     "id": "evt_fixture0127",
+     "created": 1767225600127,
+     "type": "session.text.delta",
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a11",
+      "ordinal": 0,
+      "delta": "sk you now."
+     }
+    },
+    {
+     "id": "evt_fixture0128",
+     "created": 1767225600128,
+     "type": "session.text.ended",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 128,
+      "version": 1
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a11",
+      "ordinal": 0,
+      "text": "I'll ask you now."
+     }
+    },
+    {
+     "id": "evt_fixture0129",
+     "created": 1767225600129,
+     "type": "session.tool.input.started",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 129,
+      "version": 1
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a11",
+      "id": "call_q",
+      "name": "question"
+     }
+    },
+    {
+     "id": "evt_fixture0130",
+     "created": 1767225600130,
+     "type": "session.tool.called",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 130,
+      "version": 1
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a11",
+      "id": "call_q",
+      "executed": false,
+      "input": {
+       "questions": [
+        {
+         "question": "Which color do you prefer?",
+         "header": "Color preference",
+         "options": [
+          {
+           "label": "Red",
+           "description": "Choose red"
+          },
+          {
+           "label": "Blue",
+           "description": "Choose blue"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    },
+    {
+     "id": "evt_fixture0131",
+     "created": 1767225600131,
+     "type": "form.created",
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "form": {
+       "id": "frm_1",
+       "sessionID": "ses_1",
+       "title": "Questions",
+       "metadata": {
+        "kind": "question",
+        "tool": {
+         "messageID": "msg_a11",
+         "id": "call_q"
+        }
+       },
+       "fields": [
+        {
+         "key": "q0",
+         "title": "Color preference",
+         "description": "Which color do you prefer?",
+         "type": "string",
+         "options": [
+          {
+           "value": "Red",
+           "label": "Red",
+           "description": "Choose red"
+          },
+          {
+           "value": "Blue",
+           "label": "Blue",
+           "description": "Choose blue"
+          }
+         ],
+         "custom": true
+        }
+       ]
+      }
+     }
+    }
+   ],
+   "POST /api/session/ses_1/form/frm_1/reply": [
+    {
+     "id": "evt_fixture0132",
+     "created": 1767225600132,
+     "type": "form.replied",
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "id": "frm_1",
+      "answer": {
+       "q0": "Blue"
+      }
+     }
+    },
+    {
+     "id": "evt_fixture0133",
+     "created": 1767225600133,
+     "type": "session.tool.success",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 133,
+      "version": 2
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a11",
+      "id": "call_q",
+      "content": [
+       {
+        "type": "text",
+        "text": "User has answered your questions."
+       }
+      ],
+      "metadata": {
+       "answers": [
+        [
+         "Blue"
+        ]
+       ],
+       "truncated": false
+      },
+      "executed": false
+     }
+    },
+    {
+     "id": "evt_fixture0134",
+     "created": 1767225600134,
+     "type": "session.step.ended",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 134,
+      "version": 1
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a11",
+      "finish": "tool-calls",
+      "rawFinish": "tool-calls",
+      "cost": 0,
+      "tokens": {
+       "input": 1200,
+       "output": 80,
+       "reasoning": 20,
+       "cache": {
+        "read": 3000,
+        "write": 100
+       }
+      },
+      "snapshot": "99482b54df6361365fa0ed7363ccf07edaa7fc93",
+      "files": []
+     }
+    },
+    {
+     "id": "evt_fixture0135",
+     "created": 1767225600135,
+     "type": "session.step.started",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 135,
+      "version": 1
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "agent": "build",
+      "model": {
+       "providerID": "anthropic",
+       "id": "claude-opus-5-5"
+      },
+      "assistantMessageID": "msg_a12",
+      "snapshot": "99482b54df6361365fa0ed7363ccf07edaa7fc93",
+      "started": 1767225600000
+     }
+    },
+    {
+     "id": "evt_fixture0136",
+     "created": 1767225600136,
+     "type": "session.text.started",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 136,
+      "version": 1
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a12",
+      "ordinal": 0
+     }
+    },
+    {
+     "id": "evt_fixture0137",
+     "created": 1767225600137,
+     "type": "session.text.delta",
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a12",
+      "ordinal": 0,
+      "delta": "Blue."
+     }
+    },
+    {
+     "id": "evt_fixture0138",
+     "created": 1767225600138,
+     "type": "session.text.delta",
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a12",
+      "ordinal": 0,
+      "delta": ""
+     }
+    },
+    {
+     "id": "evt_fixture0139",
+     "created": 1767225600139,
+     "type": "session.text.ended",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 139,
+      "version": 1
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a12",
+      "ordinal": 0,
+      "text": "Blue."
+     }
+    },
+    {
+     "id": "evt_fixture0140",
+     "created": 1767225600140,
+     "type": "session.step.ended",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 140,
+      "version": 1
+     },
+     "location": {
+      "directory": "/tmp"
+     },
+     "data": {
+      "sessionID": "ses_1",
+      "assistantMessageID": "msg_a12",
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+       "input": 1200,
+       "output": 80,
+       "reasoning": 20,
+       "cache": {
+        "read": 3000,
+        "write": 100
+       }
+      },
+      "snapshot": "99482b54df6361365fa0ed7363ccf07edaa7fc93",
+      "files": []
+     }
+    },
+    {
+     "id": "evt_fixture0141",
+     "created": 1767225600141,
+     "type": "session.execution.succeeded",
+     "durable": {
+      "aggregateID": "ses_1",
+      "seq": 141,
+      "version": 1
+     },
+     "data": {
+      "sessionID": "ses_1"
+     }
+    }
+   ]
+  }
+ }
+}

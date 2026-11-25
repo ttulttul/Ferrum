@@ -1098,6 +1098,8 @@ mod tests {
                     native_thread_id: "s1".into(),
                     resumed: false,
                     model: None,
+
+                    opencode2: None,
                 },
                 position: None,
             },
