@@ -64,7 +64,8 @@ jobs:
     needs: gate
     if: needs.gate.outputs.measure == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # About 10 minutes more for the long-thread section's seeding.
+    timeout-minutes: 60
     permissions:
       # Pushes the results to the perf-data branch, and the refreshed docs/performance.md to the
       # perf-docs-update branch, whose pull request it opens and merges.
@@ -130,6 +131,7 @@ jobs:
             --rust-command "$GITHUB_WORKSPACE/target/release/t3code-server" \
             --reference-root "$GITHUB_WORKSPACE/reference" \
             --max-large-idle-cpu 3 \
+            --max-open-get-p99-ms 300 --max-open-rss-ratio 1.5 \
             --json "$RUNNER_TEMP/perf.json" --markdown "$RUNNER_TEMP/perf.md" || gate=$?
           test -s "$RUNNER_TEMP/perf.json"
           echo "gate=$gate" >> "$GITHUB_OUTPUT"
@@ -230,5 +232,5 @@ jobs:
         env:
           GATE: ${{ steps.compare.outputs.gate }}
         run: |
-          echo "::error title=Performance::perf_compare.py exited with $GATE: Rust's idle CPU on a large database with clients connected is over 3% of one core, or the comparison failed after writing its results. See the Compare both servers step."
+          echo "::error title=Performance::perf_compare.py exited with $GATE: a gate failed (idle CPU on a large database over 3% of one core, GET / p99 over 300 ms or peak RSS over 1.5x the reference's while clients open long threads), or the comparison failed after writing its results. See the Compare both servers step."
           exit 1

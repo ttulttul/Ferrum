@@ -409,12 +409,17 @@ pub fn load_into(conn: &Connection, store: &mut crate::Store) -> rusqlite::Resul
     Ok(loaded)
 }
 
-/// A connection of its own to the database, that reads a thread's whole
+/// Connections of its own to the database, that read a thread's whole
 /// projection when it is first needed (`stored_projection::Hydrate`). The
-/// database is in WAL mode, so it reads beside the writer's connection.
+/// database is in WAL mode, so they read beside the writer's connection.
+/// Several, so opening one long thread does not hold up reading another.
 pub(crate) struct Reader {
-    conn: std::sync::Mutex<Connection>,
+    path: std::path::PathBuf,
+    idle: std::sync::Mutex<Vec<Connection>>,
 }
+
+/// How many reader connections a server keeps open at most.
+const READERS: usize = 4;
 
 impl Reader {
     /// A reader of the database `conn` has open.
@@ -426,43 +431,54 @@ impl Reader {
         let reader = Connection::open(path)?;
         configure(&reader, false)?;
         Ok(Self {
-            conn: std::sync::Mutex::new(reader),
+            path: std::path::PathBuf::from(path),
+            idle: std::sync::Mutex::new(vec![reader]),
         })
+    }
+
+    /// Runs `read` in one read transaction (the thread's rows as of one
+    /// commit) on an idle connection, or a new one.
+    fn with_connection<T>(
+        &self,
+        read: impl FnOnce(&Connection) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let idle = self.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        let conn = match idle {
+            Some(conn) => conn,
+            None => {
+                let conn = Connection::open(&self.path)?;
+                configure(&conn, false)?;
+                conn
+            }
+        };
+        conn.execute_batch("BEGIN")?;
+        let result = read(&conn);
+        let _ = conn.execute_batch("COMMIT");
+        let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        if idle.len() < READERS {
+            idle.push(conn);
+        }
+        result
     }
 }
 
 impl crate::stored_projection::Hydrate for Reader {
     fn read(&self, thread_id: &str) -> anyhow::Result<Option<serde_json::Value>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("the shared orchestration database reader failed"))?;
-        // One read transaction, so the thread's rows are read as of one commit.
-        conn.execute_batch("BEGIN")?;
-        let projection = read::thread_projection(&conn, thread_id);
-        let _ = conn.execute_batch("COMMIT");
-        Ok(projection?)
+        self.with_connection(|conn| Ok(read::thread_projection(conn, thread_id)?))
     }
 
     fn read_both(
         &self,
         thread_id: &str,
     ) -> anyhow::Result<Option<(serde_json::Value, crate::stored_projection::Slim)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("the shared orchestration database reader failed"))?;
-        conn.execute_batch("BEGIN")?;
-        let read = (|| -> anyhow::Result<_> {
-            let Some(projection) = read::thread_projection(&conn, thread_id)? else {
+        self.with_connection(|conn| {
+            let Some(projection) = read::thread_projection(conn, thread_id)? else {
                 return Ok(None);
             };
             let ids = std::iter::once(thread_id.to_owned()).collect();
-            let slim = read::slim_projections(&conn, &ids)?.remove(thread_id);
+            let slim = read::slim_projections(conn, &ids)?.remove(thread_id);
             Ok(slim.map(|slim| (projection, slim)))
-        })();
-        let _ = conn.execute_batch("COMMIT");
-        read
+        })
     }
 }
 

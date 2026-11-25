@@ -61,6 +61,10 @@ impl Serialize for Js<'_> {
 pub(crate) fn compact(value: &Value) -> String {
     serde_json::to_string(&Js(value)).expect("JSON value")
 }
+/// [`compact`], written to `writer` instead of a string.
+pub(crate) fn compact_to(writer: impl std::io::Write, value: &Value) -> serde_json::Result<()> {
+    serde_json::to_writer(writer, &Js(value))
+}
 pub(crate) fn pretty(writer: impl std::io::Write, value: &Value) -> serde_json::Result<()> {
     serde_json::to_writer_pretty(writer, &Js(value))
 }

@@ -312,16 +312,30 @@ impl Source {
 /// the last commit it includes.
 async fn thread_snapshot(control: &ControlState, params: &Value) -> Option<(Value, Value)> {
     let thread_id = params["threadId"].as_str()?;
+    // A few at a time: each holds a copy of its thread's projection while it
+    // builds, and a desktop opening many long threads at once would otherwise
+    // hold one for every thread and window together.
+    static BUILDING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+    let _building = BUILDING.acquire().await.ok()?;
+    control.load_whole([thread_id.to_owned()]).await;
     // The store first: a commit holds it while it numbers itself, so the
     // sequence read under it is the snapshot's.
     let store = control.store.read().await;
     let sequence = *control.next_event_id.lock().await;
     let thread = store.threads.get(thread_id)?;
-    let cursor = json!({
-        "projection": crate::thread_events::digest(&thread.projection()),
-        "sequence": sequence,
+    // One copy of the projection serves both the digest and the snapshot. A
+    // long thread's takes a while to build, so on a runtime worker its other
+    // tasks move to another worker meanwhile.
+    let (digest, snapshot) = crate::stored_projection::blocking(|| {
+        let projection = thread.projection();
+        let digest = crate::thread_events::digest(&projection);
+        (
+            digest,
+            thread.stream_snapshot_of(projection, sequence, params),
+        )
     });
-    Some((thread.stream_snapshot(sequence, params), cursor))
+    let cursor = json!({"projection": digest, "sequence": sequence});
+    Some((snapshot, cursor))
 }
 
 /// The reference's error for a thread with no projection, from getThreadProjection and

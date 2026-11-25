@@ -28,8 +28,20 @@ pub struct ThreadEvents {
 
 /// A projection's digest, to tell whether a subscriber has seen it.
 pub fn digest(projection: &Value) -> String {
-    let hash = Sha256::digest(crate::wire_json::compact(projection).as_bytes());
-    hex::encode(&hash[..16])
+    // Hashed as it is written: a long thread's projection is tens of MB as text.
+    struct Hashing(Sha256);
+    impl std::io::Write for Hashing {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            sha2::Digest::update(&mut self.0, bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut hashing = Hashing(Sha256::new());
+    crate::wire_json::compact_to(&mut hashing, projection).expect("JSON value");
+    hex::encode(&hashing.0.finalize()[..16])
 }
 
 /// The record collections that have their own events: the collection, the

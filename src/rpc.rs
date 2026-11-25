@@ -2528,6 +2528,14 @@ async fn dispatch_method(state: &Arc<AppState>, method: &str, params: &Value) ->
         return reply;
     }
 
+    if matches!(
+        method,
+        "orchestration.getThreadProjection" | "orchestration.getTurnDiff"
+    ) {
+        if let Some(thread_id) = params["threadId"].as_str() {
+            state.load_whole([thread_id.to_owned()]).await;
+        }
+    }
     let store = state.store.read().await;
     let sequence = *state.next_event_id.lock().await;
     let thread = |value: &Value| value.as_str().and_then(|id| store.threads.get(id));

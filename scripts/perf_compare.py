@@ -103,12 +103,33 @@ def _renumbered(steps, turn, keep):
     return json.loads(text)
 
 
-def perf_scenario(turns):
+def _padded(steps, pad):
+    """`steps` with every Codex command's output `pad` bytes long, so each turn adds about that
+    much to its thread: a long thread in a few turns."""
+    if not pad:
+        return steps
+    output = ("perf output line\n" * (pad // 17 + 1))[:pad]
+
+    def walk(value):
+        if isinstance(value, dict):
+            if value.get("type") == "commandExecution" and "aggregatedOutput" in value:
+                value["aggregatedOutput"] = output
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+    steps = json.loads(json.dumps(steps))
+    walk(steps)
+    return steps
+
+
+def perf_scenario(turns, pad=0):
     """The fake CLIs' scenario for `turns` turns per provider process, without the pause the
     parity fixtures leave before a tool call's end (toolGap): a Codex app-server initializes and
     starts its one thread, then plays codex_turn.json's turn `turns` times; a Claude CLI plays
     claude_turn.json's turn `turns` times. Every replayed turn gets fresh ids."""
-    codex = json.loads((FIXTURES / "codex_turn.json").read_text())["steps"]
+    codex = _padded(json.loads((FIXTURES / "codex_turn.json").read_text())["steps"], pad)
     start = next(i for i, step in enumerate(codex) if step.get("expect") == "turn/start")
     head, turn = codex[:start], codex[start:]
     keep = set(UUID.findall(json.dumps(head)))
@@ -417,7 +438,7 @@ def terminal_runs(value):
     return {run.get("id"): run.get("status") for run in runs if run.get("status") in TERMINAL_RUN}
 
 
-def run_turns(server, thread_id, turns, timeout=120):
+def run_turns(server, thread_id, turns, timeout=120, text="Run echo hi and write notes.txt", require=("completed",)):
     """Send `turns` messages to the thread one after another, each once the previous run settled;
     the seconds each took from dispatch to its run settling."""
     took = []
@@ -447,12 +468,12 @@ def run_turns(server, thread_id, turns, timeout=120):
             client.send("orchestration.dispatchCommand", {
                 "type": "message.dispatch", "commandId": f"{thread_id}-message-{n}-{uuid.uuid4()}",
                 "threadId": thread_id, "messageId": f"message:{uuid.uuid4()}",
-                "text": "Run echo hi and write notes.txt", "attachments": [], "createdBy": "user",
+                "text": text, "attachments": [], "createdBy": "user",
                 "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
             read(lambda value: bool(set(settled) - before))
             took.append(time.monotonic() - started)
             new = {settled[run] for run in set(settled) - before}
-            if new != {"completed"}:
+            if require and not new <= set(require):
                 raise RuntimeError(f"turn {n} on {thread_id} ended {sorted(new)}; see {server.stderr.name}")
         client.ws.send(encode({"_tag": "Interrupt", "requestId": request}).decode())
     return took
@@ -515,6 +536,127 @@ class Bench:
                     result[side]["idle_cpu_ms"].append(idle_cpu * 1000 * 10 / self.args.idle)
                     print(f"startup {side}: listen {server.listen_s * 1000:.0f} ms, first RPC "
                           f"{server.rpc_s * 1000:.0f} ms, idle RSS {rss / 1024:.1f} MiB", flush=True)
+        return result
+
+    def open_long(self):
+        """Peak memory, and GET / latency, while three clients open long threads at once.
+
+        Each side runs `--open-turns` Codex turns on each of `--open-threads` threads, each message
+        (and each command's output) `--open-pad-kb` KiB long, then restarts on that database. Three clients then each
+        subscribe to every thread at once, as desktop windows opening them do, while a sampler
+        reads the server's RSS and times GET / every 100 ms.
+        """
+        result = {side: {"open_peak_rss_kb": [], "open_get_p99_ms": [], "open_get_max_ms": [], "open_s": []}
+                  for side in SIDES}
+        count, turns = self.args.open_threads, self.args.open_turns
+        # Each turn's message is long, so every thread grows whatever its provider replies; each
+        # command also prints as much where the fake replays it.
+        pad = self.args.open_pad_kb * 1024
+        message = ("Please read this log and fix what fails.\n" * (pad // 41 + 1))[:pad]
+        scenario = self.fake_bin / "perf_open_scenario.json"
+        scenario.write_text(json.dumps(perf_scenario(turns, pad=pad)))
+        for order in self.orders(self.args.open_runs):
+            for side in order:
+                self.count += 1
+                root = self.temporary / f"{side}-open-{self.count}"
+                root.mkdir()
+                env = {**GIT_ISOLATION, "PATH": os.pathsep.join([str(self.fake_bin), self.hidden]),
+                       "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"),
+                       "FAKE_PROVIDER_LOG": str(self.temporary / f"{side}-open-{self.count}-provider.log"),
+                       "FAKE_PROVIDER_SCENARIO": str(scenario)}
+                checkout = self.temporary / f"{side}-open-{self.count}-checkout"
+                make_checkout(checkout)
+                threads = [f"thread:open-{n}" for n in range(count)]
+                instances = [f"codex-open-{n}" for n in range(count)]
+                server = Server(self.commands[side], root, env).start()
+                try:
+                    create_project(server, checkout)
+                    with server.connect() as client:
+                        client.call("server.updateSettings", {"patch": {"providerInstances": {
+                            instance: {"driver": "codex", "enabled": True} for instance in instances}}})
+                        for thread, instance in zip(threads, instances):
+                            create_thread(client, thread, instance, "fixture")
+                    errors = []
+
+                    def grow(thread):
+                        try:
+                            # Only the messages matter here: a run may end however the fake ends it.
+                            run_turns(server, thread, turns, text=message, require=())
+                        except Exception as error:  # reported below
+                            errors.append(error)
+                    lanes = [threading.Thread(target=grow, args=(thread,)) for thread in threads]
+                    for lane in lanes:
+                        lane.start()
+                    for lane in lanes:
+                        lane.join()
+                    if errors:
+                        raise errors[0]
+                finally:
+                    server.stop()
+                server = Server(self.commands[side], root, env).start()
+                samples, stop = [], threading.Event()
+                try:
+                    time.sleep(self.args.settle)
+
+                    def sample():
+                        while not stop.is_set():
+                            began = time.monotonic()
+                            try:
+                                http(server.url, "GET", "/", timeout=5)
+                                ms = (time.monotonic() - began) * 1000
+                            except Exception:  # a timeout counts as the whole 5 s
+                                ms = 5000.0
+                            samples.append((proc_memory(server.process.pid)["rss"], ms))
+                            time.sleep(max(0.0, 0.1 - (time.monotonic() - began)))
+                    sampler = threading.Thread(target=sample, daemon=True)
+                    sampler.start()
+                    began = time.monotonic()
+                    failures = []
+
+                    def window():
+                        try:
+                            with server.connect() as client:
+                                requests = {client.send("orchestration.subscribeThread",
+                                                        {"threadId": thread, **THREAD_INPUT}) for thread in threads}
+                                pending = set(requests)
+                                while pending:
+                                    frame = client.frame(120)
+                                    request = frame.get("requestId")
+                                    if request not in requests:
+                                        continue
+                                    if frame.get("_tag") == "Exit":
+                                        raise RuntimeError(f"a thread stream ended: {json.dumps(frame)[:400]}")
+                                    if frame.get("_tag") == "Chunk":
+                                        client.ws.send(encode({"_tag": "Ack", "requestId": request}).decode())
+                                        if any(v.get("kind") == "synchronized" for v in frame.get("values", [])):
+                                            pending.discard(request)
+                        except Exception as error:  # reported below
+                            failures.append(error)
+                    windows = [threading.Thread(target=window) for _ in range(3)]
+                    for client in windows:
+                        client.start()
+                    for client in windows:
+                        client.join()
+                    open_s = time.monotonic() - began
+                    time.sleep(1)
+                    stop.set()
+                    sampler.join(10)
+                    if failures:
+                        raise failures[0]
+                finally:
+                    stop.set()
+                    server.stop()
+                    if not self.args.keep:
+                        shutil.rmtree(root, ignore_errors=True)
+                latencies = sorted(ms for _, ms in samples)
+                p99 = latencies[min(len(latencies) - 1, int(len(latencies) * 0.99))]
+                peak = max(rss for rss, _ in samples)
+                result[side]["open_peak_rss_kb"].append(peak)
+                result[side]["open_get_p99_ms"].append(p99)
+                result[side]["open_get_max_ms"].append(latencies[-1])
+                result[side]["open_s"].append(open_s)
+                print(f"open {side}: {count} threads opened by 3 clients in {open_s:.1f} s, peak RSS "
+                      f"{peak / 1024:.0f} MiB, GET / p99 {p99:.1f} ms, max {latencies[-1]:.1f} ms", flush=True)
         return result
 
     def large(self):
@@ -794,6 +936,8 @@ METRICS = [
     ("startup", "idle_cpu_ms", "CPU while idle (per 10 s)", "ms", True),
     ("large", "idle_cpu_ms", "CPU while idle, large database with clients (per 10 s)", "ms", True),
     ("large", "idle_rss_kb", "Memory at idle, large database", "MiB", True),
+    ("open", "open_peak_rss_kb", "Peak memory, 3 clients opening long threads", "MiB", True),
+    ("open", "open_get_p99_ms", "GET / p99 while 3 clients open long threads", "ms", True),
     ("turns:codex", "peak_rss_kb", "Peak memory, Codex turns", "MiB", True),
     ("turns:claude", "peak_rss_kb", "Peak memory, Claude turns", "MiB", True),
     ("turns:codex", "turns_per_s", "Codex turns per second", "/s", False),
@@ -1010,7 +1154,7 @@ def main():
     parser.add_argument("--history", type=Path, help="summarise the result files in this directory instead")
     parser.add_argument("--update-doc", type=Path,
                         help="with --history: rewrite this document's generated block (docs/performance.md)")
-    parser.add_argument("--only", nargs="*", choices=["size", "startup", "latency", "codex", "claude", "large"],
+    parser.add_argument("--only", nargs="*", choices=["size", "startup", "latency", "codex", "claude", "large", "open"],
                         help="run only these measurements")
     parser.add_argument("--startup-runs", type=int, default=5)
     parser.add_argument("--latency-runs", type=int, default=3)
@@ -1026,6 +1170,14 @@ def main():
     parser.add_argument("--large-threads", type=int, default=2000, help="threads in the large database")
     parser.add_argument("--max-large-idle-cpu", type=float, metavar="PERCENT",
                         help="fail if Rust's median idle CPU on the large database is over this % of one core")
+    parser.add_argument("--open-runs", type=int, default=1, help="long-thread opening runs per server")
+    parser.add_argument("--open-threads", type=int, default=8, help="long threads the clients open")
+    parser.add_argument("--open-turns", type=int, default=8, help="turns that grow each long thread")
+    parser.add_argument("--open-pad-kb", type=int, default=1024, help="KiB each of those turns' command prints")
+    parser.add_argument("--max-open-get-p99-ms", type=float, metavar="MS",
+                        help="fail if Rust's GET / p99 while clients open long threads is over this")
+    parser.add_argument("--max-open-rss-ratio", type=float, metavar="RATIO",
+                        help="fail if Rust's peak RSS opening long threads is over RATIO times the reference's")
     args = parser.parse_args()
 
     if args.history and args.update_doc:
@@ -1040,12 +1192,12 @@ def main():
         return 0
     if not (args.original_command and args.rust_command and args.reference_root):
         parser.error("--original-command, --rust-command and --reference-root are required")
-    only = set(args.only or ["size", "startup", "latency", "codex", "claude", "large"])
+    only = set(args.only or ["size", "startup", "latency", "codex", "claude", "large", "open"])
     meta = {"commit": os.environ.get("GITHUB_SHA") or commit_of(ROOT), "reference": commit_of(args.reference_root),
             "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "host": host(),
             "config": {name: getattr(args, name) for name in (
                 "startup_runs", "latency_runs", "turn_runs", "samples", "warmup", "lanes", "turns", "settle", "idle",
-                "large_runs", "large_threads")}}
+                "large_runs", "large_threads", "open_runs", "open_threads", "open_turns", "open_pad_kb")}}
     results = {"schema": SCHEMA, "meta": meta}
     if "size" in only:
         rust = shlex.split(args.rust_command)[0]
@@ -1069,6 +1221,8 @@ def main():
                 results.setdefault("turns", {})[provider] = bench.turns(provider)
         if "large" in only:
             results["large"] = bench.large()
+        if "open" in only:
+            results["open"] = bench.open_long()
     parity_harness.assert_nothing_escaped()
     results["summary"] = summary_rows(results)
     if args.json:
@@ -1085,7 +1239,27 @@ def main():
                   f"with clients connected, over the {args.max_large_idle_cpu}% limit.", flush=True)
             return 1
         print(f"Idle CPU on a large database: {percent:.1f}% of one core, within {args.max_large_idle_cpu}%.")
-    return 0
+    failed = False
+    if "open" in results:
+        p99 = statistics.median(results["open"]["rust"]["open_get_p99_ms"])
+        rss = statistics.median(results["open"]["rust"]["open_peak_rss_kb"])
+        reference = statistics.median(results["open"]["original"]["open_peak_rss_kb"])
+        if args.max_open_get_p99_ms is not None:
+            if p99 > args.max_open_get_p99_ms:
+                print(f"::error title=Responsiveness::Rust's GET / p99 was {p99:.0f} ms while clients opened long "
+                      f"threads, over the {args.max_open_get_p99_ms:.0f} ms limit.", flush=True)
+                failed = True
+            else:
+                print(f"GET / p99 while opening long threads: {p99:.1f} ms, within {args.max_open_get_p99_ms:.0f} ms.")
+        if args.max_open_rss_ratio is not None:
+            if rss > reference * args.max_open_rss_ratio:
+                print(f"::error title=Memory::Rust's peak RSS opening long threads was {rss / 1024:.0f} MiB, over "
+                      f"{args.max_open_rss_ratio}x the reference's {reference / 1024:.0f} MiB.", flush=True)
+                failed = True
+            else:
+                print(f"Peak RSS opening long threads: {rss / 1024:.0f} MiB against the reference's "
+                      f"{reference / 1024:.0f} MiB, within {args.max_open_rss_ratio}x.")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

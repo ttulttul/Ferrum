@@ -1229,7 +1229,19 @@ impl Thread {
     /// client sent as the reference's ThreadStream shapes it. A bounded snapshot holds only the
     /// newest window of the timeline and a cursor to the turns before it.
     pub(crate) fn stream_snapshot(&self, sequence: u64, options: &Value) -> Value {
-        let mut projection = self.snapshot_projection();
+        self.stream_snapshot_of(self.projection(), sequence, options)
+    }
+
+    /// [`Thread::stream_snapshot`] from `projection`, this thread's
+    /// [`Thread::projection`], which the caller already built.
+    pub(crate) fn stream_snapshot_of(
+        &self,
+        projection: Value,
+        sequence: u64,
+        options: &Value,
+    ) -> Value {
+        let mut projection = projection;
+        window_messages(&mut projection);
         if options["acceptBoundedSnapshot"] != true {
             return json!({"kind":"snapshot","snapshotSequence":sequence,"projection":projection});
         }
