@@ -263,6 +263,23 @@ impl Settings {
         });
         schema::normalize_runtime(&value).map_err(anyhow::Error::msg)
     }
+    /// The revisions of every document `internal` reads: the settings file
+    /// and the secret files it may fill in. While they are unchanged,
+    /// `internal` returns the same settings, so a poller can skip re-reading
+    /// them.
+    pub(crate) fn source_revisions(&self) -> Vec<(PathBuf, Option<crate::persistence::Revision>)> {
+        let mut sources = vec![(
+            self.settings_path.clone(),
+            self.documents.revision(&self.settings_path),
+        )];
+        let mut secrets = self.documents.list(&self.secrets_dir).unwrap_or_default();
+        secrets.sort();
+        for path in secrets {
+            let revision = self.documents.revision(&path);
+            sources.push((path, revision));
+        }
+        sources
+    }
     pub(crate) fn internal(&self) -> anyhow::Result<Value> {
         let mut guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         // The upstream watcher debounces a writer's own filesystem events for 100 ms.
@@ -384,4 +401,33 @@ fn valid_account(value: &Value) -> bool {
             && s.bytes()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
     })
+}
+
+#[cfg(test)]
+mod source_revision_tests {
+    use super::Settings;
+    use crate::persistence::{DocumentStore, MemoryStore, WriteMode};
+    use std::{path::Path, sync::Arc};
+
+    #[test]
+    fn source_revisions_change_with_the_settings_or_a_secret() {
+        let documents = Arc::new(MemoryStore::new());
+        let dir = Path::new("/plane");
+        let settings = Settings::open_plane(dir, documents.clone(), None).unwrap();
+        let first = settings.source_revisions();
+        assert_eq!(settings.source_revisions(), first, "nothing changed");
+        documents
+            .write(&dir.join("settings.json"), b"{}", WriteMode::Replace)
+            .unwrap();
+        let second = settings.source_revisions();
+        assert_ne!(second, first, "the settings file changed");
+        documents
+            .write(
+                &dir.join("secrets").join("token.bin"),
+                b"x",
+                WriteMode::Replace,
+            )
+            .unwrap();
+        assert_ne!(settings.source_revisions(), second, "a secret was written");
+    }
 }

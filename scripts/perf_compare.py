@@ -487,9 +487,12 @@ class Bench:
                 with self.server(side) as server:
                     # Settle: start-up work (provider checks, migrations) ends, then idle.
                     time.sleep(self.args.settle)
-                    before = sum(server.cpu())
+                    # The server process's own CPU: the processes it reaps while idle are the
+                    # provider status probes, here the fake CLIs, whose cost says nothing about
+                    # either server.
+                    before = server.cpu()[0]
                     time.sleep(self.args.idle)
-                    idle_cpu = sum(server.cpu()) - before
+                    idle_cpu = server.cpu()[0] - before
                     rss = proc_memory(server.process.pid)["rss"] + sum(
                         proc_memory(child).get("rss", 0) for child in descendants(server.process.pid)
                         if not is_fake(child))
@@ -498,7 +501,7 @@ class Bench:
                     result[side]["listen_ms"].append(server.listen_s * 1000)
                     result[side]["first_rpc_ms"].append(server.rpc_s * 1000)
                     result[side]["idle_rss_kb"].append(rss)
-                    result[side]["idle_cpu_ms"].append(idle_cpu * 1000)
+                    result[side]["idle_cpu_ms"].append(idle_cpu * 1000 * 10 / self.args.idle)
                     print(f"startup {side}: listen {server.listen_s * 1000:.0f} ms, first RPC "
                           f"{server.rpc_s * 1000:.0f} ms, idle RSS {rss / 1024:.1f} MiB", flush=True)
         return result
