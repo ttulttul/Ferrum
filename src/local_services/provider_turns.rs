@@ -15,6 +15,7 @@ mod claude_sessions;
 mod codex;
 mod codex_server;
 mod codex_subagents;
+mod muse;
 mod opencode;
 mod opencode2;
 pub(crate) mod pi;
@@ -30,6 +31,7 @@ pub(crate) struct ProviderProcesses {
     claude: std::sync::Arc<claude_sessions::Sessions>,
     acp: std::sync::Arc<acp::Sessions>,
     pi: std::sync::Arc<pi::Sessions>,
+    muse: std::sync::Arc<muse::Sessions>,
     opencode: std::sync::Arc<opencode::Sessions>,
     /// Where the provider processes' protocol frames are recorded.
     events: ProviderEventLog,
@@ -57,6 +59,7 @@ impl ProviderProcesses {
         self.claude.close(thread);
         self.acp.close(thread);
         self.pi.close(thread);
+        self.muse.close(thread);
         self.opencode.close(thread);
     }
 
@@ -79,6 +82,7 @@ impl ProviderProcesses {
         self.claude.shutdown().await;
         self.acp.shutdown().await;
         self.pi.shutdown().await;
+        self.muse.shutdown().await;
         self.opencode.shutdown().await;
         self.events.flush().await;
     }
@@ -142,6 +146,15 @@ pub(crate) fn start(
             responses,
             sink,
             processes.pi.clone(),
+        ));
+    } else if provider.driver == crate::workspace::provider::MUSE {
+        tokio::spawn(muse::run(
+            spec,
+            provider,
+            cancel,
+            responses,
+            sink,
+            processes.muse.clone(),
         ));
     } else if provider.driver == crate::workspace::provider::OPENCODE {
         tokio::spawn(opencode::run(

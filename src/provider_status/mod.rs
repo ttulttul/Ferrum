@@ -71,7 +71,7 @@ mod fx_skills;
 pub(crate) mod grok;
 pub(crate) mod kiro;
 mod maintenance;
-mod muse;
+pub(crate) mod muse;
 pub(crate) mod opencode;
 pub(crate) mod pi;
 pub(crate) mod reset_credits;

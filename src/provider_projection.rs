@@ -130,6 +130,23 @@ fn session_capabilities(capabilities: &Value, driver: &str) -> Value {
     out
 }
 
+/// A Muse turn's token usage as the reference keeps it: a model step's
+/// tokens only once one was reported after a context usage (none have no
+/// output), and the window only once Muse reported one.
+fn muse_token_usage(usage: &provider::TokenUsage) -> Value {
+    let mut out = json!({"usedTokens": usage.used_tokens});
+    if let Some(max) = usage.max_tokens {
+        out["maxTokens"] = json!(max);
+    }
+    if usage.input_tokens != 0 || usage.output_tokens != 0 {
+        out["inputTokens"] = json!(usage.input_tokens);
+        out["cachedInputTokens"] = json!(usage.cached_input_tokens);
+        out["outputTokens"] = json!(usage.output_tokens);
+        out["reasoningOutputTokens"] = json!(usage.reasoning_output_tokens);
+    }
+    out
+}
+
 fn native_ref(driver: &str, native: &str, strength: &str) -> Value {
     json!({"driver": driver, "nativeId": native, "strength": strength})
 }
@@ -690,7 +707,11 @@ impl Thread {
                 "handoffIds": handoff_ids,
                 "forkedFrom": null,
                 "pendingBackgroundTasks": self.pending_background_tasks(&driver),
-                "contextUsage": self.agent_context_usage().unwrap_or_else(|| self.context_usage()),
+                "contextUsage": if driver == provider::MUSE {
+                    self.muse_context_usage()
+                } else {
+                    self.agent_context_usage().unwrap_or_else(|| self.context_usage())
+                },
                 "nativeMetadata": metadata,
                 "goal": null,
                 "createdAt": iso(created_at),
@@ -915,6 +936,17 @@ impl Thread {
             })
     }
 
+    /// A Muse thread's context usage: its latest turn's token usage, which
+    /// Muse's context reports also update (`session/contextUsage`).
+    fn muse_context_usage(&self) -> Value {
+        self.runs
+            .iter()
+            .rev()
+            .filter_map(|run| self.provider.runs.get(&run.id))
+            .find_map(|record| record.usage.as_ref())
+            .map_or(Value::Null, |(usage, _)| muse_token_usage(usage))
+    }
+
     /// The context usage the agent reported for its session itself (an ACP
     /// `usage_update`), which the reference keeps on the provider thread.
     fn agent_context_usage(&self) -> Option<Value> {
@@ -1091,10 +1123,15 @@ impl Thread {
         // An OpenCode 2 session stays ready after a failed turn
         // (`finishTurn`), unless its event stream was lost (`failAll`).
         let pi = thread.driver == provider::PI;
+        // A Muse session ends in error when its host failed (a broken
+        // turn), and keeps a failed turn's error while ready.
+        let muse = thread.driver == provider::MUSE;
         let opencode2 = thread.opencode2.as_ref();
         let opencode = thread.driver == provider::OPENCODE && opencode2.is_none();
         let crash = last.and_then(|t| t.failure.as_ref()).filter(|failure| {
-            pi || opencode
+            (muse && failure.class == "transport_error")
+                || pi
+                || opencode
                 || (opencode2.is_some() && failure.message == provider::OPENCODE2_STREAM_LOST)
                 || (!claude && provider::stream_closed(&failure.message))
         });
@@ -1128,7 +1165,15 @@ impl Thread {
             "driver": thread.driver,
             "extensionStatuses": [],
             "id": id,
-            "lastError": crash.map(|failure| json!(failure.message)).unwrap_or(Value::Null),
+            "lastError": match (muse, crash) {
+                // The broken turn's stream failed: the session says the
+                // turn did.
+                (true, Some(_)) => json!("Provider turn failed."),
+                (true, None) => last
+                    .and_then(|t| t.failure.as_ref())
+                    .map_or(Value::Null, |failure| json!(failure.message)),
+                (false, crash) => crash.map(|failure| json!(failure.message)).unwrap_or(Value::Null),
+            },
             // The model of the latest run sent on it.
             "model": self
                 .runs
@@ -1277,6 +1322,12 @@ impl Thread {
                 .clone()
                 .unwrap_or_else(|| native_ref(driver, &native_turn, "weak"));
         }
+        // Muse's turn is named by the id T3 minted for it.
+        if driver == provider::MUSE {
+            if let Some(reference) = &record.native_turn_ref {
+                turn["nativeTurnRef"] = reference.clone();
+            }
+        }
         if driver == provider::PI {
             turn["nativeTurnRef"] = record
                 .native_turn_ref
@@ -1301,6 +1352,11 @@ impl Thread {
                 if let Some(usage) = turn["tokenUsage"].as_object_mut() {
                     usage.remove("reasoningOutputTokens");
                 }
+            }
+            if driver == provider::MUSE {
+                let updated = turn["tokenUsage"]["updatedAt"].clone();
+                turn["tokenUsage"] = muse_token_usage(usage);
+                turn["tokenUsage"]["updatedAt"] = updated;
             }
             if let Some(ttl) = usage.prompt_cache_ttl_ms {
                 turn["tokenUsage"]["promptCacheTtlMs"] = json!(ttl);
@@ -1748,6 +1804,8 @@ impl Thread {
         // Codex questions are items of their tool call; everything else
         // hangs under the call it asks about.
         let codex_question = question && driver == provider::CODEX;
+        // A Muse request hangs under its turn's root (`publishRequest`).
+        let muse = driver == provider::MUSE;
         let (item_row_id, node_id, parent) = if codex_question {
             (
                 item_id("turn-item", driver, &open.native_item_id),
@@ -1758,7 +1816,11 @@ impl Thread {
             (
                 join("turn-item:runtime-request", &[&id]),
                 join("node:runtime-request", &[&id]),
-                item_id("node", driver, &open.native_item_id),
+                if muse {
+                    ids.root_node.clone()
+                } else {
+                    item_id("node", driver, &open.native_item_id)
+                },
             )
         };
         let native_item = if driver == provider::CODEX {
@@ -1775,12 +1837,12 @@ impl Thread {
         let reference = native_ref(driver, native_item, strength);
         // The node and item end with the answer: completed when accepted or
         // answered, cancelled when declined, withdrawn or expired.
+        // Pi's adapter resolves its own dialogs, and Muse's adapter its
+        // requests: answered is completed, however it was.
+        let own = muse || (provider::resolves_own_requests(driver) && self.opencode2().is_none());
         let done = match state.status {
-            // Pi's adapter resolves its own dialogs: answered is completed.
             "resolved" => Some(
-                if !(provider::resolves_own_requests(driver) && self.opencode2().is_none())
-                    && matches!(request.decision.as_deref(), Some("decline" | "cancel"))
-                {
+                if !own && matches!(request.decision.as_deref(), Some("decline" | "cancel")) {
                     "cancelled"
                 } else {
                     "completed"
@@ -1793,6 +1855,12 @@ impl Thread {
         let created = iso(request.created_at);
         let completed = done.and(state.resolved_at).map(iso);
         let updated = completed.clone().unwrap_or_else(|| created.clone());
+        // A Muse request that ended cannot be answered any more.
+        let capability = if muse && state.status != "pending" {
+            json!({"type": "not_resumable", "reason": "This Muse request has ended."})
+        } else {
+            state.capability
+        };
         let mut record = json!({
             "id": id,
             "nodeId": node_id,
@@ -1800,7 +1868,7 @@ impl Thread {
             "nativeRequestRef": native_ref(driver, &open.native_request_id, strength),
             "kind": open.kind,
             "status": state.status,
-            "responseCapability": state.capability,
+            "responseCapability": capability,
             "createdAt": created,
             "resolvedAt": state.resolved_at.map(iso)
         });
@@ -1846,7 +1914,15 @@ impl Thread {
             ("nodeId", json!(node_id)),
             ("providerThreadId", json!(ids.provider_thread)),
             ("providerTurnId", json!(ids.provider_turn)),
-            ("nativeItemRef", reference),
+            // A Muse request's item is its turn's `request:<id>`.
+            (
+                "nativeItemRef",
+                if muse {
+                    native_ref(driver, &format!("request:{native_item}"), strength)
+                } else {
+                    reference
+                },
+            ),
             ("parentItemId", Value::Null),
             ("ordinal", json!(0)),
             ("status", json!(status)),
@@ -2166,6 +2242,11 @@ impl Thread {
                 "createdAt": started,
                 "updatedAt": updated
             }));
+        }
+        // Muse's failure row has no node of its own.
+        if driver == provider::MUSE && item.kind == "error" {
+            out.items.push((index, Value::Object(row)));
+            return;
         }
         out.nodes.push(json!({
             "id": node,

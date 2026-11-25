@@ -843,6 +843,7 @@ pub(crate) fn provider_turn(
             agent: option("mode").unwrap_or_default(),
             default_model: String::new(),
         }),
+        muse: None,
         continuation: false,
     };
     let mut turn = turn;

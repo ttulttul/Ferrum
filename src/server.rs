@@ -650,6 +650,37 @@ impl crate::orchestration::CommandHost for AppState {
                         turn.binary_path = crate::provider_status::expand_home(&turn.binary_path);
                     }
                 }
+                // A Muse turn runs `muse` (`binaryPath` with `~` expanded),
+                // resolves "default" and its effort from the instance's live
+                // status snapshot, and names its items under the provider
+                // thread it runs on.
+                if let Ok(Some((turn, _))) = provider.as_mut() {
+                    if turn.driver == crate::workspace::provider::MUSE {
+                        turn.binary_path = crate::provider_status::expand_home(&turn.binary_path);
+                        let row = self.provider_status.latest_row(&turn.instance_id);
+                        let (default_model, reasoning_effort) =
+                            crate::provider_status::muse::turn_launch(
+                                row.as_ref(),
+                                &turn.model,
+                                turn.reasoning_effort.as_deref(),
+                            );
+                        let store = self.store.read().await;
+                        let provider_thread = store
+                            .threads
+                            .get(&run.thread_id)
+                            .and_then(|thread| {
+                                let known = thread.runs.iter().find(|known| known.id == run.id)?;
+                                thread.starting_run_ids(known)
+                            })
+                            .map(|ids| ids.provider_thread)
+                            .unwrap_or_default();
+                        turn.muse = Some(crate::workspace::provider::MuseLaunch {
+                            default_model,
+                            reasoning_effort,
+                            provider_thread,
+                        });
+                    }
+                }
                 // An Antigravity turn runs `agy acp` as the driver launches
                 // it: the instance's sign-in settings checked, the executable
                 // resolved, the private profile prepared, and the runtime's
