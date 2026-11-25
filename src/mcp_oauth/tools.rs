@@ -1400,13 +1400,8 @@ async fn run_scheduled_task_now<S: McpHost>(
         "nextRunAt":task["nextRunAt"]
     });
     if let Some(thread_id) = task["threadId"].as_str() {
-        result["link"] = thread_link(
-            &**host,
-            caller,
-            thread_id,
-            task["title"].as_str().unwrap_or("Scheduled task"),
-        )
-        .into();
+        // The reference links the task's thread without a title.
+        result["link"] = thread_link(&**host, caller, thread_id, "").into();
     }
     Ok(result)
 }
