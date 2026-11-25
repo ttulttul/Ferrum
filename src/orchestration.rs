@@ -220,7 +220,7 @@ async fn dispatch_command<H: CommandHost>(
         && command["freshContext"] == true
         && !thread_has_active_run(&state, id).await
     {
-        detach_session(&state, id, FRESH_CONTEXT_DETACH_REASON)
+        detach_session(&state, id, FRESH_CONTEXT_DETACH_REASON, true)
             .await
             .map_err(|error| {
                 json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":command_id,"commandType":kind,"message":error.to_string()})
@@ -549,6 +549,7 @@ pub(crate) async fn detach_session<H: CommandHost>(
     state: &Arc<H>,
     thread_id: &str,
     reason: &str,
+    fresh: bool,
 ) -> anyhow::Result<()> {
     let (live, run_ids, codex_thread) = {
         let store = state.store.read().await;
@@ -586,7 +587,9 @@ pub(crate) async fn detach_session<H: CommandHost>(
             .map(|native| (instance, native));
         (thread.provider.session_live(), run_ids, codex_thread)
     };
-    if !live && run_ids.is_empty() {
+    // A fresh context leaves the thread's session behind even when no CLI
+    // holds it open (after a restart, say): the next turn must not resume it.
+    if !live && run_ids.is_empty() && !(fresh && codex_thread.is_some()) {
         return Ok(());
     }
     state
@@ -594,6 +597,7 @@ pub(crate) async fn detach_session<H: CommandHost>(
             thread_id: thread_id.to_owned(),
             run_ids: run_ids.clone(),
             reason: reason.to_owned(),
+            fresh,
         })
         .await?;
     let mut cancellations = state.cancellations().lock().await;
@@ -714,6 +718,7 @@ async fn start_run<H: CommandHost>(
     wire: Option<Value>,
     deferred: bool,
     output_schema: Option<Value>,
+    fresh: bool,
 ) -> anyhow::Result<u64> {
     let (cwd, needs_baseline, wire_id, row) = state
         .store
@@ -805,6 +810,7 @@ async fn start_run<H: CommandHost>(
             .is_object()
             .then(|| Box::new(row["modelSelection"].clone())),
         output_schema: output_schema.map(Box::new),
+        fresh_context: fresh,
     };
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),
@@ -1014,6 +1020,11 @@ async fn start_existing_run<H: CommandHost>(
             .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} has no queued message.")))?;
         (run, thread.cwd.clone(), text)
     };
+    // A fresh context queued behind a turn leaves its session once that
+    // turn has ended, as the run starts (the reference's queued fresh start).
+    if run.fresh_context {
+        detach_session(&state, thread_id, FRESH_CONTEXT_DETACH_REASON, true).await?;
+    }
     run.status = "running".into();
     run.queue_held = false;
     let sequence = state
@@ -1408,7 +1419,7 @@ async fn apply_command<H: CommandHost>(
                         })
                         .await?;
                     if let Some(reason) = reason {
-                        detach_session(&state, thread_id, reason).await?;
+                        detach_session(&state, thread_id, reason, false).await?;
                     }
                 }
             }
@@ -1442,6 +1453,7 @@ async fn apply_command<H: CommandHost>(
                     .get("outputSchema")
                     .filter(|schema| schema.is_object())
                     .cloned(),
+                command["freshContext"] == true,
             )
             .await?;
             // A message to a delegated child whose task finished starts a follow-up task.
@@ -2156,7 +2168,7 @@ async fn apply_command<H: CommandHost>(
                     .await?
                     .id;
                 if let Some(reason) = reason {
-                    detach_session(&state, thread_id, reason).await?;
+                    detach_session(&state, thread_id, reason, false).await?;
                 }
                 if let Some(effect) = title_effect {
                     state.clone().generate_title(effect);
@@ -3671,6 +3683,7 @@ async fn record_link_request<H: CommandHost>(
             None,
             false,
             None,
+            false,
         )
         .await?;
     }

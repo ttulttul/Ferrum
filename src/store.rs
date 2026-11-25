@@ -132,6 +132,10 @@ pub struct Run {
     /// (`outputSchema`), which `t3_submit_output` checks a submission against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Box<serde_json::Value>>,
+    /// The message asked for a fresh context: the run starts a new provider
+    /// session, without the thread's earlier conversation (`freshContext`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_context: bool,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -368,6 +372,9 @@ pub enum Event {
         thread_id: String,
         run_ids: Vec<Uuid>,
         reason: String,
+        /// A fresh context detached it: the next turn starts a new session.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fresh: bool,
     },
     ProviderRuntimeReconciled {
         thread_id: String,
@@ -832,10 +839,13 @@ impl Store {
             }
             Event::Imported { .. } => {}
             Event::ProviderSessionDetached {
-                thread_id, run_ids, ..
+                thread_id,
+                run_ids,
+                fresh,
+                ..
             } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
-                    thread.provider.detach_session(at, run_ids);
+                    thread.provider.detach_session(at, run_ids, *fresh);
                 }
             }
             Event::ProviderRuntimeReconciled {

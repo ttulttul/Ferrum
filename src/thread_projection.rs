@@ -370,6 +370,9 @@ impl Thread {
                 if let Some(schema) = &run.output_schema {
                     out["outputSchema"] = (**schema).clone();
                 }
+                if run.fresh_context {
+                    out["freshContext"] = json!(true);
+                }
                 if !run.background_work.is_empty() {
                     out["restartCancelledBackgroundWork"] = json!(run.background_work);
                 }
@@ -1728,6 +1731,7 @@ fn stored_runs(thread_id: &str, projection: &Value) -> Vec<crate::Run> {
                 output_schema: run["outputSchema"]
                     .is_object()
                     .then(|| Box::new(run["outputSchema"].clone())),
+                fresh_context: run["freshContext"] == true,
             })
         })
         .collect()
