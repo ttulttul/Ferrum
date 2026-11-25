@@ -2016,10 +2016,14 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
             ));
         }
     }
-    if a.get("attachments")
-        .and_then(Value::as_array)
-        .is_some_and(|items| !items.is_empty())
-    {
+    // The first message's attachments: uploads the caller prepared, claimed for
+    // the new thread (`attachmentIsPendingUpload`).
+    let attachments = a["attachments"].as_array().cloned().unwrap_or_default();
+    if attachments.iter().any(|attachment| {
+        !attachment["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("pending-"))
+    }) {
         return Err(failure(
             "invalid_request",
             "A new thread accepts only pending attachment uploads.",
@@ -2187,28 +2191,59 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
             if let Some(from) = a.get("delegatedFrom").filter(|v| v.is_object()) {
                 create["delegatedFrom"] = from.clone();
             }
-            host.dispatch(create)
+            // The first message, with its uploads claimed for the new thread, starts
+            // a run that waits for its workspace (`launchThread`'s `defer_start`).
+            let claimed = if attachments.is_empty() {
+                json!({"attachments": [], "paths": []})
+            } else {
+                host.attachment_store(
+                    "claim",
+                    json!({"threadId": thread_id, "attachments": attachments}),
+                )
                 .await
-                .map_err(|e| failure("orchestration_error", dispatch_message(&e)))?;
-            if let Some(text) = message.as_ref() {
-                let mut dispatch = json!({
-                    "type": "message.dispatch",
-                    "commandId": format!("{command_id}:message"),
-                    "threadId": thread_id,
+                .map_err(|(_, message)| failure("orchestration_error", message))?
+            };
+            if message.is_some() || !attachments.is_empty() {
+                let mut initial = json!({
                     "messageId": command_id,
-                    "text": text,
-                    "attachments": [],
-                    "modelSelection": selection,
-                    "dispatchMode": {"type": "start_immediately"},
-                    "createdBy": "agent",
-                    "creationSource": "mcp",
+                    "text": message.clone().unwrap_or_default(),
+                    "attachments": claimed["attachments"],
                 });
-                if let Some(schema) = &output_schema {
-                    dispatch["outputSchema"] = schema.clone();
+                // A host that prepares workspaces starts the run once it has
+                // (`defer_start`); another starts it at once.
+                if host.prepares_worktrees() {
+                    initial["workspaceStrategy"] = json!({"type": "root"});
                 }
-                host.dispatch(dispatch)
-                    .await
-                    .map_err(|e| failure("orchestration_error", dispatch_message(&e)))?;
+                // A thread's agent names itself as the sender.
+                if let Some(sender) = caller.granted.thread.as_ref() {
+                    initial["senderThreadId"] = json!(sender.thread_id);
+                }
+                if let Some(schema) = &output_schema {
+                    initial["outputSchema"] = schema.clone();
+                }
+                create["initialMessage"] = initial;
+            }
+            if let Err(error) = host.dispatch(create).await {
+                if !attachments.is_empty() {
+                    let _ = host
+                        .attachment_store("release", json!({"paths": claimed["paths"]}))
+                        .await;
+                }
+                return Err(failure("orchestration_error", dispatch_message(&error)));
+            }
+            // Its workspace is prepared in the background.
+            let preparing = {
+                let store = host.control_state().store.read().await;
+                store.threads.get(&thread_id).and_then(|thread| {
+                    thread
+                        .runs
+                        .iter()
+                        .find(|run| run.status == "preparing")
+                        .map(|run| run.wire_id())
+                })
+            };
+            if let Some(run_id) = preparing {
+                host.prepare_delegated_run(command_id.clone(), thread_id.clone(), run_id);
             }
         }
     }

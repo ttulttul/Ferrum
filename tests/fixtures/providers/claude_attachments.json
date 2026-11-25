@@ -103,6 +103,20 @@
      }
     },
     {
+     "mcp": {
+      "tool": "t3_attachment_prepare_upload",
+      "arguments": {
+       "upload": {
+        "type": "file",
+        "name": "brief.md",
+        "mimeType": "text/markdown",
+        "sizeBytes": 24
+       }
+      },
+      "as": "brief"
+     }
+    },
+    {
      "sleep": 4
     },
     {
@@ -211,6 +225,53 @@
       "arguments": {
        "threadId": "thread:target",
        "attachments": []
+      }
+     }
+    },
+    {
+     "mcp": {
+      "tool": "t3_thread_launch",
+      "arguments": {
+       "title": "Launched with a brief",
+       "message": "Read the brief",
+       "modelSelection": {
+        "instanceId": "codex",
+        "model": "fixture"
+       },
+       "runtimeMode": "full-access",
+       "clientRequestId": "launch-brief",
+       "attachments": [
+        {
+         "type": "file",
+         "id": "$mcp.brief.attachmentId",
+         "name": "brief.md",
+         "mimeType": "text/markdown",
+         "sizeBytes": 24
+        }
+       ]
+      }
+     }
+    },
+    {
+     "mcp": {
+      "tool": "t3_thread_launch",
+      "arguments": {
+       "title": "Launched with a stored file",
+       "message": "Read it",
+       "modelSelection": {
+        "instanceId": "codex",
+        "model": "fixture"
+       },
+       "runtimeMode": "full-access",
+       "attachments": [
+        {
+         "type": "file",
+         "id": "thread-target-00000000-0000-4000-8000-000000000000-txt",
+         "name": "a.txt",
+         "mimeType": "text/plain",
+         "sizeBytes": 5
+        }
+       ]
       }
      }
     },
@@ -1437,7 +1498,7 @@
         {
          "tool_use_id": "toolu_017v6M62RNaeoCuQopYV4Teu",
          "type": "tool_result",
-         "content": "The file /workspace/notes.txt has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+         "content": "The file /workspace/notes.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
         }
        ]
       },

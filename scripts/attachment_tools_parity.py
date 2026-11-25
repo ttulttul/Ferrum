@@ -12,7 +12,9 @@ claude_attachments.json) calls T3's tools on the MCP server its server gave it:
   prepared;
 - t3_thread_send_attachments of the image and the file to another thread, whose fake Codex then
   runs the message; then sends refused: an upload never posted, an attachment the target does
-  not hold, an archived target, and no attachments.
+  not hold, an archived target, and no attachments;
+- t3_thread_launch of a Codex thread whose first message carries another upload, and a launch
+  refused for an attachment that is not a pending upload.
 
 Compared: every MCP answer (upload tokens, ids and times by form), the target thread's messages
 and their attachments, what the target's Codex was asked (images by their hash), and what the
@@ -37,7 +39,8 @@ from parity_harness import PROVIDER_CLIS, RELAY_TOOLS, http, isolated_git_env, p
 SCENARIO = {"name": "claude attachment tools", "instance": "claudeAgent", "model": "claude-opus-5-5"}
 TARGET = "thread:target"
 ARCHIVED = "thread:archived"
-UPLOADS = {"pixel.png": _ATTACHMENT_PNG, "notes.md": b"# Notes\nFixture file.\n"}
+UPLOADS = {"pixel.png": _ATTACHMENT_PNG, "notes.md": b"# Notes\nFixture file.\n",
+           "brief.md": b"# Brief\nLaunch with it.\n"}
 TOKEN = re.compile(r"/api/attachments/upload/[A-Za-z0-9_\-.]+")
 
 
@@ -47,6 +50,8 @@ def mask(value, server, root):
     for side in ("original", "rust"):
         text = text.replace(f"{root}/{side}", "<home>/<server>")
     text = TOKEN.sub("/api/attachments/upload/<token>", text)
+    # A launch's thread id hashes its server's own identity.
+    text = re.sub(r"mcp(:|-|%3A)launch(?:[:-]|%3A)[0-9a-f]{32,64}", r"mcp\1launch\1<hash>", text)
     text = re.sub(r'(expiresAt\\?": )\d+', r'\g<1>0', text)
     text = TIME.sub("<time>", UUID.sub("<uuid>", text))
     return json.loads(text)
@@ -89,6 +94,23 @@ def messages(projection):
             for m in projection.get("messages", [])]
 
 
+def launched_thread(server, log, seconds=60):
+    """The thread the agent launched with an upload, once its run settled."""
+    ids = [json.loads(line)["answer"].get("result", {}).get("structuredContent", {}).get("threadId")
+           for line in Path(f"{log}.mcp").read_text().splitlines()
+           if '"t3_thread_launch"' in line and '"answer"' in line]
+    ids = [i for i in ids if i]
+    if not ids:
+        return {}
+    deadline = time.monotonic() + seconds
+    while True:
+        thread = server.rpc("orchestration.getThreadProjection", {"threadId": ids[0]})["value"]
+        if time.monotonic() > deadline or not any(
+                r.get("status") in ("preparing", "starting", "running", "queued") for r in thread.get("runs", [])):
+            return thread
+        time.sleep(0.25)
+
+
 def attachment_files(root):
     return sorted(UUID.sub("<uuid>", p.name) for p in (root / "userdata/attachments").glob("*") if p.is_file())
 
@@ -126,7 +148,7 @@ def main():
                 dispatched = server.rpc("orchestration.dispatchCommand", seeded["dispatch"])
                 assert dispatched["_tag"] == "Success", dispatched
                 post_uploads(server, log)
-                wait_log(log, 13)
+                wait_log(log, 16)
                 wait_runs(server, 1)
                 target = server.rpc("orchestration.getThreadProjection", {"threadId": TARGET})["value"]
                 deadline = time.monotonic() + 60
@@ -134,9 +156,12 @@ def main():
                         r.get("status") in ("preparing", "starting", "running", "queued") for r in target.get("runs", [])):
                     time.sleep(0.25)
                     target = server.rpc("orchestration.getThreadProjection", {"threadId": TARGET})["value"]
+                launched = launched_thread(server, log)
                 record = {
                     "agent mcp": agent_mcp(log, tmp),
                     "target messages": messages(target),
+                    "launched messages": messages(launched),
+                    "launched runs": [run.get("status") for run in launched.get("runs", [])],
                     "target runs": [run.get("status") for run in target.get("runs", [])],
                     "target turn input": turn_inputs(log, tmp),
                     "attachment files": attachment_files(root),
