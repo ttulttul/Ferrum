@@ -460,6 +460,9 @@ pub struct Store {
     pub threads: HashMap<String, Thread>,
     /// The last recorded workspace stream position of each running run.
     pub(crate) turn_positions: HashMap<Uuid, crate::workspace::StreamPosition>,
+    /// Reads stored threads' records again, for a projection released while
+    /// idle (`projection_eviction`). Set when threads are read lazily.
+    pub(crate) stored_source: Option<std::sync::Arc<dyn crate::stored_projection::Hydrate>>,
 }
 impl Store {
     /// `threadWorkspaceRoot`: the directory a thread works in (its worktree,

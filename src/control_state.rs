@@ -21,6 +21,9 @@ pub struct ControlState {
     pub(crate) thread_launch: Mutex<()>,
     #[cfg(feature = "native")]
     pub(crate) thread_deleted: tokio::sync::Notify,
+    /// The threads open `subscribeThread` streams watch, whose whole
+    /// projections stay in memory (`projection_eviction`).
+    pub(crate) thread_watchers: crate::projection_eviction::Watchers,
     pub events: broadcast::Sender<ServerEvent>,
     pub(crate) shell_events: broadcast::Sender<crate::shell_stream::Change>,
     pub log: Mutex<Box<dyn EventLog + Send>>,
@@ -66,6 +69,7 @@ impl ControlState {
             thread_launch: Mutex::new(()),
             #[cfg(feature = "native")]
             thread_deleted: Default::default(),
+            thread_watchers: Default::default(),
             events: broadcast::channel(512).0,
             shell_events: broadcast::channel(2048).0,
             log: Mutex::new(log),

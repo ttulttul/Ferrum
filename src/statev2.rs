@@ -394,6 +394,7 @@ pub fn load_into(conn: &Connection, store: &mut crate::Store) -> rusqlite::Resul
     // through `reader` when first needed (`stored_projection`).
     let mut slim = read::slim_projections(conn, &wanted.iter().cloned().collect())?;
     let reader: Arc<dyn crate::stored_projection::Hydrate> = Arc::new(Reader::beside(conn)?);
+    store.stored_source = Some(reader.clone());
     for id in wanted {
         let Some(slim) = slim.remove(&id) else {
             continue;
@@ -441,6 +442,27 @@ impl crate::stored_projection::Hydrate for Reader {
         let projection = read::thread_projection(&conn, thread_id);
         let _ = conn.execute_batch("COMMIT");
         Ok(projection?)
+    }
+
+    fn read_both(
+        &self,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<(serde_json::Value, crate::stored_projection::Slim)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the shared orchestration database reader failed"))?;
+        conn.execute_batch("BEGIN")?;
+        let read = (|| -> anyhow::Result<_> {
+            let Some(projection) = read::thread_projection(&conn, thread_id)? else {
+                return Ok(None);
+            };
+            let ids = std::iter::once(thread_id.to_owned()).collect();
+            let slim = read::slim_projections(&conn, &ids)?.remove(thread_id);
+            Ok(slim.map(|slim| (projection, slim)))
+        })();
+        let _ = conn.execute_batch("COMMIT");
+        read
     }
 }
 

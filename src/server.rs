@@ -1489,6 +1489,7 @@ where
         }
     }
     let cleanup = tokio::spawn(crate::storage_cleanup::automatic_runs(state.clone()));
+    let eviction = tokio::spawn(crate::projection_eviction::run(state.clone()));
     let scheduled_tasks = crate::scheduled_tasks::spawn(state.clone());
     let secret_sweep = tokio::spawn(crate::secret_requests::sweep_hourly(
         state.paths.secrets.clone(),
@@ -1603,6 +1604,7 @@ where
         }
     };
     cleanup.abort();
+    eviction.abort();
     scheduled_tasks.abort();
     state.storage_cleanup.shutdown().await;
     // Stop what this server started on SSH device hosts, as the reference's host scopes do.

@@ -105,7 +105,14 @@ impl Subscription {
                 (source, first)
             }
             "orchestration.subscribeThread" => {
-                let source = listen.then(|| Source::Events(control.events.subscribe()));
+                let source = listen.then(|| {
+                    Source::Thread(
+                        control.events.subscribe(),
+                        control
+                            .thread_watchers
+                            .watch(params["threadId"].as_str().unwrap_or_default()),
+                    )
+                });
                 let Some((snapshot, cursor)) = thread_snapshot(control, params).await else {
                     return Err(Reply::Failure(
                         json!({"_tag":"Fail","error":thread_projection_error(&params["threadId"])}),
@@ -252,6 +259,12 @@ impl Subscription {
 /// Where a stream's signals arrive natively: the channel it subscribed to.
 pub enum Source {
     Events(broadcast::Receiver<ServerEvent>),
+    /// A thread's committed events, holding its whole projection in memory
+    /// while the stream is open.
+    Thread(
+        broadcast::Receiver<ServerEvent>,
+        crate::projection_eviction::Watch,
+    ),
     #[cfg(feature = "native")]
     Shell(crate::shell_stream::Live),
     Suggestions(broadcast::Receiver<Value>),
@@ -268,7 +281,7 @@ impl Source {
             return match self {
                 #[cfg(feature = "native")]
                 Source::Shell(events) => events.next().await,
-                Source::Events(events) => match events.recv().await {
+                Source::Events(events) | Source::Thread(events, _) => match events.recv().await {
                     Ok(event) => Some(Signal::Committed(Box::new(event))),
                     Err(Lagged(_)) => Some(Signal::Resync),
                     Err(Closed) => None,
