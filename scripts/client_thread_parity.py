@@ -418,6 +418,11 @@ PROVIDER_SCENARIOS = [
     # A second turn prompts the agent the thread keeps.
     {"name": "antigravity second turn", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_two_turns.json", "followUp": "Now append a line"},
     # Supervised: agy asks, with its labels (Allow once, Allow for this thread, Deny, Cancel).
+    # Auto-accept-edits: agy's edit request is allowed without asking (the generic flavor's
+    # `acpOperationDisposition` with no sandbox lets a mutation through); the file is written and
+    # the turn ends, as the reference's does. Live, every edit waited on an approval.
+    {"name": "antigravity auto-accept-edits", "instance": "antigravity", "enable": "antigravity",
+     "model": "antigravity-default", "scenario": "agy_edit_auto.json", "runtimeMode": "auto-accept-edits"},
     {"name": "antigravity approval", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_approval.json",
      "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
     {"name": "antigravity approval declined", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_approval.json",
