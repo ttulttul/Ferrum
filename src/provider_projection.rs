@@ -132,6 +132,9 @@ pub(crate) struct ProviderRecords {
     pub messages: Vec<Value>,
     pub plans: Vec<Value>,
     pub runtime_requests: Vec<Value>,
+    /// Native subagents the provider reported (`subagent.updated`), with
+    /// `origin: provider_native`.
+    pub subagents: Vec<Value>,
     /// Turn items by the index of their run, in the order they take slots;
     /// an item with [`HIDDEN_ITEM`] only holds its slot.
     pub items: Vec<(usize, Value)>,
@@ -1813,6 +1816,93 @@ impl Thread {
         }
     }
 
+    /// A native subagent's turn item, as the reference's adapter writes it
+    /// (`emitSubagentTaskUpdate`), with its subagent record and the child's
+    /// provider thread (`registerSubagentThread`): the item names the
+    /// subagent (its node), the child's app thread and provider thread.
+    fn native_subagent(
+        &self,
+        out: &mut ProviderRecords,
+        ids: &RunIds,
+        row: &mut Map<String, Value>,
+        node: &str,
+        reference: &Value,
+    ) {
+        let driver = ids.driver.as_str();
+        let instance = self.instance_id();
+        let native_thread = row
+            .remove("nativeThreadId")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let model = row.remove("model").unwrap_or(Value::Null);
+        let effort = row.remove("reasoningEffort");
+        let child_provider_thread = join(
+            "provider-thread:provider",
+            &[driver, "native-thread", &native_thread],
+        );
+        row.insert("subagentId".into(), json!(node));
+        row.insert("driver".into(), json!(driver));
+        row.insert("providerInstanceId".into(), json!(instance));
+        row.insert("providerThreadId".into(), json!(child_provider_thread));
+        let mut record = json!({
+            "id": node,
+            "threadId": self.id,
+            "runId": ids.run,
+            "parentNodeId": ids.root_node,
+            "origin": "provider_native",
+            "createdBy": "agent",
+            "driver": driver,
+            "providerInstanceId": instance,
+            "providerThreadId": child_provider_thread,
+            "childThreadId": row["childThreadId"],
+            "nativeTaskRef": reference,
+            "prompt": row["prompt"],
+            "title": row["title"],
+            "model": model,
+            "status": row["status"],
+            "result": row["result"],
+            "startedAt": row["startedAt"],
+            "completedAt": row["completedAt"],
+            "updatedAt": row["updatedAt"],
+        });
+        // The model Codex was asked to run it on, with its effort.
+        if let Some(model) = model.as_str() {
+            let mut selection = json!({"instanceId": instance, "model": model});
+            if let Some(effort) = effort.as_ref().and_then(Value::as_str) {
+                selection["options"] = json!([{"id": "reasoningEffort", "value": effort}]);
+            }
+            record["modelSelection"] = selection;
+        }
+        out.subagents.push(record);
+        if !out
+            .provider_threads
+            .iter()
+            .any(|t| t["id"] == child_provider_thread.as_str())
+        {
+            out.provider_threads.push(json!({
+                "id": child_provider_thread,
+                "driver": driver,
+                "providerInstanceId": instance,
+                "providerSessionId": self.session_row(&instance).map_or(Value::Null, |s| s["id"].clone()),
+                "appThreadId": row["childThreadId"],
+                "ownerNodeId": null,
+                "nativeThreadRef": native_ref(driver, &native_thread, "strong"),
+                "nativeConversationHeadRef": null,
+                "status": "idle",
+                "firstRunOrdinal": null,
+                "lastRunOrdinal": null,
+                "handoffIds": [],
+                "forkedFrom": {"providerThreadId": ids.provider_thread, "providerTurnId": ids.provider_turn},
+                "pendingBackgroundTasks": [],
+                "contextUsage": null,
+                "nativeMetadata": null,
+                "goal": null,
+                "createdAt": row["startedAt"],
+                "updatedAt": row["startedAt"],
+            }));
+        }
+    }
+
     fn provider_item(
         &self,
         out: &mut ProviderRecords,
@@ -1838,7 +1928,9 @@ impl Thread {
         // An item still running when its turn ended ends with the turn, but
         // a Codex command can run on after a completed turn, as background
         // work, until a restart cancels it.
-        let background = driver == provider::CODEX && item.kind == "command_execution";
+        let background = driver == provider::CODEX && item.kind == "command_execution"
+            // A native subagent keeps the status its own calls report.
+            || item.kind == "subagent";
         let status = match (item.status.as_str(), ended) {
             ("pending" | "running" | "waiting", _) if cut.is_some() => "cancelled",
             ("running", Some(TurnStatus::Interrupted)) => "interrupted",
@@ -1899,6 +1991,11 @@ impl Thread {
         }
         for (key, value) in &item.fields {
             row.insert(key.clone(), value.clone());
+        }
+        let native_subagent =
+            item.kind == "subagent" && item.fields.get("origin") == Some(&json!("provider_native"));
+        if native_subagent {
+            self.native_subagent(out, ids, &mut row, &node, &reference);
         }
         // A proposed plan (Claude's ExitPlanMode) is a plan artifact as well
         // as its turn item (`emitClaudePlanProjection`): its id is the
@@ -1969,6 +2066,7 @@ impl Thread {
                 "assistant_message" => "assistant_message",
                 "reasoning" => "reasoning",
                 "proposed_plan" => "plan",
+                "subagent" if native_subagent => "subagent",
                 _ => "tool_call",
             },
             // A pending tool call's node is running.
@@ -1976,7 +2074,7 @@ impl Thread {
             // An ACP tool call counts toward its run.
             "countsForRun": provider::is_acp(driver)
                 && !matches!(item.kind.as_str(), "assistant_message" | "reasoning"),
-            "providerThreadId": ids.provider_thread,
+            "providerThreadId": if native_subagent { row["providerThreadId"].clone() } else { json!(ids.provider_thread) },
             "providerTurnId": ids.provider_turn,
             "nativeItemRef": reference,
             "runtimeRequestId": null,

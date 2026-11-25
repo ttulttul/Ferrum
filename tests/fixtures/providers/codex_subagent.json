@@ -1,0 +1,494 @@
+{
+ "_comment": "A Codex turn whose agent spawns a native subagent (collabAgentToolCall spawnAgent) on a child thread of its own: the child runs one turn and answers, the parent waits for it (wait) and reports the answer.",
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "codexHome": "/tmp/codex-home",
+     "platformFamily": "unix",
+     "platformOs": "linux",
+     "userAgent": "codex_cli_rs/0.170.0"
+    }
+   }
+  },
+  {
+   "expect": "thread/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     },
+     "model": "gpt-6.1-sol",
+     "cwd": "/workspace",
+     "approvalPolicy": "never",
+     "sandbox": {
+      "type": "dangerFullAccess"
+     },
+     "approvalsReviewer": "user",
+     "modelProvider": "openai"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "thread/started",
+    "params": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     }
+    },
+    "emittedAtMs": 1795225883200
+   }
+  },
+  {
+   "expect": "turn/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": null,
+      "durationMs": null
+     }
+    },
+    "emittedAtMs": 1795225881428
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "01a1fbcd-0c79-7d90-b0b3-d0a56a423ddc",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "Ask a helper to read the README title, then tell me it.",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225881722,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225881722
+    },
+    "emittedAtMs": 1795225881722
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "01a1fbcd-0c79-7d90-b0b3-d0a56a423ddc",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "Ask a helper to read the README title, then tell me it.",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225881722,
+      "completedAtMs": 1795225881722
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225881722
+    },
+    "emittedAtMs": 1795225881725
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "collabAgentToolCall",
+      "id": "call_spawn_1",
+      "tool": "spawnAgent",
+      "status": "inProgress",
+      "senderThreadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "receiverThreadIds": [],
+      "prompt": "Read README.md and report its title.",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "low",
+      "agentsStates": {},
+      "startedAtMs": 1795225883300,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225883300
+    },
+    "emittedAtMs": 1795225883401
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "collabAgentToolCall",
+      "id": "call_spawn_1",
+      "tool": "spawnAgent",
+      "status": "completed",
+      "senderThreadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "receiverThreadIds": [
+       "01a1fbcd-1b00-7000-8000-00000000c41d"
+      ],
+      "prompt": "Read README.md and report its title.",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "low",
+      "agentsStates": {
+       "01a1fbcd-1b00-7000-8000-00000000c41d": {
+        "status": "pendingInit",
+        "message": null
+       }
+      },
+      "startedAtMs": 1795225883500,
+      "completedAtMs": 1795225883600
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "completedAtMs": 1795225883600
+    },
+    "emittedAtMs": 1795225883601
+   }
+  },
+  {
+   "send": {
+    "method": "thread/started",
+    "params": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "Read README.md and report its title.",
+      "projectId": null,
+      "sessionId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-1b00-7000-8000-00000000c41d"
+     }
+    },
+    "emittedAtMs": 1795225883800
+   }
+  },
+  {
+   "send": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turn": {
+      "id": "01a1fbcd-1b01-7000-8000-00000000c41e",
+      "rootTurnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": null,
+      "completedAt": null
+     }
+    },
+    "emittedAtMs": 1795225884001
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_child_1",
+      "text": "",
+      "phase": "final_answer",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225884100,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+     "startedAtMs": 1795225884100
+    },
+    "emittedAtMs": 1795225884201
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_child_1",
+      "text": "# Ferrum acceptance sandbox",
+      "phase": "final_answer",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225884300,
+      "completedAtMs": 1795225884400
+     },
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+     "completedAtMs": 1795225884400
+    },
+    "emittedAtMs": 1795225884401
+   }
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turn": {
+      "id": "01a1fbcd-1b01-7000-8000-00000000c41e",
+      "rootTurnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+      "items": [
+       {
+        "type": "agentMessage",
+        "moderation": null,
+        "id": "msg_child_1",
+        "text": "# Ferrum acceptance sandbox",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null,
+        "startedAtMs": 1795225884300,
+        "completedAtMs": 1795225884400
+       }
+      ],
+      "itemsView": "summary",
+      "status": "completed",
+      "error": null,
+      "startedAt": null,
+      "completedAt": 1795225884,
+      "durationMs": 1600
+     }
+    },
+    "emittedAtMs": 1795225884601
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "collabAgentToolCall",
+      "id": "call_wait_1",
+      "tool": "wait",
+      "status": "inProgress",
+      "senderThreadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "receiverThreadIds": [
+       "01a1fbcd-1b00-7000-8000-00000000c41d"
+      ],
+      "prompt": null,
+      "model": null,
+      "reasoningEffort": null,
+      "agentsStates": {
+       "01a1fbcd-1b00-7000-8000-00000000c41d": {
+        "status": "running",
+        "message": null
+       }
+      },
+      "startedAtMs": 1795225884700,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225884700
+    },
+    "emittedAtMs": 1795225884801
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "collabAgentToolCall",
+      "id": "call_wait_1",
+      "tool": "wait",
+      "status": "completed",
+      "senderThreadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "receiverThreadIds": [
+       "01a1fbcd-1b00-7000-8000-00000000c41d"
+      ],
+      "prompt": null,
+      "model": null,
+      "reasoningEffort": null,
+      "agentsStates": {
+       "01a1fbcd-1b00-7000-8000-00000000c41d": {
+        "status": "completed",
+        "message": "# Ferrum acceptance sandbox"
+       }
+      },
+      "startedAtMs": 1795225884900,
+      "completedAtMs": 1795225885000
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "completedAtMs": 1795225885000
+    },
+    "emittedAtMs": 1795225885001
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_parent_final",
+      "text": "",
+      "phase": "final_answer",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225885100,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225885100
+    },
+    "emittedAtMs": 1795225885201
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_parent_final",
+      "text": "The README title is `# Ferrum acceptance sandbox`.",
+      "phase": "final_answer",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225885300,
+      "completedAtMs": 1795225885400
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "completedAtMs": 1795225885400
+    },
+    "emittedAtMs": 1795225885401
+   }
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [
+       {
+        "type": "agentMessage",
+        "moderation": null,
+        "id": "msg_parent_final",
+        "text": "The README title is `# Ferrum acceptance sandbox`.",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null,
+        "startedAtMs": 1795225885300,
+        "completedAtMs": 1795225885400
+       }
+      ],
+      "itemsView": "summary",
+      "status": "completed",
+      "error": null,
+      "startedAt": null,
+      "completedAt": 1795225885,
+      "durationMs": 2600
+     }
+    },
+    "emittedAtMs": 1795225885601
+   }
+  }
+ ]
+}

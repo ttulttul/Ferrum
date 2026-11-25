@@ -1204,7 +1204,7 @@ impl Thread {
                 context_transfers.push(transfer.clone());
             }
         }
-        let mut projection = json!({"thread":app,"runs":self.run_rows(&row),"attempts":with("attempts",provider.attempts),"nodes":with("nodes",provider.nodes),"subagents":array("subagents"),
+        let mut projection = json!({"thread":app,"runs":self.run_rows(&row),"attempts":with("attempts",provider.attempts),"nodes":with("nodes",provider.nodes),"subagents":with("subagents",provider.subagents),
             "providerSessions":with("providerSessions",provider.provider_sessions),"providerThreads":with("providerThreads",provider.provider_threads),"providerTurns":with("providerTurns",provider.provider_turns),"runtimeRequests":with("runtimeRequests",provider.runtime_requests),
             "messages":messages,"plans":provider.plans,"turnItems":turn_items,"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
             "contextHandoffs":context_handoffs,"contextTransfers":context_transfers,"visibleTurnItems":visible,"updatedAt":row["updatedAt"]});

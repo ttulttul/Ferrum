@@ -14,6 +14,7 @@ mod claude_background;
 mod claude_sessions;
 mod codex;
 mod codex_server;
+mod codex_subagents;
 mod opencode;
 mod opencode2;
 pub(crate) mod pi;
