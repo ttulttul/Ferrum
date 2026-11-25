@@ -515,6 +515,10 @@ PROVIDER_SCENARIOS = [
     # (task_notification) and wakes; the continuation run names the command and how it ended.
     {"name": "claude background wake", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_background_wake.json", "settleRuns": 2},
+    # A Monitor event wakes Claude with a bare turn while its monitor runs: the continuation run
+    # shows the monitor reporting new output.
+    {"name": "claude monitor wake", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_monitor_wake.json", "settleRuns": 2},
     # A message steers the running turn (Codex `turn/steer`), which then answers it, and Stop
     # interrupts it.
     # A message steers the running Claude turn: it goes to the CLI the turn runs (priority

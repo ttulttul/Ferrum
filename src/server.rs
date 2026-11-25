@@ -780,6 +780,11 @@ impl crate::orchestration::CommandHost for AppState {
     fn unload_provider_thread(&self, instance: &str, thread: &str) {
         self.workspace().unload_provider_thread(instance, thread);
     }
+    fn queued_run_cancelled(self: Arc<Self>, thread_id: String) {
+        tokio::spawn(async move {
+            crate::provider_continuation::after_run(&*self, &thread_id).await;
+        });
+    }
     fn close_guest_thread(&self, thread_id: &str) -> Result<(), String> {
         self.guest.close_thread(thread_id).map_err(str::to_owned)
     }

@@ -281,6 +281,7 @@ pub(super) fn wake_boundary(line: &str) -> bool {
 /// a task notification that started no turn.
 fn empty_task_notification_success(message: &Value) -> bool {
     message["type"] == "result"
+        && message["origin"]["kind"] == "task-notification"
         && message["subtype"] == "success"
         && message["is_error"] != true
         && message["num_turns"] == 0
@@ -353,6 +354,10 @@ mod tests {
             r#"{"type":"result","subtype":"success","num_turns":1,"result":"Hi."}"#
         ));
         assert!(!wake_boundary(
+            r#"{"type":"result","subtype":"success","num_turns":0,"result":"","origin":{"kind":"task-notification"}}"#
+        ));
+        // Only a task notification's empty success ends no turn.
+        assert!(wake_boundary(
             r#"{"type":"result","subtype":"success","num_turns":0,"result":""}"#
         ));
         assert!(!wake_boundary(r#"{"type":"assistant","message":{}}"#));
