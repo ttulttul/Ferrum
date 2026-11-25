@@ -264,5 +264,8 @@
   },
   "kiro failed turn": {
     "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in Kiro's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
+  },
+  "codex native subagent": {
+    "live": "The reference follows the child thread's own turns (turn/started and turn/completed on the child, routed to its app thread) and updates the subagent as they start and end, with the subagent node's status, which Rust does not do yet; it also streams the child's provider thread only on the child's app thread, where Rust's parent stream sends it. The subagent's record, item, node and the child's provider thread match once the turn ends."
   }
 }

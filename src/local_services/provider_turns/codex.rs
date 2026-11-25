@@ -76,6 +76,7 @@ pub(super) async fn run(
         runtime_mode: provider.runtime_mode().to_owned(),
         pending: HashMap::new(),
         file_changes: HashMap::new(),
+        subagents: Default::default(),
         usage_baseline: None,
         rate_limits: None,
         turn_usage: TurnUsage::default(),
@@ -193,6 +194,8 @@ struct Session {
     pending: HashMap<String, Pending>,
     /// Each file change item's changes by path, for approval prompts.
     file_changes: HashMap<String, Value>,
+    /// The native subagents the turn spawned, by their child thread.
+    subagents: super::codex_subagents::Subagents,
     /// The rate limits Codex last reported (`account/rateLimits/updated`).
     rate_limits: Option<Value>,
     /// The thread-wide token totals Codex last reported.
@@ -295,6 +298,8 @@ struct TurnUsage {
     output: u64,
     reasoning: u64,
     observed: bool,
+    /// The turn spawned a native subagent (`markSubagentUsage`).
+    has_subagents: bool,
 }
 
 impl TurnUsage {
@@ -345,7 +350,7 @@ impl TurnUsage {
     fn complete(&self, completed: bool) -> Value {
         if !self.observed {
             return json!({"usageStatus": "unavailable", "usageScope": "main_agent",
-                "hasSubagents": false});
+                "hasSubagents": self.has_subagents});
         }
         let mut usage = json!({
             "usageStatus": if completed { "complete" } else { "partial" },
@@ -354,7 +359,7 @@ impl TurnUsage {
             "cachedInputTokens": self.input.min(self.cached),
             "outputTokens": self.output,
             "reasoningTokens": self.output.min(self.reasoning),
-            "hasSubagents": false,
+            "hasSubagents": self.has_subagents,
         });
         if let Some(creation) = self.cache_creation {
             usage["cacheCreationTokens"] = json!(self.input.min(creation));
@@ -1125,7 +1130,16 @@ impl Session {
                         self.file_changes.remove(id);
                     }
                 }
-                if let Some(item) = map_item(&params["item"], method == "item/completed") {
+                // A native subagent's spawn and the calls that follow it show as
+                // its subagent item.
+                if native["type"] == "collabAgentToolCall" {
+                    if native["tool"] == "spawnAgent" {
+                        self.turn_usage.has_subagents = true;
+                    }
+                    for item in self.subagents.observe(native) {
+                        self.sink.send(ProviderEvent::TurnItem { item });
+                    }
+                } else if let Some(item) = map_item(&params["item"], method == "item/completed") {
                     self.sink.send(ProviderEvent::TurnItem { item });
                 }
             }

@@ -285,6 +285,10 @@ PROVIDER_SCENARIOS = [
     # into that turn (turn/steer), which reads it.
     {"name": "codex delegate live", "instance": "codex", "model": "fixture",
      "scenario": "codex_delegate_live.json", "awaitStatus": True},
+    # A Codex agent spawns a native subagent on a child thread of its own (collabAgentToolCall
+    # spawnAgent), waits for it and reports its answer.
+    {"name": "codex native subagent", "instance": "codex", "model": "fixture",
+     "scenario": "codex_subagent.json"},
     # Codex delegation counterparts: parent and child share the instance's app-server.
     {"name": "codex delegate", "instance": "codex", "model": "fixture",
      "scenario": "codex_delegate.json", "awaitStatus": True},
