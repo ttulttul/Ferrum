@@ -30,8 +30,10 @@ import client_thread_parity as turns
 from parity_harness import managed_server, run_concurrently
 
 CASES = {
+    # The turn's command (it goes to the background) has its result, and the turn holds on.
     "running": {"fixture": "claude_launch_shutdown_running.json",
-                "stop_when": lambda p: any(i.get("type") == "command_execution" for i in p.get("turnItems", []))},
+                "stop_when": lambda p: any(i.get("type") == "command_execution" and i.get("nativeItemRef")
+                                           and i.get("status") == "completed" for i in p.get("turnItems", []))},
     "approval": {"fixture": "claude_launch_shutdown_approval.json",
                  "stop_when": lambda p: any(r.get("status") == "pending" for r in p.get("runtimeRequests", []))
                  and any(i.get("type") == "approval_request" for i in p.get("turnItems", []))},
@@ -39,6 +41,8 @@ CASES = {
 ORDERS = {"reference -> reference": ("reference", "reference"), "rust -> reference": ("rust", "reference"),
           "reference -> rust": ("reference", "rust")}
 LIVE = ("preparing", "starting", "running", "waiting", "queued")
+# Seconds a server is given to stop gracefully before it is killed.
+STOP_TIMEOUT = 60
 
 
 def launched_thread(log, seconds=60):
@@ -68,6 +72,40 @@ def effects_pending(root, thread):
         return True
 
 
+def stored_run_statuses(root, thread):
+    """The statuses the shared database holds for `thread`'s runs."""
+    with contextlib.closing(sqlite3.connect(f"file:{root}/userdata/statev2.sqlite?mode=ro", uri=True,
+                                            timeout=5)) as db:
+        return [row[0] for row in db.execute(
+            "SELECT status FROM orchestration_v2_projection_runs WHERE thread_id = ? ORDER BY ordinal", (thread,))]
+
+
+def item_statuses(view):
+    """Each turn item's status, by id, as a server shows them."""
+    return {item["id"]: item.get("status") for item in view.get("turnItems", [])}
+
+
+def stored_item_statuses(root, thread):
+    """Each turn item's status, by id, as the shared database holds them."""
+    with contextlib.closing(sqlite3.connect(f"file:{root}/userdata/statev2.sqlite?mode=ro", uri=True,
+                                            timeout=5)) as db:
+        return {json.loads(row[0])["id"]: json.loads(row[0]).get("status") for row in db.execute(
+            "SELECT payload_json FROM orchestration_v2_projection_turn_items WHERE thread_id = ?", (thread,))}
+
+
+def turn_accepted(root, thread):
+    """Whether the database holds, for each of `thread`'s running runs, a provider turn of its
+    active attempt: what the reference's recovery takes as proof the prompt arrived."""
+    with contextlib.closing(sqlite3.connect(f"file:{root}/userdata/statev2.sqlite?mode=ro", uri=True,
+                                            timeout=5)) as db:
+        attempts = [json.loads(row[0]).get("activeAttemptId") for row in db.execute(
+            "SELECT payload_json FROM orchestration_v2_projection_runs WHERE thread_id = ? AND status = 'running'",
+            (thread,))]
+        turns = {json.loads(row[0]).get("runAttemptId") for row in db.execute(
+            "SELECT payload_json FROM orchestration_v2_projection_provider_turns WHERE thread_id = ?", (thread,))}
+    return all(attempt in turns for attempt in attempts)
+
+
 def outcome(view):
     runs = sorted(view.get("runs", []), key=lambda run: run.get("ordinal", 0))
     items = sorted(view.get("turnItems", []), key=lambda item: (item.get("ordinal", 0), item.get("id")))
@@ -88,25 +126,54 @@ def one(args, credentials, case, first, second):
                     "model": "claude-opus-5-5", "scenario": CASES[case]["fixture"]}
         env, _, log = turns.scenario_env(tmp, "cross", root, scenario, turns.scenario_drivers(scenario))
         with contextlib.ExitStack() as stack:
-            url, cookie = managed_server(stack, shlex.split(first), root, *credentials, env=env)
+            # A graceful stop may take a while under load (the turn's CLI is interrupted and the
+            # stop recorded); a server killed before it finishes would leave no stop to compare.
+            url, cookie = managed_server(stack, shlex.split(first), root, *credentials, env=env,
+                                         stop_timeout=STOP_TIMEOUT)
             seeded = turns.seed_turn(url, cookie, tmp / "checkouts", scenario)
             turns.rpc(url, cookie, "orchestration.dispatchCommand", seeded["dispatch"])
             launched = launched_thread(log)
             if launched is None:
                 return {"error": "no thread was launched"}
-            turns.wait_for(url, cookie, CASES[case]["stop_when"], 60, thread=launched)
-            # What the server is still recording lands before the stop.
+            ready = turns.wait_for(url, cookie, CASES[case]["stop_when"], 60, thread=launched)
+            if not CASES[case]["stop_when"](ready):
+                raise RuntimeError(f"{case}: the launched thread never reached its stop point on {first}")
+            # What the server is still recording lands before the stop: the projection stops
+            # changing, and the database holds the run and its items as the server shows them,
+            # the run started, with the provider turn that proves its prompt arrived. A stop that beats either to the
+            # database finds a run whose provider never took its prompt, which the reference
+            # rewinds (`rewindUnacceptedRuns`) rather than cuts.
             previous = {}
             turns.wait_for(url, cookie, lambda p: (p == previous.get("p")) or previous.update(p=p) or False,
                            15, thread=launched)
-        # Stopped as a service manager stops it; the other server starts on the same home.
+
+            def recorded(p):
+                shown = [run.get("status") for run in sorted(p.get("runs", []), key=lambda r: r.get("ordinal", 0))]
+                return (shown and "starting" not in shown and stored_run_statuses(root, launched) == shown
+                        and turn_accepted(root, launched) and stored_item_statuses(root, launched) == item_statuses(p))
+            view = turns.wait_for(url, cookie, recorded, 60, thread=launched)
+            if not recorded(view):
+                raise RuntimeError(f"{case}: {first} never recorded the launched run as started "
+                                   f"({stored_run_statuses(root, launched)})")
+        # Stopped as a service manager stops it. Its shutdown settled the launched thread's run
+        # in the database before it exited; else the stop was not graceful, and the comparison
+        # would be of a killed server.
+        left = stored_run_statuses(root, launched)
+        if not left or any(status in LIVE for status in left):
+            raise RuntimeError(f"{case}: {first} exited without settling the launched run ({left})")
+        # The other server starts on the same home.
         with contextlib.ExitStack() as stack:
             url, cookie = managed_server(stack, shlex.split(second), root, *credentials, env=env)
             # Settled once the server's startup recovery has queued its continuations, nothing
             # runs there, and nothing for the thread waits in the effect outbox.
-            settled = turns.wait_for(url, cookie, lambda p: turns.startup_recorded(root, url) and p.get("runs")
-                                     and not any(run.get("status") in LIVE for run in p.get("runs", []))
-                                     and not effects_pending(root, launched), 60, thread=launched)
+            def done(p):
+                return (turns.startup_recorded(root, url) and p.get("runs")
+                        and not any(run.get("status") in LIVE for run in p.get("runs", []))
+                        and not effects_pending(root, launched))
+            settled = turns.wait_for(url, cookie, done, 90, thread=launched)
+            if not done(settled):
+                raise RuntimeError(f"{case}: {second} did not settle the launched thread after the swap: "
+                                   f"{json.dumps(outcome(settled))[:800]}")
             return outcome(settled)
 
 
