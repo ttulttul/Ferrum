@@ -752,11 +752,27 @@ async fn start_run<H: CommandHost>(
             }),
         (None, None) => None,
     };
-    // A delegated wake or a provider continuation queued behind the active
-    // run starts when that run ends; other queued messages wait to be sent.
+    // A queued run starts when the run before it ends, unless the thread's
+    // queue is held (a stop or a restart held it): then it waits with the
+    // rest, as the reference queues (`queueHeld` when `queueIsHeld`). A
+    // delegated wake or a provider continuation never waits on a hold.
     let wake = wire.as_ref().is_some_and(|wire| {
         wire["delegatedCompletion"].is_object() || is_provider_continuation(wire)
     });
+    let queue_is_held = queued
+        && !wake
+        && state
+            .store
+            .read()
+            .await
+            .threads
+            .get(thread_id)
+            .is_some_and(|thread| {
+                thread
+                    .runs
+                    .iter()
+                    .any(|run| run.status == "queued" && run.queue_held)
+            });
     let run = Run {
         id: wire_id
             .as_deref()
@@ -775,7 +791,7 @@ async fn start_run<H: CommandHost>(
         finished_at: None,
         error: None,
         user_message_id: Some(message_id.as_str().unwrap_or_default().to_owned()),
-        queue_held: queued && !wake,
+        queue_held: queue_is_held,
         restart_cut: None,
         restart_continuation_of: continues,
         requeued_at: None,
@@ -843,6 +859,51 @@ async fn start_run<H: CommandHost>(
     state.cancellations().lock().await.insert(run.id, tx);
     state.launch_run(run, cwd, text, rx);
     Ok(seq)
+}
+
+/// A run that holds the thread: those after it queue (`isActiveRun`).
+pub(crate) fn is_live(status: &str) -> bool {
+    matches!(status, "preparing" | "starting" | "running" | "waiting")
+}
+
+/// The run that starts next on a thread with no live run: its first queued
+/// run, in delivery order, that no hold keeps waiting (`nextQueuedRun`).
+pub(crate) fn next_queued_run(thread: &Thread) -> Option<&Run> {
+    if thread.runs.iter().any(|run| is_live(&run.status)) {
+        return None;
+    }
+    thread
+        .runs
+        .iter()
+        .find(|run| run.status == "queued" && !run.queue_held)
+}
+
+/// Starts the thread's next queued run when nothing runs there, as the
+/// reference does before a message starts or queues; its own receipt, so
+/// the message keeps its own.
+async fn start_next_queued<H: CommandHost>(
+    state: &Arc<H>,
+    receipt: &CommandReceipt,
+    thread_id: &str,
+) -> anyhow::Result<()> {
+    let next = state
+        .store
+        .read()
+        .await
+        .threads
+        .get(thread_id)
+        .and_then(next_queued_run)
+        .map(Run::wire_id);
+    let Some(run_id) = next else {
+        return Ok(());
+    };
+    let start = CommandReceipt {
+        command_id: format!("{}:start-queued", receipt.command_id),
+        thread_id: thread_id.to_owned(),
+        command_type: receipt.command_type.clone(),
+    };
+    start_queued_run(state.clone(), &start, thread_id, &run_id).await?;
+    Ok(())
 }
 
 async fn start_queued_run<H: CommandHost>(
@@ -1078,6 +1139,17 @@ async fn apply_command<H: CommandHost>(
                     queue_steer = true;
                 }
             }
+            // A send that beats the run-end reaction starts the next queued
+            // run first, so it never overtakes messages queued before it
+            // (`startNextQueuedRun` before a start or a queue).
+            if continues.is_none()
+                && matches!(
+                    command["dispatchMode"]["type"].as_str(),
+                    Some("start_immediately" | "queue_after_active" | "defer_start")
+                )
+            {
+                start_next_queued(&state, receipt, thread_id).await?;
+            }
             if command["dispatchMode"]["type"] == "steer_active" && !asks_output {
                 match steer::plan(&state, thread_id, command).await? {
                     steer::SteerPlan::Start => {}
@@ -1188,7 +1260,7 @@ async fn apply_command<H: CommandHost>(
                     .await
                     .threads
                     .get(thread_id)
-                    .is_some_and(|thread| thread.runs.iter().any(|run| run.status == "running"));
+                    .is_some_and(|thread| thread.runs.iter().any(|run| is_live(&run.status)));
             let title_effect = state
                 .store
                 .read()

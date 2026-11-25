@@ -1348,43 +1348,41 @@ pub(crate) async fn follow_up_delivery<H: CommandHost>(
     }
 }
 
-/// Starts a queued wake once its thread has no live run, as the reference
-/// dispatches the next queued run when the active one ends. Other queued
-/// messages wait to be sent as before.
+/// Starts the thread's next queued run once it has no live run, as the
+/// reference dispatches the next queued run when the active one ends
+/// (`startNextQueuedRun`): a wake or a queued message, in delivery order,
+/// unless a hold keeps it waiting.
 async fn start_queued_wake<H: CommandHost>(state: Arc<H>, thread_id: &str) {
     let next = {
         let store = state.store.read().await;
         let Some(thread) = store.threads.get(thread_id) else {
             return;
         };
-        let live = thread.runs.iter().any(|run| {
-            matches!(
-                run.status.as_str(),
-                "running" | "preparing" | "waiting" | "starting"
-            )
-        });
-        let next = thread.runs.iter().find(|run| run.status == "queued");
-        next.filter(|run| !live && !run.queue_held)
-            .filter(|run| {
-                thread
-                    .messages
-                    .iter()
-                    .find(|m| Some(&m.id) == run.user_message_id.as_ref())
-                    .is_some_and(crate::thread_projection::agent_notification)
-            })
-            .map(|run| run.wire_id())
+        super::next_queued_run(thread).map(|run| {
+            let wake = thread
+                .messages
+                .iter()
+                .find(|m| Some(&m.id) == run.user_message_id.as_ref())
+                .is_some_and(crate::thread_projection::agent_notification);
+            (run.wire_id(), wake)
+        })
     };
-    let Some(run_id) = next else {
+    let Some((run_id, wake)) = next else {
         return;
+    };
+    let prefix = if wake {
+        "command:server:delegated-completion:start"
+    } else {
+        "command:server:queued-run:start"
     };
     let command = json!({
         "type": "queued-run.start",
-        "commandId": join_id("command:server:delegated-completion:start", &[&run_id]),
+        "commandId": join_id(prefix, &[&run_id]),
         "threadId": thread_id,
         "runId": run_id,
     });
     if let Err(error) = super::dispatch_orchestration_command(state, command).await {
-        tracing::warn!(?error, thread_id, "could not start a delegated wake");
+        tracing::warn!(?error, thread_id, "could not start the next queued run");
     }
 }
 
