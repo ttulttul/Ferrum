@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const RECORD_MAX_BYTES: u64 = 8 * 1024;
+const SIGN_IN_MESSAGE: &str = "Sign in with Google to use Antigravity.";
 const AUTH_UNCHECKED_MESSAGE: &str =
     "Antigravity is installed. Google account access is not checked yet.";
 const DAILY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
@@ -667,8 +668,418 @@ async fn read_usage(profile: &Path, method: &str) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Models
+
+/// `ANTIGRAVITY_DEFAULT_MODEL`: the alias of the session's current model.
+const DEFAULT_MODEL_ALIAS: &str = "antigravity-default";
+/// `RUNTIME_MODES_WITHOUT_AUTO`.
+const RUNTIME_MODES_WITHOUT_AUTO: [&str; 3] =
+    ["approval-required", "auto-accept-edits", "full-access"];
+const MAX_OPTION_CHOICES: usize = 64;
+const MAX_TEXT_LENGTH: usize = 256;
+const MAX_DESCRIPTION_LENGTH: usize = 1_024;
+
+type ThinkingLevels = std::collections::HashMap<String, Option<Value>>;
+
+/// What Antigravity sessions told the provider (the reference provider's
+/// own draft, which its health checks update rather than replace): the
+/// account a session started under, or a sign-in a session asked for.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Session {
+    /// The instance's settings when a session reported.
+    pub(super) fingerprint: Value,
+    /// A session started (`onSessionStarted`); false once one asked to sign
+    /// in (`onAuthRequired`).
+    pub(super) signed_in: bool,
+    /// `initialize`'s `agentInfo.version`.
+    pub(super) version: Option<String>,
+    /// `buildAntigravityModelsFromSession`'s models.
+    pub(super) models: Vec<Value>,
+    /// `antigravityRuntimeModes`.
+    pub(super) runtime_modes: Vec<&'static str>,
+    /// The thinking options each model reported when selected; `None`
+    /// means it has none.
+    pub(super) thinking_levels: ThinkingLevels,
+}
+
+impl Session {
+    /// `onSessionStarted`: the session's account, version, runtime modes and
+    /// models.
+    pub(super) fn started(&mut self, initialized: &Value, setup: &Value) {
+        let options = setup["configOptions"].as_array().map(Vec::as_slice);
+        observe_thinking_levels(&mut self.thinking_levels, options);
+        self.signed_in = true;
+        if let Some(version) = initialized["agentInfo"]["version"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+        {
+            self.version = Some(version.to_owned());
+        }
+        self.runtime_modes = runtime_modes(setup);
+        self.models = build_models(setup, &self.thinking_levels);
+    }
+
+    /// `onConfigOptionsUpdated`: the models as the session's new options
+    /// list them, for a signed-in account.
+    pub(super) fn config_options_updated(&mut self, options: &[Value]) {
+        observe_thinking_levels(&mut self.thinking_levels, Some(options));
+        if self.signed_in {
+            self.models = build_models(&json!({ "configOptions": options }), &self.thinking_levels);
+        }
+    }
+
+    /// `onAuthRequired` (`clearAccountMetadata`): signed out, without models.
+    pub(super) fn sign_in_required(&mut self) {
+        self.signed_in = false;
+        self.models.clear();
+        self.runtime_modes = RUNTIME_MODES_WITHOUT_AUTO.to_vec();
+        self.thinking_levels.clear();
+    }
+}
+
+/// `antigravityThinkingConfig`: the session's thinking level option.
+fn thinking_config(options: Option<&[Value]>) -> Option<&Value> {
+    options?
+        .iter()
+        .find(|option| option["category"] == "thought_level")
+        .filter(|option| option["type"] == "select")
+}
+
+/// The session's model option (`id` or `category` "model").
+fn model_config(options: Option<&[Value]>) -> Option<&Value> {
+    options?
+        .iter()
+        .find(|option| option["id"] == "model" || option["category"] == "model")
+}
+
+/// A select option's choices, groups flattened (`flattenSelectChoices`).
+pub(super) fn flatten_choices(option: &Value) -> Vec<&Value> {
+    option["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| match entry.get("value") {
+            Some(_) => vec![entry],
+            None => entry["options"].as_array().into_iter().flatten().collect(),
+        })
+        .collect()
+}
+
+/// `observeThinkingLevels`: the selected model's thinking options.
+fn observe_thinking_levels(levels: &mut ThinkingLevels, options: Option<&[Value]>) {
+    let Some(model) = model_config(options).filter(|m| m["type"] == "select") else {
+        return;
+    };
+    if let Some(current) = model["currentValue"].as_str().filter(|c| !c.is_empty()) {
+        levels.insert(current.to_owned(), thinking_config(options).cloned());
+    }
+}
+
+/// `boundedText`: trimmed and cut to `maximum` characters.
+fn bounded_text(value: &Value, maximum: usize) -> String {
+    value
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(maximum)
+        .collect()
+}
+
+/// `boundedOpaqueValue`.
+fn bounded_opaque(value: &str, maximum: usize) -> Option<String> {
+    (!value.is_empty() && value == value.trim() && value.encode_utf16().count() <= maximum)
+        .then(|| value.to_owned())
+}
+
+/// `choiceId`.
+fn choice_id(value: &str) -> Option<String> {
+    if value.is_empty() {
+        Some("_t3/empty".into())
+    } else {
+        bounded_opaque(value, MAX_TEXT_LENGTH)
+    }
+}
+
+/// `acpProviderOptionDescriptors` of the thinking level option alone: its
+/// select descriptor, if it has choices.
+fn thinking_descriptor(option: &Value) -> Option<Value> {
+    if matches!(
+        option["category"].as_str(),
+        Some("model" | "collaboration_mode")
+    ) || option["type"] == "boolean"
+    {
+        return None;
+    }
+    let id = bounded_opaque(option["id"].as_str()?, MAX_TEXT_LENGTH)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut choices = Vec::new();
+    for candidate in flatten_choices(option) {
+        let Some(choice) = candidate["value"].as_str().and_then(choice_id) else {
+            continue;
+        };
+        if !seen.insert(choice.clone()) {
+            continue;
+        }
+        let label = bounded_text(&candidate["name"], MAX_TEXT_LENGTH);
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), json!(choice));
+        entry.insert(
+            "label".into(),
+            json!(if label.is_empty() {
+                choice.clone()
+            } else {
+                label
+            }),
+        );
+        let description = bounded_text(&candidate["description"], MAX_DESCRIPTION_LENGTH);
+        if !description.is_empty() {
+            entry.insert("description".into(), json!(description));
+        }
+        choices.push(Value::Object(entry));
+        if choices.len() == MAX_OPTION_CHOICES {
+            break;
+        }
+    }
+    if choices.is_empty() {
+        return None;
+    }
+    let mut descriptor = serde_json::Map::new();
+    let label = bounded_text(&option["name"], MAX_TEXT_LENGTH);
+    descriptor.insert("id".into(), json!(id));
+    descriptor.insert(
+        "label".into(),
+        json!(if label.is_empty() { id.clone() } else { label }),
+    );
+    let description = bounded_text(&option["description"], MAX_DESCRIPTION_LENGTH);
+    if !description.is_empty() {
+        descriptor.insert("description".into(), json!(description));
+    }
+    descriptor.insert("type".into(), json!("select"));
+    let current = option["currentValue"].as_str().and_then(choice_id);
+    let listed = current
+        .as_ref()
+        .is_some_and(|current| choices.iter().any(|c| c["id"] == current.as_str()));
+    descriptor.insert("options".into(), Value::Array(choices));
+    if listed {
+        descriptor.insert("currentValue".into(), json!(current));
+    }
+    descriptor.insert("role".into(), json!("reasoning"));
+    Some(Value::Object(descriptor))
+}
+
+/// `thinkingCapabilities`: a model's thinking levels, with the selected
+/// level only where this model reported it.
+fn thinking_capabilities(config: Option<&Value>, observed: bool) -> Value {
+    let Some(mut descriptor) = config.and_then(thinking_descriptor) else {
+        return json!({"optionDescriptors": []});
+    };
+    if !observed {
+        if let Some(object) = descriptor.as_object_mut() {
+            object.shift_remove("currentValue");
+        }
+    }
+    json!({ "optionDescriptors": [descriptor] })
+}
+
+/// `buildAntigravityModelsFromSession`: the session's models (its `model`
+/// option, else `models.availableModels`), each once, a later model of the
+/// same name labelled with its id, with its thinking levels.
+pub(super) fn build_models(setup: &Value, thinking_levels: &ThinkingLevels) -> Vec<Value> {
+    let options = setup["configOptions"].as_array().map(Vec::as_slice);
+    let config = model_config(options);
+    let select = config.filter(|c| c["type"] == "select");
+    let current = match select {
+        Some(config) => config["currentValue"].as_str(),
+        None => setup["models"]["currentModelId"].as_str(),
+    };
+    let entries: Vec<(String, String)> = match (config, select) {
+        (_, Some(select)) => flatten_choices(select)
+            .into_iter()
+            .filter_map(|entry| {
+                Some((
+                    entry["value"].as_str()?.to_owned(),
+                    entry["name"].as_str().unwrap_or("").to_owned(),
+                ))
+            })
+            .collect(),
+        (None, None) => setup["models"]["availableModels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|model| {
+                Some((
+                    model["modelId"].as_str()?.to_owned(),
+                    model["name"].as_str().unwrap_or("").to_owned(),
+                ))
+            })
+            .collect(),
+        (Some(_), None) => Vec::new(),
+    };
+    let current_thinking = thinking_config(options);
+    let mut seen = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    let mut models = Vec::new();
+    for (value, name) in entries {
+        if value.trim().is_empty() || !seen.insert(value.clone()) {
+            continue;
+        }
+        let base_name = if name.trim().is_empty() {
+            value.clone()
+        } else {
+            name
+        };
+        let label = if names.contains(&base_name) {
+            format!("{base_name} ({value})")
+        } else {
+            base_name.clone()
+        };
+        names.insert(base_name);
+        let is_current = Some(value.as_str()) == current;
+        let observed: Option<Option<&Value>> = if is_current {
+            Some(current_thinking)
+        } else {
+            thinking_levels.get(&value).map(Option::as_ref)
+        };
+        let mut model = serde_json::Map::new();
+        model.insert("slug".into(), json!(value));
+        model.insert("name".into(), json!(label));
+        model.insert("isCustom".into(), json!(false));
+        if is_current {
+            model.insert("isDefault".into(), json!(true));
+            model.insert("aliases".into(), json!([DEFAULT_MODEL_ALIAS]));
+        }
+        model.insert(
+            "capabilities".into(),
+            match observed {
+                None => thinking_capabilities(current_thinking, false),
+                Some(observed) => thinking_capabilities(observed, true),
+            },
+        );
+        models.push(Value::Object(model));
+    }
+    models
+}
+
+/// `antigravityRuntimeModes` (with `parseSessionModeState`): Auto only where
+/// the session offers agy's own.
+fn runtime_modes(setup: &Value) -> Vec<&'static str> {
+    let mode_config = setup["configOptions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|o| o["category"] == "mode" && o["type"] == "select");
+    let pairs = |modes: Vec<&Value>, id: &str| -> Vec<(String, String)> {
+        modes
+            .into_iter()
+            .map(|m| {
+                (
+                    m[id].as_str().unwrap_or("").trim().to_owned(),
+                    m["name"].as_str().unwrap_or("").trim().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let (current, available) = if !setup["modes"].is_null() {
+        (
+            setup["modes"]["currentModeId"].as_str(),
+            pairs(
+                setup["modes"]["availableModes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                "id",
+            ),
+        )
+    } else if let Some(config) = mode_config {
+        (
+            config["currentValue"].as_str(),
+            pairs(flatten_choices(config), "value"),
+        )
+    } else {
+        (None, Vec::new())
+    };
+    let offers_auto = current.is_some_and(|c| !c.trim().is_empty())
+        && available
+            .iter()
+            .any(|(id, name)| id == "auto" && !name.is_empty());
+    if offers_auto {
+        vec![
+            "approval-required",
+            "auto-accept-edits",
+            "auto",
+            "full-access",
+        ]
+    } else {
+        RUNTIME_MODES_WITHOUT_AUTO.to_vec()
+    }
+}
+
+/// `applyModelCatalog` with the manifest's Antigravity catalog: legacy
+/// flags, and the catalog's default chat model as the default.
+fn apply_catalog(models: &mut [Value], manifest: &Value) {
+    let catalog = if manifest["providers"]["antigravity"].is_object() {
+        &manifest["providers"]["antigravity"]
+    } else {
+        &crate::model_manifest::BUNDLED["providers"]["antigravity"]
+    };
+    let entries = catalog["models"].as_array().cloned().unwrap_or_default();
+    for model in models.iter_mut() {
+        if model["isCustom"] == true {
+            continue;
+        }
+        let legacy = entries
+            .iter()
+            .find(|e| e["slug"] == model["slug"])
+            .is_some_and(|e| e["status"] == "legacy");
+        if legacy {
+            model["isLegacy"] = json!(true);
+        } else if let Some(object) = model.as_object_mut() {
+            object.shift_remove("isLegacy");
+        }
+    }
+    let Some(requested) = catalog["defaults"]["chat"].as_str() else {
+        return;
+    };
+    if !models.iter().any(|m| m["slug"] == requested) {
+        return;
+    }
+    let Some(previous) = models
+        .iter()
+        .position(|m| m["isDefault"] == true && m["slug"] != requested)
+    else {
+        return;
+    };
+    let moved: Vec<Value> = models[previous]["aliases"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(object) = models[previous].as_object_mut() {
+        object.shift_remove("isDefault");
+        object.shift_remove("aliases");
+    }
+    if let Some(model) = models.iter_mut().find(|m| m["slug"] == requested) {
+        let mut aliases: Vec<Value> = model["aliases"].as_array().cloned().unwrap_or_default();
+        for alias in moved {
+            if !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+        model["isDefault"] = json!(true);
+        if !aliases.is_empty() {
+            model["aliases"] = Value::Array(aliases);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Check
 
+/// `checkAntigravityProvider`: the installation probe applied to what
+/// sessions reported (`session`), as the reference's `applyCheck` updates
+/// its provider's draft.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn check(
     config: &Value,
     env: &ProcessEnv,
@@ -676,6 +1087,7 @@ pub(super) async fn check(
     base: &Path,
     state_dir: &Path,
     manifest: &Value,
+    session: Option<&Session>,
 ) -> Draft {
     let auth = Auth::of(config);
     let checked_at = now_iso();
@@ -705,6 +1117,26 @@ pub(super) async fn check(
     } else {
         AUTH_UNCHECKED_MESSAGE.to_owned()
     };
+    let account = session.map(|session| {
+        let auth_value = if session.signed_in {
+            json!({"status": "authenticated", "type": auth.method, "label": auth.label()})
+        } else if auth.uses_credentials() {
+            json!({"status": "unauthenticated", "type": auth.method, "label": auth.label()})
+        } else {
+            json!({"status": "unauthenticated"})
+        };
+        let mut models = session.models.clone();
+        apply_catalog(&mut models, manifest);
+        (session, auth_value, models)
+    });
+    let sign_in_message = if auth.uses_credentials() {
+        format!(
+            "Connect with {} to use Antigravity and load models.",
+            auth.label()
+        )
+    } else {
+        SIGN_IN_MESSAGE.to_owned()
+    };
     match probe {
         Err((detail, missing)) => {
             let message = if detail.trim().is_empty() {
@@ -712,37 +1144,81 @@ pub(super) async fn check(
             } else {
                 detail.trim().to_owned()
             };
+            let mut extra = vec![
+                ("usageLimits", Value::Null),
+                ("supportsTextGeneration", json!(false)),
+                ("workspaceSnapshots", json!([])),
+            ];
+            let (auth_value, version, models) = match account {
+                Some((session, auth_value, models)) => {
+                    extra.push(("supportedRuntimeModes", json!(session.runtime_modes)));
+                    let models = if missing || !session.signed_in {
+                        Vec::new()
+                    } else {
+                        models
+                    };
+                    (auth_value, session.version.clone(), models)
+                }
+                None => (base_auth, None, Vec::new()),
+            };
             Draft {
                 installed: !missing,
-                version: None,
+                version,
                 status: "error",
-                auth: base_auth,
+                auth: auth_value,
                 checked_at,
                 message: Some(message),
-                extra: vec![
-                    ("usageLimits", Value::Null),
-                    ("supportsTextGeneration", json!(false)),
-                    ("workspaceSnapshots", json!([])),
-                ],
+                models,
+                extra,
                 ..Default::default()
             }
         }
         Ok(executable) => {
             let usage = read_usage(&profile, &auth.method).await;
+            let supports_text = text_generation_available(&profile);
+            let Some((session, auth_value, models)) = account else {
+                return Draft {
+                    installed: true,
+                    version: executable.version,
+                    status: "warning",
+                    auth: base_auth,
+                    checked_at,
+                    message: Some(unchecked),
+                    usage_limits: Some(usage),
+                    extra: vec![
+                        ("supportsTextGeneration", json!(supports_text)),
+                        ("workspaceSnapshots", json!([])),
+                    ],
+                    ..Default::default()
+                };
+            };
+            // A runtime found on PATH has no version until a session's
+            // `initialize` names it.
+            let version = executable.version.or_else(|| session.version.clone());
             Draft {
                 installed: true,
-                version: executable.version,
-                status: "warning",
-                auth: base_auth,
+                version,
+                status: if session.signed_in {
+                    "ready"
+                } else {
+                    "warning"
+                },
+                auth: auth_value,
                 checked_at,
-                message: Some(unchecked),
+                message: (!session.signed_in).then_some(sign_in_message),
+                models: if session.signed_in {
+                    models
+                } else {
+                    Vec::new()
+                },
                 usage_limits: Some(usage),
                 extra: vec![
                     (
                         "supportsTextGeneration",
-                        json!(text_generation_available(&profile)),
+                        json!(supports_text && session.signed_in),
                     ),
                     ("workspaceSnapshots", json!([])),
+                    ("supportedRuntimeModes", json!(session.runtime_modes)),
                 ],
                 ..Default::default()
             }
@@ -763,6 +1239,86 @@ mod tests {
             .starts_with("Agent Platform needs"));
         let auth = Auth::of(&json!({"authMethod": "agent-platform", "apiKey": "k"}));
         assert!(auth.config_issue().is_none());
+    }
+
+    fn model_config_with(current: &str, options: Value) -> Value {
+        json!({"id": "model", "name": "Model", "category": "model", "type": "select",
+            "currentValue": current, "options": options})
+    }
+
+    #[test]
+    fn legacy_session_models_count_only_without_a_model_option() {
+        let options = json!([{"value": "a", "name": "A"}, {"value": "b", "name": "B"}]);
+        let legacy = json!({"models": {"currentModelId": "a", "availableModels": [
+            {"modelId": "a", "name": "A"}, {"modelId": "b", "name": "B"}]}});
+        let with_option =
+            json!({"models": legacy["models"], "configOptions": [model_config_with("a", options)]});
+        let none = ThinkingLevels::new();
+        assert_eq!(
+            build_models(&legacy, &none),
+            build_models(&with_option, &none)
+        );
+        assert_eq!(
+            build_models(&legacy, &none)[0],
+            json!({"slug": "a", "name": "A", "isCustom": false,
+            "isDefault": true, "aliases": ["antigravity-default"], "capabilities": {"optionDescriptors": []}})
+        );
+        let empty = json!({"models": legacy["models"], "configOptions": [model_config_with("a", json!([]))]});
+        assert!(build_models(&empty, &none).is_empty());
+    }
+
+    #[test]
+    fn grouped_options_flatten_and_repeated_names_carry_their_ids() {
+        let setup = json!({"configOptions": [model_config_with("pro", json!([
+            {"group": "Flash", "name": "Flash", "options": [{"value": "f1", "name": "Flash"}, {"value": "f2", "name": "Flash"}]},
+            {"group": "Pro", "name": "Pro", "options": [{"value": "pro", "name": "Pro"}, {"value": "f1", "name": "Flash"}]}]))]});
+        let models = build_models(&setup, &ThinkingLevels::new());
+        let slugs: Vec<&str> = models.iter().map(|m| m["slug"].as_str().unwrap()).collect();
+        assert_eq!(slugs, ["f1", "f2", "pro"]);
+        assert_eq!(models[1]["name"], "Flash (f2)");
+        assert_eq!(models[2]["isDefault"], true);
+        assert!(models[0].get("isDefault").is_none());
+    }
+
+    #[test]
+    fn each_model_offers_the_thinking_levels_it_reported() {
+        let thinking = |current: &str| {
+            json!({"id": "thinking_level", "name": "Thinking Level", "category": "thought_level",
+                "type": "select", "currentValue": current,
+                "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]})
+        };
+        let setup = json!({"configOptions": [model_config_with("gemini", json!([
+            {"value": "gemini", "name": "Gemini"}, {"value": "claude", "name": "Claude"},
+            {"value": "plain", "name": "Plain"}, {"value": "unseen", "name": "Unseen"}])), thinking("high")]});
+        let mut levels = ThinkingLevels::new();
+        levels.insert("claude".into(), Some(thinking("low")));
+        levels.insert("plain".into(), None);
+        let models = build_models(&setup, &levels);
+        let of = |slug: &str| {
+            models.iter().find(|m| m["slug"] == slug).unwrap()["capabilities"]["optionDescriptors"]
+                [0]
+            .clone()
+        };
+        assert_eq!(of("gemini")["currentValue"], "high");
+        assert_eq!(of("gemini")["role"], "reasoning");
+        assert_eq!(of("claude")["currentValue"], "low");
+        assert!(of("plain").is_null());
+        assert_eq!(of("unseen")["id"], "thinking_level");
+        assert!(of("unseen").get("currentValue").is_none());
+    }
+
+    #[test]
+    fn auto_is_offered_only_where_the_session_lists_it() {
+        let modes = |ids: &[&str]| {
+            json!({"modes": {"currentModeId": "default",
+            "availableModes": ids.iter().map(|id| json!({"id": id, "name": id})).collect::<Vec<_>>()}})
+        };
+        assert_eq!(runtime_modes(&modes(&["default", "auto"])).len(), 4);
+        assert_eq!(
+            runtime_modes(&modes(&["default"])),
+            RUNTIME_MODES_WITHOUT_AUTO
+        );
+        assert_eq!(runtime_modes(&json!({})), RUNTIME_MODES_WITHOUT_AUTO);
     }
 
     #[test]

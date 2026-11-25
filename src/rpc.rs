@@ -1890,6 +1890,15 @@ async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply 
             // the checks found.
             crate::provider_status::refresh(state, instance_id).await;
         }
+        // A model refresh then has each enabled, installed provider that
+        // reads its models from a session of its own (Antigravity) read them.
+        if params["refreshModels"] == true {
+            if let Err(error) = crate::provider_status::refresh_models(state, instance_id).await {
+                return Reply::Failure(json!({"_tag":"Fail","error":{
+                    "_tag":"ProviderSetupError","instanceId":error.instance_id,
+                    "operation":"refresh-models","detail":error.detail}}));
+            }
+        }
         if params["omitProviders"] == true && folder.is_none() {
             return Reply::Success(json!({"providers":[]}));
         }

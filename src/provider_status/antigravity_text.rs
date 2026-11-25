@@ -638,32 +638,25 @@ async fn run(
     Ok(text)
 }
 
-/// The ACP runtime's session: initialize, authenticate, open, mode, model,
-/// prompt; the reply's text. The runtime is stopped on return.
-#[allow(clippy::too_many_arguments)]
-async fn prompt_session(
+/// Why a disposable session did not open.
+enum OpenError {
+    /// The runtime refused a request, or stopped.
+    Acp(super::acp::AcpError),
+    /// The manifest rates the runtime's version broken (#38970): why.
+    Broken(String),
+}
+
+/// A disposable ACP session (`makeDisposableRuntime(...).start()`):
+/// initialize with the version-gated client info, refuse a broken runtime,
+/// authenticate eagerly and open a session in `cwd`. Its `initialize`
+/// result and setup.
+async fn open_session(
     manifest: &Value,
     executable: &Executable,
-    args: &[String],
-    env: &ProcessEnv,
+    session: &mut AcpSession,
     cwd: &Path,
     auth: &Auth,
-    prompt: &str,
-    model: &str,
-    session_id_out: &mut Option<String>,
-) -> Result<String, Failure> {
-    let mut session = AcpSession::start_with(
-        &executable.path.display().to_string(),
-        args,
-        env,
-        cwd,
-        Requests::RefuseTools,
-    )
-    .map_err(|_| Failure::Other)?;
-    let fail = |error: super::acp::AcpError| match error {
-        super::acp::AcpError::Error(error) if sign_in_required(&error) => Failure::SignIn,
-        _ => Failure::Other,
-    };
+) -> Result<(Value, Value), OpenError> {
     // `antigravityClientInfo`: a runtime from 1.5.1 on names T3 Code.
     let named = executable.version.as_deref().is_some_and(|version| {
         let parts: Vec<u64> = version
@@ -699,30 +692,81 @@ async fn prompt_session(
             }),
         )
         .await
-        .map_err(fail)?;
+        .map_err(OpenError::Acp)?;
     // `startCompatible` (#38970): a runtime the manifest rates broken (anything
     // before 1.5) is refused once it names its version, before anything
-    // else. The refusal is a transport error, which text generation reports
-    // as a plain failure.
+    // else.
     if let Some(version) = initialized["agentInfo"]["version"]
         .as_str()
         .filter(|v| !v.is_empty())
     {
         let advisory = super::provider_compatibility(manifest, "antigravity", version);
-        if advisory.is_some_and(|a| a["status"] == "broken") {
-            return Err(Failure::Other);
+        if let Some(advisory) = advisory.filter(|a| a["status"] == "broken") {
+            let target = advisory["recommendedVersion"]
+                .as_str()
+                .or(advisory["recommendedRange"].as_str())
+                .unwrap_or("a newer version");
+            // A managed runtime names its version before it starts.
+            let action = if executable.version.is_some() {
+                "Update it in Antigravity setup".to_owned()
+            } else {
+                format!(
+                    "Update the Antigravity executable at {}",
+                    executable.path.display()
+                )
+            };
+            return Err(OpenError::Broken(format!(
+                "Antigravity {version} does not work with this T3 Code release. {action} to {target}, then retry."
+            )));
         }
     }
     // Eagerly, with the configured method: Antigravity takes ones it does not list.
     session
         .request("authenticate", json!({"methodId": auth.method}))
         .await
-        .map_err(fail)?;
+        .map_err(OpenError::Acp)?;
     let new_session = json!({"cwd": cwd, "mcpServers": []});
     let setup = session
         .request("session/new", new_session)
         .await
-        .map_err(fail)?;
+        .map_err(OpenError::Acp)?;
+    Ok((initialized, setup))
+}
+
+/// The ACP runtime's session: initialize, authenticate, open, mode, model,
+/// prompt; the reply's text. The runtime is stopped on return.
+#[allow(clippy::too_many_arguments)]
+async fn prompt_session(
+    manifest: &Value,
+    executable: &Executable,
+    args: &[String],
+    env: &ProcessEnv,
+    cwd: &Path,
+    auth: &Auth,
+    prompt: &str,
+    model: &str,
+    session_id_out: &mut Option<String>,
+) -> Result<String, Failure> {
+    let mut session = AcpSession::start_with(
+        &executable.path.display().to_string(),
+        args,
+        env,
+        cwd,
+        Requests::RefuseTools,
+    )
+    .map_err(|_| Failure::Other)?;
+    let fail = |error: super::acp::AcpError| match error {
+        super::acp::AcpError::Error(error) if sign_in_required(&error) => Failure::SignIn,
+        _ => Failure::Other,
+    };
+    // The broken runtime's refusal is a transport error, which text
+    // generation reports as a plain failure.
+    let (_, setup) = open_session(manifest, executable, &mut session, cwd, auth)
+        .await
+        .map_err(|error| match error {
+            OpenError::Acp(error) => fail(error),
+            OpenError::Broken(_) => Failure::Other,
+        })?;
     let session_id = setup["sessionId"].as_str().unwrap_or_default().to_owned();
     *session_id_out = Some(session_id.clone());
     if uuid::Uuid::parse_str(&session_id).map_or(true, |id| id.get_version_num() != 4) {
@@ -802,6 +846,276 @@ async fn prompt_session(
         ));
     }
     Ok(output.trim().to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Model refresh
+
+/// How long a model refresh may take (`AntigravityDriver.refreshModels`).
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(90);
+const REFRESH_FAILED: &str =
+    "Could not refresh Antigravity models. The previous model list is unchanged.";
+const PYTHON_SOCKS_REQUIRED: &str = "python-socks is required to use a SOCKS proxy";
+const NODE_REQUIRED_PREFIX: &str = "Antigravity sign-in requires Node.js.";
+
+/// What a model refresh's session reported (`publishCatalog`): its
+/// `initialize` result, its setup, and each later set of its config options
+/// (`ConfigOptionsUpdated`), in order.
+pub(super) struct Catalog {
+    pub(super) initialized: Value,
+    pub(super) setup: Value,
+    pub(super) updates: Vec<Vec<Value>>,
+}
+
+/// Why a model refresh failed.
+pub(super) enum CatalogFailure {
+    /// The runtime asked to sign in (`isAntigravitySignInRequiredError`).
+    SignIn,
+    /// What the refresh reports.
+    Detail(String),
+}
+
+/// `AntigravityDriver.refreshModels`: a disposable runtime in a temporary
+/// folder, without T3's MCP server, opens a session; the session's models
+/// are read, with each model selected once where models have thinking
+/// levels of their own (and the current one selected again). Its session
+/// files are removed afterwards.
+pub(super) async fn refresh_catalog(
+    base_dir: &Path,
+    state_dir: &Path,
+    manifest: &Value,
+    instance_id: &str,
+    config: &Value,
+    env: &ProcessEnv,
+) -> Result<Catalog, CatalogFailure> {
+    tokio::time::timeout(
+        REFRESH_TIMEOUT,
+        catalog_run(base_dir, state_dir, manifest, instance_id, config, env),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(CatalogFailure::Detail(
+            "Antigravity model refresh timed out. Try again or check Google sign-in.".into(),
+        ))
+    })
+}
+
+async fn catalog_run(
+    base_dir: &Path,
+    state_dir: &Path,
+    manifest: &Value,
+    instance_id: &str,
+    config: &Value,
+    env: &ProcessEnv,
+) -> Result<Catalog, CatalogFailure> {
+    let detail = |text: &str| CatalogFailure::Detail(text.to_owned());
+    let cwd = tempfile::Builder::new()
+        .prefix("t3-antigravity-setup-")
+        .rand_bytes(6)
+        .tempdir()
+        .map_err(|_| detail("Could not create an Antigravity setup workspace."))?;
+    let auth = Auth::of(config);
+    if let Some(issue) = auth.config_issue() {
+        return Err(detail(issue));
+    }
+    let key = hex::encode(Sha256::digest(instance_id.as_bytes()));
+    let gemini_home = state_dir.join("providers").join("antigravity").join(&key);
+    let executable = resolve_executable(
+        base_dir,
+        config["binaryPath"].as_str().unwrap_or(""),
+        env,
+        manifest,
+    )
+    .map_err(|_| detail(REFRESH_FAILED))?;
+    let runtime_temp = state_dir.join("antigravity-tmp").join(&key[..12]);
+    // Only a missing Node.js is reported; the profile's other failures are
+    // a failed refresh.
+    let profile = prepare_profile(&gemini_home, &runtime_temp, env, &auth)
+        .await
+        .map_err(|failure| match failure {
+            Failure::Detail(text) if text.starts_with(NODE_REQUIRED_PREFIX) => {
+                CatalogFailure::Detail(text)
+            }
+            _ => detail(REFRESH_FAILED),
+        })?;
+    let run_temp = tempfile::Builder::new()
+        .prefix("run-")
+        .rand_bytes(6)
+        .tempdir_in(&profile.temp_directory)
+        .map_err(|_| detail("Could not create an Antigravity runtime temp directory."))?;
+    let spawn_env = environment(&profile, env, &auth, run_temp.path());
+    let args: Vec<String> = vec![
+        "acp".into(),
+        "--gemini-dir".into(),
+        profile.gemini_home.display().to_string(),
+        "--app-data-dir".into(),
+        "antigravity-acp".into(),
+    ];
+    let mut session_id = None;
+    let result = catalog_session(
+        manifest,
+        &executable,
+        &args,
+        &spawn_env,
+        cwd.path(),
+        &auth,
+        &mut session_id,
+    )
+    .await;
+    if let Some(session_id) = &session_id {
+        remove_session_files(&profile.gemini_home, session_id, cwd.path());
+    }
+    drop(run_temp);
+    result
+}
+
+/// The refresh's session: opened, then each model selected where thinking
+/// levels differ per model. The runtime is stopped on return.
+async fn catalog_session(
+    manifest: &Value,
+    executable: &Executable,
+    args: &[String],
+    env: &ProcessEnv,
+    cwd: &Path,
+    auth: &Auth,
+    session_id_out: &mut Option<String>,
+) -> Result<Catalog, CatalogFailure> {
+    let failed = || CatalogFailure::Detail(REFRESH_FAILED.into());
+    let mut session = AcpSession::start_with(
+        &executable.path.display().to_string(),
+        args,
+        env,
+        cwd,
+        Requests::RefuseTools,
+    )
+    .map_err(|_| failed())?;
+    let (initialized, mut setup) = open_session(manifest, executable, &mut session, cwd, auth)
+        .await
+        .map_err(|error| match error {
+            OpenError::Broken(detail) => CatalogFailure::Detail(detail),
+            OpenError::Acp(super::acp::AcpError::Error(error)) if sign_in_required(&error) => {
+                CatalogFailure::SignIn
+            }
+            OpenError::Acp(super::acp::AcpError::Error(error))
+                if error["data"]["details"]
+                    .as_str()
+                    .is_some_and(|d| d.contains(PYTHON_SOCKS_REQUIRED)) =>
+            {
+                CatalogFailure::Detail(format!(
+                    "{REFRESH_FAILED} Antigravity reported: {PYTHON_SOCKS_REQUIRED}"
+                ))
+            }
+            OpenError::Acp(_) => failed(),
+        })?;
+    let session_id = setup["sessionId"].as_str().unwrap_or_default().to_owned();
+    *session_id_out = Some(session_id.clone());
+    // What the runtime said while it started: a sign-in link means it
+    // waits for a sign-in; option changes are the session's setup.
+    let mut updates: Vec<Vec<Value>> = Vec::new();
+    let mut signed_out = false;
+    let mut drain = |session: &mut AcpSession, updates: &mut Vec<Vec<Value>>| -> bool {
+        let mut updated = false;
+        while let Ok((method, params)) = session.notifications.try_recv() {
+            match method.as_str() {
+                "$output" => {
+                    let line = params.as_str().unwrap_or_default();
+                    if line.starts_with(AUTH_URL_LINE) || line.contains(AUTH_URL_MARKER) {
+                        signed_out = true;
+                    }
+                }
+                "session/update"
+                    if params["update"]["sessionUpdate"] == "config_option_update"
+                        && params["sessionId"] == session_id.as_str() =>
+                {
+                    if let Some(options) = params["update"]["configOptions"].as_array() {
+                        updates.push(options.clone());
+                        updated = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        updated
+    };
+    let mut startup = Vec::new();
+    drain(&mut session, &mut startup);
+    if let Some(options) = startup.pop() {
+        setup["configOptions"] = Value::Array(options);
+    }
+    let mut tracked: Vec<Value> = setup["configOptions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    // Thinking levels differ per model and are reported only for the
+    // selected one.
+    let current = tracked
+        .iter()
+        .find(|o| o["id"] == "model")
+        .and_then(|o| o["currentValue"].as_str())
+        .map(str::to_owned);
+    let thinking = tracked
+        .iter()
+        .any(|o| o["category"] == "thought_level" && o["type"] == "select");
+    if let (true, Some(current)) = (thinking, current) {
+        let config_id = tracked
+            .iter()
+            .find(|o| {
+                o["category"] == "model"
+                    && o["type"] == "select"
+                    && o["id"].as_str().is_some_and(|id| !id.trim().is_empty())
+            })
+            .and_then(|o| o["id"].as_str())
+            .map(|id| id.trim().to_owned())
+            .unwrap_or_else(|| "model".into());
+        let mut values: Vec<String> = tracked
+            .iter()
+            .find(|o| o["id"] == "model" && o["type"] == "select")
+            .map(|o| {
+                super::antigravity::flatten_choices(o)
+                    .into_iter()
+                    .filter_map(|c| c["value"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        values.push(current);
+        for value in values {
+            let selected = tracked
+                .iter()
+                .find(|o| o["id"] == config_id.as_str())
+                .and_then(|o| o["currentValue"].as_str())
+                .is_some_and(|c| c.trim() == value.trim());
+            if selected {
+                continue;
+            }
+            let response = session
+                .request(
+                    "session/set_config_option",
+                    json!({"sessionId": session_id, "configId": config_id, "value": value}),
+                )
+                .await;
+            // An update the runtime pushed meanwhile is newer than the
+            // reply.
+            let pushed = drain(&mut session, &mut updates);
+            if pushed {
+                tracked = updates.last().cloned().unwrap_or_default();
+            } else if let Ok(response) = response {
+                tracked = response["configOptions"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                updates.push(tracked.clone());
+            }
+        }
+    }
+    drain(&mut session, &mut updates);
+    if signed_out {
+        return Err(CatalogFailure::SignIn);
+    }
+    Ok(Catalog {
+        initialized,
+        setup,
+        updates,
+    })
 }
 
 #[cfg(test)]
