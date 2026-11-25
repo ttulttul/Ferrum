@@ -1297,6 +1297,222 @@ pub(crate) fn prepare_merge_back(
     })
 }
 
+/// The handoff a run on another provider instance takes (`Orchestrator`'s
+/// provider switch): the thread's history since the target instance's
+/// provider thread last saw it — all of it (`full_thread_summary`) when that
+/// instance has no provider thread with a native thread yet, else the delta
+/// (`delta_since_target_last_seen`) — with its consumed `provider_handoff`
+/// transfer and the "Provider handoff" item ahead of the run's prompt. None
+/// when `run` stays on the thread's provider instance.
+pub(crate) fn prepare_provider_switch(
+    thread: &Thread,
+    run: &Run,
+    provider: &ProviderTurn,
+    now_secs: u64,
+) -> Option<Recovery> {
+    let active = thread.provider.thread.as_ref()?;
+    let driver = run.driver.as_deref()?;
+    if active.driver == driver {
+        return None;
+    }
+    let target = thread
+        .provider
+        .other_threads
+        .iter()
+        .find(|other| other.driver == driver);
+    let needs_full = target.is_none_or(|target| target.native_id.is_none());
+    let projection = thread.full_projection();
+    let runs = projection["runs"].as_array()?;
+    let run_wire_id = run.wire_id();
+    let run_row = runs
+        .iter()
+        .find(|candidate| candidate["id"].as_str() == Some(run_wire_id.as_str()))?;
+    let run_ordinal = run_row["ordinal"].as_u64()?;
+    let target_thread_id = run_row["providerThreadId"].as_str()?;
+    let source_run = |candidate: &Value| {
+        candidate["ordinal"]
+            .as_u64()
+            .is_some_and(|o| o < run_ordinal)
+            && (matches!(
+                candidate["status"].as_str(),
+                Some("completed" | "failed" | "interrupted")
+            ) || (candidate["status"] == "cancelled" && !candidate["startedAt"].is_null()))
+    };
+    let latest = runs.iter().rev().find(|candidate| source_run(candidate))?;
+    let delivered: HashSet<&str> = projection["providerTurns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|turn| turn["runAttemptId"].as_str())
+        .collect();
+    let target_last = (!needs_full)
+        .then(|| {
+            runs.iter().rev().find(|candidate| {
+                source_run(candidate)
+                    && candidate["providerThreadId"] == target_thread_id
+                    && (candidate["status"] == "completed"
+                        || candidate["activeAttemptId"]
+                            .as_str()
+                            .is_some_and(|attempt| delivered.contains(attempt)))
+            })
+        })
+        .flatten();
+    let boundary = context_boundary_ordinal(
+        runs,
+        projection["turnItems"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    );
+    let after = target_last
+        .and_then(|last| last["ordinal"].as_u64())
+        .unwrap_or(0);
+    let latest_ordinal = latest["ordinal"].as_u64()?;
+    let covered: Vec<&Value> = runs
+        .iter()
+        .filter(|candidate| {
+            source_run(candidate)
+                && candidate["ordinal"]
+                    .as_u64()
+                    .is_some_and(|o| o >= boundary && o > after && o <= latest_ordinal)
+        })
+        .collect();
+    let (first, last) = (covered.first()?, covered.last()?);
+    let covered_ids: HashSet<&str> = covered.iter().filter_map(|c| c["id"].as_str()).collect();
+    let items: Vec<&Value> = projection["turnItems"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item["runId"]
+                .as_str()
+                .is_some_and(|id| covered_ids.contains(id))
+        })
+        .collect();
+    let created_at = iso(now_secs);
+    let from_instance = latest["providerInstanceId"].as_str().unwrap_or_default();
+    let to_instance = run_row["providerInstanceId"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&provider.instance_id);
+    let transfer_id = format!(
+        "context-transfer:type:provider_handoff:source-thread:{}:target-thread:{}:{}",
+        uri_component(&thread.id),
+        uri_component(&thread.id),
+        crate::platform::uuid_v4()
+    );
+    let strategy = if needs_full {
+        "full_thread_summary"
+    } else {
+        "delta_since_target_last_seen"
+    };
+    let mut handoff = prepare_provider_handoff(
+        strategy,
+        Some(&transfer_id),
+        &thread.id,
+        &run_wire_id,
+        target_thread_id,
+        from_instance,
+        to_instance,
+        first["ordinal"].as_u64().unwrap_or(1),
+        last["ordinal"].as_u64().unwrap_or(1),
+        runs,
+        &items,
+        handoff_token_cap(),
+        &created_at,
+    );
+    let mut from_threads: Vec<&Value> = Vec::new();
+    for candidate in &covered {
+        let id = &candidate["providerThreadId"];
+        if !id.is_null() && !from_threads.contains(&id) {
+            from_threads.push(id);
+        }
+    }
+    handoff["fromProviderThreadIds"] = json!(from_threads);
+    let point =
+        |source: &Value| crate::thread_fork::source_point_for_run(&thread.id, &projection, source);
+    let created_by = projection["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|message| message["id"] == run_row["userMessageId"])
+        .map_or(json!("user"), |message| message["createdBy"].clone());
+    let transfer = json!({
+        "id": transfer_id,
+        "type": "provider_handoff",
+        "sourceThreadId": thread.id,
+        "targetThreadId": thread.id,
+        "sourcePoint": point(latest),
+        "basePoint": target_last.map_or(Value::Null, point),
+        "sourceProviderInstanceId": from_instance,
+        "targetProviderInstanceId": to_instance,
+        "targetRunId": run_wire_id,
+        "status": "consumed",
+        "resolution": {
+            "strategy": if needs_full { "portable_context" } else { "delta_context" },
+            "contextHandoffId": handoff["id"],
+        },
+        "createdBy": created_by,
+        "error": Value::Null,
+        "createdAt": created_at,
+        "updatedAt": created_at,
+        "consumedAt": created_at,
+    });
+    let mut from_instances: Vec<&Value> = Vec::new();
+    let mut from_selections: Vec<&Value> = Vec::new();
+    for candidate in &covered {
+        let instance = &candidate["providerInstanceId"];
+        if !from_instances.contains(&instance) {
+            from_instances.push(instance);
+        }
+        let selection = &candidate["modelSelection"];
+        if !from_selections.iter().any(|known| {
+            known["instanceId"] == selection["instanceId"] && known["model"] == selection["model"]
+        }) {
+            from_selections.push(selection);
+        }
+    }
+    let turn_item = json!({
+        "id": format!(
+            "turn-item:run:{}:signal:{}",
+            uri_component(&run_wire_id),
+            uri_component(&format!("context-handoff:{}", handoff["id"].as_str().unwrap_or_default()))
+        ),
+        "threadId": thread.id,
+        "runId": run_wire_id,
+        "nodeId": run_row["rootNodeId"],
+        "providerThreadId": target_thread_id,
+        "providerTurnId": Value::Null,
+        "nativeItemRef": Value::Null,
+        "parentItemId": Value::Null,
+        "ordinal": 0,
+        "status": "completed",
+        "title": "Provider handoff",
+        "startedAt": created_at,
+        "completedAt": created_at,
+        "updatedAt": created_at,
+        "type": "handoff",
+        "contextHandoffId": handoff["id"],
+        "fromProviderThreadIds": handoff["fromProviderThreadIds"],
+        "toProviderThreadId": target_thread_id,
+        "fromProviderInstanceIds": from_instances,
+        "toProviderInstanceId": to_instance,
+        "fromModelSelections": from_selections,
+        "toModel": run_row["modelSelection"]["model"],
+        "strategy": strategy,
+        "summary": handoff["summaryText"],
+    });
+    Some(Recovery {
+        handoff,
+        transfer,
+        turn_item: Some(turn_item),
+        notice: None,
+        native_transfer: None,
+        delivery: PreparedHandoff::empty(None),
+        resumes: String::new(),
+    })
+}
+
 /// Prepare a fork's first turn (`ProviderTurnStartService`'s native fork):
 /// the provider forks the source's native session when it can; when it
 /// cannot, the fork starts fresh with the source's history up to the fork
@@ -1480,10 +1696,14 @@ fn prepare(
         .find(|candidate| candidate["id"].as_str() == Some(run_wire_id.as_str()))?;
     let run_ordinal = run_row["ordinal"].as_u64()?;
     let provider_thread_id = run_row["providerThreadId"].as_str()?;
+    // A provider thread its CLI has not reported yet (a switch's new one)
+    // has nothing to measure.
+    let unreported = Value::Null;
     let provider_thread = projection["providerThreads"]
         .as_array()?
         .iter()
-        .find(|candidate| candidate["id"].as_str() == Some(provider_thread_id))?;
+        .find(|candidate| candidate["id"].as_str() == Some(provider_thread_id))
+        .unwrap_or(&unreported);
     let instance_id = run_row["providerInstanceId"]
         .as_str()
         .filter(|s| !s.is_empty())

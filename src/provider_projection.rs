@@ -248,6 +248,43 @@ impl Thread {
         Some(pending_thread_id(&thread.driver, &run.wire_id()))
     }
 
+    /// The provider thread a run not yet reported by its CLI opens or
+    /// returns to: on another driver than the thread's current provider
+    /// thread, that driver's earlier one, or a new one named after the run.
+    fn waiting_thread_id(&self, run: &Run) -> Option<String> {
+        let driver = run.driver.as_deref();
+        match (&self.provider.thread, driver) {
+            (Some(thread), Some(driver)) if thread.driver != driver => {
+                let earlier = self
+                    .provider
+                    .other_threads
+                    .iter()
+                    .find(|other| other.driver == driver)
+                    .and_then(|other| {
+                        let first = self.runs.iter().find(|r| r.id == other.first_run)?;
+                        Some(pending_thread_id(driver, &first.wire_id()))
+                    });
+                Some(earlier.unwrap_or_else(|| pending_thread_id(driver, &run.wire_id())))
+            }
+            _ => self.provider_thread_id(),
+        }
+    }
+
+    /// The id of the provider thread `run`'s turn ran on: after a switch of
+    /// provider instance, an earlier run keeps the thread it ran on.
+    pub(crate) fn provider_thread_id_for(&self, run: &Run) -> Option<String> {
+        let opened_by = self.provider.run_threads.get(&run.id)?;
+        let record = std::iter::once(self.provider.thread.as_ref())
+            .flatten()
+            .chain(self.provider.other_threads.iter())
+            .find(|thread| thread.first_run == *opened_by)?;
+        let first = self
+            .runs
+            .iter()
+            .find(|candidate| candidate.id == *opened_by)?;
+        Some(pending_thread_id(&record.driver, &first.wire_id()))
+    }
+
     /// Whether `run` was sent to a CLI that has not reported its thread
     /// yet: the reference's run is `starting` then, with a pending attempt
     /// and root node.
@@ -268,7 +305,7 @@ impl Thread {
         let attempt = join("run-attempt:run", &[&run_id]) + ":attempt:1";
         Some(RunIds {
             root_node: join("node:run", &[&run_id]) + ":root",
-            provider_thread: self.provider_thread_id()?,
+            provider_thread: self.waiting_thread_id(run)?,
             provider_turn: String::new(),
             driver: run.driver.clone()?,
             run: run_id,
@@ -294,7 +331,7 @@ impl Thread {
             .unwrap_or_else(|| self.instance_id());
         Some(RunIds {
             root_node: join("node:run", &[&run_id]) + ":root",
-            provider_thread: self.provider_thread_id()?,
+            provider_thread: self.waiting_thread_id(run)?,
             provider_turn: String::new(),
             driver,
             run: run_id,
@@ -325,7 +362,10 @@ impl Thread {
         });
         Some(RunIds {
             root_node: join("node:run", &[&run_id]) + ":root",
-            provider_thread: self.provider_thread_id().unwrap_or_default(),
+            provider_thread: self
+                .provider_thread_id_for(run)
+                .or_else(|| self.provider_thread_id())
+                .unwrap_or_default(),
             provider_turn: format!(
                 "provider-turn:provider:{}:native-turn:{}",
                 uri_component(&record.driver),
@@ -352,15 +392,29 @@ impl Thread {
                 Some((turns, first)) => (turns, Some(first), first),
                 None => (0, None, 0),
             };
+        // Turns count per provider thread; the current one's runs bound it.
+        let active_thread = self.provider_thread_id();
+        let mut other_turns: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for (index, run) in self.runs.iter().enumerate() {
             let (Some(record), Some(ids)) =
                 (self.provider.runs.get(&run.id), self.provider_run_ids(run))
             else {
                 continue;
             };
-            turn_ordinal += 1;
-            first_ordinal.get_or_insert(index + 1);
-            last_ordinal = index + 1;
+            let turn_ordinal = if active_thread
+                .as_deref()
+                .is_none_or(|id| id == ids.provider_thread)
+            {
+                turn_ordinal += 1;
+                first_ordinal.get_or_insert(index + 1);
+                last_ordinal = index + 1;
+                turn_ordinal
+            } else {
+                let count = other_turns.entry(ids.provider_thread.clone()).or_default();
+                *count += 1;
+                *count
+            };
             let terminal = self.provider.terminals.get(&run.id);
             self.provider_run(
                 &mut out,
@@ -516,14 +570,19 @@ impl Thread {
                     }
                 };
             let metadata = self.claude_native_metadata(&driver);
-            // A fork's portable fallback is the provider thread's handoff.
+            // A fork's portable fallback, or a provider switch's handoff, is
+            // the provider thread's handoff.
             let handoff_ids: Vec<&Value> = self
                 .context_handoffs
                 .iter()
                 .filter(|handoff| {
                     handoff["toProviderThreadId"] == id.as_str()
                         && self.context_transfers.iter().any(|transfer| {
-                            transfer["id"] == handoff["transferId"] && transfer["type"] == "fork"
+                            transfer["id"] == handoff["transferId"]
+                                && (transfer["type"] == "fork"
+                                    || transfer["id"].as_str().is_some_and(|id| {
+                                        id.starts_with("context-transfer:type:provider_handoff:")
+                                    }))
                         })
                 })
                 .map(|handoff| &handoff["id"])
@@ -560,6 +619,78 @@ impl Thread {
                 "updatedAt": iso(updated_at)
             }));
         }
+        // The provider threads of instances the thread switched away from,
+        // idle with their native threads.
+        for thread in &self.provider.other_threads {
+            let Some(first) = self.runs.iter().find(|run| run.id == thread.first_run) else {
+                continue;
+            };
+            let instance = first
+                .model_selection
+                .as_deref()
+                .and_then(|selection| selection["instanceId"].as_str())
+                .unwrap_or(&thread.driver)
+                .to_owned();
+            let ordinals: Vec<usize> = self
+                .runs
+                .iter()
+                .enumerate()
+                .filter(|(_, run)| {
+                    self.provider.run_threads.get(&run.id) == Some(&thread.first_run)
+                })
+                .map(|(index, _)| index + 1)
+                .collect();
+            let session = if thread.driver == provider::CLAUDE_AGENT {
+                format!(
+                    "provider-session:provider-instance:{}:thread:{}:{}",
+                    uri_component(&instance),
+                    uri_component(&self.id),
+                    first.wire_id()
+                )
+            } else if provider::thread_session(&thread.driver) {
+                acp_session_id(&instance, &self.id, &first.wire_id())
+            } else {
+                format!(
+                    "provider-session:provider-instance:{}:shared",
+                    uri_component(&instance)
+                )
+            };
+            out.provider_threads.push(json!({
+                "id": pending_thread_id(&thread.driver, &first.wire_id()),
+                "driver": thread.driver,
+                "providerInstanceId": instance,
+                "providerSessionId": session,
+                "appThreadId": self.id,
+                "ownerNodeId": null,
+                "nativeThreadRef": thread.native_id.as_deref().map_or(Value::Null, |native| {
+                    native_ref(&thread.driver, native, "strong")
+                }),
+                "nativeConversationHeadRef": thread
+                    .conversation_head
+                    .as_deref()
+                    .map_or(Value::Null, |head| native_ref(&thread.driver, head, "strong")),
+                "status": thread.status,
+                "firstRunOrdinal": ordinals.first(),
+                "lastRunOrdinal": ordinals.last(),
+                "handoffIds": [],
+                "forkedFrom": null,
+                "pendingBackgroundTasks": [],
+                "contextUsage": null,
+                "nativeMetadata": null,
+                "goal": null,
+                "createdAt": iso(thread.created_at),
+                "updatedAt": iso(thread.updated_at)
+            }));
+        }
+        // Provider turns by provider thread, then ordinal, as the reference
+        // reads them.
+        out.provider_turns.sort_by(|a, b| {
+            (a["providerThreadId"].as_str(), a["ordinal"].as_u64())
+                .cmp(&(b["providerThreadId"].as_str(), b["ordinal"].as_u64()))
+        });
+        // Provider threads in the order the thread opened them.
+        out.provider_threads
+            .sort_by_key(|thread| thread["firstRunOrdinal"].as_u64().unwrap_or(u64::MAX));
         out.messages
             .sort_by(|a, b| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()));
         out.items

@@ -62,6 +62,9 @@
   "codex delegate followup": {
     "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after the first task's context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
   },
+  "codex then claude": {
+    "cli launch": "The reference's Claude Agent SDK sets CLAUDE_AGENT_SDK_VERSION in the server's own process environment whenever it starts a query (`process.env.CLAUDE_AGENT_SDK_VERSION = ...`), so with Claude Code installed beside Codex the Codex app-server it starts afterwards inherits it; Rust sets it only for the Claude Code CLI it starts."
+  },
   "codex thread tools": {
     "live": "Racy: the reference's pull-request sync reactor reads a newly linked request on its own schedule, so in 1 of 10 pinned local runs its first link's synced and link-updated events landed a tool call earlier than Rust's. Matched in the other runs.",
     "agent mcp": "Racy: since #197 Rust reads a newly linked pull request right after the link commits, apart from the tool call, so the agent's next list_thread_pull_requests can come before that read and show the link without its branches and draft state (seen both matching and differing)."
