@@ -133,7 +133,9 @@ struct OpenCode {
     external: bool,
     cwd: String,
     /// Stops the managed server (its process group).
-    stop_server: Option<oneshot::Sender<()>>,
+    /// Stops the managed server (its process group), and the task that
+    /// does it, which closing waits for.
+    stop_server: Option<(oneshot::Sender<()>, tokio::task::JoinHandle<()>)>,
     stream: mpsc::UnboundedReceiver<Stream>,
     stream_task: tokio::task::JoinHandle<()>,
     /// The OpenCode session: the native thread.
@@ -182,8 +184,11 @@ impl OpenCode {
                 .call(reqwest::Method::POST, &path, None, Duration::from_secs(1))
                 .await;
         }
-        if let Some(stop) = self.stop_server.take() {
+        // The server is stopped before this returns, so a server shutting
+        // down leaves no `opencode serve` behind.
+        if let Some((stop, stopped)) = self.stop_server.take() {
             let _ = stop.send(());
+            let _ = tokio::time::timeout(Duration::from_secs(3), stopped).await;
         }
     }
 
@@ -555,7 +560,7 @@ async fn open(
     let stop_server = server.child.map(|mut child| {
         let (stop, stopped) = oneshot::channel::<()>();
         let events = events.clone();
-        tokio::spawn(async move {
+        let watcher = tokio::spawn(async move {
             tokio::select! {
                 status = child.wait() => {
                     let code = status
@@ -585,7 +590,7 @@ async fn open(
                 }
             }
         });
-        stop
+        (stop, watcher)
     });
     let http = crate::provider_status::http_client();
     let authorization = server.password.as_deref().map(status::basic_authorization);

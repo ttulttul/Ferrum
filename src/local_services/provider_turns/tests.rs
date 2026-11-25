@@ -1398,6 +1398,16 @@ fn opencode_spec(dir: &Path, scenario: &str, log: &Path) -> TurnSpec {
     spec
 }
 
+/// Run an OpenCode turn on provider processes of its own, which are shut
+/// down afterwards, so no `opencode serve` outlives the test.
+async fn run_opencode(spec: TurnSpec) -> (Vec<ProviderEvent>, TurnExit) {
+    let processes = std::sync::Arc::new(ProviderProcesses::default());
+    let (_cancel, cancelled) = oneshot::channel();
+    let ran = collect(start(spec, cancelled, processes.clone()).unwrap()).await;
+    processes.opencode.shutdown().await;
+    ran
+}
+
 fn opencode_requests(log: &Path) -> Vec<Value> {
     std::fs::read_to_string(format!("{}.http", log.display()))
         .unwrap_or_default()
@@ -1411,7 +1421,7 @@ fn opencode_requests(log: &Path) -> Vec<Value> {
 async fn opencode_turn_streams_reasoning_tools_and_the_reply() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("oc.log");
-    let (events, exit) = run(opencode_spec(dir.path(), "opencode_turn.json", &log)).await;
+    let (events, exit) = run_opencode(opencode_spec(dir.path(), "opencode_turn.json", &log)).await;
     assert!(exit.success, "{exit:?}");
     assert_eq!(terminal(&events), (TurnStatus::Completed, None));
     assert_eq!(native_thread(&events), ("ses_1".into(), false));
@@ -1468,7 +1478,8 @@ async fn opencode_turn_streams_reasoning_tools_and_the_reply() {
 async fn opencode_turn_fails_with_the_providers_error() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("oc.log");
-    let (events, exit) = run(opencode_spec(dir.path(), "opencode_failed.json", &log)).await;
+    let (events, exit) =
+        run_opencode(opencode_spec(dir.path(), "opencode_failed.json", &log)).await;
     assert!(!exit.success);
     let (status, failure) = terminal(&events);
     let failure = failure.expect("a failure");
@@ -1484,10 +1495,11 @@ async fn opencode_stop_aborts_the_session_and_waits_for_idle() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("oc.log");
     let (cancel, cancelled) = oneshot::channel();
+    let processes = std::sync::Arc::new(ProviderProcesses::default());
     let mut events = start(
         opencode_spec(dir.path(), "opencode_interrupt.json", &log),
         cancelled,
-        TEST_SERVERS.clone(),
+        processes.clone(),
     )
     .unwrap();
     while let Some(event) = events.recv().await {
@@ -1499,6 +1511,7 @@ async fn opencode_stop_aborts_the_session_and_waits_for_idle() {
     }
     cancel.send(()).unwrap();
     let (rest, exit) = collect(events).await;
+    processes.opencode.shutdown().await;
     assert!(exit.cancelled && !exit.success, "{exit:?}");
     assert_eq!(terminal(&rest), (TurnStatus::Interrupted, None));
     // The aborted tool ends interrupted, as OpenCode reports it.
