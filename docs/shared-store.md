@@ -237,8 +237,11 @@ add tables to it. So:
     visibility rule.
 - **Start-up reads such threads lazily** (`src/stored_projection.rs`). A home's turn
   items and nodes can run to many gigabytes, so start-up reads only each thread's slim
-  records, with one query per table (`statev2::read::slim_projections`):
-  - the thread row and its small collections (only users' messages and runs' prompts);
+  records, with one query per table, the tables read at once on connections of their own
+  (`statev2::read::slim_projections`):
+  - the thread row and the small collections the typed state and the shell row read
+    (of the messages, only users' messages and runs' prompts, by the role column's
+    index and by id);
   - the turn items its shell row looks at, through the reference's partial indexes;
   - how many other turn items each run holds.
 

@@ -478,6 +478,8 @@ pub fn missing_from_database(
 
 #[cfg(test)]
 mod lazy_tests;
+#[cfg(test)]
+mod write_back_tests;
 
 #[cfg(test)]
 mod tests {

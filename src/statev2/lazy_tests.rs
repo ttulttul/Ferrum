@@ -34,8 +34,8 @@ fn synthetic_thread(index: usize) -> Value {
     let uri = crate::thread_projection::uri_component;
     let root = |n: usize| format!("node:run:{}:root", uri(&run_id(n)));
     let provider_thread = format!(
-        "provider-thread:provider:codex:native-thread:pending:{}",
-        run_id(1)
+        "provider-thread:provider:codex:native-thread:{}",
+        uri(&format!("pending:{}", run_id(1)))
     );
     let base = index * 10;
     let mut out = json!({
@@ -172,6 +172,17 @@ fn synthetic_thread(index: usize) -> Value {
                 json!({"outcome": "updated", "source": {"kind": "background_task"}});
         }
         push(&mut out, "messages", prompt);
+        if wake {
+            // A message a user created in the woken run, not a user's role.
+            push(
+                &mut out,
+                "messages",
+                json!({"id": format!("{message}:steer"), "threadId": id, "runId": run_id(n),
+                    "role": "system", "text": "steered", "createdBy": "user",
+                    "creationSource": "web", "streaming": false,
+                    "createdAt": at(base + 10 * n + 2), "updatedAt": at(base + 10 * n + 2)}),
+            );
+        }
         push(
             &mut out,
             "messages",
@@ -185,6 +196,8 @@ fn synthetic_thread(index: usize) -> Value {
                 "startedAt": at(base + 10 * n + 1), "updatedAt": at(base + 10 * n + 2)})
         };
         let mut user_item = item("user_message", "completed", 0);
+        // The reference's id for a message's user item.
+        user_item["id"] = json!(format!("turn-item:message:{}", uri(&message)));
         user_item["messageId"] = json!(message);
         user_item["inputIntent"] = json!(intent);
         push(&mut out, "turnItems", user_item);
@@ -325,7 +338,7 @@ fn synthetic_thread(index: usize) -> Value {
 
 /// A database holding `count` synthetic threads, written as this server
 /// writes a new thread.
-fn seeded(count: usize) -> (tempfile::TempDir, Connection) {
+pub(super) fn seeded(count: usize) -> (tempfile::TempDir, Connection) {
     let home = tempfile::tempdir().unwrap();
     let conn = open(home.path()).unwrap();
     conn.execute_batch(&format!(
@@ -381,14 +394,14 @@ fn typed(thread: &crate::Thread) -> (Value, String) {
 #[test]
 fn start_up_reads_no_thread_whole_and_every_shell_row_is_the_whole_ones() {
     let (_home, conn) = seeded(240);
-    read::SLIM_STATEMENTS.with(|s| s.borrow_mut().clear());
+    read::SLIM_STATEMENTS.lock().unwrap().clear();
     HYDRATIONS.with(|count| count.set(0));
     let mut store = crate::Store::default();
     let loaded = load_into(&conn, &mut store).unwrap();
     assert_eq!(loaded.threads, 240);
     assert_eq!(HYDRATIONS.with(|count| count.get()), 0);
     // No node is read, and turn items only by their type or message.
-    let statements = read::SLIM_STATEMENTS.with(|s| s.borrow().clone());
+    let statements = read::SLIM_STATEMENTS.lock().unwrap().clone();
     assert!(!statements.is_empty());
     for sql in &statements {
         assert!(!sql.contains("projection_nodes"), "{sql}");
@@ -443,7 +456,10 @@ fn start_up_never_decodes_nodes_or_unfiltered_turn_items() {
     conn.execute_batch(
         "UPDATE orchestration_v2_projection_nodes SET payload_json = 'unreadable';
          UPDATE orchestration_v2_projection_turn_items SET payload_json = 'unreadable'
-           WHERE type IN ('reasoning', 'command_execution') AND status = 'completed';",
+           WHERE type IN ('reasoning', 'command_execution') AND status = 'completed';
+         DROP TRIGGER orchestration_v2_message_search_update;
+         UPDATE orchestration_v2_projection_messages SET payload_json = 'unreadable'
+           WHERE role = 'assistant';",
     )
     .unwrap();
     let mut store = crate::Store::default();
@@ -460,7 +476,7 @@ fn start_up_never_decodes_nodes_or_unfiltered_turn_items() {
         .is_err());
 }
 
-fn control_with(home: &std::path::Path) -> crate::control_state::ControlState {
+pub(super) fn control_with(home: &std::path::Path) -> crate::control_state::ControlState {
     let documents = std::sync::Arc::new(crate::persistence::MemoryStore::new());
     let dir = std::path::Path::new("/state");
     let auth = crate::auth_service::AuthService::with_bootstrap("secret")
@@ -473,8 +489,10 @@ fn control_with(home: &std::path::Path) -> crate::control_state::ControlState {
         dir,
     )
     .unwrap();
-    let writer = write::Writer::new(open(home).unwrap());
-    control.attach_shared_store(Box::new(writer), 0);
+    let writer = open(home).unwrap();
+    // As start-up attaches it: commits continue after the latest sequence.
+    let sequence = read::max_sequence(&writer).unwrap();
+    control.attach_shared_store(Box::new(write::Writer::new(writer)), sequence);
     control
 }
 
