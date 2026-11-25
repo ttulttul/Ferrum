@@ -679,6 +679,7 @@ impl<'a> Turn<'a> {
             conversation_head: None,
             status: TurnStatus::Running,
             model: None,
+            history_injected: false,
         });
         loop {
             let message = if let Some(queued) = pi.queued.pop_front() {
@@ -950,6 +951,7 @@ impl<'a> Turn<'a> {
             conversation_head: pi.leaf.clone(),
             status,
             model: self.model.clone(),
+            history_injected: false,
         });
         let end = match status {
             TurnStatus::Interrupted => TurnEnd::interrupted(true),
@@ -1036,6 +1038,7 @@ impl<'a> Turn<'a> {
             conversation_head: pi.leaf.clone(),
             status: TurnStatus::Interrupted,
             model: self.model.clone(),
+            history_injected: false,
         });
         Ended::Stopped(TurnEnd::interrupted(true))
     }

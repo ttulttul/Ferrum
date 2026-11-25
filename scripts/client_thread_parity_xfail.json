@@ -55,6 +55,9 @@
     "live": "Racy: matched in 4 of 12 pinned local runs. Otherwise the reference steers the delegated result into the parent's running Claude turn (#39528) and queues the follow-up run while that turn still runs, sending the delivery's card once with its message and the queued run before the turn ends, where Rust also sends the card's pending and completed steer updates and creates the follow-up run after the turn ends. Which way it goes depends on whether the result arrives before the turn's last item.",
     "items": "Racy: in 1 of 10 pinned local rounds Rust steered the delegated result into the parent's running Claude turn, so its notification item came before the turn's assistant message, where the reference queued it as the follow-up run after the turn. Same race as the live entry: which happens depends on whether the result arrives before the turn's last item. Matched in the other rounds."
   },
+  "claude then codex": {
+    "cli launch": "The reference's Claude Agent SDK sets CLAUDE_AGENT_SDK_VERSION in the server's own process environment whenever it starts a query (`process.env.CLAUDE_AGENT_SDK_VERSION = ...`), so with Claude Code installed beside Codex the Codex app-server it starts afterwards inherits it; Rust sets it only for the Claude Code CLI it starts."
+  },
   "codex delegate": {
     "agent mcp": "Racy: on a blocking delegate_task wait, the reference's waitForTask races its outbox finalizer, so resultContextTransferId can already be populated on one server while still null on the other (seen both matching and differing).",
     "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
@@ -63,6 +66,9 @@
     "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after the first task's context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
   },
   "codex then claude": {
+    "cli launch": "The reference's Claude Agent SDK sets CLAUDE_AGENT_SDK_VERSION in the server's own process environment whenever it starts a query (`process.env.CLAUDE_AGENT_SDK_VERSION = ...`), so with Claude Code installed beside Codex the Codex app-server it starts afterwards inherits it; Rust sets it only for the Claude Code CLI it starts."
+  },
+  "codex then claude then codex": {
     "cli launch": "The reference's Claude Agent SDK sets CLAUDE_AGENT_SDK_VERSION in the server's own process environment whenever it starts a query (`process.env.CLAUDE_AGENT_SDK_VERSION = ...`), so with Claude Code installed beside Codex the Codex app-server it starts afterwards inherits it; Rust sets it only for the Claude Code CLI it starts."
   },
   "codex thread tools": {

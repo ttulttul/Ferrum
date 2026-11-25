@@ -228,6 +228,31 @@ pub(crate) async fn launch<H: TurnHost>(
     if let (Some(fallback), Some(provider)) = (recovery.as_ref(), spec.provider.as_mut()) {
         provider.recovery_prompt = Some(fallback.prompt(&spec.prompt));
     }
+    // Codex takes the history as native items before the prompt instead
+    // (`thread/inject_items`), when it can.
+    let user_text = spec.prompt.clone();
+    if let Some(provider) = spec
+        .provider
+        .as_mut()
+        .filter(|provider| provider.driver == crate::workspace::provider::CODEX)
+    {
+        if let Some(prepared) = prepared_handoff
+            .as_ref()
+            .filter(|prepared| !prepared.inject_items.is_null())
+        {
+            provider.inject_items = Some(prepared.inject_items.clone());
+            provider.injected_prompt = Some(prepared.prompt_without_history(&user_text));
+        }
+        if let Some(fallback) = recovery
+            .as_ref()
+            .filter(|fallback| !fallback.delivery.inject_items.is_null())
+        {
+            provider.recovery_inject_items = Some(fallback.delivery.inject_items.clone());
+            provider
+                .injected_prompt
+                .get_or_insert_with(|| fallback.delivery.prompt_without_history(&user_text));
+        }
+    }
     if let Some(prepared) = prepared_handoff.as_mut() {
         // A Codex turn records its handoffs once its app-server has loaded
         // the native thread (see `record`): the reference prepares them only
@@ -711,6 +736,8 @@ async fn record<H: TurnHost>(
     };
     let mut exit = None;
     let mut text = StreamedText::default();
+    // The handoffs' history went to the native thread (Codex), not inline.
+    let mut injected = false;
     let mut observed_native_thread: Option<String> = pending_handoff
         .as_ref()
         .and_then(|prepared| prepared.native_thread_id.clone());
@@ -782,6 +809,13 @@ async fn record<H: TurnHost>(
             &event,
             TurnEvent::Provider(ProviderEvent::ProviderThread { .. })
         );
+        if let TurnEvent::Provider(ProviderEvent::ProviderTurn {
+            history_injected: true,
+            ..
+        }) = &event
+        {
+            injected = true;
+        }
         let accepted_prompt = matches!(
             &event,
             TurnEvent::Provider(
@@ -891,8 +925,11 @@ async fn record<H: TurnHost>(
                     done(position);
                     if accepted_prompt {
                         if let Some(prepared) = pending_handoff.take() {
-                            let delivered = prepared
-                                .into_delivered(observed_native_thread.as_deref(), crate::now());
+                            let delivered = prepared.into_delivered_as(
+                                if injected { "injected" } else { "inline" },
+                                observed_native_thread.as_deref(),
+                                crate::now(),
+                            );
                             commit_handoffs(host, run, delivered).await;
                         }
                     }

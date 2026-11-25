@@ -1010,6 +1010,7 @@ impl<'a> Turn<'a> {
             conversation_head: None,
             status: TurnStatus::Running,
             model: None,
+            history_injected: false,
         });
         let sent = tokio::select! {
             sent = self.send_prompt(oc, parts) => sent,
@@ -1227,6 +1228,7 @@ impl<'a> Turn<'a> {
                     conversation_head: None,
                     status: TurnStatus::Running,
                     model: None,
+                    history_injected: false,
                 });
             }
             return;
@@ -1565,6 +1567,7 @@ impl<'a> Turn<'a> {
             conversation_head: self.user_message.clone(),
             status,
             model: None,
+            history_injected: false,
         });
         let broken = oc.dead.is_some();
         match status {

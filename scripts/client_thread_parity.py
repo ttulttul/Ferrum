@@ -577,6 +577,16 @@ PROVIDER_SCENARIOS = [
     # thread for it and hands it the thread's history (a full_thread_summary context handoff).
     {"name": "codex then claude", "instance": "codex", "model": "fixture", "scenario": "switch_codex_claude.json",
      "followUp": "Now append a line", "followUpModel": {"instanceId": "claudeAgent", "model": "claude-opus-5-5"}},
+    # Back on Codex, its own thread resumes and takes only what happened since it last ran
+    # (delta_since_target_last_seen), as native items.
+    {"name": "codex then claude then codex", "instance": "codex", "model": "fixture",
+     "scenario": "switch_back_codex.json", "followUp": ["Now append a line", "And one more"],
+     "followUpModel": [{"instanceId": "claudeAgent", "model": "claude-opus-5-5"},
+                       {"instanceId": "codex", "model": "fixture"}]},
+    # The other way, Codex takes the history as native items (thread/inject_items) before the prompt.
+    {"name": "claude then codex", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "switch_codex_claude.json", "followUp": "Now append a line",
+     "followUpModel": {"instanceId": "codex", "model": "fixture"}},
     {"name": "claude model switch", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_two_turns.json", "followUp": "Now append a line",
      "followUpModel": {"instanceId": "claudeAgent", "model": "claude-sonnet-5-5"}},
@@ -735,6 +745,11 @@ PROVIDER_SCENARIOS = [
     {"name": "claude restart resume missing retried", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_restart_resume_missing.json", "restart": {"after": "settled", "transcript": "conversation",
                                                                      "followUp": ["Now append a line", "Now append a line again"]}},
+    # Codex no longer has the thread the restarted server resumes for a follow-up: a fresh thread
+    # takes the thread's history as native items (thread/inject_items), then the follow-up.
+    {"name": "codex restart resume missing", "instance": "codex", "model": "fixture",
+     "scenario": "codex_restart_resume_missing.json",
+     "restart": {"after": "settled", "followUp": "Now append a line"}},
     # The thread's saved session holds no conversation: the reference recovers its context in a
     # fresh session, with a summary of the thread (full_thread_summary).
     {"name": "claude restart transcript empty", "instance": "claudeAgent", "model": "claude-opus-5-5",
@@ -1366,6 +1381,11 @@ def cli_approvals(log):
         if isinstance(request, dict) and request.get("subtype") in ("set_model", "apply_flag_settings"):
             # A running Claude CLI switched to another model selection.
             out.append("control " + json.dumps(request, sort_keys=True))
+        elif method == "thread/inject_items":
+            # A context handoff's history Codex took as native items.
+            # Handoff ids end in a UUID each server draws.
+            items = json.dumps((message.get("params") or {}).get("items"), sort_keys=True)
+            out.append("thread/inject_items " + UUID.sub("<uuid>", items))
         elif method in ("thread/start", "thread/resume", "turn/start"):
             params = message.get("params") or {}
             out.append(f"{method} " + json.dumps({k: params[k] for k in CODEX_POLICY_KEYS if k in params},
@@ -1776,15 +1796,20 @@ def text_provider_runs(log, root, provider):
 
 def follow_up_turn(args, url, cookie, text, model=None):
     """A second message once the first run settled, with `model` (a model selection) to switch
-    the thread's model or provider with it; the thread as read once it settled too."""
-    runs = len(thread_projection(url, cookie).get("runs", []))
-    rpc(url, cookie, "orchestration.dispatchCommand", {
-        "type": "message.dispatch", "commandId": "follow-up-message", "threadId": THREAD,
-        "messageId": "message:follow-up", "text": text, "attachments": [],
-        **({"modelSelection": model} if model else {}),
-        "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
-    wait_for(url, cookie, lambda p: len(p.get("runs", [])) > runs
-             and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", [])), 40)
+    the thread's model or provider with it; the thread as read once it settled too. With lists,
+    several messages, each sent once the one before it settled, each with its own selection."""
+    texts = [text] if isinstance(text, str) else text
+    models = model if isinstance(model, list) else [model] * len(texts)
+    for index, (one, selection) in enumerate(zip(texts, models)):
+        suffix = "" if index == 0 else f"-{index + 1}"
+        runs = len(thread_projection(url, cookie).get("runs", []))
+        rpc(url, cookie, "orchestration.dispatchCommand", {
+            "type": "message.dispatch", "commandId": f"follow-up-message{suffix}", "threadId": THREAD,
+            "messageId": f"message:follow-up{suffix}", "text": one, "attachments": [],
+            **({"modelSelection": selection} if selection else {}),
+            "createdBy": "user", "creationSource": "web", "dispatchMode": {"type": "start_immediately"}})
+        wait_for(url, cookie, lambda p: len(p.get("runs", [])) > runs
+                 and not any(r.get("status") in ACTIVE_RUN for r in p.get("runs", [])), 40)
     after = run_client(args, url, cookie, {"threadId": THREAD, "inspect": True})
     return {step: value for step, value in after["steps"].items() if "live" not in step}
 
@@ -2403,8 +2428,9 @@ def scenario_drivers(scenario):
     if scenario["scenario"] is None:
         return set()
     # A follow-up on another provider needs that provider's CLI too.
-    switched = (scenario.get("followUpModel") or {}).get("instanceId")
-    return {TURN_CLIS[instance] for instance in {scenario["instance"], switched} if instance}
+    switched = scenario.get("followUpModel") or {}
+    switched = [m.get("instanceId") for m in (switched if isinstance(switched, list) else [switched])]
+    return {TURN_CLIS[instance] for instance in {scenario["instance"], *switched} if instance}
 
 
 def provider_turns(args, credentials):

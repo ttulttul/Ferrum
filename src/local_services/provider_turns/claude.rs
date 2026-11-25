@@ -870,6 +870,7 @@ impl<'a> Attempt<'a> {
                     conversation_head: None,
                     status: TurnStatus::Running,
                     model: None,
+                    history_injected: false,
                 });
                 self.report_delivery();
             }
@@ -1022,6 +1023,7 @@ impl<'a> Attempt<'a> {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: Some(model.to_owned()),
+                history_injected: false,
             });
             // An assistant snapshot of a call that did not stream fills in
             // its usage, as the reference fills gaps in streamed usage.

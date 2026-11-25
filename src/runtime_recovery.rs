@@ -862,6 +862,7 @@ mod tests {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                history_injected: false,
             },
             ProviderEvent::TurnItem {
                 item: ProviderItem::new("tool-1", "command_execution", "running"),
@@ -1136,6 +1137,7 @@ mod tests {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                history_injected: false,
             },
             ProviderEvent::TurnItem {
                 item: ProviderItem::new("exec-1", "command_execution", "running")
