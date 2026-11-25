@@ -1755,25 +1755,6 @@ impl mcp_oauth::McpHost for AppState {
             }
         })
     }
-    fn claim_preview_recording(
-        self: &Arc<Self>,
-        thread_id: String,
-        artifact: serde_json::Value,
-    ) -> mcp_oauth::HostFuture<Result<serde_json::Value, String>> {
-        let state = self.clone();
-        Box::pin(async move {
-            crate::local_services::claim_preview_recording_from(
-                &state.paths.attachments,
-                &thread_id,
-                &artifact,
-                |id, limit| {
-                    let workspace = state.workspace.clone();
-                    Box::pin(async move { workspace.fetch_attachment(&id, limit).await })
-                },
-            )
-            .await
-        })
-    }
     fn html_page(
         self: &Arc<Self>,
         operation: &'static str,

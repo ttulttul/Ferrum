@@ -31,6 +31,9 @@ pub use provider::{ProviderEvent, ProviderTurn};
 pub use remote::{connect, NativeLink};
 pub use remote::{unavailable, BusFrame, RemoteWorkspace, Transport};
 
+/// The `_tag` of a failed `preview.claimRecording`, whose message is the claim's.
+pub const RECORDING_CLAIM_ERROR: &str = "PreviewRecordingClaimError";
+
 /// A reply payload: the success value, or the error value an RPC fails with.
 pub type Reply = Result<Value, Value>;
 
@@ -209,18 +212,6 @@ pub trait Workspace: MaybeSendSync {
     fn write_file<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>>;
     fn file_metadata<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>>;
     fn browse<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>>;
-
-    /// The bytes of one of the workspace's own attachments, such as the
-    /// pending video a preview recording left where its browser ran: `None`
-    /// when the workspace keeps its attachments with the server's, `Err` when
-    /// it could not be fetched or is larger than `max_bytes`.
-    fn fetch_attachment<'a>(
-        &'a self,
-        _id: &'a str,
-        _max_bytes: u64,
-    ) -> WorkspaceFuture<'a, Option<Result<Vec<u8>, String>>> {
-        Box::pin(async { None })
-    }
 
     /// Filesystem side of a signed asset. Only native hosts serve these operations in agentd.
     #[cfg(feature = "native")]

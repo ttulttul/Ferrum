@@ -898,72 +898,7 @@ fn end_sink(state: &mut State, sink: Sink, reason: EndReason) {
     }
 }
 
-impl RemoteWorkspace {
-    /// An attachment of agentd's own, through the asset operations it already
-    /// serves: a grant for it (`asset.prepare`), its response opened
-    /// (`asset.open`), and its body pulled a chunk at a time (`asset.read`).
-    async fn pull_attachment(&self, id: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        let failed = |what: &str| format!("could not {what} the attachment {id} at the workspace");
-        let grant = self
-            .request(
-                op::ASSET_PREPARE,
-                json!({"resource":{"_tag":"attachment","attachmentId":id}}),
-            )
-            .await
-            .map_err(|_| failed("prepare"))?;
-        let opened = self
-            .request(
-                op::ASSET_OPEN,
-                json!({"claims":grant["claims"],"name":grant["name"],"method":"GET","headers":{}}),
-            )
-            .await
-            .map_err(|_| failed("open"))?;
-        let body = opened["body"].as_u64();
-        // agentd releases the body once read to its end; close it otherwise.
-        struct Open<'a>(&'a RemoteWorkspace, Option<u64>);
-        impl Drop for Open<'_> {
-            fn drop(&mut self) {
-                if let Some(id) = self.1 {
-                    self.0.close_asset(id);
-                }
-            }
-        }
-        let mut open = Open(self, body);
-        if opened["status"] != 200 {
-            return Err(failed("find"));
-        }
-        let mut bytes = Vec::new();
-        if let Some(body) = body {
-            loop {
-                let chunk = self
-                    .request(op::ASSET_READ, json!({"body":body}))
-                    .await
-                    .map_err(|_| failed("read"))?;
-                let Some(chunk) = chunk.as_str() else {
-                    break;
-                };
-                bytes.extend(STANDARD.decode(chunk).map_err(|_| failed("read"))?);
-                if bytes.len() as u64 > max_bytes {
-                    return Err(format!(
-                        "the attachment {id} is larger than {max_bytes} bytes"
-                    ));
-                }
-            }
-        }
-        open.1 = None;
-        Ok(bytes)
-    }
-}
-
 impl Workspace for RemoteWorkspace {
-    fn fetch_attachment<'a>(
-        &'a self,
-        id: &'a str,
-        max_bytes: u64,
-    ) -> WorkspaceFuture<'a, Option<Result<Vec<u8>, String>>> {
-        Box::pin(async move { Some(self.pull_attachment(id, max_bytes).await) })
-    }
     fn list_entries<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Option<Reply>> {
         boxed(self.routed(op::FS_LIST_ENTRIES, input.clone(), "projects.listEntries"))
     }

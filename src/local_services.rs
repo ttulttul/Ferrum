@@ -23,27 +23,15 @@ mod vcs_upstream;
 
 pub use devices::DeviceService;
 
-const RECORDING_FAILED: &str = "Preview recording could not be saved to the agent environment.";
-/// The largest recording the encoder keeps (`PROVIDER_SEND_TURN_MAX_FILE_BYTES`).
-pub(crate) const MAX_RECORDING_BYTES: u64 = 50 * 1024 * 1024;
-
-/// Where a stopped recording's pending attachment is, and where its claim
-/// moves it: its pending id, its file now, its claimed id and file, and the
-/// size the stop reported.
-pub(crate) struct RecordingFiles {
-    pub uploaded: String,
-    pub current: std::path::PathBuf,
-    id: String,
-    fin: std::path::PathBuf,
-    pub size: u64,
-}
-
-pub(crate) fn recording_files(
+/// `claimPreviewRecording`: a stopped recording's pending attachment, checked
+/// against what the stop reported and moved to the thread's id. A retry finds
+/// the file already moved.
+pub(crate) fn claim_preview_recording(
     attachments: &std::path::Path,
     thread_id: &str,
     artifact: &Value,
-) -> Result<RecordingFiles, String> {
-    const FAILED: &str = RECORDING_FAILED;
+) -> Result<Value, String> {
+    const FAILED: &str = "Preview recording could not be saved to the agent environment.";
     let Some(uploaded) = artifact["uploadedAttachmentId"].as_str() else {
         return Err(
             "Update the desktop app to transfer recordings. The recording remains on the desktop."
@@ -65,84 +53,11 @@ pub(crate) fn recording_files(
         .ok_or(FAILED)?;
     let segment = crate::html_render::thread_segment(thread_id).ok_or(FAILED)?;
     let id = format!("{segment}-{uuid}-{extension}");
-    Ok(RecordingFiles {
-        uploaded: uploaded.to_owned(),
-        current: attachments.join(format!("{uploaded}.{extension}")),
-        fin: attachments.join(format!("{id}.{extension}")),
-        id,
-        size,
-    })
-}
-
-impl RecordingFiles {
-    /// Whether neither the pending file nor its claimed copy is here.
-    pub(crate) fn absent(&self) -> bool {
-        std::fs::symlink_metadata(&self.current).is_err()
-            && std::fs::symlink_metadata(&self.fin).is_err()
-    }
-}
-
-/// `claim_preview_recording`, first bringing the pending video here when the
-/// browser that recorded it ran in a workspace on another machine (`fetch`,
-/// `Workspace::fetch_attachment`: `None` where the workspace keeps its
-/// attachments with the server's). A retry finds it already here.
-pub(crate) async fn claim_preview_recording_from<'a, F>(
-    attachments: &std::path::Path,
-    thread_id: &str,
-    artifact: &Value,
-    fetch: F,
-) -> Result<Value, String>
-where
-    F: FnOnce(
-        String,
-        u64,
-    ) -> crate::workspace::WorkspaceFuture<'a, Option<Result<Vec<u8>, String>>>,
-{
-    if let Ok(files) = recording_files(attachments, thread_id, artifact) {
-        if files.absent() {
-            if let Some(fetched) = fetch(files.uploaded.clone(), MAX_RECORDING_BYTES).await {
-                let saved = fetched
-                    .ok()
-                    .filter(|bytes| bytes.len() as u64 == files.size)
-                    .and_then(|bytes| {
-                        std::fs::create_dir_all(attachments).ok()?;
-                        let mut file = std::fs::OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .open(&files.current)
-                            .ok()?;
-                        std::io::Write::write_all(&mut file, &bytes).ok()
-                    });
-                if saved.is_none() {
-                    let _ = std::fs::remove_file(&files.current);
-                    return Err(RECORDING_FAILED.into());
-                }
-            }
-        }
-    }
-    claim_preview_recording(attachments, thread_id, artifact)
-}
-
-/// `claimPreviewRecording`: a stopped recording's pending attachment, checked
-/// against what the stop reported and moved to the thread's id. A retry finds
-/// the file already moved.
-pub(crate) fn claim_preview_recording(
-    attachments: &std::path::Path,
-    thread_id: &str,
-    artifact: &Value,
-) -> Result<Value, String> {
-    const FAILED: &str = RECORDING_FAILED;
-    let RecordingFiles {
-        current,
-        id,
-        fin,
-        size,
-        ..
-    } = recording_files(attachments, thread_id, artifact)?;
+    let current = attachments.join(format!("{uploaded}.{extension}"));
+    let fin = attachments.join(format!("{id}.{extension}"));
     let valid = |path: &std::path::Path| {
-        std::fs::symlink_metadata(path).is_ok_and(|m| {
-            m.is_file() && m.len() == size && size > 0 && size <= MAX_RECORDING_BYTES
-        })
+        std::fs::symlink_metadata(path)
+            .is_ok_and(|m| m.is_file() && m.len() == size && size > 0 && size <= 50 * 1024 * 1024)
     };
     if current.exists() {
         if !valid(&current) {
@@ -551,103 +466,5 @@ mod claim_tests {
                 .unwrap_err(),
             "Update the desktop app to transfer recordings. The recording remains on the desktop."
         );
-    }
-
-    /// A fetch that answers `answer` and records the ids it was asked for.
-    fn fetcher(
-        answer: Option<Result<Vec<u8>, String>>,
-        asked: &std::sync::Mutex<Vec<String>>,
-    ) -> impl FnOnce(
-        String,
-        u64,
-    )
-        -> crate::workspace::WorkspaceFuture<'static, Option<Result<Vec<u8>, String>>>
-           + '_ {
-        move |id, _| {
-            asked.lock().unwrap().push(id);
-            Box::pin(async move { answer })
-        }
-    }
-
-    #[tokio::test]
-    async fn a_recording_made_on_another_machine_is_brought_here_and_claimed() {
-        let dir = tempfile::tempdir().unwrap();
-        let uuid = "0b9c2c7e-6a2b-4b8f-9f1e-2f5b7c3a1d00";
-        let pending = format!("pending-{uuid}-mp4");
-        let artifact =
-            json!({"sizeBytes": 5, "mimeType": "video/mp4", "uploadedAttachmentId": pending});
-        let asked = std::sync::Mutex::new(Vec::new());
-        let claimed = claim_preview_recording_from(
-            dir.path(),
-            "thread:One",
-            &artifact,
-            fetcher(Some(Ok(b"video".to_vec())), &asked),
-        )
-        .await
-        .unwrap();
-        let id = format!("thread-one-{uuid}-mp4");
-        assert_eq!(claimed["id"], json!(id));
-        assert_eq!(
-            std::fs::read(dir.path().join(format!("{id}.mp4"))).unwrap(),
-            b"video"
-        );
-        assert_eq!(*asked.lock().unwrap(), [pending]);
-        // A retry finds it here and fetches nothing.
-        let again = std::sync::Mutex::new(Vec::new());
-        assert!(claim_preview_recording_from(
-            dir.path(),
-            "thread:One",
-            &artifact,
-            fetcher(Some(Ok(b"other".to_vec())), &again)
-        )
-        .await
-        .is_ok());
-        assert!(again.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_remote_recording_that_does_not_match_or_cannot_be_fetched_is_refused() {
-        let uuid = "0b9c2c7e-6a2b-4b8f-9f1e-2f5b7c3a1d00";
-        let artifact =
-            json!({"sizeBytes": 5, "uploadedAttachmentId": format!("pending-{uuid}-mp4")});
-        for answer in [
-            Some(Ok(b"longer video".to_vec())),
-            Some(Err("gone".to_owned())),
-            None,
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let asked = std::sync::Mutex::new(Vec::new());
-            assert_eq!(
-                claim_preview_recording_from(
-                    dir.path(),
-                    "thread:One",
-                    &artifact,
-                    fetcher(answer, &asked)
-                )
-                .await
-                .unwrap_err(),
-                RECORDING_FAILED
-            );
-            // Nothing is left behind for a later claim to take.
-            assert_eq!(
-                std::fs::read_dir(dir.path())
-                    .map(|d| d.count())
-                    .unwrap_or(0),
-                0
-            );
-        }
-        // A local recording is claimed as before, without a fetch.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(format!("pending-{uuid}-mp4.mp4")), b"video").unwrap();
-        let asked = std::sync::Mutex::new(Vec::new());
-        assert!(claim_preview_recording_from(
-            dir.path(),
-            "thread:One",
-            &artifact,
-            fetcher(Some(Err("unused".to_owned())), &asked)
-        )
-        .await
-        .is_ok());
-        assert!(asked.lock().unwrap().is_empty());
     }
 }
