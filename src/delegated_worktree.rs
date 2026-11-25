@@ -24,6 +24,10 @@ struct Preparation {
     message: String,
     attachments: Vec<Value>,
     scripts: Vec<Value>,
+    /// The branch the launch named, instead of a generated one.
+    branch: Option<String>,
+    /// Start from the base as its remote has it (`startFromOrigin`).
+    start_from_origin: bool,
 }
 
 async fn load(state: &AppState, thread_id: &str, run_id: &str) -> Option<Preparation> {
@@ -56,7 +60,127 @@ async fn load(state: &AppState, thread_id: &str, run_id: &str) -> Option<Prepara
             .and_then(|wire| wire["attachments"].as_array().cloned())
             .unwrap_or_default(),
         scripts: project["scripts"].as_array().cloned().unwrap_or_default(),
+        branch: strategy["branch"]
+            .as_str()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(str::to_owned),
+        start_from_origin: strategy["startFromOrigin"] == true,
     })
+}
+
+/// Runs git in `cwd`: its trimmed output, when it succeeds.
+async fn git(cwd: &str, args: &[&str]) -> Option<String> {
+    let output = crate::login_shell::tokio_command("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// `resolveWorktreeBaseRemote`: the remote the base branch tracks, else `origin`.
+async fn base_remote(cwd: &str, base_ref: &str) -> Option<String> {
+    let tracked = git(
+        cwd,
+        &["config", "--get", &format!("branch.{base_ref}.remote")],
+    )
+    .await
+    .filter(|remote| !remote.is_empty() && remote != ".");
+    let remote = tracked.unwrap_or_else(|| "origin".to_owned());
+    git(cwd, &["remote", "get-url", &remote])
+        .await
+        .map(|_| remote)
+}
+
+/// `fetchWorktreeBaseCommit`: the base's commit as `remote` has it now.
+async fn fetch_base(cwd: &str, remote: &str, base_ref: &str) -> Option<String> {
+    git(cwd, &["fetch", "--quiet", "--no-tags", remote, base_ref]).await?;
+    git(
+        cwd,
+        &["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"],
+    )
+    .await
+}
+
+/// `checkWorktreeBase`: refuses a worktree launch before any thread exists when
+/// the project is no Git repository, its base resolves to no commit, or the
+/// branch it names exists. The refusal is its message and the hint for it.
+pub(crate) async fn check_base(
+    root: &str,
+    title: &str,
+    strategy: &Value,
+) -> Result<(), (String, String)> {
+    let base_ref = strategy["baseRef"].as_str().unwrap_or_default();
+    let start_from_origin = strategy["startFromOrigin"] == true;
+    if git(root, &["rev-parse", "--show-toplevel"]).await.is_none() {
+        return Err((
+            format!("Project \"{title}\" ({root}) is not a Git repository."),
+            "Use workspaceStrategy: {type: \"root\"}, or pass the projectId of a Git repository."
+                .into(),
+        ));
+    }
+    let has_commit = |name: String| async move {
+        git(
+            root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{name}^{{commit}}"),
+            ],
+        )
+        .await
+        .is_some()
+    };
+    let resolves = has_commit(base_ref.to_owned()).await
+        || (start_from_origin
+            && match base_remote(root, base_ref).await {
+                Some(remote) => fetch_base(root, &remote, base_ref).await.is_some(),
+                None => false,
+            })
+        // `git worktree add` takes a remote-tracking branch or tag of that name.
+        || git(
+            root,
+            &[
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                &format!("refs/remotes/*/{base_ref}"),
+                &format!("refs/tags/{base_ref}"),
+            ],
+        )
+        .await
+        .is_some_and(|found| !found.is_empty())
+        || !has_commit("HEAD".to_owned()).await;
+    if !resolves {
+        let hint = if start_from_origin {
+            "Pass a branch, tag, or commit that exists there; no remote of the project has it either."
+        } else {
+            "Pass a branch, tag, or commit that exists there, or set startFromOrigin:true if it exists only on a remote."
+        };
+        return Err((
+            format!("Base ref \"{base_ref}\" does not resolve to a commit in project \"{title}\" ({root})."),
+            hint.into(),
+        ));
+    }
+    if let Some(branch) = strategy["branch"].as_str().filter(|b| !b.trim().is_empty()) {
+        if has_commit(format!("refs/heads/{branch}")).await {
+            return Err((
+                format!("Branch \"{branch}\" already exists in project \"{title}\"."),
+                "Pass a branch name that does not exist yet, or omit branch to get a generated name."
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Whether the run waits to start in the project's own checkout (`{type: "root"}`).
@@ -341,7 +465,13 @@ async fn run(
         fixed.mode = "static".into();
         branch_name = branch::format_generated_branch_name(token, &fixed);
     }
-    let name_wanted = !preparation.message.is_empty() && branch::is_temporary_branch(&branch_name);
+    // A launch that named its branch uses it as it is.
+    if let Some(named) = &preparation.branch {
+        branch_name = named.clone();
+    }
+    let name_wanted = preparation.branch.is_none()
+        && !preparation.message.is_empty()
+        && branch::is_temporary_branch(&branch_name);
     let name_generation = async {
         if name_wanted {
             Some(
@@ -370,7 +500,27 @@ async fn run(
             }),
         )
         .await?;
-        tracker.stage_status(thread_id, "fetch", "skipped", None);
+        // A base taken from its remote is fetched first (`fetchWorktreeBaseCommit`).
+        let mut start_ref = preparation.base_ref.clone();
+        let mut base_ref_name = preparation.base_ref.clone();
+        let remote = if preparation.start_from_origin {
+            base_remote(root, &preparation.base_ref).await
+        } else {
+            None
+        };
+        match &remote {
+            Some(remote) => {
+                tracker.stage_status(thread_id, "fetch", "running", None);
+                if let Some(commit) = fetch_base(root, remote, &preparation.base_ref).await {
+                    start_ref = commit;
+                    base_ref_name = format!("{remote}/{}", preparation.base_ref);
+                }
+                tracker.stage_status(thread_id, "fetch", "done", None);
+            }
+            None => {
+                tracker.stage_status(thread_id, "fetch", "skipped", None);
+            }
+        }
         let mut branch_name = branch_name.clone();
         // An existing branch at one of its parents blocks a nested name.
         let parts: Vec<&str> = branch_name.split('/').collect();
@@ -387,9 +537,9 @@ async fn run(
             "createWorktree",
             json!({
                 "cwd": root,
-                "refName": preparation.base_ref,
+                "refName": start_ref,
                 "newRefName": branch_name,
-                "baseRefName": preparation.base_ref,
+                "baseRefName": base_ref_name,
                 "path": null,
             }),
         )

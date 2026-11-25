@@ -2142,12 +2142,37 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
             "Pass projectId: this MCP client is not running inside a T3 thread.",
         ));
     };
-    if strategy.is_some_and(|s| s["type"] != "root") {
-        return Err(failure(
-            "invalid_request",
-            "This server runs new threads in the project's checkout: omit workspaceStrategy or use {\"type\":\"root\"}.",
-        ));
-    }
+    // A new worktree of the project, from a base branch, tag or commit, on a
+    // branch the launch names or a generated one. An omitted startFromOrigin
+    // follows the new-worktree setting, as the composer's does.
+    let worktree = match strategy {
+        Some(s) if s["type"] == "worktree" && host.prepares_worktrees() => {
+            let base = s["baseRef"]
+                .as_str()
+                .map(str::trim)
+                .filter(|base| !base.is_empty())
+                .ok_or_else(invalid_arguments)?;
+            let from_origin = match s.get("startFromOrigin").filter(|v| !v.is_null()) {
+                Some(value) => value.as_bool().ok_or_else(invalid_arguments)?,
+                None => host.settings()["newWorktreesStartFromOrigin"]
+                    .as_bool()
+                    .unwrap_or(true),
+            };
+            let mut resolved =
+                json!({"type": "worktree", "baseRef": base, "startFromOrigin": from_origin});
+            if let Some(branch) = s.get("branch").filter(|v| !v.is_null()) {
+                resolved["branch"] = json!(branch.as_str().ok_or_else(invalid_arguments)?);
+            }
+            Some(resolved)
+        }
+        Some(s) if s["type"] != "root" => {
+            return Err(failure(
+                "invalid_request",
+                "This server runs new threads in the project's checkout or a new worktree: use {\"type\":\"root\"} or {\"type\":\"worktree\"}.",
+            ));
+        }
+        _ => None,
+    };
     let message = arg_str(a, "message")?.map(str::to_owned);
     let requested_mode = arg_str(a, "runtimeMode")?;
     let requested_interaction = arg_str(a, "interactionMode")?;
@@ -2233,7 +2258,8 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
                 json!([host.environment_id(), key]).to_string().as_bytes()
             ))
         ),
-        None => format!("mcp:launch:{}", crate::platform::uuid_v4().simple()),
+        // `newCommandId`.
+        None => format!("mcp:{}", crate::platform::uuid_v4()),
     };
     let thread_id = command_id.clone();
     let replay = {
@@ -2249,6 +2275,18 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
         }
         Some(_) => {}
         None => {
+            // Refused before any thread exists (`checkWorktreeBase`).
+            if let Some(worktree) = &worktree {
+                let title = project["title"].as_str().unwrap_or_default().to_owned();
+                host.check_worktree_base(root.clone(), title, worktree.clone())
+                    .await
+                    .map_err(|(message, hint)| {
+                        failure(
+                            "invalid_request",
+                            format!("{message} No thread was created. {hint}"),
+                        )
+                    })?;
+            }
             let folder = if scratch || host.is_scratch_project(&project_id).await {
                 let seed = message.as_deref().unwrap_or(&title);
                 host.scratch_thread_folder(&thread_id, seed)
@@ -2257,9 +2295,10 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
             } else {
                 None
             };
+            // A worktree's path and branch are recorded once it is made.
             let worktree_path = match folder {
                 Some(path) => json!(path),
-                None if root.is_empty() => Value::Null,
+                None if root.is_empty() || worktree.is_some() => Value::Null,
                 None => json!(root),
             };
             let mut create = json!({
@@ -2312,7 +2351,8 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
                 // A host that prepares workspaces starts the run once it has
                 // (`defer_start`); another starts it at once.
                 if host.prepares_worktrees() {
-                    initial["workspaceStrategy"] = json!({"type": "root"});
+                    initial["workspaceStrategy"] =
+                        worktree.clone().unwrap_or_else(|| json!({"type": "root"}));
                 }
                 // A thread's agent names itself as the sender.
                 if let Some(sender) = caller.granted.thread.as_ref() {

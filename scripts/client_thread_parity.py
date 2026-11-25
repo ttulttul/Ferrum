@@ -231,6 +231,11 @@ PROVIDER_SCENARIOS = [
     # generated name, then runs in that checkout.
     {"name": "claude delegate worktree", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate_worktree.json", "awaitStatus": True},
+    # A thread the agent launches in a new worktree (`workspaceStrategy: {type: "worktree"}`): its
+    # run waits, preparing, while the server checks out the base on the named branch, then runs
+    # there; a base that resolves to no commit, or a branch that exists, is refused first.
+    {"name": "claude launch worktree", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_launch_worktree.json", "awaitStatus": True},
     # A delegated task in a linked environment (`target.environmentId`): the task's thread is
     # launched there through the link, followed until its run ends, and its reply becomes the
     # task's result here.
@@ -1378,7 +1383,7 @@ def cli_approvals(log):
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # A new worktree's folder (`<branch>-<random>`), named apart on each server.
-WORKTREE_DIR = re.compile(r"(/worktrees/[^/\"\s]+/)t3-[0-9a-f]{8}-[0-9a-f]{16}")
+WORKTREE_DIR = re.compile(r"(/worktrees/[^/\"\s]+/)[A-Za-z0-9._-]+?-[0-9a-f]{16}(?=[/\"\s]|$)")
 BEARER = re.compile(r"Bearer [A-Za-z0-9_\-.]+")
 MCP_URL = re.compile(r"http://127\.0\.0\.1:\d+/mcp")
 

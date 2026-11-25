@@ -260,6 +260,17 @@ pub trait McpHost: AuthHost {
         _run_id: String,
     ) {
     }
+    /// `checkWorktreeBase`: whether a launch may start a worktree of the project at
+    /// `root` with `strategy`, or the refusal's message and hint. Only a host that
+    /// prepares worktrees checks; others never get a worktree launch.
+    fn check_worktree_base(
+        self: &Arc<Self>,
+        _root: String,
+        _title: String,
+        _strategy: Value,
+    ) -> HostFuture<Result<(), (String, String)>> {
+        Box::pin(async { Ok(()) })
+    }
     /// `sourceControl.cloneRepository`, or the failure's `detail`.
     fn clone_repository(self: &Arc<Self>, _input: Value) -> HostFuture<Result<Value, String>> {
         Box::pin(async { Err("The source control operation could not be completed.".to_owned()) })
