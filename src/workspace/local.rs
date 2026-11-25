@@ -223,6 +223,14 @@ impl Workspace for LocalWorkspace {
     fn unload_provider_thread(&self, instance: &str, thread: &str) {
         self.providers.unload_thread(instance, thread);
     }
+    fn provider_wakes(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<crate::workspace::provider::ProviderWake>> {
+        self.providers.take_wakes()
+    }
+    fn retire_provider_wake(&self, wake: &crate::workspace::provider::ProviderWake) {
+        self.providers.retire_wake(wake);
+    }
     fn stop_providers(&self) -> WorkspaceFuture<'_, ()> {
         // Their turns end first (an interrupt takes up to its grace).
         self.providers

@@ -141,6 +141,8 @@ pub mod event_log;
 pub mod persistence;
 pub mod platform;
 mod projection_shell;
+#[cfg(feature = "native")]
+mod provider_continuation;
 mod provider_projection;
 mod provider_state;
 mod runtime_recovery;

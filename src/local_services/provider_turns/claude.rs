@@ -511,7 +511,10 @@ impl<'a> Attempt<'a> {
         } = attempt;
         match session {
             Some(session) if keep && cli.alive() => {
-                sessions.keep(session, cli, launch, selection, queued)
+                let route = super::claude_sessions::WakeRoute {
+                    app_thread_id: provider.app_thread_id.clone(),
+                };
+                sessions.keep(session, cli, launch, selection, queued, route)
             }
             _ => cli.close().await,
         }
@@ -523,6 +526,14 @@ impl<'a> Attempt<'a> {
         spec: &TurnSpec,
         cancel: &mut Option<oneshot::Receiver<()>>,
     ) -> Outcome {
+        // A continuation run shows the wake the thread's running CLI
+        // buffered while idle, as the reference drains its wake buffer, and
+        // sends nothing; with no wake left (the CLI closed, or a turn took
+        // it), it completes without a turn.
+        let continuation = spec.provider.as_ref().is_some_and(|p| p.continuation);
+        if continuation && (!self.reused || self.cli.buffered_lines().next().is_none()) {
+            return Outcome::Ended(TurnEnd::completed());
+        }
         // T3's instructions for the agent, appended to Claude Code's system
         // prompt as the reference's query initializes it, once per CLI.
         if !self.reused {
@@ -643,13 +654,14 @@ impl<'a> Attempt<'a> {
         // message again takes it rather than writing it a second time (the
         // reference's continuation adopts the wake). Its bytes counted with
         // the steer.
-        let adopted = attachments.is_empty()
-            && self
-                .queued
-                .iter()
-                .position(|text| *text == spec.prompt)
-                .map(|at| self.queued.remove(at))
-                .is_some();
+        let adopted = continuation
+            || attachments.is_empty()
+                && self
+                    .queued
+                    .iter()
+                    .position(|text| *text == spec.prompt)
+                    .map(|at| self.queued.remove(at))
+                    .is_some();
         let prompt = json!({
             "type": "user",
             "session_id": "",

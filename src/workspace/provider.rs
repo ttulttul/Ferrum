@@ -161,6 +161,30 @@ pub struct ProviderTurn {
     /// predates it sees the same wire bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub antigravity: Option<AntigravityLaunch>,
+    /// The turn is a continuation run (`creationSource: "provider"`): it
+    /// shows what the thread's running CLI did on its own while idle
+    /// rather than sending its prompt, as the reference's Claude adapter
+    /// drains its wake buffer. Optional and omitted when false, so an
+    /// agentd or control plane that predates it sees the same wire bytes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continuation: bool,
+}
+
+/// A provider's CLI began work of its own while no turn of its thread ran
+/// (a Claude wake turn), which a continuation run of the thread shows
+/// (`offerWakeContinuation` in the reference).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderWake {
+    /// [`CLAUDE_AGENT`].
+    pub driver: String,
+    /// The app thread whose turns the CLI runs.
+    pub app_thread_id: String,
+    /// The CLI's native session.
+    pub native_thread_id: String,
+    /// Names this wake when its continuation ends without starting
+    /// ([`crate::workspace::Workspace::retire_provider_wake`]).
+    pub token: u64,
 }
 
 /// What an OpenCode turn needs beyond the common launch: the configured

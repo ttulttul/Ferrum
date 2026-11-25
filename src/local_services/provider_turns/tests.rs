@@ -1583,3 +1583,61 @@ async fn antigravity_launch_error_fails_the_session_open() {
     );
     assert!(received(&log).is_empty(), "nothing was launched");
 }
+
+/// With no turn running, the thread's Claude CLI wakes on its own: the
+/// session reports the wake once, and a continuation turn shows what the CLI
+/// wrote without sending it anything (the reference drains its wake buffer).
+#[tokio::test]
+async fn an_idle_claude_wake_is_reported_and_its_continuation_shows_it() {
+    let processes = std::sync::Arc::new(ProviderProcesses::default());
+    let mut wakes = processes.take_wakes().expect("the wakes are taken once");
+    assert!(processes.take_wakes().is_none());
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(CLAUDE_AGENT, "claude_wake.json", &log, None);
+    spec.turn_id = format!("wake-{}", uuid::Uuid::new_v4());
+    spec.provider.as_mut().unwrap().app_thread_id = "thread:wake".into();
+    let (_cancel, cancelled) = oneshot::channel();
+    let (first, exit) = collect(start(spec.clone(), cancelled, processes.clone()).unwrap()).await;
+    assert!(exit.success, "{first:#?}");
+    let wake = tokio::time::timeout(std::time::Duration::from_secs(30), wakes.recv())
+        .await
+        .expect("the idle CLI reports its wake")
+        .unwrap();
+    assert_eq!(wake.driver, CLAUDE_AGENT);
+    assert_eq!(wake.app_thread_id, "thread:wake");
+    let session = first
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            ProviderEvent::ProviderThread {
+                native_thread_id, ..
+            } => Some(native_thread_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(wake.native_thread_id, session);
+    // Its continuation, on the same CLI.
+    spec.turn_id = format!("continuation-{}", uuid::Uuid::new_v4());
+    spec.prompt = crate::provider_continuation::CONTINUATION_MESSAGE_TEXT.into();
+    let provider = spec.provider.as_mut().unwrap();
+    provider.resume = Some(session);
+    provider.continuation = true;
+    let (_cancel, cancelled) = oneshot::channel();
+    let (second, exit) = collect(start(spec, cancelled, processes.clone()).unwrap()).await;
+    assert!(exit.success, "{second:#?}");
+    assert!(second
+        .iter()
+        .any(|event| matches!(event, ProviderEvent::TurnItem { item }
+        if item.kind == "assistant_message"
+            && item.fields["text"] == "The build I left running finished; it passed.")));
+    assert!(!second
+        .iter()
+        .any(|event| matches!(event, ProviderEvent::PromptDelivered { .. })));
+    let prompts = received(&log)
+        .iter()
+        .filter(|message| message["type"] == "user")
+        .count();
+    assert_eq!(prompts, 1, "only the first turn's prompt reached the CLI");
+    processes.shutdown(std::time::Duration::from_secs(1)).await;
+}

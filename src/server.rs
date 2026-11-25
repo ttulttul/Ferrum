@@ -703,6 +703,20 @@ impl crate::orchestration::CommandHost for AppState {
                                 &run,
                             )
                         };
+                        // A provider's continuation run shows what its CLI did
+                        // while idle rather than sending its text.
+                        provider.continuation = {
+                            let store = self.store.read().await;
+                            run.user_message_id.as_deref().is_some_and(|id| {
+                                store.threads.get(&run.thread_id).is_some_and(|thread| {
+                                    thread.messages.iter().any(|m| {
+                                        m.id == id
+                                            && m.role == crate::thread_projection::NOTIFICATION_ROLE
+                                            && m.creation_source.as_deref() == Some("provider")
+                                    })
+                                })
+                            })
+                        };
                         // A command its provider runs itself takes no output instructions.
                         let is_command = crate::run_output::is_provider_command(
                             &spec.prompt,
@@ -750,6 +764,8 @@ impl crate::orchestration::CommandHost for AppState {
                 let continues = run.restart_continuation_of.is_some().then(|| self.clone());
                 let (host, thread_id) = (self.clone(), run.thread_id.clone());
                 crate::turn::launch(self, run, spec, cancel).await;
+                // A continuation that ended retires its wake.
+                crate::provider_continuation::after_run(&*host, &thread_id).await;
                 // A delegated child's end settles its task; an idle parent gets its results.
                 crate::orchestration::after_run(host, &thread_id).await;
                 if let Some(state) = continues {
@@ -1547,6 +1563,11 @@ where
     // The SSH device hosts in settings, kept in step with them.
     let devices = state.local.clone();
     tokio::spawn(async move { devices.devices.watch_hosts(&devices.data_dir).await });
+    // What a provider's CLI does on its own between turns opens a
+    // continuation run of its thread.
+    if let Some(wakes) = state.workspace.provider_wakes() {
+        tokio::spawn(crate::provider_continuation::run(state.clone(), wakes));
+    }
     let (stopping_tx, stopping_rx) = oneshot::channel::<()>();
     let stopping_endpoint = endpoint.clone();
     let stopping_state = state.clone();
