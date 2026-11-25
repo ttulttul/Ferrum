@@ -508,6 +508,10 @@ PROVIDER_SCENARIOS = [
     # notification from the provider) that shows that turn.
     {"name": "claude wake", "instance": "claudeAgent", "model": "claude-opus-5-5", "scenario": "claude_wake.json",
      "settleRuns": 2},
+    # A command Claude started in the background finishes while no turn runs: Claude reports it
+    # (task_notification) and wakes; the continuation run names the command and how it ended.
+    {"name": "claude background wake", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_background_wake.json", "settleRuns": 2},
     # A message steers the running turn (Codex `turn/steer`), which then answers it, and Stop
     # interrupts it.
     # A message steers the running Claude turn: it goes to the CLI the turn runs (priority
@@ -1165,6 +1169,10 @@ def rendered_turn(projection):
         for field in ("text", "title", "command", "toolName"):
             if record.get(field) not in (None, ""):
                 row.append(f"{field}={str(record[field])[:80]}")
+        # A notification card says what it reports and how that ended.
+        if record.get("type") == "notification":
+            row.append(f"summary={str(record.get('summary'))[:80]} outcome={record.get('outcome')} "
+                       f"source={(record.get('source') or {}).get('kind')}")
         if record.get("failure"):
             # A provider session's id ends in a UUID each server draws.
             row.append("failure=" + UUID.sub("<uuid>", str(record["failure"].get("message")))[:120])

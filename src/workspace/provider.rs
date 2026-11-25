@@ -192,6 +192,14 @@ pub struct ProviderWake {
     /// Names this wake when its continuation ends without starting
     /// ([`crate::workspace::Workspace::retire_provider_wake`]).
     pub token: u64,
+    /// The text of the wake's continuation: the summary of the background
+    /// task notification that started it, if one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The continuation's notification, naming the background work that
+    /// ended (`backgroundWorkNotification`), if any did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<serde_json::Value>,
 }
 
 /// What an OpenCode turn needs beyond the common launch: the configured

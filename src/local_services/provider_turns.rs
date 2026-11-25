@@ -10,6 +10,7 @@
 //! [`requests`]).
 mod acp;
 mod claude;
+mod claude_background;
 mod claude_sessions;
 mod codex;
 mod codex_server;
@@ -351,6 +352,9 @@ pub(crate) struct Cli {
     /// Lines read while no turn ran (an idle Claude CLI's own wake), which
     /// the next turn handles first.
     buffered: std::collections::VecDeque<String>,
+    /// The background tasks a Claude session runs (`local_bash` commands), whose end
+    /// while no turn runs is reported with the wake it starts.
+    pub(crate) background: claude_background::Roster,
     /// The end of the CLI's standard error, for recognizing known refusals.
     stderr_tail: std::sync::Arc<std::sync::Mutex<String>>,
     /// The task reading standard error, until it has read all of it.
@@ -416,6 +420,7 @@ impl Cli {
             stdin,
             lines: BufReader::new(stdout).lines(),
             buffered: Default::default(),
+            background: Default::default(),
             stderr_tail,
             stderr_reader,
         })
