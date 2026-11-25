@@ -1236,6 +1236,34 @@ impl<'a> Attempt<'a> {
             .unwrap_or_default()
             .to_owned();
         if tool_name == "ExitPlanMode" {
+            // The client captures the plan (`claudeProposedPlan`): it shows
+            // as the turn's proposed plan, and the tool is denied.
+            let value = if input["type"] == "record" {
+                &input["value"]
+            } else {
+                &input
+            };
+            if let Some(plan) = value["plan"]
+                .as_str()
+                .map(str::trim)
+                .filter(|plan| !plan.is_empty())
+            {
+                // The tool call shows first, then its plan, as the
+                // reference starts the call before it emits a held plan.
+                self.tool_use(&json!({"id": tool_use_id, "name": tool_name, "input": input}));
+                let item = ProviderItem::new(
+                    format!("proposed_plan:{tool_use_id}"),
+                    "proposed_plan",
+                    "completed",
+                )
+                .with("markdown", plan)
+                .with("streaming", false)
+                .with(
+                    "nativeItemRef",
+                    json!({"driver": CLAUDE_AGENT, "nativeId": tool_use_id, "strength": "strong"}),
+                );
+                self.sink.send(ProviderEvent::TurnItem { item });
+            }
             return Some(json!({"behavior": "deny", "toolUseID": tool_use_id,
                 "message": "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn."}));
         }
