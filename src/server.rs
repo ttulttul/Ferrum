@@ -1842,6 +1842,16 @@ impl mcp_oauth::McpHost for AppState {
             }),
         );
     }
+    fn check_worktree_base(
+        self: &Arc<Self>,
+        root: String,
+        title: String,
+        strategy: serde_json::Value,
+    ) -> crate::mcp_oauth::HostFuture<Result<(), (String, String)>> {
+        Box::pin(
+            async move { crate::delegated_worktree::check_base(&root, &title, &strategy).await },
+        )
+    }
     fn clone_repository(
         self: &Arc<Self>,
         input: serde_json::Value,
