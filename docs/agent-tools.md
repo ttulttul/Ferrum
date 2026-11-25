@@ -293,10 +293,9 @@ ends. The control plane still refuses these tasks.
 there becomes a task; checked before its run there ends) and `claude delegate remote cancel`
 (cancelled while its thread there runs, then cancelled again), against a loopback linked environment that records
 each call (`scripts/remote_task_peer.py`). In the cancel, the result is steered into the parent's
-running Claude turn, which ends before reading it, and the CLI answers it as its next turn. Rust
-sends such an unread steer again as a queued run that adopts the CLI's copy; the reference leaves it
-to the CLI and opens a wake continuation run when Claude answers. Both end in one run with the
-answer (wake continuations in Rust are still to come).
+running Claude turn, which ends before reading it, and the CLI answers it as its next turn. Both
+servers leave such an unread steer to the CLI, counted delivered, and open a wake continuation run
+when Claude answers it.
 
 ### 4c. Attachments
 
