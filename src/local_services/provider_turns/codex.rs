@@ -641,6 +641,8 @@ impl Session {
                 .or(model.clone()),
             opencode2: None,
             native_title: None,
+            native_updated_at: None,
+            context_usage: None,
         });
         // The context handoff's history goes to the thread as native items
         // before the prompt (the reference's injectHistory); a Codex that

@@ -636,7 +636,7 @@ impl Thread {
                 "handoffIds": handoff_ids,
                 "forkedFrom": null,
                 "pendingBackgroundTasks": self.pending_background_tasks(&driver),
-                "contextUsage": self.context_usage(),
+                "contextUsage": self.agent_context_usage().unwrap_or_else(|| self.context_usage()),
                 "nativeMetadata": metadata,
                 "goal": null,
                 "createdAt": iso(created_at),
@@ -861,6 +861,17 @@ impl Thread {
             })
     }
 
+    /// The context usage the agent reported for its session itself (an ACP
+    /// `usage_update`), which the reference keeps on the provider thread.
+    fn agent_context_usage(&self) -> Option<Value> {
+        let usage = self.provider.thread.as_ref()?.context_usage.as_ref()?;
+        let mut out = json!({"usedTokens": usage.used_tokens});
+        if let Some(max) = usage.max_tokens.filter(|max| *max > 0) {
+            out["maxTokens"] = json!(max);
+        }
+        Some(out)
+    }
+
     /// A Claude session's metadata: its title (the thread's) and what its
     /// prompts used of its attachment budget.
     /// The native metadata of a Claude provider thread the thread switched
@@ -949,6 +960,15 @@ impl Thread {
             .and_then(|thread| thread.native_title.as_deref())
         {
             metadata.insert("title".into(), json!(title));
+        }
+        // When the agent says it changed its session (fx's `updatedAt`).
+        if let Some(at) = self
+            .provider
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.native_updated_at.as_deref())
+        {
+            metadata.insert("updatedAt".into(), json!(at));
         }
         if metadata.is_empty() {
             Value::Null
@@ -2213,6 +2233,8 @@ mod tests {
 
                 opencode2: None,
                 native_title: None,
+                native_updated_at: None,
+                context_usage: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
@@ -2328,6 +2350,8 @@ mod tests {
 
                 opencode2: None,
                 native_title: None,
+                native_updated_at: None,
+                context_usage: None,
             },
             item("msg", "assistant_message", "running", Some("")),
             item("patch", "file_change", "running", None),
@@ -2396,6 +2420,8 @@ mod tests {
             model: None,
             opencode2: None,
             native_title: None,
+            native_updated_at: None,
+            context_usage: None,
         };
         let monitor = json!({"taskId": "m1", "kind": "monitor", "nativeItemId": "toolu_m1",
             "command": "tail -f build.log", "awaited": true});
@@ -2458,6 +2484,8 @@ mod tests {
 
                 opencode2: None,
                 native_title: None,
+                native_updated_at: None,
+                context_usage: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
@@ -2699,6 +2727,8 @@ mod tests {
 
                 opencode2: None,
                 native_title: None,
+                native_updated_at: None,
+                context_usage: None,
             },
             2,
         );
@@ -2760,6 +2790,8 @@ mod tests {
                     model_selection: json!({"instanceId": "opencode", "model": "a/m", "options": []}),
                 }),
                 native_title: None,
+                native_updated_at: None,
+                context_usage: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("ses_1:attempt:a".into()),

@@ -1,8 +1,8 @@
 //! Turns over the Agent Client Protocol (ACP): newline-delimited JSON-RPC 2.0
 //! with the agent's CLI on its standard streams, as the reference's generic
 //! ACP adapter speaks it, in its Grok flavor (`grok agent stdio`), its
-//! generic one for ACP Registry agents, or Antigravity's and Kiro's
-//! ([`Flavor`]).
+//! generic one for ACP Registry agents, or Antigravity's, Kiro's and
+//! fx's ([`Flavor`]).
 //!
 //! A thread keeps its agent process across turns ([`Sessions`]), as the
 //! reference's provider session does: the first turn sends `initialize` and
@@ -22,7 +22,7 @@ use super::{
 use crate::thread_projection::uri_component;
 use crate::workspace::provider::{
     ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition, TurnStatus,
-    ACP_REGISTRY, ANTIGRAVITY, GROK, KIRO,
+    ACP_REGISTRY, ANTIGRAVITY, FX, GROK, KIRO,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Value};
@@ -68,6 +68,14 @@ const KIRO_START_HOLD_BOUND: Duration = Duration::from_secs(2);
 /// The steering note Kiro's model ends a steered reply with.
 const KIRO_STEERING_NOTE: &str = "[STEERING steer-";
 
+/// fx's launch: its ACP server, with no arguments of the instance's.
+const FX_ARGS: [&str; 1] = ["acp"];
+/// How long a Stop waits for fx to answer its cancelled prompt
+/// (`defaultCancelTimeout`, fx's `wait-for-prompt` cancel).
+const FX_STOP_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
+/// fx's effort when the thread chose none (`FX_DEFAULT_EFFORT`).
+const FX_DEFAULT_EFFORT: &str = "medium";
+
 /// Which flavor of the reference's ACP adapter a turn runs in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Flavor {
@@ -85,6 +93,11 @@ enum Flavor {
     /// its approval labels, a Stop held until the prompt started, steering
     /// with `_session/steer`, and its own prompt errors.
     Kiro,
+    /// fx's `fx acp` (`FxAdapterV2`): the generic flavor with fx's session
+    /// `_meta` (its profile's MCP servers), its backend and model options,
+    /// an effort of `medium` by default, and a session mode locked to the
+    /// runtime mode.
+    Fx,
 }
 
 impl Flavor {
@@ -93,6 +106,7 @@ impl Flavor {
             ACP_REGISTRY => Self::Registry,
             ANTIGRAVITY => Self::Antigravity,
             KIRO => Self::Kiro,
+            FX => Self::Fx,
             _ => Self::Grok,
         }
     }
@@ -102,6 +116,7 @@ impl Flavor {
             Self::Registry => ACP_REGISTRY,
             Self::Antigravity => ANTIGRAVITY,
             Self::Kiro => KIRO,
+            Self::Fx => FX,
         }
     }
     /// The harness the runtime notes name (`runtimeHarness ?? driver`).
@@ -111,6 +126,7 @@ impl Flavor {
             Self::Registry => ACP_REGISTRY,
             Self::Antigravity => "Antigravity",
             Self::Kiro => "Kiro",
+            Self::Fx => "fx",
         }
     }
     /// The agent's command line.
@@ -124,6 +140,7 @@ impl Flavor {
             Self::Registry | Self::Antigravity => provider.launch_args.clone(),
             // Fixed: Kiro takes no launch arguments of the instance's.
             Self::Kiro => KIRO_ARGS.iter().map(|arg| (*arg).to_owned()).collect(),
+            Self::Fx => FX_ARGS.iter().map(|arg| (*arg).to_owned()).collect(),
         }
     }
 }
@@ -295,9 +312,15 @@ struct Agent {
     /// Kiro: its own cloud-config tool calls still running, whose updates
     /// are not the turn's.
     cloud_tools: HashSet<String>,
-    /// Kiro: a `config_option_update` arrived while a request was in flight,
-    /// which the request's result does not replace.
+    /// Kiro and fx: a `config_option_update` arrived while a request was in
+    /// flight, which the request's result does not replace.
     config_pushed: bool,
+    /// fx: what its session options were last set for (the model, effort,
+    /// runtime and interaction modes); they are set again when that changes.
+    fx_configured: Option<String>,
+    /// fx: a mode write fx took since the session was created or loaded
+    /// (fx enforces its saved mode until a client writes one).
+    mode_written: bool,
 }
 
 impl Agent {
@@ -318,6 +341,7 @@ impl Agent {
             // endpoint (`processEnvironment`), for the terminal fallback.
             Flavor::Registry | Flavor::Antigravity => ("", "", process_environment(provider)),
             Flavor::Kiro => ("kiro-cli", "", process_environment(provider)),
+            Flavor::Fx => ("fx", "", process_environment(provider)),
         };
         let mut extra_env = extra_env;
         // Each Antigravity process gets a temporary folder of its own.
@@ -392,6 +416,8 @@ impl Agent {
             mcp_http: false,
             cloud_tools: HashSet::new(),
             config_pushed: false,
+            fx_configured: None,
+            mode_written: false,
         })
     }
 
@@ -492,7 +518,7 @@ impl Agent {
     async fn initialize(&mut self) -> Result<(), AcpError> {
         // A registry agent may also ask the user to sign in at a URL.
         let elicitation = match self.flavor {
-            Flavor::Grok | Flavor::Antigravity | Flavor::Kiro => json!({"form": {}}),
+            Flavor::Grok | Flavor::Antigravity | Flavor::Kiro | Flavor::Fx => json!({"form": {}}),
             Flavor::Registry => json!({"form": {}, "url": {}}),
         };
         let mut params = json!({
@@ -559,6 +585,14 @@ impl Agent {
     ) -> Result<Value, AcpError> {
         let replay = method == "session/load";
         match self.request(method, params.clone(), replay).await {
+            // fx signs in on its own (`fx login`) and lists no method: its
+            // refusal stands.
+            Err(
+                error @ AcpError::Rpc {
+                    code: AUTH_REQUIRED,
+                    ..
+                },
+            ) if self.flavor == Flavor::Fx => Err(error),
             Err(AcpError::Rpc {
                 code: AUTH_REQUIRED,
                 ..
@@ -572,12 +606,12 @@ impl Agent {
                     Flavor::Grok if xai_key => "xai.api_key".to_owned(),
                     Flavor::Grok => "cached_token".to_owned(),
                     // The instance's method, else the agent's first.
-                    Flavor::Registry | Flavor::Antigravity | Flavor::Kiro
+                    Flavor::Registry | Flavor::Antigravity | Flavor::Kiro | Flavor::Fx
                         if !self.auth_method.is_empty() =>
                     {
                         self.auth_method.clone()
                     }
-                    Flavor::Registry | Flavor::Antigravity | Flavor::Kiro => {
+                    Flavor::Registry | Flavor::Antigravity | Flavor::Kiro | Flavor::Fx => {
                         self.auth_methods.first().cloned().unwrap_or_default()
                     }
                 };
@@ -597,7 +631,14 @@ impl Agent {
 
     /// Apply the turn's model and effort (`applyGrokSessionModelSelection`):
     /// `grok-build` keeps the session's model, and any effort is applied.
-    async fn configure(&mut self, provider: &ProviderTurn) -> Result<(), AcpError> {
+    async fn configure(
+        &mut self,
+        spec: &TurnSpec,
+        provider: &ProviderTurn,
+    ) -> Result<(), AcpError> {
+        if self.flavor == Flavor::Fx {
+            return self.configure_fx(spec, provider).await;
+        }
         if self.flavor == Flavor::Registry {
             return self.configure_generic(provider).await;
         }
@@ -916,6 +957,247 @@ impl Agent {
         Ok(())
     }
 
+    /// fx's session options, in the reference's order (`applyFxModelSelection`,
+    /// `applyFxEffortDefault`, the option loop, then the mode locked to the
+    /// policy): its backend and model, its effort, then its mode. Set when the
+    /// session opens, and again once the thread's selection or modes changed.
+    async fn configure_fx(
+        &mut self,
+        spec: &TurnSpec,
+        provider: &ProviderTurn,
+    ) -> Result<(), AcpError> {
+        let effort = provider
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .map(str::to_owned);
+        let key = json!([
+            provider.model.trim(),
+            effort,
+            provider.runtime_mode(),
+            provider.interaction_mode()
+        ])
+        .to_string();
+        if self.fx_configured.as_deref() == Some(key.as_str()) {
+            return Ok(());
+        }
+        let selected = provider.model.trim();
+        let shown = if selected.is_empty() {
+            "default"
+        } else {
+            selected
+        };
+        let rejected = |error: AcpError| {
+            match error {
+            AcpError::Rpc { code: -32602, .. } => AcpError::Startup(format!(
+                "The agent did not accept the model \"{shown}\". Choose another model for this provider, then retry."
+            )),
+            other => other,
+        }
+        };
+        self.fx_model(spec, provider).await.map_err(rejected)?;
+        let option =
+            self.kiro_option(|option| option["id"] == "effort" && option["type"] == "select");
+        if let Some(option) = option {
+            let listed = select_values(&option);
+            match &effort {
+                // A thread without an effort starts at medium.
+                None => {
+                    if listed.iter().any(|value| value == FX_DEFAULT_EFFORT)
+                        && option["currentValue"] != FX_DEFAULT_EFFORT
+                    {
+                        self.set_kiro_option("effort", FX_DEFAULT_EFFORT)
+                            .await
+                            .map_err(rejected)?;
+                    }
+                }
+                // The thread's, when fx lists it; a refused one keeps fx's.
+                Some(effort) => {
+                    if listed.contains(effort) && option["currentValue"] != effort.as_str() {
+                        match self.set_kiro_option("effort", effort).await {
+                            Err(AcpError::Rpc { code: -32602, .. }) => {
+                                tracing::warn!("fx rejected the reasoning effort");
+                            }
+                            other => other?,
+                        }
+                    }
+                }
+            }
+        }
+        self.fx_mode(provider.runtime_mode()).await?;
+        self.fx_configured = Some(key);
+        Ok(())
+    }
+
+    /// fx's backend and model (`applyFxModelSelection`): "default" is the
+    /// one `fx status --json` names in the thread's folder; a slug
+    /// `backend:model` names a backend fx lists, else a model on the
+    /// current one. The backend is written first, then the model (even
+    /// unlisted), read again from the backend's options; a failure after a
+    /// backend switch switches back.
+    async fn fx_model(&mut self, spec: &TurnSpec, provider: &ProviderTurn) -> Result<(), AcpError> {
+        let select = |agent: &Self, id: &str| {
+            agent.kiro_option(|option| option["id"] == id && option["type"] == "select")
+        };
+        let current = |option: &Option<Value>| {
+            option
+                .as_ref()
+                .and_then(|option| option["currentValue"].as_str())
+                .map(str::to_owned)
+        };
+        let backend_option = select(self, "provider");
+        let original_backend = current(&backend_option);
+        let original_model = current(&select(self, "model"));
+        let backends = backend_option
+            .as_ref()
+            .map(select_values)
+            .unwrap_or_default();
+        let selected = provider.model.trim();
+        let is_default = selected.is_empty() || selected == "default";
+        let target: Option<(Option<String>, String)> = if is_default {
+            fx_default_choice(spec, provider)
+                .await
+                .map(|(backend, model)| (Some(backend), model))
+        } else {
+            match selected.find(':') {
+                Some(at) if at > 0 && backends.iter().any(|b| b == &selected[..at]) => Some((
+                    Some(selected[..at].to_owned()),
+                    selected[at + 1..].to_owned(),
+                )),
+                _ => Some((None, selected.to_owned())),
+            }
+        };
+        let target_backend = target.as_ref().and_then(|(backend, _)| backend.clone());
+        let can_select = match &target_backend {
+            None => true,
+            Some(backend) => {
+                backend_option.is_some()
+                    && (original_backend.as_ref() == Some(backend) || backends.contains(backend))
+            }
+        };
+        let changing = can_select
+            && backend_option.is_some()
+            && target_backend.is_some()
+            && target_backend != original_backend;
+        let applied = async {
+            if changing {
+                if let Some(backend) = &target_backend {
+                    self.set_kiro_option("provider", backend).await?;
+                }
+            }
+            let model_option = select(self, "model");
+            let Some((_, model)) = &target else {
+                return Ok(());
+            };
+            if current(&model_option).as_ref() == Some(model) || (is_default && !can_select) {
+                return Ok(());
+            }
+            if is_default
+                && !model_option
+                    .as_ref()
+                    .is_some_and(|option| select_values(option).contains(model))
+            {
+                return Err(AcpError::Rpc {
+                    code: -32602,
+                    message: "The default fx model is unavailable on its configured backend."
+                        .into(),
+                    data: json!({"configId": "model"}),
+                });
+            }
+            self.set_kiro_option("model", model).await
+        }
+        .await;
+        if applied.is_err() && changing {
+            if let Some(backend) = &original_backend {
+                // Errors switching back are not the turn's.
+                if self.set_kiro_option("provider", backend).await.is_ok() {
+                    let restored = current(&select(self, "model"));
+                    if let Some(model) = &original_model {
+                        if restored.as_ref() != Some(model) {
+                            let _ = self.set_kiro_option("model", model).await;
+                        }
+                    }
+                }
+            }
+        }
+        applied
+    }
+
+    /// fx's mode for the runtime mode (`fxSessionModeForPolicy`,
+    /// `withFxSessionMode`): Supervised `ask`, Auto `auto` (fx 0.0.13's
+    /// `code`), Full access `full-access`. A mode fx does not advertise
+    /// fails the session; the first write after it was created or loaded
+    /// is sent even when fx reports that mode already.
+    async fn fx_mode(&mut self, runtime_mode: &str) -> Result<(), AcpError> {
+        let requested = match runtime_mode {
+            "auto" => "auto",
+            "full-access" => "full-access",
+            _ => "ask",
+        };
+        let mode_option =
+            self.kiro_option(|option| option["category"] == "mode" && option["type"] == "select");
+        let advertised = if self.modes.is_empty() {
+            mode_option.as_ref().map(select_values).unwrap_or_default()
+        } else {
+            self.modes.clone()
+        };
+        let candidates: &[&str] = match requested {
+            "auto" => &["auto", "code"],
+            other => &[other],
+        };
+        let Some(target) = candidates
+            .iter()
+            .find(|id| advertised.iter().any(|mode| mode == *id))
+            .map(|id| (*id).to_owned())
+        else {
+            let listed = if advertised.is_empty() {
+                "no modes".to_owned()
+            } else {
+                advertised.join(", ")
+            };
+            return Err(AcpError::Startup(format!(
+                "fx cannot run in mode \"{requested}\"; it advertises {listed}."
+            )));
+        };
+        let current = self.current_mode.clone().or_else(|| {
+            mode_option
+                .as_ref()
+                .and_then(|option| option["currentValue"].as_str())
+                .map(str::to_owned)
+        });
+        if current.as_deref() == Some(target.as_str()) {
+            if !self.mode_written {
+                // A plain request: its result does not replace the options.
+                let params =
+                    json!({"sessionId": self.session, "configId": "mode", "value": target});
+                self.request("session/set_config_option", params, false)
+                    .await?;
+                self.mode_written = true;
+            }
+            return Ok(());
+        }
+        match &mode_option {
+            Some(option) => {
+                let id = option["id"].as_str().unwrap_or("mode").to_owned();
+                self.set_kiro_option(&id, &target).await?;
+                let reported = self
+                    .kiro_option(|option| {
+                        option["category"] == "mode" && option["type"] == "select"
+                    })
+                    .and_then(|option| option["currentValue"].as_str().map(str::to_owned));
+                self.current_mode = Some(reported.unwrap_or(target));
+            }
+            None => {
+                let params = json!({"sessionId": self.session, "modeId": target});
+                self.request("session/set_mode", params, false).await?;
+                self.current_mode = Some(target);
+            }
+        }
+        self.mode_written = true;
+        Ok(())
+    }
+
     /// The session's config option `matches` picks.
     fn kiro_option(&self, matches: impl Fn(&Value) -> bool) -> Option<Value> {
         self.config_options
@@ -979,7 +1261,7 @@ impl Agent {
     fn note_update(&mut self, params: &Value) -> bool {
         // Before `session/new` answers, its session's updates are already
         // this agent's.
-        if self.flavor != Flavor::Kiro
+        if !matches!(self.flavor, Flavor::Kiro | Flavor::Fx)
             || (!self.session.is_empty() && params["sessionId"] != self.session.as_str())
         {
             return false;
@@ -991,6 +1273,11 @@ impl Agent {
                     self.config_options = options.clone();
                     self.config_pushed = true;
                 }
+                false
+            }
+            "tool_call" | "tool_call_update" | "tool_call_content_chunk"
+                if self.flavor != Flavor::Kiro =>
+            {
                 false
             }
             "tool_call" | "tool_call_update" | "tool_call_content_chunk" => {
@@ -1175,10 +1462,15 @@ pub(super) async fn run(
     let (mut agent, resumed) = match agent {
         Ok(opened) => opened,
         Err(error) => {
-            return sink.finish(TurnEnd::failed(
-                error.failure(),
-                ThreadDisposition::Reusable,
-            ));
+            // fx has no failure text of its own: an agent's refusal says the
+            // generic one (`makeProviderFailure`).
+            let failure = match &error {
+                AcpError::Rpc { .. } if Flavor::of(&provider) == Flavor::Fx => {
+                    antigravity_prompt_failure(&error)
+                }
+                _ => error.failure(),
+            };
+            return sink.finish(TurnEnd::failed(failure, ThreadDisposition::Reusable));
         }
     };
     let mut turn = Turn::new(&spec, &provider, &sink, &agent, &mut responses);
@@ -1226,9 +1518,10 @@ async fn open(
 ) -> Result<(Agent, bool), AcpError> {
     if let Some(mut agent) = sessions.take(thread, &launch, resume).await {
         // Kiro switches model, agent and effort within its session, so each
-        // turn sets them (`configureSession`).
-        if agent.flavor == Flavor::Kiro {
-            if let Err(error) = agent.configure(provider).await {
+        // turn sets them (`configureSession`); fx's are set again once the
+        // thread's selection or modes changed.
+        if matches!(agent.flavor, Flavor::Kiro | Flavor::Fx) {
+            if let Err(error) = agent.configure(spec, provider).await {
                 agent.stop().await;
                 return Err(error);
             }
@@ -1273,6 +1566,11 @@ async fn start(
     // The session's setup carries T3's pull request instructions for an
     // agent that takes them in its system prompt (`antigravitySessionMeta`).
     let mut meta = None;
+    // fx loads the user's own MCP servers only when setup asks for them
+    // (`FX_SESSION_META`).
+    if agent.flavor == Flavor::Fx {
+        meta = Some(json!({"fx": {"profileMcpServers": true}}));
+    }
     if agent.flavor == Flavor::Antigravity {
         // Eagerly, with the configured method: agy takes ones it does not list.
         let method = if agent.auth_method.is_empty() {
@@ -1361,8 +1659,48 @@ async fn start(
             false
         }
     };
-    agent.configure(provider).await?;
+    // fx enforces its saved mode until the new or loaded session's is written.
+    agent.mode_written = false;
+    agent.configure(spec, provider).await?;
     Ok(resumed)
+}
+
+/// `readFxDefaultChoice`: the backend and model fx starts a new session on
+/// in the thread's folder, from `fx status --json` run there with the
+/// turn's environment; none when it fails or names no model.
+async fn fx_default_choice(spec: &TurnSpec, provider: &ProviderTurn) -> Option<(String, String)> {
+    let mut env: crate::provider_status::ProcessEnv = std::env::vars().collect();
+    env.extend(spec.env.iter().cloned());
+    let timeout = crate::provider_status::fx::status_timeout(&env);
+    let mut command = crate::login_shell::tokio_command(program(&provider.binary_path, "fx"));
+    for (name, _) in std::env::vars_os() {
+        let text = name.to_string_lossy();
+        if spec
+            .env_remove
+            .iter()
+            .any(|removed| text.eq_ignore_ascii_case(removed))
+        {
+            command.env_remove(&name);
+        }
+    }
+    command
+        .envs(spec.env.iter().cloned())
+        .args(["status", "--json"])
+        .current_dir(&spec.cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let output = tokio::time::timeout(timeout, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    crate::provider_status::fx::default_choice(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// A select option's values, its groups' included.
@@ -1604,8 +1942,12 @@ struct Turn<'a> {
     steering_note: Option<NoteFilter>,
     /// Whether the session was loaded, as the thread's record says.
     resumed: bool,
-    /// Kiro: the title it last gave its session.
+    /// Kiro and fx: the title it last gave its session.
     native_title: Option<String>,
+    /// fx: when it says it last changed its session (`updatedAt`).
+    native_updated_at: Option<String>,
+    /// fx: the context usage it last reported (`usage_update`).
+    context_usage: Option<crate::workspace::provider::ContextUsage>,
 }
 
 /// The state of Kiro's steering note filter (`makeKiroSteeringNoteFilter`):
@@ -1705,6 +2047,8 @@ impl<'a> Turn<'a> {
             steering_note: None,
             resumed: false,
             native_title: None,
+            native_updated_at: None,
+            context_usage: None,
         }
     }
 
@@ -1738,6 +2082,8 @@ impl<'a> Turn<'a> {
 
             opencode2: None,
             native_title: None,
+            native_updated_at: None,
+            context_usage: None,
         });
         self.sink.send(ProviderEvent::ProviderTurn {
             native_turn_id: Some(self.scoped(&self.native_turn)),
@@ -1878,7 +2224,12 @@ impl<'a> Turn<'a> {
             .write(&json!({"jsonrpc": "2.0", "method": "session/cancel",
                 "params": {"sessionId": session}}))
             .await;
-        let deadline = Instant::now() + STOP_CONFIRM_TIMEOUT;
+        let timeout = if self.flavor == Flavor::Fx {
+            FX_STOP_CONFIRM_TIMEOUT
+        } else {
+            STOP_CONFIRM_TIMEOUT
+        };
+        let deadline = Instant::now() + timeout;
         loop {
             let line = tokio::select! {
                 line = agent.cli.next_line() => line,
@@ -1900,6 +2251,8 @@ impl<'a> Turn<'a> {
             } else if message["method"] == "session/update" {
                 if self.flavor == Flavor::Kiro {
                     self.kiro_update(agent, &message["params"]);
+                } else if self.flavor == Flavor::Fx {
+                    self.fx_update(agent, &message["params"]);
                 } else {
                     let update = message["params"]["update"].clone();
                     self.update(&update);
@@ -1964,7 +2317,7 @@ impl<'a> Turn<'a> {
         // The selection's model ("default", the agent's own, says none).
         let model = match (self.model.as_str(), self.flavor) {
             ("", Flavor::Grok) => Some("grok-build"),
-            ("", Flavor::Registry | Flavor::Antigravity | Flavor::Kiro) => None,
+            ("", Flavor::Registry | Flavor::Antigravity | Flavor::Kiro | Flavor::Fx) => None,
             (model, _) => Some(model),
         };
         // An agent whose session took the pull request text has notes
@@ -2004,6 +2357,10 @@ impl<'a> Turn<'a> {
                 self.kiro_update(agent, &message["params"]);
                 None
             }
+            (Some("session/update"), None) if self.flavor == Flavor::Fx => {
+                self.fx_update(agent, &message["params"]);
+                None
+            }
             (Some("session/update"), None) => {
                 let params = &message["params"];
                 if params["sessionId"].as_str() == Some(self.session.as_str())
@@ -2022,7 +2379,8 @@ impl<'a> Turn<'a> {
                         data: error.get("data").cloned().unwrap_or(Value::Null),
                     };
                     let failure = match self.flavor {
-                        Flavor::Antigravity => antigravity_prompt_failure(&error),
+                        // fx has no `promptFailure`: the generic texts.
+                        Flavor::Antigravity | Flavor::Fx => antigravity_prompt_failure(&error),
                         Flavor::Kiro => kiro_prompt_failure(&error),
                         _ => error.failure(),
                     };
@@ -2295,22 +2653,7 @@ impl<'a> Turn<'a> {
             self.started = true;
         }
         if kind == "session_info_update" {
-            // Its title names the provider thread (`nativeMetadata.title`).
-            let title = update["title"]
-                .as_str()
-                .map(|title| title.trim().chars().take(1024).collect::<String>())
-                .filter(|title| !title.is_empty());
-            if title.is_some() && title != self.native_title {
-                self.native_title = title.clone();
-                self.sink.send(ProviderEvent::ProviderThread {
-                    driver: self.flavor.driver().into(),
-                    native_thread_id: self.session.clone(),
-                    resumed: self.resumed,
-                    model: None,
-                    opencode2: None,
-                    native_title: title,
-                });
-            }
+            self.session_title(update);
             match kiro["kind"].as_str() {
                 Some("steering_injected") => self.steering_note = Some(NoteFilter::default()),
                 Some("steering_cleared") => self.steering_note = None,
@@ -2327,6 +2670,82 @@ impl<'a> Turn<'a> {
             }
         }
         self.update(update);
+    }
+
+    /// A `session_info_update`'s title names the provider thread
+    /// (`nativeMetadata.title`).
+    fn session_title(&mut self, update: &Value) {
+        let text = |key: &str, limit: usize| {
+            update[key]
+                .as_str()
+                .map(|text| text.trim().chars().take(limit).collect::<String>())
+                .filter(|text| !text.is_empty())
+        };
+        let title = text("title", 1024);
+        // fx also says when it changed the session (`updatedAt`), and each
+        // of its updates reports the provider thread again.
+        let updated_at = if self.flavor == Flavor::Fx {
+            text("updatedAt", 128)
+        } else {
+            None
+        };
+        let fx = self.flavor == Flavor::Fx;
+        if (title.is_some() && title != self.native_title)
+            || (fx && (title.is_some() || updated_at.is_some()))
+        {
+            if title.is_some() {
+                self.native_title = title;
+            }
+            if updated_at.is_some() {
+                self.native_updated_at = updated_at;
+            }
+            self.thread_updated();
+        }
+    }
+
+    /// Report the provider thread again with what the agent said of its
+    /// session.
+    fn thread_updated(&self) {
+        self.sink.send(ProviderEvent::ProviderThread {
+            driver: self.flavor.driver().into(),
+            native_thread_id: self.session.clone(),
+            resumed: self.resumed,
+            model: None,
+            opencode2: None,
+            native_title: self.native_title.clone(),
+            native_updated_at: self.native_updated_at.as_deref().map(Box::from),
+            context_usage: self.context_usage.clone().map(Box::new),
+        });
+    }
+
+    /// fx's `usage_update`: how much of its context window the session
+    /// uses, the provider thread's `contextUsage` (not the turn's usage).
+    fn context_usage_update(&mut self, update: &Value) {
+        let Some(used) = update["used"].as_u64() else {
+            return;
+        };
+        self.context_usage = Some(crate::workspace::provider::ContextUsage {
+            used_tokens: used,
+            max_tokens: update["size"].as_u64().filter(|size| *size > 0),
+        });
+        self.thread_updated();
+    }
+
+    /// One fx `session/update`: its pushed options noted, its session's
+    /// title kept, the rest as the generic flavor reads it.
+    fn fx_update(&mut self, agent: &mut Agent, params: &Value) {
+        agent.note_update(params);
+        let update = &params["update"];
+        if params["sessionId"].as_str() != Some(self.session.as_str())
+            || update["_meta"]["isReplay"] == true
+        {
+            return;
+        }
+        match update["sessionUpdate"].as_str() {
+            Some("session_info_update") => self.session_title(update),
+            Some("usage_update") => self.context_usage_update(update),
+            _ => self.update(update),
+        }
     }
 
     /// One `session/update`.
@@ -2838,6 +3257,11 @@ impl<'a> Turn<'a> {
                 }
                 return;
             }
+            // fx has no active steering: the orchestrator queues its steers,
+            // and `_x.ai/interject` is Grok's alone.
+            if self.flavor == Flavor::Fx {
+                return;
+            }
             let params = json!({"sessionId": self.session, "text": text});
             let _ = agent.send("_x.ai/interject", params).await;
             return;
@@ -3000,11 +3424,16 @@ fn disposition(flavor: Flavor, runtime_mode: &str, kind: &str) -> Disposition {
         // agy's own Auto already decided what it asks (`antigravityPermissionDisposition`).
         "auto" if matches!(flavor, Flavor::Grok | Flavor::Antigravity) => Disposition::Ask,
         // Kiro has no auto mode: the thread's policy asks, as Supervised.
-        "auto" if flavor == Flavor::Kiro => Disposition::Ask,
+        // fx's automatic review asks only about what it refused itself
+        // (`fxPermissionDisposition`).
+        "auto" if matches!(flavor, Flavor::Kiro | Flavor::Fx) => Disposition::Ask,
         "auto" => Disposition::Allow,
         "full-access" => Disposition::Allow,
         _ if reads => Disposition::Allow,
-        "auto-accept-edits" if edits && flavor != Flavor::Grok => Disposition::Allow,
+        // fx runs any other mode as `ask`, under approval-required.
+        "auto-accept-edits" if edits && !matches!(flavor, Flavor::Grok | Flavor::Fx) => {
+            Disposition::Allow
+        }
         _ => Disposition::Ask,
     }
 }
@@ -3294,6 +3723,17 @@ mod tests {
         // generic flavor's lets requests through.
         assert!(asks(Flavor::Grok, "auto", "read"));
         assert!(!asks(Flavor::Registry, "auto", "execute"));
+    }
+
+    #[test]
+    fn fx_asks_in_auto_and_about_edits_outside_full_access() {
+        let asks = |mode, kind| matches!(disposition(Flavor::Fx, mode, kind), Disposition::Ask);
+        assert!(asks("auto", "read"));
+        assert!(asks("auto", "edit"));
+        assert!(!asks("approval-required", "read"));
+        assert!(asks("approval-required", "execute"));
+        assert!(asks("auto-accept-edits", "edit"));
+        assert!(!asks("full-access", "execute"));
     }
 
     #[test]

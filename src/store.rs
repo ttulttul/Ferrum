@@ -1113,6 +1113,8 @@ mod tests {
 
                     opencode2: None,
                     native_title: None,
+                    native_updated_at: None,
+                    context_usage: None,
                 },
                 position: None,
             },

@@ -110,10 +110,11 @@ pub(crate) async fn plan<H: CommandHost>(
         )));
     }
     // Rust steers Codex, Claude and Grok turns; another driver's steer
-    // waits for the next turn. ACP Registry agents have no active steering
-    // (the reference restarts their turn with the message instead).
+    // waits for the next turn. ACP Registry agents and fx have no active
+    // steering (the reference restarts their turn with the message instead).
     if !crate::workspace::provider::runs_turns(&ids.driver)
         || ids.driver == crate::workspace::provider::ACP_REGISTRY
+        || ids.driver == crate::workspace::provider::FX
     {
         return Ok(SteerPlan::Queue);
     }

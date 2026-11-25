@@ -2,7 +2,7 @@
 //! Claude Code stream-json transcripts (`tests/fixtures/providers`).
 use super::*;
 use crate::workspace::provider::{
-    ProviderTurn, TurnStatus, ACP_REGISTRY, ANTIGRAVITY, CLAUDE_AGENT, GROK, KIRO, OPENCODE, PI,
+    ProviderTurn, TurnStatus, ACP_REGISTRY, ANTIGRAVITY, CLAUDE_AGENT, FX, GROK, KIRO, OPENCODE, PI,
 };
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -2217,4 +2217,100 @@ async fn pi_and_opencode_turns_write_their_event_logs() {
             );
         }
     }
+}
+
+/// The `session/set_config_option` writes a fake ACP agent received, as
+/// `[configId, value]`.
+fn config_writes(log: &Path) -> Vec<Value> {
+    received(log)
+        .into_iter()
+        .filter(|m| m["method"] == "session/set_config_option")
+        .map(|m| json!([m["params"]["configId"], m["params"]["value"]]))
+        .collect()
+}
+
+#[tokio::test]
+async fn fx_sets_its_backend_model_effort_and_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(FX, "fx_model.json", &log, None);
+    if let Some(provider) = spec.provider.as_mut() {
+        provider.model = "codex:gpt-6-astra".into();
+        provider.reasoning_effort = Some("high".into());
+        provider.runtime_mode = "approval-required".into();
+    }
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    let sent = received(&log);
+    let initialize = &sent[0]["params"];
+    assert_eq!(
+        initialize["clientCapabilities"]["elicitation"],
+        json!({"form": {}})
+    );
+    assert!(initialize.get("_meta").is_none());
+    assert!(initialize["clientCapabilities"].get("_meta").is_none());
+    assert_eq!(sent[1]["method"], "session/new");
+    assert_eq!(
+        sent[1]["params"]["_meta"],
+        json!({"fx": {"profileMcpServers": true}})
+    );
+    let args = std::fs::read_to_string(format!("{}.args", log.display())).unwrap();
+    assert_eq!(args.trim(), "acp");
+    // The backend, then the model from its list, the effort, and the mode
+    // fx already reports (the first write after the session opened).
+    assert_eq!(
+        config_writes(&log),
+        [
+            json!(["provider", "codex"]),
+            json!(["model", "gpt-6-astra"]),
+            json!(["effort", "high"]),
+            json!(["mode", "ask"])
+        ]
+    );
+    let prompt = sent
+        .iter()
+        .find(|m| m["method"] == "session/prompt")
+        .unwrap();
+    assert!(prompt["params"].get("_meta").is_none());
+    // Its output is the content's text; its usage the provider thread's.
+    let command = items(&events, "command_execution");
+    assert_eq!(command.last().unwrap().fields["output"], json!("hi\n"));
+    assert!(events.iter().any(|e| matches!(e,
+        ProviderEvent::ProviderThread { context_usage: Some(usage), native_title: Some(title), .. }
+            if usage.used_tokens == 19549 && usage.max_tokens == Some(1_000_000) && title == "Run echo hi")));
+}
+
+#[tokio::test]
+async fn fx_starts_at_medium_effort_in_the_runtime_modes_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(FX, "fx_turn.json", &log, None);
+    if let Some(provider) = spec.provider.as_mut() {
+        // The session's own model, on its backend: nothing to write.
+        provider.model = "fx-large".into();
+    }
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    assert_eq!(
+        config_writes(&log),
+        [json!(["effort", "medium"]), json!(["mode", "full-access"])]
+    );
+}
+
+#[tokio::test]
+async fn fxs_failed_prompt_says_the_generic_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(FX, "fx_failed.json", &log, None);
+    if let Some(provider) = spec.provider.as_mut() {
+        provider.model = "fx-large".into();
+    }
+    let (events, _) = run(spec).await;
+    let (status, failure) = terminal(&events);
+    assert_eq!(status, TurnStatus::Failed);
+    let failure = failure.expect("a failure");
+    assert_eq!(failure.message, "Provider turn failed.");
+    assert_eq!(failure.code, None);
 }
