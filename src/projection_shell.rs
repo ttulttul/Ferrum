@@ -257,6 +257,26 @@ fn is_background_wake(run: &Value, projection: &Value) -> bool {
             .any(|m| m["runId"] == run["id"] && m["createdBy"] == "user")
 }
 
+/// Whether the thread's active run is blocked waiting on another thread or a
+/// task (`blockedOnThreadWait`), from its full projection.
+pub(crate) fn thread_blocked_on_wait(projection: &Value) -> bool {
+    let runs: Vec<&Value> = projection["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .collect();
+    let active = runs
+        .iter()
+        .copied()
+        .filter(|run| is_interruptible(run))
+        .max_by_key(|run| ordinal(run));
+    let items = projection["turnItems"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    blocked_on_thread_wait(active, &items)
+}
+
 /// `deriveBlockedOnThreadWait`, for the thread-wait tools.
 fn blocked_on_thread_wait(active: Option<&Value>, items: &[Value]) -> bool {
     let Some(active) = active.filter(|run| run["status"] == "running") else {
