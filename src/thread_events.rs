@@ -180,8 +180,9 @@ pub enum Order {
     /// failure no turn reported, the run, its root node and the provider
     /// thread.
     End,
-    /// A checkpoint capture (`CheckpointCaptureService`): the checkpoints,
-    /// the checkpoint item, then the run and its root node.
+    /// A checkpoint capture (`CheckpointCaptureService`): a provider thread
+    /// the run's completion changed, the checkpoints, the checkpoint item,
+    /// then the run and its root node.
     Checkpoint,
     /// A run sent (`ThreadMessageIntake`): the thread, the provider thread
     /// the run opens, the run, its pending attempt and root node, the
@@ -485,7 +486,10 @@ impl Order {
                 Collection("checkpoints"),
                 Collection("contextHandoffs"),
             ],
+            // A provider thread the run's completion changes comes first:
+            // the reference's run stores it before its checkpoint.
             Order::Checkpoint => &[
+                Collection("providerThreads"),
                 Collection("checkpoints"),
                 Items(Phase::All),
                 Collection("runs"),
@@ -494,7 +498,6 @@ impl Order {
                 Collection("checkpointScopes"),
                 LooseMessages,
                 Collection("providerSessions"),
-                Collection("providerThreads"),
                 Collection("providerTurns"),
                 Collection("runtimeRequests"),
                 Collection("subagents"),

@@ -5,12 +5,13 @@
 use serde_json::{json, Value};
 
 /// What kind of background work a report is about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Kind {
     /// A subagent's report; Rust's Claude adapter does not track background
     /// subagents yet.
     #[allow(dead_code)]
     Subagent,
+    #[default]
     Command,
     Monitor,
     BackgroundTask,
@@ -26,7 +27,7 @@ impl Kind {
         }
     }
 
-    fn wire(self) -> &'static str {
+    pub(crate) fn wire(self) -> &'static str {
         match self {
             Kind::Subagent => "subagent",
             Kind::Command => "command",

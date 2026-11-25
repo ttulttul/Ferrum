@@ -547,12 +547,12 @@ impl Thread {
                         let strength = if driver == provider::OPENCODE { "weak" } else { "strong" };
                         native_ref(&driver, head, strength)
                     }),
-                "status": status,
+                "status": self.held_open_status(&driver, status),
                 "firstRunOrdinal": first_ordinal,
                 "lastRunOrdinal": last_ordinal,
                 "handoffIds": handoff_ids,
                 "forkedFrom": null,
-                "pendingBackgroundTasks": [],
+                "pendingBackgroundTasks": self.pending_background_tasks(&driver),
                 "contextUsage": self.context_usage(),
                 "nativeMetadata": metadata,
                 "goal": null,
@@ -565,6 +565,81 @@ impl Thread {
         out.items
             .retain(|(_, item)| item.get("requestSlot").is_none());
         out
+    }
+
+    /// The provider thread's status once its last run ended. A Claude
+    /// continuation that completed while background tasks still run is active
+    /// again once the run completes: the reference's run, whose events those
+    /// tasks keep it reading, stores the turn's completed provider thread
+    /// (`active`) again after its own final `idle` update, before its
+    /// checkpoint.
+    fn held_open_status(&self, driver: &str, status: &'static str) -> &'static str {
+        let holds =
+            |thread: &crate::provider_state::ThreadRecord| !thread.background_tasks.is_empty();
+        if status != "idle"
+            || driver != provider::CLAUDE_AGENT
+            || !self.provider.thread.as_ref().is_some_and(holds)
+        {
+            return status;
+        }
+        let last = self
+            .runs
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, run)| self.provider.runs.contains_key(&run.id));
+        let continued = last.is_some_and(|(index, run)| {
+            // Its checkpoint's capture, or the run's end without one.
+            let settled = run.status == "completed"
+                || self
+                    .checkpoints
+                    .iter()
+                    .any(|checkpoint| checkpoint.turn_count == index as u64 + 1);
+            self.provider
+                .terminals
+                .get(&run.id)
+                .is_some_and(|terminal| terminal.status == TurnStatus::Completed)
+                && settled
+                && run.user_message_id.as_deref().is_some_and(|id| {
+                    self.messages.iter().any(|message| {
+                        message.id == id && crate::thread_projection::provider_continuation(message)
+                    })
+                })
+        });
+        if continued {
+            "active"
+        } else {
+            status
+        }
+    }
+
+    /// The background tasks the provider thread runs now: as the adapter listed
+    /// them, with the turn item and thread of the command that launched each
+    /// (`backgroundTaskLaunch`) and the run each first appeared under, which
+    /// the reference's projection stamps (`attributePendingBackgroundTasks`).
+    fn pending_background_tasks(&self, driver: &str) -> Value {
+        let Some(thread) = &self.provider.thread else {
+            return json!([]);
+        };
+        let tasks: Vec<Value> = thread
+            .background_tasks
+            .iter()
+            .map(|(task, owner)| {
+                let mut task = task.clone();
+                if let Some(native) = task["nativeItemId"]
+                    .as_str()
+                    .filter(|_| !task["command"].is_null())
+                {
+                    task["itemId"] = json!(item_id("turn-item", driver, native));
+                    task["sourceThreadId"] = json!(self.id);
+                }
+                if let Some(run) = self.runs.iter().find(|run| run.id == *owner) {
+                    task["runId"] = json!(run.wire_id());
+                }
+                task
+            })
+            .collect();
+        json!(tasks)
     }
 
     /// The provider thread's context usage, as the reference sets it when a
@@ -1821,6 +1896,76 @@ mod tests {
             driver: None,
             closing: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_claude_thread_lists_its_background_tasks_and_a_continuation_leaves_it_active() {
+        let claude_run = |status: &str, message: &str| {
+            let mut run = running_codex_thread(Uuid::new_v4()).runs.remove(0);
+            run.provider = "claudeAgent".into();
+            run.status = status.into();
+            run.user_message_id = Some(message.into());
+            run.wire_id = Some(format!("run:{message}"));
+            run
+        };
+        let first = claude_run("completed", "m1");
+        let wake = claude_run("running", "m2");
+        let mut live = thread(first.clone());
+        live.runs.push(wake.clone());
+        live.messages.push(crate::ConversationMessage {
+            id: "m2".into(),
+            role: crate::thread_projection::NOTIFICATION_ROLE.into(),
+            creation_source: Some("provider".into()),
+            ..Default::default()
+        });
+        let opened = ProviderEvent::ProviderThread {
+            driver: "claudeAgent".into(),
+            native_thread_id: "sess".into(),
+            resumed: false,
+            model: None,
+        };
+        let monitor = json!({"taskId": "m1", "kind": "monitor", "nativeItemId": "toolu_m1",
+            "command": "tail -f build.log", "awaited": true});
+        live.provider.apply(first.id, &opened, 1);
+        live.provider.apply(
+            first.id,
+            &ProviderEvent::BackgroundTasks {
+                tasks: vec![monitor.clone()],
+            },
+            1,
+        );
+        live.provider
+            .apply(first.id, &terminal(TurnStatus::Completed), 2);
+        live.provider.apply(wake.id, &opened, 3);
+        live.provider
+            .apply(wake.id, &terminal(TurnStatus::Completed), 4);
+        let thread_record = |live: &Thread| live.provider_records().provider_threads.remove(0);
+        // The task keeps the run it appeared under, with its launching item.
+        let record = thread_record(&live);
+        assert_eq!(
+            record["pendingBackgroundTasks"],
+            json!([{"taskId": "m1", "kind": "monitor", "nativeItemId": "toolu_m1",
+                "command": "tail -f build.log", "awaited": true, "runId": "run:m1",
+                "itemId": "turn-item:provider:claudeAgent:native-item:toolu_m1",
+                "sourceThreadId": "t1"}])
+        );
+        // The continuation's turn ended: idle until its checkpoint.
+        assert_eq!(record["status"], "idle");
+        live.checkpoints.push(crate::CheckpointRecord {
+            turn_count: 2,
+            tree: "tree".into(),
+            cwd: "/w".into(),
+            captured_at: 5,
+            ready: true,
+        });
+        assert_eq!(thread_record(&live)["status"], "active");
+        // With nothing left running it stays idle.
+        live.provider.apply(
+            wake.id,
+            &ProviderEvent::BackgroundTasks { tasks: vec![] },
+            5,
+        );
+        assert_eq!(thread_record(&live)["status"], "idle");
     }
 
     fn running_codex_thread(run_id: Uuid) -> Thread {

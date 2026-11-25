@@ -816,7 +816,18 @@ impl<'a> Attempt<'a> {
     }
 
     async fn handle(&mut self, message: Value) -> Option<Outcome> {
+        let before = self.cli.background.published();
         self.cli.background.observe_turn(&message);
+        // The provider thread lists the tasks running now
+        // (`emitRosterUpdate`).
+        if let Some(tasks) = self.cli.background.changed(&before) {
+            self.sink.send(ProviderEvent::BackgroundTasks { tasks });
+        } else if message["type"] == "result" && message["parent_tool_use_id"].is_null() {
+            if let Some(tasks) = self.cli.background.unsent() {
+                self.sink
+                    .report_at_end(ProviderEvent::BackgroundTasks { tasks });
+            }
+        }
         let kind = message["type"].as_str().unwrap_or_default();
         if kind != "control_response" {
             self.answered = true;
