@@ -59,6 +59,18 @@ async fn load(state: &AppState, thread_id: &str, run_id: &str) -> Option<Prepara
     })
 }
 
+/// Whether the run waits to start in the project's own checkout (`{type: "root"}`).
+async fn waits_in_root(state: &AppState, thread_id: &str, run_id: &str) -> bool {
+    let store = state.store.read().await;
+    store.threads.get(thread_id).is_some_and(|thread| {
+        thread
+            .runs
+            .iter()
+            .any(|run| run.wire_id() == run_id && run.status == "preparing")
+            && thread.stored_row()["runExtras"][run_id]["workspacePreparation"]["type"] == "root"
+    })
+}
+
 fn message_of(error: &Value) -> String {
     error["detail"]
         .as_str()
@@ -139,6 +151,23 @@ async fn generate_branch_name(
 
 /// Prepares `run_id` of `thread_id`, a delegated child's run that waits for its worktree.
 pub(crate) async fn prepare(state: Arc<AppState>, command_id: &str, thread_id: &str, run_id: &str) {
+    // A run in the project's own checkout has nothing to prepare: it starts.
+    if waits_in_root(&state, thread_id, run_id).await {
+        let released = dispatch(
+            &state,
+            json!({
+                "type": "prepared-run.release",
+                "commandId": format!("{command_id}:release"),
+                "threadId": thread_id,
+                "runId": run_id,
+            }),
+        )
+        .await;
+        if let Err(error) = released {
+            tracing::warn!(%error, thread_id, "failed to start a run in its project's checkout");
+        }
+        return;
+    }
     let Some(preparation) = load(&state, thread_id, run_id).await else {
         return;
     };

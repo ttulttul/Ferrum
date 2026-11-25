@@ -981,11 +981,21 @@ async fn apply_command<H: CommandHost>(
                 .map(|project| project.path.clone())
                 .unwrap_or_default();
             let id = receipt.thread_id.clone();
+            let mut row = crate::thread_projection::created(
+                command,
+                &crate::auth_service::iso(crate::auth_service::now()),
+            );
+            // A first message that waits for its workspace records what it
+            // waits for on its run (`workspacePreparation`), which the run's
+            // preparation reads.
+            let preparation = &command["initialMessage"]["workspaceStrategy"];
+            if preparation.is_object() {
+                row["runExtras"] = json!({
+                    Run::reference_id(&id, 1): {"workspacePreparation": preparation}
+                });
+            }
             let thread = Thread {
-                row: crate::thread_projection::created(
-                    command,
-                    &crate::auth_service::iso(crate::auth_service::now()),
-                ),
+                row,
                 id,
                 project_id,
                 title: command
