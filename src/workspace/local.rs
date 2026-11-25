@@ -255,6 +255,20 @@ impl Workspace for LocalWorkspace {
         method: &'a str,
         input: &'a Value,
     ) -> WorkspaceFuture<'a, Option<Reply>> {
+        if method == "claimRecording" {
+            // The workspace keeps the attachments its browser recorded into.
+            let attachments =
+                crate::config::ServerPaths::from_state_dir(&self.data_dir).attachments;
+            let reply = crate::local_services::claim_preview_recording(
+                &attachments,
+                input["threadId"].as_str().unwrap_or_default(),
+                &input["artifact"],
+            )
+            .map_err(|message| {
+                serde_json::json!({"_tag": crate::workspace::RECORDING_CLAIM_ERROR, "message": message})
+            });
+            return futures_util::future::ready(Some(reply)).boxed();
+        }
         if method == "automation" {
             let previews = self.previews.clone();
             let dir = self.data_dir.clone();

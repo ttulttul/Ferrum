@@ -603,8 +603,8 @@ pub(crate) async fn mcp_workspace(
                 .await,
         );
     }
-    if method == "preview.automation" {
-        return workspace.preview("automation", input).await;
+    if let Some(name @ ("automation" | "claimRecording")) = method.strip_prefix("preview.") {
+        return workspace.preview(name, input).await;
     }
     // Server-internal Git operations, for a delegated task's worktree.
     if let Some(name @ ("resolveCommit" | "renameBranch")) = method.strip_prefix("vcs.") {
@@ -666,7 +666,8 @@ pub(crate) async fn workspace(
             }
             Some(workspace.preview_profile(name, input).await)
         }
-        "preview" if name != "automation" => {
+        // Agent-only preview operations are not client calls.
+        "preview" if !matches!(name, "automation" | "claimRecording") => {
             let reply = workspace.preview(name, input).await;
             if name == "close" && reply.as_ref().is_some_and(Result::is_ok) {
                 workspace
@@ -731,4 +732,30 @@ pub(crate) async fn polled_stream(
     Some(Ok(
         serde_json::json!({"_tag":"snapshot","local":local,"remote":remote}),
     ))
+}
+
+#[cfg(all(test, feature = "native"))]
+mod claim_routing_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn only_agents_reach_a_recording_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = crate::workspace::LocalWorkspace::open(dir.path()).unwrap();
+        let settings = WorkspaceSettings::default();
+        let input = json!({"threadId":"thread:One","artifact":{"sizeBytes":5,"uploadedAttachmentId":"pending-0b9c2c7e-6a2b-4b8f-9f1e-2f5b7c3a1d00-mp4"}});
+        // The agent tool's route reaches the workspace's claim (here: nothing to claim).
+        let agent = mcp_workspace(&local, &settings, "preview.claimRecording", &input).await;
+        assert_eq!(
+            agent.unwrap().unwrap_err()["_tag"],
+            crate::workspace::RECORDING_CLAIM_ERROR
+        );
+        // A client's preview call does not.
+        assert!(
+            workspace(&local, &settings, "preview.claimRecording", &input)
+                .await
+                .is_none()
+        );
+    }
 }

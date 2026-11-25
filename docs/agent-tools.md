@@ -400,8 +400,11 @@ recording draws the cursor and ring into its frames (`__t3Recorder.cursor`), wit
 pauses so they can be seen. Nothing waits when no one watches or records.
 `scripts/preview_provider_parity.py` compares the messages a passive viewer receives.
 
-**Not yet:** recordings from an agentd workspace on another machine (the claim reads the server's
-attachments directory).
+A recording is claimed where its browser ran, which keeps the thread's attachments: the
+server's own workspace, or, for the control plane, the `t3-agentd` workspace on another machine
+(`preview.claimRecording`, an agent-only workspace operation that clients cannot call, carried by
+agentd's existing `preview.call`). An older agentd that does not know it fails the claim as before.
+`agentd/tests/remote.rs` claims one through agentd.
 
 ### 4g. Run output
 

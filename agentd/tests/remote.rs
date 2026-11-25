@@ -725,3 +725,65 @@ fn without_digest(
         })
     })
 }
+
+#[tokio::test]
+async fn a_recording_is_claimed_where_its_browser_ran() {
+    let setup = setup().await;
+    // The browser ran in the workspace agentd serves, so its video is in agentd's attachments.
+    let attachments = setup._dir.path().join("state/attachments");
+    std::fs::create_dir_all(&attachments).unwrap();
+    let uuid = "0b9c2c7e-6a2b-4b8f-9f1e-2f5b7c3a1d00";
+    let pending = format!("pending-{uuid}-mp4");
+    std::fs::write(attachments.join(format!("{pending}.mp4")), b"video").unwrap();
+    let artifact = json!({"tabId":"tab-1","mimeType":"video/mp4","sizeBytes":5,"uploadedAttachmentId":pending});
+    let input = json!({"threadId":"thread:One","artifact":artifact});
+
+    let claimed = setup
+        .remote
+        .preview("claimRecording", &input)
+        .await
+        .unwrap()
+        .unwrap();
+    let id = format!("thread-one-{uuid}-mp4");
+    assert_eq!(claimed["id"], json!(id));
+    assert!(claimed.get("uploadedAttachmentId").is_none());
+    assert_eq!(
+        std::fs::read(attachments.join(format!("{id}.mp4"))).unwrap(),
+        b"video"
+    );
+    assert!(!attachments.join(format!("{pending}.mp4")).exists());
+    // A retry finds it already claimed.
+    assert_eq!(
+        setup
+            .remote
+            .preview("claimRecording", &input)
+            .await
+            .unwrap()
+            .unwrap()["id"],
+        json!(id)
+    );
+    // One that does not match what the stop reported is refused with the claim's message.
+    let wrong =
+        json!({"threadId":"thread:One","artifact":{"sizeBytes":6,"uploadedAttachmentId":pending}});
+    let refused = setup
+        .remote
+        .preview("claimRecording", &wrong)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused["_tag"], "PreviewRecordingClaimError");
+    assert_eq!(
+        refused["message"],
+        "Preview recording could not be saved to the agent environment."
+    );
+    // The server's own workspace answers the same.
+    assert_eq!(
+        setup
+            .local
+            .preview("claimRecording", &input)
+            .await
+            .unwrap()
+            .unwrap()["id"],
+        json!(id)
+    );
+}

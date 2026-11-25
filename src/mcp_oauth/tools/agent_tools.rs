@@ -471,7 +471,8 @@ pub(super) async fn preview_recording_stop<S: McpHost>(
     let mut response = preview_automation(host, caller, "recordingStop", &input).await?;
     let icon = response.as_object_mut().and_then(|r| r.remove("toolIcon"));
     let mut artifact = host
-        .claim_preview_recording(&thread_id, &response)
+        .claim_preview_recording(thread_id, response)
+        .await
         .map_err(Refusal::Text)?;
     if let Some(icon) = icon {
         artifact["toolIcon"] = icon;

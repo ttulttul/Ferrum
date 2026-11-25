@@ -1755,13 +1755,6 @@ impl mcp_oauth::McpHost for AppState {
             }
         })
     }
-    fn claim_preview_recording(
-        &self,
-        thread_id: &str,
-        artifact: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
-        crate::local_services::claim_preview_recording(&self.paths.attachments, thread_id, artifact)
-    }
     fn html_page(
         self: &Arc<Self>,
         operation: &'static str,

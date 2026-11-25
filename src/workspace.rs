@@ -31,6 +31,9 @@ pub use provider::{ProviderEvent, ProviderTurn};
 pub use remote::{connect, NativeLink};
 pub use remote::{unavailable, BusFrame, RemoteWorkspace, Transport};
 
+/// The `_tag` of a failed `preview.claimRecording`, whose message is the claim's.
+pub const RECORDING_CLAIM_ERROR: &str = "PreviewRecordingClaimError";
+
 /// A reply payload: the success value, or the error value an RPC fails with.
 pub type Reply = Result<Value, Value>;
 

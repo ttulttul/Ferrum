@@ -351,13 +351,30 @@ pub trait McpHost: AuthHost {
     }
     /// `claimPreviewRecording`: the recording a stopped preview left as a
     /// pending attachment, moved to `thread_id`'s attachments; the artifact,
-    /// or the failure's message.
+    /// or the failure's message. It is claimed where the browser ran, which
+    /// keeps the thread's attachments: this server's workspace, or the
+    /// t3-agentd workspace another machine serves (`preview.claimRecording`).
     fn claim_preview_recording(
-        &self,
-        _thread_id: &str,
-        _artifact: &Value,
-    ) -> Result<Value, String> {
-        Err("Preview recording could not be saved to the agent environment.".to_owned())
+        self: &Arc<Self>,
+        thread_id: String,
+        artifact: Value,
+    ) -> HostFuture<Result<Value, String>> {
+        let host = self.clone();
+        Box::pin(async move {
+            const FAILED: &str = "Preview recording could not be saved to the agent environment.";
+            let input = json!({"threadId": thread_id, "artifact": artifact});
+            host.workspace_call("preview.claimRecording".into(), input)
+                .await
+                .map_err(|error| {
+                    // A workspace that cannot claim (an older t3-agentd) fails as before.
+                    match error["_tag"].as_str() {
+                        Some(crate::workspace::RECORDING_CLAIM_ERROR) => {
+                            error["message"].as_str().unwrap_or(FAILED).to_owned()
+                        }
+                        _ => FAILED.to_owned(),
+                    }
+                })
+        })
     }
     /// The HTML toolkit's page work (`HtmlRender`): `"preview"` renders a page
     /// in a headless browser, `"publish"` stores it for its thread to show.
