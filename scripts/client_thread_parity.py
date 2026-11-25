@@ -431,6 +431,31 @@ PROVIDER_SCENARIOS = [
     {"name": "antigravity interrupt", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_interrupt.json", "interrupt": "command"},
     {"name": "antigravity failed turn", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_failed.json"},
     {"name": "antigravity missing", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": None},
+    # OpenCode 2: one `opencode serve` for the instance, its event stream (`GET /api/event`) routed by
+    # session; T3's MCP server and instructions are written for the thread, the prompt goes to
+    # `POST /api/session/<id>/prompt` with T3's own id, and the execution's end ends the turn.
+    {"name": "opencode2 turn", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode2_turn.json"},
+    # A second turn prompts the session the instance's provider session keeps for the thread.
+    {"name": "opencode2 second turn", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode2_two_turns.json", "followUp": "Now append a line"},
+    # Stop asks OpenCode to interrupt; the turn ends with session.execution.interrupted.
+    {"name": "opencode2 interrupt", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode2_interrupt.json", "interrupt": "command"},
+    # Supervised: the session's rules ask before a shell command (`permission.asked`); the answer is a
+    # reply decision ("once"), a decline also steers a note to the model first, and an allow for the
+    # session adds the command's patterns to the session's rules, then replies "once".
+    {"name": "opencode2 approval", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode2_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
+    {"name": "opencode2 approval declined", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode2_approval_declined.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "decline"}},
+    {"name": "opencode2 approval for session", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode2_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "acceptForSession"}},
+    # OpenCode's question tool asks through a form, answered with `POST .../form/<id>/reply`.
+    {"name": "opencode2 question", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode2_question.json",
+     "respond": {"answers": {"q0": "Blue"}}},
+    # A message steers the running turn: another prompt with `delivery: "steer"`.
+    {"name": "opencode2 steer", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode2_steer.json",
+     "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}},
+    # A provider error fails the turn with its message (a rate limit is a usage limit); the session stays ready.
+    {"name": "opencode2 failed turn", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode2_failed.json"},
     # Grok over ACP: its turns run in the `grok agent stdio` session the thread keeps, and stream
     # reasoning, a command and the reply.
     {"name": "grok turn", "instance": "grok", "enable": "grok", "model": "grok-build", "scenario": "grok_turn.json"},
@@ -1508,8 +1533,9 @@ def cli_launch(log, root):
 
 def opencode_calls(log, mask, unserved):
     """What a server asked of OpenCode for a turn: each session, MCP, permission and question
-    request with its query and body. The message ids T3 picks are masked, and the system text is
-    compared as Rust sends it, without what names a tool Rust does not serve yet."""
+    request with its query and body. The message ids T3 picks are masked, and the system text (an
+    OpenCode 2 session's instructions entry) is compared as Rust sends it, without what names a
+    tool Rust does not serve yet."""
     out = []
     path = Path(str(log) + ".http")
     for line in (path.read_text().splitlines() if path.exists() else []):
@@ -1526,7 +1552,11 @@ def opencode_calls(log, mask, unserved):
                 body["messageID"] = "<message>"
             if isinstance(body.get("system"), str):
                 body["system"] = without_unserved(body["system"], unserved)
-        query = re.sub(r"directory=[^&]*", "directory=<cwd>", request.get("query", ""))
+            if "/instructions/entries/" in request["path"] and isinstance(body.get("value"), str):
+                body["value"] = without_unserved(body["value"], unserved)
+        # OpenCode 2's location-scoped calls name the directory as `location[directory]`.
+        query = re.sub(r"directory(%5D|\])?=[^&]*", lambda match: f"directory{match.group(1) or ''}=<cwd>",
+                       request.get("query", ""))
         out.append(f"opencode {request['method']} {request['path']} {query} "
                    + json.dumps(mask(body), sort_keys=True))
     return out

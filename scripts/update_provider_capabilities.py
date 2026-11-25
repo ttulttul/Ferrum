@@ -3,7 +3,8 @@
 
 Each provider's capabilities are the reference adapter's
 `... satisfies OrchestrationV2ProviderCapabilities` object (CodexAdapterV2.ts,
-ClaudeAdapterV2.ts, provider-pi's adapter.ts), a plain literal Node evaluates; Grok's
+ClaudeAdapterV2.ts, provider-pi's adapter.ts, provider-opencode's 1.x and OpenCode 2
+adapters), a plain literal Node evaluates; Grok's
 (provider-grok's adapter.ts) spreads the generic ACP adapter's
 `AcpProviderCapabilitiesV2`, which Node imports from the reference to
 evaluate it. They are what a Grok session negotiates with an agent that
@@ -24,6 +25,8 @@ ADAPTERS = {"antigravity": "apps/server/src/orchestration-v2/Adapters/Antigravit
             "codex": "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
             "grok": "packages/provider-grok/src/server/adapter.ts",
             "opencode": "packages/provider-opencode/src/server/adapter.ts",
+            # OpenCode 2's adapter, whose capabilities an OpenCode 2 thread's session reports.
+            "opencode2": "packages/provider-opencode/src/server/v2/adapter.ts",
             "pi": "packages/provider-pi/src/server/adapter.ts"}
 # Drivers whose capabilities are an exported constant as it is (ACP Registry agents run the generic
 # ACP adapter's): the constant, and the reference module that exports it.

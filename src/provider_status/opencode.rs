@@ -697,6 +697,34 @@ pub(crate) struct Owners {
     probes: Arc<Mutex<HashMap<String, Probed>>>,
 }
 
+/// A borrow of a managed server ([`Owners::lend`]), given back when it is
+/// released or dropped.
+pub(crate) struct Lease {
+    owners: Owners,
+    key: String,
+    url: String,
+    released: bool,
+}
+
+impl Lease {
+    async fn release(mut self) {
+        self.released = true;
+        self.owners.give_back(&self.key, &self.url).await;
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let (owners, key, url) = (self.owners.clone(), self.key.clone(), self.url.clone());
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move { owners.give_back(&key, &url).await });
+        }
+    }
+}
+
 /// `OPENCODE_CONFIG_CONTENT` for a managed server.
 fn config_content(env: &ProcessEnv) -> String {
     env.get("OPENCODE_CONFIG_CONTENT")
@@ -951,42 +979,65 @@ impl Owners {
         F: FnOnce(Server) -> Fut,
         Fut: std::future::Future<Output = Result<T, String>>,
     {
-        let server = {
-            let mut servers = self.servers.lock().await;
-            let reusable = match servers.get_mut(key) {
-                Some(running) => matches!(running.child.try_wait(), Ok(None)),
-                None => false,
-            };
-            if reusable {
-                let running = servers.get_mut(key).unwrap();
-                if let Some(idle) = running.idle.take() {
-                    idle.abort();
-                }
-                running.borrowers += 1;
-                running.server.clone()
-            } else {
-                servers.remove(key);
-                let (server, child) = start.await?;
-                servers.insert(
-                    key.to_owned(),
-                    Running {
-                        server: server.clone(),
-                        child,
-                        borrowers: 1,
-                        idle: None,
-                    },
-                );
-                server
-            }
-        };
-        let result = use_(server.clone()).await;
+        let (server, lease) = self.lend(key, start).await?;
+        let result = use_(server).await;
+        lease.release().await;
+        result
+    }
+
+    /// A running managed server (started if need be), held until the
+    /// returned [`Lease`] is released or dropped: an OpenCode 2 provider
+    /// session's borrow, which lasts as long as the session does
+    /// (`OpenCode2Adapter`'s `borrow`).
+    async fn lend(
+        &self,
+        key: &str,
+        start: impl std::future::Future<Output = Result<(Server, tokio::process::Child), String>>,
+    ) -> Result<(Server, Lease), String> {
         let mut servers = self.servers.lock().await;
-        if let Some(running) = servers.get_mut(key).filter(|r| r.server.url == server.url) {
+        let reusable = match servers.get_mut(key) {
+            Some(running) => matches!(running.child.try_wait(), Ok(None)),
+            None => false,
+        };
+        let server = if let Some(running) = servers.get_mut(key).filter(|_| reusable) {
+            if let Some(idle) = running.idle.take() {
+                idle.abort();
+            }
+            running.borrowers += 1;
+            running.server.clone()
+        } else {
+            servers.remove(key);
+            let (server, child) = start.await?;
+            servers.insert(
+                key.to_owned(),
+                Running {
+                    server: server.clone(),
+                    child,
+                    borrowers: 1,
+                    idle: None,
+                },
+            );
+            server
+        };
+        let lease = Lease {
+            owners: self.clone(),
+            key: key.to_owned(),
+            url: server.url.clone(),
+            released: false,
+        };
+        Ok((server, lease))
+    }
+
+    /// One borrower of `key`'s server (at `url`) is done: the last one
+    /// stops it 30 seconds later, unless it is borrowed again.
+    async fn give_back(&self, key: &str, url: &str) {
+        let mut servers = self.servers.lock().await;
+        if let Some(running) = servers.get_mut(key).filter(|r| r.server.url == url) {
             running.borrowers = running.borrowers.saturating_sub(1);
             if running.borrowers == 0 {
                 let owner = self.servers.clone();
                 let key = key.to_owned();
-                let url = server.url.clone();
+                let url = url.to_owned();
                 running.idle = Some(tokio::spawn(async move {
                     tokio::time::sleep(IDLE_TTL).await;
                     let mut servers = owner.lock().await;
@@ -999,7 +1050,18 @@ impl Owners {
                 }));
             }
         }
-        result
+    }
+
+    /// Stop every managed server now.
+    #[cfg(test)]
+    pub(crate) async fn stop_all(&self) {
+        let servers: Vec<Running> = self.servers.lock().await.drain().map(|(_, r)| r).collect();
+        for mut running in servers {
+            if let Some(idle) = running.idle.take() {
+                idle.abort();
+            }
+            let _ = running.child.kill().await;
+        }
     }
 
     /// `makeOpenCodeRuntimeProbe`: a 2.x result is kept for good.
@@ -2289,7 +2351,7 @@ async fn check_v2(
 }
 
 // ---------------------------------------------------------------------------
-// Turns: the 1.x server a thread's provider session runs its turns on.
+// Turns: the server a provider session runs its turns on.
 
 /// A provider session's OpenCode 1.x server: the configured one, or the
 /// `opencode serve` process the session started and owns.
@@ -2300,27 +2362,59 @@ pub(crate) struct TurnServer {
     pub(crate) child: Option<tokio::process::Child>,
 }
 
-/// Why a thread on an OpenCode 2 server or CLI runs no turns yet.
-pub(crate) const OPENCODE2_TURNS_UNSUPPORTED: &str =
-    "OpenCode 2 turns are not supported by this server yet.";
+/// An OpenCode 2 provider session's server (`OpenCode2Connection`): the
+/// configured one, or the instance's managed `opencode serve`, which every
+/// OpenCode 2 use of the instance shares (status checks, text generation,
+/// turns), held by the session's [`Lease`] while it lasts.
+pub(crate) struct V2TurnServer {
+    pub(crate) url: String,
+    pub(crate) password: Option<String>,
+    pub(crate) version: String,
+    pub(crate) external: bool,
+    pub(crate) lease: Option<Lease>,
+}
 
-/// `connectToOpenCodeServer` for a 1.x provider session: the configured
-/// server, checked, or a new `opencode serve` of the session's own (never
-/// shared, unlike the status checks' server). The version decides the
-/// adapter, as `selectOpenCodeRuntimeAdapter` does: a failed probe counts as
-/// 1.x.
+/// The server a provider session connects to, by the runtime's generation.
+pub(crate) enum TurnConnection {
+    V1(TurnServer),
+    V2(V2TurnServer),
+}
+
+/// `connectToOpenCodeServer` for a provider session. The version decides
+/// the adapter, as `selectOpenCodeRuntimeAdapter` does (a failed probe
+/// counts as 1.x): a 1.x session gets the configured server, checked, or a
+/// new `opencode serve` of its own (never shared, unlike the status checks'
+/// server); an OpenCode 2 session borrows the instance's server
+/// (`OpenCode2Server.withConnection`) for as long as it lasts. Without a
+/// configured URL an OpenCode 2 probe the status checks recorded stands, as
+/// the reference keeps a 2.x probe for good.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn connect_turn_server(
+    owners: &Owners,
+    instance_id: &str,
     binary: &str,
     server_url: &str,
     password: &str,
     env: ProcessEnv,
     directory: &str,
-) -> Result<TurnServer, String> {
+) -> Result<TurnConnection, String> {
     let probing = probe_env(&env);
     if !server_url.trim().is_empty() {
         let probed = probe_server(server_url, password, &probing).await?;
         if probed.generation == Generation::V2 {
-            return Err(OPENCODE2_TURNS_UNSUPPORTED.into());
+            let server = Server {
+                url: server_url.trim().to_owned(),
+                password: Some(password.to_owned()),
+                version: String::new(),
+            };
+            let version = verify_v2(&server, &env).await?;
+            return Ok(TurnConnection::V2(V2TurnServer {
+                url: server.url,
+                password: server.password,
+                version,
+                external: true,
+                lease: None,
+            }));
         }
         let server = Server {
             url: server_url.trim().to_owned(),
@@ -2328,15 +2422,55 @@ pub(crate) async fn connect_turn_server(
             version: String::new(),
         };
         verify_v1(&server, directory, &env).await?;
-        return Ok(TurnServer {
+        return Ok(TurnConnection::V1(TurnServer {
             url: server.url,
             password: server.password,
             external: true,
             child: None,
-        });
+        }));
     }
-    if matches!(probe_binary(binary, &probing).await, Ok(p) if p.generation == Generation::V2) {
-        return Err(OPENCODE2_TURNS_UNSUPPORTED.into());
+    let cached = owners
+        .probes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(instance_id)
+        .cloned();
+    let generation = match cached {
+        Some(probed) => Some(probed.generation),
+        None => {
+            let probe = probe_binary(binary, &probing).await;
+            owners.record_probe(instance_id, &probe);
+            probe.ok().map(|probed| probed.generation)
+        }
+    };
+    if generation == Some(Generation::V2) {
+        let password =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+        let mut server_env = env.clone();
+        server_env.remove("OPENCODE_SERVER_PASSWORD");
+        server_env.insert("OPENCODE_PASSWORD".into(), password.clone());
+        server_env.insert("OPENCODE_CONFIG_CONTENT".into(), config_content(&env));
+        let timeout = probe_timeout("opencode", SERVER_START_TIMEOUT_MS, &env);
+        let cwd = std::env::current_dir()
+            .unwrap_or_default()
+            .display()
+            .to_string();
+        let start = start_server_retrying(
+            binary,
+            server_env,
+            Some(password),
+            timeout,
+            Generation::V2,
+            &cwd,
+        );
+        let (server, lease) = owners.lend(&format!("{instance_id}\0v2"), start).await?;
+        return Ok(TurnConnection::V2(V2TurnServer {
+            url: server.url,
+            password: server.password,
+            version: server.version,
+            external: false,
+            lease: Some(lease),
+        }));
     }
     let password = (!password.is_empty())
         .then(|| password.to_owned())
@@ -2356,12 +2490,12 @@ pub(crate) async fn connect_turn_server(
         directory,
     )
     .await?;
-    Ok(TurnServer {
+    Ok(TurnConnection::V1(TurnServer {
         url: server.url,
         password: server.password,
         external: false,
         child: Some(child),
-    })
+    }))
 }
 
 /// `Basic base64("opencode:<password>")`.

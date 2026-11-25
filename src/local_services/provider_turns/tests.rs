@@ -1651,3 +1651,120 @@ async fn claude_fork_continues_its_source_session_under_a_new_id() {
     );
     assert_eq!(first_prompt(&log), json!("History\n\nHello"));
 }
+
+/// An OpenCode 2 turn on the fake server playing `scenario`, on an instance
+/// of its own (an instance shares one OpenCode 2 session).
+fn opencode2_spec(dir: &Path, scenario: &str, log: &Path) -> TurnSpec {
+    let mut spec = opencode_spec(dir, scenario, log);
+    if let Some(provider) = spec.provider.as_mut() {
+        provider.instance_id = format!("opencode2:{}", log.display());
+        provider.thread_title = "Thread".into();
+    }
+    spec
+}
+
+/// Close a test's OpenCode 2 sessions and stop the servers they borrowed,
+/// which would otherwise outlive the test process.
+async fn stop_opencode2(processes: &ProviderProcesses) {
+    processes.opencode.shutdown().await;
+    processes.opencode.owners().stop_all().await;
+}
+
+#[tokio::test]
+async fn opencode2_turn_prompts_its_session_and_ends_with_the_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("oc2.log");
+    let processes = std::sync::Arc::new(ProviderProcesses::default());
+    let (_cancel, cancelled) = oneshot::channel();
+    let spec = opencode2_spec(dir.path(), "opencode2_turn.json", &log);
+    let (events, exit) = collect(start(spec, cancelled, processes.clone()).unwrap()).await;
+    stop_opencode2(&processes).await;
+    assert!(exit.success, "{events:#?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    assert_eq!(native_thread(&events), ("ses_1".into(), false));
+    // The thread reports the OpenCode 2 server it runs on.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::ProviderThread { opencode2: Some(server), .. } if server.version == "2.2.6"
+    )));
+    // Named by its prompt's id, never more strongly.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::ProviderTurn { native_turn_ref: Some(reference), .. }
+            if reference["nativeId"] == "msg_t3_turn_ses_1:attempt-1" && reference["strength"] == "weak"
+    )));
+    let command = items(&events, "command_execution");
+    let done = command.last().expect("the shell call");
+    assert_eq!(
+        (
+            done.status.as_str(),
+            &done.fields["input"],
+            &done.fields["output"]
+        ),
+        ("completed", &json!("echo hi"), &json!("hi\n"))
+    );
+    assert_eq!(final_text(&events), "Ran echo hi.");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::Usage { usage } if usage.used_tokens == 4380 && usage.max_tokens == Some(180_000)
+    )));
+    let requests = opencode_requests(&log);
+    let paths: Vec<String> = requests
+        .iter()
+        .map(|r| {
+            format!(
+                "{} {}",
+                r["method"].as_str().unwrap(),
+                r["path"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "POST /api/session",
+            "PUT /api/experimental/session/ses_1/instructions/entries/t3-code",
+            "POST /api/session/ses_1/prompt",
+        ]
+    );
+    assert_eq!(requests[0]["body"]["title"], "Thread");
+    assert_eq!(
+        requests[2]["body"],
+        json!({"id": "msg_t3_turn_ses_1:attempt-1", "text": "Say hello", "delivery": null, "resume": null})
+    );
+}
+
+#[tokio::test]
+async fn opencode2_stop_interrupts_the_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("oc2.log");
+    let (cancel, cancelled) = oneshot::channel();
+    let processes = std::sync::Arc::new(ProviderProcesses::default());
+    let mut events = start(
+        opencode2_spec(dir.path(), "opencode2_interrupt.json", &log),
+        cancelled,
+        processes.clone(),
+    )
+    .unwrap();
+    while let Some(event) = events.recv().await {
+        if matches!(&event, TurnEvent::Provider(ProviderEvent::TurnItem { item })
+            if item.kind == "command_execution" && item.status == "running")
+        {
+            break;
+        }
+    }
+    cancel.send(()).unwrap();
+    let (rest, exit) = collect(events).await;
+    stop_opencode2(&processes).await;
+    assert!(exit.cancelled && !exit.success, "{exit:?}");
+    assert_eq!(terminal(&rest), (TurnStatus::Interrupted, None));
+    assert_eq!(
+        items(&rest, "command_execution")
+            .last()
+            .map(|i| i.status.as_str()),
+        Some("interrupted")
+    );
+    assert!(opencode_requests(&log)
+        .iter()
+        .any(|r| r["method"] == "POST" && r["path"] == "/api/session/ses_1/interrupt"));
+}

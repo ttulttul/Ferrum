@@ -25,8 +25,14 @@ pub(crate) const HIDDEN_ITEM: &str = "\u{0}hidden";
 /// The id of the provider session a thread's provider thread names before
 /// its session opens: a Codex instance's shared session, or the thread's own
 /// Claude or ACP session, named after the run that opens it.
-fn pending_session_id(driver: &str, instance: &str, thread_id: &str, run_id: &str) -> String {
-    if provider::thread_session(driver) {
+fn pending_session_id(
+    driver: &str,
+    instance: &str,
+    thread_id: &str,
+    run_id: &str,
+    opencode2: bool,
+) -> String {
+    if provider::thread_session(driver) && !opencode2 {
         acp_session_id(instance, thread_id, run_id)
     } else if driver == provider::CLAUDE_AGENT {
         format!(
@@ -534,7 +540,8 @@ impl Thread {
                                 &thread.driver,
                                 &instance,
                                 &self.id,
-                                &run.wire_id()
+                                &run.wire_id(),
+                                thread.opencode2.is_some()
                             )),
                             _ => session_id.clone(),
                         };
@@ -564,7 +571,8 @@ impl Thread {
                             &driver,
                             &instance,
                             &self.id,
-                            &run.map(Run::wire_id).unwrap_or_default()
+                            &run.map(Run::wire_id).unwrap_or_default(),
+                            false
                         ));
                         (driver, Value::Null, "not_loaded", at, at, session)
                     }
@@ -829,6 +837,14 @@ impl Thread {
         if provider::is_acp(driver) {
             return self.acp_native_metadata();
         }
+        // An OpenCode 2 session's model (`withReportedModel`).
+        if let Some(opencode2) = self.opencode2() {
+            return if opencode2.model_selection.is_null() {
+                Value::Null
+            } else {
+                json!({"modelSelection": opencode2.model_selection})
+            };
+        }
         if driver != provider::CLAUDE_AGENT {
             return Value::Null;
         }
@@ -874,6 +890,17 @@ impl Thread {
         }
     }
 
+    /// The OpenCode 2 server the thread's turns ran on, when they ran on
+    /// one: its provider session is the instance's (shared by its threads),
+    /// a failed turn leaves it ready, and its requests resolve as answered.
+    pub(crate) fn opencode2(&self) -> Option<&provider::OpenCode2Thread> {
+        self.provider
+            .thread
+            .as_ref()
+            .filter(|thread| thread.driver == provider::OPENCODE)
+            .and_then(|thread| thread.opencode2.as_ref())
+    }
+
     /// The provider session the thread's turns ran in, once one opened: the
     /// shared app-server session of a Codex instance, or the thread's own
     /// Claude session (which the reference opens even when the CLI is
@@ -896,7 +923,7 @@ impl Thread {
         }
         let id = if let Some(id) = &self.provider.prior_session_id {
             id.clone()
-        } else if provider::thread_session(&thread.driver) {
+        } else if provider::thread_session(&thread.driver) && thread.opencode2.is_none() {
             acp_session_id(instance, &self.id, &first.wire_id())
         } else if claude {
             format!(
@@ -920,10 +947,15 @@ impl Thread {
         // a stopped one (its process is stopped).
         // An OpenCode session ends in error with a failed turn too, but
         // stays ready after a stop (its server keeps running).
+        // An OpenCode 2 session stays ready after a failed turn
+        // (`finishTurn`), unless its event stream was lost (`failAll`).
         let pi = thread.driver == provider::PI;
-        let opencode = thread.driver == provider::OPENCODE;
+        let opencode2 = thread.opencode2.as_ref();
+        let opencode = thread.driver == provider::OPENCODE && opencode2.is_none();
         let crash = last.and_then(|t| t.failure.as_ref()).filter(|failure| {
-            pi || opencode || (!claude && provider::stream_closed(&failure.message))
+            pi || opencode
+                || (opencode2.is_some() && failure.message == provider::OPENCODE2_STREAM_LOST)
+                || (!claude && provider::stream_closed(&failure.message))
         });
         let crashed = crash.is_some();
         // A restart stops a session that has not failed.
@@ -937,9 +969,19 @@ impl Thread {
             });
         let capabilities: Value =
             serde_json::from_str(include_str!("provider_capabilities.json")).unwrap_or_default();
+        let capabilities = match opencode2 {
+            // OpenCode 2's own, with native goals from 2.2.5 on.
+            Some(opencode2) => {
+                let mut capabilities = capabilities["opencode2"].clone();
+                capabilities["turns"]["supportsNativeGoals"] =
+                    json!(provider::version_at_least(&opencode2.version, (2, 2, 5)));
+                capabilities
+            }
+            None => session_capabilities(&capabilities, &thread.driver),
+        };
         let row = self.stored_row();
         Some(json!({
-            "capabilities": session_capabilities(&capabilities, &thread.driver),
+            "capabilities": capabilities,
             "createdAt": iso(thread.created_at),
             "cwd": self.cwd,
             "driver": thread.driver,
@@ -1281,7 +1323,7 @@ impl Thread {
                             .as_ref()
                             .is_some_and(|thread| thread.native_id.is_none())) =>
             {
-                let session = if provider::thread_session(driver) {
+                let session = if provider::thread_session(driver) && self.opencode2().is_none() {
                     acp_session_id(instance, &self.id, &ids.run)
                 } else {
                     join("provider-session:provider-instance", &[instance]) + ":shared"
@@ -1499,7 +1541,7 @@ impl Thread {
         let done = match state.status {
             // Pi's adapter resolves its own dialogs: answered is completed.
             "resolved" => Some(
-                if !provider::resolves_own_requests(driver)
+                if !(provider::resolves_own_requests(driver) && self.opencode2().is_none())
                     && matches!(request.decision.as_deref(), Some("decline" | "cancel"))
                 {
                     "cancelled"
@@ -1526,7 +1568,9 @@ impl Thread {
             "resolvedAt": state.resolved_at.map(iso)
         });
         // Pi's resolution records no decision.
-        if state.status == "resolved" && !provider::resolves_own_requests(driver) {
+        if state.status == "resolved"
+            && !(provider::resolves_own_requests(driver) && self.opencode2().is_none())
+        {
             for (key, value) in [
                 ("decision", &request.decision),
                 ("feedback", &request.feedback),
@@ -1877,6 +1921,8 @@ mod tests {
                 native_thread_id: "thr".into(),
                 resumed: false,
                 model: None,
+
+                opencode2: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
@@ -1988,6 +2034,8 @@ mod tests {
                 native_thread_id: "thr".into(),
                 resumed: false,
                 model: None,
+
+                opencode2: None,
             },
             item("msg", "assistant_message", "running", Some("")),
             item("patch", "file_change", "running", None),
@@ -2054,6 +2102,7 @@ mod tests {
             native_thread_id: "sess".into(),
             resumed: false,
             model: None,
+            opencode2: None,
         };
         let monitor = json!({"taskId": "m1", "kind": "monitor", "nativeItemId": "toolu_m1",
             "command": "tail -f build.log", "awaited": true});
@@ -2113,6 +2162,8 @@ mod tests {
                 native_thread_id: "thr".into(),
                 resumed: false,
                 model: None,
+
+                opencode2: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
@@ -2259,6 +2310,8 @@ mod tests {
                 native_thread_id: "thr".into(),
                 resumed: false,
                 model: None,
+
+                opencode2: None,
             },
             2,
         );
@@ -2293,6 +2346,72 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn an_opencode2_thread_shares_its_instances_session_and_stays_ready_after_a_failure() {
+        let run_id = Uuid::new_v4();
+        let mut live = thread(
+            serde_json::from_value(json!({
+                "id": run_id, "thread_id": "t1", "provider": "opencode", "status": "running",
+                "started_at": 1, "finished_at": null, "error": null, "user_message_id": null,
+                "driver": "opencode"
+            }))
+            .unwrap(),
+        );
+        live.row = json!({"modelSelection": {"instanceId": "opencode", "model": "a/m"}});
+        let failure = crate::workspace::provider::ProviderFailure::new("usage_limit", "Rate limit");
+        for event in [
+            ProviderEvent::ProviderThread {
+                driver: "opencode".into(),
+                native_thread_id: "ses_1".into(),
+                resumed: false,
+                model: None,
+                opencode2: Some(crate::workspace::provider::OpenCode2Thread {
+                    version: "2.2.6".into(),
+                    model_selection: json!({"instanceId": "opencode", "model": "a/m", "options": []}),
+                }),
+            },
+            ProviderEvent::ProviderTurn {
+                native_turn_id: Some("ses_1:attempt:a".into()),
+                native_turn_ref: Some(
+                    json!({"driver": "opencode", "nativeId": "msg_t3_turn_ses_1:a", "strength": "weak"}),
+                ),
+                conversation_head: None,
+                status: TurnStatus::Running,
+                model: None,
+            },
+            ProviderEvent::TurnTerminal {
+                status: TurnStatus::Failed,
+                failure: Some(failure),
+                thread_disposition: crate::workspace::provider::ThreadDisposition::Reusable,
+                driver: None,
+                closing: Vec::new(),
+            },
+        ] {
+            live.provider.apply(run_id, &event, 2);
+        }
+        let projection = live.projection();
+        let session = &projection["providerSessions"][0];
+        assert_eq!(
+            session["id"],
+            "provider-session:provider-instance:opencode:shared"
+        );
+        assert_eq!(session["status"], "ready");
+        assert_eq!(session["lastError"], Value::Null);
+        let capabilities = &session["capabilities"];
+        assert_eq!(
+            capabilities["sessions"]["supportsMultipleProviderThreadsPerSession"],
+            true
+        );
+        assert_eq!(capabilities["turns"]["supportsNativeGoals"], true);
+        let thread = &projection["providerThreads"][0];
+        assert_eq!(thread["providerSessionId"], session["id"]);
+        assert_eq!(thread["nativeMetadata"]["modelSelection"]["model"], "a/m");
+        assert_eq!(
+            projection["providerTurns"][0]["nativeTurnRef"]["nativeId"],
+            "msg_t3_turn_ses_1:a"
         );
     }
 }

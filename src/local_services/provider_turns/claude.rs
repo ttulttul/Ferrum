@@ -424,6 +424,8 @@ impl<'a> Attempt<'a> {
                 native_thread_id: id.clone(),
                 resumed: fork,
                 model: Some(provider.model.clone()).filter(|model| !model.trim().is_empty()),
+
+                opencode2: None,
             });
         }
         // The reference marks only a turn that resumes an interrupted one
@@ -848,6 +850,8 @@ impl<'a> Attempt<'a> {
                     resumed: self.resume.is_some(),
                     native_thread_id: session,
                     model: message["model"].as_str().map(str::to_owned),
+
+                    opencode2: None,
                 };
                 // A new session keeps the id it was given until the turn
                 // ends, as the reference's thread does; then it names the

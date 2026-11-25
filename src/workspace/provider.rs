@@ -27,7 +27,7 @@ pub const ACP_REGISTRY: &str = "acpRegistry";
 /// Pi's CLI, whose turns run over its RPC mode (`pi --mode rpc`).
 pub const PI: &str = "pi";
 
-/// OpenCode, whose 1.x turns run on its HTTP server (`opencode serve`).
+/// OpenCode, whose turns run on its HTTP server (`opencode serve`).
 pub const OPENCODE: &str = "opencode";
 /// Antigravity's `agy` CLI, whose turns run over ACP (`agy acp`).
 pub const ANTIGRAVITY: &str = "antigravity";
@@ -232,6 +232,18 @@ pub struct AntigravityLaunch {
     pub launch_error: String,
 }
 
+/// What an OpenCode 2 thread's [`ProviderEvent::ProviderThread`] reports:
+/// the server's version (whose 2.2.5 enables native goals) and the model
+/// the OpenCode session reports (`nativeMetadata.modelSelection`), omitted
+/// when unknown.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCode2Thread {
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub model_selection: Value,
+}
+
 /// Where a provider CLI reaches T3's tools for its thread
 /// (`McpProviderSessionConfig` in the reference).
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -285,6 +297,26 @@ const WORKSPACE_MISSING: &str =
     "This thread's workspace folder no longer exists or is not a directory: ";
 pub const CODEX_STREAM_CLOSED: &str = "The provider event stream closed unexpectedly. Retry the turn; if it keeps failing, check the provider and server logs.";
 
+/// How the reference's OpenCode 2 adapter fails every turn when its event
+/// stream is lost (`failAll`); its provider session ends in error with it.
+pub const OPENCODE2_STREAM_LOST: &str =
+    "The OpenCode event stream was lost and could not reconnect.";
+
+/// Whether `version` (`x.y.z`, anything after ignored) is at least
+/// `minimum`.
+pub fn version_at_least(version: &str, minimum: (u64, u64, u64)) -> bool {
+    let parts: Vec<u64> = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .take(3)
+        .filter_map(|part| part.parse().ok())
+        .collect();
+    match parts.as_slice() {
+        [major, minor, patch, ..] => (*major, *minor, *patch) >= minimum,
+        _ => false,
+    }
+}
+
 /// Whether a failure is the reference's `ProviderAdapterEventStreamError`:
 /// the plain category text, or (since #39299) the one naming the exit.
 pub fn stream_closed(message: &str) -> bool {
@@ -305,6 +337,13 @@ pub enum ProviderEvent {
         resumed: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// The OpenCode 2 server the thread's turns run on, which records
+        /// them as the reference's OpenCode 2 adapter does (a provider
+        /// session shared by the instance's threads, and more). Additive and
+        /// skippable: absent for every other driver and for OpenCode 1.x, and
+        /// a reader that predates it ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opencode2: Option<OpenCode2Thread>,
     },
     /// The turn started running in the CLI.
     #[serde(rename = "provider_turn.updated", rename_all = "camelCase")]
