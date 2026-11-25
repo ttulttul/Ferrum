@@ -129,6 +129,8 @@ mod storage_cleanup;
 #[cfg(feature = "native")]
 mod thread_search;
 #[cfg(feature = "native")]
+mod vcs_broadcast;
+#[cfg(feature = "native")]
 pub mod voice;
 pub mod workspace;
 pub mod workspace_protocol;

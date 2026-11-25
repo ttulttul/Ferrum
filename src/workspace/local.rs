@@ -251,6 +251,9 @@ impl Workspace for LocalWorkspace {
     fn local_servers<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
         discovery::scan(&self.terminals, input).boxed()
     }
+    fn watches_local_paths(&self) -> bool {
+        true
+    }
     fn stop_local_server<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply> {
         discovery::stop(&self.terminals, input).boxed()
     }

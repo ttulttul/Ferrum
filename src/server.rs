@@ -65,6 +65,8 @@ pub struct AppState {
     /// The same workspace, for the native-only HTTP routes that reach into
     /// its services (media, browser pages).
     pub(crate) local: Arc<crate::workspace::LocalWorkspace>,
+    /// `subscribeVcsStatus` and `subscribeVcsBranch`, shared per folder.
+    pub(crate) vcs_hub: crate::vcs_broadcast::Hub,
     pub worktree_setup: worktree_setup::WorktreeSetupTracker,
     pub(crate) project_mutation_lock: Mutex<()>,
     pub(crate) find_cache: std::sync::Mutex<crate::thread_search::FindCache>,
@@ -418,6 +420,7 @@ impl AppState {
             issues: tokio::sync::Mutex::new(issues::IssueService::new(dir.clone())),
             workspace: local.clone(),
             local,
+            vcs_hub: Default::default(),
             worktree_setup: worktree_setup::WorktreeSetupTracker::default(),
             project_mutation_lock: Mutex::new(()),
             find_cache: Default::default(),
