@@ -236,15 +236,19 @@ struct Reporter {
 }
 
 impl Reporter {
-    /// Report a wake; its token, once reported.
-    fn report(&self) -> Option<u64> {
+    /// Report a wake, with what ended in the background since the last one; its
+    /// token, once reported.
+    fn report(&self, cli: &mut Cli) -> Option<u64> {
         let token = WAKE_TOKENS.fetch_add(1, Ordering::Relaxed);
+        let (detail, notification) = cli.background.take_wake();
         self.wakes
             .send(ProviderWake {
                 driver: CLAUDE_AGENT.into(),
                 app_thread_id: self.route.app_thread_id.clone(),
                 native_thread_id: self.session.clone(),
                 token,
+                detail,
+                notification,
             })
             .ok()?;
         Some(token)
@@ -302,7 +306,7 @@ async fn read_idle(
                     cli.drop_buffered_wake();
                     reported = None;
                     if cli.buffered_lines().any(wake_boundary) {
-                        reported = reporter.report();
+                        reported = reporter.report(&mut cli);
                     }
                 }
                 Some(Control::Retire(_)) => {}
@@ -310,9 +314,12 @@ async fn read_idle(
             line = cli.read_line(), if open => match line {
                 Some(line) => {
                     let boundary = wake_boundary(&line);
+                    if let Ok(message) = serde_json::from_str::<Value>(&line) {
+                        cli.background.observe_idle(&message);
+                    }
                     cli.buffer_line(line);
                     if boundary && reported.is_none() {
-                        reported = reporter.report();
+                        reported = reporter.report(&mut cli);
                     }
                 }
                 None => open = false,

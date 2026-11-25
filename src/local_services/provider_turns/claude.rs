@@ -816,6 +816,7 @@ impl<'a> Attempt<'a> {
     }
 
     async fn handle(&mut self, message: Value) -> Option<Outcome> {
+        self.cli.background.observe_turn(&message);
         let kind = message["type"].as_str().unwrap_or_default();
         if kind != "control_response" {
             self.answered = true;

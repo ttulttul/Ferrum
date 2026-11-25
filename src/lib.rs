@@ -138,6 +138,8 @@ pub mod worktree_setup;
 pub use contracts::{http_known, rpc_known, HTTP_CONTRACTS, RPC_CONTRACTS};
 
 pub const PROTOCOL_VERSION: u32 = 2;
+#[cfg(feature = "native")]
+mod background_work;
 pub mod event_log;
 pub mod persistence;
 pub mod platform;
