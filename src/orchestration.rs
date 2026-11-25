@@ -860,7 +860,22 @@ async fn start_run<H: CommandHost>(
             }
         }
     }
-    if queued || deferred {
+    if deferred {
+        return Ok(seq);
+    }
+    if queued {
+        // The run it queued behind may have ended after the queue was chosen
+        // and before the run was recorded queued, when that run's end found
+        // nothing queued to start: start it now, as the reference's run end
+        // would have (`startNextQueuedRun`). A run still live keeps it queued.
+        let after_end = CommandReceipt {
+            command_id: format!("{}:after-run-end", receipt.command_id),
+            thread_id: receipt.thread_id.clone(),
+            command_type: receipt.command_type.clone(),
+        };
+        if let Err(error) = start_next_queued(&state, &after_end, thread_id).await {
+            tracing::debug!(%error, thread_id, "a queued run's start went to its run end");
+        }
         return Ok(seq);
     }
     let (tx, rx) = oneshot::channel();
@@ -3800,5 +3815,171 @@ mod detach_tests {
             detach_reason("thread.metadata.update", &json!({"title": "T"}), &codex),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod queue_race_tests {
+    use super::*;
+
+    /// A command host whose started runs record their launch and do nothing
+    /// else: a run's end is committed by the test.
+    struct Host {
+        control: crate::control_state::ControlState,
+        lock: Mutex<()>,
+        cancellations: Mutex<HashMap<Uuid, oneshot::Sender<()>>>,
+        workspace: crate::workspace::RemoteWorkspace,
+        launched: std::sync::Mutex<Vec<Uuid>>,
+    }
+
+    impl std::ops::Deref for Host {
+        type Target = crate::control_state::ControlState;
+        fn deref(&self) -> &Self::Target {
+            &self.control
+        }
+    }
+
+    impl CommandHost for Host {
+        fn mutation_lock(&self) -> &Mutex<()> {
+            &self.lock
+        }
+        fn policy_summary(&self) -> Option<&Value> {
+            None
+        }
+        fn runtime_denial(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn provider_denial(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn effective_settings(&self) -> anyhow::Result<Value> {
+            Ok(json!({}))
+        }
+        fn workspace(&self) -> &dyn crate::workspace::Workspace {
+            &self.workspace
+        }
+        fn cancellations(&self) -> &Mutex<HashMap<Uuid, oneshot::Sender<()>>> {
+            &self.cancellations
+        }
+        fn launch_run(self: Arc<Self>, run: Run, _: String, _: String, _: oneshot::Receiver<()>) {
+            self.launched.lock().unwrap().push(run.id);
+        }
+        fn close_guest_thread(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn resolve_guest_message(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn host() -> Arc<Host> {
+        let documents = Arc::new(crate::persistence::MemoryStore::new());
+        let dir = std::path::Path::new("/state");
+        let auth = crate::auth_service::AuthService::with_bootstrap("secret")
+            .open_in(documents.clone(), dir)
+            .unwrap();
+        let control = crate::control_state::ControlState::open(
+            auth,
+            documents,
+            Box::new(crate::event_log::MemoryLog::default()),
+            dir,
+        )
+        .unwrap();
+        Arc::new(Host {
+            control,
+            lock: Default::default(),
+            cancellations: Default::default(),
+            workspace: Default::default(),
+            launched: Default::default(),
+        })
+    }
+
+    async fn dispatch(host: &Arc<Host>, command: Value) {
+        if let Err(error) = dispatch_orchestration_command(host.clone(), command.clone()).await {
+            panic!("{} failed: {error}", command["type"]);
+        }
+    }
+
+    fn statuses(host: &Host, thread: &str) -> Vec<String> {
+        host.store_now().threads[thread]
+            .runs
+            .iter()
+            .map(|run| run.status.clone())
+            .collect()
+    }
+
+    /// A message queued behind a live run whose end came before the queued
+    /// run was recorded (so that end found nothing to start) still starts:
+    /// a delegated task's delivery queued while its parent's turn ended
+    /// otherwise stayed queued for good.
+    #[tokio::test]
+    async fn a_run_queued_as_the_active_one_ended_still_starts() {
+        let host = host();
+        let folder = tempfile::tempdir().unwrap();
+        host.commit(Event::ProjectCreated(crate::store::Project {
+            id: "project:q".into(),
+            name: "Q".into(),
+            path: folder.path().display().to_string(),
+            created_at: 1,
+        }))
+        .await
+        .unwrap();
+        dispatch(
+            &host,
+            json!({"type": "thread.create", "commandId": "c:create", "threadId": "thread:q",
+                "projectId": "project:q", "title": "Q",
+                "modelSelection": {"instanceId": "codex", "model": "fixture"},
+                "runtimeMode": "full-access", "interactionMode": "default", "branch": null,
+                "worktreePath": null, "createdBy": "user", "creationSource": "web"}),
+        )
+        .await;
+        dispatch(
+            &host,
+            json!({"type": "message.dispatch", "commandId": "c:first", "threadId": "thread:q",
+                "messageId": "message:first", "text": "First", "attachments": [],
+                "createdBy": "user", "creationSource": "web",
+                "dispatchMode": {"type": "start_immediately"}}),
+        )
+        .await;
+        assert_eq!(host.launched.lock().unwrap().len(), 1);
+        let first = host.store_now().threads["thread:q"].runs[0].id;
+        // The delivery chose to queue while the first run was live; that run
+        // then ended, and its end found nothing queued.
+        host.commit(Event::RunFinished {
+            run_id: first,
+            thread_id: "thread:q".into(),
+            status: "completed".into(),
+            error: None,
+        })
+        .await
+        .unwrap();
+        let receipt = CommandReceipt {
+            command_id: "c:delivery".into(),
+            thread_id: "thread:q".into(),
+            command_type: "message.dispatch".into(),
+        };
+        start_run(
+            host.clone(),
+            &receipt,
+            "thread:q",
+            "Background task completed.".into(),
+            &json!("message:delivery"),
+            true,
+            None,
+            Some("server".into()),
+            None,
+            false,
+            None,
+            None,
+            false,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        // The queued run started rather than waiting for a run end that
+        // already happened.
+        assert_eq!(host.launched.lock().unwrap().len(), 2);
+        assert_ne!(statuses(&host, "thread:q")[1], "queued");
     }
 }
