@@ -177,6 +177,9 @@ pub(crate) struct ProviderStatus {
     claude_caps: Mutex<HashMap<String, claude::CapabilitiesCache>>,
     codex_skills: codex::SkillsHelper,
     reset_credits: reset_credits::Coordinator,
+    /// What each Antigravity instance's sessions reported (its account and
+    /// models), which its checks keep.
+    antigravity: Mutex<HashMap<String, antigravity::Session>>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     changes: tokio::sync::broadcast::Sender<()>,
     disabled: std::sync::atomic::AtomicBool,
@@ -205,6 +208,7 @@ impl ProviderStatus {
             claude_caps: Mutex::default(),
             codex_skills: Default::default(),
             reset_credits: Default::default(),
+            antigravity: Mutex::default(),
             locks: Mutex::default(),
             changes: tokio::sync::broadcast::channel(16).0,
             // Off until the server binary turns them on, so a test that
@@ -308,6 +312,22 @@ impl ProviderStatus {
                 from_cache: true,
             },
         );
+    }
+
+    /// What `instance_id`'s Antigravity sessions reported under the
+    /// settings `fingerprint` (a provider the reference rebuilt for new
+    /// settings starts without it).
+    fn antigravity_session(
+        &self,
+        instance_id: &str,
+        fingerprint: &Value,
+    ) -> Option<antigravity::Session> {
+        self.antigravity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(instance_id)
+            .filter(|session| session.fingerprint == *fingerprint)
+            .cloned()
     }
 
     fn lock_for(&self, instance_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -470,6 +490,7 @@ async fn check_instance(
         "kiro" => kiro::check(&instance.config, &env).await,
         "grok" => grok::check(&instance.config, &env).await,
         "antigravity" => {
+            let session = service.antigravity_session(&instance.id, &instance.fingerprint);
             antigravity::check(
                 &instance.config,
                 &env,
@@ -477,6 +498,7 @@ async fn check_instance(
                 &service.base_dir,
                 &service.state_dir,
                 &manifest,
+                session.as_ref(),
             )
             .await
         }
@@ -608,6 +630,91 @@ pub(crate) async fn refresh(state: &Arc<AppState>, only: Option<&str>) {
         })
         .collect::<Vec<_>>();
     futures_join_all(checks).await;
+}
+
+/// A model refresh's failure (`ProviderSetupError` with the operation
+/// `refresh-models`): the instance and why.
+pub(crate) struct RefreshModelsError {
+    pub(crate) instance_id: String,
+    pub(crate) detail: String,
+}
+
+/// `server.refreshProviders`' model refresh (`refreshModels`): each enabled,
+/// installed Antigravity instance (or only `only`) reads its models from a
+/// session of its own, then is checked again. Other drivers' checks already
+/// list their models. The first failure ends the refresh.
+pub(crate) async fn refresh_models(
+    state: &Arc<AppState>,
+    only: Option<&str>,
+) -> Result<(), RefreshModelsError> {
+    let service = &state.provider_status;
+    if service.is_disabled() {
+        return Ok(());
+    }
+    let Ok(settings) = state.settings.internal() else {
+        return Ok(());
+    };
+    for instance in instances(state, &settings) {
+        if instance.driver != "antigravity" || only.is_some_and(|id| id != instance.id) {
+            continue;
+        }
+        let Some(row) = service.published_row(&instance.id, &instance.fingerprint) else {
+            continue;
+        };
+        if row["enabled"] != true || row["installed"] != true {
+            continue;
+        }
+        let manifest = state.model_manifest.current();
+        let env = base_env(&instance.environment);
+        let refreshed = antigravity_text::refresh_catalog(
+            &service.base_dir,
+            &service.state_dir,
+            &manifest,
+            &instance.id,
+            &instance.config,
+            &env,
+        )
+        .await;
+        let mut session = service
+            .antigravity_session(&instance.id, &instance.fingerprint)
+            .unwrap_or_else(|| antigravity::Session {
+                fingerprint: instance.fingerprint.clone(),
+                ..Default::default()
+            });
+        let failure = match refreshed {
+            Ok(catalog) => {
+                session.started(&catalog.initialized, &catalog.setup);
+                for options in &catalog.updates {
+                    session.config_options_updated(options);
+                }
+                None
+            }
+            // `onAuthRequired`: the account is signed out.
+            Err(antigravity_text::CatalogFailure::SignIn) => {
+                session.sign_in_required();
+                Some("Sign in to Antigravity in provider settings before refreshing models.".into())
+            }
+            Err(antigravity_text::CatalogFailure::Detail(detail)) => {
+                return Err(RefreshModelsError {
+                    instance_id: instance.id,
+                    detail,
+                })
+            }
+        };
+        service
+            .antigravity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(instance.id.clone(), session);
+        check_instance(state, &instance, Reason::Apply).await;
+        if let Some(detail) = failure {
+            return Err(RefreshModelsError {
+                instance_id: instance.id,
+                detail,
+            });
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -566,6 +566,37 @@ def agy_managed(version="1.6.2", **record):
     return {"files": files, "executables": [f"{directory}/agy_acp_server.par", f"{directory}/localharness_external"]}
 
 
+AGY_SESSION = "0b6a3c1e-5d2f-4a8b-9c7d-1e2f3a4b5c6d"
+AGY_THINKING = {"id": "thinking_level", "name": "Thinking Level", "category": "thought_level", "type": "select",
+                "currentValue": "high", "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]}
+AGY_CONFIG_OPTIONS = [
+    {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "gemini-3.8-flash",
+     "options": [
+         {"group": "flash", "name": "Flash", "options": [
+             {"value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash"},
+             {"value": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash (High)"},
+             {"value": "gemini-3.8-flash-preview", "name": "Gemini 3.8 Flash"}]},
+         {"group": "older", "name": "Older", "options": [
+             {"value": "gemini-3.7-flash-high", "name": "Gemini 3.7 Flash (High)"},
+             {"value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash"}]}]},
+    AGY_THINKING,
+    {"id": "mode", "name": "Session Mode", "category": "mode", "type": "select", "currentValue": "default",
+     "options": [{"value": "default", "name": "Default"}, {"value": "auto", "name": "Auto"}]}]
+
+
+def agy_acp_spec(**entry):
+    """An agy CLI on PATH serving ACP, whose sessions list models in a `model` option."""
+    return {"commands": [
+        {"args": ["--version"], "stdout": "agy 1.6.2", "stderr": "", "exit": 0},
+        {"prefix": ["acp"], "rpc": {
+            "initialize": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True},
+                           "authMethods": [{"id": "oauth-personal", "name": "Google"}],
+                           "agentInfo": {"name": "agy", "version": "1.6.2"}},
+            "authenticate": {},
+            "session/new": {"sessionId": AGY_SESSION, "configOptions": AGY_CONFIG_OPTIONS},
+            "session/set_config_option": {"configOptions": AGY_CONFIG_OPTIONS}}, **entry}]}
+
+
 def agy(name, settings=None, **extra):
     return {"name": f"antigravity {name}", "instance": "antigravity", "settings": settings or enabled("antigravity"),
             "fakes": {}, **extra}
@@ -600,6 +631,15 @@ SCENARIOS += [
             json.dumps({"hooks": {}})}, executables=["fake-bin/agy"]),
     agy("Gemini Enterprise without a project", enabled("antigravity", authMethod="oauth-business"),
         files={"fake-bin/agy": AGY_RUNTIME}, executables=["fake-bin/agy"]),
+    # A client's model refresh (`refreshModels`) opens a session of the agy CLI and lists its models:
+    # the `model` option's groups flattened, a repeated name labelled with its id, the catalog's
+    # default and legacy flags, and the thinking levels each model reported when selected.
+    agy("model refresh", fakes={"agy": {"spec": agy_acp_spec()}}, refresh={},
+        refreshPayload={"refreshModels": True}),
+    # A session that asks to sign in signs the account out: no models, and the refresh fails.
+    agy("model refresh needs sign-in", fakes={"agy": {"spec": agy_acp_spec(
+        rpcErrors={"session/new": {"code": -32000, "message": "Authentication required"}})}},
+        refresh={}, refreshPayload={"refreshModels": True}),
 ]
 
 
@@ -1371,9 +1411,16 @@ def run_server(args, command, root, scenario, temporary):
             else:
                 shutil.copyfile(FIXTURES / scenario["refresh"], fixture)
             ws = stack.enter_context(contextlib.closing(config_socket(url, cookie)))
-            refreshed = rpc(url, cookie, "server.refreshProviders", {})
-            outcome["refresh"] = strip(without_enrichment(row_of(refreshed["providers"], scenario["instance"])),
-                                       temporary)
+            try:
+                refreshed = rpc(url, cookie, "server.refreshProviders", scenario.get("refreshPayload", {}))
+                outcome["refresh"] = strip(without_enrichment(row_of(refreshed["providers"], scenario["instance"])),
+                                           temporary)
+            except RuntimeError as error:
+                # A refresh that fails (a model refresh that needs a sign-in) is compared by its failure.
+                outcome["refresh"] = strip(str(error), temporary)
+                # And by the row it leaves (a signed-out account has no models).
+                outcome["afterRefresh"] = strip(wait_checked(url, cookie, scenario["instance"], 20, False,
+                                                             temporary), temporary)
             outcome["event"] = strip(next_provider_event(ws, scenario["instance"]), temporary)
     launches = Path(str(log) + ".args")
     # `codex app-server --help` is the reference's managed Codex runtime deciding whether a
@@ -1418,7 +1465,7 @@ def differences(left, right, path="$"):
 def compare(outcomes):
     problems = {}
     original, rust = outcomes["original"], outcomes["rust"]
-    for check in ("row", "refresh", "event", "interval", "redeem", "afterRedeem", "folder", "folderAgain"):
+    for check in ("row", "refresh", "afterRefresh", "event", "interval", "redeem", "afterRedeem", "folder", "folderAgain"):
         if original.get(check) != rust.get(check):
             problems[check] = [f"original {json.dumps(original.get(check), sort_keys=True)}",
                                f"rust     {json.dumps(rust.get(check), sort_keys=True)}",
