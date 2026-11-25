@@ -728,6 +728,45 @@ pub(crate) async fn refresh_models(
     Ok(())
 }
 
+/// `onSessionStarted`: an Antigravity session a turn opened reported its
+/// account, version, runtime modes and models (`started`: `initialize` and
+/// `setup`), which the instance's status keeps, as after a model refresh.
+pub(crate) async fn session_started(state: &Arc<AppState>, instance_id: &str, started: &Value) {
+    let service = &state.provider_status;
+    if service.is_disabled() {
+        return;
+    }
+    let Ok(settings) = state.settings.internal() else {
+        return;
+    };
+    let Some(instance) = instances(state, &settings)
+        .into_iter()
+        .find(|instance| instance.id == instance_id && instance.driver == "antigravity")
+    else {
+        return;
+    };
+    if !instance.enabled {
+        return;
+    }
+    let mut session = service
+        .antigravity_session(&instance.id, &instance.fingerprint)
+        .unwrap_or_else(|| antigravity::Session {
+            fingerprint: instance.fingerprint.clone(),
+            ..Default::default()
+        });
+    session.started(&started["initialize"], &started["setup"]);
+    service
+        .antigravity
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(instance.id.clone(), session);
+    check_instance(state, &instance, Reason::Apply).await;
+    // The session's folder gets its snapshot (skills and commands).
+    if let Some(cwd) = started["cwd"].as_str().filter(|cwd| !cwd.is_empty()) {
+        refresh_workspace_snapshot(state, &instance.id, cwd, false).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workspace snapshots
 

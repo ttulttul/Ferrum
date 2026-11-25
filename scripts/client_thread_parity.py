@@ -459,6 +459,10 @@ PROVIDER_SCENARIOS = [
      "runtimeMode": "auto-accept-edits", "respond": {"decision": "accept"}},
     {"name": "antigravity approval read-only command", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_command_ls.json",
      "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
+    # A turn's session gives the instance its models, runtime modes and version
+    # (`onSessionStarted`), so the instance's status lists them after the turn.
+    {"name": "antigravity models from a turn", "instance": "antigravity", "enable": "antigravity",
+     "model": "antigravity-default", "scenario": "agy_turn.json", "status": True},
     {"name": "antigravity approval", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_approval.json",
      "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
     {"name": "antigravity approval declined", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_approval.json",

@@ -2479,6 +2479,7 @@ mod tests {
                 native_title: None,
                 native_updated_at: None,
                 context_usage: None,
+                session_started: None,
             },
             10,
         );

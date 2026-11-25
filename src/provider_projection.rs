@@ -2371,6 +2371,7 @@ mod tests {
                 native_title: None,
                 native_updated_at: None,
                 context_usage: None,
+                session_started: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
@@ -2488,6 +2489,7 @@ mod tests {
                 native_title: None,
                 native_updated_at: None,
                 context_usage: None,
+                session_started: None,
             },
             item("msg", "assistant_message", "running", Some("")),
             item("patch", "file_change", "running", None),
@@ -2558,6 +2560,7 @@ mod tests {
             native_title: None,
             native_updated_at: None,
             context_usage: None,
+            session_started: None,
         };
         let monitor = json!({"taskId": "m1", "kind": "monitor", "nativeItemId": "toolu_m1",
             "command": "tail -f build.log", "awaited": true});
@@ -2622,6 +2625,7 @@ mod tests {
                 native_title: None,
                 native_updated_at: None,
                 context_usage: None,
+                session_started: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn".into()),
@@ -2865,6 +2869,7 @@ mod tests {
                 native_title: None,
                 native_updated_at: None,
                 context_usage: None,
+                session_started: None,
             },
             2,
         );
@@ -2921,13 +2926,14 @@ mod tests {
                 native_thread_id: "ses_1".into(),
                 resumed: false,
                 model: None,
-                opencode2: Some(crate::workspace::provider::OpenCode2Thread {
+                opencode2: Some(Box::new(crate::workspace::provider::OpenCode2Thread {
                     version: "2.2.6".into(),
                     model_selection: json!({"instanceId": "opencode", "model": "a/m", "options": []}),
-                }),
+                })),
                 native_title: None,
                 native_updated_at: None,
                 context_usage: None,
+                session_started: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("ses_1:attempt:a".into()),

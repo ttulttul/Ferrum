@@ -390,5 +390,8 @@
   },
   "antigravity approval read-only command": {
     "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in Antigravity's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes Antigravity's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates. During an approval it also sends the permission's runtime-request.updated before its turn item, and Rust sends the requested command's node update after the request's records."
+  },
+  "antigravity models from a turn": {
+    "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in Antigravity's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes Antigravity's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
   }
 }

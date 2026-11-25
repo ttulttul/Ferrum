@@ -405,7 +405,7 @@ pub enum ProviderEvent {
         /// skippable: absent for every other driver and for OpenCode 1.x, and
         /// a reader that predates it ignores it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        opencode2: Option<OpenCode2Thread>,
+        opencode2: Option<Box<OpenCode2Thread>>,
         /// The title the agent gave its session (an ACP `session_info_update`
         /// title: Kiro's focus), the provider thread's `nativeMetadata.title`.
         /// Additive and skippable: absent until an agent names its session,
@@ -423,6 +423,14 @@ pub enum ProviderEvent {
         /// reader that predates it ignores it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_usage: Option<Box<ContextUsage>>,
+        /// What an Antigravity session reported as it started (`{instanceId,
+        /// initialize: {agentInfo}, setup, cwd}`: the session's setup result holds
+        /// its models, config options and modes), which the instance's provider status takes as
+        /// the reference's `onSessionStarted` does. Sent once per session.
+        /// Additive and skippable: absent for every other driver and on later
+        /// turns, and a reader that predates it ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_started: Option<Box<Value>>,
     },
     /// The turn started running in the CLI.
     #[serde(rename = "provider_turn.updated", rename_all = "camelCase")]

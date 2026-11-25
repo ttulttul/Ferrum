@@ -4215,6 +4215,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
                     native_title: None,
                     native_updated_at: None,
                     context_usage: None,
+                    session_started: None,
                 }),
             );
             agentd.emit(
@@ -4297,6 +4298,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             native_title: None,
             native_updated_at: None,
             context_usage: None,
+            session_started: None,
         });
         emit(ProviderEvent::ProviderTurn {
             native_turn_id: Some("turn_1".into()),
@@ -4549,6 +4551,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             native_title: None,
             native_updated_at: None,
             context_usage: None,
+            session_started: None,
         });
         emit(ProviderEvent::TurnItem {
             item: ProviderItem::new("rs_1", "reasoning", "completed").with("text", ""),

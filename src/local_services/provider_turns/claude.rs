@@ -430,6 +430,7 @@ impl<'a> Attempt<'a> {
                 native_title: None,
                 native_updated_at: None,
                 context_usage: None,
+                session_started: None,
             });
         }
         // The reference marks only a turn that resumes an interrupted one
@@ -915,6 +916,7 @@ impl<'a> Attempt<'a> {
                     native_title: None,
                     native_updated_at: None,
                     context_usage: None,
+                    session_started: None,
                 };
                 // A new session keeps the id it was given until the turn
                 // ends, as the reference's thread does; then it names the
