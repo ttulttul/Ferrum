@@ -54,10 +54,23 @@ pub(super) async fn run(
             }
         }
     }
+    // A fork's first turn continues the source's session under a new id when
+    // Claude Code has its conversation (the reference's native fork), else
+    // starts fresh with the source's history (its portable fallback).
+    let mut fork = false;
+    if let Some(source) = provider.fork_session.clone().filter(|_| resume.is_none()) {
+        if transcript_state(&spec, &provider, &source).await == Transcript::Conversation {
+            resume = Some(source);
+            fork = true;
+        } else if let Some(prompt) = provider.recovery_prompt.clone() {
+            spec.prompt = prompt;
+        }
+    }
     let attempt = Attempt::run(
         &spec,
         &provider,
         resume.as_deref(),
+        fork,
         &mut cancel,
         &mut responses,
         &sink,
@@ -270,10 +283,12 @@ struct StreamUsage {
 }
 
 impl<'a> Attempt<'a> {
+    #[allow(clippy::too_many_arguments)]
     async fn run(
         spec: &TurnSpec,
         provider: &ProviderTurn,
         resume: Option<&'a str>,
+        fork: bool,
         cancel: &mut Option<oneshot::Receiver<()>>,
         responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
         sink: &'a Sink,
@@ -309,6 +324,9 @@ impl<'a> Attempt<'a> {
         args.push("--permission-prompt-tool=stdio".into());
         if let Some(resume) = resume {
             args.push(format!("--resume={resume}"));
+            if fork {
+                args.push("--fork-session".into());
+            }
         }
         // T3's own tools run without asking, as the reference allows them.
         if provider.mcp.is_some() {
@@ -326,7 +344,7 @@ impl<'a> Attempt<'a> {
         }
         let mut session = resume.map(str::to_owned);
         let mut new_session = None;
-        if resume.is_none() {
+        if resume.is_none() || fork {
             // The reference picks a new session's id itself, so the thread
             // names its session even if the CLI never starts.
             let id = uuid::Uuid::new_v4().to_string();
@@ -384,7 +402,7 @@ impl<'a> Attempt<'a> {
             "mcp": provider.mcp.as_ref().map(|mcp| (&mcp.url, &mcp.authorization)),
         })
         .to_string();
-        let (running, switched_from) = match resume {
+        let (running, switched_from) = match resume.filter(|_| !fork) {
             Some(id) => match sessions.take(id, &launch, &selection).await {
                 Some((cli, from)) => (Some(cli), from),
                 None => (None, None),
@@ -400,10 +418,11 @@ impl<'a> Attempt<'a> {
                 .position(|a| a == "--thinking-display")
                 .unwrap_or(args.len());
             args.insert(at, flag.clone());
+            // A fork continues its source's conversation: resumed.
             sink.send(ProviderEvent::ProviderThread {
                 driver: CLAUDE_AGENT.into(),
                 native_thread_id: id.clone(),
-                resumed: false,
+                resumed: fork,
                 model: Some(provider.model.clone()).filter(|model| !model.trim().is_empty()),
             });
         }

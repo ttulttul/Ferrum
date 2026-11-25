@@ -234,6 +234,11 @@ pub struct Thread {
     /// fallback's "Recovered context"), each ahead of its run's prompt.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub handoff_items: Vec<serde_json::Value>,
+    /// A fork's view of its source's conversation up to the fork
+    /// (`visibleTurnItems` rows with `visibility` inherited, then the
+    /// synthetic fork marker), taken when it was forked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_items: Vec<serde_json::Value>,
     /// What provider turns left behind; rebuilt from the log.
     #[serde(skip)]
     pub(crate) provider: Box<crate::provider_state::ProviderState>,
@@ -577,7 +582,9 @@ impl Store {
                 turn_item,
             } => {
                 if let Some(t) = self.threads.get_mut(thread_id) {
-                    upsert_by_id(&mut t.context_handoffs, handoff);
+                    if !handoff.is_null() {
+                        upsert_by_id(&mut t.context_handoffs, handoff);
+                    }
                     if let Some(transfer) = transfer {
                         upsert_by_id(&mut t.context_transfers, transfer);
                     }
@@ -1052,6 +1059,7 @@ mod tests {
                 context_handoffs: Vec::new(),
                 context_transfers: Vec::new(),
                 handoff_items: Vec::new(),
+                inherited_items: Vec::new(),
                 provider: Box::default(),
                 stored: None,
             },

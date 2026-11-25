@@ -140,6 +140,13 @@ pub struct ProviderTurn {
     /// wire bytes; without it the fresh session gets the plain prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_prompt: Option<String>,
+    /// For a fork's first turn: the source's native session to fork, which
+    /// the CLI continues under a new id when it can. When it cannot, the turn
+    /// starts a fresh session with [`ProviderTurn::recovery_prompt`] (the
+    /// source's history). Optional and omitted when unset, so an agentd or
+    /// control plane that predates it sees the same wire bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_session: Option<String>,
     /// The native turn id a Pi turn is named by before Pi names it
     /// (`<provider thread>:attempt:<attempt>`), which its items' ids extend.
     /// Optional and omitted when empty, so an agentd or control plane that

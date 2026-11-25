@@ -837,6 +837,7 @@ mod tests {
             context_handoffs: Vec::new(),
             context_transfers: Vec::new(),
             handoff_items: Vec::new(),
+            inherited_items: Vec::new(),
             provider: Default::default(),
             stored: None,
         }

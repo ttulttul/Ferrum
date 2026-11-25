@@ -77,6 +77,7 @@ mod scratch;
 mod server_config;
 mod settings;
 pub mod subscription;
+mod thread_fork;
 mod wire_json;
 #[cfg(feature = "native")]
 pub use settings::policy::ManagedPolicyFileError;

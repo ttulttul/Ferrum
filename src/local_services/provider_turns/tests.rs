@@ -1602,3 +1602,52 @@ async fn an_idle_claude_wake_is_reported_and_its_continuation_shows_it() {
     assert_eq!(prompts, 1, "only the first turn's prompt reached the CLI");
     processes.shutdown(std::time::Duration::from_secs(1)).await;
 }
+
+#[tokio::test]
+async fn claude_fork_continues_its_source_session_under_a_new_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("claude-home");
+    let project = home.join("projects").join("-workspace");
+    std::fs::create_dir_all(&project).unwrap();
+    let source = format!("sess-source-{}", uuid::Uuid::new_v4());
+    std::fs::write(
+        project.join(format!("{source}.jsonl")),
+        "{\"type\":\"user\",\"message\":{}}\n",
+    )
+    .unwrap();
+    let fork = |name: &str, source: &str| {
+        let log = dir.path().join(name);
+        let mut spec = fake_spec(CLAUDE_AGENT, "claude_turn.json", &log, None);
+        spec.env
+            .push(("CLAUDE_CONFIG_DIR".into(), home.display().to_string()));
+        let provider = spec.provider.as_mut().unwrap();
+        provider.fork_session = Some(source.to_owned());
+        provider.recovery_prompt = Some("History\n\nHello".into());
+        (spec, log)
+    };
+    // Its conversation is saved: the CLI forks it.
+    let (spec, log) = fork("native.jsonl", &source);
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    let (session, resumed) = native_thread(&events);
+    assert!(resumed && session != source);
+    let args = std::fs::read_to_string(dir.path().join("native.jsonl.args")).unwrap();
+    assert!(
+        args.contains(&format!("--resume={source} --fork-session")),
+        "{args}"
+    );
+    assert!(args.contains(&format!("--session-id={session}")), "{args}");
+    assert_eq!(first_prompt(&log), json!("Say hello"));
+    // None is saved: a fresh session takes the source's history.
+    let (spec, log) = fork("portable.jsonl", "sess-unsaved");
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    let (_, resumed) = native_thread(&events);
+    assert!(!resumed);
+    let args = std::fs::read_to_string(dir.path().join("portable.jsonl.args")).unwrap();
+    assert!(
+        !args.contains("--resume") && !args.contains("--fork-session"),
+        "{args}"
+    );
+    assert_eq!(first_prompt(&log), json!("History\n\nHello"));
+}
