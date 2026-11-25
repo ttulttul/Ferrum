@@ -530,6 +530,60 @@ impl Thread {
                 ));
             }
         }
+        // A run that waited for its workspace keeps the preparation's item,
+        // completed, once it is released (`ThreadLaunchService`'s "Workspace
+        // ready").
+        for (index, run) in self.runs.iter().enumerate() {
+            let prepared =
+                !self.row["runExtras"][run.wire_id().as_str()]["workspacePreparation"].is_null();
+            if !prepared || matches!(run.status.as_str(), "preparing" | "queued") {
+                continue;
+            }
+            // A preparation that failed or was stopped never released the run.
+            if !self.provider.runs.contains_key(&run.id) && run.status != "running" {
+                continue;
+            }
+            let Some(ids) = self
+                .provider_run_ids(run)
+                .or_else(|| self.starting_run_ids(run))
+            else {
+                continue;
+            };
+            let at = iso(run.started_at);
+            let native = format!("workspace-preparation:{}", ids.run);
+            // It comes before what the run's provider did.
+            let first = out
+                .items
+                .iter()
+                .position(|(run_index, _)| *run_index == index)
+                .unwrap_or(out.items.len());
+            out.items.insert(
+                first,
+                (
+                    index,
+                    json!({
+                        "id": item_id("turn-item", &ids.driver, &native),
+                        "threadId": self.id,
+                        "runId": ids.run,
+                        "nodeId": ids.root_node,
+                        "providerThreadId": ids.provider_thread,
+                        "providerTurnId": null,
+                        "nativeItemRef": null,
+                        "parentItemId": null,
+                        "ordinal": 0,
+                        "status": "completed",
+                        "title": "Workspace ready",
+                        "startedAt": at,
+                        "completedAt": at,
+                        "updatedAt": at,
+                        "type": "command_execution",
+                        "input": "Preparing workspace",
+                        "output": "Workspace preparation completed.",
+                        "exitCode": 0
+                    }),
+                ),
+            );
+        }
         // Attempts in their runs' order, as the reference reads them.
         let position = |attempt: &Value| {
             self.runs
