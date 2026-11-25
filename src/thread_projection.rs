@@ -319,6 +319,12 @@ impl Thread {
                     "checkpointId": null,
                     "contextHandoffId": null
                 });
+                // A merge-back's delta is the run's handoff.
+                if let Some(handoff) = self.context_handoffs.iter().find(|handoff| {
+                    handoff["targetRunId"] == out["id"] && handoff["strategy"] == "fork_delta_summary"
+                }) {
+                    out["contextHandoffId"] = handoff["id"].clone();
+                }
                 let turn_count = index as u64 + 1;
                 // A completed turn's checkpoint shows on its run once the run
                 // completes, as the reference's capture completes it.

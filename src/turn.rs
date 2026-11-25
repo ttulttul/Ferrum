@@ -93,6 +93,29 @@ pub(crate) async fn launch<H: TurnHost>(
     // A turn that resumes a native session also prepares its resume fallback
     // (`prepareRecoveryHandoff`): the thread's history for a fresh session,
     // should that one not resume.
+    // A fork merged back hands this run what the fork did: recorded first, so
+    // its handoff is delivered with the prompt like any pending one.
+    if let Some(provider) = spec.provider.as_ref() {
+        let merge = {
+            let store = host.store.read().await;
+            store.threads.get(&run.thread_id).and_then(|thread| {
+                let transfer = thread.context_transfers.iter().find(|transfer| {
+                    transfer["type"] == "merge_back" && transfer["status"] == "pending"
+                })?;
+                let source = store.threads.get(transfer["sourceThreadId"].as_str()?)?;
+                crate::context_handoff::prepare_merge_back(
+                    thread,
+                    source,
+                    &run,
+                    provider,
+                    crate::now(),
+                )
+            })
+        };
+        if let Some(merge) = merge {
+            commit_recovery(&*host, &run, &merge).await;
+        }
+    }
     let (mut prepared_handoff, mut recovery) = match spec.provider.as_ref() {
         Some(provider) => {
             let store = host.store.read().await;
