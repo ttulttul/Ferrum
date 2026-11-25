@@ -139,8 +139,8 @@ jobs:
             ${{ runner.temp }}/perf.json
             ${{ runner.temp }}/perf.md
       # Results go to the perf-data branch, one file per commit, with a README.md of the latest
-      # numbers and the trend. Nothing is committed to main, and a push to perf-data triggers no
-      # workflow.
+      # numbers and the trend. This step commits nothing to main (the next step's pull request
+      # brings only docs/performance.md there), and a push to perf-data triggers no workflow.
       - name: Record the results on perf-data
         if: github.ref == 'refs/heads/main'
         env:

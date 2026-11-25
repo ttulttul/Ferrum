@@ -94,7 +94,7 @@ Every measurement runs several times: 5 startups, 3 latency servers, and 3 throu
 
 ### Where Rust is slower
 
-`server.getConfig` takes longer in Rust (see the latency rows). On every call Rust runs `git rev-parse` to decide whether to offer a scratch folder, and looks for editors and remote targets again (`src/config_rpc.rs`). The reference caches its answer to the git check once it has one (`ManagedProjectFolders.ts`). Caching it in Rust should close most of the gap; that is left for a separate change.
+`server.getConfig` used to take longer in Rust: on every call it ran `git rev-parse` to decide whether to offer a scratch folder, and looked for editors and remote targets again. It now keeps those answers as the reference does: editors and remote targets for a minute, served stale while a refresh runs (`makeStaleWhileRevalidate`), and the git check for good once git has answered (`ManagedProjectFolders.ts`). On one machine, Rust's p50 went from 15.8 ms to 1.78 ms, against the reference's 2.6 ms.
 
 Rust also uses more CPU while idle: about 60 ms in 10 seconds against the reference's 10 ms (the measurement's resolution is 10 ms). That is still under 1% of one core, but it is a difference worth finding the cause of.
 
