@@ -225,6 +225,13 @@ jobs:
           if ! gh pr merge "$pr" --repo "$REPOSITORY" --squash --delete-branch; then
             echo "::warning title=Performance::Could not merge pull request #$pr, which refreshes docs/performance.md."
           fi
+      # A streamed delta to a long thread is planned, written and sent to live subscribers from the
+      # records it changes (shared_store::Partial): its commit must stay under 6 ms (median of 200,
+      # on a thread of about 4.5 MB of turn items). It cost 87 ms when commits copied whole threads.
+      - name: Check the commit cost of a delta to a long thread
+        env:
+          T3CODE_COMMIT_COST_MAX_MS: "6"
+        run: cargo test --locked --release --lib commit_cost -- --ignored --nocapture
       # Idle CPU after start-up on a large database, with clients connected, must stay under 3% of
       # one core (perf_compare.py's `large` section). It fails the job after the results are kept.
       - name: Check idle CPU on a large database

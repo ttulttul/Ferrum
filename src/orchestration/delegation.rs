@@ -375,6 +375,7 @@ pub(super) async fn request<H: CommandHost>(
         inherited_items: Vec::new(),
         provider: Default::default(),
         stored: None,
+        revision: 0,
     };
     state.commit(Event::ThreadCreated(child)).await?;
     state

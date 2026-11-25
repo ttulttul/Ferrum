@@ -252,6 +252,11 @@ pub struct Thread {
     /// `stored_projection`.
     #[serde(skip)]
     pub(crate) stored: Option<crate::stored_projection::Stored>,
+    /// Counts the commits to this thread (`Store::apply_record`): live
+    /// subscribers tell what they have seen by it (`thread_events::token`),
+    /// instead of hashing the whole projection.
+    #[serde(skip)]
+    pub(crate) revision: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -533,6 +538,19 @@ impl Store {
             }
         }
         self.apply_at(&record.event, record.at);
+        // Every commit to a thread moves its revision on (live subscribers
+        // follow it, `thread_events::token`), except provider output, which
+        // is not part of the projection and which they skip. A plane rebuilt
+        // from its log replays these, so it reaches the same revisions.
+        if !matches!(record.event, Event::RunOutput { .. }) {
+            if let Some(thread) = record
+                .event
+                .thread_id()
+                .and_then(|id| self.threads.get_mut(id))
+            {
+                thread.revision += 1;
+            }
+        }
         if let Some(receipt) = &record.receipt {
             self.command_receipts.insert(
                 receipt.command_id.clone(),
@@ -1076,6 +1094,7 @@ mod tests {
                 inherited_items: Vec::new(),
                 provider: Box::default(),
                 stored: None,
+                revision: 0,
             },
         );
         store.apply_record(&ServerEvent {

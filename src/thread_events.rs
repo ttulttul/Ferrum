@@ -27,6 +27,12 @@ pub struct ThreadEvents {
 }
 
 /// A projection's digest, to tell whether a subscriber has seen it.
+/// What a live subscriber has seen of a thread: its revision
+/// (`Thread::revision`), which a plane rebuilt from its log reaches again.
+pub(crate) fn token(revision: u64) -> String {
+    format!("r{revision}")
+}
+
 pub fn digest(projection: &Value) -> String {
     // Hashed as it is written: a long thread's projection is tens of MB as text.
     struct Hashing(Sha256);

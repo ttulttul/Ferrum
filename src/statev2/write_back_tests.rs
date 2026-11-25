@@ -540,8 +540,11 @@ async fn writing_back_lazily_read_threads_never_deletes_or_rewrites_other_rows()
     step("delete", "thread:5", &["thread:5"], &[], &[]);
     assert!(!host.store_now().threads.contains_key("thread:5"));
 
-    // The shared-store plan of a change to a slim thread diffs the whole
-    // projection the database holds.
+    // The shared-store plan of a change to a slim thread is made from the
+    // records the database holds, never the slim ones: a small change from
+    // those records cut down to it (`shared_store::Partial`), each one the
+    // database's, and it writes exactly what diffing the whole projection
+    // writes, here the thread row and nothing else.
     assert!(partial(&host, "thread:8"));
     {
         let store = host.store_now();
@@ -557,17 +560,32 @@ async fn writing_back_lazily_read_threads_never_deletes_or_rewrites_other_rows()
         };
         let planned = crate::shared_store::plan(&store, &record, "2027-01-15T08:00:00.000Z");
         let whole = read::thread_projection(&conn, "thread:8").unwrap().unwrap();
-        same_records(
-            planned.threads[0].before.as_ref().unwrap(),
-            &whole,
-            "thread:8",
-        );
+        let before = planned.threads[0].before.as_ref().unwrap();
+        let after = &planned.threads[0].after;
+        for (key, records) in before.as_object().unwrap() {
+            let Some(records) = records.as_array() else {
+                continue;
+            };
+            for record in records {
+                let id = &record["id"];
+                let held = whole[key.as_str()]
+                    .as_array()
+                    .and_then(|all| all.iter().find(|r| &r["id"] == id));
+                // An instance's shared session is one row for all its threads.
+                if id.as_str().is_some_and(|id| id.ends_with(":shared")) {
+                    continue;
+                }
+                assert_eq!(held, Some(record), "{key} {id} is the database's");
+            }
+        }
         let mut expected = whole.clone();
         expected["thread"]["title"] = json!("Planned");
-        assert_eq!(planned.threads[0].after["nodes"], whole["nodes"]);
-        assert_eq!(planned.threads[0].after["turnItems"], whole["turnItems"]);
-        assert_eq!(planned.threads[0].after["messages"], whole["messages"]);
-        assert_eq!(planned.threads[0].after["thread"]["title"], "Planned");
+        assert_eq!(
+            crate::shared_store::write_effect(before, after).1,
+            crate::shared_store::write_effect(&whole, &expected).1,
+            "the plan writes what diffing the whole projection writes"
+        );
+        assert_eq!(after["thread"]["title"], "Planned");
     }
 
     // A restart's reconcile, on the threads it stops a session or a run of.
@@ -1009,4 +1027,88 @@ async fn a_watched_busy_or_recent_thread_is_not_released() {
     assert_eq!(released.read, 1);
     assert!(partial(&host, watched));
     assert!(!partial(&host, busy));
+}
+
+/// What committing a streamed delta to a long thread costs, phase by phase:
+/// `cargo test --release --lib commit_cost -- --ignored --nocapture`.
+/// A thread of about 4.5 MB of turn items, a live subscriber and a shell
+/// listener (so every phase of a commit runs), a turn, then 200 deltas to its
+/// assistant message. Afterwards, the thread's records are the database's.
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn commit_cost_of_deltas_on_a_long_thread() {
+    let (home, conn, id) = super::lazy_tests::seeded_large(12, 2000, 2048);
+    let host = host(home.path(), &conn);
+    let _live = host.control.events.subscribe();
+    let _shell = host.control.shell_events.subscribe();
+    dispatch(
+        &host,
+        json!({"type": "message.dispatch", "commandId": "c:bench", "threadId": id, "messageId": "message:bench",
+        "text": "Stream", "attachments": [], "createdBy": "user", "creationSource": "web"}),
+    )
+    .await;
+    let run = host.store_now().threads[&id].runs.last().unwrap().id;
+    let size = crate::wire_json::compact(&host.store_now().threads[&id].projection()).len();
+    let provider = |event| crate::Event::RunProvider {
+        run_id: run,
+        thread_id: id.clone(),
+        event,
+        position: None,
+    };
+    host.commit(provider(crate::workspace::ProviderEvent::TurnItem {
+        item: crate::workspace::provider::ProviderItem::new(
+            "bench-answer",
+            "assistant_message",
+            "running",
+        )
+        .with("text", ""),
+    }))
+    .await
+    .unwrap();
+    crate::commit_timing::enable();
+    let mut took = Vec::new();
+    for n in 0..200 {
+        let started = std::time::Instant::now();
+        host.commit(provider(crate::workspace::ProviderEvent::TurnItemDelta {
+            item_id: "bench-answer".into(),
+            delta: format!("word {n} "),
+            held: false,
+        }))
+        .await
+        .unwrap();
+        took.push(started.elapsed());
+    }
+    let phases = crate::commit_timing::totals();
+    took.sort();
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    eprintln!(
+        "thread {:.1} MB; per delta: median {:.2} ms, p95 {:.2} ms, max {:.2} ms",
+        size as f64 / 1e6,
+        ms(took[took.len() / 2]),
+        ms(took[took.len() * 95 / 100]),
+        ms(*took.last().unwrap())
+    );
+    for (phase, (count, total)) in &phases {
+        eprintln!(
+            "  {phase:32} {count:4} x  {:.3} ms",
+            ms(*total) / *count as f64
+        );
+    }
+    host.commit(crate::Event::RunFinished {
+        run_id: run,
+        thread_id: id.clone(),
+        status: "completed".into(),
+        error: None,
+    })
+    .await
+    .unwrap();
+    store_matches_database(&host, &conn, &id);
+    if let Ok(limit) = std::env::var("T3CODE_COMMIT_COST_MAX_MS") {
+        let limit: f64 = limit.parse().unwrap();
+        let median = ms(took[took.len() / 2]);
+        assert!(
+            median <= limit,
+            "a delta took {median:.2} ms, over {limit} ms"
+        );
+    }
 }

@@ -321,7 +321,7 @@ impl ControlState {
                 scratch.apply_record(&record);
                 for (thread_id, stored) in stored_after {
                     if let Some(thread) = scratch.threads.get_mut(&thread_id) {
-                        thread.stored = Some(crate::stored_projection::Stored::whole(stored));
+                        stored.install(thread);
                     }
                 }
                 (items.iter().filter_map(snapshot_key).collect(), items.len())
@@ -375,16 +375,32 @@ impl ControlState {
         receipt: Option<CommandReceipt>,
         suppress: &[String],
     ) -> anyhow::Result<ServerEvent> {
+        // Boxed: every command's future embeds its commits, and in a debug
+        // build a commit's frames are large (see `rpc::stack_tests`).
+        Box::pin(self.commit_unboxed(event, receipt, suppress)).await
+    }
+
+    async fn commit_unboxed(
+        &self,
+        event: Event,
+        receipt: Option<CommandReceipt>,
+        suppress: &[String],
+    ) -> anyhow::Result<ServerEvent> {
+        let _commit = crate::commit_timing::phase("commit");
         // Read the threads this commit plans from before taking the store
         // for writing, which every reader would wait for meanwhile.
+        let phase = crate::commit_timing::phase("load whole");
         let touched = crate::shared_store::touched_threads(&*self.store.read().await, &event);
         self.load_whole(touched).await;
+        drop(phase);
         let mut store = self.store.write().await;
         let mut next_event_id = self.next_event_id.lock().await;
         let mut shared = self.shared.lock().await;
         // A thread whose slim records alone are loaded is read whole first:
         // the plan below diffs whole projections only.
+        let phase = crate::commit_timing::phase("hydrate check");
         crate::shared_store::hydrate_touched(&store, &event)?;
+        drop(phase);
         let mut record = ServerEvent {
             id: *next_event_id + 1,
             at: crate::now(),
@@ -398,6 +414,7 @@ impl ControlState {
         let mut commit = None;
         let shell_listening = self.shell_events.receiver_count() > 0;
         if shared.is_some() || shell_listening {
+            let _phase = crate::commit_timing::phase("plan (shared_commit)");
             let (planned_commit, stored) = shared_commit(&store, &record, *next_event_id);
             stored_after = stored;
             commit = Some(planned_commit);
@@ -407,6 +424,7 @@ impl ControlState {
         // domain events, one sequence number each.
         let mut live_events = 0;
         if self.events.receiver_count() > 0 {
+            let _phase = crate::commit_timing::phase("live events (thread_events)");
             if let Some(mut events) = thread_events(&store, &record, &stored_after, suppress) {
                 live_events = events.items.as_ref().map_or(0, Vec::len) as u64;
                 record.id = *next_event_id + live_events.max(stored_events).max(1);
@@ -421,13 +439,16 @@ impl ControlState {
             }
         }
         record.id = *next_event_id + live_events.max(stored_events).max(1);
+        let shell_phase = crate::commit_timing::phase("shell changes");
         let shell_changes: Vec<_> = commit
             .iter()
             .filter(|_| shell_listening)
             .flat_map(|commit| &commit.events)
             .filter_map(|event| crate::shell_stream::Change::from_event(event, &store))
             .collect();
+        drop(shell_phase);
         if let (Some(writer), Some(mut commit)) = (shared.as_mut(), commit) {
+            let _phase = crate::commit_timing::phase("database write");
             commit.sequence = record.id;
             if let Err(error) = writer.write(&commit) {
                 // Nothing is logged or applied: the commit fails as a whole.
@@ -440,14 +461,16 @@ impl ControlState {
         *next_event_id = record.id;
         #[cfg(feature = "native")]
         let thread_count = store.threads.len();
+        let apply_phase = crate::commit_timing::phase("apply");
         store.apply_record(&record);
+        drop(apply_phase);
         #[cfg(feature = "native")]
         if store.threads.len() < thread_count {
             self.thread_deleted.notify_one();
         }
         for (thread_id, stored) in stored_after {
             if let Some(thread) = store.threads.get_mut(&thread_id) {
-                thread.stored = Some(crate::stored_projection::Stored::whole(stored));
+                stored.install(thread);
             }
         }
         if let Event::ThreadPatched { ref patch, .. } = record.event {
@@ -472,7 +495,10 @@ fn shared_commit(
     store: &Store,
     record: &ServerEvent,
     last: u64,
-) -> (crate::shared_store::SharedCommit, Vec<(String, Value)>) {
+) -> (
+    crate::shared_store::SharedCommit,
+    Vec<(String, crate::shared_store::StoredAfter)>,
+) {
     use crate::shared_store::{project_event, thread_events, ProjectWrite, ReceiptWrite};
     let occurred_at = crate::thread_projection::iso(record.at);
     let planned = crate::shared_store::plan(store, record, &occurred_at);
@@ -597,53 +623,104 @@ pub(crate) fn coalesce(batch: &[Vec<String>]) -> Vec<Vec<String>> {
 fn thread_events(
     store: &Store,
     record: &ServerEvent,
-    stored_after: &[(String, Value)],
+    stored_after: &[(String, crate::shared_store::StoredAfter)],
     suppress: &[String],
 ) -> Option<crate::thread_events::ThreadEvents> {
     let thread_id = record.event.thread_id()?.to_owned();
-    let mut scratch = Store::default();
-    let before = store.threads.get(&thread_id).map(|thread| {
-        scratch.threads.insert(thread_id.clone(), thread.clone());
-        thread.projection()
-    })?;
-    scratch.apply_record(record);
-    let thread = scratch.threads.get_mut(&thread_id)?;
-    if let Some((_, stored)) = stored_after.iter().find(|(id, _)| *id == thread_id) {
-        thread.stored = Some(crate::stored_projection::Stored::whole(stored.clone()));
-    }
-    let after = thread.projection();
-    // An unchanged projection still moves subscribers past the commit.
+    let revision = store.threads.get(&thread_id)?.revision;
     let at = crate::thread_projection::iso(record.at);
     let order = crate::thread_events::Order::of(&record.event);
     let command_type = record
         .receipt
         .as_ref()
         .map(|receipt| receipt.command_type.as_str());
-    let items = match crate::shared_store::detach_reason(&record.event) {
-        Some(reason) => {
-            crate::thread_events::diff_detaching(&thread_id, &before, &after, &at, reason, order)
+    let diff =
+        |before: &Value, after: &Value| match crate::shared_store::detach_reason(&record.event) {
+            Some(reason) => {
+                crate::thread_events::diff_detaching(&thread_id, before, after, &at, reason, order)
+            }
+            None => crate::thread_events::diff_for_command(
+                &thread_id,
+                before,
+                after,
+                &at,
+                order,
+                command_type,
+            ),
+        };
+    // The thread's revision after this commit (`Store::apply_record`).
+    let after = revision + u64::from(!matches!(record.event, Event::RunOutput { .. }));
+    let finish = |items: Option<Vec<Value>>| {
+        let items = items.map(|mut items| {
+            if !suppress.is_empty() {
+                items.retain(|item| snapshot_key(item).is_none_or(|key| !suppress.contains(&key)));
+            }
+            items
+        });
+        crate::thread_events::ThreadEvents {
+            before: crate::thread_events::token(revision),
+            after: crate::thread_events::token(after),
+            thread_id: thread_id.clone(),
+            items,
         }
-        None => crate::thread_events::diff_for_command(
-            &thread_id,
-            &before,
-            &after,
-            &at,
-            order,
-            command_type,
-        ),
     };
-    let items = items.map(|mut items| {
-        if !suppress.is_empty() {
-            items.retain(|item| snapshot_key(item).is_none_or(|key| !suppress.contains(&key)));
-        }
-        items
-    });
-    Some(crate::thread_events::ThreadEvents {
-        before: crate::thread_events::digest(&before),
-        after: crate::thread_events::digest(&after),
-        thread_id,
-        items,
-    })
+    // A change planned from partial projections: the live events come from
+    // them too, at the cost of the change.
+    if let Some((_, crate::shared_store::StoredAfter::Patch(patch))) =
+        stored_after.iter().find(|(id, _)| *id == thread_id)
+    {
+        let partial = &patch.partial;
+        let _phase = crate::commit_timing::phase("  live: partial");
+        let before = crate::thread_projection::wire_projection(&thread_id, &partial.before);
+        let after = crate::thread_projection::wire_projection(&thread_id, &partial.after);
+        let items = diff(&before, &after);
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            items,
+            whole_thread_events(store, record, stored_after, &thread_id, &diff),
+            "partial live events differ from the whole ones"
+        );
+        return Some(finish(items));
+    }
+    Some(finish(whole_thread_events(
+        store,
+        record,
+        stored_after,
+        &thread_id,
+        &diff,
+    )))
+}
+
+/// The live events of `record` from the thread's whole projections.
+fn whole_thread_events(
+    store: &Store,
+    record: &ServerEvent,
+    stored_after: &[(String, crate::shared_store::StoredAfter)],
+    thread_id: &str,
+    diff: &dyn Fn(&Value, &Value) -> Option<Vec<Value>>,
+) -> Option<Vec<Value>> {
+    let current = store.threads.get(thread_id)?;
+    let mut scratch = Store::default();
+    scratch
+        .threads
+        .insert(thread_id.to_owned(), current.clone());
+    let phase = crate::commit_timing::phase("  live: before projection");
+    let before = current.projection();
+    drop(phase);
+    scratch.apply_record(record);
+    let thread = scratch.threads.get_mut(thread_id)?;
+    if let Some((_, stored)) = stored_after.iter().find(|(id, _)| id == thread_id) {
+        let whole = match current.stored.as_ref() {
+            Some(current) => stored.whole(current.get()).into_owned(),
+            None => stored.whole(&Value::Null).into_owned(),
+        };
+        thread.stored = Some(crate::stored_projection::Stored::whole(whole));
+    }
+    let phase = crate::commit_timing::phase("  live: after projection");
+    let after = thread.projection();
+    drop(phase);
+    let _phase = crate::commit_timing::phase("  live: diff");
+    diff(&before, &after)
 }
 
 /// A JSON array document as a map by each entry's `id`; empty when the
