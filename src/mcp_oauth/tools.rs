@@ -861,7 +861,9 @@ fn thread_summary<S: McpHost>(host: &S, caller: &Caller, thread: &crate::Thread)
         "snoozed": snoozed(&row),
         "snoozedUntil": row["snoozedUntil"],
         "pinned": thread.pinned,
-        "blockedOnThreadWait": false,
+        // A thread blocked in a wait on another thread or a task, so an agent
+        // can see it before waiting on that thread in turn.
+        "blockedOnThreadWait": crate::projection_shell::thread_blocked_on_wait(&thread.full_projection()),
         // This server runs no background tasks for a thread.
         "pendingBackgroundTasks": [],
         "parentThreadId": row["lineage"]["parentThreadId"],
@@ -2023,6 +2025,7 @@ async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
                 "status": run["status"],
                 "providerInstanceId": run["providerInstanceId"],
                 "model": run["modelSelection"]["model"].as_str().unwrap_or("default"),
+                "executedModel": run["executedModel"],
                 "requestedAt": run["requestedAt"],
                 "startedAt": run["startedAt"],
                 "completedAt": run["completedAt"],

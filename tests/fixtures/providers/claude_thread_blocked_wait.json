@@ -1,0 +1,544 @@
+{
+ "toolGap": 0,
+ "variants": [
+  {
+   "envContains": {
+    "T3CODE_THREAD_ID": "thread:target"
+   },
+   "steps": [
+    {
+     "expect": "user"
+    },
+    {
+     "send": {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "$session",
+      "model": "claude-opus-5-5",
+      "cwd": "/workspace",
+      "permissionMode": "bypassPermissions",
+      "uuid": "00000000-0000-0071-0000-000000000000",
+      "tools": [
+       "Bash",
+       "Edit",
+       "Read",
+       "Write",
+       "TodoWrite"
+      ]
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "message_start",
+       "message": {
+        "model": "claude-opus-5-5",
+        "id": "msg_0071",
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "container": null,
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+         "input_tokens": 4,
+         "cache_creation_input_tokens": 10,
+         "cache_read_input_tokens": 20,
+         "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 10
+         },
+         "output_tokens": 3,
+         "service_tier": "standard",
+         "inference_geo": "global",
+         "speed": "standard"
+        },
+        "input_transformations": [],
+        "diagnostics": null,
+        "context_management": null
+       }
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0071-0000-000000000001",
+      "ttft_ms": 1000,
+      "thinking_display": "updates",
+      "api_message_id": "msg_0071"
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "content_block_start",
+       "index": 0,
+       "content_block": {
+        "type": "text",
+        "text": ""
+       }
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0071-0000-000000000002",
+      "api_message_id": "msg_0071"
+     }
+    },
+    {
+     "mcp": {
+      "tool": "t3_thread_read",
+      "arguments": {
+       "threadId": "thread:client-thread",
+       "limit": 1
+      },
+      "retryUntilText": "blockedOnThreadWait\\\":true",
+      "retries": 40,
+      "retryDelay": 0.25
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "content_block_delta",
+       "index": 0,
+       "delta": {
+        "type": "text_delta",
+        "text": "Read it."
+       }
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0071-0000-000000000003",
+      "api_message_id": "msg_0071"
+     }
+    },
+    {
+     "send": {
+      "type": "assistant",
+      "message": {
+       "model": "claude-opus-5-5",
+       "id": "msg_0071",
+       "type": "message",
+       "role": "assistant",
+       "content": [
+        {
+         "type": "text",
+         "text": "Read it."
+        }
+       ],
+       "container": null,
+       "stop_reason": null,
+       "stop_sequence": null,
+       "stop_details": null,
+       "usage": {
+        "input_tokens": 4,
+        "cache_creation_input_tokens": 10,
+        "cache_read_input_tokens": 20,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 10
+        },
+        "output_tokens": 3,
+        "service_tier": "standard",
+        "inference_geo": "global",
+        "speed": "standard"
+       },
+       "input_transformations": [],
+       "diagnostics": null,
+       "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "$session",
+      "uuid": "00000000-0000-0071-0000-000000000004"
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "content_block_stop",
+       "index": 0
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0071-0000-000000000005",
+      "api_message_id": "msg_0071"
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "message_delta",
+       "delta": {
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "stop_details": null,
+        "container": null
+       },
+       "usage": {
+        "input_tokens": 4,
+        "cache_creation_input_tokens": 10,
+        "cache_read_input_tokens": 20,
+        "output_tokens": 3
+       },
+       "context_management": {
+        "applied_edits": []
+       }
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0071-0000-000000000006",
+      "api_message_id": "msg_0071"
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "message_stop"
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0071-0000-000000000007",
+      "api_message_id": "msg_0071"
+     }
+    },
+    {
+     "send": {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false,
+      "duration_ms": 1000,
+      "num_turns": 1,
+      "result": "Read it.",
+      "stop_reason": "end_turn",
+      "session_id": "$session",
+      "usage": {
+       "input_tokens": 4,
+       "cache_creation_input_tokens": 10,
+       "cache_read_input_tokens": 20,
+       "output_tokens": 3
+      },
+      "modelUsage": {
+       "claude-opus-5-5": {
+        "inputTokens": 4,
+        "outputTokens": 3,
+        "contextWindow": 1000000
+       }
+      },
+      "uuid": "00000000-0000-0071-0000-000000000008"
+     }
+    }
+   ]
+  },
+  {
+   "steps": [
+    {
+     "expect": "user"
+    },
+    {
+     "send": {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "$session",
+      "model": "claude-opus-5-5",
+      "cwd": "/workspace",
+      "permissionMode": "bypassPermissions",
+      "uuid": "00000000-0000-0061-0000-000000000000",
+      "tools": [
+       "Bash",
+       "Edit",
+       "Read",
+       "Write",
+       "TodoWrite"
+      ]
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "message_start",
+       "message": {
+        "model": "claude-opus-5-5",
+        "id": "msg_0061",
+        "type": "message",
+        "role": "assistant",
+        "content": [],
+        "container": null,
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+         "input_tokens": 4,
+         "cache_creation_input_tokens": 10,
+         "cache_read_input_tokens": 20,
+         "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 10
+         },
+         "output_tokens": 3,
+         "service_tier": "standard",
+         "inference_geo": "global",
+         "speed": "standard"
+        },
+        "input_transformations": [],
+        "diagnostics": null,
+        "context_management": null
+       }
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0061-0000-000000000001",
+      "ttft_ms": 1000,
+      "thinking_display": "updates",
+      "api_message_id": "msg_0061"
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "content_block_start",
+       "index": 0,
+       "content_block": {
+        "type": "text",
+        "text": ""
+       }
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0061-0000-000000000002",
+      "api_message_id": "msg_0061"
+     }
+    },
+    {
+     "mcp": {
+      "tool": "t3_thread_send",
+      "arguments": {
+       "threadId": "thread:target",
+       "message": "Read the thread that sent you this.",
+       "mode": "auto"
+      },
+      "as": "start"
+     }
+    },
+    {
+     "send": {
+      "type": "assistant",
+      "message": {
+       "model": "claude-opus-5-5",
+       "id": "msg_0061",
+       "type": "message",
+       "role": "assistant",
+       "content": [
+        {
+         "type": "tool_use",
+         "id": "toolu_wait",
+         "name": "mcp__t3-code__t3_thread_wait",
+         "input": {
+          "threadId": "thread:target",
+          "runId": "$mcp.start.runId",
+          "timeoutMs": 30000
+         },
+         "caller": {
+          "type": "direct"
+         }
+        }
+       ],
+       "container": null,
+       "stop_reason": null,
+       "stop_sequence": null,
+       "stop_details": null,
+       "usage": {
+        "input_tokens": 4,
+        "cache_creation_input_tokens": 10,
+        "cache_read_input_tokens": 20,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 10
+        },
+        "output_tokens": 3,
+        "service_tier": "standard",
+        "inference_geo": "global",
+        "speed": "standard"
+       },
+       "input_transformations": [],
+       "diagnostics": null,
+       "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "$session",
+      "uuid": "00000000-0000-0061-0000-000000000020"
+     }
+    },
+    {
+     "mcp": {
+      "tool": "t3_thread_wait",
+      "arguments": {
+       "threadId": "thread:target",
+       "runId": "$mcp.start.runId",
+       "timeoutMs": 30000
+      }
+     }
+    },
+    {
+     "send": {
+      "type": "user",
+      "message": {
+       "role": "user",
+       "content": [
+        {
+         "tool_use_id": "toolu_wait",
+         "type": "tool_result",
+         "content": "completed"
+        }
+       ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "$session",
+      "uuid": "00000000-0000-0061-0000-000000000021"
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "content_block_delta",
+       "index": 0,
+       "delta": {
+        "type": "text_delta",
+        "text": "It read me."
+       }
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0061-0000-000000000003",
+      "api_message_id": "msg_0061"
+     }
+    },
+    {
+     "send": {
+      "type": "assistant",
+      "message": {
+       "model": "claude-opus-5-5",
+       "id": "msg_0061",
+       "type": "message",
+       "role": "assistant",
+       "content": [
+        {
+         "type": "text",
+         "text": "It read me."
+        }
+       ],
+       "container": null,
+       "stop_reason": null,
+       "stop_sequence": null,
+       "stop_details": null,
+       "usage": {
+        "input_tokens": 4,
+        "cache_creation_input_tokens": 10,
+        "cache_read_input_tokens": 20,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 10
+        },
+        "output_tokens": 3,
+        "service_tier": "standard",
+        "inference_geo": "global",
+        "speed": "standard"
+       },
+       "input_transformations": [],
+       "diagnostics": null,
+       "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "$session",
+      "uuid": "00000000-0000-0061-0000-000000000004"
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "content_block_stop",
+       "index": 0
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0061-0000-000000000005",
+      "api_message_id": "msg_0061"
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "message_delta",
+       "delta": {
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "stop_details": null,
+        "container": null
+       },
+       "usage": {
+        "input_tokens": 4,
+        "cache_creation_input_tokens": 10,
+        "cache_read_input_tokens": 20,
+        "output_tokens": 3
+       },
+       "context_management": {
+        "applied_edits": []
+       }
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0061-0000-000000000006",
+      "api_message_id": "msg_0061"
+     }
+    },
+    {
+     "send": {
+      "type": "stream_event",
+      "event": {
+       "type": "message_stop"
+      },
+      "session_id": "$session",
+      "parent_tool_use_id": null,
+      "uuid": "00000000-0000-0061-0000-000000000007",
+      "api_message_id": "msg_0061"
+     }
+    },
+    {
+     "send": {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false,
+      "duration_ms": 1000,
+      "num_turns": 1,
+      "result": "It read me.",
+      "stop_reason": "end_turn",
+      "session_id": "$session",
+      "usage": {
+       "input_tokens": 4,
+       "cache_creation_input_tokens": 10,
+       "cache_read_input_tokens": 20,
+       "output_tokens": 3
+      },
+      "modelUsage": {
+       "claude-opus-5-5": {
+        "inputTokens": 4,
+        "outputTokens": 3,
+        "contextWindow": 1000000
+       }
+      },
+      "uuid": "00000000-0000-0061-0000-000000000008"
+     }
+    }
+   ]
+  }
+ ]
+}
