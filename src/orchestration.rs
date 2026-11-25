@@ -46,6 +46,10 @@ pub(crate) trait CommandHost:
     /// shared app-server once its turn ended, or close its Claude session's
     /// CLI. Hosts without local provider turns ignore it.
     fn unload_provider_thread(&self, _instance: &str, _thread: &str) {}
+    /// A queued run of `thread_id` was cancelled before it started: a host
+    /// that opens provider continuations retires the wake of one that ends
+    /// so (`onRunEndedWithoutStarting`). Hosts without them ignore it.
+    fn queued_run_cancelled(self: Arc<Self>, _thread_id: String) {}
     /// Run a `thread-title.generate` effect in the background. Hosts that
     /// run no provider CLIs ignore it.
     fn generate_title(self: Arc<Self>, _effect: crate::title_generation::TitleEffect) {}
@@ -2160,7 +2164,7 @@ async fn apply_command<H: CommandHost>(
             if !valid {
                 return Err(anyhow::anyhow!(format!("Run {run_id} is not queued.")));
             }
-            return Ok(state
+            let sequence = state
                 .commit_receipted(
                     Event::RunFinished {
                         run_id: Run::uuid_for(run_id),
@@ -2171,7 +2175,11 @@ async fn apply_command<H: CommandHost>(
                     Some(receipt.clone()),
                 )
                 .await?
-                .id);
+                .id;
+            state
+                .clone()
+                .queued_run_cancelled(thread_id.unwrap_or_default().to_owned());
+            return Ok(sequence);
         }
         "queued-run.edit" => {
             let run_id = command["runId"].as_str().unwrap_or_default();
