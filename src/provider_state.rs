@@ -106,6 +106,9 @@ pub struct ThreadRecord {
     pub opencode2: Option<OpenCode2Thread>,
     /// The title the agent last gave its session (Kiro's focus).
     pub native_title: Option<String>,
+    /// What its native session's prompts used of its attachment budget, kept
+    /// while the thread runs on another instance's provider thread.
+    pub attachment_budget: Option<(u64, u64)>,
 }
 
 /// One run's provider turn.
@@ -233,18 +236,6 @@ impl ProviderState {
                 native_title,
                 ..
             } => {
-                record.driver = driver.clone();
-                record.native_thread_id = Some(native_thread_id.clone());
-                record.resumed = *resumed;
-                // A run that starts a new native session starts a new
-                // attachment budget.
-                if !resumed && !record.prompt_delivered {
-                    self.attachment_budget = None;
-                }
-                self.native_thread = Some(NativeThread {
-                    driver: driver.clone(),
-                    id: native_thread_id.clone(),
-                });
                 // A turn on another provider instance moves to that
                 // instance's provider thread, opening one the first time; the
                 // one it leaves stays, idle.
@@ -257,6 +248,7 @@ impl ProviderState {
                         if left.status == "active" {
                             left.status = "idle";
                         }
+                        left.attachment_budget = self.attachment_budget.take();
                         self.other_threads.push(left);
                     }
                     if let Some(at) = self
@@ -264,9 +256,23 @@ impl ProviderState {
                         .iter()
                         .position(|thread| thread.driver == *driver)
                     {
-                        self.thread = Some(self.other_threads.remove(at));
+                        let mut back = self.other_threads.remove(at);
+                        self.attachment_budget = back.attachment_budget.take();
+                        self.thread = Some(back);
                     }
                 }
+                record.driver = driver.clone();
+                record.native_thread_id = Some(native_thread_id.clone());
+                record.resumed = *resumed;
+                // A run that starts a new native session starts a new
+                // attachment budget.
+                if !resumed && !record.prompt_delivered {
+                    self.attachment_budget = None;
+                }
+                self.native_thread = Some(NativeThread {
+                    driver: driver.clone(),
+                    id: native_thread_id.clone(),
+                });
                 let thread = self.thread.get_or_insert_with(|| ThreadRecord {
                     driver: driver.clone(),
                     first_run: run,
@@ -278,6 +284,7 @@ impl ProviderState {
                     background_tasks: Vec::new(),
                     opencode2: None,
                     native_title: None,
+                    attachment_budget: None,
                 });
                 thread.native_id = Some(native_thread_id.clone());
                 if opencode2.is_some() {
@@ -436,6 +443,7 @@ impl ProviderState {
                     background_tasks: Vec::new(),
                     opencode2: None,
                     native_title: None,
+                    attachment_budget: None,
                 });
                 self.terminals.insert(
                     run,
@@ -769,6 +777,9 @@ pub(crate) fn provider_turn(
         turn_ordinal: Some(state.provider_turns() as u64 + 1),
         recovery_prompt: None,
         fork_session: None,
+        inject_items: None,
+        recovery_inject_items: None,
+        injected_prompt: None,
         native_turn: String::new(),
         thread_title: row["title"].as_str().unwrap_or_default().to_owned(),
         context_window: (driver == provider::CLAUDE_AGENT)

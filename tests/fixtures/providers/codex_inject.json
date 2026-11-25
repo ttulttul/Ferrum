@@ -1,0 +1,10 @@
+{
+ "replies": {
+  "thread/inject_items": {}
+ },
+ "variants": [
+  {
+   "scenario": "codex_turn.json"
+  }
+ ]
+}

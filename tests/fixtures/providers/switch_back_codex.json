@@ -1,0 +1,15 @@
+{
+ "replies": {
+  "thread/inject_items": {}
+ },
+ "variants": [
+  {
+   "argsContain": "app-server",
+   "scenario": "codex_model_switch.json"
+  },
+  {
+   "argsContain": "stream-json",
+   "scenario": "claude_turn.json"
+  }
+ ]
+}

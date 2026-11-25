@@ -1,0 +1,27 @@
+{
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "codexHome": "/tmp/codex-home",
+     "platformFamily": "unix",
+     "platformOs": "linux",
+     "userAgent": "codex_cli_rs/0.170.0"
+    }
+   }
+  },
+  {
+   "branch": {
+    "thread/start": "codex_turn.json",
+    "thread/resume": "codex_restart_resume_missing_fresh.json"
+   }
+  }
+ ],
+ "replies": {
+  "thread/inject_items": {}
+ }
+}

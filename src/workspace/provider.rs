@@ -149,6 +149,19 @@ pub struct ProviderTurn {
     /// control plane that predates it sees the same wire bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_session: Option<String>,
+    /// The context handoff's history as native history items, which Codex
+    /// takes with `thread/inject_items` before the prompt instead of inline
+    /// (the reference's injectHistory); [`ProviderTurn::recovery_inject_items`]
+    /// for a fresh thread taking the resume fallback. When it takes them, the
+    /// prompt is [`ProviderTurn::injected_prompt`]. Optional and omitted when
+    /// unset, so an agentd or control plane that predates them sees the same
+    /// wire bytes; without them the history goes inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject_items: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_inject_items: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injected_prompt: Option<String>,
     /// The native turn id a Pi turn is named by before Pi names it
     /// (`<provider thread>:attempt:<attempt>`), which its items' ids extend.
     /// Optional and omitted when empty, so an agentd or control plane that
@@ -389,6 +402,12 @@ pub enum ProviderEvent {
         /// The model the turn ran on, once the CLI reports it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// The turn's context handoff went to the native thread as history
+        /// (Codex `thread/inject_items`), not inline with the prompt.
+        /// Optional and omitted when false: a reader that predates it skips
+        /// it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        history_injected: bool,
     },
     /// A turn item was created or changed. Later updates of the same
     /// `item.id` replace earlier ones.

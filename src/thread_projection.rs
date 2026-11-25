@@ -1894,6 +1894,7 @@ fn stored_provider(
                 Some("error") => "error",
                 _ => "not_loaded",
             },
+            attachment_budget: None,
         });
     }
     state

@@ -687,7 +687,7 @@ impl Thread {
                 "forkedFrom": null,
                 "pendingBackgroundTasks": [],
                 "contextUsage": null,
-                "nativeMetadata": null,
+                "nativeMetadata": self.left_thread_metadata(thread),
                 "goal": null,
                 "createdAt": iso(thread.created_at),
                 "updatedAt": iso(thread.updated_at)
@@ -850,6 +850,30 @@ impl Thread {
 
     /// A Claude session's metadata: its title (the thread's) and what its
     /// prompts used of its attachment budget.
+    /// The native metadata of a Claude provider thread the thread switched
+    /// away from: its session's attachment budget and title.
+    fn left_thread_metadata(&self, thread: &crate::provider_state::ThreadRecord) -> Value {
+        if thread.driver != provider::CLAUDE_AGENT {
+            return Value::Null;
+        }
+        let mut metadata = Map::new();
+        if let Some((bytes, pages)) = thread.attachment_budget {
+            metadata.insert(
+                "claudeAttachmentBudget".into(),
+                json!({"bytesUsed": bytes, "pagesUsed": pages}),
+            );
+        }
+        let title = self.title.trim();
+        if !title.is_empty() {
+            metadata.insert("title".into(), json!(title));
+        }
+        if metadata.is_empty() {
+            Value::Null
+        } else {
+            Value::Object(metadata)
+        }
+    }
+
     fn claude_native_metadata(&self, driver: &str) -> Value {
         if provider::is_acp(driver) {
             return self.acp_native_metadata();
@@ -2183,6 +2207,7 @@ mod tests {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                history_injected: false,
             },
             opened("a", "command"),
             opened("q", "user_input"),
@@ -2427,6 +2452,7 @@ mod tests {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                history_injected: false,
             },
         ] {
             live.provider.apply(run_id, &event, 2);
@@ -2730,6 +2756,7 @@ mod tests {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                history_injected: false,
             },
             ProviderEvent::TurnTerminal {
                 status: TurnStatus::Failed,

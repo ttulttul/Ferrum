@@ -81,6 +81,7 @@ pub(super) async fn run(
         rate_limits: None,
         turn_usage: TurnUsage::default(),
         thread_id: None,
+        history_injected: false,
         turn_id: None,
         terminal: None,
         last_error: None,
@@ -203,6 +204,9 @@ struct Session {
     /// What this turn used so far.
     turn_usage: TurnUsage,
     thread_id: Option<String>,
+    /// The turn's context handoff went to the thread with
+    /// `thread/inject_items` (reported on its provider turn).
+    history_injected: bool,
     turn_id: Option<String>,
     /// `turn/completed` for our turn, once it arrived.
     terminal: Option<Value>,
@@ -559,11 +563,15 @@ impl Session {
         // with the thread's recovered context ahead of it, as the reference's
         // resumeThread fails into its resume fallback.
         let mut prompt = spec.prompt.as_str();
+        // Whether the turn takes the resume fallback's history (a fresh
+        // thread), not the resumed thread's handoffs.
+        let mut recovered = false;
         // A fork starts a fresh thread with its source's history: this
         // server does not fork Codex threads natively (`thread/fork`) yet.
         if provider.fork_session.is_some() && provider.resume.is_none() {
             if let Some(recovery) = provider.recovery_prompt.as_deref() {
                 prompt = recovery;
+                recovered = true;
             }
         }
         // What the thread was loaded with: a thread still loaded with the
@@ -595,6 +603,7 @@ impl Session {
                 Err(Failed::Rpc(error)) if thread_not_found(&error) => {
                     if let Some(recovery) = provider.recovery_prompt.as_deref() {
                         prompt = recovery;
+                        recovered = true;
                     }
                 }
                 Err(other) => return Err(other),
@@ -632,6 +641,27 @@ impl Session {
             opencode2: None,
             native_title: None,
         });
+        // The context handoff's history goes to the thread as native items
+        // before the prompt (the reference's injectHistory); a Codex that
+        // does not know `thread/inject_items` takes it inline instead.
+        let items = if recovered {
+            provider.recovery_inject_items.as_ref()
+        } else {
+            provider.inject_items.as_ref()
+        };
+        if let Some(items) = items.filter(|items| items.as_array().is_some_and(|i| !i.is_empty())) {
+            let params = json!({"threadId": thread_id, "items": items});
+            match self.request("thread/inject_items", params).await {
+                Ok(_) => {
+                    self.history_injected = true;
+                    if let Some(plain) = provider.injected_prompt.as_deref() {
+                        prompt = plain;
+                    }
+                }
+                Err(Failed::Rpc(error)) if error["code"] == -32601 => {}
+                Err(other) => return Err(other),
+            }
+        }
 
         let (approval_policy, reviewer, sandbox_policy) = runtime_mode_policy(&self.runtime_mode);
         // `toCodexInput`: the text naming each attachment's file, then each
@@ -980,6 +1010,7 @@ impl Session {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                history_injected: self.history_injected,
             });
         }
     }

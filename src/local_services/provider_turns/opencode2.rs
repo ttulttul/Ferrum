@@ -1402,6 +1402,7 @@ impl Turn<'_> {
             conversation_head: None,
             status: TurnStatus::Running,
             model: None,
+            history_injected: false,
         });
     }
 
@@ -2244,6 +2245,7 @@ impl Turn<'_> {
             conversation_head: None,
             status,
             model: None,
+            history_injected: false,
         });
         // A cold server lists models lazily: read them again for the next
         // turn when the window was unknown.

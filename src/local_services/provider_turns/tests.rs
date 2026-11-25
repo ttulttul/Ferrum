@@ -1943,3 +1943,43 @@ async fn kiros_failed_prompt_says_kiros_error() {
     assert_eq!(failure.code.as_deref(), Some("-32000"));
     assert_eq!(failure.class, "provider_error");
 }
+
+#[tokio::test]
+async fn codex_turn_injects_the_handoff_history_before_its_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(CODEX, "codex_inject.json", &log, None);
+    spec.prompt = "History\n\nUser message:\nSay hello".into();
+    let items = json!([{"type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "History"}]}]);
+    let provider = spec.provider.as_mut().unwrap();
+    provider.inject_items = Some(items.clone());
+    provider.injected_prompt = Some("Say hello".into());
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    let sent = received(&log);
+    let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
+    let inject = methods
+        .iter()
+        .position(|m| *m == "thread/inject_items")
+        .expect("injected");
+    let turn = methods
+        .iter()
+        .position(|m| *m == "turn/start")
+        .expect("a turn");
+    assert!(inject < turn, "{methods:?}");
+    let request = sent
+        .iter()
+        .find(|m| m["method"] == "thread/inject_items")
+        .unwrap();
+    assert_eq!(request["params"]["items"], items);
+    let start = sent.iter().find(|m| m["method"] == "turn/start").unwrap();
+    assert_eq!(start["params"]["input"][0]["text"], "Say hello");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ProviderEvent::ProviderTurn {
+            history_injected: true,
+            ..
+        }
+    )));
+}

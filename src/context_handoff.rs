@@ -91,6 +91,9 @@ pub(crate) struct PreparedHandoff {
     /// A side chat's `manual_context` handoff, recorded as delivered inline
     /// with the prompt (no item ids).
     pub side_chat: Option<Value>,
+    /// The inline history as native history items (`historyResponseItems`),
+    /// which Codex takes with `thread/inject_items` instead (Null when none).
+    pub inject_items: Value,
 }
 
 impl PreparedHandoff {
@@ -110,6 +113,17 @@ impl PreparedHandoff {
         with_inline_context(&context, user_text)
     }
 
+    /// `user_text` with only a side chat's context ahead of it: what the
+    /// prompt carries once the history went to the native thread.
+    pub(crate) fn prompt_without_history(&self, user_text: &str) -> String {
+        let side = self
+            .side_chat
+            .as_ref()
+            .and_then(|handoff| handoff["summaryText"].as_str())
+            .unwrap_or_default();
+        with_inline_context(side, user_text)
+    }
+
     /// Nothing to deliver but what is added to it.
     pub(crate) fn empty(native_thread_id: Option<String>) -> Self {
         PreparedHandoff {
@@ -122,12 +136,20 @@ impl PreparedHandoff {
             over_budget: false,
             recorded: true,
             side_chat: None,
+            inject_items: Value::Null,
         }
     }
 
-    /// Handoff records updated to `delivery.status = "inline"` once the provider
-    /// accepted the prompt.
-    pub(crate) fn into_delivered(self, native_thread_id: Option<&str>, at: u64) -> Vec<Value> {
+    /// Handoff records with their delivery once the provider accepted the
+    /// prompt.
+    /// `status` is `inline`, or `injected` when Codex took the history with
+    /// `thread/inject_items`.
+    pub(crate) fn into_delivered_as(
+        self,
+        status: &str,
+        native_thread_id: Option<&str>,
+        at: u64,
+    ) -> Vec<Value> {
         let now = iso(at);
         let native = native_thread_id.or(self.native_thread_id.as_deref());
         let side_chat = self.side_chat.map(|mut handoff| {
@@ -145,7 +167,7 @@ impl PreparedHandoff {
                 if let Some(native_id) = native {
                     handoff["delivery"] = json!({
                         "nativeThreadId": native_id,
-                        "status": "inline",
+                        "status": status,
                         "omittedItemIds": omitted_item_ids,
                         "itemIds": item_ids,
                     });
@@ -2031,6 +2053,7 @@ fn prepare(
             native_thread_id: loaded_native_id.map(str::to_owned),
             recorded: false,
             side_chat: None,
+            inject_items: Value::Null,
             over_budget: false,
         });
     }
@@ -2263,6 +2286,7 @@ fn prepare(
             native_thread_id: loaded_native_id.map(str::to_owned),
             recorded: false,
             side_chat: None,
+            inject_items: Value::Null,
             over_budget: true,
         });
     }
@@ -2322,6 +2346,7 @@ fn prepare(
         recorded: false,
         over_budget: false,
         side_chat: None,
+        inject_items: history_response_items(&selected.messages, &selected.context),
     })
 }
 
@@ -2462,6 +2487,7 @@ mod tests {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                history_injected: false,
             },
             10,
         );
@@ -2516,7 +2542,7 @@ mod tests {
         assert_eq!(33 + prompt_bytes, 2187);
 
         // Wire projection clears summaryText and strips history and delivery.
-        let delivered = prepared.into_delivered(Some("sess-saved"), 73);
+        let delivered = prepared.into_delivered_as("inline", Some("sess-saved"), 73);
         assert_eq!(delivered[0]["delivery"]["status"], "inline");
         let wire = project_for_wire(&delivered[0]);
         assert_eq!(wire["summaryText"], "");
