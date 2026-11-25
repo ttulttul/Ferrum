@@ -7,8 +7,13 @@
 //! A command a `Monitor` tool call starts is a monitor: its events wake Claude with a
 //! bare turn and no `task_notification`, which the continuation shows as the monitor
 //! reporting new output (`isClaudeMonitorEventWake`).
+//!
+//! The tasks running now are the provider thread's `pendingBackgroundTasks`
+//! (`publishedPendingBackgroundTasks`): each with the command and tool call that
+//! launched it, and a monitor marked awaited.
 use crate::background_work::{self, Kind, Report};
-use serde_json::Value;
+use indexmap::IndexMap;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
 /// `CLAUDE_OPAQUE_BACKGROUND_TASK_KINDS`: the task types that report their own end.
@@ -19,17 +24,50 @@ fn opaque_kind(task_type: Option<&str>) -> Option<Kind> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct Task {
     kind: Kind,
     description: Option<String>,
+    /// The tool call that launched it (`nativeItemId`).
+    tool_use_id: Option<String>,
+    /// The launching `Bash` or `Monitor` call's command (`backgroundTaskLaunch`).
+    command: Option<String>,
+}
+
+impl Task {
+    /// The task as the provider thread lists it, without what the projection adds
+    /// (its item, thread and run).
+    fn published(&self, task_id: &str, awaited: bool) -> Value {
+        let mut task = json!({"taskId": task_id, "kind": self.kind.wire()});
+        if let Some(description) = &self.description {
+            task["description"] = json!(description);
+        }
+        if let Some(id) = &self.tool_use_id {
+            task["nativeItemId"] = json!(id);
+        }
+        if let Some(command) = &self.command {
+            task["command"] = json!(command);
+        }
+        if awaited {
+            task["awaited"] = json!(true);
+        }
+        task
+    }
 }
 
 /// One session's background tasks.
 #[derive(Debug, Default)]
 pub(crate) struct Roster {
-    /// The tasks running now, by id.
-    pending: HashMap<String, Task>,
+    /// The tasks running now, by id, in the order they started.
+    pending: IndexMap<String, Task>,
+    /// Running tasks Claude resumes after (a monitor it started:
+    /// `awaitedBackgroundTasksByNativeThread`).
+    awaited: HashSet<String>,
+    /// The current turn's `Bash` and `Monitor` calls' commands, by tool call
+    /// (`activeContext.toolCalls`).
+    tool_commands: HashMap<String, String>,
+    /// The tool call each task started from (`toolUseIdsByTaskId`).
+    tool_use_ids: HashMap<String, String>,
     /// Tasks whose end wakes the session (`wakeEligibleBackgroundTasksByNativeThread`).
     eligible: HashSet<String>,
     /// Tasks seen since, for a notification that comes after the roster dropped them
@@ -45,6 +83,8 @@ pub(crate) struct Roster {
     monitors: HashSet<String>,
     /// The session started a turn on its own while a monitor ran: a monitor event.
     monitor_wake: bool,
+    /// The tasks last sent to the provider thread.
+    sent: Vec<Value>,
 }
 
 impl Roster {
@@ -54,14 +94,60 @@ impl Roster {
         self.eligible.insert(task_id.to_owned());
     }
 
+    /// `removePendingBackgroundTask`: a task that ended leaves the roster.
+    fn remove(&mut self, task_id: &str) {
+        self.pending.shift_remove(task_id);
+        self.awaited.remove(task_id);
+        self.tool_use_ids.remove(task_id);
+    }
+
+    /// The running tasks, as the provider thread lists them.
+    pub(crate) fn published(&self) -> Vec<Value> {
+        self.pending
+            .iter()
+            .map(|(id, task)| task.published(id, self.awaited.contains(id)))
+            .collect()
+    }
+
+    /// The running tasks, when a turn's frame changed them (`emitRosterUpdate`).
+    pub(crate) fn changed(&mut self, before: &[Value]) -> Option<Vec<Value>> {
+        let tasks = self.published();
+        if tasks == before {
+            return None;
+        }
+        self.sent = tasks.clone();
+        Some(tasks)
+    }
+
+    /// The running tasks, when they differ from what was last sent: a task that
+    /// ended while the session was idle leaves with the turn's completed provider
+    /// thread.
+    pub(crate) fn unsent(&mut self) -> Option<Vec<Value>> {
+        let tasks = self.published();
+        if tasks == self.sent {
+            return None;
+        }
+        self.sent = tasks.clone();
+        Some(tasks)
+    }
+
+    /// `backgroundTaskLaunch`: the command of the turn's tool call that launched a task.
+    fn launch_command(&self, tool_use_id: Option<&str>) -> Option<String> {
+        self.tool_commands.get(tool_use_id?).cloned()
+    }
+
     /// A frame of a running turn: tasks it starts become eligible; one it sees end does
     /// not wake the session.
     pub(crate) fn observe_turn(&mut self, message: &Value) {
+        // A turn's tool calls are its own (`activeContext.toolCalls`).
+        if message["type"] == "system" && message["subtype"] == "init" {
+            self.tool_commands.clear();
+        }
         self.track_monitor_calls(message);
         self.observe_roster(message);
         if message["type"] == "system" && message["subtype"] == "task_notification" {
             if let Some(task_id) = message["task_id"].as_str() {
-                self.pending.remove(task_id);
+                self.remove(task_id);
                 self.eligible.remove(task_id);
                 self.monitors.remove(task_id);
             }
@@ -73,9 +159,19 @@ impl Roster {
         let blocks = message["message"]["content"].as_array();
         for block in blocks.into_iter().flatten() {
             match block["type"].as_str() {
-                Some("tool_use") if block["name"] == "Monitor" => {
-                    if let Some(id) = block["id"].as_str() {
+                Some("tool_use") => {
+                    let (Some(id), Some(name)) = (block["id"].as_str(), block["name"].as_str())
+                    else {
+                        continue;
+                    };
+                    if name == "Monitor" {
                         self.monitor_calls.insert(id.to_owned());
+                    }
+                    if let Some(command) = block["input"]["command"]
+                        .as_str()
+                        .filter(|_| matches!(name, "Bash" | "Monitor"))
+                    {
+                        self.tool_commands.insert(id.to_owned(), command.to_owned());
                     }
                 }
                 Some("tool_result") => {
@@ -102,13 +198,12 @@ impl Roster {
                 return;
             };
             self.monitors.remove(task_id);
+            let pending = self.pending.get(task_id).cloned();
+            self.remove(task_id);
             if !self.eligible.remove(task_id) {
                 return;
             }
-            let task = self
-                .pending
-                .remove(task_id)
-                .or_else(|| self.known.remove(task_id));
+            let task = pending.or_else(|| self.known.remove(task_id));
             self.known.remove(task_id);
             let status = message["status"].as_str().unwrap_or_default();
             self.reports.push(Report {
@@ -138,6 +233,14 @@ impl Roster {
                 ) else {
                     return;
                 };
+                let tool_use_id = message["tool_use_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned);
+                if let Some(id) = &tool_use_id {
+                    self.tool_use_ids.insert(task_id.to_owned(), id.clone());
+                }
                 // Only the launching `Monitor` call tells a monitor from a background
                 // command (`isClaudeMonitorTask`).
                 let started_by_monitor = self.monitors.contains(task_id)
@@ -150,11 +253,27 @@ impl Roster {
                 } else {
                     kind
                 };
+                // A monitor that starts is one Claude resumes after
+                // (`upsertPendingBackgroundTask`).
+                if kind == Kind::Monitor
+                    && self.pending.get(task_id).map(|t| t.kind) != Some(Kind::Monitor)
+                {
+                    self.awaited.insert(task_id.to_owned());
+                }
                 let description = message["description"]
                     .as_str()
                     .filter(|d| !d.trim().is_empty())
                     .map(str::to_owned);
-                self.upsert(task_id, Task { kind, description });
+                let command = self.launch_command(tool_use_id.as_deref());
+                self.upsert(
+                    task_id,
+                    Task {
+                        kind,
+                        description,
+                        tool_use_id,
+                        command,
+                    },
+                );
             }
             // A level: the tasks running now (`replacePendingBackgroundTasks`).
             Some("background_tasks_changed") => {
@@ -170,19 +289,36 @@ impl Roster {
                         } else {
                             kind
                         };
+                        // What the roster names over what the task had
+                        // (`{ ...previous, ...task }`).
+                        let previous = self.pending.get(task_id).cloned().unwrap_or_default();
                         let description = entry["description"]
                             .as_str()
                             .filter(|d| !d.trim().is_empty())
                             .map(str::to_owned)
-                            .or_else(|| {
-                                self.pending
-                                    .get(task_id)
-                                    .and_then(|t| t.description.clone())
-                            });
-                        Some((task_id.to_owned(), Task { kind, description }))
+                            .or(previous.description);
+                        let tool_use_id = self
+                            .tool_use_ids
+                            .get(task_id)
+                            .cloned()
+                            .or(previous.tool_use_id);
+                        let command = self
+                            .launch_command(tool_use_id.as_deref())
+                            .or(previous.command);
+                        Some((
+                            task_id.to_owned(),
+                            Task {
+                                kind,
+                                description,
+                                tool_use_id,
+                                command,
+                            },
+                        ))
                     })
                     .collect();
                 self.pending.clear();
+                let listed: HashSet<&String> = tasks.iter().map(|(id, _)| id).collect();
+                self.awaited.retain(|id| listed.contains(id));
                 for (task_id, task) in tasks {
                     self.upsert(&task_id, task);
                 }
@@ -293,6 +429,46 @@ mod tests {
             roster.take_wake().1.unwrap()["summary"],
             "Monitor \"tail -f build.log\" finished"
         );
+    }
+
+    #[test]
+    fn running_tasks_are_listed_with_what_launched_them() {
+        let mut roster = Roster::default();
+        roster.observe_turn(&json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_m1", "name": "Monitor",
+             "input": {"command": "tail -f build.log"}},
+            {"type": "tool_use", "id": "toolu_b1", "name": "Bash",
+             "input": {"command": "npm test", "run_in_background": true}}]}}));
+        let before = roster.published();
+        roster.observe_turn(&json!({"type": "system", "subtype": "task_started",
+            "task_id": "m1", "tool_use_id": "toolu_m1", "description": "tail -f build.log",
+            "is_backgrounded": true, "task_type": "local_bash"}));
+        let monitor = json!({"taskId": "m1", "kind": "monitor", "description": "tail -f build.log",
+            "nativeItemId": "toolu_m1", "command": "tail -f build.log", "awaited": true});
+        assert_eq!(roster.changed(&before), Some(vec![monitor.clone()]));
+        // A level lists both; the command is not awaited.
+        let before = roster.published();
+        roster.observe_turn(&json!({"type": "system", "subtype": "task_started",
+            "task_id": "b1", "tool_use_id": "toolu_b1", "description": "npm test",
+            "is_backgrounded": true, "task_type": "local_bash"}));
+        roster.observe_turn(
+            &json!({"type": "system", "subtype": "background_tasks_changed",
+            "tasks": [{"task_id": "m1", "task_type": "local_bash"},
+                      {"task_id": "b1", "task_type": "local_bash", "description": "npm test"}]}),
+        );
+        let command = json!({"taskId": "b1", "kind": "command", "description": "npm test",
+            "nativeItemId": "toolu_b1", "command": "npm test"});
+        assert_eq!(
+            roster.changed(&before),
+            Some(vec![monitor.clone(), command])
+        );
+        // The command ends while idle: the next turn's end reports the list without it.
+        roster.observe_idle(&task_notification("b1", "completed"));
+        let before = roster.published();
+        roster.observe_turn(&json!({"type": "system", "subtype": "init"}));
+        assert_eq!(roster.changed(&before), None);
+        assert_eq!(roster.unsent(), Some(vec![monitor]));
+        assert_eq!(roster.unsent(), None);
     }
 
     #[test]

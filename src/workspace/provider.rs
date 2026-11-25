@@ -381,6 +381,13 @@ pub enum ProviderEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         untaken: bool,
     },
+    /// The background tasks the provider thread runs now, after a change (the
+    /// reference's roster `provider_thread.updated`): each task's id, kind and
+    /// what launched it (`pendingBackgroundTasks` without `runId`, which the
+    /// projection stamps). Additive: a reader that predates it fails only this
+    /// event's line, as for `steer.updated`.
+    #[serde(rename = "background_tasks.updated")]
+    BackgroundTasks { tasks: Vec<Value> },
     /// Recorded by earlier builds, which approved every request themselves.
     /// Kept so their event logs still load; it changes nothing.
     #[serde(rename = "runtime_request.resolved", rename_all = "camelCase")]

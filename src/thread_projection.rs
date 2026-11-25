@@ -1752,6 +1752,20 @@ fn stored_provider(
             conversation_head: record["nativeConversationHeadRef"]["nativeId"]
                 .as_str()
                 .map(str::to_owned),
+            background_tasks: record["pendingBackgroundTasks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|task| {
+                    let owner = crate::Run::uuid_for(task["runId"].as_str()?);
+                    let mut task = task.clone();
+                    let fields = task.as_object_mut()?;
+                    for key in ["runId", "itemId", "sourceThreadId"] {
+                        fields.remove(key);
+                    }
+                    Some((task, owner))
+                })
+                .collect(),
             status: match record["status"].as_str() {
                 Some("active") => "active",
                 Some("idle") => "idle",

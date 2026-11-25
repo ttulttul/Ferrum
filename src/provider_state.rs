@@ -91,6 +91,9 @@ pub struct ThreadRecord {
     pub status: &'static str,
     /// The conversation's last entry when its last turn ended (Pi).
     pub conversation_head: Option<String>,
+    /// The background tasks running now (`pendingBackgroundTasks`), each with
+    /// the run it first appeared under (`attributePendingBackgroundTasks`).
+    pub background_tasks: Vec<(Value, Uuid)>,
 }
 
 /// One run's provider turn.
@@ -236,6 +239,7 @@ impl ProviderState {
                     native_id: None,
                     status: "active",
                     conversation_head: None,
+                    background_tasks: Vec::new(),
                 });
                 thread.native_id = Some(native_thread_id.clone());
                 thread.status = "active";
@@ -331,6 +335,27 @@ impl ProviderState {
                 }
             }
             ProviderEvent::TurnUsage { usage } => record.turn_usage = Some(usage.clone()),
+            // A task keeps the run it first appeared under; a new one is this run's.
+            ProviderEvent::BackgroundTasks { tasks } => {
+                if let Some(thread) = self.thread.as_mut() {
+                    let owners: HashMap<&Value, Uuid> = thread
+                        .background_tasks
+                        .iter()
+                        .map(|(task, owner)| (&task["taskId"], *owner))
+                        .collect();
+                    let tasks: Vec<(Value, Uuid)> = tasks
+                        .iter()
+                        .map(|task| {
+                            let owner = owners.get(&task["taskId"]).copied().unwrap_or(run);
+                            (task.clone(), owner)
+                        })
+                        .collect();
+                    if tasks != thread.background_tasks {
+                        thread.background_tasks = tasks;
+                        thread.updated_at = at;
+                    }
+                }
+            }
             // On the steer message, which the store updates.
             ProviderEvent::SteerUpdated { .. } => {}
             ProviderEvent::PromptDelivered { bytes, pages } => {
@@ -363,6 +388,7 @@ impl ProviderState {
                     native_id: None,
                     status: "not_loaded",
                     conversation_head: None,
+                    background_tasks: Vec::new(),
                 });
                 self.terminals.insert(
                     run,
