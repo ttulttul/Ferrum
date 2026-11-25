@@ -1,7 +1,8 @@
 //! Turns over the Agent Client Protocol (ACP): newline-delimited JSON-RPC 2.0
 //! with the agent's CLI on its standard streams, as the reference's generic
-//! ACP adapter speaks it, in its Grok flavor (`grok agent stdio`) or its
-//! generic one for ACP Registry agents ([`Flavor`]).
+//! ACP adapter speaks it, in its Grok flavor (`grok agent stdio`), its
+//! generic one for ACP Registry agents, or Antigravity's and Kiro's
+//! ([`Flavor`]).
 //!
 //! A thread keeps its agent process across turns ([`Sessions`]), as the
 //! reference's provider session does: the first turn sends `initialize` and
@@ -19,11 +20,11 @@ use super::{cancelled, next_response, program, requests, Cli, Launch, Sink, Turn
 use crate::thread_projection::uri_component;
 use crate::workspace::provider::{
     ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition, TurnStatus,
-    ACP_REGISTRY, ANTIGRAVITY, GROK,
+    ACP_REGISTRY, ANTIGRAVITY, GROK, KIRO,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -54,6 +55,17 @@ const AGY_READ_LIMIT: u64 = 8 * 1024 * 1024;
 /// How long a Stop waits for an agent to answer its cancelled prompt.
 const STOP_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Kiro's launch (`KIRO_ACP_ARGS`): its V3 engine, signed in by the CLI.
+const KIRO_ARGS: [&str; 3] = ["acp", "--agent-engine=v3", "--auth-method=cli"];
+/// How long Kiro may take to advertise the model T3 wrote before its effort
+/// is set (`KIRO_MODEL_ADVERT_BOUND`).
+const KIRO_MODEL_ADVERT_BOUND: Duration = Duration::from_secs(2);
+/// How long a Stop or a steer waits for Kiro to start the prompt
+/// (`KIRO_CANCEL_HOLD_BOUND`): Kiro can drop a cancel sent just after it.
+const KIRO_START_HOLD_BOUND: Duration = Duration::from_secs(2);
+/// The steering note Kiro's model ends a steered reply with.
+const KIRO_STEERING_NOTE: &str = "[STEERING steer-";
+
 /// Which flavor of the reference's ACP adapter a turn runs in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Flavor {
@@ -66,6 +78,11 @@ enum Flavor {
     /// with eager sign-in, client file reads, `session/resume`, its tool
     /// shapes, its approval labels and questions.
     Antigravity,
+    /// Kiro's `kiro-cli acp` (`KiroAdapterV2`): the generic flavor with its
+    /// hooks opt-in, its session options (agent, model, effort, autopilot),
+    /// its approval labels, a Stop held until the prompt started, steering
+    /// with `_session/steer`, and its own prompt errors.
+    Kiro,
 }
 
 impl Flavor {
@@ -73,6 +90,7 @@ impl Flavor {
         match provider.driver.as_str() {
             ACP_REGISTRY => Self::Registry,
             ANTIGRAVITY => Self::Antigravity,
+            KIRO => Self::Kiro,
             _ => Self::Grok,
         }
     }
@@ -81,6 +99,7 @@ impl Flavor {
             Self::Grok => GROK,
             Self::Registry => ACP_REGISTRY,
             Self::Antigravity => ANTIGRAVITY,
+            Self::Kiro => KIRO,
         }
     }
     /// The harness the runtime notes name (`runtimeHarness ?? driver`).
@@ -89,6 +108,7 @@ impl Flavor {
             Self::Grok => "Grok",
             Self::Registry => ACP_REGISTRY,
             Self::Antigravity => "Antigravity",
+            Self::Kiro => "Kiro",
         }
     }
     /// The agent's command line.
@@ -100,6 +120,8 @@ impl Flavor {
                 args
             }
             Self::Registry | Self::Antigravity => provider.launch_args.clone(),
+            // Fixed: Kiro takes no launch arguments of the instance's.
+            Self::Kiro => KIRO_ARGS.iter().map(|arg| (*arg).to_owned()).collect(),
         }
     }
 }
@@ -268,6 +290,12 @@ struct Agent {
     system_prompt_append: bool,
     /// The agent reaches MCP servers over HTTP (`mcpCapabilities.http`).
     mcp_http: bool,
+    /// Kiro: its own cloud-config tool calls still running, whose updates
+    /// are not the turn's.
+    cloud_tools: HashSet<String>,
+    /// Kiro: a `config_option_update` arrived while a request was in flight,
+    /// which the request's result does not replace.
+    config_pushed: bool,
 }
 
 impl Agent {
@@ -286,6 +314,7 @@ impl Agent {
             // The generic flavor gives the agent its thread and T3's MCP
             // endpoint (`processEnvironment`), for the terminal fallback.
             Flavor::Registry | Flavor::Antigravity => ("", "", process_environment(provider)),
+            Flavor::Kiro => ("kiro-cli", "", process_environment(provider)),
         };
         let mut extra_env = extra_env;
         // Each Antigravity process gets a temporary folder of its own.
@@ -307,7 +336,9 @@ impl Agent {
             }
             _ => None,
         };
-        if flavor != Flavor::Grok && provider.binary_path.trim().is_empty() {
+        if matches!(flavor, Flavor::Registry | Flavor::Antigravity)
+            && provider.binary_path.trim().is_empty()
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Local ACP provider requires an executable.",
@@ -355,6 +386,8 @@ impl Agent {
             agent_version: None,
             system_prompt_append: false,
             mcp_http: false,
+            cloud_tools: HashSet::new(),
+            config_pushed: false,
         })
     }
 
@@ -429,8 +462,11 @@ impl Agent {
             if message.get("method").is_some() {
                 if message.get("id").is_some() {
                     self.refuse(&message).await;
-                } else if replay && message["method"] == "session/update" {
-                    replayed = Some(Instant::now());
+                } else if message["method"] == "session/update" {
+                    self.note_update(&message["params"]);
+                    if replay {
+                        replayed = Some(Instant::now());
+                    }
                 }
                 continue;
             }
@@ -452,7 +488,7 @@ impl Agent {
     async fn initialize(&mut self) -> Result<(), AcpError> {
         // A registry agent may also ask the user to sign in at a URL.
         let elicitation = match self.flavor {
-            Flavor::Grok | Flavor::Antigravity => json!({"form": {}}),
+            Flavor::Grok | Flavor::Antigravity | Flavor::Kiro => json!({"form": {}}),
             Flavor::Registry => json!({"form": {}, "url": {}}),
         };
         let mut params = json!({
@@ -470,6 +506,13 @@ impl Agent {
         if self.flavor == Flavor::Grok {
             // Grok then asks about auto-mode refusals instead of denying them.
             params["_meta"] = json!({"clientType": "extension"});
+        }
+        if self.flavor == Flavor::Kiro {
+            // Kiro V3 loads the user's hooks only when the client opts in;
+            // `v2` makes Kiro run them itself rather than ask T3.
+            let hooks = json!({"kiro": {"hooks": {"enabled": true, "v2": true}}});
+            params["clientCapabilities"]["_meta"] = hooks.clone();
+            params["capabilities"]["_meta"] = hooks;
         }
         if self.flavor == Flavor::Antigravity {
             // agy reads files through T3 (`clientFileReads`), and from 1.5.1
@@ -525,10 +568,12 @@ impl Agent {
                     Flavor::Grok if xai_key => "xai.api_key".to_owned(),
                     Flavor::Grok => "cached_token".to_owned(),
                     // The instance's method, else the agent's first.
-                    Flavor::Registry | Flavor::Antigravity if !self.auth_method.is_empty() => {
+                    Flavor::Registry | Flavor::Antigravity | Flavor::Kiro
+                        if !self.auth_method.is_empty() =>
+                    {
                         self.auth_method.clone()
                     }
-                    Flavor::Registry | Flavor::Antigravity => {
+                    Flavor::Registry | Flavor::Antigravity | Flavor::Kiro => {
                         self.auth_methods.first().cloned().unwrap_or_default()
                     }
                 };
@@ -554,6 +599,9 @@ impl Agent {
         }
         if self.flavor == Flavor::Antigravity {
             return self.configure_antigravity(provider).await;
+        }
+        if self.flavor == Flavor::Kiro {
+            return self.configure_kiro(provider).await;
         }
         let requested = match provider.model.trim() {
             "" => "grok-build",
@@ -741,6 +789,220 @@ impl Agent {
         result?;
         self.current_mode = Some(wanted.to_owned());
         Ok(())
+    }
+
+    /// Kiro's session options, in the reference's order
+    /// (`applyKiroModelSelection`, then `sessionConfigForPolicy`): the
+    /// thread's agent, its model, the model's effort once Kiro advertises
+    /// the model, then Autopilot (on only in Full access).
+    async fn configure_kiro(&mut self, provider: &ProviderTurn) -> Result<(), AcpError> {
+        let launch = provider.kiro.clone().unwrap_or_default();
+        let rejected = |model: &str| {
+            let model = model.to_owned();
+            move |error: AcpError| {
+                match error {
+                AcpError::Rpc { code: -32602, .. } => AcpError::Startup(format!(
+                    "The agent did not accept the model \"{model}\". Choose another model for this provider, then retry."
+                )),
+                other => other,
+            }
+            }
+        };
+        // The agent (`mode`): only one the session lists, and not its current.
+        let mut agent_switched = false;
+        let agent = launch.agent.trim().to_owned();
+        if !agent.is_empty() {
+            if let Some(option) = self.kiro_option(|option| option["id"] == "mode") {
+                if option["type"] == "select"
+                    && option["currentValue"] != agent.as_str()
+                    && select_values(&option).contains(&agent)
+                {
+                    self.set_kiro_option("mode", &agent)
+                        .await
+                        .map_err(rejected(&provider.model))?;
+                    agent_switched = true;
+                }
+            }
+        }
+        // The model: "default" is Kiro's own, already running in a session
+        // that does not advertise `model` yet; another is written even
+        // unlisted, as Kiro fails the next prompt on one it can't use.
+        let model_option =
+            self.kiro_option(|option| option["id"] == "model" || option["category"] == "model");
+        let current = model_option
+            .as_ref()
+            .filter(|option| option["type"] == "select")
+            .and_then(|option| option["currentValue"].as_str().map(str::to_owned));
+        let selected = provider.model.trim();
+        let is_default = selected.is_empty() || selected == "default";
+        let select = model_option
+            .as_ref()
+            .is_some_and(|option| option["type"] == "select");
+        let applied = if is_default && !select && !agent_switched {
+            current
+        } else {
+            let requested = if is_default {
+                match launch.default_model.trim() {
+                    "" => "auto".to_owned(),
+                    model => model.to_owned(),
+                }
+            } else {
+                selected.to_owned()
+            };
+            if current.as_deref() == Some(requested.as_str()) {
+                current
+            } else {
+                let id = model_option
+                    .as_ref()
+                    .and_then(|option| option["id"].as_str())
+                    .unwrap_or("model")
+                    .to_owned();
+                self.set_kiro_option(&id, &requested)
+                    .await
+                    .map_err(rejected(&provider.model))?;
+                Some(requested)
+            }
+        };
+        // The effort, once Kiro advertises the written model (it resets the
+        // level on a model change); a level it does not offer is not sent.
+        if let Some(effort) = provider
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+        {
+            if let Some(options) = self.await_kiro_model(applied.as_deref()).await {
+                let level = options
+                    .iter()
+                    .find(|option| option["id"] == "effortLevel" && option["type"] == "select");
+                if let Some(level) = level {
+                    if select_values(level).iter().any(|value| value == effort)
+                        && level["currentValue"] != effort
+                    {
+                        // A refused level keeps Kiro's.
+                        match self.set_kiro_option("effortLevel", effort).await {
+                            Err(AcpError::Rpc { code, .. }) => {
+                                tracing::warn!(code, "Kiro rejected the reasoning effort");
+                            }
+                            other => other?,
+                        }
+                    }
+                }
+            } else {
+                tracing::warn!("Kiro did not advertise the model's reasoning effort");
+            }
+        }
+        // Autopilot: on only for Full access; off, Kiro asks before it ends a
+        // turn with changes.
+        let autopilot = if provider.runtime_mode() == "full-access" {
+            "on"
+        } else {
+            "off"
+        };
+        if let Some(option) = self.kiro_option(|option| option["id"] == "autopilot") {
+            if option["type"] == "select"
+                && option["currentValue"] != autopilot
+                && select_values(&option)
+                    .iter()
+                    .any(|value| value == autopilot)
+            {
+                self.set_kiro_option("autopilot", autopilot).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The session's config option `matches` picks.
+    fn kiro_option(&self, matches: impl Fn(&Value) -> bool) -> Option<Value> {
+        self.config_options
+            .iter()
+            .find(|option| matches(option))
+            .cloned()
+    }
+
+    /// `session/set_config_option`; its result's options become the
+    /// session's, unless Kiro pushed newer ones while it was in flight.
+    async fn set_kiro_option(&mut self, id: &str, value: &str) -> Result<(), AcpError> {
+        self.config_pushed = false;
+        let params = json!({"sessionId": self.session, "configId": id, "value": value});
+        let result = self
+            .request("session/set_config_option", params, false)
+            .await?;
+        if !self.config_pushed {
+            if let Some(options) = result["configOptions"].as_array() {
+                self.config_options = options.clone();
+            }
+        }
+        Ok(())
+    }
+
+    /// The session's options once their model is `model` (any, for none),
+    /// waiting up to [`KIRO_MODEL_ADVERT_BOUND`] for Kiro to advertise it.
+    async fn await_kiro_model(&mut self, model: Option<&str>) -> Option<Vec<Value>> {
+        let advertised = |options: &[Value]| {
+            model.is_none_or(|model| {
+                options.iter().any(|option| {
+                    (option["id"] == "model" || option["category"] == "model")
+                        && option["type"] == "select"
+                        && option["currentValue"] == model
+                })
+            })
+        };
+        let deadline = Instant::now() + KIRO_MODEL_ADVERT_BOUND;
+        loop {
+            if advertised(&self.config_options) {
+                return Some(self.config_options.clone());
+            }
+            let line = tokio::select! {
+                line = self.cli.next_line() => line?,
+                _ = tokio::time::sleep_until(deadline) => return None,
+            };
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if message.get("method").is_some() && message.get("id").is_some() {
+                self.refuse(&message).await;
+            } else if message["method"] == "session/update" {
+                self.note_update(&message["params"]);
+            }
+        }
+    }
+
+    /// What Kiro's session state takes from an update outside a turn's
+    /// projection: its pushed config options, and its own cloud-config tool
+    /// calls (whose later updates are dropped). True when the update is one
+    /// of those calls'.
+    fn note_update(&mut self, params: &Value) -> bool {
+        // Before `session/new` answers, its session's updates are already
+        // this agent's.
+        if self.flavor != Flavor::Kiro
+            || (!self.session.is_empty() && params["sessionId"] != self.session.as_str())
+        {
+            return false;
+        }
+        let update = &params["update"];
+        match update["sessionUpdate"].as_str().unwrap_or_default() {
+            "config_option_update" => {
+                if let Some(options) = update["configOptions"].as_array() {
+                    self.config_options = options.clone();
+                    self.config_pushed = true;
+                }
+                false
+            }
+            "tool_call" | "tool_call_update" | "tool_call_content_chunk" => {
+                let id = update["toolCallId"].as_str().unwrap_or_default().to_owned();
+                if update["_meta"]["kiro"]["toolId"] == "fetch_cloud_config" {
+                    self.cloud_tools.insert(id.clone());
+                } else if !self.cloud_tools.contains(&id) {
+                    return false;
+                }
+                if matches!(update["status"].as_str(), Some("completed" | "failed")) {
+                    self.cloud_tools.remove(&id);
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Note a session's setup result: its models and config options.
@@ -956,7 +1218,15 @@ async fn open(
     launch: String,
     resume: Option<&str>,
 ) -> Result<(Agent, bool), AcpError> {
-    if let Some(agent) = sessions.take(thread, &launch, resume).await {
+    if let Some(mut agent) = sessions.take(thread, &launch, resume).await {
+        // Kiro switches model, agent and effort within its session, so each
+        // turn sets them (`configureSession`).
+        if agent.flavor == Flavor::Kiro {
+            if let Err(error) = agent.configure(provider).await {
+                agent.stop().await;
+                return Err(error);
+            }
+        }
         return Ok((agent, false));
     }
     // What a Stop left, when this turn resumes that same session.
@@ -1087,6 +1357,41 @@ async fn start(
     };
     agent.configure(provider).await?;
     Ok(resumed)
+}
+
+/// A select option's values, its groups' included.
+fn select_values(option: &Value) -> Vec<String> {
+    option["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| -> Vec<String> {
+            match entry["options"].as_array() {
+                Some(group) if entry.get("value").is_none() => group
+                    .iter()
+                    .filter_map(|choice| choice["value"].as_str().map(str::to_owned))
+                    .collect(),
+                _ => entry["value"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+/// A failed Kiro prompt (`kiroPromptFailure`): Kiro's own message, meant
+/// for the user, with its code.
+fn kiro_prompt_failure(error: &AcpError) -> ProviderFailure {
+    match error {
+        AcpError::Rpc { code, message, .. } => {
+            let mut failure = ProviderFailure::new("provider_error", message.trim());
+            failure.code = Some(code.to_string());
+            failure
+        }
+        other => other.failure(),
+    }
 }
 
 /// Whether `version` (`1.5.1`, `1.6.2-beta`) is at least `at`.
@@ -1223,6 +1528,9 @@ struct Tool {
     skipped: u32,
     /// The item's status once T3 ended it (`interrupted`).
     forced: Option<&'static str>,
+    /// Its last titled update named no kind, so its title is shown as is
+    /// (the reference presents each titled update alone).
+    plain_title: bool,
 }
 
 /// A permission request waiting for the user.
@@ -1278,6 +1586,65 @@ struct Turn<'a> {
     /// Questions agy asked (`interaction_*`), by request id: the RPC id and
     /// the options.
     questions: HashMap<String, (Value, Vec<Value>)>,
+    /// When the prompt went out.
+    prompt_at: Instant,
+    /// Kiro: the agent started the prompt (`isKiroPromptActivity`), so it
+    /// honors a cancel or a steer.
+    started: bool,
+    /// Kiro: steering messages held until the prompt started.
+    pending_steers: Vec<String>,
+    /// Kiro: the steering note filter, from `steering_injected` until
+    /// `steering_cleared`.
+    steering_note: Option<NoteFilter>,
+    /// Whether the session was loaded, as the thread's record says.
+    resumed: bool,
+    /// Kiro: the title it last gave its session.
+    native_title: Option<String>,
+}
+
+/// The state of Kiro's steering note filter (`makeKiroSteeringNoteFilter`):
+/// a chunk end that may start the note, and whether the text is in it.
+#[derive(Default)]
+struct NoteFilter {
+    held: String,
+    in_note: bool,
+}
+
+impl NoteFilter {
+    /// The visible part of a chunk: the `[STEERING steer-…]` note dropped,
+    /// a tail that may start it held for the next chunk.
+    fn filter(&mut self, text: &str) -> String {
+        let mut pending = std::mem::take(&mut self.held) + text;
+        let mut visible = String::new();
+        while !pending.is_empty() {
+            if self.in_note {
+                let Some(end) = pending.find(']') else {
+                    break;
+                };
+                pending = pending[end + 1..].to_owned();
+                self.in_note = false;
+                continue;
+            }
+            if let Some(start) = pending.find(KIRO_STEERING_NOTE) {
+                visible.push_str(pending[..start].trim_end());
+                pending = pending[start + KIRO_STEERING_NOTE.len()..].to_owned();
+                self.in_note = true;
+                continue;
+            }
+            let held = (1..KIRO_STEERING_NOTE.len())
+                .rev()
+                .find(|length| {
+                    pending.len() >= *length
+                        && pending.is_char_boundary(pending.len() - length)
+                        && KIRO_STEERING_NOTE.starts_with(&pending[pending.len() - length..])
+                })
+                .unwrap_or(0);
+            visible.push_str(&pending[..pending.len() - held]);
+            self.held = pending[pending.len() - held..].to_owned();
+            break;
+        }
+        visible
+    }
 }
 
 impl<'a> Turn<'a> {
@@ -1326,6 +1693,12 @@ impl<'a> Turn<'a> {
                 && version_at_least(agent.agent_version.as_deref(), (1, 5, 0)),
             prompt_usage: None,
             questions: HashMap::new(),
+            prompt_at: Instant::now(),
+            started: false,
+            pending_steers: Vec::new(),
+            steering_note: None,
+            resumed: false,
+            native_title: None,
         }
     }
 
@@ -1348,6 +1721,7 @@ impl<'a> Turn<'a> {
         cancel: &mut Option<oneshot::Receiver<()>>,
         resumed: bool,
     ) -> Ended {
+        self.resumed = resumed;
         // The thread first, as the turn's records hang from it (the
         // reference reports its turn first).
         self.sink.send(ProviderEvent::ProviderThread {
@@ -1357,6 +1731,7 @@ impl<'a> Turn<'a> {
             model: None,
 
             opencode2: None,
+            native_title: None,
         });
         self.sink.send(ProviderEvent::ProviderTurn {
             native_turn_id: Some(self.scoped(&self.native_turn)),
@@ -1378,13 +1753,25 @@ impl<'a> Turn<'a> {
             return Ended::Crashed(AcpError::Closed.failure());
         };
         self.prompt_rpc = prompt_rpc;
+        self.prompt_at = Instant::now();
         let ended = loop {
+            // Kiro's held steers go once the prompt started, or at the bound.
+            let steer_due =
+                (!self.pending_steers.is_empty()).then_some(self.prompt_at + KIRO_START_HOLD_BOUND);
             let line = tokio::select! {
                 line = agent.cli.next_line() => line,
                 _ = cancelled(cancel) => {
                     self.cancel_pending(agent).await;
                     if super::take_detached(&self.sink.turn_id) {
                         break Ended::Detached;
+                    }
+                    // Kiro can drop a cancel sent before it started the
+                    // prompt; one that settles meanwhile is not cancelled.
+                    if self.flavor == Flavor::Kiro {
+                        self.interrupting = true;
+                        if let Some(end) = self.hold_until_started(agent).await {
+                            break end;
+                        }
                     }
                     if self.flavor != Flavor::Grok {
                         break self.cancel_prompt(agent).await;
@@ -1398,6 +1785,10 @@ impl<'a> Turn<'a> {
                 }
                 _ = super::sleep_until(self.flush_at) => {
                     self.flush();
+                    continue;
+                }
+                _ = super::sleep_until(steer_due) => {
+                    self.send_steers(agent).await;
                     continue;
                 }
             };
@@ -1419,6 +1810,9 @@ impl<'a> Turn<'a> {
             if let Some(end) = self.handle(agent, message).await {
                 break end;
             }
+            if self.started && !self.pending_steers.is_empty() {
+                self.send_steers(agent).await;
+            }
         };
         if self.delivered {
             agent.instructions = Some(state);
@@ -1429,6 +1823,41 @@ impl<'a> Turn<'a> {
             agent.notes = None;
         }
         ended
+    }
+
+    /// Kiro's Stop hold (`cancelAfterPromptStarts`): follow the turn until
+    /// the agent started the prompt, or [`KIRO_START_HOLD_BOUND`] after it
+    /// was sent. The turn's end when the prompt settled meanwhile, which
+    /// then needs no cancel.
+    async fn hold_until_started(&mut self, agent: &mut Agent) -> Option<Ended> {
+        let deadline = self.prompt_at + KIRO_START_HOLD_BOUND;
+        while !self.started {
+            let line = tokio::select! {
+                line = agent.cli.next_line() => line,
+                _ = tokio::time::sleep_until(deadline) => return None,
+            };
+            let Some(line) = line else {
+                let status = agent.cli.exit_status().await;
+                self.close_streams();
+                return Some(Ended::Crashed(super::acp_crashed(status)));
+            };
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if let Some(end) = self.handle(agent, message).await {
+                return Some(end);
+            }
+        }
+        None
+    }
+
+    /// Send Kiro the steering messages held for the prompt's start
+    /// (`_session/steer`, which queues each for the model's next step).
+    async fn send_steers(&mut self, agent: &mut Agent) {
+        for text in std::mem::take(&mut self.pending_steers) {
+            let params = json!({"sessionId": self.session, "message": text});
+            let _ = agent.send("_session/steer", params).await;
+        }
     }
 
     /// The generic flavor's Stop: `session/cancel`, then the prompt's answer
@@ -1462,8 +1891,12 @@ impl<'a> Turn<'a> {
             if message.get("id").is_some() && message.get("method").is_some() {
                 agent.refuse(&message).await;
             } else if message["method"] == "session/update" {
-                let update = message["params"]["update"].clone();
-                self.update(&update);
+                if self.flavor == Flavor::Kiro {
+                    self.kiro_update(agent, &message["params"]);
+                } else {
+                    let update = message["params"]["update"].clone();
+                    self.update(&update);
+                }
             }
         }
     }
@@ -1524,7 +1957,7 @@ impl<'a> Turn<'a> {
         // The selection's model ("default", the agent's own, says none).
         let model = match (self.model.as_str(), self.flavor) {
             ("", Flavor::Grok) => Some("grok-build"),
-            ("", Flavor::Registry | Flavor::Antigravity) => None,
+            ("", Flavor::Registry | Flavor::Antigravity | Flavor::Kiro) => None,
             (model, _) => Some(model),
         };
         // An agent whose session took the pull request text has notes
@@ -1560,6 +1993,10 @@ impl<'a> Turn<'a> {
                 agent.refuse(&message).await;
                 None
             }
+            (Some("session/update"), None) if self.flavor == Flavor::Kiro => {
+                self.kiro_update(agent, &message["params"]);
+                None
+            }
             (Some("session/update"), None) => {
                 let params = &message["params"];
                 if params["sessionId"].as_str() == Some(self.session.as_str())
@@ -1577,10 +2014,10 @@ impl<'a> Turn<'a> {
                         message: error["message"].as_str().unwrap_or_default().to_owned(),
                         data: error.get("data").cloned().unwrap_or(Value::Null),
                     };
-                    let failure = if self.flavor == Flavor::Antigravity {
-                        antigravity_prompt_failure(&error)
-                    } else {
-                        error.failure()
+                    let failure = match self.flavor {
+                        Flavor::Antigravity => antigravity_prompt_failure(&error),
+                        Flavor::Kiro => kiro_prompt_failure(&error),
+                        _ => error.failure(),
                     };
                     return Some(self.failed(failure, true));
                 }
@@ -1816,6 +2253,75 @@ impl<'a> Turn<'a> {
         Ok(lines.join("\n"))
     }
 
+    /// One Kiro `session/update`: its session state noted, its own
+    /// cloud-config calls and its sub-agents' frames dropped, the prompt's
+    /// start noted, and the steering note left out of its reply.
+    fn kiro_update(&mut self, agent: &mut Agent, params: &Value) {
+        if agent.note_update(params) {
+            return;
+        }
+        let update = &params["update"];
+        if params["sessionId"].as_str() != Some(self.session.as_str())
+            || update["_meta"]["isReplay"] == true
+        {
+            return;
+        }
+        // A sub-agent's frames run in the parent's session; its child
+        // thread is not projected, so only its call shows.
+        let kiro = &update["_meta"]["kiro"];
+        if kiro["agentSubtaskId"].is_string() && kiro["kind"] != "agent-subtask" {
+            return;
+        }
+        let kind = update["sessionUpdate"].as_str().unwrap_or_default();
+        if matches!(
+            kind,
+            "agent_message_chunk"
+                | "agent_message"
+                | "agent_thought_chunk"
+                | "agent_thought"
+                | "tool_call"
+                | "tool_call_update"
+                | "tool_call_content_chunk"
+                | "plan_update"
+        ) || (kind == "session_info_update" && kiro["kind"] == "turn_start")
+        {
+            self.started = true;
+        }
+        if kind == "session_info_update" {
+            // Its title names the provider thread (`nativeMetadata.title`).
+            let title = update["title"]
+                .as_str()
+                .map(|title| title.trim().chars().take(1024).collect::<String>())
+                .filter(|title| !title.is_empty());
+            if title.is_some() && title != self.native_title {
+                self.native_title = title.clone();
+                self.sink.send(ProviderEvent::ProviderThread {
+                    driver: self.flavor.driver().into(),
+                    native_thread_id: self.session.clone(),
+                    resumed: self.resumed,
+                    model: None,
+                    opencode2: None,
+                    native_title: title,
+                });
+            }
+            match kiro["kind"].as_str() {
+                Some("steering_injected") => self.steering_note = Some(NoteFilter::default()),
+                Some("steering_cleared") => self.steering_note = None,
+                _ => {}
+            }
+            return;
+        }
+        if kind == "agent_message_chunk" && update["content"]["type"] == "text" {
+            if let Some(filter) = self.steering_note.as_mut() {
+                let mut update = update.clone();
+                let text = update["content"]["text"].as_str().unwrap_or_default();
+                update["content"]["text"] = json!(filter.filter(text));
+                return self.update(&update);
+            }
+        }
+        self.update(update);
+    }
+
     /// One `session/update`.
     fn update(&mut self, update: &Value) {
         match update["sessionUpdate"].as_str().unwrap_or_default() {
@@ -1926,6 +2432,10 @@ impl<'a> Turn<'a> {
         }
         if let Some(title) = update["title"].as_str() {
             tool.title = Some(title.to_owned());
+            tool.plain_title = update["kind"]
+                .as_str()
+                .is_none_or(|kind| kind.trim().is_empty())
+                && !title.trim().is_empty();
         }
         match update["status"].as_str() {
             Some("pending") => tool.status = "pending".into(),
@@ -1993,11 +2503,17 @@ impl<'a> Turn<'a> {
             native_ref(self.flavor.driver(), id, "strong"),
         );
         let command = tool_command(tool);
-        let output = text_of(if tool.raw_output.is_null() {
+        let source = if tool.raw_output.is_null() {
             &tool.content
         } else {
             &tool.raw_output
-        });
+        };
+        // Kiro's outputs are in `message` (an empty `output` beside it).
+        let output = if self.flavor == Flavor::Kiro {
+            output_text(source)
+        } else {
+            text_of(source)
+        };
         let kind = tool.kind.as_deref().unwrap_or_default();
         match kind {
             "execute" => {
@@ -2037,7 +2553,12 @@ impl<'a> Turn<'a> {
                 });
                 item.fields.insert("toolName".into(), json!("Read"));
                 item.fields.insert("input".into(), input_of(tool));
-                if let Some(output) = output {
+                // The reference shows a read's raw output.
+                if self.flavor == Flavor::Kiro {
+                    if !tool.raw_output.is_null() {
+                        item.fields.insert("output".into(), tool.raw_output.clone());
+                    }
+                } else if let Some(output) = output {
                     item.fields.insert("output".into(), json!(output));
                 }
             }
@@ -2057,6 +2578,9 @@ impl<'a> Turn<'a> {
                     item.fields.insert("output".into(), output);
                 }
             }
+        }
+        if self.flavor == Flavor::Kiro && tool.plain_title {
+            item.title = tool.title.as_deref().map(|title| title.trim().to_owned());
         }
         item
     }
@@ -2125,10 +2649,19 @@ impl<'a> Turn<'a> {
                 .and_then(|option| option["optionId"].as_str())
                 .map(str::to_owned)
         };
-        let disposed = if t3_tool {
-            Disposition::Allow
-        } else {
-            disposition(self.flavor, &self.runtime_mode, &kind)
+        let offers_once = options.iter().any(|option| {
+            option["kind"] == "allow_once"
+                && option["optionId"]
+                    .as_str()
+                    .is_some_and(|id| !id.trim().is_empty())
+        });
+        let disposed = match disposition(self.flavor, &self.runtime_mode, &kind) {
+            _ if t3_tool => Disposition::Allow,
+            // A policy approval may only use Kiro's `allow_once`: its
+            // `allow_always` saves a consent rule for the whole workspace
+            // (`kiroPermissionDisposition`).
+            Disposition::Allow if self.flavor == Flavor::Kiro && !offers_once => Disposition::Ask,
+            disposed => disposed,
         };
         match disposed {
             Disposition::Allow => {
@@ -2197,6 +2730,33 @@ impl<'a> Turn<'a> {
         if self.flavor == Flavor::Grok {
             open.fields.insert("options".into(), Value::Array(labels));
         }
+        // Kiro's labels (`kiroApprovalOptions`): "Always allow" only without
+        // a one-time choice, as it saves a workspace rule.
+        if self.flavor == Flavor::Kiro {
+            let offers = |kind: &str| {
+                options.iter().any(|option| {
+                    option["kind"] == kind
+                        && option["optionId"]
+                            .as_str()
+                            .is_some_and(|id| !id.trim().is_empty())
+                })
+            };
+            let mut labels = Vec::new();
+            offered = vec!["cancel"];
+            if offers("allow_once") {
+                labels.push(json!({"decision": "accept", "label": "Allow once"}));
+                offered.push("accept");
+            } else if offers("allow_always") {
+                labels.push(json!({"decision": "acceptForSession", "label": "Always allow"}));
+                offered.push("acceptForSession");
+            }
+            if offers("reject_once") {
+                labels.push(json!({"decision": "decline", "label": "Deny"}));
+                offered.push("decline");
+            }
+            labels.push(json!({"decision": "cancel", "label": "Cancel"}));
+            open.fields.insert("options".into(), Value::Array(labels));
+        }
         // agy's labels (`antigravityApprovalOptions`), for the options it offers.
         if self.flavor == Flavor::Antigravity {
             let offers = |kind: &str| {
@@ -2261,6 +2821,16 @@ impl<'a> Turn<'a> {
                 }
                 return;
             }
+            // Kiro queues it with `_session/steer` once the prompt started
+            // (a steer sent earlier is dropped like an early cancel).
+            if self.flavor == Flavor::Kiro {
+                let text = crate::workspace::attachment_prompt::text_with_paths(text, &[]);
+                self.pending_steers.push(text);
+                if self.started {
+                    self.send_steers(agent).await;
+                }
+                return;
+            }
             let params = json!({"sessionId": self.session, "text": text});
             let _ = agent.send("_x.ai/interject", params).await;
             return;
@@ -2301,7 +2871,7 @@ impl<'a> Turn<'a> {
         // Grok offers "allow for session" for edits only; the generic flavor
         // takes the agent's first always-allow option.
         if decision == "acceptForSession"
-            && self.flavor == Flavor::Grok
+            && matches!(self.flavor, Flavor::Grok | Flavor::Kiro)
             && !pending.offered.contains(&"acceptForSession")
         {
             decision = "accept";
@@ -2422,6 +2992,8 @@ fn disposition(flavor: Flavor, runtime_mode: &str, kind: &str) -> Disposition {
     match runtime_mode {
         // agy's own Auto already decided what it asks (`antigravityPermissionDisposition`).
         "auto" if matches!(flavor, Flavor::Grok | Flavor::Antigravity) => Disposition::Ask,
+        // Kiro has no auto mode: the thread's policy asks, as Supervised.
+        "auto" if flavor == Flavor::Kiro => Disposition::Ask,
         "auto" => Disposition::Allow,
         "full-access" => Disposition::Allow,
         _ if reads => Disposition::Allow,
@@ -2544,6 +3116,47 @@ fn text_of(value: &Value) -> Option<String> {
             .iter()
             .find_map(|key| map.get(*key).and_then(text_of)),
         other => Some(other.to_string()),
+    }
+}
+
+/// Text from a tool's output as the reference's `textFromUnknown` reads it:
+/// a string, the first non-empty of its output fields (`message` last), or
+/// its entries' texts by line.
+fn output_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(entries) => {
+            let texts: Vec<String> = entries
+                .iter()
+                .filter_map(output_text)
+                .filter(|text| !text.is_empty())
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        }
+        Value::Object(map) => [
+            "output_for_prompt",
+            "stdout",
+            "stderr",
+            "output",
+            "combinedOutput",
+            "combined_output",
+            "content",
+            "text",
+            "message",
+        ]
+        .iter()
+        .find_map(|key| {
+            map.get(*key)
+                .and_then(output_text)
+                .filter(|text| !text.is_empty())
+        })
+        .or_else(|| {
+            map.get("Result")
+                .filter(|result| result.is_object())
+                .or_else(|| map.get("result").filter(|result| result.is_object()))
+                .and_then(output_text)
+        }),
+        _ => None,
     }
 }
 
@@ -2704,6 +3317,37 @@ mod tests {
         };
         normalize_bash(&mut tool);
         assert_eq!(tool.status, "failed");
+    }
+
+    #[test]
+    fn kiros_steering_note_is_left_out_across_chunks() {
+        let mut filter = NoteFilter::default();
+        let chunks = [
+            "steering",
+            " fixture observed\n\n[",
+            "STEERING steer-f5f",
+            "9d167: Updated",
+            " response.]",
+            " After.",
+        ];
+        let visible: String = chunks.iter().map(|chunk| filter.filter(chunk)).collect();
+        assert_eq!(visible, "steering fixture observed\n\n After.");
+        // A bracket that does not start the note shows once the next chunk says so.
+        let mut filter = NoteFilter::default();
+        assert_eq!(filter.filter("a ["), "a ");
+        assert_eq!(filter.filter("1]"), "[1]");
+    }
+
+    #[test]
+    fn kiros_tool_output_skips_empty_fields() {
+        let output = json!({"output": "", "exitCode": 0, "message": "Output:\n\nExit Code: 0"});
+        assert_eq!(
+            output_text(&output).as_deref(),
+            Some("Output:\n\nExit Code: 0")
+        );
+        let content = json!([{"type": "content", "content": {"type": "text", "text": "a"}},
+            {"type": "content", "content": {"type": "text", "text": "b"}}]);
+        assert_eq!(output_text(&content).as_deref(), Some("a\nb"));
     }
 
     #[test]

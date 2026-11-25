@@ -974,6 +974,7 @@ impl<'a> Turn<'a> {
             model: None,
 
             opencode2: None,
+            native_title: None,
         });
         let rules = permission_rules(provider.runtime_mode());
         if let Err(detail) = oc.apply_permission(&rules).await {

@@ -632,6 +632,18 @@ impl crate::orchestration::CommandHost for AppState {
                         }
                     }
                 }
+                // A Kiro turn runs `kiro-cli` (`binaryPath` with `~`
+                // expanded) and knows which model Kiro's "default" stands
+                // for, from the instance's live status snapshot.
+                if let Ok(Some((turn, _))) = provider.as_mut() {
+                    if turn.driver == crate::workspace::provider::KIRO {
+                        turn.binary_path = crate::provider_status::expand_home(&turn.binary_path);
+                        let row = self.provider_status.latest_row(&turn.instance_id);
+                        let kiro = turn.kiro.get_or_insert_with(Default::default);
+                        kiro.default_model =
+                            crate::provider_status::kiro::default_model_id(row.as_ref());
+                    }
+                }
                 // An Antigravity turn runs `agy acp` as the driver launches
                 // it: the instance's sign-in settings checked, the executable
                 // resolved, the private profile prepared, and the runtime's

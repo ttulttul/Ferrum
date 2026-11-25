@@ -57,6 +57,20 @@ pub(crate) fn models(
         .collect()
 }
 
+/// `kiroDefaultModelId`: Kiro's id for "Kiro default" in a status row, the
+/// `default` model's first alias, else `auto`.
+pub(crate) fn default_model_id(row: Option<&Value>) -> String {
+    row.and_then(|row| row["models"].as_array())
+        .into_iter()
+        .flatten()
+        .find(|model| model["slug"] == DEFAULT_MODEL_SLUG)
+        .and_then(|model| model["aliases"][0].as_str())
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or(FALLBACK_DEFAULT_MODEL)
+        .to_owned()
+}
+
 /// `kiroAuthFromWhoami`.
 fn auth_from_whoami(output: Option<&CommandResult>, env: &ProcessEnv) -> Value {
     let Some(output) = output else {

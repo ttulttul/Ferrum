@@ -644,6 +644,7 @@ impl<'a> Turn<'a> {
             model: None,
 
             opencode2: None,
+            native_title: None,
         });
         if let Err(failure) = pi.apply_selection(provider).await {
             return Ended::Settled(TurnEnd::failed(failure, ThreadDisposition::Reusable));

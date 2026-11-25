@@ -2,7 +2,7 @@
 //! Claude Code stream-json transcripts (`tests/fixtures/providers`).
 use super::*;
 use crate::workspace::provider::{
-    ProviderTurn, TurnStatus, ACP_REGISTRY, ANTIGRAVITY, CLAUDE_AGENT, GROK, OPENCODE, PI,
+    ProviderTurn, TurnStatus, ACP_REGISTRY, ANTIGRAVITY, CLAUDE_AGENT, GROK, KIRO, OPENCODE, PI,
 };
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -1767,4 +1767,90 @@ async fn opencode2_stop_interrupts_the_execution() {
     assert!(opencode_requests(&log)
         .iter()
         .any(|r| r["method"] == "POST" && r["path"] == "/api/session/ses_1/interrupt"));
+}
+
+#[tokio::test]
+async fn kiro_turn_opts_into_hooks_and_reads_kiros_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (events, exit) = run(fake_spec(KIRO, "kiro_turn.json", &log, None)).await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    let sent: Vec<Value> = received(&log);
+    let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
+    // Kiro's default model in Full access: nothing to set before the prompt.
+    assert_eq!(
+        &methods[..3],
+        ["initialize", "session/new", "session/prompt"]
+    );
+    let initialize = &sent[0]["params"];
+    assert_eq!(
+        initialize["clientCapabilities"]["_meta"],
+        json!({"kiro": {"hooks": {"enabled": true, "v2": true}}})
+    );
+    assert_eq!(
+        initialize["clientCapabilities"]["elicitation"],
+        json!({"form": {}})
+    );
+    assert!(sent[2]["params"].get("_meta").is_none());
+    let args = std::fs::read_to_string(format!("{}.args", log.display())).unwrap();
+    assert_eq!(args.trim(), "acp --agent-engine=v3 --auth-method=cli");
+    // The command's output is Kiro's `message`; the read's too.
+    let command = items(&events, "command_execution");
+    let done = command.last().expect("the command");
+    assert_eq!(
+        (done.status.as_str(), &done.fields["output"]),
+        ("completed", &json!("Output:\nhi\n\n\nExit Code: 0"))
+    );
+    let read = items(&events, "dynamic_tool");
+    assert!(
+        read.iter().all(|item| !item.id.contains("cloudconfig")),
+        "Kiro's cloud-config call is not the turn's"
+    );
+    assert_eq!(
+        read.last().map(|item| &item.fields["output"]),
+        Some(&json!({"message": "Read the /workspace/notes.txt file: hello"}))
+    );
+    assert_eq!(final_text(&events), "Done: hi");
+}
+
+#[tokio::test]
+async fn kiro_sets_its_model_then_the_effort_it_advertises() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let mut spec = fake_spec(KIRO, "kiro_model.json", &log, None);
+    if let Some(provider) = spec.provider.as_mut() {
+        provider.model = "claude-opus-5.5".into();
+        provider.reasoning_effort = Some("high".into());
+    }
+    let (events, exit) = run(spec).await;
+    assert!(exit.success, "{exit:?}");
+    assert_eq!(terminal(&events), (TurnStatus::Completed, None));
+    let writes: Vec<Value> = received(&log)
+        .into_iter()
+        .filter(|m| m["method"] == "session/set_config_option")
+        .map(|m| json!([m["params"]["configId"], m["params"]["value"]]))
+        .collect();
+    assert_eq!(
+        writes,
+        [
+            json!(["model", "claude-opus-5.5"]),
+            json!(["effortLevel", "high"])
+        ]
+    );
+}
+
+#[tokio::test]
+async fn kiros_failed_prompt_says_kiros_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("in.jsonl");
+    let (events, _) = run(fake_spec(KIRO, "kiro_failed.json", &log, None)).await;
+    let (status, failure) = terminal(&events);
+    assert_eq!(status, TurnStatus::Failed);
+    let failure = failure.expect("a failure");
+    assert!(failure
+        .message
+        .starts_with("The model 'not-a-kiro-model' is not available."));
+    assert_eq!(failure.code.as_deref(), Some("-32000"));
+    assert_eq!(failure.class, "provider_error");
 }

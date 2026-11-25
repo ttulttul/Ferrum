@@ -461,6 +461,34 @@ PROVIDER_SCENARIOS = [
      "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}},
     # A provider error fails the turn with its message (a rate limit is a usage limit); the session stays ready.
     {"name": "opencode2 failed turn", "instance": "opencode", "enable": "opencode", "model": "anthropic/claude-opus-5-5", "scenario": "opencode2_failed.json"},
+    # Kiro's `kiro-cli acp` (V3): its hooks opt-in, Kiro's default model kept (no option writes in
+    # Full access), its cloud-config call dropped, and its outputs (`rawOutput.message`).
+    {"name": "kiro turn", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": "kiro_turn.json"},
+    # A second turn prompts the agent the thread keeps.
+    {"name": "kiro second turn", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": "kiro_two_turns.json",
+     "followUp": "Now append a line"},
+    # A named model is written to Kiro's `model` option, then the effort Kiro advertises for it.
+    {"name": "kiro model and effort", "instance": "kiro", "enable": "kiro", "model": "claude-opus-5.5",
+     "modelOptions": [{"id": "reasoningEffort", "value": "high"}], "scenario": "kiro_model.json"},
+    # Supervised: Autopilot goes off and Kiro asks, with its labels (Allow once, Deny, Cancel).
+    {"name": "kiro approval", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": "kiro_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
+    {"name": "kiro approval declined", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": "kiro_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "decline"}},
+    # Kiro's card offers no "this session" (its allow_always saves a workspace rule): allow once.
+    {"name": "kiro approval for session", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": "kiro_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "acceptForSession"}},
+    # Auto: Kiro has no auto mode, so it runs Supervised (Autopilot off) and its request goes to the user.
+    {"name": "kiro auto", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": "kiro_approval.json",
+     "runtimeMode": "auto", "respond": {"decision": "accept"}},
+    # Stop once Kiro started the prompt: `session/cancel`, and the agent is kept.
+    {"name": "kiro interrupt", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": "kiro_interrupt.json",
+     "interrupt": "command"},
+    # A message steers the running turn (`_session/steer`); its `[STEERING …]` note is not shown.
+    {"name": "kiro steer", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": "kiro_steer.json",
+     "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}},
+    {"name": "kiro failed turn", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": "kiro_failed.json"},
+    {"name": "kiro missing", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": None},
     # Grok over ACP: its turns run in the `grok agent stdio` session the thread keeps, and stream
     # reasoning, a command and the reply.
     {"name": "grok turn", "instance": "grok", "enable": "grok", "model": "grok-build", "scenario": "grok_turn.json"},
@@ -811,9 +839,32 @@ esac
 FAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 "$FAKE_STATUS_CLI" "$FAKE_AGY_STATUS" "$@"
 """
 AGY_STATUS_SPEC = {"commands": [command for command in AGY_TITLE_SPEC["commands"] if command.get("args") == ["--version"]]}
+# The fake Kiro: a turn's runtime (`kiro-cli acp ...` with the thread in its environment) replays
+# the scenario; the status check (its version, account, models, and the agent probe that runs the
+# same `acp` command line without a thread) answers from KIRO_STATUS_SPEC, signed in with
+# `auto` as Kiro's default model (as provider_status_parity.py has it).
+FAKE_KIRO = """#!/bin/sh
+if [ "$1" = acp ] && [ -n "$T3CODE_THREAD_ID" ]; then
+  exec python3 "$FAKE_PROVIDER_CLI" "$@"
+fi
+FAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 "$FAKE_STATUS_CLI" "$FAKE_KIRO_STATUS" "$@"
+"""
+KIRO_STATUS_SPEC = {"commands": [
+    {"args": ["--version"], "stdout": "kiro-cli 2.32.0", "stderr": "", "exit": 0},
+    {"args": ["whoami", "--format", "json"], "stdout": '{"accountType": "BuilderId", "email": "dev@example.com"}\nProfile: default',
+     "stderr": "", "exit": 0},
+    {"args": ["chat", "--list-models", "--format", "json"], "stdout": json.dumps({
+        "models": [{"model_id": "auto", "model_name": "Auto"}, {"model_id": "claude-haiku-4.5", "model_name": "Haiku 4.5"},
+                   {"model_id": "claude-opus-5.5", "model_name": "Opus 5.5"}], "default_model": "auto"}),
+     "stderr": "", "exit": 0},
+    {"prefix": ["acp"], "rpc": {
+        "initialize": {"protocolVersion": 2, "agentCapabilities": {"loadSession": True}, "authMethods": []},
+        "_kiro/config/template": {"configOptions": [{"id": "mode", "type": "select", "currentValue": "vibe", "options": [
+            {"value": "vibe", "name": "Default"}, {"value": "spec", "name": "Spec"}, {"value": "plan", "name": "Plan"}]}]}}}]}
 TURN_CLIS = {"codex": "codex", "claudeAgent": "claude", "grok": "grok", "pi": "pi", "acp-local": "fixture-acp",
              "opencode": "opencode",
              "antigravity": "agy",
+             "kiro": "kiro-cli",
              # Installed in the server's home (`registryAgent`), not on PATH.
              "acp-registry": "registry-agent"}
 # The ACP Registry agent a `registryAgent` scenario's servers find in their cached index, already
@@ -1042,7 +1093,7 @@ def write_fake_clis(directory, drivers):
     directory.mkdir(parents=True, exist_ok=True)
     for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK),
                          ("fixture-acp", FAKE_ACP_AGENT), ("pi", FAKE_PI), ("opencode", FAKE_OPENCODE),
-                         ("agy", FAKE_AGY)):
+                         ("agy", FAKE_AGY), ("kiro-cli", FAKE_KIRO)):
         if name in drivers:
             (directory / name).write_text(script)
             (directory / name).chmod(0o755)
@@ -1052,6 +1103,8 @@ def write_fake_clis(directory, drivers):
         (directory / "pi.status.json").write_text(json.dumps(PI_STATUS_SPEC))
     if "agy" in drivers:
         (directory / "agy.status.json").write_text(json.dumps(AGY_STATUS_SPEC))
+    if "kiro-cli" in drivers:
+        (directory / "kiro-cli.status.json").write_text(json.dumps(KIRO_STATUS_SPEC))
 
 
 def write_text_provider(directory, provider):
@@ -1095,7 +1148,8 @@ def seed_turn(url, cookie, root, scenario, remote=None):
     rpc(url, cookie, "orchestration.dispatchCommand", {
         "type": "thread.create", "commandId": "seed-thread", "threadId": THREAD, "projectId": "project:github",
         "title": "New thread" if scenario.get("title") else "Thread",
-        "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"]},
+        "modelSelection": {"instanceId": scenario["instance"], "model": scenario["model"],
+                           **({"options": scenario["modelOptions"]} if scenario.get("modelOptions") else {})},
         "runtimeMode": scenario.get("runtimeMode", "full-access"),
         "interactionMode": scenario.get("interactionMode", "default"), "branch": None,
         "worktreePath": None, "createdBy": "user", "creationSource": "web"})
@@ -1575,7 +1629,7 @@ def opencode_calls(log, mask, unserved):
 # The ACP requests a server sends a turn's agent, compared with their parameters.
 ACP_LAUNCH_METHODS = ("initialize", "authenticate", "session/new", "session/load", "session/set_model",
                       "session/set_mode", "session/set_config_option", "session/prompt", "session/cancel",
-                      "session/close", "session/resume")
+                      "session/close", "session/resume", "_session/steer")
 
 
 def acp_params(method, params, unserved):
@@ -2294,6 +2348,7 @@ def scenario_env(temporary, name, root, scenario, drivers):
            "FAKE_STATUS_CLI": str(FIXTURES / "status_cli.py"), "FAKE_GROK_STATUS": str(fake_bin / "grok.status.json"),
            "FAKE_PI_STATUS": str(fake_bin / "pi.status.json"),
            "FAKE_AGY_STATUS": str(fake_bin / "agy.status.json"),
+           "FAKE_KIRO_STATUS": str(fake_bin / "kiro-cli.status.json"),
            # "titleAfterTurn": the title CLI answers once the driver saw the turn settle.
            **({"FAKE_TITLE_GATE": str(log) + ".turn-settled"} if scenario.get("titleAfterTurn") else {}),
            "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}

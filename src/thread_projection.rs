@@ -1862,6 +1862,10 @@ fn stored_provider(
     if let Some(first_run) = first_run {
         state.thread = Some(crate::provider_state::ThreadRecord {
             opencode2,
+            // An ACP agent's session title (`nativeMetadata.title`).
+            native_title: record["nativeMetadata"]["title"]
+                .as_str()
+                .map(str::to_owned),
             driver,
             first_run: crate::Run::uuid_for(&first_run),
             created_at: iso_seconds(&record["createdAt"]),

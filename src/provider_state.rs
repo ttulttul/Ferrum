@@ -104,6 +104,8 @@ pub struct ThreadRecord {
     pub background_tasks: Vec<(Value, Uuid)>,
     /// The OpenCode 2 server its turns ran on, as the last one reported it.
     pub opencode2: Option<OpenCode2Thread>,
+    /// The title the agent last gave its session (Kiro's focus).
+    pub native_title: Option<String>,
 }
 
 /// One run's provider turn.
@@ -228,6 +230,7 @@ impl ProviderState {
                 native_thread_id,
                 resumed,
                 opencode2,
+                native_title,
                 ..
             } => {
                 record.driver = driver.clone();
@@ -274,10 +277,14 @@ impl ProviderState {
                     conversation_head: None,
                     background_tasks: Vec::new(),
                     opencode2: None,
+                    native_title: None,
                 });
                 thread.native_id = Some(native_thread_id.clone());
                 if opencode2.is_some() {
                     thread.opencode2 = opencode2.clone();
+                }
+                if native_title.is_some() {
+                    thread.native_title = native_title.clone();
                 }
                 thread.status = "active";
                 thread.updated_at = at;
@@ -428,6 +435,7 @@ impl ProviderState {
                     conversation_head: None,
                     background_tasks: Vec::new(),
                     opencode2: None,
+                    native_title: None,
                 });
                 self.terminals.insert(
                     run,
@@ -777,7 +785,10 @@ pub(crate) fn provider_turn(
             agent: option("agent").unwrap_or_default(),
         }),
         antigravity: None,
-
+        kiro: (driver == provider::KIRO).then(|| provider::KiroLaunch {
+            agent: option("mode").unwrap_or_default(),
+            default_model: String::new(),
+        }),
         continuation: false,
     };
     let mut turn = turn;
@@ -859,6 +870,7 @@ mod tests {
             resumed: false,
             model: None,
             opencode2: None,
+            native_title: None,
         };
         state.apply(first, &thread(provider::CODEX, "thr_codex"), 1);
         state.apply(second, &thread(provider::CLAUDE_AGENT, "sess_claude"), 2);
@@ -907,6 +919,7 @@ mod tests {
                 model: None,
 
                 opencode2: None,
+                native_title: None,
             },
             1,
         );

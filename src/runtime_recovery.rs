@@ -854,6 +854,7 @@ mod tests {
                 model: None,
 
                 opencode2: None,
+                native_title: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: None,
@@ -1055,6 +1056,7 @@ mod tests {
                 model: None,
 
                 opencode2: None,
+                native_title: None,
             },
             11,
         );
@@ -1126,6 +1128,7 @@ mod tests {
                 model: None,
 
                 opencode2: None,
+                native_title: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn-1".into()),

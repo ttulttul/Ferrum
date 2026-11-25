@@ -69,7 +69,7 @@ mod cursor_skills;
 mod fx;
 mod fx_skills;
 pub(crate) mod grok;
-mod kiro;
+pub(crate) mod kiro;
 mod maintenance;
 mod muse;
 pub(crate) mod opencode;
@@ -337,6 +337,17 @@ impl ProviderStatus {
             .entry(instance_id.to_owned())
             .or_default()
             .clone()
+    }
+
+    /// The instance's last published status row, whatever settings it was
+    /// checked with: what a turn reads from the live provider snapshot.
+    pub(crate) fn latest_row(&self, instance_id: &str) -> Option<Value> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .published
+            .get(instance_id)
+            .map(|p| p.row.clone())
+            .filter(|row| !row.is_null())
     }
 
     fn published_row(&self, instance_id: &str, fingerprint: &Value) -> Option<Value> {

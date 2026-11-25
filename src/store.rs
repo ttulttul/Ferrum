@@ -1109,6 +1109,7 @@ mod tests {
                     model: None,
 
                     opencode2: None,
+                    native_title: None,
                 },
                 position: None,
             },

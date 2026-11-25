@@ -1,0 +1,287 @@
+{
+ "replies": {
+  "session/set_config_option": {
+   "configOptions": [
+    {
+     "type": "select",
+     "id": "mode",
+     "name": "Mode",
+     "currentValue": "vibe",
+     "options": [
+      {
+       "value": "vibe",
+       "name": "Vibe"
+      },
+      {
+       "value": "spec",
+       "name": "Spec"
+      },
+      {
+       "value": "plan",
+       "name": "Plan"
+      }
+     ],
+     "category": "mode"
+    },
+    {
+     "type": "select",
+     "id": "autopilot",
+     "name": "Autopilot",
+     "currentValue": "on",
+     "options": [
+      {
+       "value": "on",
+       "name": "On"
+      },
+      {
+       "value": "off",
+       "name": "Off"
+      }
+     ]
+    }
+   ]
+  },
+  "session/close": {},
+  "session/load": {
+   "configOptions": [
+    {
+     "type": "select",
+     "id": "mode",
+     "name": "Mode",
+     "currentValue": "vibe",
+     "options": [
+      {
+       "value": "vibe",
+       "name": "Vibe"
+      },
+      {
+       "value": "spec",
+       "name": "Spec"
+      },
+      {
+       "value": "plan",
+       "name": "Plan"
+      }
+     ],
+     "category": "mode"
+    },
+    {
+     "type": "select",
+     "id": "autopilot",
+     "name": "Autopilot",
+     "currentValue": "on",
+     "options": [
+      {
+       "value": "on",
+       "name": "On"
+      },
+      {
+       "value": "off",
+       "name": "Off"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "protocolVersion": 2,
+     "agentCapabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+       "image": true,
+       "embeddedContext": true
+      },
+      "mcpCapabilities": {
+       "http": true,
+       "sse": true
+      },
+      "sessionCapabilities": {
+       "list": {},
+       "close": {},
+       "delete": {},
+       "fork": {
+        "_meta": {
+         "kiro": {
+          "messageId": true
+         }
+        }
+       }
+      },
+      "_meta": {
+       "kiro": {
+        "checkpoints": true,
+        "sessionList": true,
+        "policyNotifications": true,
+        "extensionMethods": [
+         "_kiro/session/compact",
+         "_kiro/config/template"
+        ],
+        "replayMarking": true
+       }
+      }
+     },
+     "authMethods": [
+      {
+       "id": "aws-builder-id",
+       "name": "AWS Builder ID"
+      },
+      {
+       "id": "aws-iam-identity-center",
+       "name": "AWS IAM Identity Center"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "expect": "session/new"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "available_commands_update",
+      "availableCommands": []
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "_meta": {
+      "schemaVersion": "1.0.0",
+      "id": "sess_00000000-0000-4000-8000-000000000001",
+      "title": "New Session",
+      "agentMode": "vibe"
+     },
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "modes": {
+      "currentModeId": "vibe",
+      "availableModes": [
+       {
+        "id": "vibe",
+        "name": "Default"
+       },
+       {
+        "id": "spec",
+        "name": "Spec"
+       },
+       {
+        "id": "plan",
+        "name": "Plan"
+       }
+      ]
+     },
+     "configOptions": [
+      {
+       "type": "select",
+       "id": "mode",
+       "name": "Mode",
+       "currentValue": "vibe",
+       "options": [
+        {
+         "value": "vibe",
+         "name": "Vibe"
+        },
+        {
+         "value": "spec",
+         "name": "Spec"
+        },
+        {
+         "value": "plan",
+         "name": "Plan"
+        }
+       ],
+       "category": "mode"
+      },
+      {
+       "type": "select",
+       "id": "autopilot",
+       "name": "Autopilot",
+       "currentValue": "on",
+       "options": [
+        {
+         "value": "on",
+         "name": "On"
+        },
+        {
+         "value": "off",
+         "name": "Off"
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "expect": "session/prompt"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "_meta": {
+       "kiro": {
+        "kind": "user_message_id_assigned",
+        "userMessageId": "00000000-0000-4000-9000-000000000101"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "_meta": {
+       "kiro": {
+        "kind": "display_error",
+        "message": "The model 'not-a-kiro-model' is not available.",
+        "errorType": "InvalidModelError"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "error": {
+     "code": -32000,
+     "message": "The model 'not-a-kiro-model' is not available. Please select a different model and try again. (Request ID: 00000000-0000-4000-9000-000000000301)",
+     "data": {
+      "errorType": "InvalidModelError",
+      "retryErrorType": "CLIENT_ERROR"
+     }
+    }
+   }
+  }
+ ]
+}
