@@ -1129,6 +1129,174 @@ pub(crate) fn prepare_side_chat(
     }))
 }
 
+/// `makeForkDeltaSummary`: what a fork did, for the thread it merges back to.
+fn make_fork_delta_summary(
+    source_thread_id: &str,
+    target_thread_id: &str,
+    from: u64,
+    to: u64,
+    items: &[&Value],
+) -> String {
+    let lines: Vec<String> = items
+        .iter()
+        .filter_map(|item| summarize_delta_item(item))
+        .collect();
+    let mut parts = vec![
+        "Merge-back context from forked conversation.".to_owned(),
+        format!("Source thread: {source_thread_id}"),
+        format!("Target thread: {target_thread_id}"),
+        format!("Covered fork runs: {from}-{to}"),
+        String::new(),
+        "Fork delta:".to_owned(),
+    ];
+    if lines.is_empty() {
+        parts.push("- No user-visible delta items.".to_owned());
+    } else {
+        parts.extend(lines);
+    }
+    parts.join("\n")
+}
+
+/// A merge-back's delivery to the thread's next run: a `fork_delta_summary`
+/// of the fork's own runs through the merged point, the "Merge-back context"
+/// item ahead of the run's prompt, and the transfer consumed
+/// (`Orchestrator`'s `prepareForkDelta` at dispatch). None without a pending
+/// merge-back, or when its source is gone.
+pub(crate) fn prepare_merge_back(
+    thread: &Thread,
+    source: &Thread,
+    run: &Run,
+    provider: &ProviderTurn,
+    now_secs: u64,
+) -> Option<Recovery> {
+    let transfer = thread.context_transfers.iter().find(|transfer| {
+        transfer["type"] == "merge_back"
+            && transfer["targetThreadId"] == thread.id.as_str()
+            && transfer["status"] == "pending"
+    })?;
+    let projection = thread.full_projection();
+    let run_wire_id = run.wire_id();
+    let run_row = projection["runs"]
+        .as_array()?
+        .iter()
+        .find(|candidate| candidate["id"].as_str() == Some(run_wire_id.as_str()))?;
+    let source_projection = source.full_projection();
+    let source_runs = source_projection["runs"].as_array()?;
+    let source_run = source_runs
+        .iter()
+        .find(|candidate| candidate["id"] == transfer["sourcePoint"]["runId"])?;
+    let through = source_run["ordinal"].as_u64()?;
+    let ordinals: HashMap<&str, u64> = source_runs
+        .iter()
+        .filter(|candidate| candidate["status"] != "rolled_back")
+        .filter_map(|candidate| Some((candidate["id"].as_str()?, candidate["ordinal"].as_u64()?)))
+        .collect();
+    let items: Vec<&Value> = source_projection["turnItems"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item["runId"]
+                .as_str()
+                .and_then(|id| ordinals.get(id))
+                .is_some_and(|ordinal| *ordinal <= through)
+        })
+        .collect();
+    let (from, to) = items
+        .iter()
+        .filter_map(|item| item["runId"].as_str().and_then(|id| ordinals.get(id)))
+        .fold(None, |range: Option<(u64, u64)>, ordinal| {
+            Some(range.map_or((*ordinal, *ordinal), |(from, to)| {
+                (from.min(*ordinal), to.max(*ordinal))
+            }))
+        })
+        .unwrap_or((1, 1));
+    let coverage = handoff_coverage(&source.id, from, to, &items);
+    let messages: Vec<HistoricalMessage> = items
+        .iter()
+        .filter_map(|item| historical_message(item, None))
+        .collect();
+    let selected = select_history(&messages, &coverage, 0, &[], handoff_token_cap());
+    let created_at = iso(now_secs);
+    let source_instance = source_run["providerInstanceId"]
+        .as_str()
+        .unwrap_or_default();
+    let to_instance = run_row["providerInstanceId"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&provider.instance_id);
+    let handoff = json!({
+        "id": allocate_handoff_id(&thread.id, source_instance, to_instance),
+        "transferId": transfer["id"],
+        "threadId": thread.id,
+        "targetRunId": run_wire_id,
+        "fromProviderThreadIds": [source_run["providerThreadId"]],
+        "toProviderThreadId": run_row["providerThreadId"],
+        "coveredRunOrdinals": {"from": from, "to": to},
+        "strategy": "fork_delta_summary",
+        "status": "ready",
+        "summaryMessageId": Value::Null,
+        "summaryText": make_fork_delta_summary(&source.id, &thread.id, from, to, &items),
+        "history": {
+            "messages": selected.messages,
+            "coverage": coverage,
+            "omittedItems": selected.omitted_items,
+            "omittedItemIds": selected.omitted_item_ids,
+        },
+        "createdByProviderInstanceId": Value::Null,
+        "createdAt": created_at,
+        "updatedAt": created_at,
+    });
+    let turn_item = json!({
+        "id": format!(
+            "turn-item:run:{}:signal:{}",
+            uri_component(&run_wire_id),
+            uri_component(&format!("context-handoff:{}", handoff["id"].as_str().unwrap_or_default()))
+        ),
+        "threadId": thread.id,
+        "runId": run_wire_id,
+        "nodeId": run_row["rootNodeId"],
+        "providerThreadId": run_row["providerThreadId"],
+        "providerTurnId": Value::Null,
+        "nativeItemRef": Value::Null,
+        "parentItemId": Value::Null,
+        "ordinal": 0,
+        "status": "completed",
+        "title": "Merge-back context",
+        "startedAt": created_at,
+        "completedAt": created_at,
+        "updatedAt": created_at,
+        "type": "handoff",
+        "contextHandoffId": handoff["id"],
+        "fromProviderThreadIds": handoff["fromProviderThreadIds"],
+        "toProviderThreadId": handoff["toProviderThreadId"],
+        "fromProviderInstanceIds": [source_instance],
+        "toProviderInstanceId": to_instance,
+        "fromModelSelections": [source_run["modelSelection"]],
+        "toModel": run_row["modelSelection"]["model"],
+        "strategy": "fork_delta_summary",
+        "summary": handoff["summaryText"],
+    });
+    let mut consumed = transfer.clone();
+    consumed["targetProviderInstanceId"] = json!(to_instance);
+    consumed["targetRunId"] = json!(run_wire_id);
+    consumed["status"] = json!("consumed");
+    consumed["resolution"] =
+        json!({"strategy": "fork_delta_context", "contextHandoffId": handoff["id"]});
+    consumed["error"] = Value::Null;
+    consumed["updatedAt"] = json!(created_at);
+    consumed["consumedAt"] = json!(created_at);
+    Some(Recovery {
+        handoff,
+        transfer: consumed,
+        turn_item: Some(turn_item),
+        notice: None,
+        native_transfer: None,
+        delivery: PreparedHandoff::empty(None),
+        resumes: String::new(),
+    })
+}
+
 /// Prepare a fork's first turn (`ProviderTurnStartService`'s native fork):
 /// the provider forks the source's native session when it can; when it
 /// cannot, the fork starts fresh with the source's history up to the fork
@@ -2400,5 +2568,17 @@ mod tests {
         );
         assert_eq!(compact_text(&"a".repeat(300), 240).len(), 240);
         assert!(compact_text(&"a".repeat(300), 240).ends_with("..."));
+    }
+
+    #[test]
+    fn a_fork_delta_summary_lists_what_the_fork_did() {
+        let user = json!({"type": "user_message", "text": "Try it on the fork"});
+        let reply = json!({"type": "assistant_message", "text": "Done"});
+        assert_eq!(
+            make_fork_delta_summary("thread:f", "thread:t", 1, 2, &[&user, &reply]),
+            "Merge-back context from forked conversation.\nSource thread: thread:f\nTarget thread: thread:t\nCovered fork runs: 1-2\n\nFork delta:\n- User: Try it on the fork\n- Assistant: Done"
+        );
+        assert!(make_fork_delta_summary("thread:f", "thread:t", 1, 1, &[])
+            .ends_with("Fork delta:\n- No user-visible delta items."));
     }
 }

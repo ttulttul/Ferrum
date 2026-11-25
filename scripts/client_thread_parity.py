@@ -498,6 +498,9 @@ PROVIDER_SCENARIOS = [
      "fork": {"text": "Continue on the fork"}},
     {"name": "claude side chat", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_fork.json", "fork": {"text": "Ask on the side", "sideChat": True}},
+    # The fork merged back: the thread's next run takes what the fork did (fork_delta_summary).
+    {"name": "claude fork merge back", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_fork.json", "fork": {"text": "Continue on the fork", "mergeBack": "Back on the main thread"}},
     {"name": "claude model switch", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_two_turns.json", "followUp": "Now append a line",
      "followUpModel": {"instanceId": "claudeAgent", "model": "claude-sonnet-5-5"}},

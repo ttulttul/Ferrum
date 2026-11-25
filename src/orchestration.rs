@@ -2565,46 +2565,148 @@ async fn apply_command<H: CommandHost>(
                 .id);
         }
         "thread.merge_back" => {
+            // Records a pending `merge_back` transfer on the thread merged
+            // into; its next run takes the fork's delta (`thread.merge_back`).
             let source_thread_id = command["sourceThreadId"].as_str().unwrap_or_default();
             let target_thread_id = command["targetThreadId"].as_str().unwrap_or_default();
             let store = state.store.read().await;
+            let not_found = |id: &str| {
+                anyhow::anyhow!(format!(
+                    "No orchestration projection exists for thread {id}."
+                ))
+            };
             let source = store
                 .threads
                 .get(source_thread_id)
                 .cloned()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(format!(
-                        "No orchestration projection exists for thread {source_thread_id}."
-                    ))
-                })?;
+                .ok_or_else(|| not_found(source_thread_id))?;
             let target = store
                 .threads
                 .get(target_thread_id)
                 .cloned()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(format!(
-                        "No orchestration projection exists for thread {target_thread_id}."
-                    ))
-                })?;
-            let existing = target
-                .messages
-                .iter()
-                .map(|m| m.id.as_str())
-                .collect::<std::collections::HashSet<_>>();
-            let additions = source
-                .messages
-                .into_iter()
-                .filter(|m| !existing.contains(m.id.as_str()))
-                .collect::<Vec<_>>();
+                .ok_or_else(|| not_found(target_thread_id))?;
             drop(store);
-            for message in additions {
+            if source.row["lineage"]["relationshipToParent"] != "fork"
+                || source.row["lineage"]["parentThreadId"] != target_thread_id
+            {
+                return Err(anyhow::anyhow!(format!(
+                    "Thread {source_thread_id} is not a fork of {target_thread_id}."
+                )));
+            }
+            if !source.row["deletedAt"].is_null() {
+                return Err(anyhow::anyhow!(format!(
+                    "Thread {source_thread_id} was deleted."
+                )));
+            }
+            if target.archived || !target.row["deletedAt"].is_null() {
+                return Err(anyhow::anyhow!(format!(
+                    "Thread {target_thread_id} is archived or deleted."
+                )));
+            }
+            // Queued runs cannot take merge-back context.
+            if target.runs.iter().any(|run| {
+                matches!(
+                    run.status.as_str(),
+                    "queued" | "preparing" | "starting" | "running" | "waiting"
+                )
+            }) {
+                return Err(anyhow::anyhow!(
+                    "Finish or stop the target thread's active work and clear its queue before merging back."
+                ));
+            }
+            if target.context_transfers.iter().any(|transfer| {
+                transfer["type"] == "merge_back"
+                    && transfer["status"] == "pending"
+                    && transfer["sourceThreadId"] != source_thread_id
+            }) {
+                return Err(anyhow::anyhow!(format!(
+                    "Thread {target_thread_id} already has pending context from another side chat or fork. Send a message there first."
+                )));
+            }
+            let projection = source.full_projection();
+            let Some(source_run) =
+                crate::thread_fork::source_run(&projection, &command["sourcePoint"]).cloned()
+            else {
+                return Err(anyhow::anyhow!(format!(
+                    "No stable source run was found for merge-back source {}.",
+                    command["sourcePoint"]["type"].as_str().unwrap_or_default()
+                )));
+            };
+            if !matches!(source_run["status"].as_str(), Some("completed" | "waiting")) {
+                return Err(anyhow::anyhow!(format!(
+                    "Merge-back source run {} is {}; only provider-finished runs are supported.",
+                    source_run["id"].as_str().unwrap_or_default(),
+                    source_run["status"].as_str().unwrap_or_default()
+                )));
+            }
+            let Some(fork_transfer) = source.context_transfers.iter().rev().find(|transfer| {
+                transfer["type"] == "fork"
+                    && transfer["sourceThreadId"] == target_thread_id
+                    && transfer["targetThreadId"] == source_thread_id
+            }) else {
+                return Err(anyhow::anyhow!(format!(
+                    "No fork transfer exists between {target_thread_id} and {source_thread_id}."
+                )));
+            };
+            let at = crate::auth_service::iso(crate::auth_service::now());
+            let id = format!(
+                "context-transfer:type:merge_back:source-thread:{}:target-thread:{}:{}",
+                crate::thread_projection::uri_component(source_thread_id),
+                crate::thread_projection::uri_component(target_thread_id),
+                crate::platform::uuid_v4()
+            );
+            let has_provider_thread =
+                crate::thread_fork::provider_thread_for_run(&projection, &source_run).is_some();
+            // An earlier pending merge-back of the same fork is superseded.
+            for pending in target.context_transfers.iter().filter(|transfer| {
+                transfer["type"] == "merge_back"
+                    && transfer["status"] == "pending"
+                    && transfer["sourceThreadId"] == source_thread_id
+            }) {
+                let mut superseded = pending.clone();
+                superseded["status"] = json!("superseded");
+                superseded["error"] = json!(format!("Superseded by merge-back transfer {id}."));
+                superseded["updatedAt"] = json!(at);
                 state
-                    .commit(Event::MessageAdded {
+                    .commit(Event::ContextHandoffUpdated {
                         thread_id: target_thread_id.to_owned(),
-                        message,
+                        handoff: Value::Null,
+                        transfer: Some(superseded),
+                        turn_item: None,
                     })
                     .await?;
             }
+            let transfer = json!({
+                "id": id,
+                "type": "merge_back",
+                "sourceThreadId": source_thread_id,
+                "targetThreadId": target_thread_id,
+                "sourcePoint": crate::thread_fork::source_point_for_run(
+                    source_thread_id, &projection, &source_run),
+                "basePoint": fork_transfer["sourcePoint"],
+                "sourceProviderInstanceId": source_run["providerInstanceId"],
+                "targetProviderInstanceId": target.stored_row()["modelSelection"]["instanceId"],
+                "targetRunId": Value::Null,
+                "status": "pending",
+                "resolution": Value::Null,
+                "createdBy": command["createdBy"],
+                "error": if has_provider_thread {
+                    Value::Null
+                } else {
+                    json!("Source merge-back run has no provider thread.")
+                },
+                "createdAt": at,
+                "updatedAt": at,
+                "consumedAt": Value::Null,
+            });
+            state
+                .commit(Event::ContextHandoffUpdated {
+                    thread_id: target_thread_id.to_owned(),
+                    handoff: Value::Null,
+                    transfer: Some(transfer),
+                    turn_item: None,
+                })
+                .await?;
             let sequence = state
                 .commit_receipted(
                     Event::CommandDispatched {

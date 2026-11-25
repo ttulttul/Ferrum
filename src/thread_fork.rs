@@ -30,7 +30,7 @@ fn provider_turn_for_run<'a>(projection: &'a Value, run: &Value) -> Option<&'a V
 }
 
 /// The source run's provider thread (`providerThreadForRun`).
-fn provider_thread_for_run<'a>(projection: &'a Value, run: &Value) -> Option<&'a Value> {
+pub(crate) fn provider_thread_for_run<'a>(projection: &'a Value, run: &Value) -> Option<&'a Value> {
     projection["providerThreads"]
         .as_array()?
         .iter()
@@ -38,7 +38,7 @@ fn provider_thread_for_run<'a>(projection: &'a Value, run: &Value) -> Option<&'a
 }
 
 /// Where in the source a fork starts (`contextSourcePointForRun`).
-fn source_point_for_run(thread_id: &str, projection: &Value, run: &Value) -> Value {
+pub(crate) fn source_point_for_run(thread_id: &str, projection: &Value, run: &Value) -> Value {
     let mut point = json!({"threadId": thread_id, "runId": run["id"]});
     if !run["checkpointId"].is_null() {
         point["checkpointId"] = run["checkpointId"].clone();
