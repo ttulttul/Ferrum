@@ -616,6 +616,13 @@ impl ProviderFailure {
     }
 }
 
+/// The native id of a turn's first provider retry item (an `error` item
+/// with `retry`); the `N`th retry after a recovery is `terminal-failure:N`.
+/// The projection names it as the reference does
+/// (`terminal-failure:<provider turn>[:N]`), and a failure the retry ends in
+/// takes its place, as both are the turn's failure row.
+pub const PROVIDER_RETRY_ITEM: &str = "terminal-failure";
+
 /// A turn item in the reference's `OrchestrationV2TurnItem` shape, without
 /// the fields the control plane owns.
 ///

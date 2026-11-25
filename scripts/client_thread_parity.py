@@ -299,6 +299,11 @@ PROVIDER_SCENARIOS = [
      "scenario": "claude_delegate_restart.json", "awaitStatus": True, "settleRuns": 2,
      "restart": {"after": "settled"}},
     {"name": "codex failed turn", "instance": "codex", "model": "fixture", "scenario": "codex_failed.json"},
+    # Codex retries a dropped stream (`error` with willRetry): a provider retry item shows,
+    # then recovers when output resumes, or becomes the failure the turn ends with.
+    {"name": "codex retry recovers", "instance": "codex", "model": "fixture",
+     "scenario": "codex_retry_recovers.json"},
+    {"name": "codex retry fails", "instance": "codex", "model": "fixture", "scenario": "codex_retry_fails.json"},
     # Runtime requests: what each server asks the user, and what it answers the CLI.
     {"name": "codex approval", "instance": "codex", "model": "fixture", "scenario": "codex_approval.json",
      "respond": {"decision": "accept"}},
