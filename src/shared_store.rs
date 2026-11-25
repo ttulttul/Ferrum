@@ -397,6 +397,27 @@ fn touched_threads(store: &Store, event: &Event) -> Vec<String> {
     ids
 }
 
+/// Reads whole, from the database, the stored projection of every thread
+/// `event` touches whose slim records alone are loaded
+/// (`stored_projection`), so a commit plans its writes and live events from
+/// whole projections. A thread that cannot be read fails the commit before
+/// anything is written.
+pub(crate) fn hydrate_touched(store: &Store, event: &Event) -> anyhow::Result<()> {
+    for thread_id in touched_threads(store, event) {
+        if let Some(stored) = store
+            .threads
+            .get(&thread_id)
+            .and_then(|t| t.stored.as_ref())
+        {
+            stored.try_get().map_err(|error| {
+                tracing::error!(%thread_id, error = %format!("{error:#}"), "could not read a thread from the shared orchestration database");
+                error
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// The thread changes of `record`, worked out on a copy of the touched
 /// threads: each one's full projection before and after, the stored records
 /// a thread read from the database ends with, and its domain events.
@@ -453,7 +474,7 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
         let after = match (&thread.stored, &computed_before) {
             (Some(stored), Some(computed_before)) => {
                 let computed_after = thread.computed_full_projection();
-                let stored_after = overlay(stored, computed_before, &computed_after);
+                let stored_after = overlay(stored.get(), computed_before, &computed_after);
                 planned
                     .stored
                     .push((thread_id.clone(), stored_after.clone()));

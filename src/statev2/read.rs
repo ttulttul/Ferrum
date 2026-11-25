@@ -176,6 +176,291 @@ pub fn thread_projection(conn: &Connection, thread_id: &str) -> rusqlite::Result
     Ok(Some(Value::Object(projection)))
 }
 
+/// The turn items a shell row looks at (`projection_shell::shell` and its
+/// visibility rule), by `(type, status)`, a `None` status meaning any:
+/// failed compactions and errors, stop requests and their results, running or
+/// waiting execution items, and waiting link and secret cards. Queued input
+/// (`queued_turn` user messages) is read separately, by its own index.
+const SHELL_ITEM_KINDS: &str = "VALUES ('compaction', 'failed'), ('error', 'failed'),
+    ('run_interrupt_request', NULL), ('run_interrupt_result', NULL),
+    ('command_execution', 'running'), ('command_execution', 'waiting'),
+    ('file_change', 'running'), ('file_change', 'waiting'),
+    ('file_search', 'running'), ('file_search', 'waiting'),
+    ('web_search', 'running'), ('web_search', 'waiting'),
+    ('dynamic_tool', 'running'), ('dynamic_tool', 'waiting'),
+    ('mcp_tool_call', 'running'), ('mcp_tool_call', 'waiting'),
+    ('subagent', 'running'), ('subagent', 'waiting'),
+    ('link_request', 'waiting'), ('secret_request', 'waiting')";
+
+fn decode(text: &str) -> rusqlite::Result<Value> {
+    serde_json::from_str(text).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every statement `slim_projections` ran on this test thread.
+    pub(crate) static SLIM_STATEMENTS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn prepare_slim<'c>(conn: &'c Connection, sql: &str) -> rusqlite::Result<rusqlite::Statement<'c>> {
+    #[cfg(test)]
+    SLIM_STATEMENTS.with(|statements| statements.borrow_mut().push(sql.to_owned()));
+    conn.prepare(sql)
+}
+
+/// The slim records of the threads `ids` names (`stored_projection::Slim`),
+/// read with one query per table rather than one per thread. Each
+/// collection holds what `thread_projection` gives, in its order, except
+/// `nodes` (empty), `turnItems` (only what the shell row looks at) and
+/// `messages` (only users' messages and runs' prompts). A
+/// thread the database has no live row for is left out.
+pub(crate) fn slim_projections(
+    conn: &Connection,
+    ids: &std::collections::HashSet<String>,
+) -> rusqlite::Result<std::collections::HashMap<String, crate::stored_projection::Slim>> {
+    use std::collections::HashMap;
+    let mut out: HashMap<String, crate::stored_projection::Slim> = HashMap::new();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let mut collections: HashMap<String, Map<String, Value>> = HashMap::new();
+    let mut statement = prepare_slim(
+        conn,
+        "SELECT thread_id, payload_json FROM orchestration_v2_projection_threads
+         WHERE deleted_at IS NULL",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        if !ids.contains(&id) {
+            continue;
+        }
+        let thread = decode(&row.get::<_, String>(1)?)?;
+        let mut projection = Map::new();
+        projection.insert("thread".into(), thread);
+        for key in [
+            "runs",
+            "attempts",
+            "nodes",
+            "subagents",
+            "providerSessions",
+            "providerThreads",
+            "providerTurns",
+            "runtimeRequests",
+            "messages",
+            "plans",
+            "turnItems",
+            "checkpointScopes",
+            "checkpoints",
+            "contextHandoffs",
+            "contextTransfers",
+        ] {
+            projection.insert(key.into(), Value::Array(Vec::new()));
+        }
+        collections.insert(id, projection);
+    }
+    drop(rows);
+    drop(statement);
+    // Each table whole, ordered by thread and then as `thread_projection`
+    // orders one thread's rows.
+    for (key, sql) in [
+        ("runs", "SELECT thread_id, payload_json FROM orchestration_v2_projection_runs ORDER BY thread_id, ordinal ASC"),
+        ("attempts", "SELECT thread_id, payload_json FROM orchestration_v2_projection_run_attempts ORDER BY thread_id, run_id ASC, attempt_ordinal ASC"),
+        ("subagents", "SELECT thread_id, payload_json FROM orchestration_v2_projection_subagents ORDER BY thread_id, COALESCE(started_at, ''), subagent_id ASC"),
+        ("providerSessions", "SELECT bindings.thread_id, sessions.payload_json FROM orchestration_v2_projection_provider_sessions AS sessions
+            INNER JOIN orchestration_v2_projection_provider_session_bindings AS bindings
+              ON bindings.provider_session_id = sessions.provider_session_id
+            ORDER BY bindings.thread_id, sessions.updated_at ASC, sessions.provider_session_id ASC"),
+        ("providerThreads", "SELECT thread_id, payload_json FROM orchestration_v2_projection_provider_threads ORDER BY thread_id, COALESCE(first_run_ordinal, 0), provider_thread_id ASC"),
+        ("providerTurns", "SELECT thread_id, payload_json FROM orchestration_v2_projection_provider_turns ORDER BY thread_id, provider_thread_id ASC, ordinal ASC"),
+        ("runtimeRequests", "SELECT thread_id, payload_json FROM orchestration_v2_projection_runtime_requests ORDER BY thread_id, created_at ASC, runtime_request_id ASC"),
+        // Only the messages the typed state or the shell row reads: users'
+        // messages, and runs' prompts.
+        ("messages", "SELECT thread_id, payload_json FROM orchestration_v2_projection_messages
+            WHERE json_extract(payload_json, '$.role') = 'user'
+               OR json_extract(payload_json, '$.createdBy') = 'user'
+               OR json_extract(payload_json, '$.id') IN
+                  (SELECT json_extract(payload_json, '$.userMessageId') FROM orchestration_v2_projection_runs)
+            ORDER BY thread_id, created_at ASC, message_id ASC"),
+        ("plans", "SELECT thread_id, payload_json FROM orchestration_v2_projection_plans ORDER BY thread_id, plan_id ASC"),
+        ("checkpointScopes", "SELECT thread_id, payload_json FROM orchestration_v2_projection_checkpoint_scopes ORDER BY thread_id, ordinal_within_parent ASC, scope_id ASC"),
+        ("checkpoints", "SELECT thread_id, payload_json FROM orchestration_v2_projection_checkpoints ORDER BY thread_id, scope_id ASC, ordinal_within_scope ASC"),
+        ("contextHandoffs", "SELECT thread_id, payload_json FROM orchestration_v2_projection_context_handoffs ORDER BY thread_id, rowid ASC"),
+    ] {
+        let mut statement = prepare_slim(conn, sql)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let Some(projection) = collections.get_mut(&id) else {
+                continue;
+            };
+            let value = decode(&row.get::<_, String>(1)?)?;
+            if let Some(Value::Array(list)) = projection.get_mut(key) {
+                list.push(value);
+            }
+        }
+    }
+    // A transfer belongs to its source and its target thread.
+    {
+        let mut statement = prepare_slim(
+            conn,
+            "SELECT source_thread_id, target_thread_id, payload_json
+             FROM orchestration_v2_projection_context_transfers ORDER BY rowid ASC",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let source: Option<String> = row.get(0)?;
+            let target: Option<String> = row.get(1)?;
+            let owners: Vec<&String> = match (&source, &target) {
+                (Some(source), Some(target)) if source == target => vec![source],
+                (source, target) => source.iter().chain(target.iter()).collect(),
+            };
+            if !owners.iter().any(|id| collections.contains_key(*id)) {
+                continue;
+            }
+            let value = decode(&row.get::<_, String>(2)?)?;
+            for id in owners {
+                if let Some(Value::Array(list)) = collections
+                    .get_mut(id)
+                    .and_then(|projection| projection.get_mut("contextTransfers"))
+                {
+                    list.push(value.clone());
+                }
+            }
+        }
+    }
+    // The turn items the shell looks at, through the indexes on
+    // `(thread_id, type, status)` and on queued input.
+    // By thread: each item's ordinal, id, run id (columns) and record.
+    type Item = (i64, String, Option<String>, Value);
+    let mut items: HashMap<String, Vec<Item>> = HashMap::new();
+    for sql in [
+        format!(
+            "WITH kinds(type, status) AS ({SHELL_ITEM_KINDS})
+             SELECT i.thread_id, i.ordinal, i.turn_item_id, i.run_id, i.payload_json
+             FROM orchestration_v2_projection_threads AS t
+             CROSS JOIN kinds AS k
+             CROSS JOIN orchestration_v2_projection_turn_items AS i
+               ON i.thread_id = t.thread_id AND i.type = k.type
+              AND (k.status IS NULL OR i.status = k.status)
+             WHERE t.deleted_at IS NULL"
+        ),
+        "SELECT thread_id, ordinal, turn_item_id, run_id, payload_json
+         FROM orchestration_v2_projection_turn_items
+         WHERE type = 'user_message' AND json_valid(payload_json)
+           AND json_extract(payload_json, '$.inputIntent') = 'queued_turn'"
+            .to_owned(),
+    ] {
+        let mut statement = prepare_slim(conn, &sql)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            if !collections.contains_key(&id) {
+                continue;
+            }
+            let item_id: String = row.get(2)?;
+            let list = items.entry(id).or_default();
+            if list.iter().any(|(_, known, _, _)| *known == item_id) {
+                continue;
+            }
+            list.push((
+                row.get(1)?,
+                item_id,
+                row.get(3)?,
+                decode(&row.get::<_, String>(4)?)?,
+            ));
+        }
+    }
+    // How many turn items each run holds: the reference's own count, which
+    // its triggers keep with every turn item written or deleted (`run_key`
+    // is '' for items of no run).
+    let mut counts: HashMap<String, Vec<(Option<String>, u64)>> = HashMap::new();
+    {
+        let mut statement = prepare_slim(
+            conn,
+            "SELECT thread_id, run_key, item_count FROM orchestration_v2_projection_turn_item_counts",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            if collections.contains_key(&id) {
+                let run: String = row.get(1)?;
+                counts.entry(id).or_default().push((
+                    (!run.is_empty()).then_some(run),
+                    row.get::<_, i64>(2)?.max(0) as u64,
+                ));
+            }
+        }
+    }
+    // The first turn item showing each message read, from the reference's
+    // message-ordinal index (`sortMessagesByTurnItemOrder`).
+    let mut ordinals: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    {
+        let mut statement = prepare_slim(
+            conn,
+            "SELECT MIN(ordinal) FROM orchestration_v2_projection_turn_items
+               INDEXED BY orchestration_v2_projection_turn_items_message_ordinal_idx
+             WHERE thread_id = ?1 AND json_extract(payload_json, '$.messageId') = ?2
+               AND type IN ('user_message', 'assistant_message') AND json_valid(payload_json)",
+        )?;
+        for (id, projection) in &collections {
+            for message in projection
+                .get("messages")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(message) = message["id"].as_str() else {
+                    continue;
+                };
+                let first: Option<i64> =
+                    statement.query_row(params![id, message], |row| row.get(0))?;
+                if let Some(first) = first {
+                    ordinals
+                        .entry(id.clone())
+                        .or_default()
+                        .insert(message.to_owned(), first);
+                }
+            }
+        }
+    }
+    for (id, mut projection) in collections {
+        let mut list = items.remove(&id).unwrap_or_default();
+        list.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        let mut loaded: HashMap<Option<String>, u64> = HashMap::new();
+        for (_, _, run, _) in &list {
+            *loaded.entry(run.clone()).or_default() += 1;
+        }
+        let unloaded_items = counts
+            .remove(&id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(run, count)| {
+                let loaded = loaded.get(&run).copied().unwrap_or(0);
+                (run, count.saturating_sub(loaded))
+            })
+            .filter(|(_, count)| *count > 0)
+            .collect();
+        projection.insert(
+            "turnItems".into(),
+            Value::Array(list.into_iter().map(|(_, _, _, item)| item).collect()),
+        );
+        let updated_at = projection["thread"]["updatedAt"].clone();
+        projection.insert("updatedAt".into(), updated_at);
+        out.insert(
+            id.clone(),
+            crate::stored_projection::Slim {
+                projection: Value::Object(projection),
+                message_ordinals: ordinals.remove(&id).unwrap_or_default(),
+                unloaded_items,
+            },
+        );
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

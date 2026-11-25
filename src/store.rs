@@ -244,9 +244,10 @@ pub struct Thread {
     pub(crate) provider: Box<crate::provider_state::ProviderState>,
     /// The thread's projection as `statev2.sqlite` holds it, when it was read
     /// from there rather than built by this server's events
-    /// (docs/shared-store.md).
+    /// (docs/shared-store.md). Read lazily at start-up: see
+    /// `stored_projection`.
     #[serde(skip)]
-    pub(crate) stored: Option<Box<serde_json::Value>>,
+    pub(crate) stored: Option<crate::stored_projection::Stored>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -235,6 +235,19 @@ add tables to it. So:
   - The thread's shell row is derived from those records the way the reference derives
     it. `src/projection_shell.rs` ports `threadShellFromProjection` and the turn-item
     visibility rule.
+- **Start-up reads such threads lazily** (`src/stored_projection.rs`). A home's turn
+  items and nodes can run to many gigabytes, so start-up reads only each thread's slim
+  records, with one query per table (`statev2::read::slim_projections`):
+  - the thread row and its small collections (only users' messages and runs' prompts);
+  - the turn items its shell row looks at, through the reference's partial indexes;
+  - how many other turn items each run holds.
+
+  The typed state and the shell row come from those. Anything else reads the thread's
+  whole projection, through a reader connection of its own, the first time it needs it,
+  and keeps it: snapshots, tools, and every commit. A commit reads each thread it
+  touches whole before it plans its writes, so it never diffs slim records.
+- A thread whose database holds no provider session, or only a stopped one, has no live
+  session for a restart to stop, as the reference's recovery reads it.
 - **When Rust changes such a thread** (pull request 2):
   - It computes its own projection before and after the event, as it already does for
     domain events.
