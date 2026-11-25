@@ -75,21 +75,7 @@ async fn dispatch<S: McpHost>(host: &Arc<S>, command: Value) -> Result<u64, Refu
 /// The link a caller acts for, when it is fenced: paired below full access
 /// (`fencingLinkOrigin`).
 pub(super) fn fencing_origin(store: &crate::store::Store, caller: &Caller) -> Option<Value> {
-    let own = caller
-        .thread
-        .as_ref()
-        .and_then(|thread| store.threads.get(&thread.id))
-        .map(|thread| thread.stored_row()["linkOrigin"].clone())
-        .filter(Value::is_object);
-    let origin = own.or_else(|| {
-        (caller.thread.is_none() && caller.granted.peer_link).then(|| {
-            json!({
-                "sessionId": caller.granted.session_id,
-                "label": caller.granted.label,
-                "access": caller.granted.access,
-            })
-        })
-    })?;
+    let origin = caller_link_origin(store, caller)?;
     (origin["access"] != "full-access").then_some(origin)
 }
 
@@ -168,19 +154,58 @@ pub(super) async fn check_targets<S: McpHost>(
                 ),
             ));
         }
-        if let Some(origin) = fencing_origin(&store, caller) {
-            if row["linkOrigin"]["sessionId"] != origin["sessionId"] {
-                return Err(failure(
-                    "capability_denied",
-                    format!(
-                        "This work was started from {} through a linked environment, so it may change only threads that link started. A link paired with full access is not limited this way.",
-                        origin["label"].as_str().unwrap_or_default()
-                    ),
-                ));
-            }
+        same_link(&store, caller, &row)?;
+    }
+    Ok(())
+}
+
+/// `assertSameLink`: a caller fenced by its link (below full access) may change
+/// only a thread that link started (`linkOrigin`). The caller's own thread is
+/// always its own.
+pub(super) fn same_link(
+    store: &crate::store::Store,
+    caller: &Caller,
+    row: &Value,
+) -> Result<(), Refusal> {
+    if caller
+        .thread
+        .as_ref()
+        .is_some_and(|t| row["id"] == t.id.as_str())
+    {
+        return Ok(());
+    }
+    if let Some(origin) = fencing_origin(store, caller) {
+        if row["linkOrigin"]["sessionId"] != origin["sessionId"] {
+            return Err(failure(
+                "capability_denied",
+                format!(
+                    "This work was started from {} through a linked environment, so it may change only threads that link started. A link paired with full access is not limited this way.",
+                    origin["label"].as_str().unwrap_or_default()
+                ),
+            ));
         }
     }
     Ok(())
+}
+
+/// `callerLinkOrigin`: the link the caller acts for, which the threads it
+/// starts carry: its own thread's, or its linked session's.
+pub(super) fn caller_link_origin(store: &crate::store::Store, caller: &Caller) -> Option<Value> {
+    let own = caller
+        .thread
+        .as_ref()
+        .and_then(|thread| store.threads.get(&thread.id))
+        .map(|thread| thread.stored_row()["linkOrigin"].clone())
+        .filter(Value::is_object);
+    own.or_else(|| {
+        (caller.thread.is_none() && caller.granted.peer_link).then(|| {
+            json!({
+                "sessionId": caller.granted.session_id,
+                "label": caller.granted.label,
+                "access": caller.granted.access,
+            })
+        })
+    })
 }
 
 /// A thread link's ids as written: `t3-thread://v1/<thread>`,

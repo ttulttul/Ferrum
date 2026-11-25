@@ -185,8 +185,10 @@ if (token !== null) {
   await call("t3_thread_list", { allProjects: true });
   if (root) {
     const project = await call("t3_project_create", { title: "Peer link", workspaceRoot: root });
+    // Below full access the link cannot register a project: it uses the one the user has.
+    const projectId = project.id ?? process.env.T3_PEER_LINK_PROJECT;
     const launched = await call("t3_thread_launch", {
-      projectId: project.id,
+      projectId,
       title: "Peer link",
       message: "hello",
       modelSelection: { instanceId: "codex", model: "fixture" },
@@ -195,6 +197,24 @@ if (token !== null) {
     const waited = await call("t3_thread_wait", { threadId: launched.threadId, timeoutMs: 5000 });
     report.steps.at(-1).keys = Object.keys(waited).filter((key) => key !== "next").sort();
     await call("t3_thread_read", { threadId: launched.threadId, afterPosition: -1 });
+    // The thread this link started is the link's to change; the user's own thread is not,
+    // unless the link has full access.
+    const userThread = process.env.T3_PEER_LINK_USER_THREAD;
+    for (const [whose, threadId] of [["launched", launched.threadId], ["user's", userThread]]) {
+      if (threadId === undefined) continue;
+      const tagged = async (name, args) => {
+        await call(name, args);
+        report.steps.at(-1).name = `${name} (${whose} thread)`;
+      };
+      await tagged("t3_thread_update", { threadId, action: "rename", title: "Peer link renamed" });
+      await tagged("t3_thread_configure", { threadId, modelSelection: { instanceId: "codex", model: "fixture-2" } });
+      await tagged("t3_thread_organize", { threadId, action: "pin" });
+      // A fenced link is refused before the queue is looked at; with full access the
+      // queue answers that the run is not queued, so only a fenced link asks.
+      if (process.env.T3_PEER_LINK_ACCESS !== "full-access")
+        await tagged("t3_queue", { action: "cancel", threadId, queuedRunId: "run-not-queued" });
+      await tagged("t3_thread_interrupt", { threadId });
+    }
   }
 }
 

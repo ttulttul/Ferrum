@@ -2184,8 +2184,20 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
                 "createdBy": "agent",
                 "creationSource": "mcp",
             });
-            if let Some(from) = a.get("delegatedFrom").filter(|v| v.is_object()) {
-                create["delegatedFrom"] = from.clone();
+            // The thread carries the link the caller acts for, if any
+            // (`startsThreads` "stamped"), and only then where a link's
+            // delegation or workflow run came from.
+            let origin = {
+                let store = host.control_state().store.read().await;
+                threads::caller_link_origin(&store, caller)
+            };
+            if let Some(origin) = origin {
+                create["linkOrigin"] = origin;
+                for key in ["delegatedFrom", "workflowRun"] {
+                    if let Some(value) = a.get(key).filter(|v| v.is_object()) {
+                        create[key] = value.clone();
+                    }
+                }
             }
             host.dispatch(create)
                 .await
@@ -2280,6 +2292,7 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
         let thread = find_thread(&store, &id)?;
         let row = thread.stored_row();
         within_limits(caller, &row)?;
+        threads::same_link(&store, caller, &row)?;
         if let Some(problem) = output_schema
             .as_ref()
             .and_then(|schema| crate::run_output::request_problem(schema, &text, 0))
@@ -2455,7 +2468,9 @@ async fn thread_interrupt<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value)
     let target = {
         let store = host.control_state().store.read().await;
         let thread = find_thread(&store, &id)?;
-        within_limits(caller, &thread.stored_row())?;
+        let row = thread.stored_row();
+        within_limits(caller, &row)?;
+        threads::same_link(&store, caller, &row)?;
         let all = runs(&thread.projection());
         match run_id.as_deref() {
             Some(wanted) => Some(
