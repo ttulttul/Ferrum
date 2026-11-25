@@ -98,8 +98,8 @@ Changes, all on the experiment branch only:
 - `client_thread_parity.py --shard I/N` splits the provider scenarios into N shards with a
   greedy cost balance (restart ≈ 30 s, `cli restored` ≈ 150 s, others ≈ 10 s). The seeded
   thread checks run on shard 1. All 44 scenarios are covered exactly once (checked).
-- `scripts/ci_parity_shard.sh <shard>` holds the commands for each shard: `thread-1-4` …
-  `thread-4-4`, `core` (initial sync, codex schemas, client RPC, harness, edges,
+- `scripts/ci_parity_shard.sh <shard>` holds the commands for each shard: `thread-1-N` …
+  `thread-N-N` (N is 8 since step 7), `core` (initial sync, codex schemas, client RPC, harness, edges,
   orchestration, config, config snapshot, auth, CORS, MCP, peer link), `integrations`
   (GitHub, Linear, source control hosts, git workflow, preview, relay, relay client;
   the only shard that installs Chromium) and `relay-provisioning`. Every command from
@@ -249,3 +249,10 @@ Now 9 shards:
 - **`status-1-2`, `status-2-2`** each run half of `provider_status_parity.py` (`--shard I/N`, scenarios dealt out longest wait first): about 460 s each at the CI worst case.
 
 Locally (one run, two shards at a time): `integrations` 171 s, `integrations-2` 392 s, `status-1-2` 246 s, `status-2-2` 247 s.
+
+**Step 7 (eight thread shards, measured costs, Nov 2026).** Main runs the restart scenarios in real time (`PARITY_REAL_TIME=1`), and with the Kiro, Codex retry and worktree launch scenarios the four thread shards reached 16–19 minutes against their 20-minute timeout. Runs 45611790922 (on 672452d) and 45605083661 cancelled three of them; e4f8e8f (run 45601007803) still passed at 16–18 minutes. The greedy split used guessed costs (9–25 s a scenario), while CI took 13–197 s each: 4,089 s across the 186 scenarios, measured from the gaps between result lines in the logs of runs 45601007803 and 45611790922.
+
+- `scripts/client_thread_parity_durations.json` holds each scenario's measured seconds on main. `client_thread_parity.py --shard I/N` balances by them: as measured in real time, and on pull requests (faketime) less the fixed waits faketime skips. A scenario not measured yet gets its guessed cost scaled by the median of measured to guessed (about 1.5×). The seeded thread checks on shard 1 count as 30 s.
+- `scripts/thread_shard_durations.py RUN_ID …` measures the scenarios again from parity runs on main and updates the file. Run it when the thread shards drift apart.
+- The thread shards are now `thread-1-8` … `thread-8-8`: 510–519 s of scenarios each in real time (445–455 s on pull requests), plus about 2.6 minutes of setup, so about 11 minutes a job. The shard timeout is 30 minutes.
+

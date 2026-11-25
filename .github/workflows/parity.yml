@@ -148,12 +148,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Each shard takes about 11 minutes on main; the rest is headroom for new scenarios.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # scripts/ci_parity_shard.sh lists each shard's suites.
-        shard: [thread-1-4, thread-2-4, thread-3-4, thread-4-4, core, integrations, integrations-2, status-1-2, status-2-2]
+        # scripts/ci_parity_shard.sh lists each shard's suites. The thread shards are balanced by
+        # each scenario's measured time (scripts/client_thread_parity_durations.json).
+        shard: [thread-1-8, thread-2-8, thread-3-8, thread-4-8, thread-5-8, thread-6-8, thread-7-8, thread-8-8, core, integrations, integrations-2, status-1-2, status-2-2]
         # The nightly run runs every shard twice.
         round: ${{ fromJSON(github.event_name == 'schedule' && '[1, 2]' || '[1]') }}
         include:

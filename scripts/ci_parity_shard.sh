@@ -21,7 +21,8 @@ run() {
 
 case "$shard" in
   thread-*)
-    # thread-I-N: provider scenario shard I of N (shard 1 also runs the seeded thread checks).
+    # thread-I-N: provider scenario shard I of N (shard 1 also runs the seeded thread checks),
+    # balanced by scripts/client_thread_parity_durations.json.
     IFS=- read -r _ index count <<<"$shard"
     # PARITY_REAL_TIME=1 waits out the restart timers that faketime otherwise skips.
     real_time=()
