@@ -145,6 +145,7 @@ pub(super) async fn send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) 
         let row = thread.stored_row();
         if caller.thread.as_ref().is_none_or(|t| t.id != thread_id) {
             within_limits(caller, &row)?;
+            threads::same_link(&store, caller, &row)?;
         }
         if !row["archivedAt"].is_null() {
             return Err(failure(

@@ -268,7 +268,7 @@ pub(crate) fn checkpoint_id(thread_id: &str, turn_count: u64) -> String {
 }
 
 pub(crate) fn created(command: &Value, at: &str) -> Value {
-    json!({"createdBy":command["createdBy"],"creationSource":command["creationSource"],
+    let mut row = json!({"createdBy":command["createdBy"],"creationSource":command["creationSource"],
         "id":command["threadId"],"projectId":command["projectId"],"title":command["title"],
         "providerInstanceId":command["modelSelection"]["instanceId"],"modelSelection":command["modelSelection"],
         "runtimeMode":command["runtimeMode"],"interactionMode":command["interactionMode"],
@@ -276,7 +276,17 @@ pub(crate) fn created(command: &Value, at: &str) -> Value {
         "pullRequests":[],
         "activeProviderThreadId":null,"lineage":{"parentThreadId":null,"relationshipToParent":null,"rootThreadId":command["threadId"]},
         "forkedFrom":null,"createdAt":at,"updatedAt":at,"archivedAt":null,"settledOverride":null,
-        "settledAt":null,"snoozedUntil":null,"snoozedAt":null,"lastVisitedAt":null,"deletedAt":null})
+        "settledAt":null,"snoozedUntil":null,"snoozedAt":null,"lastVisitedAt":null,"deletedAt":null});
+    // Work a link started carries that link (`linkOrigin`), and with it where a
+    // link's delegation or workflow run came from; without one those are dropped.
+    if command["linkOrigin"].is_object() {
+        for key in ["linkOrigin", "delegatedFrom", "workflowRun"] {
+            if command[key].is_object() {
+                row[key] = command[key].clone();
+            }
+        }
+    }
+    row
 }
 
 impl Thread {

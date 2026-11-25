@@ -432,8 +432,11 @@ def main():
 def reference_client_steps(args, servers, access):
     """Each server's answers to the reference's own "link another machine" client, which decodes
     every one with the reference's schemas: its sign-in, its MCP handshake, and tool calls made
-    as a linked environment (a client, not a thread), launching and reading a thread in a project.
-    Registering the project needs full access; with less it is refused."""
+    as a linked environment (a client, not a thread), launching and reading a thread in a project,
+    then renaming, reconfiguring, pinning and interrupting it and the user's own thread (and, below
+    full access, cancelling a queued run in each). Registering the project needs full access; with
+    less it is refused, the launch uses the user's project, and the user's thread is the link's to
+    change only with full access."""
     steps = {}
     for kind, command in servers.items():
         with TemporaryDirectory() as tmp, ExitStack() as stack:
@@ -443,12 +446,29 @@ def reference_client_steps(args, servers, access):
             server = Server(stack, command, home, secret, key)
             project = Path(tmp) / "project"
             project.mkdir()
+            # The user's project and a thread of their own, which a link below full access
+            # may not change, unlike the thread it launches.
+            user_project = Path(tmp) / "user-project"
+            user_project.mkdir()
+            status, _, body = http(server.url, "POST", "/api/projects/mutate", encode({
+                "type": "project.create", "commandId": "create-user-project", "projectId": "project:user",
+                "title": "User project", "workspaceRoot": str(user_project)}),
+                {"Cookie": server.cookie, "Content-Type": "application/json"})
+            assert status == 200, (status, body)
+            created = server.rpc("orchestration.dispatchCommand", {
+                "type": "thread.create", "commandId": "create-user-thread", "threadId": "thread:user",
+                "projectId": "project:user", "title": "User thread",
+                "modelSelection": {"instanceId": "codex", "model": "fixture"},
+                "runtimeMode": "auto", "interactionMode": "default", "branch": None,
+                "worktreePath": None, "createdBy": "user", "creationSource": "web"})
+            assert created["_tag"] == "Success", created
             status, _, body = http(server.url, "POST", "/api/auth/pairing-token",
                                    encode({"purpose": "peer-link", "access": access}),
                                    {"Cookie": server.cookie, "Content-Type": "application/json"})
             assert status == 200, (status, body)
             env = {**os.environ, "T3_PEER_LINK_CODE": json.loads(body)["credential"], "T3_PEER_LINK_ACCESS": access,
-                   "T3_PEER_LINK_ROOT": str(project)}
+                   "T3_PEER_LINK_ROOT": str(project), "T3_PEER_LINK_PROJECT": "project:user",
+                   "T3_PEER_LINK_USER_THREAD": "thread:user"}
             # parity-env: the Node sign-in driver, a client of the server, not a T3 server
             done = subprocess.run([args.node, str(Path(__file__).with_name("peer_link_sign_in.mjs")),
                                    str(args.reference_root), server.url],
