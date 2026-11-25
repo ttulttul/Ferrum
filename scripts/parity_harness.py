@@ -58,7 +58,9 @@ def ready(url, process=None):
 
 
 @contextlib.contextmanager
-def launch(command, url, **kwargs):
+def launch(command, url, stop_timeout=5, **kwargs):
+    """Runs a server for the `with` block. On leaving it the server is sent SIGTERM and given
+    `stop_timeout` seconds to shut down gracefully before SIGKILL."""
     if not command:
         ready(url)
         yield
@@ -72,7 +74,7 @@ def launch(command, url, **kwargs):
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=stop_timeout)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
@@ -346,9 +348,10 @@ def server_env(home, env=None):
     return child
 
 
-def managed_server(stack, prefix, root, secret, signing_key, env=None, stderr_path=None):
+def managed_server(stack, prefix, root, secret, signing_key, env=None, stderr_path=None, stop_timeout=5):
     """Launches one server in `root`. `env` adds variables (or replaces PATH) for the child; see
-    server_env, which also takes the variables of a leading `env NAME=value` in `prefix`."""
+    server_env, which also takes the variables of a leading `env NAME=value` in `prefix`. A
+    suite that checks what a graceful shutdown leaves gives it `stop_timeout` seconds."""
     secrets_dir = root / "userdata" / "secrets"
     secrets_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     key_file = secrets_dir / "mcp-oauth-signing-key.bin"
@@ -378,7 +381,8 @@ def managed_server(stack, prefix, root, secret, signing_key, env=None, stderr_pa
             attempt_stack.enter_context(launch(prefix + ["--bootstrap-fd", str(bootstrap.fileno())], url,
                                                env=server_env(root, {**variables, **(env or {}), "HOME": str(root),
                                                                      "T3CODE_HOME": str(root)}),
-                                               cwd=root, pass_fds=(bootstrap.fileno(),), stderr=stderr))
+                                               cwd=root, pass_fds=(bootstrap.fileno(),), stderr=stderr,
+                                               stop_timeout=stop_timeout))
             cookie = session_cookie(url, secret)
         except RuntimeError as error:
             attempt_stack.close()
