@@ -115,6 +115,22 @@ pub(crate) async fn launch<H: TurnHost>(
         if let Some(merge) = merge {
             commit_recovery(&*host, &run, &merge).await;
         }
+        // So does a run on another provider instance: the thread's history
+        // since that instance last saw it.
+        let switch = {
+            let store = host.store.read().await;
+            store.threads.get(&run.thread_id).and_then(|thread| {
+                crate::context_handoff::prepare_provider_switch(
+                    thread,
+                    &run,
+                    provider,
+                    crate::now(),
+                )
+            })
+        };
+        if let Some(switch) = switch {
+            commit_recovery(&*host, &run, &switch).await;
+        }
     }
     let (mut prepared_handoff, mut recovery) = match spec.provider.as_ref() {
         Some(provider) => {

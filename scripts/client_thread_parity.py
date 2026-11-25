@@ -501,6 +501,10 @@ PROVIDER_SCENARIOS = [
     # The fork merged back: the thread's next run takes what the fork did (fork_delta_summary).
     {"name": "claude fork merge back", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_fork.json", "fork": {"text": "Continue on the fork", "mergeBack": "Back on the main thread"}},
+    # The follow-up switches the thread to another provider: the reference opens a provider
+    # thread for it and hands it the thread's history (a full_thread_summary context handoff).
+    {"name": "codex then claude", "instance": "codex", "model": "fixture", "scenario": "switch_codex_claude.json",
+     "followUp": "Now append a line", "followUpModel": {"instanceId": "claudeAgent", "model": "claude-opus-5-5"}},
     {"name": "claude model switch", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_two_turns.json", "followUp": "Now append a line",
      "followUpModel": {"instanceId": "claudeAgent", "model": "claude-sonnet-5-5"}},

@@ -305,7 +305,12 @@ impl Thread {
                     "id": run.wire_id(),
                     "threadId": self.id,
                     "ordinal": index + 1,
-                    "providerInstanceId": instance,
+                    // Each run names the instance it ran on (a switch changes it).
+                    "providerInstanceId": run
+                        .model_selection
+                        .as_deref()
+                        .and_then(|selection| selection["instanceId"].as_str())
+                        .unwrap_or(&instance),
                     "modelSelection": run.model_selection.as_deref().unwrap_or(&selection),
                     "providerThreadId": null,
                     "userMessageId": run.user_message_id.clone().filter(|id| !id.trim().is_empty()).unwrap_or_else(|| run.wire_id()),
@@ -319,10 +324,13 @@ impl Thread {
                     "checkpointId": null,
                     "contextHandoffId": null
                 });
-                // A merge-back's delta is the run's handoff.
-                if let Some(handoff) = self.context_handoffs.iter().find(|handoff| {
-                    handoff["targetRunId"] == out["id"] && handoff["strategy"] == "fork_delta_summary"
-                }) {
+                // A merge-back's delta, or a provider switch's handoff, is
+                // the run's handoff.
+                if let Some(handoff) = self
+                    .context_handoffs
+                    .iter()
+                    .find(|handoff| handoff["targetRunId"] == out["id"] && run_handoff(handoff))
+                {
                     out["contextHandoffId"] = handoff["id"].clone();
                 }
                 let turn_count = index as u64 + 1;
@@ -893,6 +901,15 @@ impl Thread {
     /// model of the latest earlier run the timeline shows by its prompt, when
     /// that differs from the run's own.
     fn model_switch(&self, index: usize, run: &crate::Run) -> Option<Value> {
+        // A run with a handoff shows the switch by its handoff item.
+        let run_id = run.wire_id();
+        if self
+            .context_handoffs
+            .iter()
+            .any(|handoff| handoff["targetRunId"] == run_id.as_str() && run_handoff(handoff))
+        {
+            return None;
+        }
         let to = run.model_selection.as_deref()?;
         let previous = self.runs[..index].iter().rev().find(|earlier| {
             !matches!(earlier.status.as_str(), "rolled_back" | "queued")
@@ -1916,6 +1933,15 @@ fn sort_messages_by_turn_item_order(
                 .then_with(|| millis(&left["createdAt"]).cmp(&millis(&right["createdAt"])))
         });
     }
+}
+
+/// Whether `handoff` is the one its target run names (`contextHandoffId`):
+/// a merge-back's delta or a provider switch's handoff, prepared for the run.
+fn run_handoff(handoff: &Value) -> bool {
+    handoff["strategy"] == "fork_delta_summary"
+        || handoff["transferId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("context-transfer:type:provider_handoff:"))
 }
 
 #[cfg(test)]

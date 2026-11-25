@@ -1,0 +1,6 @@
+{
+ "variants": [
+  {"argsContain": "app-server", "scenario": "codex_turn.json"},
+  {"argsContain": "stream-json", "scenario": "claude_turn.json"}
+ ]
+}

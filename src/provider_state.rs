@@ -18,8 +18,16 @@ use uuid::Uuid;
 pub struct ProviderState {
     /// The native thread the next turn resumes, if it may.
     pub native_thread: Option<NativeThread>,
-    /// The thread's provider thread record, once a provider turn ran.
+    /// The thread's provider thread record, once a provider turn ran: the
+    /// one its latest provider turn ran on.
     pub thread: Option<ThreadRecord>,
+    /// The provider threads of the other provider instances the thread ran
+    /// on before switching (the reference keeps one per instance), each with
+    /// its native thread, which a switch back resumes.
+    pub other_threads: Vec<ThreadRecord>,
+    /// The provider thread each run's turn ran on, by the run that opened it
+    /// (its record's `first_run`).
+    pub run_threads: HashMap<Uuid, Uuid>,
     /// Each run's provider turn, by run.
     pub runs: HashMap<Uuid, RunRecord>,
     /// How each run's provider turn ended, from its `turn.terminal`.
@@ -231,6 +239,28 @@ impl ProviderState {
                     driver: driver.clone(),
                     id: native_thread_id.clone(),
                 });
+                // A turn on another provider instance moves to that
+                // instance's provider thread, opening one the first time; the
+                // one it leaves stays, idle.
+                if self
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| thread.driver != *driver)
+                {
+                    if let Some(mut left) = self.thread.take() {
+                        if left.status == "active" {
+                            left.status = "idle";
+                        }
+                        self.other_threads.push(left);
+                    }
+                    if let Some(at) = self
+                        .other_threads
+                        .iter()
+                        .position(|thread| thread.driver == *driver)
+                    {
+                        self.thread = Some(self.other_threads.remove(at));
+                    }
+                }
                 let thread = self.thread.get_or_insert_with(|| ThreadRecord {
                     driver: driver.clone(),
                     first_run: run,
@@ -244,6 +274,7 @@ impl ProviderState {
                 thread.native_id = Some(native_thread_id.clone());
                 thread.status = "active";
                 thread.updated_at = at;
+                self.run_threads.insert(run, thread.first_run);
             }
             ProviderEvent::ProviderTurn {
                 native_turn_id,
@@ -545,6 +576,13 @@ impl ProviderState {
             .as_ref()
             .filter(|thread| thread.driver == driver)
             .map(|thread| thread.id.clone())
+            // A switch back resumes that instance's own native thread.
+            .or_else(|| {
+                self.other_threads
+                    .iter()
+                    .find(|thread| thread.driver == driver && thread.status != "error")
+                    .and_then(|thread| thread.native_id.clone())
+            })
     }
 }
 
@@ -802,6 +840,42 @@ pub(crate) fn split_args(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_switch_of_instance_opens_its_own_provider_thread_and_a_switch_back_resumes_the_first() {
+        use uuid::Uuid;
+        let (first, second, third) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut state = ProviderState::default();
+        let thread = |driver: &str, id: &str| ProviderEvent::ProviderThread {
+            driver: driver.into(),
+            native_thread_id: id.into(),
+            resumed: false,
+            model: None,
+        };
+        state.apply(first, &thread(provider::CODEX, "thr_codex"), 1);
+        state.apply(second, &thread(provider::CLAUDE_AGENT, "sess_claude"), 2);
+        assert_eq!(
+            state.thread.as_ref().unwrap().driver,
+            provider::CLAUDE_AGENT
+        );
+        assert_eq!(state.other_threads.len(), 1);
+        assert_eq!(state.other_threads[0].status, "idle");
+        assert_eq!(state.run_threads[&first], first);
+        assert_eq!(state.run_threads[&second], second);
+        // Back on Codex, the turn resumes Codex's own native thread and its record.
+        assert_eq!(
+            state.resume_for(provider::CODEX).as_deref(),
+            Some("thr_codex")
+        );
+        state.apply(third, &thread(provider::CODEX, "thr_codex"), 3);
+        assert_eq!(state.thread.as_ref().unwrap().first_run, first);
+        assert_eq!(state.run_threads[&third], first);
+        assert_eq!(state.other_threads[0].driver, provider::CLAUDE_AGENT);
+        assert_eq!(
+            state.resume_for(provider::CLAUDE_AGENT).as_deref(),
+            Some("sess_claude")
+        );
+    }
+
     use super::*;
     use serde_json::json;
 
