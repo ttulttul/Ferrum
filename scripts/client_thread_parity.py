@@ -288,11 +288,11 @@ PROVIDER_SCENARIOS = [
     # A Codex agent spawns a native subagent on a child thread of its own (collabAgentToolCall
     # spawnAgent), waits for it and reports its answer.
     {"name": "codex native subagent", "instance": "codex", "model": "fixture",
-     "scenario": "codex_subagent.json"},
+     "scenario": "codex_subagent.json", "children": True},
     # The same as Codex 0.170 reports it: subAgentActivity started and completed around a wait
     # that names no agents, the child's own notifications going to its thread only.
     {"name": "codex native subagent activity", "instance": "codex", "model": "fixture",
-     "scenario": "codex_subagent_activity.json"},
+     "scenario": "codex_subagent_activity.json", "children": True},
     # Codex delegation counterparts: parent and child share the instance's app-server.
     {"name": "codex delegate", "instance": "codex", "model": "fixture",
      "scenario": "codex_delegate.json", "awaitStatus": True},
@@ -2042,6 +2042,16 @@ def fork_turn(args, url, cookie, fork):
     return out
 
 
+def child_threads(args, url, cookie):
+    """What a client reads of the first child thread a native subagent of the thread runs on
+    (`children` scenarios)."""
+    subagents = thread_projection(url, cookie).get("subagents", [])
+    child = next((s["childThreadId"] for s in subagents if s.get("childThreadId")), None)
+    if child is None:
+        return {"child": {"steps": {}, "missing": True}}
+    return {"child": run_client(args, url, cookie, {"threadId": child, "inspect": True})}
+
+
 def turn_app_servers(log):
     """How many Codex app-servers a server started for turns (its status probe's aside): the
     reference shares one per instance across turns and threads."""
@@ -2448,7 +2458,7 @@ def compare_turn(original, rust):
         if rendered[0][key] != rendered[1][key]:
             problems[key] = [f"original {rendered[0][key]}", f"rust     {rendered[1][key]}"]
     # A fork of the thread, and the thread after the fork merged back (`fork` scenarios).
-    for part in ("fork", "merged"):
+    for part in ("fork", "merged", "child"):
         if part in original or part in rust:
             if part not in original or part not in rust:
                 problems[part] = [f"read by original {part in original} rust {part in rust}"]
@@ -2696,6 +2706,8 @@ def provider_turns(args, credentials):
                                      len(scenario["uploads"]))
                     if scenario.get("fork"):
                         outcomes[name].update(fork_turn(args, url, cookie, scenario["fork"]))
+                    if scenario.get("children"):
+                        outcomes[name].update(child_threads(args, url, cookie))
                     if scenario.get("followUp"):
                         outcomes[name]["steps"].update(follow_up_turn(args, url, cookie, scenario["followUp"],
                                                                       scenario.get("followUpModel")))

@@ -1117,6 +1117,8 @@ impl Thread {
             ));
         }
         let mut turn_items = self.turn_items_with(provider.items);
+        // What a native subagent's child thread holds outside any run: its prompt.
+        turn_items.splice(0..0, array("nativeTurnItems"));
         if wire {
             // As snapshots serve them: without input still waiting in the
             // queue (the database keeps it).
@@ -1137,7 +1139,8 @@ impl Thread {
             records.extend(extra);
             Value::Array(records)
         };
-        let mut messages = self.message_rows();
+        let mut messages = array("nativeMessages");
+        messages.extend(self.message_rows());
         messages.extend(provider.messages);
         // The reference lists messages by creation time: each run's prompt,
         // then what its provider said, run after run. A message without a
