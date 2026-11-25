@@ -2290,11 +2290,11 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
             } else {
                 None
             };
-            // A worktree's path and branch are recorded once it is made.
+            // A worktree's path and branch are recorded once it is made; a
+            // thread in the project's own checkout has none (`launchThread`).
             let worktree_path = match folder {
                 Some(path) => json!(path),
-                None if root.is_empty() || worktree.is_some() => Value::Null,
-                None => json!(root),
+                None => Value::Null,
             };
             let mut create = json!({
                 "type": "thread.create",
