@@ -575,6 +575,7 @@ async fn run_call(
             }
         };
         let (result, ()) = tokio::join!(workflow, forward);
+        refresh_vcs_after(state, method, params);
         // The last frame is queued on the connection. Let its writer flush it before Exit.
         state.runtime.yield_now().await;
         return match result {
@@ -583,10 +584,34 @@ async fn run_call(
             Err(e) => Reply::Failure(json!({"_tag":"Fail","error":e})),
         };
     }
-    if matches!(
-        method,
-        "subscribeVcsBranch" | "subscribeVcsStatus" | "subscribeDiscoveredLocalServers"
-    ) {
+    if matches!(method, "subscribeVcsBranch" | "subscribeVcsStatus") {
+        // One shared status per folder (`vcs_broadcast`); each subscriber sends
+        // what changed since what it last sent.
+        let mut shared = state.vcs_hub.subscribe(state, method, params);
+        let mut previous: Option<Value> = None;
+        loop {
+            let snapshot = match shared.next().await {
+                Some(Ok(v)) => v,
+                Some(Err(error)) if error["_tag"] == "Die" => return Reply::Failure(error),
+                Some(Err(error)) => return Reply::Failure(json!({"_tag":"Fail","error":error})),
+                None => return Reply::defect(format!("Unknown stream: {method}")),
+            };
+            match (method, previous.as_ref()) {
+                ("subscribeVcsStatus", Some(old)) => {
+                    if old["local"] != snapshot["local"] {
+                        send(json!([{"_tag":"localUpdated","local":snapshot["local"]}])).await;
+                    }
+                    if old["remote"] != snapshot["remote"] {
+                        send(json!([{"_tag":"remoteUpdated","remote":snapshot["remote"]}])).await;
+                    }
+                }
+                (_, Some(old)) if old == &snapshot => {}
+                _ => send(json!([snapshot])).await,
+            }
+            previous = Some(snapshot);
+        }
+    }
+    if method == "subscribeDiscoveredLocalServers" {
         let mut previous: Option<Value> = None;
         loop {
             let snapshot = match crate::dispatch::polled_stream(
@@ -603,28 +628,11 @@ async fn run_call(
                 Some(Err(error)) => return Reply::Failure(json!({"_tag":"Fail","error":error})),
                 None => return Reply::defect(format!("Unknown stream: {method}")),
             };
-            match (method, previous.as_ref()) {
-                ("subscribeVcsStatus", Some(old)) => {
-                    if old["local"] != snapshot["local"] {
-                        send(json!([{"_tag":"localUpdated","local":snapshot["local"]}])).await;
-                    }
-                    if old["remote"] != snapshot["remote"] {
-                        send(json!([{"_tag":"remoteUpdated","remote":snapshot["remote"]}])).await;
-                    }
-                }
-                ("subscribeDiscoveredLocalServers", Some(old))
-                    if old["servers"] == snapshot["servers"] => {}
-                (_, Some(old)) if old == &snapshot => {}
+            match previous.as_ref() {
+                Some(old) if old["servers"] == snapshot["servers"] => {}
                 _ => send(json!([snapshot])).await,
             }
-            let start_remote = previous.is_none()
-                && method == "subscribeVcsStatus"
-                && params["includeRemote"] != false
-                && snapshot["local"]["isRepo"] == true;
             previous = Some(snapshot);
-            if start_remote {
-                continue;
-            }
             state.runtime.sleep(std::time::Duration::from_secs(2)).await;
         }
     }
@@ -696,6 +704,23 @@ async fn run_call(
 }
 
 async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply {
+    let reply = dispatch_method(state, method, params).await;
+    refresh_vcs_after(state, method, params);
+    reply
+}
+
+/// A `vcs.*` or `git.*` call may have changed its folder's status: shared
+/// status streams of that folder read it again (the reference refreshes after
+/// each of these calls).
+fn refresh_vcs_after(state: &AppState, method: &str, params: &Value) {
+    if method.starts_with("vcs.") || method.starts_with("git.") {
+        if let Some(cwd) = params["cwd"].as_str() {
+            state.vcs_hub.refresh(cwd);
+        }
+    }
+}
+
+async fn dispatch_method(state: &Arc<AppState>, method: &str, params: &Value) -> Reply {
     if !crate::rpc_known(method) {
         return Reply::defect(format!("Unknown request tag: {method}"));
     }

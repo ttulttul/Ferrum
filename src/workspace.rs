@@ -350,6 +350,11 @@ pub trait Workspace: MaybeSendSync {
     }
     /// The local servers a `subscribeDiscoveredLocalServers` stream reports.
     fn local_servers<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply>;
+    /// Whether a folder this workspace names is a folder on this machine, so
+    /// its files can be checked here (`vcs_broadcast`).
+    fn watches_local_paths(&self) -> bool {
+        false
+    }
     /// `preview.stopLocalServer`.
     fn stop_local_server<'a>(&'a self, input: &'a Value) -> WorkspaceFuture<'a, Reply>;
 
