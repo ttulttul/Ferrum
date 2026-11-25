@@ -290,7 +290,7 @@ tasks are followed again after a restart. A follow-up sent to a finished task's 
 ends. The control plane still refuses these tasks.
 
 **Parity:** `claude delegate remote` (a wait), `claude delegate remote followup` (a follow-up sent
-there becomes a task; checked before its run there ends) and `claude delegate remote cancel`
+there becomes a task, whose result wakes the idle parent's running CLI) and `claude delegate remote cancel`
 (cancelled while its thread there runs, then cancelled again), against a loopback linked environment that records
 each call (`scripts/remote_task_peer.py`). In the cancel, the result is steered into the parent's
 running Claude turn, which ends before reading it, and the CLI answers it as its next turn. Both

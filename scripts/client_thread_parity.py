@@ -239,10 +239,10 @@ PROVIDER_SCENARIOS = [
     # A follow-up to a finished task in a linked environment (t3_thread_send there): it becomes a task
     # of its own, recorded with the run the send started there and followed through the link.
     {"name": "claude delegate remote followup", "instance": "claudeAgent", "model": "claude-opus-5-5",
-     "scenario": "claude_delegate_remote_followup.json", "awaitStatus": True,
-     # The follow-up's run there ends after the snapshot: what a wake run does after a remote
-     # follow-up is left to its own scenario.
-     "peer": {"finish_after": 1, "follow_up_after": 60}},
+     "scenario": "claude_delegate_remote_followup.json", "awaitStatus": True, "settleRuns": 2,
+     # The follow-up's run there ends a few seconds after the parent's turn, and its result wakes
+     # the idle parent, whose running CLI reads it with task_status.
+     "peer": {"finish_after": 1, "follow_up_after": 3}},
     # A task in a linked environment cancelled while its thread there runs: the thread there is
     # stopped through the link, and cancelling it again stops it there again. The cancelled result
     # is steered into the parent's turn, which ends before reading it; the CLI then answers it as
