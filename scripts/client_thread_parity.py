@@ -441,6 +441,24 @@ PROVIDER_SCENARIOS = [
     # the turn ends, as the reference's does. Live, every edit waited on an approval.
     {"name": "antigravity auto-accept-edits", "instance": "antigravity", "enable": "antigravity",
      "model": "antigravity-default", "scenario": "agy_edit_auto.json", "runtimeMode": "auto-accept-edits"},
+    # Not in the reference (user decision): in Auto-accept edits Antigravity runs an allowlisted
+    # read-only command line unasked, where the reference asks (expected differences, listed).
+    {"name": "antigravity auto-accept-edits read-only command", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_command_ls.json",
+     "runtimeMode": "auto-accept-edits", "respond": {"decision": "accept"}},
+    # Anything else still asks, as in the reference: a write, a redirection, a chain, a
+    # substitution, a pipe into a shell, and a read-only command in approval-required.
+    {"name": "antigravity auto-accept-edits write command", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_command_touch.json",
+     "runtimeMode": "auto-accept-edits", "respond": {"decision": "accept"}},
+    {"name": "antigravity auto-accept-edits redirection", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_command_redirect.json",
+     "runtimeMode": "auto-accept-edits", "respond": {"decision": "accept"}},
+    {"name": "antigravity auto-accept-edits chained command", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_command_chain.json",
+     "runtimeMode": "auto-accept-edits", "respond": {"decision": "accept"}},
+    {"name": "antigravity auto-accept-edits substitution", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_command_substitution.json",
+     "runtimeMode": "auto-accept-edits", "respond": {"decision": "accept"}},
+    {"name": "antigravity auto-accept-edits pipe into a shell", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_command_pipe_shell.json",
+     "runtimeMode": "auto-accept-edits", "respond": {"decision": "accept"}},
+    {"name": "antigravity approval read-only command", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_command_ls.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
     {"name": "antigravity approval", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_approval.json",
      "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
     {"name": "antigravity approval declined", "instance": "antigravity", "enable": "antigravity", "model": "antigravity-default", "scenario": "agy_approval.json",

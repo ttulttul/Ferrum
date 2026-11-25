@@ -19,6 +19,7 @@ mod muse;
 mod opencode;
 mod opencode2;
 pub(crate) mod pi;
+mod read_only_command;
 mod requests;
 
 pub(crate) use codex_server::Registry as CodexServers;
