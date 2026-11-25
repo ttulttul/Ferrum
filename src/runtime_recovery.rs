@@ -855,6 +855,8 @@ mod tests {
 
                 opencode2: None,
                 native_title: None,
+                native_updated_at: None,
+                context_usage: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: None,
@@ -1058,6 +1060,8 @@ mod tests {
 
                 opencode2: None,
                 native_title: None,
+                native_updated_at: None,
+                context_usage: None,
             },
             11,
         );
@@ -1130,6 +1134,8 @@ mod tests {
 
                 opencode2: None,
                 native_title: None,
+                native_updated_at: None,
+                context_usage: None,
             },
             ProviderEvent::ProviderTurn {
                 native_turn_id: Some("turn-1".into()),

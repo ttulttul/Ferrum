@@ -179,6 +179,21 @@ fn status_backend(model_source: Option<&str>) -> String {
     }
 }
 
+/// `readFxDefaultChoice`: the backend and model fx starts a new session on,
+/// from what `fx status --json` printed in the thread's folder; none
+/// without a model (or when the output is not fx's status).
+pub(crate) fn default_choice(stdout: &str) -> Option<(String, String)> {
+    let status = decode_status(stdout)?;
+    let model = non_empty(status.model.as_deref())?;
+    Some((status_backend(status.model_source.as_deref()), model))
+}
+
+/// How long a turn waits for `fx status --json` (`AUTH_PROBE_TIMEOUT_MS`,
+/// which `T3CODE_FX_PROBE_TIMEOUT_MS` in `env` may extend).
+pub(crate) fn status_timeout(env: &ProcessEnv) -> std::time::Duration {
+    probe_timeout("fx", AUTH_PROBE_TIMEOUT_MS, env)
+}
+
 /// `readFxConfiguredBackends`: the `providers` keys of fx's profile settings
 /// (`$FX_HOME/settings.json`, else `~/.fx/settings.json`) that fx accepts as
 /// ids and that are not built-in names.
@@ -492,4 +507,27 @@ fn darwin_major() -> Option<u32> {
         .next()?
         .parse()
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_choice_is_the_status_model_on_its_backend() {
+        assert_eq!(
+            default_choice(r#"{"auth": "oauth", "model": "fx-large"}"#),
+            Some(("gateway".into(), "fx-large".into()))
+        );
+        assert_eq!(
+            default_choice(r#"{"model": "gpt-6", "model_source": "Codex subscription"}"#),
+            Some(("codex".into(), "gpt-6".into()))
+        );
+        assert_eq!(
+            default_choice(r#"{"model": "qwen", "model_source": "local"}"#),
+            Some(("local".into(), "qwen".into()))
+        );
+        assert_eq!(default_choice(r#"{"auth": "oauth", "model": " "}"#), None);
+        assert_eq!(default_choice("not json"), None);
+    }
 }

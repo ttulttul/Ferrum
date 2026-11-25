@@ -644,6 +644,12 @@ impl crate::orchestration::CommandHost for AppState {
                             crate::provider_status::kiro::default_model_id(row.as_ref());
                     }
                 }
+                // An fx turn runs `fx` (`binaryPath` with `~` expanded).
+                if let Ok(Some((turn, _))) = provider.as_mut() {
+                    if turn.driver == crate::workspace::provider::FX {
+                        turn.binary_path = crate::provider_status::expand_home(&turn.binary_path);
+                    }
+                }
                 // An Antigravity turn runs `agy acp` as the driver launches
                 // it: the instance's sign-in settings checked, the executable
                 // resolved, the private profile prepared, and the runtime's

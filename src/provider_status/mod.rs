@@ -66,7 +66,7 @@ mod claude_skills;
 mod codex;
 mod cursor;
 mod cursor_skills;
-mod fx;
+pub(crate) mod fx;
 mod fx_skills;
 pub(crate) mod grok;
 pub(crate) mod kiro;

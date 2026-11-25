@@ -1140,6 +1140,8 @@ impl<'a> Turn<'a> {
 
             opencode2: None,
             native_title: None,
+            native_updated_at: None,
+            context_usage: None,
         });
         let rules = permission_rules(provider.runtime_mode());
         if let Err(detail) = oc.apply_permission(&rules).await {

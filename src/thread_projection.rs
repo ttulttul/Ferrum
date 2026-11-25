@@ -1859,6 +1859,9 @@ fn stored_provider(
         version: String::new(),
         model_selection: record["nativeMetadata"]["modelSelection"].clone(),
     });
+    // fx's turns are the ones whose sessions report these (Rust's other ACP
+    // flavors do not read them yet).
+    let fx = driver == crate::workspace::provider::FX;
     if let Some(first_run) = first_run {
         state.thread = Some(crate::provider_state::ThreadRecord {
             opencode2,
@@ -1866,6 +1869,20 @@ fn stored_provider(
             native_title: record["nativeMetadata"]["title"]
                 .as_str()
                 .map(str::to_owned),
+            // And what fx itself reported of its session: when it changed
+            // it, and its context usage (its `usage_update`).
+            native_updated_at: fx
+                .then(|| record["nativeMetadata"]["updatedAt"].as_str())
+                .flatten()
+                .map(str::to_owned),
+            context_usage: fx
+                .then(|| {
+                    Some(crate::workspace::provider::ContextUsage {
+                        used_tokens: record["contextUsage"]["usedTokens"].as_u64()?,
+                        max_tokens: record["contextUsage"]["maxTokens"].as_u64(),
+                    })
+                })
+                .flatten(),
             driver,
             first_run: crate::Run::uuid_for(&first_run),
             created_at: iso_seconds(&record["createdAt"]),

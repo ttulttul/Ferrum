@@ -503,6 +503,44 @@ PROVIDER_SCENARIOS = [
      "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}},
     {"name": "kiro failed turn", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": "kiro_failed.json"},
     {"name": "kiro missing", "instance": "kiro", "enable": "kiro", "model": "default", "scenario": None},
+    # fx's `fx acp`: its session `_meta` (profile MCP servers), Default resolved by `fx status --json`
+    # in the thread's folder (the session's own model: nothing written), the effort at medium, and
+    # the mode Full access asks for.
+    {"name": "fx turn", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_turn.json"},
+    # A second turn prompts the agent the thread keeps, setting nothing again.
+    {"name": "fx second turn", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_two_turns.json",
+     "followUp": "Now append a line"},
+    # Default on a session running another model: fx's default model is written.
+    {"name": "fx default model", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_default.json"},
+    # `backend:model` writes the backend, then the model from its list, then the effort; a follow-up on
+    # another backend switches back, its effort (none chosen) at medium.
+    {"name": "fx model and effort", "instance": "fx", "enable": "fx", "model": "codex:gpt-6-astra",
+     "modelOptions": [{"id": "effort", "value": "high"}], "scenario": "fx_model.json",
+     "followUp": "Now append a line", "followUpModel": {"instanceId": "fx", "model": "gateway:fx-small"}},
+    # Supervised runs fx's `ask` mode, and fx's request goes to the user.
+    {"name": "fx approval", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "accept"}},
+    {"name": "fx approval declined", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "decline"}},
+    {"name": "fx approval for session", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_approval.json",
+     "runtimeMode": "approval-required", "respond": {"decision": "acceptForSession"}},
+    # Auto runs fx's automatic review, which asks only about what it refused: the user answers.
+    {"name": "fx auto", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_approval.json",
+     "runtimeMode": "auto", "respond": {"decision": "accept"}},
+    # Full access runs fx's `full-access`; T3 answers a request itself with `allow_once`.
+    {"name": "fx full access", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_approval.json"},
+    # fx 0.0.13 advertises no full-access mode: the session does not open.
+    {"name": "fx no full access", "instance": "fx", "enable": "fx", "model": "default",
+     "scenario": "fx_no_full_access.json"},
+    # Stop mid-command: `session/cancel`, fx's cancelled answer, and the agent is kept.
+    {"name": "fx interrupt", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_interrupt.json",
+     "interrupt": "command"},
+    # A steer: the reference cancels and prompts again with it; Rust queues it for the next turn.
+    {"name": "fx steer", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_steer.json",
+     "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}},
+    {"name": "fx failed turn", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_failed.json"},
+    {"name": "fx signed out", "instance": "fx", "enable": "fx", "model": "default", "scenario": "fx_signed_out.json"},
+    {"name": "fx missing", "instance": "fx", "enable": "fx", "model": "default", "scenario": None},
     # Grok over ACP: its turns run in the `grok agent stdio` session the thread keeps, and stream
     # reasoning, a command and the reply.
     {"name": "grok turn", "instance": "grok", "enable": "grok", "model": "grok-build", "scenario": "grok_turn.json"},
@@ -890,10 +928,36 @@ KIRO_STATUS_SPEC = {"commands": [
         "initialize": {"protocolVersion": 2, "agentCapabilities": {"loadSession": True}, "authMethods": []},
         "_kiro/config/template": {"configOptions": [{"id": "mode", "type": "select", "currentValue": "vibe", "options": [
             {"value": "vibe", "name": "Default"}, {"value": "spec", "name": "Spec"}, {"value": "plan", "name": "Plan"}]}]}}}]}
+# The fake fx: `fx acp` is always a turn's runtime (the status check never opens a session), which
+# replays the scenario; its other commands (the status check's, and the `fx status --json` a turn on
+# Default runs in the thread's folder) answer from FX_STATUS_SPEC, as provider_status_parity.py has
+# it: fx-large on the gateway is the default, and fx lists Full access.
+FAKE_FX = """#!/bin/sh
+if [ "$1" = acp ]; then
+  exec python3 "$FAKE_PROVIDER_CLI" "$@"
+fi
+FAKE_PROVIDER_LOG="$FAKE_PROVIDER_LOG.text" exec python3 "$FAKE_STATUS_CLI" "$FAKE_FX_STATUS" "$@"
+"""
+
+
+def _fx_ok(args, stdout, backend=None):
+    return {"args": args, "env": {"FX_PROVIDER": backend}, "stdout": stdout, "stderr": "", "exit": 0}
+
+
+FX_STATUS_SPEC = {"commands": [
+    {"args": ["--version"], "stdout": "fx 0.0.15", "stderr": "", "exit": 0},
+    _fx_ok(["status", "--json"], json.dumps({"auth": "oauth", "model": "fx-large", "modes": [
+        {"id": "auto"}, {"id": "ask"}, {"id": "full-access"}]})),
+    _fx_ok(["status", "--json"], '{"auth": "oauth"}', "gateway"),
+    _fx_ok(["models", "--json"], json.dumps({"ids": ["fx-large", "fx-small"]}), "gateway"),
+    _fx_ok(["status", "--json"], '{"auth": "chatgpt"}', "codex"),
+    _fx_ok(["models", "--json"], json.dumps({"ids": ["gpt-6.1-sol", "gpt-6-astra"]}), "codex"),
+    _fx_ok(["status", "--json"], '{"auth": "missing"}', "grok")]}
 TURN_CLIS = {"codex": "codex", "claudeAgent": "claude", "grok": "grok", "pi": "pi", "acp-local": "fixture-acp",
              "opencode": "opencode",
              "antigravity": "agy",
              "kiro": "kiro-cli",
+             "fx": "fx",
              # Installed in the server's home (`registryAgent`), not on PATH.
              "acp-registry": "registry-agent"}
 # The ACP Registry agent a `registryAgent` scenario's servers find in their cached index, already
@@ -1122,7 +1186,7 @@ def write_fake_clis(directory, drivers):
     directory.mkdir(parents=True, exist_ok=True)
     for name, script in (("codex", FAKE_CODEX), ("claude", FAKE_CLAUDE), ("grok", FAKE_GROK),
                          ("fixture-acp", FAKE_ACP_AGENT), ("pi", FAKE_PI), ("opencode", FAKE_OPENCODE),
-                         ("agy", FAKE_AGY), ("kiro-cli", FAKE_KIRO)):
+                         ("agy", FAKE_AGY), ("kiro-cli", FAKE_KIRO), ("fx", FAKE_FX)):
         if name in drivers:
             (directory / name).write_text(script)
             (directory / name).chmod(0o755)
@@ -1134,6 +1198,8 @@ def write_fake_clis(directory, drivers):
         (directory / "agy.status.json").write_text(json.dumps(AGY_STATUS_SPEC))
     if "kiro-cli" in drivers:
         (directory / "kiro-cli.status.json").write_text(json.dumps(KIRO_STATUS_SPEC))
+    if "fx" in drivers:
+        (directory / "fx.status.json").write_text(json.dumps(FX_STATUS_SPEC))
 
 
 def write_text_provider(directory, provider):
@@ -2418,6 +2484,7 @@ def scenario_env(temporary, name, root, scenario, drivers):
            "FAKE_PI_STATUS": str(fake_bin / "pi.status.json"),
            "FAKE_AGY_STATUS": str(fake_bin / "agy.status.json"),
            "FAKE_KIRO_STATUS": str(fake_bin / "kiro-cli.status.json"),
+           "FAKE_FX_STATUS": str(fake_bin / "fx.status.json"),
            # "titleAfterTurn": the title CLI answers once the driver saw the turn settle.
            **({"FAKE_TITLE_GATE": str(log) + ".turn-settled"} if scenario.get("titleAfterTurn") else {}),
            "FAKE_PROVIDER_SCENARIO": str(FIXTURES / (scenario["scenario"] or "codex_turn.json"))}

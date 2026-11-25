@@ -33,18 +33,20 @@ pub const OPENCODE: &str = "opencode";
 pub const ANTIGRAVITY: &str = "antigravity";
 /// Kiro's CLI, whose turns run over ACP (`kiro-cli acp --agent-engine=v3`).
 pub const KIRO: &str = "kiro";
+/// fx's CLI, whose turns run over ACP (`fx acp`).
+pub const FX: &str = "fx";
 
 /// Whether the workspace runs turns of `driver`'s CLI.
 pub fn runs_turns(driver: &str) -> bool {
     matches!(
         driver,
-        CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI | OPENCODE | ANTIGRAVITY | KIRO
+        CODEX | CLAUDE_AGENT | GROK | ACP_REGISTRY | PI | OPENCODE | ANTIGRAVITY | KIRO | FX
     )
 }
 
 /// Whether `driver`'s turns run over ACP.
 pub fn is_acp(driver: &str) -> bool {
-    matches!(driver, GROK | ACP_REGISTRY | ANTIGRAVITY | KIRO)
+    matches!(driver, GROK | ACP_REGISTRY | ANTIGRAVITY | KIRO | FX)
 }
 
 /// Whether the reference gives each of `driver`'s threads a provider
@@ -384,6 +386,17 @@ pub enum ProviderEvent {
         /// and a reader that predates it ignores it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         native_title: Option<String>,
+        /// When the agent says it last changed its session (an ACP
+        /// `session_info_update`'s `updatedAt`: fx's), the provider thread's
+        /// `nativeMetadata.updatedAt`. Additive and skippable, as above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_updated_at: Option<Box<str>>,
+        /// How much of its context window the agent's session uses (an ACP
+        /// `usage_update`: fx's), the provider thread's `contextUsage`.
+        /// Additive and skippable: absent until an agent reports it, and a
+        /// reader that predates it ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_usage: Option<Box<ContextUsage>>,
     },
     /// The turn started running in the CLI.
     #[serde(rename = "provider_turn.updated", rename_all = "camelCase")]
@@ -690,6 +703,16 @@ pub struct PlanStep {
     pub step: String,
     /// `pending`, `inProgress` or `completed`.
     pub status: String,
+}
+
+/// A provider thread's `contextUsage`, as an agent reports it: the tokens its
+/// session holds and its context window, when known.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    pub used_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
 }
 
 /// The reference's provider turn `tokenUsage`, without `updatedAt`.

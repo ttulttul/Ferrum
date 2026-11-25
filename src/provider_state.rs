@@ -109,6 +109,10 @@ pub struct ThreadRecord {
     /// What its native session's prompts used of its attachment budget, kept
     /// while the thread runs on another instance's provider thread.
     pub attachment_budget: Option<(u64, u64)>,
+    /// When the agent says it last changed its session (fx).
+    pub native_updated_at: Option<String>,
+    /// The context usage the agent last reported for its session (fx).
+    pub context_usage: Option<provider::ContextUsage>,
 }
 
 /// One run's provider turn.
@@ -234,6 +238,8 @@ impl ProviderState {
                 resumed,
                 opencode2,
                 native_title,
+                native_updated_at,
+                context_usage,
                 ..
             } => {
                 // A turn on another provider instance moves to that
@@ -285,6 +291,8 @@ impl ProviderState {
                     opencode2: None,
                     native_title: None,
                     attachment_budget: None,
+                    native_updated_at: None,
+                    context_usage: None,
                 });
                 thread.native_id = Some(native_thread_id.clone());
                 if opencode2.is_some() {
@@ -292,6 +300,12 @@ impl ProviderState {
                 }
                 if native_title.is_some() {
                     thread.native_title = native_title.clone();
+                }
+                if native_updated_at.is_some() {
+                    thread.native_updated_at = native_updated_at.as_deref().map(str::to_owned);
+                }
+                if context_usage.is_some() {
+                    thread.context_usage = context_usage.as_deref().cloned();
                 }
                 thread.status = "active";
                 thread.updated_at = at;
@@ -444,6 +458,8 @@ impl ProviderState {
                     opencode2: None,
                     native_title: None,
                     attachment_budget: None,
+                    native_updated_at: None,
+                    context_usage: None,
                 });
                 self.terminals.insert(
                     run,
@@ -715,10 +731,11 @@ pub(crate) fn provider_turn(
     let config = &instance["config"];
     let text = |key: &str| config[key].as_str().unwrap_or_default().trim().to_owned();
     // Pi's thinking level is its "thinking" option, OpenCode's variant its
-    // "variant" (`t3:default` choosing none).
+    // "variant" (`t3:default` choosing none), fx's effort its "effort".
     let effort_option = match driver {
         provider::PI => "thinking",
         provider::OPENCODE => "variant",
+        provider::FX => "effort",
         _ => "reasoningEffort",
     };
     let option = |id: &str| {
@@ -882,6 +899,8 @@ mod tests {
             model: None,
             opencode2: None,
             native_title: None,
+            native_updated_at: None,
+            context_usage: None,
         };
         state.apply(first, &thread(provider::CODEX, "thr_codex"), 1);
         state.apply(second, &thread(provider::CLAUDE_AGENT, "sess_claude"), 2);
@@ -931,6 +950,8 @@ mod tests {
 
                 opencode2: None,
                 native_title: None,
+                native_updated_at: None,
+                context_usage: None,
             },
             1,
         );

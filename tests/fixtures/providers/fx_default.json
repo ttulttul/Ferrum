@@ -1,0 +1,561 @@
+{
+ "replies": {
+  "session/set_config_option": {
+   "configOptions": [
+    {
+     "id": "provider",
+     "name": "Provider",
+     "category": "model",
+     "type": "select",
+     "currentValue": "gateway",
+     "options": [
+      {
+       "value": "gateway",
+       "name": "Vercel AI Gateway"
+      },
+      {
+       "value": "codex",
+       "name": "Codex subscription"
+      },
+      {
+       "value": "grok",
+       "name": "Grok subscription"
+      }
+     ]
+    },
+    {
+     "id": "model",
+     "name": "Model",
+     "category": "model",
+     "type": "select",
+     "currentValue": "fx-large",
+     "options": [
+      {
+       "value": "fx-large",
+       "name": "fx-large"
+      },
+      {
+       "value": "fx-small",
+       "name": "fx-small"
+      }
+     ]
+    },
+    {
+     "id": "mode",
+     "name": "Session Mode",
+     "description": "Controls how the agent requests permission",
+     "category": "mode",
+     "type": "select",
+     "currentValue": "ask",
+     "options": [
+      {
+       "value": "auto",
+       "name": "Auto",
+       "description": "Check actions with an automatic safety review instead of asking"
+      },
+      {
+       "value": "ask",
+       "name": "Ask",
+       "description": "Request permission before making any changes"
+      },
+      {
+       "value": "full-access",
+       "name": "Full access",
+       "description": "Run without asking"
+      }
+     ]
+    },
+    {
+     "id": "effort",
+     "name": "Reasoning Effort",
+     "description": "How hard the model thinks",
+     "category": "thought_level",
+     "type": "select",
+     "currentValue": "medium",
+     "options": [
+      {
+       "value": "auto",
+       "name": "Auto"
+      },
+      {
+       "value": "low",
+       "name": "Low"
+      },
+      {
+       "value": "medium",
+       "name": "Medium"
+      },
+      {
+       "value": "high",
+       "name": "High"
+      },
+      {
+       "value": "xhigh",
+       "name": "Xhigh"
+      },
+      {
+       "value": "max",
+       "name": "Max"
+      }
+     ]
+    }
+   ]
+  },
+  "session/close": {},
+  "session/load": {
+   "sessionId": "fx-session-01",
+   "configOptions": [
+    {
+     "id": "provider",
+     "name": "Provider",
+     "category": "model",
+     "type": "select",
+     "currentValue": "gateway",
+     "options": [
+      {
+       "value": "gateway",
+       "name": "Vercel AI Gateway"
+      },
+      {
+       "value": "codex",
+       "name": "Codex subscription"
+      },
+      {
+       "value": "grok",
+       "name": "Grok subscription"
+      }
+     ]
+    },
+    {
+     "id": "model",
+     "name": "Model",
+     "category": "model",
+     "type": "select",
+     "currentValue": "fx-large",
+     "options": [
+      {
+       "value": "fx-large",
+       "name": "fx-large"
+      },
+      {
+       "value": "fx-small",
+       "name": "fx-small"
+      }
+     ]
+    },
+    {
+     "id": "mode",
+     "name": "Session Mode",
+     "description": "Controls how the agent requests permission",
+     "category": "mode",
+     "type": "select",
+     "currentValue": "ask",
+     "options": [
+      {
+       "value": "auto",
+       "name": "Auto",
+       "description": "Check actions with an automatic safety review instead of asking"
+      },
+      {
+       "value": "ask",
+       "name": "Ask",
+       "description": "Request permission before making any changes"
+      },
+      {
+       "value": "full-access",
+       "name": "Full access",
+       "description": "Run without asking"
+      }
+     ]
+    },
+    {
+     "id": "effort",
+     "name": "Reasoning Effort",
+     "description": "How hard the model thinks",
+     "category": "thought_level",
+     "type": "select",
+     "currentValue": "xhigh",
+     "options": [
+      {
+       "value": "auto",
+       "name": "Auto"
+      },
+      {
+       "value": "low",
+       "name": "Low"
+      },
+      {
+       "value": "medium",
+       "name": "Medium"
+      },
+      {
+       "value": "high",
+       "name": "High"
+      },
+      {
+       "value": "xhigh",
+       "name": "Xhigh"
+      },
+      {
+       "value": "max",
+       "name": "Max"
+      }
+     ]
+    }
+   ],
+   "modes": {
+    "currentModeId": "ask",
+    "availableModes": [
+     {
+      "id": "auto",
+      "name": "Auto",
+      "description": "Check actions with an automatic safety review instead of asking"
+     },
+     {
+      "id": "ask",
+      "name": "Ask",
+      "description": "Request permission before making any changes"
+     },
+     {
+      "id": "full-access",
+      "name": "Full access",
+      "description": "Run without asking"
+     }
+    ]
+   }
+  }
+ },
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "protocolVersion": 1,
+     "agentCapabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+       "image": true,
+       "audio": false,
+       "embeddedContext": true
+      },
+      "mcpCapabilities": {
+       "http": true,
+       "sse": false,
+       "acp": false
+      },
+      "sessionCapabilities": {
+       "list": {},
+       "resume": {},
+       "close": {},
+       "systemPrompt": {}
+      },
+      "_meta": {
+       "fx": {
+        "steering": true
+       }
+      }
+     },
+     "agentInfo": {
+      "name": "fx",
+      "title": "fx",
+      "version": "0.0.15"
+     },
+     "authMethods": []
+    }
+   }
+  },
+  {
+   "expect": "session/new"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "sessionId": "fx-session-01",
+     "configOptions": [
+      {
+       "id": "provider",
+       "name": "Provider",
+       "category": "model",
+       "type": "select",
+       "currentValue": "gateway",
+       "options": [
+        {
+         "value": "gateway",
+         "name": "Vercel AI Gateway"
+        },
+        {
+         "value": "codex",
+         "name": "Codex subscription"
+        },
+        {
+         "value": "grok",
+         "name": "Grok subscription"
+        }
+       ]
+      },
+      {
+       "id": "model",
+       "name": "Model",
+       "category": "model",
+       "type": "select",
+       "currentValue": "fx-small",
+       "options": [
+        {
+         "value": "fx-large",
+         "name": "fx-large"
+        },
+        {
+         "value": "fx-small",
+         "name": "fx-small"
+        }
+       ]
+      },
+      {
+       "id": "mode",
+       "name": "Session Mode",
+       "description": "Controls how the agent requests permission",
+       "category": "mode",
+       "type": "select",
+       "currentValue": "ask",
+       "options": [
+        {
+         "value": "auto",
+         "name": "Auto",
+         "description": "Check actions with an automatic safety review instead of asking"
+        },
+        {
+         "value": "ask",
+         "name": "Ask",
+         "description": "Request permission before making any changes"
+        },
+        {
+         "value": "full-access",
+         "name": "Full access",
+         "description": "Run without asking"
+        }
+       ]
+      },
+      {
+       "id": "effort",
+       "name": "Reasoning Effort",
+       "description": "How hard the model thinks",
+       "category": "thought_level",
+       "type": "select",
+       "currentValue": "xhigh",
+       "options": [
+        {
+         "value": "auto",
+         "name": "Auto"
+        },
+        {
+         "value": "low",
+         "name": "Low"
+        },
+        {
+         "value": "medium",
+         "name": "Medium"
+        },
+        {
+         "value": "high",
+         "name": "High"
+        },
+        {
+         "value": "xhigh",
+         "name": "Xhigh"
+        },
+        {
+         "value": "max",
+         "name": "Max"
+        }
+       ]
+      }
+     ],
+     "modes": {
+      "currentModeId": "ask",
+      "availableModes": [
+       {
+        "id": "auto",
+        "name": "Auto",
+        "description": "Check actions with an automatic safety review instead of asking"
+       },
+       {
+        "id": "ask",
+        "name": "Ask",
+        "description": "Request permission before making any changes"
+       },
+       {
+        "id": "full-access",
+        "name": "Full access",
+        "description": "Run without asking"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "fx-session-01",
+     "update": {
+      "sessionUpdate": "available_commands_update",
+      "availableCommands": []
+     }
+    }
+   }
+  },
+  {
+   "expect": "session/prompt"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "fx-session-01",
+     "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "m1",
+      "content": {
+       "type": "text",
+       "text": "Running it."
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "fx-session-01",
+     "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "call_echo_1",
+      "name": "shell",
+      "title": "Running",
+      "kind": "execute",
+      "status": "pending",
+      "rawInput": {
+       "action": "run",
+       "command": "echo hi",
+       "yield_time_ms": 1000
+      },
+      "_meta": {
+       "fx": {
+        "toolCall": {
+         "internal": false
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "fx-session-01",
+     "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "call_echo_1",
+      "status": "in_progress"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "fx-session-01",
+     "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "call_echo_1",
+      "status": "completed",
+      "content": [
+       {
+        "type": "content",
+        "content": {
+         "type": "text",
+         "text": "hi\n"
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "fx-session-01",
+     "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "m2",
+      "content": {
+       "type": "text",
+       "text": "Done: hi"
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "fx-session-01",
+     "update": {
+      "sessionUpdate": "session_info_update",
+      "title": "Run echo hi",
+      "updatedAt": "2026-10-11T12:40:13Z"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "fx-session-01",
+     "update": {
+      "sessionUpdate": "usage_update",
+      "used": 19549,
+      "size": 1000000
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id:session/prompt",
+    "result": {
+     "stopReason": "end_turn",
+     "usage": {
+      "inputTokens": 19540,
+      "outputTokens": 9,
+      "reasoningTokens": 0
+     }
+    }
+   }
+  }
+ ]
+}
