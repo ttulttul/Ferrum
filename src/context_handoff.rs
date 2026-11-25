@@ -2401,6 +2401,8 @@ mod tests {
             )),
             output_schema: None,
             fresh_context: false,
+            ordinal: None,
+            cancelled_in_queue: false,
         };
 
         let mut thread = Thread {
@@ -2620,6 +2622,8 @@ mod tests {
             )),
             output_schema: None,
             fresh_context: false,
+            ordinal: None,
+            cancelled_in_queue: false,
         };
         let mut thread = Thread {
             row: json!({

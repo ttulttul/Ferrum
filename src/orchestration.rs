@@ -729,7 +729,7 @@ async fn start_run<H: CommandHost>(
         .map(|t| {
             // The reference's id (`run:thread:<thread>:ordinal:<n>`), so a
             // run reads the same on both servers and sorts by ordinal there.
-            let wire_id = Some(Run::reference_id(thread_id, t.runs.len() + 1));
+            let wire_id = Some(Run::reference_id(thread_id, t.next_run_ordinal()));
             (
                 t.cwd.clone(),
                 t.checkpoints.is_empty(),
@@ -811,6 +811,8 @@ async fn start_run<H: CommandHost>(
             .then(|| Box::new(row["modelSelection"].clone())),
         output_schema: output_schema.map(Box::new),
         fresh_context: fresh,
+        ordinal: None,
+        cancelled_in_queue: false,
     };
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),
@@ -984,7 +986,7 @@ async fn start_existing_run<H: CommandHost>(
     thread_id: &str,
     run_id: &str,
 ) -> anyhow::Result<u64> {
-    let (mut run, cwd, text) = {
+    let (mut run, cwd, text, renumbered) = {
         let store = state.store.read().await;
         let thread = store
             .threads
@@ -1018,7 +1020,22 @@ async fn start_existing_run<H: CommandHost>(
             .find(|message| message.id == message_id)
             .map(|message| message.content.clone())
             .ok_or_else(|| anyhow::anyhow!(format!("Run {run_id} has no queued message.")))?;
-        (run, thread.cwd.clone(), text)
+        // A queued run that starts after a newer run started moves past it,
+        // as the reference renumbers it, so the transcript keeps the order
+        // the runs ran in.
+        let index = thread
+            .runs
+            .iter()
+            .position(|candidate| candidate.id == run.id);
+        let own = index.map_or(0, |index| run.ordinal_at(index));
+        let newer_started = thread.runs.iter().enumerate().any(|(at, other)| {
+            other.id != run.id
+                && other.ordinal_at(at) > own
+                && other.status != "queued"
+                && !thread.cancelled_before_start(other)
+        });
+        let renumbered = newer_started.then(|| thread.next_run_ordinal() as u32);
+        (run, thread.cwd.clone(), text, renumbered)
     };
     // A fresh context queued behind a turn leaves its session once that
     // turn has ended, as the run starts (the reference's queued fresh start).
@@ -1027,6 +1044,11 @@ async fn start_existing_run<H: CommandHost>(
     }
     run.status = "running".into();
     run.queue_held = false;
+    // It starts now, not when it was queued.
+    run.started_at = now();
+    if renumbered.is_some() {
+        run.ordinal = renumbered;
+    }
     let sequence = state
         .commit_receipted(Event::RunStarted(run.clone()), Some(receipt.clone()))
         .await?

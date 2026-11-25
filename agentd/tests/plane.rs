@@ -1537,8 +1537,27 @@ async fn mcp_tool(
     result["structuredContent"].clone()
 }
 
-#[tokio::test]
-async fn projects_ensure_scratch_and_mcp_scratch_launch_run_over_agentd() {
+/// Runs on a thread with the server's worker stack
+/// ([`t3code_server::WORKER_STACK_BYTES`]), as the server polls a request: the
+/// launch's whole future chain runs on one stack, and a debug build's async
+/// frames are large (tokio's default test thread is a quarter of it).
+#[test]
+fn projects_ensure_scratch_and_mcp_scratch_launch_run_over_agentd() {
+    std::thread::Builder::new()
+        .stack_size(t3code_server::WORKER_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(scratch_launch_run_over_agentd())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn scratch_launch_run_over_agentd() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("workspace");
     std::fs::create_dir_all(&root).unwrap();

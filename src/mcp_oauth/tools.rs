@@ -727,8 +727,24 @@ fn active(runs: &[Value]) -> Option<&Value> {
         .filter(|run| !TERMINAL.contains(&run["status"].as_str().unwrap_or("")))
         .max_by_key(|run| run["ordinal"].as_u64())
 }
+/// The thread's live run, newest first (`latestActiveRun`): a queued run is
+/// not active.
+fn live(runs: &[Value]) -> Option<&Value> {
+    runs.iter()
+        .filter(|run| {
+            matches!(
+                run["status"].as_str(),
+                Some("preparing" | "starting" | "running" | "waiting")
+            )
+        })
+        .max_by_key(|run| run["ordinal"].as_u64())
+}
+/// The thread's status (`threadStatus`): its live run's, else its latest
+/// run's.
 fn thread_status(runs: &[Value]) -> Value {
-    latest(runs).map_or(json!("idle"), |run| run["status"].clone())
+    live(runs)
+        .or_else(|| latest(runs))
+        .map_or(json!("idle"), |run| run["status"].clone())
 }
 fn snoozed(row: &Value) -> bool {
     row["snoozedUntil"].as_str().is_some_and(|until| {
@@ -1905,7 +1921,7 @@ fn read_item(
         Some("assistant_message") => (json!("agent"), json!("provider")),
         _ => (Value::Null, Value::Null),
     };
-    json!({
+    let mut out = json!({
         "position": visible["position"],
         "visibility": "local",
         "sourceThreadId": thread.id,
@@ -1921,7 +1937,16 @@ fn read_item(
         "textTruncated": truncated,
         "nextTextOffset": next,
         "updatedAt": item["updatedAt"],
-    })
+    });
+    // An agent's message names the thread (or link) it came from.
+    if item["type"] == "user_message" {
+        for key in ["senderThreadId", "linkedSender"] {
+            if !item[key].is_null() {
+                out[key] = item[key].clone();
+            }
+        }
+    }
+    out
 }
 
 async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcome {
@@ -2034,7 +2059,7 @@ async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
         .collect::<Vec<_>>();
     let mut detail = thread_summary(host, caller, thread);
     let extra = json!({
-        "activeRunId": active(&all_runs).map(|run| run["id"].clone()),
+        "activeRunId": live(&all_runs).map(|run| run["id"].clone()),
         "titleRegeneration": row["titleRegeneration"],
         "lastTitleRegeneration": row["lastTitleRegeneration"],
         "branch": row["branch"],

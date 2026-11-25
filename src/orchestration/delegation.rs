@@ -833,7 +833,7 @@ pub(crate) async fn record_work_started_at<H: CommandHost>(
             return Ok(());
         };
         (
-            crate::Run::reference_id(thread_id, thread.runs.len() + 1),
+            crate::Run::reference_id(thread_id, thread.next_run_ordinal()),
             thread.stored_row()["runExtras"].clone(),
         )
     };

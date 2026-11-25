@@ -2358,6 +2358,8 @@ mod tests {
             model_selection: None,
             output_schema: None,
             fresh_context: false,
+            ordinal: None,
+            cancelled_in_queue: false,
         };
         let mut live = thread(run.clone());
         for event in [
