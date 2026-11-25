@@ -10,48 +10,48 @@ CI writes this section from its measurements. It refreshes the section at most o
 
 From the latest CI run, on a GitHub-hosted runner. A ratio above 1× favors Ferrum.
 
-- Installed size: **2.9×** in Ferrum's favor (70.0 MiB against 205 MiB).
-- Start to first RPC: **31.7×** in Ferrum's favor (82.7 ms <sub>(78.5–144)</sub> against 2618 ms <sub>(2534–2782)</sub>).
-- Memory at idle (RSS): **11.2×** in Ferrum's favor (40.3 MiB <sub>(40.2–40.8)</sub> against 452 MiB <sub>(451–457)</sub>).
-- CPU while idle (per 10 s): **3.0×** in the reference's favor (90.0 ms <sub>(90.0–100.0)</sub> against 30.0 ms <sub>(20.0–260)</sub>).
-- Peak memory, Codex turns: **10.6×** in Ferrum's favor (60.6 MiB <sub>(59.8–60.9)</sub> against 645 MiB <sub>(642–673)</sub>).
-- Peak memory, Claude turns: **11.2×** in Ferrum's favor (59.0 MiB <sub>(58.4–59.8)</sub> against 662 MiB <sub>(658–686)</sub>).
-- Codex turns per second: **2.4×** in Ferrum's favor (5.60 /s <sub>(5.43–5.61)</sub> against 2.36 /s <sub>(2.20–2.52)</sub>).
-- Claude turns per second: **1.9×** in Ferrum's favor (4.06 /s <sub>(3.93–4.34)</sub> against 2.13 /s <sub>(2.11–2.30)</sub>).
-- CPU per Codex turn: **3.0×** in Ferrum's favor (202 ms <sub>(196–210)</sub> against 611 ms <sub>(532–647)</sub>).
-- CPU per Claude turn: **2.5×** in Ferrum's favor (264 ms <sub>(263–264)</sub> against 653 ms <sub>(630–689)</sub>).
-- RPC latency (p50 and p95 of 6 RPCs): from **0.4×** to **23.8×** (above 1× favors Ferrum).
+- Installed size: **2.9×** in Ferrum's favor (70.1 MiB against 205 MiB).
+- Start to first RPC: **36.0×** in Ferrum's favor (86.8 ms <sub>(82.9–94.3)</sub> against 3126 ms <sub>(3007–3205)</sub>).
+- Memory at idle (RSS): **11.1×** in Ferrum's favor (40.9 MiB <sub>(40.5–41.7)</sub> against 456 MiB <sub>(452–457)</sub>).
+- CPU while idle (per 10 s): **3.0×** in Ferrum's favor (10.00 ms <sub>(0.00–20.0)</sub> against 30.0 ms <sub>(10.00–290)</sub>).
+- Peak memory, Codex turns: **11.6×** in Ferrum's favor (59.4 MiB <sub>(59.3–59.9)</sub> against 691 MiB <sub>(652–691)</sub>).
+- Peak memory, Claude turns: **11.2×** in Ferrum's favor (59.8 MiB <sub>(59.3–60.2)</sub> against 667 MiB <sub>(655–668)</sub>).
+- Codex turns per second: **2.7×** in Ferrum's favor (4.78 /s <sub>(4.74–4.78)</sub> against 1.79 /s <sub>(1.74–1.83)</sub>).
+- Claude turns per second: **2.4×** in Ferrum's favor (4.02 /s <sub>(4.01–4.06)</sub> against 1.65 /s <sub>(1.65–1.68)</sub>).
+- CPU per Codex turn: **3.2×** in Ferrum's favor (255 ms <sub>(253–256)</sub> against 811 ms <sub>(785–840)</sub>).
+- CPU per Claude turn: **2.6×** in Ferrum's favor (344 ms <sub>(342–348)</sub> against 906 ms <sub>(890–908)</sub>).
+- RPC latency (p50 and p95 of 6 RPCs): from **1.2×** to **22.1×** (above 1× favors Ferrum).
 
-Commit `8c0f3e6717f9`, reference `fd0331ca`, 2026-11-24T23:38:11Z, AMD EPYC 9V74 80-Core Processor (4 CPUs), Linux 7.0.0-1017-azure.
+Commit `f2145255066a`, reference `fd0331ca`, 2026-11-25T00:15:00Z, AMD EPYC 7763 64-Core Processor (4 CPUs), Linux 7.0.0-1017-azure.
 
 Ratio: how many times smaller, faster or lighter the Rust server is (the reference's median over Rust's, or Rust's over the reference's for turns per second). Medians, with the range in brackets.
 
 | Measure | Rust | Reference | Ratio |
 | --- | ---: | ---: | ---: |
-| Installed size | 70.0 MiB | 205 MiB | **2.9×** |
-| Start to first RPC | 82.7 ms <sub>(78.5–144)</sub> | 2618 ms <sub>(2534–2782)</sub> | **31.7×** |
-| Memory at idle (RSS) | 40.3 MiB <sub>(40.2–40.8)</sub> | 452 MiB <sub>(451–457)</sub> | **11.2×** |
-| CPU while idle (per 10 s) | 90.0 ms <sub>(90.0–100.0)</sub> | 30.0 ms <sub>(20.0–260)</sub> | **0.3×** |
-| Peak memory, Codex turns | 60.6 MiB <sub>(59.8–60.9)</sub> | 645 MiB <sub>(642–673)</sub> | **10.6×** |
-| Peak memory, Claude turns | 59.0 MiB <sub>(58.4–59.8)</sub> | 662 MiB <sub>(658–686)</sub> | **11.2×** |
-| Codex turns per second | 5.60 /s <sub>(5.43–5.61)</sub> | 2.36 /s <sub>(2.20–2.52)</sub> | **2.4×** |
-| Claude turns per second | 4.06 /s <sub>(3.93–4.34)</sub> | 2.13 /s <sub>(2.11–2.30)</sub> | **1.9×** |
-| CPU per Codex turn | 202 ms <sub>(196–210)</sub> | 611 ms <sub>(532–647)</sub> | **3.0×** |
-| CPU per Claude turn | 264 ms <sub>(263–264)</sub> | 653 ms <sub>(630–689)</sub> | **2.5×** |
-| server.getConfig p50 | 11.5 ms <sub>(10.4–12.0)</sub> | 4.87 ms <sub>(4.67–4.91)</sub> | **0.4×** |
-| server.getConfig p95 | 13.1 ms <sub>(12.0–14.3)</sub> | 6.11 ms <sub>(5.70–6.17)</sub> | **0.5×** |
-| server.getSettings p50 | 0.42 ms <sub>(0.40–0.42)</sub> | 0.53 ms <sub>(0.52–0.54)</sub> | **1.3×** |
-| server.getSettings p95 | 0.45 ms <sub>(0.45–0.48)</sub> | 0.72 ms <sub>(0.71–0.74)</sub> | **1.6×** |
-| orchestration.subscribeShell p50 | 1.30 ms <sub>(1.28–1.32)</sub> | 3.99 ms <sub>(3.96–4.16)</sub> | **3.1×** |
-| orchestration.subscribeShell p95 | 1.34 ms <sub>(1.32–1.40)</sub> | 5.48 ms <sub>(5.14–5.89)</sub> | **4.1×** |
-| orchestration.subscribeThread p50 | 4.39 ms <sub>(4.08–4.48)</sub> | 14.7 ms <sub>(14.0–15.3)</sub> | **3.3×** |
-| orchestration.subscribeThread p95 | 4.78 ms <sub>(4.61–4.99)</sub> | 17.0 ms <sub>(16.2–18.1)</sub> | **3.6×** |
-| orchestration.getThreadProjection p50 | 2.02 ms <sub>(1.95–2.02)</sub> | 11.9 ms <sub>(11.8–13.3)</sub> | **5.9×** |
-| orchestration.getThreadProjection p95 | 2.09 ms <sub>(2.01–2.18)</sub> | 13.9 ms <sub>(13.1–14.9)</sub> | **6.6×** |
-| orchestration.getTurnDiff p50 | 2.61 ms <sub>(2.58–2.71)</sub> | 62.1 ms <sub>(48.9–68.2)</sub> | **23.8×** |
-| orchestration.getTurnDiff p95 | 3.08 ms <sub>(2.98–3.08)</sub> | 70.7 ms <sub>(65.2–73.1)</sub> | **22.9×** |
+| Installed size | 70.1 MiB | 205 MiB | **2.9×** |
+| Start to first RPC | 86.8 ms <sub>(82.9–94.3)</sub> | 3126 ms <sub>(3007–3205)</sub> | **36.0×** |
+| Memory at idle (RSS) | 40.9 MiB <sub>(40.5–41.7)</sub> | 456 MiB <sub>(452–457)</sub> | **11.1×** |
+| CPU while idle (per 10 s) | 10.00 ms <sub>(0.00–20.0)</sub> | 30.0 ms <sub>(10.00–290)</sub> | **3.0×** |
+| Peak memory, Codex turns | 59.4 MiB <sub>(59.3–59.9)</sub> | 691 MiB <sub>(652–691)</sub> | **11.6×** |
+| Peak memory, Claude turns | 59.8 MiB <sub>(59.3–60.2)</sub> | 667 MiB <sub>(655–668)</sub> | **11.2×** |
+| Codex turns per second | 4.78 /s <sub>(4.74–4.78)</sub> | 1.79 /s <sub>(1.74–1.83)</sub> | **2.7×** |
+| Claude turns per second | 4.02 /s <sub>(4.01–4.06)</sub> | 1.65 /s <sub>(1.65–1.68)</sub> | **2.4×** |
+| CPU per Codex turn | 255 ms <sub>(253–256)</sub> | 811 ms <sub>(785–840)</sub> | **3.2×** |
+| CPU per Claude turn | 344 ms <sub>(342–348)</sub> | 906 ms <sub>(890–908)</sub> | **2.6×** |
+| server.getConfig p50 | 3.33 ms <sub>(3.31–3.60)</sub> | 5.27 ms <sub>(5.10–5.43)</sub> | **1.6×** |
+| server.getConfig p95 | 3.44 ms <sub>(3.42–3.89)</sub> | 6.63 ms <sub>(6.56–7.05)</sub> | **1.9×** |
+| server.getSettings p50 | 0.60 ms <sub>(0.58–0.61)</sub> | 0.69 ms <sub>(0.68–0.70)</sub> | **1.2×** |
+| server.getSettings p95 | 0.62 ms <sub>(0.61–0.63)</sub> | 0.95 ms <sub>(0.92–0.95)</sub> | **1.5×** |
+| orchestration.subscribeShell p50 | 1.65 ms <sub>(1.64–1.71)</sub> | 4.74 ms <sub>(4.24–4.82)</sub> | **2.9×** |
+| orchestration.subscribeShell p95 | 1.73 ms <sub>(1.71–1.87)</sub> | 6.63 ms <sub>(5.84–6.76)</sub> | **3.8×** |
+| orchestration.subscribeThread p50 | 5.30 ms <sub>(5.27–5.35)</sub> | 17.9 ms <sub>(17.4–18.2)</sub> | **3.4×** |
+| orchestration.subscribeThread p95 | 5.68 ms <sub>(5.45–5.71)</sub> | 20.2 ms <sub>(19.4–20.7)</sub> | **3.6×** |
+| orchestration.getThreadProjection p50 | 2.64 ms <sub>(2.64–2.67)</sub> | 14.5 ms <sub>(14.2–14.6)</sub> | **5.5×** |
+| orchestration.getThreadProjection p95 | 2.71 ms <sub>(2.68–2.90)</sub> | 16.2 ms <sub>(16.1–16.9)</sub> | **6.0×** |
+| orchestration.getTurnDiff p50 | 3.17 ms <sub>(3.01–3.40)</sub> | 63.2 ms <sub>(60.4–65.9)</sub> | **20.0×** |
+| orchestration.getTurnDiff p95 | 3.36 ms <sub>(3.13–3.82)</sub> | 74.4 ms <sub>(71.3–78.4)</sub> | **22.1×** |
 
-Installed size: Rust is one binary (70.0 MiB). The reference is Node (143.4 MiB), its bundle (22.6 MiB) and 23 external packages (145.2 MiB), 311.2 MiB in all; the table leaves out the 105.8 MiB of packages for features Rust lacks (local speech-to-text, Cursor turns).
+Installed size: Rust is one binary (70.1 MiB). The reference is Node (143.4 MiB), its bundle (22.6 MiB) and 23 external packages (145.2 MiB), 311.2 MiB in all; the table leaves out the 105.8 MiB of packages for features Rust lacks (local speech-to-text, Cursor turns).
 
 Startup: 5 runs per server after one warm-up; idle measured over 10 s after 3 s. Latency: 3 servers each, 200 calls per RPC after 20 warm-up calls. Turns: 8 threads at once, 5 turns each, 3 runs.
 
@@ -61,6 +61,7 @@ Ratios by commit for the last 10 runs, newest first. The [`perf-data` branch](ht
 
 | Date | Commit | Installed size | Start to first RPC | Memory at idle (RSS) | CPU while idle (per 10 s) | Peak memory, Codex turns | Peak memory, Claude turns | Codex turns per second | Claude turns per second | CPU per Codex turn | CPU per Claude turn |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2026-11-25 | `f2145255` | 2.9× | 36.0× | 11.1× | 3.0× | 11.6× | 11.2× | 2.7× | 2.4× | 3.2× | 2.6× |
 | 2026-11-24 | `8c0f3e67` | 2.9× | 31.7× | 11.2× | 0.3× | 10.6× | 11.2× | 2.4× | 1.9× | 3.0× | 2.5× |
 | 2026-11-24 | `1bd449a3` | 2.9× | 33.5× | 11.2× | 0.2× | 11.0× | 11.1× | 2.4× | 2.2× | 2.9× | 2.4× |
 | 2026-11-24 | `e2933272` | 3.0× | 35.5× | 11.1× | 3.1× | 10.8× | 11.2× | 1.7× | 1.8× | 2.1× | 2.0× |
@@ -70,7 +71,6 @@ Ratios by commit for the last 10 runs, newest first. The [`perf-data` branch](ht
 | 2026-11-24 | `52b62924` | 3.0× | 36.2× | 11.1× | 3.1× | 11.0× | 11.2× | 1.7× | 1.6× | 2.1× | 1.9× |
 | 2026-11-24 | `e10f06d2` | 3.0× | 36.4× | 11.1× | 3.2× | 11.0× | 11.2× | 1.8× | 1.7× | 2.2× | 1.9× |
 | 2026-11-24 | `00b0e0d7` | 3.0× | 31.2× | 11.2× | 0.3× | 11.0× | 11.2× | 2.7× | 2.8× | 3.1× | 3.0× |
-| 2026-11-24 | `ec02f406` | 3.0× | 31.1× | 11.3× | 2.6× | 11.0× | 11.3× | 3.2× | 3.0× | 3.7× | 3.1× |
 
 <!-- perf:end -->
 
