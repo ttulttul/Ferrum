@@ -343,8 +343,21 @@ impl ProviderState {
                     .find(|known| known.item.id == item.id)
                 {
                     Some(known) => {
+                        // A native subagent whose model Codex reported changes its record,
+                        // not its item (`updateSubagentSelection`).
+                        let without_selection = |item: &ProviderItem| {
+                            let mut item = item.clone();
+                            item.fields.remove("model");
+                            item.fields.remove("reasoningEffort");
+                            item
+                        };
+                        let selection_only = item.kind == "subagent"
+                            && known.item != *item
+                            && without_selection(&known.item) == without_selection(item);
                         known.item = item.clone();
-                        known.updated_at = at;
+                        if !selection_only {
+                            known.updated_at = at;
+                        }
                         // An item's end carries all its text.
                         if item.status != "running" {
                             known.held_text.clear();

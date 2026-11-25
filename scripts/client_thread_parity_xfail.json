@@ -272,7 +272,7 @@
     "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in Kiro's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates)."
   },
   "codex native subagent": {
-    "live": "The reference follows the child thread's own turns (turn/started and turn/completed on the child, routed to its app thread) and updates the subagent as they start and end, with the subagent node's status, which Rust does not do yet; it also streams the child's provider thread only on the child's app thread, where Rust's parent stream sends it. The subagent's record, item, node and the child's provider thread match once the turn ends."
+    "live": "The reference reports a spawned subagent running before the pending state its spawn names, and follows the child thread's own turns (turn/started and turn/completed on the child, routed to its app thread), updating the subagent as they start and end; Rust reports the states the collab calls name and does not follow the child's turns yet. The subagent's record, item, node and the child's provider thread match once the turn ends."
   },
   "fx turn": {
     "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates."
@@ -309,5 +309,8 @@
   },
   "fx interrupt": {
     "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in fx's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes fx's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates. After the Stop the reference sends the interrupted reply's last assistant message update after fx's provider thread updates (its title and context usage), where Rust has already sent it."
+  },
+  "codex native subagent activity": {
+    "live": "Codex reports a subagent's completion as both item/started and item/completed of its subAgentActivity, and the reference updates the subagent for each; Rust's subagent item does not change the second time, so its parent's stream reports the completion once. Everything else the stream carries matches."
   }
 }

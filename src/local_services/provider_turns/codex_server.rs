@@ -295,10 +295,12 @@ impl AppServer {
             };
             // The turn's thread, bound as Codex names it, so what Codex
             // sends about it next reaches the turn.
+            // Only its first: a resume that reads a subagent's thread does not take the
+            // turn's own notifications away from it.
             if method == "thread/start" || method == "thread/resume" {
                 if let Some(thread) = message["result"]["thread"]["id"].as_str() {
                     if let Some(entry) = routes.sessions.get_mut(&session) {
-                        entry.1 = Some(thread.to_owned());
+                        entry.1.get_or_insert_with(|| thread.to_owned());
                     }
                 }
             }

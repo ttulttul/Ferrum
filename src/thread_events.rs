@@ -816,6 +816,16 @@ fn diff_with_command(
             .unwrap()
             .extend(started);
     }
+    // A native subagent's record goes with its item (`emitSubagentTaskUpdate`), and a child's
+    // provider thread is reported on the child's own thread, not here.
+    let native_subagent =
+        |item: &Value| item["type"] == "subagent" && item["origin"] == "provider_native";
+    let item_subagents: std::collections::HashSet<String> = collections["turnItems"]
+        .iter()
+        .filter(|(_, item)| native_subagent(item))
+        .filter_map(|(_, item)| item["subagentId"].as_str().map(str::to_owned))
+        .collect();
+    let old_nodes = by_id(before, "nodes");
     let push_collection = |out: &mut Vec<Value>, name: &str| {
         let (_, created, updated) = COLLECTIONS
             .iter()
@@ -823,6 +833,20 @@ fn diff_with_command(
             .copied()
             .unwrap_or((name, "", ""));
         for (is_new, record) in &collections[name] {
+            if name == "subagents"
+                && record["id"]
+                    .as_str()
+                    .is_some_and(|id| item_subagents.contains(id))
+            {
+                continue;
+            }
+            if name == "providerThreads"
+                && record["appThreadId"]
+                    .as_str()
+                    .is_some_and(|t| t != thread_id)
+            {
+                continue;
+            }
             out.push(event(
                 thread_id,
                 if *is_new { created } else { updated },
@@ -1023,12 +1047,24 @@ fn diff_with_command(
                     if let Some(index) = nodes.iter().position(|node| {
                         node["id"] == item["nodeId"] && node["kind"] != "root_turn"
                     }) {
-                        out.push(event(
-                            thread_id,
-                            "node.updated",
-                            nodes.remove(index),
-                            occurred_at,
-                        ));
+                        let node = nodes.remove(index);
+                        // A native subagent's node is reported when it starts; its record
+                        // carries what changes after.
+                        let reported = native_subagent(item)
+                            && node["id"]
+                                .as_str()
+                                .is_some_and(|id| old_nodes.contains_key(id));
+                        if !reported {
+                            out.push(event(thread_id, "node.updated", node, occurred_at));
+                        }
+                    }
+                    if native_subagent(item) {
+                        if let Some((_, record)) = collections["subagents"]
+                            .iter()
+                            .find(|(_, record)| record["id"] == item["subagentId"])
+                        {
+                            out.push(event(thread_id, "subagent.updated", record, occurred_at));
+                        }
                     }
                     if let Some(index) = messages.iter().position(|m| m["id"] == item["messageId"])
                     {
