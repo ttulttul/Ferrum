@@ -1827,6 +1827,24 @@ fn normalize_antigravity(tool: &mut Tool) {
     }
 }
 
+/// The command line an Antigravity permission request is about: its own
+/// `rawInput`'s, else the tracked tool call's (normalized to `command`).
+/// When both name one and they differ, none (so it asks).
+fn requested_command(call: &Value, tracked: Option<&Tool>) -> Option<String> {
+    let text = |value: &Value| {
+        ["CommandLine", "command_line", "commandLine", "command"]
+            .iter()
+            .find_map(|key| value[*key].as_str().filter(|v| !v.trim().is_empty()))
+            .map(|v| v.trim().to_owned())
+    };
+    let asked = text(&call["rawInput"]);
+    let called = tracked.and_then(|tool| text(&tool.raw_input));
+    match (asked, called) {
+        (Some(asked), Some(called)) if asked != called => None,
+        (asked, called) => asked.or(called),
+    }
+}
+
 fn current_model(setup: &Value) -> Option<String> {
     setup["models"]["currentModelId"]
         .as_str()
@@ -3081,8 +3099,16 @@ impl<'a> Turn<'a> {
                     .as_str()
                     .is_some_and(|id| !id.trim().is_empty())
         });
+        // Not in the reference (user decision): read-only commands shouldn't
+        // block Antigravity in Auto-accept edits, so an allowlisted one runs
+        // unasked. Every other mode and flavor is unchanged.
+        let read_only_command = self.flavor == Flavor::Antigravity
+            && self.runtime_mode == "auto-accept-edits"
+            && kind == "execute"
+            && requested_command(call, tracked.as_ref())
+                .is_some_and(|command| super::read_only_command::is_read_only(&command));
         let disposed = match disposition(self.flavor, &self.runtime_mode, &kind) {
-            _ if t3_tool => Disposition::Allow,
+            _ if t3_tool || read_only_command => Disposition::Allow,
             // A policy approval may only use Kiro's `allow_once`: its
             // `allow_always` saves a consent rule for the whole workspace
             // (`kiroPermissionDisposition`).
@@ -3682,6 +3708,34 @@ fn unified_diff(tool: &Tool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_permission_names_its_command_from_the_request_or_its_call() {
+        let tool = |command: &str| Tool {
+            raw_input: json!({"CommandLine": command, "command": command}),
+            ..Default::default()
+        };
+        // agy's request names it, or only the tracked call does.
+        assert_eq!(
+            requested_command(&json!({"rawInput": {"command": " ls "}}), None).as_deref(),
+            Some("ls")
+        );
+        assert_eq!(
+            requested_command(&json!({"toolCallId": "c"}), Some(&tool("ls -la"))).as_deref(),
+            Some("ls -la")
+        );
+        assert_eq!(
+            requested_command(&json!({"rawInput": {"command": "ls"}}), Some(&tool("ls")))
+                .as_deref(),
+            Some("ls")
+        );
+        // A request naming another command than its call names none, so it asks.
+        assert_eq!(
+            requested_command(&json!({"rawInput": {"command": "ls"}}), Some(&tool("rm x"))),
+            None
+        );
+        assert_eq!(requested_command(&json!({}), None), None);
+    }
 
     #[test]
     fn grok_launches_in_the_runtime_modes_mode() {

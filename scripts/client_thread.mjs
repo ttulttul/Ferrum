@@ -214,7 +214,8 @@ const QUIET_MS = 750;
  * `seed.interrupt === "command"`, once a command it runs is (so the command's item comes before
  * the interrupt's on both servers, however fast each takes the CLI's frames); with
  * `seed.interrupt === "request"`, once a runtime request is pending. With `seed.respond`
- * ({decision} or {answers}), the first pending runtime request is answered with it. With
+ * ({decision} or {answers}), the first pending runtime request is answered with it (a run that
+ * settles without one answers nothing: `respondReply` is `{noRequest: true}`). With
  * `seed.change` (a command without its ids), that command is sent once the provider turn runs;
  * with `seed.changeAfter === "quiet"`, once the turn's stream has then been quiet for
  * QUIET_MS, where its CLI waits (so the change lands after the same items on both servers).
@@ -329,17 +330,24 @@ const liveTurn = (client, seed) =>
       return { dispatchReply: plain(reply), interruptReply, respondReply, changeReply, items };
     }
     if (seed.respond) {
-      const request = yield* Deferred.await(requestPending);
-      respondReply = yield* client["orchestration.dispatchCommand"]({
-        type: "runtime-request.respond",
-        commandId: "turn-respond",
-        threadId: seed.threadId,
-        requestId: request.id,
-        ...seed.respond,
-      }).pipe(
-        Effect.map(plain),
-        Effect.catch((error) => Effect.succeed({ error: String(error?._tag ?? error) })),
+      // A run that settles without asking has nothing to answer.
+      const request = yield* Effect.raceFirst(
+        Deferred.await(requestPending),
+        Deferred.await(settled).pipe(Effect.as(null)),
       );
+      respondReply =
+        request === null
+          ? { noRequest: true }
+          : yield* client["orchestration.dispatchCommand"]({
+              type: "runtime-request.respond",
+              commandId: "turn-respond",
+              threadId: seed.threadId,
+              requestId: request.id,
+              ...seed.respond,
+            }).pipe(
+              Effect.map(plain),
+              Effect.catch((error) => Effect.succeed({ error: String(error?._tag ?? error) })),
+            );
     }
     if (seed.interrupt === "request") {
       yield* Deferred.await(requestPending);

@@ -1,0 +1,204 @@
+{
+ "replies": {
+  "authenticate": {},
+  "session/set_model": {},
+  "session/set_mode": {},
+  "session/set_config_option": {
+   "configOptions": []
+  }
+ },
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "protocolVersion": 1,
+     "agentCapabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+       "image": true,
+       "embeddedContext": true
+      }
+     },
+     "agentInfo": {
+      "name": "agy",
+      "version": "1.6.2"
+     },
+     "authMethods": [
+      {
+       "id": "oauth-personal",
+       "name": "Google"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "expect": "session/new"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "sessionId": "0b6a3c1e-5d2f-4a8b-9c7d-1e2f3a4b5c6d",
+     "models": {
+      "currentModelId": "fixture-small",
+      "availableModels": [
+       {
+        "modelId": "fixture-small",
+        "name": "Fixture Small"
+       },
+       {
+        "modelId": "fixture-large",
+        "name": "Fixture Large"
+       }
+      ]
+     },
+     "modes": {
+      "currentModeId": "default",
+      "availableModes": [
+       {
+        "id": "default",
+        "name": "Default"
+       },
+       {
+        "id": "auto_edit",
+        "name": "Auto edit"
+       },
+       {
+        "id": "yolo",
+        "name": "YOLO"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "expect": "session/prompt"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "0b6a3c1e-5d2f-4a8b-9c7d-1e2f3a4b5c6d",
+     "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "call-1",
+      "title": "Run `ls; rm x`",
+      "kind": "execute",
+      "status": "pending",
+      "rawInput": {
+       "CommandLine": "ls; rm x",
+       "Cwd": "/workspace"
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "perm-1",
+    "method": "session/request_permission",
+    "params": {
+     "sessionId": "0b6a3c1e-5d2f-4a8b-9c7d-1e2f3a4b5c6d",
+     "toolCall": {
+      "toolCallId": "call-1",
+      "kind": "execute",
+      "title": "Run `ls; rm x`",
+      "rawInput": {
+       "command": "ls; rm x"
+      }
+     },
+     "options": [
+      {
+       "optionId": "allow-always",
+       "name": "Always allow",
+       "kind": "allow_always"
+      },
+      {
+       "optionId": "allow",
+       "name": "Allow",
+       "kind": "allow_once"
+      },
+      {
+       "optionId": "reject",
+       "name": "Reject",
+       "kind": "reject_once"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "expectReply": "perm-1"
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "0b6a3c1e-5d2f-4a8b-9c7d-1e2f3a4b5c6d",
+     "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "call-1",
+      "status": "in_progress"
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "0b6a3c1e-5d2f-4a8b-9c7d-1e2f3a4b5c6d",
+     "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "call-1",
+      "status": "completed",
+      "rawOutput": {
+       "commandLine": "ls; rm x",
+       "workingDir": "/workspace",
+       "exitCode": 0,
+       "exit_code": 0,
+       "combinedOutput": "hi\n"
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+     "sessionId": "0b6a3c1e-5d2f-4a8b-9c7d-1e2f3a4b5c6d",
+     "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "content": {
+       "type": "text",
+       "text": "Done."
+      }
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "jsonrpc": "2.0",
+    "id": "$id",
+    "result": {
+     "stopReason": "end_turn"
+    }
+   }
+  }
+ ]
+}
