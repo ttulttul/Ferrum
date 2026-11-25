@@ -2052,6 +2052,9 @@ impl Thread {
             "completedAt": row["completedAt"],
             "updatedAt": row["updatedAt"],
         });
+        if let Some(progress) = row.get("progress") {
+            record["progress"] = progress.clone();
+        }
         // The model Codex was asked to run it on, with its effort.
         if let Some(model) = model.as_str() {
             let mut selection = json!({"instanceId": instance, "model": model});
@@ -2101,6 +2104,10 @@ impl Thread {
     ) {
         let driver = ids.driver.as_str();
         let item = &record.item;
+        // A native subagent's own turn goes to its child thread, not here.
+        if item.kind == "subagent_turn" || item.fields.contains_key("subagentThread") {
+            return;
+        }
         // The reference shows no reasoning that has no text.
         if item.kind == "reasoning"
             && item

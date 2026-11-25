@@ -1,5 +1,5 @@
 {
- "_comment": "A Codex turn whose agent starts a native subagent as Codex 0.170 reports it: a subAgentActivity item (kind started, with the child thread, its path, model and effort), a wait call that names no agents, then subAgentActivity completed; the child's own notifications go to its thread, not this connection. The server reads the child thread's model: thread/read names none, so it resumes the thread, whose answer names it.",
+ "_comment": "A Codex turn whose agent starts a native subagent as Codex 0.170 reports it: a subAgentActivity item (kind started, with the child thread, its path, model and effort), a wait call that names no agents, then subAgentActivity completed; the child's own turn comes on the same connection on its own thread (turn/started naming the parent's turn as its root, its items, turn/completed), with no thread/started. The server reads the child thread's model: thread/read names none, so it resumes the thread, whose answer names it.",
  "steps": [
   {
    "expect": "initialize"
@@ -210,6 +210,173 @@
      "completedAtMs": 1795225883400
     },
     "emittedAtMs": 1795225883401
+   }
+  },
+  {
+   "send": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turn": {
+      "id": "01a1fbcd-1b01-7000-8000-00000000c41e",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": 1795225890,
+      "completedAt": null,
+      "durationMs": null
+     }
+    },
+    "emittedAtMs": 1795225890200
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "commandExecution",
+      "id": "exec-child-read-1",
+      "pluginId": null,
+      "scriptPath": null,
+      "command": "/bin/bash -lc \"head -1 README.md\"",
+      "cwd": "/workspace",
+      "processId": "29302",
+      "source": "unifiedExecStartup",
+      "status": "inProgress",
+      "commandActions": [
+       {
+        "type": "unknown",
+        "command": "echo hi && printf 'hello' > notes.txt"
+       }
+      ],
+      "aggregatedOutput": null,
+      "exitCode": null,
+      "durationMs": null,
+      "startedAtMs": 1795225887656,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+     "startedAtMs": 1795225887656
+    },
+    "emittedAtMs": 1795225890401
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "commandExecution",
+      "id": "exec-child-read-1",
+      "pluginId": null,
+      "scriptPath": null,
+      "command": "/bin/bash -lc \"head -1 README.md\"",
+      "cwd": "/workspace",
+      "processId": "29302",
+      "source": "unifiedExecStartup",
+      "status": "completed",
+      "commandActions": [
+       {
+        "type": "unknown",
+        "command": "echo hi && printf 'hello' > notes.txt"
+       }
+      ],
+      "aggregatedOutput": "# Ferrum acceptance sandbox\n",
+      "exitCode": 0,
+      "durationMs": 0,
+      "startedAtMs": 1795225887656,
+      "completedAtMs": 1795225890600
+     },
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225890600
+    },
+    "emittedAtMs": 1795225890601
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_child_activity_1",
+      "text": "",
+      "phase": "final_answer",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225890700,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+     "startedAtMs": 1795225890700
+    },
+    "emittedAtMs": 1795225890801
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "agentMessage",
+      "moderation": null,
+      "id": "msg_child_activity_1",
+      "text": "`# Ferrum acceptance sandbox`",
+      "phase": "final_answer",
+      "memoryCitation": null,
+      "delivery": null,
+      "questions": null,
+      "startedAtMs": 1795225890900,
+      "completedAtMs": 1795225891000
+     },
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225891000
+    },
+    "emittedAtMs": 1795225891001
+   }
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turn": {
+      "id": "01a1fbcd-1b01-7000-8000-00000000c41e",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [
+       {
+        "type": "agentMessage",
+        "moderation": null,
+        "id": "msg_child_activity_1",
+        "text": "`# Ferrum acceptance sandbox`",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null,
+        "startedAtMs": 1795225890900,
+        "completedAtMs": 1795225891000
+       }
+      ],
+      "itemsView": "summary",
+      "status": "completed",
+      "error": null,
+      "startedAt": 1795225890,
+      "completedAt": 1795225891,
+      "durationMs": 1200
+     }
+    },
+    "emittedAtMs": 1795225891201
    }
   },
   {

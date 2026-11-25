@@ -1,5 +1,5 @@
 {
- "_comment": "A Codex turn whose agent spawns a native subagent (collabAgentToolCall spawnAgent) on a child thread of its own: the child runs one turn and answers, the parent waits for it (wait) and reports the answer.",
+ "_comment": "A Codex turn whose agent spawns a native subagent (collabAgentToolCall spawnAgent) on a child thread of its own (Codex sends no thread/started for it; its turn names the parent's turn as its root): the child runs one turn and answers, the parent waits for it (wait) and reports the answer.",
  "steps": [
   {
    "expect": "initialize"
@@ -226,37 +226,12 @@
   },
   {
    "send": {
-    "method": "thread/started",
-    "params": {
-     "thread": {
-      "cliVersion": "0.170.0",
-      "createdAt": 1795225880,
-      "cwd": "/workspace",
-      "ephemeral": false,
-      "modelProvider": "openai",
-      "preview": "Read README.md and report its title.",
-      "projectId": null,
-      "sessionId": "01a1fbcd-1b00-7000-8000-00000000c41d",
-      "source": "appServer",
-      "status": {
-       "type": "idle"
-      },
-      "turns": [],
-      "updatedAt": 1795225880,
-      "id": "01a1fbcd-1b00-7000-8000-00000000c41d"
-     }
-    },
-    "emittedAtMs": 1795225883800
-   }
-  },
-  {
-   "send": {
     "method": "turn/started",
     "params": {
      "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
      "turn": {
       "id": "01a1fbcd-1b01-7000-8000-00000000c41e",
-      "rootTurnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
       "items": [],
       "itemsView": "notLoaded",
       "status": "inProgress",
@@ -321,7 +296,7 @@
      "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
      "turn": {
       "id": "01a1fbcd-1b01-7000-8000-00000000c41e",
-      "rootTurnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
       "items": [
        {
         "type": "agentMessage",

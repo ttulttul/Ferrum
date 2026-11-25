@@ -67,6 +67,10 @@ pub(crate) async fn record_child(
     driver: &str,
     item: &ProviderItem,
 ) {
+    // What a subagent's own turn reports belongs to its child thread.
+    if let Some(native) = item.fields.get("subagentThread").and_then(Value::as_str) {
+        return record_child_turn(state, parent_thread_id, driver, native, item).await;
+    }
     let Some(subagent) = subagent(item) else {
         return;
     };
@@ -122,6 +126,242 @@ pub(crate) async fn record_child(
     };
     if let Err(error) = state.commit(event).await {
         tracing::warn!(%error, parent_thread_id, "failed to record a native subagent's thread");
+    }
+}
+
+/// `IdAllocator.derive.subagentThread`.
+fn child_thread_id(native_thread: &str) -> String {
+    use sha2::Digest;
+    let legacy = format!(
+        "thread:provider:codex:native-thread:{}",
+        crate::thread_projection::uri_component(native_thread)
+    );
+    let digest = hex::encode(sha2::Sha256::digest(legacy.as_bytes()));
+    format!("thread:subagent:{}", &digest[..16])
+}
+
+/// Replaces the record with `record`'s id in `records`, or adds it.
+fn upsert(records: &mut Vec<Value>, record: Value) {
+    match records.iter_mut().find(|r| r["id"] == record["id"]) {
+        Some(existing) => *existing = record,
+        None => records.push(record),
+    }
+}
+
+/// A subagent's own turn, as the reference's adapter records it on the child thread
+/// (`emitSubagentProviderTurnStarted`, its items, `finalizeTurn` for a subagent): the turn's
+/// provider turn and root node, the child's provider thread active while it runs, and each
+/// item with its node and, for an answer, its message.
+async fn record_child_turn(
+    state: &ControlState,
+    parent_thread_id: &str,
+    driver: &str,
+    native: &str,
+    item: &ProviderItem,
+) {
+    let at = crate::auth_service::iso(crate::auth_service::now());
+    let child_id = child_thread_id(native);
+    let turn = item
+        .fields
+        .get("nativeTurnId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let event = {
+        let store = state.store.read().await;
+        let (Some(parent), Some(child)) = (
+            store.threads.get(parent_thread_id),
+            store.threads.get(&child_id),
+        ) else {
+            return;
+        };
+        let row = child.stored_row();
+        let records = |key: &str| row[key].as_array().cloned().unwrap_or_default();
+        let (mut nodes, mut turns, mut threads) = (
+            records("nodes"),
+            records("providerTurns"),
+            records("providerThreads"),
+        );
+        let (mut items, mut messages) = (records("nativeTurnItems"), records("nativeMessages"));
+        let provider_thread = row["activeProviderThreadId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let turn_id = format!(
+            "provider-turn:provider:{}:native-turn:{}",
+            crate::thread_projection::uri_component(driver),
+            crate::thread_projection::uri_component(&turn)
+        );
+        let strong =
+            |native: &str| json!({"driver": driver, "nativeId": native, "strength": "strong"});
+        // The child's first turn hangs from the root node it was made with; a later one gets its own.
+        let ordinal = turns
+            .iter()
+            .position(|t| t["id"] == turn_id.as_str())
+            .unwrap_or(turns.len())
+            + 1;
+        let first_root = nodes
+            .iter()
+            .find(|n| n["kind"] == "root_turn" && n["runId"].is_null())
+            .cloned();
+        let root_id = if ordinal == 1 {
+            first_root
+                .as_ref()
+                .map(|n| n["id"].clone())
+                .unwrap_or(Value::Null)
+        } else {
+            json!(item_id("node", driver, &format!("{turn}:thread-root")))
+        };
+        if item.kind == "subagent_turn" {
+            let running = item.status == "running";
+            let previous = turns.iter().find(|t| t["id"] == turn_id.as_str()).cloned();
+            let started = previous
+                .as_ref()
+                .map_or(json!(at), |t| t["startedAt"].clone());
+            let mut provider_turn = json!({
+                "id": turn_id,
+                "providerThreadId": provider_thread,
+                "nodeId": root_id,
+                "runAttemptId": null,
+                "nativeTurnRef": strong(&turn),
+                "ordinal": ordinal,
+                "status": item.status,
+                "startedAt": started,
+                "completedAt": if running { Value::Null } else { json!(at) },
+            });
+            let model = item.fields.get("model").cloned().filter(|m| m.is_string());
+            if !running {
+                let mut usage = json!({
+                    "usageStatus": "unavailable",
+                    "usageScope": "main_agent",
+                    "hasSubagents": false,
+                });
+                if let Some(model) = &model {
+                    usage["models"] = json!([model]);
+                }
+                provider_turn["turnTokenUsage"] = usage;
+                if let Some(model) = &model {
+                    provider_turn["model"] = model.clone();
+                }
+            }
+            upsert(&mut turns, provider_turn);
+            let mut root = first_root.filter(|_| ordinal == 1).unwrap_or_else(|| {
+                json!({
+                    "id": root_id, "threadId": child_id, "runId": null, "parentNodeId": null,
+                    "rootNodeId": root_id, "kind": "root_turn", "countsForRun": false,
+                    "providerThreadId": provider_thread, "runtimeRequestId": null,
+                    "checkpointScopeId": null, "startedAt": at,
+                })
+            });
+            root["status"] = json!(item.status);
+            root["providerTurnId"] = json!(turn_id);
+            root["completedAt"] = if running { Value::Null } else { json!(at) };
+            upsert(&mut nodes, root);
+            // The child's provider thread, as its parent records it, active while it runs.
+            if let Some(mut record) = parent
+                .provider_records()
+                .provider_threads
+                .into_iter()
+                .find(|t| t["id"] == provider_thread.as_str())
+            {
+                record["status"] = json!(if running { "active" } else { "idle" });
+                record["updatedAt"] = json!(at);
+                upsert(&mut threads, record);
+            }
+        } else {
+            let native_item = item.id.as_str();
+            let running = item.status == "running";
+            // An answer shows once it has text.
+            let empty = item
+                .fields
+                .get("text")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty);
+            if item.kind == "assistant_message" && running && empty {
+                return;
+            }
+            let row_id = item_id("turn-item", driver, native_item);
+            let node_id = item_id("node", driver, native_item);
+            let previous = items.iter().find(|i| i["id"] == row_id.as_str()).cloned();
+            let started = previous
+                .as_ref()
+                .map_or(json!(at), |i| i["startedAt"].clone());
+            let ordinal = previous
+                .as_ref()
+                .and_then(|i| i["ordinal"].as_u64())
+                .unwrap_or(items.len() as u64 + 1);
+            let completed = if running { Value::Null } else { json!(at) };
+            let mut record = json!({
+                "id": row_id,
+                "threadId": child_id,
+                "runId": null,
+                "nodeId": node_id,
+                "providerThreadId": provider_thread,
+                "providerTurnId": turn_id,
+                "nativeItemRef": strong(native_item),
+                "parentItemId": null,
+                "ordinal": ordinal,
+                "status": item.status,
+                "title": item.title,
+                "startedAt": started,
+                "completedAt": completed,
+                "updatedAt": at,
+                "type": item.kind,
+            });
+            for (key, value) in &item.fields {
+                if !matches!(key.as_str(), "subagentThread" | "nativeTurnId") {
+                    record[key] = value.clone();
+                }
+            }
+            if item.kind == "assistant_message" {
+                let message_id = item_id("message", driver, native_item);
+                record["messageId"] = json!(message_id);
+                upsert(
+                    &mut messages,
+                    json!({
+                        "createdBy": "agent", "creationSource": "provider", "id": message_id,
+                        "threadId": child_id, "runId": null, "nodeId": node_id, "role": "assistant",
+                        "text": record["text"], "attachments": [], "streaming": running,
+                        "createdAt": started, "updatedAt": at,
+                    }),
+                );
+            }
+            upsert(&mut items, record);
+            upsert(
+                &mut nodes,
+                json!({
+                    "id": node_id,
+                    "threadId": child_id,
+                    "runId": null,
+                    "parentNodeId": root_id,
+                    "rootNodeId": root_id,
+                    "kind": match item.kind.as_str() {
+                        "assistant_message" => "assistant_message",
+                        "reasoning" => "reasoning",
+                        _ => "tool_call",
+                    },
+                    "status": item.status,
+                    "countsForRun": false,
+                    "providerThreadId": provider_thread,
+                    "providerTurnId": turn_id,
+                    "nativeItemRef": strong(native_item),
+                    "runtimeRequestId": null,
+                    "checkpointScopeId": null,
+                    "startedAt": started,
+                    "completedAt": completed,
+                }),
+            );
+        }
+        Event::ThreadPatched {
+            thread_id: child_id.clone(),
+            patch: json!({"row": {
+                "nodes": nodes, "providerTurns": turns, "providerThreads": threads,
+                "nativeTurnItems": items, "nativeMessages": messages,
+            }}),
+        }
+    };
+    if let Err(error) = state.commit(event).await {
+        tracing::warn!(%error, parent_thread_id, "failed to record a native subagent's turn");
     }
 }
 
