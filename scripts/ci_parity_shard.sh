@@ -65,6 +65,7 @@ case "$shard" in
     run python3 scripts/run_output_parity.py "${both[@]}"
     run python3 scripts/thread_queue_parity.py "${both[@]}"
     run python3 scripts/thread_send_modes_parity.py "${both[@]}"
+    run python3 scripts/thread_launch_parity.py "${both[@]}"
     run python3 scripts/workflow_parity.py "${both[@]}"
     run python3 scripts/workflow_rpc_parity.py "${both[@]}"
     run python3 scripts/secret_request_parity.py "${both[@]}"
