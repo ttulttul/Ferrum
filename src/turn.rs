@@ -555,6 +555,9 @@ async fn commit_handoffs<H: TurnHost>(
 /// How long the reference's provider commit batch is busy committing a
 /// batch: snapshots that arrive meanwhile wait and share the next one.
 const SNAPSHOT_WINDOW: Duration = Duration::from_millis(20);
+/// How long an ACP agent's frames read together take to reach the
+/// reference's commit worker (see [`Snapshots::reads_first`]).
+const ACP_READ_WINDOW: Duration = Duration::from_millis(20);
 /// The most snapshots one batch takes (`MAX_EVENTS`).
 const SNAPSHOT_BATCH: usize = 64;
 
@@ -577,6 +580,27 @@ struct Snapshots {
     flush_at: Option<crate::runtime::Wait>,
     /// The turn's terminal was seen: snapshots commit one at a time.
     terminal_seen: bool,
+    /// An ACP agent's turn: the reference's worker takes a snapshot only
+    /// once the ACP stream has handed over what it read with it, so an idle
+    /// worker waits [`ACP_READ_WINDOW`] before committing, and snapshots
+    /// read together share a batch.
+    reads_first: bool,
+}
+
+/// The entity a snapshot replaces the state of: its turn item, or the
+/// turn's plan.
+fn snapshot_entity(event: &Event) -> Option<String> {
+    match event {
+        Event::RunProvider {
+            event: ProviderEvent::TurnItem { item },
+            ..
+        } => Some(format!("item:{}", item.id)),
+        Event::RunProvider {
+            event: ProviderEvent::Plan { .. },
+            ..
+        } => Some("plan".into()),
+        _ => None,
+    }
 }
 
 /// Whether a commit sent any live events.
@@ -607,7 +631,9 @@ impl Snapshots {
         position: Option<StreamPosition>,
     ) {
         self.queued.push((event, position));
-        if self.flush_at.is_none() {
+        if self.flush_at.is_none() && self.reads_first {
+            self.flush_at = Some(host.turn_wait(ACP_READ_WINDOW));
+        } else if self.flush_at.is_none() {
             if self.commit(host, run).await {
                 self.flush_at = Some(host.turn_wait(SNAPSHOT_WINDOW));
             }
@@ -650,6 +676,9 @@ impl Snapshots {
             return false;
         }
         let events: Vec<Event> = queued.iter().map(|(event, _)| event.clone()).collect();
+        // As the reference's `coalesce`: each snapshot is one job keyed by
+        // its entity (the turn item, or the turn's plan), and a job a later
+        // one of its entity replaces sends none of its live events.
         let suppress = if events.len() > 1 {
             let keys: Vec<Vec<String>> = host
                 .dry_run(&events)
@@ -657,7 +686,18 @@ impl Snapshots {
                 .into_iter()
                 .map(|(keys, _)| keys)
                 .collect();
-            crate::control_state::coalesce(&keys)
+            let entities: Vec<Vec<String>> = events
+                .iter()
+                .enumerate()
+                .map(|(index, event)| {
+                    vec![snapshot_entity(event).unwrap_or_else(|| format!("#{index}"))]
+                })
+                .collect();
+            crate::control_state::coalesce(&entities)
+                .into_iter()
+                .zip(keys)
+                .map(|(dropped, keys)| if dropped.is_empty() { Vec::new() } else { keys })
+                .collect()
         } else {
             vec![Vec::new()]
         };
@@ -745,7 +785,13 @@ async fn record<H: TurnHost>(
     let mut observed_native_thread: Option<String> = pending_handoff
         .as_ref()
         .and_then(|prepared| prepared.native_thread_id.clone());
-    let mut snapshots = Snapshots::default();
+    let mut snapshots = Snapshots {
+        reads_first: run
+            .driver
+            .as_deref()
+            .is_some_and(crate::workspace::provider::is_acp),
+        ..Default::default()
+    };
     loop {
         use futures_util::future::{select, Either};
         enum Woke {
@@ -1074,4 +1120,43 @@ async fn record<H: TurnHost>(
     host.turn_finished(run);
     done(exit_position);
     Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    fn snapshot(id: &str, status: &str) -> Event {
+        Event::RunProvider {
+            run_id: Uuid::nil(),
+            thread_id: "t".into(),
+            event: ProviderEvent::TurnItem {
+                item: crate::workspace::provider::ProviderItem::new(
+                    id,
+                    "assistant_message",
+                    status,
+                ),
+            },
+            position: None,
+        }
+    }
+
+    #[test]
+    fn a_snapshot_is_one_job_of_its_item() {
+        // The reference coalesces whole snapshots by entity: a running reply
+        // followed by its completion is dropped, whatever records each one
+        // touches.
+        let events = [
+            snapshot("a", "running"),
+            snapshot("a", "completed"),
+            snapshot("b", "running"),
+        ];
+        let entities: Vec<Vec<String>> = events
+            .iter()
+            .map(|event| vec![snapshot_entity(event).unwrap()])
+            .collect();
+        let dropped = crate::control_state::coalesce(&entities);
+        assert_eq!(dropped[0], vec!["item:a".to_owned()]);
+        assert!(dropped[1].is_empty() && dropped[2].is_empty());
+    }
 }

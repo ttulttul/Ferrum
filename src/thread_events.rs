@@ -220,6 +220,10 @@ pub enum Order {
     Subagent,
     /// A stop closed delegated task cohorts: each run, then its tasks.
     CohortStop,
+    /// A provider turn's report: as `Default`, but the turn before the
+    /// provider thread it changed (the reference's adapters report the turn,
+    /// then the thread it made active or newly marked).
+    Turn,
     /// A proposed plan (Claude's ExitPlanMode): its node, the plan, then
     /// its turn item (`emitClaudePlanProjection`).
     Plan,
@@ -376,6 +380,10 @@ impl Order {
                 event: ProviderEvent::TurnItem { item },
                 ..
             } if item.kind == "proposed_plan" => Order::Plan,
+            crate::Event::RunProvider {
+                event: ProviderEvent::ProviderTurn { .. },
+                ..
+            } => Order::Turn,
             _ => Order::Default,
         }
     }
@@ -393,6 +401,23 @@ impl Order {
                 Collection("providerSessions"),
                 Collection("providerThreads"),
                 Collection("providerTurns"),
+                Collection("runtimeRequests"),
+                Collection("subagents"),
+                Collection("plans"),
+                Collection("checkpoints"),
+                Collection("contextHandoffs"),
+                Collection("contextTransfers"),
+            ],
+            Order::Turn => &[
+                Collection("runs"),
+                Collection("attempts"),
+                LooseNodes,
+                Collection("checkpointScopes"),
+                LooseMessages,
+                Items(Phase::All),
+                Collection("providerSessions"),
+                Collection("providerTurns"),
+                Collection("providerThreads"),
                 Collection("runtimeRequests"),
                 Collection("subagents"),
                 Collection("plans"),
@@ -1121,6 +1146,22 @@ pub fn sequence(thread_id: &str, events: Vec<Value>, last: u64) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_provider_turn_report_comes_before_the_thread_it_changed() {
+        let position = |order: Order, name: &str| {
+            order
+                .steps()
+                .iter()
+                .position(|step| matches!(step, Step::Collection(c) if *c == name))
+                .unwrap()
+        };
+        assert!(position(Order::Turn, "providerTurns") < position(Order::Turn, "providerThreads"));
+        // Anything else keeps the thread first.
+        assert!(
+            position(Order::Default, "providerThreads") < position(Order::Default, "providerTurns")
+        );
+    }
 
     #[test]
     fn a_commit_becomes_the_events_of_what_it_changed() {
