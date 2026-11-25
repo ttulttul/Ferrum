@@ -212,6 +212,20 @@ impl Stored {
         matches!(&self.0, Repr::Lazy(lazy) if lazy.whole.get().is_none())
     }
 
+    /// The whole projection, to change in place: read first if only the slim
+    /// records are loaded, and copied only if something else still holds it.
+    pub(crate) fn make_mut(&mut self) -> &mut Value {
+        if let Repr::Lazy(_) = &self.0 {
+            let whole = self.get().clone();
+            self.0 = Repr::Whole(Arc::new(whole));
+        }
+        self.1.store(now_ms(), Ordering::Relaxed);
+        match &mut self.0 {
+            Repr::Whole(projection) => Arc::make_mut(projection),
+            Repr::Lazy(_) => unreachable!("made whole above"),
+        }
+    }
+
     /// Whether the whole projection is held in memory.
     pub(crate) fn is_resident(&self) -> bool {
         match &self.0 {

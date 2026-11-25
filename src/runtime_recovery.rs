@@ -843,6 +843,7 @@ mod tests {
             inherited_items: Vec::new(),
             provider: Default::default(),
             stored: None,
+            revision: 0,
         }
     }
 

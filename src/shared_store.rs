@@ -134,8 +134,56 @@ pub struct SharedCommit {
 /// applied to `stored`: how a commit changes a thread whose records came
 /// from the database. Records the computation adds are added whole; fields
 /// and records only the database holds are kept.
+/// What a commit changes in a stored thread, as [`overlay`] applies it: the
+/// thread record, and the records (by collection and id) whose computed
+/// version changed or is new.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Changed {
+    pub thread: bool,
+    pub records: Vec<(String, String)>,
+}
+
+pub(crate) fn changed(computed_before: &Value, computed_after: &Value) -> Changed {
+    let mut changed = Changed {
+        thread: computed_before["thread"] != computed_after["thread"],
+        records: Vec::new(),
+    };
+    let Some(collections) = computed_after.as_object() else {
+        return changed;
+    };
+    for (key, records) in collections {
+        let Some(records) = records.as_array() else {
+            continue;
+        };
+        if key == "visibleTurnItems" {
+            continue;
+        }
+        let before: std::collections::HashMap<&str, &Value> = computed_before[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| Some((r["id"].as_str()?, r)))
+            .collect();
+        for record in records {
+            let Some(id) = record["id"].as_str() else {
+                continue;
+            };
+            if before.get(id) != Some(&record) {
+                changed.records.push((key.clone(), id.to_owned()));
+            }
+        }
+    }
+    changed
+}
+
 pub fn overlay(stored: &Value, computed_before: &Value, computed_after: &Value) -> Value {
     let mut out = stored.clone();
+    overlay_in_place(&mut out, computed_before, computed_after);
+    out
+}
+
+/// [`overlay`], changing `out` itself.
+pub(crate) fn overlay_in_place(out: &mut Value, computed_before: &Value, computed_after: &Value) {
     let patch = |target: &mut Value, before: &Value, after: &Value| {
         let (Some(target), Some(after)) = (target.as_object_mut(), after.as_object()) else {
             return;
@@ -159,7 +207,7 @@ pub fn overlay(stored: &Value, computed_before: &Value, computed_after: &Value) 
         &computed_after["thread"],
     );
     let Some(collections) = computed_after.as_object() else {
-        return out;
+        return;
     };
     for (key, records) in collections {
         let Some(records) = records.as_array() else {
@@ -192,7 +240,68 @@ pub fn overlay(stored: &Value, computed_before: &Value, computed_after: &Value) 
             }
         }
     }
-    out
+}
+
+/// The collections a long thread is long in: a commit's partial projection
+/// keeps only their changed records, and every other collection whole.
+pub(crate) const LONG_COLLECTIONS: [&str; 3] = ["turnItems", "messages", "nodes"];
+
+/// The most records a commit may change and still be planned from partial
+/// projections (`Partial`); a bigger change is planned from whole ones.
+const PARTIAL_MOST: usize = 8;
+
+/// A commit's change to a stored thread, held as the thread's records with
+/// its long collections cut down to the changed records. Diffing these gives
+/// what diffing the whole projections gives, at the cost of the change.
+#[derive(Debug, PartialEq)]
+pub struct Partial {
+    /// The stored records before the commit, cut down.
+    pub before: Value,
+    /// The same after the commit ([`overlay`] of `before`).
+    pub after: Value,
+}
+
+impl Partial {
+    /// The partial projections of a change to `stored`, unless the change is
+    /// too big for them to be worth it.
+    pub(crate) fn of(
+        stored: &Value,
+        computed_before: &Value,
+        computed_after: &Value,
+    ) -> Option<Self> {
+        let changed = changed(computed_before, computed_after);
+        if changed.records.len() > PARTIAL_MOST {
+            return None;
+        }
+        let object = stored.as_object()?;
+        let mut before = Map::new();
+        for (key, value) in object {
+            let cut = LONG_COLLECTIONS.contains(&key.as_str()) && value.is_array();
+            before.insert(
+                key.clone(),
+                if cut {
+                    Value::Array(
+                        value
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|record| {
+                                record["id"].as_str().is_some_and(|id| {
+                                    changed.records.iter().any(|(k, i)| k == key && i == id)
+                                })
+                            })
+                            .cloned()
+                            .collect(),
+                    )
+                } else {
+                    value.clone()
+                },
+            );
+        }
+        let before = Value::Object(before);
+        let after = overlay(&before, computed_before, computed_after);
+        Some(Partial { before, after })
+    }
 }
 
 /// The event metadata the reference keeps beside a thread event's payload.
@@ -419,13 +528,65 @@ pub(crate) fn hydrate_touched(store: &Store, event: &Event) -> anyhow::Result<()
 }
 
 /// The thread changes of `record`, worked out on a copy of the touched
-/// threads: each one's full projection before and after, the stored records
-/// a thread read from the database ends with, and its domain events.
+/// threads: each one's projection before and after (whole, or cut down to the
+/// change: [`Partial`]), the stored records a thread read from the database
+/// ends with, and its domain events.
 pub struct Planned {
     pub threads: Vec<ThreadWrite>,
     pub events: Vec<Value>,
     /// The stored records each thread read from the database ends with.
-    pub stored: Vec<(String, Value)>,
+    pub stored: Vec<(String, StoredAfter)>,
+}
+
+/// The stored records a thread ends a commit with.
+#[derive(Debug, PartialEq)]
+pub enum StoredAfter {
+    /// These, whole.
+    Whole(Value),
+    /// Its stored records with this change made to them ([`overlay`]).
+    Patch(Box<Patch>),
+}
+
+/// See [`StoredAfter::Patch`].
+#[derive(Debug, PartialEq)]
+pub struct Patch {
+    pub computed_before: Value,
+    pub computed_after: Value,
+    /// The change, cut down, for the commit's live events.
+    pub partial: Partial,
+}
+
+impl StoredAfter {
+    /// Gives `thread` these stored records: a patch is made in place, so the
+    /// long thread is not copied (unless something else still holds it).
+    pub(crate) fn install(self, thread: &mut crate::Thread) {
+        match self {
+            StoredAfter::Whole(stored) => {
+                thread.stored = Some(crate::stored_projection::Stored::whole(stored));
+            }
+            StoredAfter::Patch(patch) => match thread.stored.as_mut() {
+                Some(stored) => overlay_in_place(
+                    stored.make_mut(),
+                    &patch.computed_before,
+                    &patch.computed_after,
+                ),
+                None => unreachable!("a patch is planned only for a stored thread"),
+            },
+        }
+    }
+
+    /// The whole stored records, made from `current` (the thread's before
+    /// the commit) when this is a patch.
+    pub(crate) fn whole(&self, current: &Value) -> std::borrow::Cow<'_, Value> {
+        match self {
+            StoredAfter::Whole(stored) => std::borrow::Cow::Borrowed(stored),
+            StoredAfter::Patch(patch) => std::borrow::Cow::Owned(overlay(
+                current,
+                &patch.computed_before,
+                &patch.computed_after,
+            )),
+        }
+    }
 }
 
 pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
@@ -434,21 +595,100 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
         events: Vec::new(),
         stored: Vec::new(),
     };
+    let detach = detach_reason(&record.event);
+    let order = crate::thread_events::Order::of(&record.event);
+    let command_type = record
+        .receipt
+        .as_ref()
+        .map(|receipt| receipt.command_type.as_str());
+    let imported = matches!(record.event, Event::Imported { .. });
     for thread_id in touched_threads(store, &record.event) {
         let mut scratch = Store::default();
         let existing = store.threads.get(&thread_id);
         if let Some(thread) = existing {
             scratch.threads.insert(thread_id.clone(), thread.clone());
         }
-        // An imported thread is new to the database: written whole, with
-        // its thread.created.
-        let before = existing
-            .filter(|_| !matches!(record.event, Event::Imported { .. }))
-            .map(|thread| thread.full_projection());
+        let phase = crate::commit_timing::phase("  plan: computed before");
         let computed_before = existing
             .filter(|thread| thread.stored.is_some())
             .map(|thread| thread.computed_full_projection());
+        drop(phase);
+        let phase = crate::commit_timing::phase("  plan: apply to copy");
         scratch.apply_record(record);
+        drop(phase);
+        // A small change to a thread read from the database: planned from
+        // its stored records cut down to the change, which costs the change
+        // and not the thread. A debug build checks it against the whole.
+        if let (Some(existing), Some(thread), Some(computed_before)) =
+            (existing, scratch.threads.get(&thread_id), &computed_before)
+        {
+            let stored = existing.stored.as_ref().expect("filtered above").get();
+            let phase = crate::commit_timing::phase("  plan: computed after");
+            let computed_after = thread.computed_full_projection();
+            drop(phase);
+            let phase = crate::commit_timing::phase("  plan: partial");
+            let partial = (!imported)
+                .then(|| Partial::of(stored, computed_before, &computed_after))
+                .flatten();
+            drop(phase);
+            if let Some(partial) = partial {
+                let _phase = crate::commit_timing::phase("  plan: partial diff");
+                let before =
+                    crate::thread_projection::database_projection(&thread_id, &partial.before);
+                let after = partial.after.clone();
+                let events = crate::thread_events::diff_all_for_command(
+                    &thread_id,
+                    &before,
+                    &after,
+                    occurred_at,
+                    detach,
+                    order,
+                    command_type,
+                );
+                #[cfg(debug_assertions)]
+                check_partial_plan(
+                    existing,
+                    stored,
+                    computed_before,
+                    &computed_after,
+                    (&before, &after, &events),
+                    |before, after| {
+                        crate::thread_events::diff_all_for_command(
+                            &thread_id,
+                            before,
+                            after,
+                            occurred_at,
+                            detach,
+                            order,
+                            command_type,
+                        )
+                    },
+                );
+                planned.events.extend(events);
+                planned.threads.push(ThreadWrite {
+                    thread_id: thread_id.clone(),
+                    before: Some(before),
+                    after,
+                    deleted: false,
+                });
+                planned.stored.push((
+                    thread_id,
+                    StoredAfter::Patch(Box::new(Patch {
+                        computed_before: computed_before.clone(),
+                        computed_after,
+                        partial,
+                    })),
+                ));
+                continue;
+            }
+        }
+        // An imported thread is new to the database: written whole, with
+        // its thread.created.
+        let phase = crate::commit_timing::phase("  plan: before projection");
+        let before = existing
+            .filter(|_| !imported)
+            .map(|thread| thread.full_projection());
+        drop(phase);
         let Some(thread) = scratch.threads.get(&thread_id) else {
             // Deleted: the database keeps its records, marked deleted.
             if let Some(before) = before {
@@ -474,37 +714,39 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
         let after = match (&thread.stored, &computed_before) {
             (Some(stored), Some(computed_before)) => {
                 let computed_after = thread.computed_full_projection();
+                let _phase = crate::commit_timing::phase("  plan: overlay");
                 let stored_after = overlay(stored.get(), computed_before, &computed_after);
                 planned
                     .stored
-                    .push((thread_id.clone(), stored_after.clone()));
+                    .push((thread_id.clone(), StoredAfter::Whole(stored_after.clone())));
                 stored_after
             }
             _ => thread.full_projection(),
         };
+        let diff_phase = crate::commit_timing::phase("  plan: diff");
+        let created;
         let diff_from = match &before {
-            Some(before) => before.clone(),
+            Some(before) => before,
             None => {
                 planned.events.push(json!({"threadId": thread_id, "type": "thread.created",
                     "payload": after["thread"], "occurredAt": after["thread"]["createdAt"].as_str().unwrap_or(occurred_at),
                     "providerInstanceId": after["thread"]["providerInstanceId"]}));
-                empty_projection(&after["thread"])
+                created = empty_projection(&after["thread"]);
+                &created
             }
         };
         planned
             .events
             .extend(crate::thread_events::diff_all_for_command(
                 &thread_id,
-                &diff_from,
+                diff_from,
                 &after,
                 occurred_at,
-                detach_reason(&record.event),
-                crate::thread_events::Order::of(&record.event),
-                record
-                    .receipt
-                    .as_ref()
-                    .map(|receipt| receipt.command_type.as_str()),
+                detach,
+                order,
+                command_type,
             ));
+        drop(diff_phase);
         planned.threads.push(ThreadWrite {
             thread_id,
             before,
@@ -513,6 +755,77 @@ pub fn plan(store: &Store, record: &ServerEvent, occurred_at: &str) -> Planned {
         });
     }
     planned
+}
+
+/// What a thread write changes in the database: whether the thread row
+/// changes, and for each collection the ids removed and the records written.
+#[cfg(any(test, debug_assertions))]
+type WriteEffect = (
+    bool,
+    std::collections::BTreeMap<String, (Vec<String>, Vec<(String, Value)>)>,
+);
+
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn write_effect(before: &Value, after: &Value) -> WriteEffect {
+    let mut tables = std::collections::BTreeMap::new();
+    let ids = |projection: &Value, key: &str| -> std::collections::BTreeMap<String, Value> {
+        projection[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| Some((r["id"].as_str()?.to_owned(), r.clone())))
+            .collect()
+    };
+    let keys: std::collections::BTreeSet<&String> = before
+        .as_object()
+        .into_iter()
+        .chain(after.as_object())
+        .flat_map(|o| o.keys())
+        .filter(|k| *k != "thread")
+        .collect();
+    for key in keys {
+        let old = ids(before, key);
+        let new = ids(after, key);
+        let removed: Vec<String> = old
+            .keys()
+            .filter(|id| !new.contains_key(*id))
+            .cloned()
+            .collect();
+        let written: Vec<(String, Value)> = new
+            .into_iter()
+            .filter(|(id, record)| old.get(id) != Some(record))
+            .collect();
+        if !removed.is_empty() || !written.is_empty() {
+            tables.insert(key.clone(), (removed, written));
+        }
+    }
+    (before["thread"] != after["thread"], tables)
+}
+
+/// In a debug build, plans the commit from whole projections too, and
+/// checks the partial plan writes, and tells, exactly what it does.
+#[cfg(debug_assertions)]
+fn check_partial_plan(
+    existing: &crate::Thread,
+    stored: &Value,
+    computed_before: &Value,
+    computed_after: &Value,
+    (before, after, events): (&Value, &Value, &[Value]),
+    diff: impl Fn(&Value, &Value) -> Vec<Value>,
+) {
+    let whole_before = existing.full_projection();
+    let whole_after = overlay(stored, computed_before, computed_after);
+    let whole_events = diff(&whole_before, &whole_after);
+    assert_eq!(
+        events,
+        whole_events.as_slice(),
+        "a partial plan's events differ from the whole plan's"
+    );
+    assert_eq!(
+        write_effect(before, after),
+        write_effect(&whole_before, &whole_after),
+        "a partial plan writes differently from the whole plan"
+    );
 }
 
 #[cfg(test)]

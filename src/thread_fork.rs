@@ -286,6 +286,7 @@ mod tests {
             inherited_items: Vec::new(),
             provider: Box::default(),
             stored: None,
+            revision: 0,
         }
     }
 

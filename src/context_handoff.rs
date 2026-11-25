@@ -2466,6 +2466,7 @@ mod tests {
             inherited_items: Vec::new(),
             provider: Box::default(),
             stored: None,
+            revision: 0,
         };
 
         // Run 1 ran on sess-saved and delivered its prompt (33 bytes).
@@ -2681,6 +2682,7 @@ mod tests {
             inherited_items: Vec::new(),
             provider: Box::default(),
             stored: None,
+            revision: 0,
         };
         thread.provider.apply(
             run1_id,

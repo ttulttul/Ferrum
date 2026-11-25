@@ -1572,6 +1572,19 @@ pub(crate) fn linked(store: &Store, input: &Value, issue: bool) -> Value {
 /// The projection of a thread read from `statev2.sqlite`: its stored records,
 /// with turn items as snapshots carry them when `wire`, and each turn item a
 /// local visible row, as Rust's own projections are.
+/// The projection `statev2.sqlite` holds for `stored` (a thread's stored
+/// records, whole or cut down to a commit's change), as
+/// [`Thread::full_projection`] gives it for a stored thread.
+pub(crate) fn database_projection(thread_id: &str, stored: &Value) -> Value {
+    stored_projection(thread_id, stored, false, None)
+}
+
+/// The projection subscribers get for `stored`, as [`Thread::projection`]
+/// gives it for a stored thread.
+pub(crate) fn wire_projection(thread_id: &str, stored: &Value) -> Value {
+    stored_projection(thread_id, stored, true, None)
+}
+
 fn stored_projection(
     thread_id: &str,
     stored: &Value,
@@ -1776,6 +1789,7 @@ impl Thread {
             inherited_items: Vec::new(),
             provider,
             stored: None,
+            revision: 0,
             row,
         }
     }

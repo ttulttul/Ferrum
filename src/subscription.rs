@@ -323,18 +323,17 @@ async fn thread_snapshot(control: &ControlState, params: &Value) -> Option<(Valu
     let store = control.store.read().await;
     let sequence = *control.next_event_id.lock().await;
     let thread = store.threads.get(thread_id)?;
-    // One copy of the projection serves both the digest and the snapshot. A
-    // long thread's takes a while to build, so on a runtime worker its other
-    // tasks move to another worker meanwhile.
-    let (digest, snapshot) = crate::stored_projection::blocking(|| {
-        let projection = thread.projection();
-        let digest = crate::thread_events::digest(&projection);
-        (
-            digest,
-            thread.stream_snapshot_of(projection, sequence, params),
-        )
+    // A long thread's snapshot takes a while to build, so on a runtime worker
+    // its other tasks move to another worker meanwhile.
+    let snapshot = crate::stored_projection::blocking(|| {
+        thread.stream_snapshot_of(thread.projection(), sequence, params)
     });
-    let cursor = json!({"projection": digest, "sequence": sequence});
+    // What the subscriber has seen: the thread's revision, which every commit
+    // that changes its projection moves on (`thread_events::token`).
+    let cursor = json!({
+        "projection": crate::thread_events::token(thread.revision),
+        "sequence": sequence,
+    });
     Some((snapshot, cursor))
 }
 

@@ -249,6 +249,18 @@ add tables to it. So:
   whole projection, through a reader connection of its own, the first time it needs it,
   and keeps it: snapshots, tools, and every commit. A commit reads each thread it
   touches whole before it plans its writes, so it never diffs slim records.
+- **A small change is planned from the records it changes** (`shared_store::Partial`). A
+  commit's own projections before and after (from the typed state, small) say which
+  records it changes. When that is at most 8 records, the thread's stored records are cut
+  down to those in its long collections (turn items, messages, nodes), every other
+  collection kept whole, and the commit's database events, its row writes and its live
+  events come from the cut-down records. The thread's stored records are then patched in
+  place after the write, not copied. A streamed delta changes two records (its message and
+  turn item), so its commit costs the change and not the thread. A debug build plans every
+  such commit from the whole projections too, and fails if the events, the rows written or
+  the live events differ. Live subscribers tell what they have seen by the thread's
+  revision in this process (`thread_events::token`), which each commit that changes the
+  projection moves on, instead of a hash of the whole projection.
 - A thread whose database holds no provider session, or only a stopped one, has no live
   session for a restart to stop, as the reference's recovery reads it.
 - **When Rust changes such a thread** (pull request 2):

@@ -1176,6 +1176,7 @@ async fn apply_command<H: CommandHost>(
                 inherited_items: Vec::new(),
                 provider: Default::default(),
                 stored: None,
+                revision: 0,
             };
             let sequence = state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))
@@ -2764,6 +2765,7 @@ async fn apply_command<H: CommandHost>(
                 inherited_items,
                 provider: Default::default(),
                 stored: None,
+                revision: 0,
             };
             return Ok(state
                 .commit_receipted(Event::ThreadCreated(thread), Some(receipt.clone()))

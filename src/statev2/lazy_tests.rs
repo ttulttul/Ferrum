@@ -371,6 +371,79 @@ pub(super) fn seeded(count: usize) -> (tempfile::TempDir, Connection) {
     (home, conn)
 }
 
+/// [`seeded`]'s database with one of its settled threads grown by `items`
+/// command items of `size` bytes of output each: a long thread. Its id.
+pub(super) fn seeded_large(
+    count: usize,
+    items: usize,
+    size: usize,
+) -> (tempfile::TempDir, Connection, String) {
+    let (home, conn) = seeded(count);
+    let settled = [
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted",
+        "rolled_back",
+    ];
+    let index = (0..count)
+        .find(|&index| {
+            let thread = synthetic_thread(index);
+            thread["thread"]["archivedAt"].is_null()
+                && thread["runs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|run| settled.contains(&run["status"].as_str().unwrap_or_default()))
+        })
+        .expect("a settled thread");
+    let before = synthetic_thread(index);
+    let mut after = before.clone();
+    let template = after["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "command_execution")
+        .cloned()
+        .unwrap();
+    let ordinal = after["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["ordinal"].as_i64())
+        .max()
+        .unwrap();
+    let output = "x".repeat(size);
+    for n in 0..items {
+        let mut item = template.clone();
+        item["id"] = json!(format!("item:large:{n}"));
+        item["ordinal"] = json!(ordinal + 1 + n as i64);
+        item["output"] = json!(output);
+        after["turnItems"].as_array_mut().unwrap().push(item);
+    }
+    let id = before["thread"]["id"].as_str().unwrap().to_owned();
+    let mut writer = write::Writer::new(open(home.path()).unwrap());
+    crate::shared_store::SharedStore::write(
+        &mut writer,
+        &crate::shared_store::SharedCommit {
+            threads: vec![crate::shared_store::ThreadWrite {
+                thread_id: id.clone(),
+                before: Some(before),
+                after,
+                deleted: false,
+            }],
+            projects: Vec::new(),
+            events: Vec::new(),
+            receipt: None,
+            effects: Vec::new(),
+            sequence: 1,
+            occurred_at: at(1),
+        },
+    )
+    .unwrap();
+    (home, conn, id)
+}
+
 /// Each thread as start-up read it before: whole.
 fn eager_threads(conn: &Connection, store: &crate::Store) -> Vec<crate::Thread> {
     read::thread_ids(conn)

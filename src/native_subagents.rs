@@ -298,6 +298,7 @@ fn child_thread(
         inherited_items: Vec::new(),
         provider: Default::default(),
         stored: None,
+        revision: 0,
     }
 }
 
