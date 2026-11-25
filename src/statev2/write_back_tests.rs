@@ -803,6 +803,27 @@ async fn writing_back_lazily_read_threads_keeps_every_row_of_a_real_database() {
         )
         .await;
     }
+    // Released while idle (`projection_eviction`): every planned projection
+    // holds exactly the database's rows, so each goes back to its slim
+    // records, and a second write reads it whole again first.
+    let released =
+        crate::projection_eviction::sweep(&host.control, std::time::Duration::ZERO).await;
+    eprintln!("released {released:?}");
+    for id in &candidates {
+        assert!(partial(&host, id), "{id} is released");
+    }
+    assert!(released.planned >= candidates.len(), "{released:?}");
+    for (index, id) in candidates.iter().enumerate() {
+        dispatch(
+            &host,
+            json!({"type": "thread.metadata.update",
+            "commandId": format!("check:rename-after-release:{index}"), "threadId": id,
+            "title": format!("Write-back check {index}, after release")}),
+        )
+        .await;
+        assert!(!partial(&host, id));
+        store_matches_database(&host, &conn, id);
+    }
     let after = table_summaries(&conn, &touched);
     let mut differing = Vec::new();
     for (table, before) in &before {
@@ -844,4 +865,148 @@ async fn writing_back_lazily_read_threads_keeps_every_row_of_a_real_database() {
         }
     }
     assert!(differing.is_empty(), "{differing:?}");
+}
+
+/// The ids of `host`'s stored, unarchived threads, by whether every run of theirs has
+/// settled (`projection_eviction` keeps a thread with a run going whole).
+fn by_settled(host: &Host) -> (Vec<String>, Vec<String>) {
+    let store = host.store_now();
+    // Archived threads take no metadata commands.
+    let mut ids: Vec<&String> = store
+        .threads
+        .iter()
+        .filter(|(_, thread)| thread.stored_row()["archivedAt"].is_null())
+        .map(|(id, _)| id)
+        .collect();
+    ids.sort();
+    let (settled, busy): (Vec<&String>, Vec<&String>) = ids.into_iter().partition(|id| {
+        store.threads[*id].runs.iter().all(|run| {
+            matches!(
+                run.status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted" | "rolled_back"
+            )
+        })
+    });
+    (
+        settled.into_iter().cloned().collect(),
+        busy.into_iter().cloned().collect(),
+    )
+}
+
+/// A thread released while idle (`projection_eviction`) goes back to its
+/// slim records. A later write reads it whole again before planning, and
+/// loses no row: the database changes exactly as on a server that never
+/// released it.
+#[tokio::test(flavor = "current_thread")]
+async fn writing_a_thread_released_while_idle_keeps_every_row() {
+    let (home_kept, conn_kept) = seeded(24);
+    let (home_evicted, conn_evicted) = seeded(24);
+    let kept = host(home_kept.path(), &conn_kept);
+    let evicted = host(home_evicted.path(), &conn_evicted);
+    let (settled, _) = by_settled(&evicted);
+    assert!(settled.len() >= 6, "{settled:?}");
+    let written = &settled[..3];
+    let read_only = &settled[3];
+    let untouched = &settled[4..];
+    // First writes leave planned projections; a read hydrates another.
+    for (n, id) in written.iter().enumerate() {
+        for host in [&kept, &evicted] {
+            dispatch(
+                host,
+                json!({"type": "thread.metadata.update", "commandId": format!("c:first:{n}"),
+                    "threadId": id, "title": format!("First {n}")}),
+            )
+            .await;
+        }
+    }
+    for host in [&kept, &evicted] {
+        let _ = host.store_now().threads[read_only].projection();
+        assert!(!partial(host, read_only));
+    }
+    let before_kept = snapshot(&conn_kept);
+    let before_evicted = snapshot(&conn_evicted);
+    // Release everything idle on one server only.
+    let released =
+        crate::projection_eviction::sweep(&evicted.control, std::time::Duration::ZERO).await;
+    assert_eq!(
+        released,
+        crate::projection_eviction::Released {
+            read: 1,
+            planned: 3
+        }
+    );
+    for id in written.iter().chain([read_only]) {
+        assert!(partial(&evicted, id), "{id} is released");
+        assert!(!partial(&kept, id), "{id} stays whole");
+    }
+    // Releasing writes nothing.
+    assert!(
+        without_bookkeeping(changes(&before_evicted, &snapshot(&conn_evicted)))
+            .changed
+            .is_empty()
+    );
+    // Second writes: each reads its thread whole again first.
+    for (n, id) in written.iter().chain([read_only]).enumerate() {
+        for host in [&kept, &evicted] {
+            dispatch(
+                host,
+                json!({"type": "thread.metadata.update", "commandId": format!("c:second:{n}"),
+                    "threadId": id, "title": format!("Second {n}")}),
+            )
+            .await;
+            dispatch(
+                host,
+                json!({"type": "thread.pin", "commandId": format!("c:pin:{n}"), "threadId": id}),
+            )
+            .await;
+        }
+        assert!(!partial(&evicted, id), "{id} is read whole to be written");
+        store_matches_database(&evicted, &conn_evicted, id);
+        store_matches_database(&kept, &conn_kept, id);
+    }
+    // Both databases changed the same rows, and neither removed one.
+    let diff_kept = without_bookkeeping(changes(&before_kept, &snapshot(&conn_kept)));
+    let diff_evicted = without_bookkeeping(changes(&before_evicted, &snapshot(&conn_evicted)));
+    assert!(
+        diff_evicted.removed.is_empty(),
+        "{:?}",
+        diff_evicted.removed
+    );
+    assert_eq!(diff_evicted.changed, diff_kept.changed);
+    assert_eq!(diff_evicted.added, diff_kept.added);
+    for id in untouched {
+        assert!(partial(&evicted, id) && partial(&kept, id), "{id}");
+    }
+}
+
+/// A thread a stream watches, one with a run still going, or one used
+/// recently stays whole.
+#[tokio::test(flavor = "current_thread")]
+async fn a_watched_busy_or_recent_thread_is_not_released() {
+    let (home, conn) = seeded(24);
+    let host = host(home.path(), &conn);
+    let (settled, busy) = by_settled(&host);
+    let (watched, idle, busy) = (&settled[0], &settled[1], &busy[0]);
+    for id in [watched, idle, busy] {
+        let _ = host.store_now().threads[id].projection();
+    }
+    let watch = host.control.thread_watchers.watch(watched);
+    // A long idle time: nothing was idle that long.
+    let released =
+        crate::projection_eviction::sweep(&host.control, std::time::Duration::from_secs(3600))
+            .await;
+    assert_eq!(released, Default::default());
+    // No idle time: only the unwatched, settled thread goes.
+    let released =
+        crate::projection_eviction::sweep(&host.control, std::time::Duration::ZERO).await;
+    assert_eq!(released.read, 1);
+    assert!(partial(&host, idle));
+    assert!(!partial(&host, watched));
+    assert!(!partial(&host, busy), "{busy} has a run going");
+    drop(watch);
+    let released =
+        crate::projection_eviction::sweep(&host.control, std::time::Duration::ZERO).await;
+    assert_eq!(released.read, 1);
+    assert!(partial(&host, watched));
+    assert!(!partial(&host, busy));
 }

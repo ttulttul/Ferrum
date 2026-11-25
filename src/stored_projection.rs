@@ -9,13 +9,27 @@
 //! commit's plan) asks for the whole projection through [`Stored::get`],
 //! which reads it from the database the first time and keeps it. The slim
 //! records are never handed out, so nothing can diff or serve them.
+//!
+//! A whole projection nothing has used for a while can be released again
+//! (`projection_eviction`): the thread goes back to its slim records and is
+//! read whole the next time anything needs it.
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-/// Reads one thread's whole projection (`statev2::read::thread_projection`).
+/// Reads one thread's records from the database.
 pub(crate) trait Hydrate: Send + Sync {
+    /// The whole projection (`statev2::read::thread_projection`).
     fn read(&self, thread_id: &str) -> anyhow::Result<Option<Value>>;
+    /// The whole projection and the slim records, read as of one commit, so
+    /// a thread can go back to its slim records (`statev2::read::slim_projections`).
+    fn read_both(&self, thread_id: &str) -> anyhow::Result<Option<(Value, Slim)>>;
+}
+
+/// Milliseconds since this process started, for last use.
+fn now_ms() -> u64 {
+    crate::platform::monotonic_ms()
 }
 
 /// What start-up reads of a thread instead of its whole projection.
@@ -71,7 +85,7 @@ enum Repr {
 
 /// A thread's stored projection.
 #[derive(Clone)]
-pub(crate) struct Stored(Repr);
+pub(crate) struct Stored(Repr, Arc<AtomicU64>);
 
 impl std::fmt::Debug for Stored {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -95,22 +109,29 @@ thread_local! {
 impl Stored {
     /// A projection read (or planned) whole.
     pub(crate) fn whole(projection: Value) -> Self {
-        Stored(Repr::Whole(Box::new(projection)))
+        Stored(
+            Repr::Whole(Box::new(projection)),
+            Arc::new(AtomicU64::new(now_ms())),
+        )
     }
 
     /// A thread's slim records, read whole from `source` when first needed.
     pub(crate) fn lazy(thread_id: String, slim: Slim, source: Arc<dyn Hydrate>) -> Self {
-        Stored(Repr::Lazy(Arc::new(Lazy {
-            thread_id,
-            slim,
-            whole: OnceLock::new(),
-            source,
-        })))
+        Stored(
+            Repr::Lazy(Arc::new(Lazy {
+                thread_id,
+                slim,
+                whole: OnceLock::new(),
+                source,
+            })),
+            Arc::new(AtomicU64::new(now_ms())),
+        )
     }
 
     /// The whole projection, read from the database the first time when
     /// only the slim records are loaded.
     pub(crate) fn try_get(&self) -> anyhow::Result<&Value> {
+        self.1.store(now_ms(), Ordering::Relaxed);
         let lazy = match &self.0 {
             Repr::Whole(projection) => return Ok(projection),
             Repr::Lazy(lazy) => lazy,
@@ -151,6 +172,34 @@ impl Stored {
     #[cfg(test)]
     pub(crate) fn is_partial(&self) -> bool {
         matches!(&self.0, Repr::Lazy(lazy) if lazy.whole.get().is_none())
+    }
+
+    /// Whether the whole projection is held in memory.
+    pub(crate) fn is_resident(&self) -> bool {
+        match &self.0 {
+            Repr::Whole(_) => true,
+            Repr::Lazy(lazy) => lazy.whole.get().is_some(),
+        }
+    }
+
+    /// Milliseconds since the whole projection was last asked for.
+    pub(crate) fn idle_ms(&self) -> u64 {
+        now_ms().saturating_sub(self.1.load(Ordering::Relaxed))
+    }
+
+    /// Releases a whole projection read from the database, keeping the slim
+    /// records it was read beside. Nothing else may hold this projection: a
+    /// clone of it (a commit's scratch copy) keeps it.
+    pub(crate) fn release_read(&mut self) -> bool {
+        match &mut self.0 {
+            Repr::Lazy(lazy) => Arc::get_mut(lazy).is_some_and(|lazy| lazy.whole.take().is_some()),
+            Repr::Whole(_) => false,
+        }
+    }
+
+    /// Whether this is a projection a commit planned (not one read lazily).
+    pub(crate) fn is_planned(&self) -> bool {
+        matches!(self.0, Repr::Whole(_))
     }
 
     /// While only the slim records are loaded: those records, the message

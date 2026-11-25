@@ -145,6 +145,7 @@ mod background_work;
 pub mod event_log;
 pub mod persistence;
 pub mod platform;
+mod projection_eviction;
 mod projection_shell;
 #[cfg(feature = "native")]
 mod provider_continuation;
