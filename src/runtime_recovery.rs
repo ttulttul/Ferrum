@@ -811,6 +811,7 @@ mod tests {
             driver: None,
             model_selection: None,
             output_schema: None,
+            fresh_context: false,
         }
     }
 

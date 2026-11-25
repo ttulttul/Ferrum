@@ -2222,6 +2222,7 @@ mod tests {
             driver: None,
             model_selection: None,
             output_schema: None,
+            fresh_context: false,
         };
         let mut live = thread(run.clone());
         for event in [

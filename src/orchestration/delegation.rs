@@ -490,6 +490,7 @@ async fn start_child_run<H: CommandHost>(
         Some(wire),
         deferred,
         None,
+        false,
     )
     .await?;
     Ok(seq)
@@ -2019,7 +2020,7 @@ async fn release_finished_delegate<H: CommandHost>(
     if background || !per_thread {
         return Ok(());
     }
-    super::detach_session(state, child_id, "Delegated task finished.").await
+    super::detach_session(state, child_id, "Delegated task finished.", false).await
 }
 
 /// A delegated task's live status (`finalizeAppOwnedSubagentTask` with a

@@ -56,6 +56,9 @@ pub struct ProviderState {
     /// Runs a detach stopped mid-turn: the provider, not the user, ended
     /// them.
     pub detached_runs: std::collections::HashSet<Uuid>,
+    /// A fresh context detached the session: the next turn starts a new
+    /// native session rather than resuming one, until a turn reports it.
+    pub fresh_session: bool,
     /// For a thread read from the shared database: the provider turns its
     /// provider thread already ran and the ordinal of the first run on it,
     /// so the turns this server adds continue that numbering.
@@ -266,6 +269,10 @@ impl ProviderState {
                         self.attachment_budget = back.attachment_budget.take();
                         self.thread = Some(back);
                     }
+                }
+                // The fresh session a turn opens is the one later turns resume.
+                if !self.detached_runs.contains(&run) {
+                    self.fresh_session = false;
                 }
                 record.driver = driver.clone();
                 record.native_thread_id = Some(native_thread_id.clone());
@@ -564,8 +571,11 @@ impl ProviderState {
     }
 
     /// A thread change detached the provider session, stopping `runs`.
-    pub(crate) fn detach_session(&mut self, at: u64, runs: &[Uuid]) {
+    pub(crate) fn detach_session(&mut self, at: u64, runs: &[Uuid], fresh: bool) {
         self.session_detached_at = Some(at);
+        if fresh {
+            self.fresh_session = true;
+        }
         self.detached_runs.extend(runs.iter().copied());
         // A turn the detach stops reports its thread idle when it ends.
         if let Some(thread) = self
@@ -612,6 +622,9 @@ impl ProviderState {
 
     /// The native thread a turn of `driver` resumes.
     pub fn resume_for(&self, driver: &str) -> Option<String> {
+        if self.fresh_session {
+            return None;
+        }
         self.native_thread
             .as_ref()
             .filter(|thread| thread.driver == driver)
@@ -976,5 +989,41 @@ mod tests {
         assert_eq!(turn.resume, None);
         let other = json!({"modelSelection": {"instanceId": "cursor", "model": "x"}});
         assert!(provider_turn(&json!({}), &json!({}), &other, &state).is_none());
+    }
+
+    #[test]
+    fn a_fresh_context_resumes_nothing_until_its_turn_opens_a_new_session() {
+        use uuid::Uuid;
+        let (first, fresh) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut state = ProviderState::default();
+        let thread = |id: &str| ProviderEvent::ProviderThread {
+            driver: provider::CLAUDE_AGENT.into(),
+            native_thread_id: id.into(),
+            resumed: false,
+            model: None,
+            opencode2: None,
+            native_title: None,
+            native_updated_at: None,
+            context_usage: None,
+        };
+        state.apply(first, &thread("sess-old"), 1);
+        assert_eq!(
+            state.resume_for(provider::CLAUDE_AGENT).as_deref(),
+            Some("sess-old")
+        );
+        // A detach for another reason still resumes the session later.
+        state.detach_session(2, &[], false);
+        assert_eq!(
+            state.resume_for(provider::CLAUDE_AGENT).as_deref(),
+            Some("sess-old")
+        );
+        state.detach_session(3, &[], true);
+        assert_eq!(state.resume_for(provider::CLAUDE_AGENT), None);
+        // The fresh turn's own session is the one later turns resume.
+        state.apply(fresh, &thread("sess-new"), 4);
+        assert_eq!(
+            state.resume_for(provider::CLAUDE_AGENT).as_deref(),
+            Some("sess-new")
+        );
     }
 }

@@ -9,7 +9,9 @@ second Claude thread:
 - starts another turn, then restarts it (mode "restart"): the running turn is interrupted, and
   the restart runs as a new run;
 - sends with freshContext: the message starts a new provider session, without the earlier
-  conversation;
+  conversation (the CLI is started on a new session id, not resumed);
+- starts another turn and queues a freshContext message behind it: once that turn ends, the
+  message starts a new provider session too;
 - steers and restarts the idle thread: refused, as nothing runs there.
 
 Steers and restarts are retried while the target's turn has not started yet. Compared: every MCP
@@ -44,7 +46,8 @@ def target_cli(log):
     for line in launches.read_text().splitlines() if launches.exists() else []:
         launch = json.loads(line)
         if launch["env"].get("T3CODE_THREAD_ID") == TARGET:
-            pids[launch["pid"]] = {"resumes": "--resume" in launch["argv"], "prompts": []}
+            pids[launch["pid"]] = {"resumes": any(arg.startswith("--resume") for arg in launch["argv"]),
+                                      "prompts": []}
     messages = Path(str(log) + ".messages")
     for line in messages.read_text().splitlines() if messages.exists() else []:
         with contextlib.suppress(ValueError):
@@ -102,7 +105,7 @@ def main():
                     "worktreePath": None, "createdBy": "user", "creationSource": "web"})
                 dispatched = server.rpc("orchestration.dispatchCommand", seeded["dispatch"])
                 assert dispatched["_tag"] == "Success", dispatched
-                views = wait_settled(server, {THREAD: 1, TARGET: 4}, seconds=90)
+                views = wait_settled(server, {THREAD: 1, TARGET: 6}, seconds=90)
                 record = {
                     "mcp answers": sorted(without_retries(agent_mcp(log, tmp))),
                     "target runs": runs(views[TARGET]),

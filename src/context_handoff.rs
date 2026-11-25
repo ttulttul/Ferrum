@@ -2400,6 +2400,7 @@ mod tests {
                 json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5"}),
             )),
             output_schema: None,
+            fresh_context: false,
         };
 
         let mut thread = Thread {
@@ -2617,6 +2618,7 @@ mod tests {
                 json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5"}),
             )),
             output_schema: None,
+            fresh_context: false,
         };
         let mut thread = Thread {
             row: json!({
