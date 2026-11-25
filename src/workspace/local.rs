@@ -37,6 +37,11 @@ impl LocalWorkspace {
         previews: PreviewService,
         devices: DeviceService,
     ) -> Self {
+        // The provider processes' protocol frames go to per-thread logs under
+        // this workspace's own state, on the host that runs them.
+        let events = crate::local_services::provider_event_log::ProviderEventLog::open(
+            &crate::config::ServerPaths::from_state_dir(&data_dir).provider_logs,
+        );
         Self {
             data_dir,
             settings,
@@ -45,7 +50,9 @@ impl LocalWorkspace {
             terminals,
             previews: std::sync::Arc::new(previews),
             devices,
-            providers: Default::default(),
+            providers: std::sync::Arc::new(
+                crate::local_services::provider_turns::ProviderProcesses::with_event_log(events),
+            ),
             clones: Default::default(),
         }
     }

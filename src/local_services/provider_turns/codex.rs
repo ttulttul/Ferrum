@@ -53,7 +53,7 @@ pub(super) async fn run(
     sink: Sink,
     servers: std::sync::Arc<super::codex_server::Registry>,
 ) {
-    let cli = match super::codex_server::acquire(&servers, &spec, &provider) {
+    let cli = match super::codex_server::acquire(&servers, &spec, &provider, &sink.log) {
         Ok(cli) => cli,
         Err(_) => {
             // The reference's CodexAppServerSpawnError.
@@ -126,6 +126,7 @@ pub(super) async fn list_models(
                 "CODEX_INTERNAL_ORIGINATOR_OVERRIDE".into(),
                 "T3 Code".into(),
             )],
+            log: None,
         },
     )
     .map_err(|e| anyhow::anyhow!("could not start {binary} app-server: {e}"))?;

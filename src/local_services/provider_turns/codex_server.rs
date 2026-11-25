@@ -11,6 +11,7 @@
 //! [`THREAD_UNLOAD_DELAY`], and the process stops once no turn has run for
 //! [`IDLE_RELEASE_DELAY`]. A settings change takes effect when the next
 //! process starts, as in the reference.
+use super::super::provider_event_log::{Direction, Protocol, ProtocolLog, ProviderEventLog};
 use crate::workspace::provider::ProviderTurn;
 use crate::workspace::TurnSpec;
 use serde_json::{json, Value};
@@ -49,6 +50,63 @@ struct Routes {
     replies: HashMap<u64, (u64, String)>,
 }
 
+/// `makeCodexProtocolThreadRouter`: the T3 thread each frame belongs to, for
+/// the provider event log. A request names it in its config or by its native
+/// thread, a reply follows its request, and a frame tied to no thread (such
+/// as `initialize`) goes to the global log.
+#[derive(Default)]
+struct ThreadRouter {
+    by_native: HashMap<String, String>,
+    by_request: HashMap<String, String>,
+}
+
+impl ThreadRouter {
+    fn route(&mut self, direction: Direction, frame: &Value) -> Option<String> {
+        let id = &frame["id"];
+        let request = frame["method"].is_string();
+        let key = (id.is_string() || id.is_number()).then(|| {
+            let side = if request == (direction == Direction::Outgoing) {
+                "client"
+            } else {
+                "server"
+            };
+            let id = id.as_str().map_or_else(|| id.to_string(), str::to_owned);
+            format!("{side}:{id}")
+        });
+        if !request {
+            let thread = self.by_request.remove(&key?);
+            if let (Some(thread), Some(native)) =
+                (&thread, frame["result"]["thread"]["id"].as_str())
+            {
+                self.by_native.insert(native.to_owned(), thread.clone());
+            }
+            return thread;
+        }
+        let params = &frame["params"];
+        let configured = params["config"]["shell_environment_policy.set.T3CODE_THREAD_ID"].as_str();
+        let native = params["threadId"]
+            .as_str()
+            .or(params["thread"]["id"].as_str());
+        let mut thread = match configured {
+            Some(configured) => Some(configured.to_owned()),
+            None => native.and_then(|native| self.by_native.get(native).cloned()),
+        };
+        if let (None, Some(native)) = (&thread, native) {
+            // A subagent's thread belongs to its parent's.
+            thread = params["thread"]["source"]["subAgent"]["thread_spawn"]["parent_thread_id"]
+                .as_str()
+                .and_then(|parent| self.by_native.get(parent).cloned());
+            if let Some(thread) = &thread {
+                self.by_native.insert(native.to_owned(), thread.clone());
+            }
+        }
+        if let (Some(thread), Some(key)) = (&thread, key) {
+            self.by_request.insert(key, thread.clone());
+        }
+        thread
+    }
+}
+
 pub(crate) struct AppServer {
     key: String,
     registry: std::sync::Weak<Registry>,
@@ -64,6 +122,9 @@ pub(crate) struct AppServer {
     idle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     exited: watch::Receiver<Option<Option<std::process::ExitStatus>>>,
     pid: Option<u32>,
+    /// Where the frames to and from the process are recorded, and the
+    /// thread each belongs to.
+    log: Option<(ProtocolLog, Mutex<ThreadRouter>)>,
 }
 
 /// One turn's line to the shared app-server.
@@ -78,6 +139,7 @@ pub(super) fn acquire(
     registry: &Arc<Registry>,
     spec: &TurnSpec,
     provider: &ProviderTurn,
+    log: &ProviderEventLog,
 ) -> std::io::Result<Conn> {
     // The reference shares by instance. A turn naming none (a test's)
     // shares only with turns launched the same way.
@@ -92,7 +154,7 @@ pub(super) fn acquire(
         if let Some(server) = all.get(&key).filter(|s| s.exited.borrow().is_none()) {
             return Ok(server.clone());
         }
-        let server = AppServer::spawn(registry, &key, spec, provider)?;
+        let server = AppServer::spawn(registry, &key, spec, provider, log)?;
         all.insert(key.clone(), server.clone());
         Ok(server)
     })?;
@@ -120,6 +182,7 @@ impl AppServer {
         key: &str,
         spec: &TurnSpec,
         provider: &ProviderTurn,
+        log: &ProviderEventLog,
     ) -> std::io::Result<Arc<Self>> {
         let program = super::program(&provider.binary_path, "codex");
         let mut args = vec![
@@ -175,6 +238,15 @@ impl AppServer {
             idle: Mutex::default(),
             exited,
             pid: child.id(),
+            // The instance's shared provider session.
+            log: log
+                .protocol(
+                    Protocol::Codex {
+                        session: super::provider_session_id(spec, provider, false),
+                    },
+                    None,
+                )
+                .map(|log| (log, Mutex::default())),
         });
         let reader = Arc::downgrade(&server);
         tokio::spawn(async move {
@@ -208,7 +280,9 @@ impl AppServer {
 
     /// Send a line from the app-server to the turn it belongs to.
     fn route(&self, line: String) {
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+        let message = serde_json::from_str::<Value>(&line).ok();
+        self.log_frame(Direction::Incoming, &line, message.as_ref());
+        let Some(message) = message else {
             return;
         };
         let mut routes = self.lock_routes();
@@ -288,12 +362,26 @@ impl AppServer {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Record a frame in the provider event log of the thread it belongs to.
+    fn log_frame(&self, direction: Direction, line: &str, frame: Option<&Value>) {
+        if let Some((log, router)) = &self.log {
+            let thread = frame.and_then(|frame| {
+                router
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .route(direction, frame)
+            });
+            log.line_for(direction, line, thread.as_deref());
+        }
+    }
+
     async fn write_line(&self, message: &Value) -> std::io::Result<()> {
         let mut stdin = self.stdin.lock().await;
         let Some(stdin) = stdin.as_mut() else {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         };
         let mut line = message.to_string();
+        self.log_frame(Direction::Outgoing, &line, Some(message));
         line.push('\n');
         stdin.write_all(line.as_bytes()).await?;
         stdin.flush().await

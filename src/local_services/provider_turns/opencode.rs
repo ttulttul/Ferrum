@@ -144,6 +144,137 @@ impl Sessions {
     }
 }
 
+/// The reference's `makeOpenCodeProtocolLogger`: each SDK call the session
+/// makes and its reply, and each event it hears, as a native log record
+/// holding the call's or event's shape, never its values.
+#[derive(Clone)]
+pub(super) struct ProtocolRecorder {
+    log: super::ProviderEventLog,
+    protocol: &'static str,
+    instance: String,
+    session: String,
+    thread: String,
+}
+
+impl ProtocolRecorder {
+    /// The recorder for a provider session `spec`'s turn opens; `None` when
+    /// no logs are kept.
+    pub(super) fn new(
+        sink: &Sink,
+        spec: &TurnSpec,
+        provider: &ProviderTurn,
+        opencode2: bool,
+    ) -> Option<Self> {
+        sink.log.enabled().then(|| Self {
+            log: sink.log.clone(),
+            // OpenCode 2's records are this server's own: the reference keeps
+            // none for it.
+            protocol: if opencode2 {
+                "opencode2-sdk.sse"
+            } else {
+                "opencode-sdk.sse"
+            },
+            instance: provider.instance_id.clone(),
+            session: super::provider_session_id(spec, provider, opencode2),
+            thread: provider.app_thread_id.clone(),
+        })
+    }
+
+    pub(super) fn record(
+        &self,
+        direction: super::Direction,
+        message_kind: &str,
+        method: &str,
+        payload: Option<&Value>,
+    ) {
+        // Per-token deltas; the part's final message.part.updated is still logged.
+        if method == "message.part.delta"
+            || (self.protocol != "opencode-sdk.sse" && method.ends_with(".delta"))
+        {
+            return;
+        }
+        let observed = super::super::provider_event_log::iso_time(std::time::SystemTime::now());
+        let method = super::super::provider_event_log::structural_protocol_method(method);
+        let id = format!(
+            "raw-event:provider-session:{}:method:{}:{}",
+            encode(&self.session),
+            encode(&method),
+            uuid::Uuid::new_v4()
+        );
+        let direction = match direction {
+            super::Direction::Incoming => "incoming",
+            super::Direction::Outgoing => "outgoing",
+        };
+        self.log.native(
+            json!({"observedAt": observed, "event": {
+                "id": id,
+                "kind": "protocol",
+                "protocol": self.protocol,
+                "provider": OPENCODE,
+                "providerInstanceId": self.instance,
+                "providerSessionId": self.session,
+                "createdAt": observed,
+                "threadId": self.thread,
+                "payload": {
+                    "direction": direction,
+                    "messageKind": message_kind,
+                    "method": method,
+                    "payload": super::super::provider_event_log::summarize_native_protocol_payload(payload),
+                },
+            }}),
+            Some(&self.thread),
+        );
+    }
+
+    /// A call, then its reply (`sdkCall`): the reply's record holds the
+    /// SDK response's shape (`{data}`), and a failed call has none.
+    pub(super) fn call(&self, method: &str, body: Option<&Value>) {
+        self.record(super::Direction::Outgoing, "request", method, body);
+    }
+
+    pub(super) fn reply(&self, method: &str) {
+        self.record(
+            super::Direction::Incoming,
+            "response",
+            method,
+            Some(&json!({"data": null})),
+        );
+    }
+
+    pub(super) fn event(&self, event: &Value) {
+        let method = event["type"].as_str().unwrap_or_default();
+        self.record(
+            super::Direction::Incoming,
+            "notification",
+            method,
+            Some(event),
+        );
+    }
+}
+
+/// The 1.x SDK method a call is (`session.promptAsync` for
+/// `POST /session/<id>/prompt_async`).
+fn sdk_method(method: &reqwest::Method, path: &str) -> &'static str {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    match (method.as_str(), segments.as_slice()) {
+        ("POST", ["session"]) => "session.create",
+        ("GET", ["session", "status"]) => "session.status",
+        ("GET", ["session", _]) => "session.get",
+        ("PATCH", ["session", _]) => "session.update",
+        ("POST", ["session", _, "abort"]) => "session.abort",
+        ("POST", ["session", _, "prompt_async"]) => "session.promptAsync",
+        ("GET", ["session", _, "children"]) => "session.children",
+        ("GET", ["session", _, "message"]) => "session.messages",
+        ("POST", ["session", _, "command"]) => "session.command",
+        ("POST", ["session", _, "summarize"]) => "session.summarize",
+        ("POST", ["permission", _, "reply"]) => "permission.reply",
+        ("POST", ["question", _, "reply"]) => "question.reply",
+        ("GET", ["provider"]) => "config.providers",
+        ("POST", ["mcp"]) => "mcp.add",
+        _ => "unknown",
+    }
+}
+
 /// One provider session: its server, event stream and OpenCode session.
 struct OpenCode {
     /// What it was opened with: a turn opened otherwise opens another.
@@ -176,6 +307,8 @@ struct OpenCode {
     /// The session replaced one that could not be resumed: its first turn
     /// sends the recovery prompt (the thread's context, then the prompt).
     recovered: bool,
+    /// Where its calls and events are recorded.
+    log: Option<ProtocolRecorder>,
 }
 
 impl OpenCode {
@@ -261,6 +394,10 @@ impl OpenCode {
                 .header("content-type", "application/json")
                 .body(body.to_string());
         }
+        let sdk = sdk_method(&method, path);
+        if let Some(log) = &self.log {
+            log.call(sdk, body);
+        }
         let response = request.send().await.map_err(|error| {
             if error.is_timeout() {
                 format!("{method} {path} timed out")
@@ -283,6 +420,9 @@ impl OpenCode {
         }
         let parsed: Option<Value> = serde_json::from_str(&text).ok();
         if (200..300).contains(&status) {
+            if let Some(log) = &self.log {
+                log.reply(sdk);
+            }
             return Ok(parsed.unwrap_or(Value::Null));
         }
         let error = parsed.unwrap_or(Value::Null);
@@ -474,6 +614,7 @@ async fn pump(
     authorization: Option<String>,
     events: mpsc::UnboundedSender<Stream>,
     connected: oneshot::Sender<Result<(), String>>,
+    log: Option<ProtocolRecorder>,
 ) {
     let mut connected = Some(connected);
     let mut attempt: u32 = 0;
@@ -489,8 +630,20 @@ async fn pump(
         if let Some(id) = &last_id {
             request = request.header("last-event-id", id);
         }
+        if let Some(log) = &log {
+            log.call("event.subscribe", None);
+        }
         match request.send().await {
             Ok(mut response) if response.status().is_success() => {
+                if let Some(log) = &log {
+                    // `sdkResponseForRawLog` of a stream: `{subscribed: true}`.
+                    log.record(
+                        super::Direction::Incoming,
+                        "response",
+                        "event.subscribe",
+                        Some(&json!({"subscribed": true})),
+                    );
+                }
                 attempt = 0;
                 if let Some(connected) = connected.take() {
                     let _ = connected.send(Ok(()));
@@ -509,6 +662,9 @@ async fn pump(
                                         let frame = data.join("\n");
                                         data.clear();
                                         if let Ok(event) = serde_json::from_str::<Value>(&frame) {
+                                            if let Some(log) = &log {
+                                                log.event(&event);
+                                            }
                                             if events.send(Stream::Event(event)).is_err() {
                                                 return;
                                             }
@@ -565,6 +721,7 @@ async fn open(
     provider: &ProviderTurn,
     launch: String,
     server: status::TurnServer,
+    log: Option<ProtocolRecorder>,
 ) -> Result<(OpenCode, bool), ProviderFailure> {
     let (events, stream) = mpsc::unbounded_channel();
     // A managed server's exit fails the session's turns.
@@ -624,6 +781,7 @@ async fn open(
         dead: None,
         clock: (0, 0),
         recovered: false,
+        log: log.clone(),
     };
     let failed = |oc: OpenCode, detail: String| async move {
         oc.close().await;
@@ -650,6 +808,7 @@ async fn open(
         authorization,
         events,
         connected,
+        log,
     ));
     match tokio::time::timeout(REQUEST_TIMEOUT, accepted).await {
         Ok(Ok(Ok(()))) => {}
@@ -738,9 +897,15 @@ pub(super) async fn run(
         .await
         .map_err(|detail| ProviderFailure::new("provider_error", detail))?;
         match connection {
-            status::TurnConnection::V1(server) => open(&spec, &provider, launch, server)
-                .await
-                .map(|(oc, resumed)| Opened::V1(oc, resumed)),
+            status::TurnConnection::V1(server) => open(
+                &spec,
+                &provider,
+                launch,
+                server,
+                ProtocolRecorder::new(&sink, &spec, &provider, false),
+            )
+            .await
+            .map(|(oc, resumed)| Opened::V1(oc, resumed)),
             status::TurnConnection::V2(server) => opencode2::Shared::open(&spec, &provider, server)
                 .await
                 .map(Opened::V2),

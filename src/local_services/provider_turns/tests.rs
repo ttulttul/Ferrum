@@ -1983,3 +1983,238 @@ async fn codex_turn_injects_the_handoff_history_before_its_prompt() {
         }
     )));
 }
+
+/// The records of a thread's provider event log, by line.
+fn event_log_records(dir: &Path, thread: &str) -> Vec<Value> {
+    let segment = super::super::provider_event_log::resolve_thread_segment(Some(thread));
+    let text = std::fs::read_to_string(dir.join(format!("events.{segment}.log")))
+        .unwrap_or_else(|error| panic!("events.{segment}.log: {error}"));
+    text.lines()
+        .map(|line| {
+            let (stamp, record) = line.split_once("] NTIVE: ").expect("a native line");
+            assert!(stamp.starts_with('[') && stamp.ends_with('Z'), "{line}");
+            serde_json::from_str(record).expect("a JSON record")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn provider_turns_write_their_frames_to_the_threads_event_log() {
+    let logs = tempfile::tempdir().unwrap();
+    let processes = std::sync::Arc::new(ProviderProcesses::with_event_log(
+        super::super::provider_event_log::ProviderEventLog::open(logs.path()),
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let mut threads = vec![];
+    for (driver, scenario) in [
+        (CODEX, "codex_turn.json"),
+        (CLAUDE_AGENT, "claude_turn.json"),
+        (GROK, "grok_turn.json"),
+    ] {
+        let log = dir.path().join(format!("{driver}.jsonl"));
+        let mut spec = fake_spec(driver, scenario, &log, None);
+        spec.turn_id = format!("run-{driver}");
+        let thread = spec.provider.as_ref().unwrap().app_thread_id.clone();
+        let (_cancel, cancelled) = oneshot::channel();
+        let (events, exit) = collect(start(spec, cancelled, processes.clone()).unwrap()).await;
+        assert!(exit.success, "{driver}: {exit:?}");
+        assert_eq!(terminal(&events).0, TurnStatus::Completed);
+        threads.push((driver, thread));
+    }
+    processes.shutdown(std::time::Duration::from_secs(1)).await;
+    if let Ok(keep) = std::env::var("T3_KEEP_EVENT_LOGS") {
+        for entry in std::fs::read_dir(logs.path()).unwrap().flatten() {
+            std::fs::copy(entry.path(), Path::new(&keep).join(entry.file_name())).unwrap();
+        }
+    }
+
+    // Codex: every decoded frame both ways, filed under the turn's thread,
+    // with no token deltas.
+    let codex = event_log_records(logs.path(), &threads[0].1);
+    assert!(codex.iter().all(|r| r["provider"] == "codex"
+        && r["protocol"] == "codex.app-server"
+        && r["kind"] == "protocol"
+        && r["providerSessionId"] == "provider-session:provider-instance::shared"
+        && r["event"]["stage"] == "decoded"));
+    let methods = |records: &[Value], direction: &str| -> Vec<String> {
+        records
+            .iter()
+            .filter(|r| r["event"]["direction"] == direction)
+            .filter_map(|r| r["event"]["payload"]["method"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let sent = methods(&codex, "outgoing");
+    assert!(
+        sent.contains(&"thread/start".into()) && sent.contains(&"turn/start".into()),
+        "{sent:?}"
+    );
+    let heard = methods(&codex, "incoming");
+    assert!(heard.contains(&"turn/completed".into()), "{heard:?}");
+    assert!(
+        !heard
+            .iter()
+            .any(|m| m.ends_with("/delta") || m.ends_with("TextDelta")),
+        "{heard:?}"
+    );
+    // Replies come back to the thread that asked.
+    assert!(codex.iter().any(|r| r["event"]["direction"] == "incoming"
+        && r["event"]["payload"]["result"]["thread"]["id"].is_string()));
+    // Frames tied to no thread go to the global log.
+    assert!(!sent.contains(&"initialize".into()));
+    let global = event_log_records(logs.path(), "");
+    assert_eq!(
+        methods(&global, "outgoing")[..2],
+        ["initialize", "initialized"]
+    );
+
+    // Claude: the SDK's view, its prompt offered and its messages heard,
+    // without partial-message deltas.
+    let claude = event_log_records(logs.path(), &threads[1].1);
+    assert!(claude.iter().all(|r| r["provider"] == "claudeAgent"
+        && r["protocol"] == "claude-agent-sdk.query"
+        && r["providerSessionId"]
+            .as_str()
+            .is_some_and(|s| s.ends_with(":run-claudeAgent"))));
+    let types: Vec<(&str, &str)> = claude
+        .iter()
+        .map(|r| {
+            (
+                r["event"]["direction"].as_str().unwrap(),
+                r["event"]["payload"]["type"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(types[0], ("outgoing", "query.open"));
+    // The SDK's own handshake stays out; the shutdown closes the query.
+    assert!(
+        !types.iter().any(|t| t.1.starts_with("control_")),
+        "{types:?}"
+    );
+    assert_eq!(types.last(), Some(&("outgoing", "query.close")));
+    assert!(types.contains(&("outgoing", "prompt.offer")), "{types:?}");
+    assert!(types.contains(&("incoming", "assistant")), "{types:?}");
+    assert!(types.contains(&("incoming", "result")), "{types:?}");
+    assert!(!claude
+        .iter()
+        .any(|r| r["event"]["payload"]["event"]["type"] == "content_block_delta"));
+
+    // ACP: each request the client made, started and answered.
+    let grok = event_log_records(logs.path(), &threads[2].1);
+    let lifecycle: Vec<(&str, &str)> = grok
+        .iter()
+        .map(|r| {
+            assert_eq!(r["event"]["kind"], "request");
+            assert_eq!(r["event"]["provider"], GROK);
+            assert_eq!(r["event"]["threadId"], threads[2].1.as_str());
+            (
+                r["event"]["payload"]["method"].as_str().unwrap(),
+                r["event"]["payload"]["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        lifecycle,
+        [
+            ("initialize", "started"),
+            ("initialize", "succeeded"),
+            ("session/new", "started"),
+            ("session/new", "succeeded"),
+            ("session/prompt", "started"),
+            ("session/prompt", "succeeded"),
+            // The server's shutdown closes the thread's session.
+            ("session/close", "started"),
+            ("session/close", "succeeded"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn pi_and_opencode_turns_write_their_event_logs() {
+    let logs = tempfile::tempdir().unwrap();
+    let processes = std::sync::Arc::new(ProviderProcesses::with_event_log(
+        super::super::provider_event_log::ProviderEventLog::open(logs.path()),
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    // Each OpenCode its own folder: the spec writes the `opencode` shim there.
+    let (oc, oc2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let specs = [
+        fake_spec(PI, "pi_turn.json", &dir.path().join("pi.jsonl"), None),
+        opencode_spec(oc.path(), "opencode_turn.json", &oc.path().join("oc.log")),
+        opencode2_spec(
+            oc2.path(),
+            "opencode2_turn.json",
+            &oc2.path().join("oc2.log"),
+        ),
+    ];
+    let mut threads = vec![];
+    for spec in specs {
+        let thread = spec.provider.as_ref().unwrap().app_thread_id.clone();
+        let (_cancel, cancelled) = oneshot::channel();
+        let (events, exit) = collect(start(spec, cancelled, processes.clone()).unwrap()).await;
+        assert!(exit.success, "{events:#?}");
+        threads.push(thread);
+    }
+    processes.shutdown(std::time::Duration::from_secs(1)).await;
+    processes.opencode.owners().stop_all().await;
+
+    // Pi: its RPC frames both ways, without streamed tokens.
+    let pi = event_log_records(logs.path(), &threads[0]);
+    assert!(pi
+        .iter()
+        .all(|r| r["provider"] == "pi" && r["protocol"] == "pi.rpc"));
+    for direction in ["incoming", "outgoing"] {
+        assert!(
+            pi.iter().any(|r| r["event"]["direction"] == direction),
+            "{pi:#?}"
+        );
+    }
+    assert!(!pi
+        .iter()
+        .any(|r| r["event"]["payload"]["assistantMessageEvent"]["type"]
+            .as_str()
+            .is_some_and(|kind| kind.ends_with("_delta"))));
+
+    // OpenCode: each SDK call, its reply and each event, as shapes.
+    for (thread, protocol) in [
+        (&threads[1], "opencode-sdk.sse"),
+        (&threads[2], "opencode2-sdk.sse"),
+    ] {
+        let records = event_log_records(logs.path(), thread);
+        let calls: Vec<(&str, &str, &str)> = records
+            .iter()
+            .map(|r| {
+                let event = &r["event"];
+                assert_eq!(event["protocol"], protocol);
+                assert_eq!(event["provider"], OPENCODE);
+                assert_eq!(event["threadId"], thread.as_str());
+                assert!(event["payload"]["payload"]["valueType"].is_string(), "{r}");
+                (
+                    event["payload"]["direction"].as_str().unwrap(),
+                    event["payload"]["messageKind"].as_str().unwrap(),
+                    event["payload"]["method"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert!(
+            calls.iter().any(|c| c.0 == "outgoing" && c.1 == "request"),
+            "{calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.0 == "incoming" && c.1 == "response"),
+            "{calls:?}"
+        );
+        assert!(calls.iter().any(|c| c.1 == "notification"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c.2.ends_with(".delta")), "{calls:?}");
+        if protocol == "opencode-sdk.sse" {
+            assert!(
+                calls.contains(&("outgoing", "request", "session.promptAsync")),
+                "{calls:?}"
+            );
+        } else {
+            assert!(
+                calls.contains(&("outgoing", "request", "session.prompt")),
+                "{calls:?}"
+            );
+        }
+    }
+}

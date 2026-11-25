@@ -16,7 +16,9 @@
 //! snapshot at most every 50 ms), and each tool call is one item whose type
 //! follows its ACP kind. A `session/request_permission` the runtime mode does
 //! not answer goes to the user as a runtime request.
-use super::{cancelled, next_response, program, requests, Cli, Launch, Sink, TurnEnd};
+use super::{
+    cancelled, next_response, program, requests, Cli, Launch, Protocol, ProtocolLog, Sink, TurnEnd,
+};
 use crate::thread_projection::uri_component;
 use crate::workspace::provider::{
     ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition, TurnStatus,
@@ -303,6 +305,7 @@ impl Agent {
         spec: &TurnSpec,
         provider: &ProviderTurn,
         launch: String,
+        log: Option<ProtocolLog>,
     ) -> std::io::Result<Self> {
         let flavor = Flavor::of(provider);
         let (default, home_var, extra_env) = match flavor {
@@ -356,6 +359,7 @@ impl Agent {
                     ""
                 },
                 extra_env,
+                log,
             },
         )?;
         Ok(Self {
@@ -1162,7 +1166,8 @@ pub(super) async fn run(
     let launch = launch_key(&spec, &provider);
     let resume = provider.resume.clone().filter(|id| !id.is_empty());
     let agent = tokio::select! {
-        agent = open(&spec, &provider, &sessions, &thread, launch, resume.as_deref()) => agent,
+        agent = open(&spec, &provider, &sessions, &thread, launch, resume.as_deref(),
+            sink.protocol_log(Protocol::Acp { provider: provider.driver.clone() }, &thread)) => agent,
         _ = cancelled(&mut cancel) => {
             return sink.finish(TurnEnd::interrupted(true));
         }
@@ -1217,6 +1222,7 @@ async fn open(
     thread: &str,
     launch: String,
     resume: Option<&str>,
+    log: Option<ProtocolLog>,
 ) -> Result<(Agent, bool), AcpError> {
     if let Some(mut agent) = sessions.take(thread, &launch, resume).await {
         // Kiro switches model, agent and effort within its session, so each
@@ -1242,7 +1248,7 @@ async fn open(
     {
         return Err(AcpError::Startup(error.to_owned()));
     }
-    let mut agent = Agent::spawn(spec, provider, launch)
+    let mut agent = Agent::spawn(spec, provider, launch, log)
         .await
         .map_err(|error| AcpError::Startup(error.to_string()))?;
     let started = start(spec, provider, &mut agent, stopped, resume).await;

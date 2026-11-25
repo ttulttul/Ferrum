@@ -13,7 +13,7 @@
 //! writes, is handled in order. A turn ends once Pi says its agent settled
 //! and a `get_state` finds it idle; its entries since the last turn name the
 //! turn, and its session statistics give the turn's usage.
-use super::{cancelled, next_response, program, Cli, Launch, Sink, TurnEnd};
+use super::{cancelled, next_response, program, Cli, Launch, Protocol, ProtocolLog, Sink, TurnEnd};
 use crate::workspace::provider::{
     ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition, TokenUsage,
     TurnStatus, PI,
@@ -425,6 +425,7 @@ async fn spawn(
     provider: &ProviderTurn,
     launch: String,
     session: Option<&str>,
+    log: Option<ProtocolLog>,
 ) -> Result<Pi, ProviderFailure> {
     let launch_args =
         crate::provider_status::pi::resolve_launch_tokens(provider.launch_args.clone())
@@ -478,6 +479,7 @@ async fn spawn(
             home_var: "PI_CODING_AGENT_DIR",
             home: "",
             extra_env,
+            log,
         },
     )
     .map_err(|error| ProviderFailure::new("provider_error", error.to_string()))?;
@@ -513,7 +515,10 @@ pub(super) async fn run(
     let launch = launch_key(&spec, &provider);
     let resume = provider.resume.clone().filter(|id| !id.is_empty());
     let opened = tokio::select! {
-        opened = open(&spec, &provider, &sessions, &thread, launch, resume.as_deref()) => opened,
+        opened = open(&spec, &provider, &sessions, &thread, launch, resume.as_deref(),
+            sink.protocol_log(Protocol::Pi {
+                session: super::provider_session_id(&spec, &provider, false),
+            }, &thread)) => opened,
         _ = cancelled(&mut cancel) => return sink.finish(TurnEnd::interrupted(true)),
     };
     let (mut pi, resumed) = match opened {
@@ -545,12 +550,13 @@ async fn open(
     thread: &str,
     launch: String,
     resume: Option<&str>,
+    log: Option<ProtocolLog>,
 ) -> Result<(Pi, bool), ProviderFailure> {
     if let Some(pi) = sessions.take(thread, &launch, resume).await {
         return Ok((pi, false));
     }
     let session = resume.filter(|file| resumable(file, &spec.cwd));
-    let mut pi = spawn(spec, provider, launch, session).await?;
+    let mut pi = spawn(spec, provider, launch, session, log).await?;
     match pi.register(session.is_some()).await {
         Ok(()) => Ok((pi, session.is_some())),
         Err(failure) => {

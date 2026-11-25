@@ -22,6 +22,19 @@ use serde_json::{json, Map, Value};
 /// which still takes its slot (see [`ProviderRecords::items`]).
 pub(crate) const HIDDEN_ITEM: &str = "\u{0}hidden";
 
+/// The id of the provider session a turn of `run_id` opens (see
+/// [`pending_session_id`]), which the provider event logs name.
+#[cfg(feature = "native")]
+pub(crate) fn opened_session_id(
+    driver: &str,
+    instance: &str,
+    thread_id: &str,
+    run_id: &str,
+    opencode2: bool,
+) -> String {
+    pending_session_id(driver, instance, thread_id, run_id, opencode2)
+}
+
 /// The id of the provider session a thread's provider thread names before
 /// its session opens: a Codex instance's shared session, or the thread's own
 /// Claude or ACP session, named after the run that opens it.
