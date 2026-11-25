@@ -1416,9 +1416,17 @@ async fn settle_next<H: CommandHost>(
         let Some(parent) = store.threads.get(parent_id) else {
             return Ok(false);
         };
+        let parent_row = parent.stored_row();
+        // No unsettled task of this child: nothing to read (the projections
+        // of a thread read from the shared database are read when needed).
+        if !records(&parent_row, "subagents").iter().any(|t| {
+            t["origin"] == "app_owned" && t["childThreadId"] == child_id && t["result"].is_null()
+        }) {
+            return Ok(false);
+        }
         (
             child.full_projection(),
-            parent.stored_row(),
+            parent_row,
             parent.full_projection(),
         )
     };

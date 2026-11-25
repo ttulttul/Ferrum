@@ -543,6 +543,37 @@ def stop(pid: int, label: str) -> None:
         fail(f"the {label} process {pid} did not stop within 30 seconds. It was left running")
 
 
+def terminate_child(process: subprocess.Popen[bytes], label: str, timeout: float = 15.0) -> None:
+    """Stop a server this script started, and wait until it has exited.
+
+    It may still own the T3 home's lock, so nothing may start on that home
+    before it is gone: SIGTERM to its process group (it was started in a new
+    session), then SIGKILL after ``timeout`` seconds.
+    """
+    if process.poll() is not None:
+        return
+
+    def signal_group(sig: int) -> None:
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            process.send_signal(sig)
+
+    signal_group(signal.SIGTERM)
+    try:
+        process.wait(timeout=timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    signal_group(signal.SIGKILL)
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        fail(f"the {label} process {process.pid} did not exit even after SIGKILL")
+
+
 def read_bytes(path: Path) -> bytes:
     try:
         return path.read_bytes()
@@ -730,8 +761,17 @@ def launch_rust(state: dict[str, object]) -> subprocess.Popen[bytes]:
     ]
     process = start_process(argv, environment, str(state["originalCwd"]), LOG_PATH)
     health_host = str(state.get("healthHost", state["host"]))
-    wait_for_server(process, health_host, int(state["port"]), "Rust")
-    wait_for_rust_runtime(Path(state["runtimePath"]), process.pid, int(state["port"]))
+    try:
+        wait_for_server(process, health_host, int(state["port"]), "Rust")
+        wait_for_rust_runtime(Path(state["runtimePath"]), process.pid, int(state["port"]))
+    except SwitchError as error:
+        # A Rust server that is still starting owns the T3 home: it must be
+        # gone before anything (the rollback's TypeScript server) starts there.
+        try:
+            terminate_child(process, "Rust")
+        except SwitchError as stop_error:
+            fail(f"{error}. Stopping that Rust server also failed: {stop_error}")
+        raise
     state["mode"] = "rust"
     state["rustPid"] = process.pid
     state["rustStartedAt"] = time.time()
@@ -808,6 +848,15 @@ def restore_original(state: dict[str, object], rollback: bool = False) -> None:
         marker = mark_tunnel_handoff(state.get("baseDir"))
         try:
             stop(rust_pid, "Rust")
+        except SwitchError:
+            # It still owns the T3 home: the TypeScript server must not start
+            # until it is gone. It runs in its own session (start_process).
+            try:
+                os.killpg(rust_pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            if not wait_for_exit(rust_pid):
+                fail(f"the Rust process {rust_pid} did not exit even after SIGKILL. It was left running")
         finally:
             clear_tunnel_handoff(marker)
     runtime_path = Path(str(state["runtimePath"]))
@@ -844,12 +893,21 @@ def restore_original(state: dict[str, object], rollback: bool = False) -> None:
                 require_ok=False,
             )
             process_pid = process.pid
-    except SwitchError:
+    except SwitchError as restore_error:
         if rollback:
             if isinstance(service, dict):
                 systemd_remask(service, state)
             state["mode"] = "rust"
-            launch_rust(state)
+            # The TypeScript server's failure is the one to report; a Rust
+            # server that also fails to start again comes second.
+            try:
+                launch_rust(state)
+            except SwitchError as relaunch_error:
+                fail(
+                    f"restarting the TypeScript server failed: {restore_error}. "
+                    f"Starting the Rust server again also failed: {relaunch_error}"
+                )
+            fail(f"restarting the TypeScript server failed, so the Rust server was started again: {restore_error}")
         raise
     if not read_json(runtime_path):
         backup = state.get("runtimeBackup")

@@ -285,6 +285,10 @@ impl ControlState {
             }
         }
         drop(store);
+        for event in events {
+            // As a commit does; a thread that cannot be read fails below.
+            let _ = crate::shared_store::hydrate_touched(&scratch, event);
+        }
         let at = crate::now();
         events
             .iter()
@@ -313,7 +317,7 @@ impl ControlState {
                 scratch.apply_record(&record);
                 for (thread_id, stored) in stored_after {
                     if let Some(thread) = scratch.threads.get_mut(&thread_id) {
-                        thread.stored = Some(Box::new(stored));
+                        thread.stored = Some(crate::stored_projection::Stored::whole(stored));
                     }
                 }
                 (items.iter().filter_map(snapshot_key).collect(), items.len())
@@ -351,6 +355,9 @@ impl ControlState {
         let mut store = self.store.write().await;
         let mut next_event_id = self.next_event_id.lock().await;
         let mut shared = self.shared.lock().await;
+        // A thread whose slim records alone are loaded is read whole first:
+        // the plan below diffs whole projections only.
+        crate::shared_store::hydrate_touched(&store, &event)?;
         let mut record = ServerEvent {
             id: *next_event_id + 1,
             at: crate::now(),
@@ -413,7 +420,7 @@ impl ControlState {
         }
         for (thread_id, stored) in stored_after {
             if let Some(thread) = store.threads.get_mut(&thread_id) {
-                thread.stored = Some(Box::new(stored));
+                thread.stored = Some(crate::stored_projection::Stored::whole(stored));
             }
         }
         if let Event::ThreadPatched { ref patch, .. } = record.event {
@@ -575,7 +582,7 @@ fn thread_events(
     scratch.apply_record(record);
     let thread = scratch.threads.get_mut(&thread_id)?;
     if let Some((_, stored)) = stored_after.iter().find(|(id, _)| *id == thread_id) {
-        thread.stored = Some(Box::new(stored.clone()));
+        thread.stored = Some(crate::stored_projection::Stored::whole(stored.clone()));
     }
     let after = thread.projection();
     // An unchanged projection still moves subscribers past the commit.

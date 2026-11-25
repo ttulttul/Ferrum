@@ -152,6 +152,7 @@ mod runtime_recovery;
 pub mod shared_store;
 mod shell_stream;
 mod store;
+mod stored_projection;
 pub use store::*;
 pub(crate) use store::{now, CommandReceipt};
 #[cfg(feature = "native")]

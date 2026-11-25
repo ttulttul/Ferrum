@@ -941,7 +941,7 @@ impl Thread {
     /// carry them (output omitted).
     fn projection_with(&self, wire: bool) -> Value {
         if let Some(stored) = &self.stored {
-            return stored_projection(&self.id, stored, wire);
+            return stored_projection(&self.id, stored.get(), wire, None);
         }
         self.computed_projection(wire)
     }
@@ -1181,7 +1181,7 @@ impl Thread {
             "providerSessions":with("providerSessions",provider.provider_sessions),"providerThreads":with("providerThreads",provider.provider_threads),"providerTurns":with("providerTurns",provider.provider_turns),"runtimeRequests":with("runtimeRequests",provider.runtime_requests),
             "messages":messages,"plans":provider.plans,"turnItems":turn_items,"checkpointScopes":checkpoint_scopes,"checkpoints":checkpoints,
             "contextHandoffs":context_handoffs,"contextTransfers":context_transfers,"visibleTurnItems":visible,"updatedAt":row["updatedAt"]});
-        sort_messages_by_turn_item_order(&mut projection);
+        sort_messages_by_turn_item_order(&mut projection, None);
         projection
     }
 
@@ -1247,6 +1247,9 @@ impl Thread {
     /// projection as the reference's `threadShellFromProjection` derives it,
     /// so a thread lists the same on both servers.
     pub(crate) fn shell(&self) -> Value {
+        if let Some(slim) = self.stored.as_ref().and_then(|s| s.slim_for_shell()) {
+            return slim_shell(&self.id, &slim);
+        }
         crate::projection_shell::shell(&self.projection(), SHELL_FIELDS)
     }
 }
@@ -1445,12 +1448,17 @@ pub(crate) fn linked(store: &Store, input: &Value, issue: bool) -> Value {
 /// The projection of a thread read from `statev2.sqlite`: its stored records,
 /// with turn items as snapshots carry them when `wire`, and each turn item a
 /// local visible row, as Rust's own projections are.
-fn stored_projection(thread_id: &str, stored: &Value, wire: bool) -> Value {
+fn stored_projection(
+    thread_id: &str,
+    stored: &Value,
+    wire: bool,
+    message_ordinals: Option<&std::collections::HashMap<String, i64>>,
+) -> Value {
     let mut projection = stored.clone();
     // The thread's fields in the contract's order, as the reference encodes
     // it; a change made here adds its fields at the end of the stored record.
     projection["thread"] = ordered(APP_FIELDS, &stored["thread"]);
-    sort_messages_by_turn_item_order(&mut projection);
+    sort_messages_by_turn_item_order(&mut projection, message_ordinals);
     if wire {
         // As the reference's snapshot window reads them: without a rolled
         // back run's items or input still waiting in the queue. (Only when
@@ -1488,6 +1496,43 @@ fn stored_projection(thread_id: &str, stored: &Value, wire: bool) -> Value {
     projection
 }
 
+/// The shell row of a thread whose slim records alone are loaded
+/// (`stored_projection::Slim`): derived from them as from the whole
+/// projection, since they hold every record the shell looks at, with its
+/// item counts adding the turn items they leave out. Those are never hidden
+/// by the visibility rule except as a rolled-back run's (the slim records
+/// hold every queued input and stop result).
+fn slim_shell(thread_id: &str, slim: &crate::stored_projection::SlimView<'_>) -> Value {
+    let projection = stored_projection(
+        thread_id,
+        slim.projection,
+        true,
+        Some(slim.message_ordinals),
+    );
+    let mut shell = crate::projection_shell::shell(&projection, SHELL_FIELDS);
+    let mut rolled_back = std::collections::HashSet::new();
+    for run in projection["runs"].as_array().into_iter().flatten() {
+        let id = run["id"].as_str().unwrap_or_default();
+        if run["status"] == "rolled_back" {
+            rolled_back.insert(id);
+        } else {
+            rolled_back.remove(id);
+        }
+    }
+    let unloaded: u64 = slim
+        .unloaded_items
+        .iter()
+        .filter(|(run, _)| !run.as_deref().is_some_and(|run| rolled_back.contains(run)))
+        .map(|(_, count)| count)
+        .sum();
+    for key in ["itemCount", "visibleItemCount"] {
+        if let Some(count) = shell[key].as_u64() {
+            shell[key] = json!(count + unloaded);
+        }
+    }
+    shell
+}
+
 /// Seconds since the epoch of an ISO timestamp, 0 when it does not parse.
 fn iso_seconds(value: &Value) -> u64 {
     value
@@ -1503,6 +1548,34 @@ impl Thread {
     /// `statev2::read::thread_projection` returns it). Its snapshots serve the
     /// stored records; the typed fields hold what listing and commands read.
     pub(crate) fn from_stored(projection: Value, project_root: Option<&str>) -> Thread {
+        let mut thread = Self::typed_from_stored(&projection, project_root);
+        thread.stored = Some(crate::stored_projection::Stored::whole(projection));
+        thread
+    }
+
+    /// A thread read from `statev2.sqlite` whose slim records alone are
+    /// loaded (`statev2::read::slim_projections`): the typed state comes from
+    /// its small collections, which the slim records hold whole; the whole
+    /// projection is read from `source` when first needed.
+    pub(crate) fn from_slim(
+        slim: crate::stored_projection::Slim,
+        project_root: Option<&str>,
+        source: std::sync::Arc<dyn crate::stored_projection::Hydrate>,
+    ) -> Thread {
+        let mut thread = Self::typed_from_stored(&slim.projection, project_root);
+        let mut slim = slim;
+        slim.keep_only_shell_records();
+        thread.stored = Some(crate::stored_projection::Stored::lazy(
+            thread.id.clone(),
+            slim,
+            source,
+        ));
+        thread
+    }
+
+    /// The typed state of a thread read from `statev2.sqlite`. It reads no
+    /// nodes or turn items.
+    fn typed_from_stored(projection: &Value, project_root: Option<&str>) -> Thread {
         let row = projection["thread"].clone();
         let text = |key: &str| row[key].as_str().map(str::to_owned);
         let active = projection["runs"]
@@ -1542,13 +1615,13 @@ impl Thread {
             })
             .collect();
         let thread_id = text("id").unwrap_or_default();
-        let runs = stored_runs(&thread_id, &projection);
-        let checkpoints = stored_checkpoints(&projection);
+        let runs = stored_runs(&thread_id, projection);
+        let checkpoints = stored_checkpoints(projection);
         let context_handoffs = projection["contextHandoffs"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let provider = Box::new(stored_provider(&thread_id, &row, &projection));
+        let provider = Box::new(stored_provider(&thread_id, &row, projection));
         Thread {
             id: thread_id,
             project_id: text("projectId").unwrap_or_default(),
@@ -1578,7 +1651,7 @@ impl Thread {
             handoff_items: Vec::new(),
             inherited_items: Vec::new(),
             provider,
-            stored: Some(Box::new(projection)),
+            stored: None,
             row,
         }
     }
@@ -1714,13 +1787,23 @@ fn stored_provider(
         state.prior_turns = Some((turns, first as usize));
     }
     let instance = row["providerInstanceId"].clone();
-    state.prior_session_id = projection["providerSessions"]
+    let session = projection["providerSessions"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|session| session["providerInstanceId"] == instance)
-        .max_by_key(|session| iso_seconds(&session["updatedAt"]))
-        .and_then(|session| session["id"].as_str().map(str::to_owned));
+        .max_by_key(|session| iso_seconds(&session["updatedAt"]));
+    state.prior_session_id = session.and_then(|session| session["id"].as_str().map(str::to_owned));
+    // No session of the thread is live when the database holds none, or its
+    // latest is stopped: a restart then has none to stop, as the reference's
+    // recovery selects only threads with a live session.
+    match session {
+        Some(session) if session["status"] == "stopped" => {
+            state.session_stopped_at = Some(iso_seconds(&session["updatedAt"]));
+        }
+        None => state.session_stopped_at = Some(iso_seconds(&record["updatedAt"])),
+        Some(_) => {}
+    }
     state.prior_usage = projection["providerTurns"]
         .as_array()
         .into_iter()
@@ -1780,9 +1863,20 @@ fn stored_provider(
 /// The reference's `sortMessagesByTurnItemOrder`: messages in the order of
 /// the first user or assistant turn item that shows each, then by creation
 /// time and id.
-fn sort_messages_by_turn_item_order(projection: &mut Value) {
+fn sort_messages_by_turn_item_order(
+    projection: &mut Value,
+    known: Option<&std::collections::HashMap<String, i64>>,
+) {
     let mut ordinals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    for item in projection["turnItems"].as_array().into_iter().flatten() {
+    if let Some(known) = known {
+        ordinals.clone_from(known);
+    }
+    for item in projection["turnItems"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|_| known.is_none())
+    {
         if !matches!(
             item["type"].as_str(),
             Some("user_message" | "assistant_message")
