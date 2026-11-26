@@ -42,6 +42,10 @@ pub(crate) trait TurnHost:
     fn turn_recorded(&self, _run: &Run, _position: Option<StreamPosition>) {}
     /// The run has ended and its end is recorded.
     fn turn_finished(&self, _run: &Run) {}
+    /// A completed provider run is visible to a waiting parent before its checkpoint is captured.
+    fn provider_run_completed(self: Arc<Self>, _run: &Run) -> Option<crate::runtime::Wait> {
+        None
+    }
     /// A stopped run's turn has ended, before its checkpoint: what its stop
     /// left for then (its delegated tasks' stop), if anything.
     fn turn_stopped(
@@ -1098,6 +1102,11 @@ async fn record<H: TurnHost>(
             let wait = host.turn_wait(Duration::from_secs(30));
             futures_util::pin_mut!(wait);
             let _ = futures_util::future::select(stop, wait).await;
+        }
+    }
+    if run_status == "completed" {
+        if let Some(completed) = owner.clone().provider_run_completed(run) {
+            completed.await;
         }
     }
     // Stopped turns also leave a rollback point. A stopped provider run is
