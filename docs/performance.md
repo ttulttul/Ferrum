@@ -82,6 +82,28 @@ Ratios by commit for the last 10 runs, newest first. The [`perf-data` branch](ht
 
 <!-- perf:end -->
 
+## Live trials on a real database
+
+CI measures fake workloads on a small database. Five times, Ferrum also took over from the reference for 40 minutes on a 33 GB production database with about 7,000 threads, with real desktop clients connected and real agent threads at work, while an acceptance suite drove it. Each trial sampled the server process every 2 seconds (CPU as % of one core, resident memory, and `GET /` timed against a 2 s timeout). The reference was sampled on the same machine just before each one.
+
+| Trial | Fixes it had | CPU mean / p95 | RSS mean / max | `GET /` mean / max, failures | What it found |
+| --- | --- | ---: | ---: | ---: | --- |
+| 1 | – | 38.8% / 50.0% | 2.08 / 2.23 GB | 18.7 ms / 2.0 s, 1 of 1,200 | 40% of a core while idle: every git, `ps` and `lsof` was started with `fork`, which copied the server's page tables (#311). Every git status stream polled git every 2 s on its own (#313). Threads read whole were never released (#316). |
+| 2 | #311, #313, #316 | 1.97% / 8.5% | 1.19 / 2.18 GB | 1.4 ms / 1.2 s, 0 | Idle CPU fixed. |
+| 3 | as 2 | 12.3% / 63.5% | 2.47 / 5.15 GB | 11.3 ms / 2.0 s, 5 of 1,199 | A 10 s stall and a 5 GB peak while clients opened long threads: each caller read the thread again, on the runtime workers, under the store lock (#337). A delta to a long thread cost tens of milliseconds, copying the whole thread several times (#340). |
+| 4 | #337, #340 | 6.5% / 25.5% | 8.5 / 21.8 GB | 26.9 ms / 2.0 s, 13 of 1,053 | `t3_thread_list` across all projects read every thread whole before paging: 21.6 GB and a 5-minute stall of writes (#347). Every request now releases what it reads whole past 64 threads (#349). |
+| 5 | #347, #349 | **1.64% / 6.5%** | **0.77 / 1.22 GB** | **0.65 ms / 0.41 s, 0 of 1,200** | Eight unbounded thread lists over about 7,150 threads, alongside attachment sends, held. |
+
+The reference, on the same database just before each trial, averaged 1.3–6.7% of a core and 0.62–0.79 GB. In the fifth trial Ferrum used about a quarter of its CPU (1.6% against 6.7%), and its resident memory settled at 675 MB after the trial's peaks.
+
+What each fix changed, as measured in its pull request:
+- #311: idle CPU on a copy of that database, with two clients, went from 87–91% to 1.3–1.4% of a core.
+- #313: two clients' git status streams on five folders: the server's own CPU went from 5.8–7.6% to 0.1–0.8%, and its git processes' from 17.7–21.3% to 0.1–3.1%.
+- #316: RSS after opening and closing 300 long threads went from 2.96 GB (kept) to 0.77 GB once they had been idle.
+- #337: three clients opening the eight longest threads: the peak went from 3.1 to 1.9 GB, and the slowest `GET /` from 5 s (timed out) to 12 ms.
+- #340: a streamed delta to a 4.5 MB thread went from 87 ms to 1.9 ms.
+- #347 and #349: listing 2,000 lazily read threads went from 1.9 s and 472 MB to 111 ms and 1 MB.
+
 ## What is measured
 
 Each server runs alone, on a free loopback port, in its own temporary home. Both get the environment the parity suites use (`parity_harness.server_env`): no real provider CLI on `PATH` (and never `~/.local/bin` or an nvm directory), a login shell that reads only the temporary home's profile, no telemetry, and all HTTP(S) sent to the harness's refusing proxy. The script fails if any server ran without that proxy. Provider turns use the fake `codex` and `claude` CLIs from `tests/fixtures/providers`, so no model is called and nothing leaves the machine.
