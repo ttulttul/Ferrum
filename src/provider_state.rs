@@ -219,7 +219,10 @@ impl ProviderState {
         // A native subagent's own turn is its child thread's (recorded there), nothing of the
         // run that reports it.
         if let ProviderEvent::TurnItem { item } = event {
-            if item.kind == "subagent_turn" || item.fields.contains_key("subagentThread") {
+            if item.kind == "subagent_turn"
+                || item.fields.contains_key("subagentThread")
+                || item.fields.contains_key("subagentChild")
+            {
                 return;
             }
         }

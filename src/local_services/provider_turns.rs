@@ -12,6 +12,7 @@ mod acp;
 mod claude;
 mod claude_background;
 mod claude_sessions;
+mod claude_subagents;
 mod codex;
 mod codex_server;
 mod codex_subagents;

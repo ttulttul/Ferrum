@@ -24,6 +24,9 @@ fn subagent(item: &ProviderItem) -> Option<Subagent<'_>> {
     if item.kind != "subagent" || item.fields.get("origin") != Some(&json!("provider_native")) {
         return None;
     }
+    if item.fields.contains_key("claudeTaskId") {
+        return None;
+    }
     let text = |key: &str| {
         item.fields
             .get(key)
@@ -70,6 +73,9 @@ pub(crate) async fn record_child(
     // What a subagent's own turn reports belongs to its child thread.
     if let Some(native) = item.fields.get("subagentThread").and_then(Value::as_str) {
         return record_child_turn(state, parent_thread_id, driver, native, item).await;
+    }
+    if item.fields.contains_key("claudeTaskId") || item.fields.contains_key("subagentChild") {
+        return record_claude(state, parent_thread_id, driver, item).await;
     }
     let Some(subagent) = subagent(item) else {
         return;
@@ -131,9 +137,15 @@ pub(crate) async fn record_child(
 
 /// `IdAllocator.derive.subagentThread`.
 fn child_thread_id(native_thread: &str) -> String {
+    driver_child_thread_id("codex", native_thread)
+}
+
+/// `IdAllocator.derive.subagentThread` for `driver`'s native thread.
+pub(crate) fn driver_child_thread_id(driver: &str, native_thread: &str) -> String {
     use sha2::Digest;
     let legacy = format!(
-        "thread:provider:codex:native-thread:{}",
+        "thread:provider:{}:native-thread:{}",
+        crate::thread_projection::uri_component(driver),
         crate::thread_projection::uri_component(native_thread)
     );
     let digest = hex::encode(sha2::Sha256::digest(legacy.as_bytes()));
@@ -365,6 +377,143 @@ async fn record_child_turn(
     }
 }
 
+/// A Claude subagent's child thread (`claudeSubagentIds`): named by the parent's provider
+/// thread and the task, made when the task starts; its records outside any run (the child's
+/// messages and the task's result message) hang from its root node, which ends as the task.
+async fn record_claude(
+    state: &ControlState,
+    parent_thread_id: &str,
+    driver: &str,
+    item: &ProviderItem,
+) {
+    let task = item
+        .fields
+        .get("claudeTaskId")
+        .or_else(|| item.fields.get("subagentChild"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let at = crate::auth_service::iso(crate::auth_service::now());
+    let event = {
+        let store = state.store.read().await;
+        let Some(parent) = store.threads.get(parent_thread_id) else {
+            return;
+        };
+        let Some(provider_thread) = parent.provider_thread_id() else {
+            return;
+        };
+        let child_id = driver_child_thread_id(driver, &format!("{provider_thread}:{task}"));
+        let parent_row = parent.stored_row();
+        let instance = parent_row["providerInstanceId"]
+            .as_str()
+            .or(parent_row["modelSelection"]["instanceId"].as_str())
+            .unwrap_or(driver)
+            .to_owned();
+        match store.threads.get(&child_id) {
+            None if item.kind == "subagent" => {
+                let ordinal = store
+                    .threads
+                    .values()
+                    .filter(|t| t.stored_row()["lineage"]["parentThreadId"] == parent_thread_id)
+                    .count()
+                    + 1;
+                let prompt = item
+                    .fields
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let title = crate::orchestration::delegation::subagent_thread_title(
+                    &parent.title,
+                    item.title.as_deref(),
+                    prompt,
+                    ordinal,
+                );
+                let subagent = Subagent {
+                    child_id: &child_id,
+                    native_thread: "",
+                    model: item.fields.get("model").and_then(Value::as_str),
+                    effort: None,
+                };
+                Event::ThreadCreated(child_thread(
+                    parent, &subagent, item, driver, &instance, &title, prompt, &at,
+                ))
+            }
+            None => return,
+            Some(child) => {
+                let row = child.stored_row();
+                let mut nodes = row["nodes"].as_array().cloned().unwrap_or_default();
+                let root = nodes
+                    .iter()
+                    .find(|n| n["kind"] == "root_turn")
+                    .map(|n| n["id"].clone())
+                    .unwrap_or(Value::Null);
+                let mut patch = json!({});
+                if item.kind == "subagent" {
+                    // The root node ends as the task does.
+                    if item.status == "running" {
+                        return;
+                    }
+                    for node in nodes.iter_mut().filter(|n| n["kind"] == "root_turn") {
+                        node["status"] = json!(item.status);
+                        node["completedAt"] = json!(at);
+                    }
+                    patch["nodes"] = json!(nodes);
+                } else {
+                    let mut items = row["nativeTurnItems"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut messages = row["nativeMessages"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    let native = item.id.as_str();
+                    let message_id = item_id("message", driver, native);
+                    let mut record = json!({
+                        "id": item_id("turn-item", driver, native),
+                        "threadId": child_id,
+                        "runId": null,
+                        "nodeId": root,
+                        "providerThreadId": null,
+                        "providerTurnId": null,
+                        "nativeItemRef": {"driver": driver, "nativeId": native, "strength": "strong"},
+                        "parentItemId": null,
+                        "ordinal": items.len() + 1,
+                        "status": item.status,
+                        "title": item.title,
+                        "startedAt": at,
+                        "completedAt": at,
+                        "updatedAt": at,
+                        "type": item.kind,
+                        "messageId": message_id,
+                    });
+                    for (key, value) in &item.fields {
+                        if key != "subagentChild" {
+                            record[key] = value.clone();
+                        }
+                    }
+                    messages.push(json!({
+                        "createdBy": "agent", "creationSource": "provider", "id": message_id,
+                        "threadId": child_id, "runId": null, "nodeId": root, "role": "assistant",
+                        "text": record["text"], "attachments": [], "streaming": false,
+                        "createdAt": at, "updatedAt": at,
+                    }));
+                    items.push(record);
+                    patch["nativeTurnItems"] = json!(items);
+                    patch["nativeMessages"] = json!(messages);
+                }
+                Event::ThreadPatched {
+                    thread_id: child_id.clone(),
+                    patch: json!({"row": patch}),
+                }
+            }
+        }
+    };
+    if let Err(error) = state.commit(event).await {
+        tracing::warn!(%error, parent_thread_id, "failed to record a Claude subagent's thread");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn child_thread(
     parent: &Thread,
@@ -377,14 +526,31 @@ fn child_thread(
     at: &str,
 ) -> Thread {
     let parent_row = parent.stored_row();
-    let native_item = item.id.as_str();
+    // A Claude task's records are named by the task (`task:<id>`), its refs by its id; a
+    // Codex subagent's by its item. A Claude child has no provider thread of its own.
+    let native_item = item
+        .fields
+        .get("nodeNativeId")
+        .and_then(Value::as_str)
+        .unwrap_or(item.id.as_str());
+    let root_ref = item
+        .fields
+        .get("nativeItemRef")
+        .and_then(|reference| reference["nativeId"].as_str())
+        .unwrap_or(native_item)
+        .to_owned();
+    let claude = item.fields.contains_key("claudeTaskId");
     let subagent_node = item_id("node", driver, native_item);
     let root_node = item_id("node", driver, &format!("{native_item}:thread-root"));
-    let provider_thread = format!(
-        "provider-thread:provider:{}:native-thread:{}",
-        crate::thread_projection::uri_component(driver),
-        crate::thread_projection::uri_component(subagent.native_thread)
-    );
+    let provider_thread = if claude {
+        Value::Null
+    } else {
+        json!(format!(
+            "provider-thread:provider:{}:native-thread:{}",
+            crate::thread_projection::uri_component(driver),
+            crate::thread_projection::uri_component(subagent.native_thread)
+        ))
+    };
     let strong = |native: &str| json!({"driver": driver, "nativeId": native, "strength": "strong"});
     // The parent's app thread, as the child's (`makeSubagentChildThread`): the remote parent
     // delegated the parent thread, not its subagents.
@@ -423,7 +589,7 @@ fn child_thread(
                 subagent.effort,
             ),
         ),
-        ("activeProviderThreadId", json!(provider_thread)),
+        ("activeProviderThreadId", provider_thread.clone()),
         (
             "lineage",
             json!({
@@ -464,7 +630,7 @@ fn child_thread(
         "countsForRun": false,
         "providerThreadId": provider_thread,
         "providerTurnId": null,
-        "nativeItemRef": strong(native_item),
+        "nativeItemRef": strong(&root_ref),
         "runtimeRequestId": null,
         "checkpointScopeId": null,
         "startedAt": at,
@@ -489,6 +655,10 @@ fn child_thread(
             "createdAt": at,
             "updatedAt": at
         }]);
+        // A Claude brief is no workflow script (`workflowScript`).
+        if claude {
+            row["nativeMessages"][0]["workflowScript"] = json!(false);
+        }
         row["nativeTurnItems"] = json!([{
             "id": item_id("turn-item", driver, &native_prompt),
             "threadId": subagent.child_id,
@@ -513,6 +683,9 @@ fn child_thread(
             "senderThreadId": parent.id,
             "inputIntent": "turn_start"
         }]);
+        if claude {
+            row["nativeTurnItems"][0]["workflowScript"] = json!(false);
+        }
     }
     Thread {
         row,

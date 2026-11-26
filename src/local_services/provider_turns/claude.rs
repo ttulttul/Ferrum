@@ -244,6 +244,10 @@ struct Attempt<'a> {
     block_counts: HashMap<(String, &'static str, bool), u64>,
     /// Tool calls still waiting for a result, in the order they started.
     tools: IndexMap<String, ProviderItem>,
+    /// The native subagents its `Agent` calls run.
+    subagents: super::claude_subagents::ClaudeSubagents,
+    /// The turn's model, which a subagent runs unless its call names another.
+    model: Option<String>,
     next_control: u64,
     /// Whether the CLI was given the SubagentStart hook that adds the device
     /// text (the thread may use devices), which also numbers its Stop hook.
@@ -532,6 +536,8 @@ impl<'a> Attempt<'a> {
             open_items: vec![],
             block_counts: HashMap::new(),
             tools: IndexMap::new(),
+            subagents: Default::default(),
+            model: Some(provider.model.clone()).filter(|model| !model.trim().is_empty()),
             next_control: 1,
             device_hook: provider.mcp.as_ref().is_some_and(|mcp| mcp.device_tools),
             runtime_mode: provider.runtime_mode().to_owned(),
@@ -566,7 +572,12 @@ impl<'a> Attempt<'a> {
             (&outcome, attempt.turn_started, attempt.usage_reported)
         {
             attempt.sink.send(ProviderEvent::TurnUsage {
-                usage: turn_token_usage(attempt.result.as_ref(), end.status, &attempt.root_models),
+                usage: turn_token_usage(
+                    attempt.result.as_ref(),
+                    end.status,
+                    &attempt.root_models,
+                    attempt.subagents.ran_any(),
+                ),
             });
         }
         if let Outcome::Ended(end) = &outcome {
@@ -896,8 +907,27 @@ impl<'a> Attempt<'a> {
             self.answered = true;
         }
         self.accept_steers(&message);
-        // Subagents' own messages stay inside their tool call.
+        // Subagents' own messages stay inside their tool call; a native subagent's go to its
+        // child thread.
         let nested = !message["parent_tool_use_id"].is_null();
+        if let Some(task) = message["parent_tool_use_id"]
+            .as_str()
+            .and_then(|call| self.subagents.task_of(call))
+        {
+            for item in self.subagents.child_message(&task, &message) {
+                self.sink.send(ProviderEvent::TurnItem { item });
+            }
+        }
+        if kind == "system"
+            && matches!(
+                message["subtype"].as_str(),
+                Some("task_started" | "task_progress" | "task_notification")
+            )
+        {
+            for item in self.subagents.frame(&message, self.model.as_deref()) {
+                self.sink.send(ProviderEvent::TurnItem { item });
+            }
+        }
         match kind {
             "system" if message["subtype"] == "init" => {
                 let session = message["session_id"]
@@ -1161,6 +1191,11 @@ impl<'a> Attempt<'a> {
         }
         let name = block["name"].as_str().unwrap_or_default();
         let input = &block["input"];
+        // A native subagent shows as its subagent, not as a tool call.
+        if name == "Agent" {
+            self.subagents.call(id, input);
+            return;
+        }
         if name == "TodoWrite" {
             let steps = input["todos"]
                 .as_array()
@@ -1582,6 +1617,7 @@ impl<'a> Attempt<'a> {
                         Some(message),
                         TurnStatus::Completed,
                         &self.root_models,
+                        self.subagents.ran_any(),
                     ),
                 });
                 self.usage_reported = true;
@@ -1654,7 +1690,12 @@ fn now_ms() -> i64 {
 /// The reference's normalizeClaudeTurnTokenUsage for a turn that ran in one
 /// segment: the `result`'s totals, `complete` only for a turn that completed
 /// with a successful result.
-fn turn_token_usage(result: Option<&Value>, status: TurnStatus, models: &[String]) -> Value {
+fn turn_token_usage(
+    result: Option<&Value>,
+    status: TurnStatus,
+    models: &[String],
+    has_subagents: bool,
+) -> Value {
     let usage = result.map_or(&Value::Null, |result| &result["usage"]);
     let count = |key: &str| {
         usage[key]
@@ -1682,7 +1723,7 @@ fn turn_token_usage(result: Option<&Value>, status: TurnStatus, models: &[String
     if !known || (!success && !positive) {
         out.insert("usageStatus".into(), json!("unavailable"));
         out.insert("usageScope".into(), json!("main_agent"));
-        out.insert("hasSubagents".into(), json!(false));
+        out.insert("hasSubagents".into(), json!(has_subagents));
         return Value::Object(out);
     }
     let input = uncached.map(|uncached| {
@@ -1708,7 +1749,7 @@ fn turn_token_usage(result: Option<&Value>, status: TurnStatus, models: &[String
     if let (Some(thinking), Some(output)) = (thinking, output) {
         out.insert("reasoningTokens".into(), json!(output.min(thinking)));
     }
-    out.insert("hasSubagents".into(), json!(false));
+    out.insert("hasSubagents".into(), json!(has_subagents));
     let complete =
         status == TurnStatus::Completed && success && input.is_some() && output.is_some();
     out.insert(
