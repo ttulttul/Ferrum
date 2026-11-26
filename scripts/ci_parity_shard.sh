@@ -96,6 +96,7 @@ case "$shard" in
     run python3 scripts/source_control_lookup_parity.py "${both[@]}"
     run python3 scripts/project_clone_parity.py "${both[@]}"
     run python3 scripts/project_favicon_parity.py "${both[@]}"
+    run python3 scripts/layout_commands_parity.py "${both[@]}"
     run python3 scripts/bitbucket_pull_requests_parity.py "${both[@]}"
     run python3 scripts/bitbucket_settings_parity.py "${both[@]}"
     run python3 scripts/bitbucket_pull_request_parity.py "${both[@]}"
