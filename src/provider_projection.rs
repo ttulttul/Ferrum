@@ -110,6 +110,28 @@ pub(crate) struct RunIds {
     pub driver: String,
 }
 
+/// A run's attempt `ordinal` and its root node (`runAttempt`,
+/// `rootNode`/`rootNodeAttempt`): a run's first attempt's root node is the
+/// run's own.
+pub(crate) fn attempt_ids(run_id: &str, ordinal: u32) -> (String, String) {
+    let attempt = join("run-attempt:run", &[run_id]) + &format!(":attempt:{ordinal}");
+    let root = if ordinal <= 1 {
+        join("node:run", &[run_id]) + ":root"
+    } else {
+        join("node:run", &[run_id]) + &format!(":attempt:{ordinal}:root")
+    };
+    (attempt, root)
+}
+
+/// The ordinal at the end of an attempt id (`...:attempt:<n>`).
+fn attempt_ordinal(attempt: &str) -> u32 {
+    attempt
+        .rsplit(':')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1)
+}
+
 pub(crate) fn item_id(prefix: &str, driver: &str, native: &str) -> String {
     format!(
         "{prefix}:provider:{}:native-item:{}",
@@ -341,9 +363,9 @@ impl Thread {
             return None;
         }
         let run_id = run.wire_id();
-        let attempt = join("run-attempt:run", &[&run_id]) + ":attempt:1";
+        let (attempt, root_node) = attempt_ids(&run_id, run.steering_restarts + 1);
         Some(RunIds {
-            root_node: join("node:run", &[&run_id]) + ":root",
+            root_node,
             provider_thread: self.waiting_thread_id(run)?,
             provider_turn: String::new(),
             driver: run.driver.clone()?,
@@ -361,7 +383,7 @@ impl Thread {
             return None;
         }
         let run_id = run.wire_id();
-        let attempt = join("run-attempt:run", &[&run_id]) + ":attempt:1";
+        let (attempt, root_node) = attempt_ids(&run_id, run.steering_restarts + 1);
         let driver = self
             .provider
             .thread
@@ -369,7 +391,7 @@ impl Thread {
             .map(|thread| thread.driver.clone())
             .unwrap_or_else(|| self.instance_id());
         Some(RunIds {
-            root_node: join("node:run", &[&run_id]) + ":root",
+            root_node,
             provider_thread: self.waiting_thread_id(run)?,
             provider_turn: String::new(),
             driver,
@@ -379,19 +401,57 @@ impl Thread {
     }
 
     /// The ids of `run`'s provider records, when it ran a provider turn.
+    /// A steering restart starts `run_id` over at `at` as its next attempt
+    /// with `message_id`: the attempt that ran, and its provider turn, are
+    /// superseded ([`Event::RunRestarted`](crate::Event::RunRestarted)).
+    pub(crate) fn restart_run(&mut self, run_id: uuid::Uuid, message_id: &str, at: u64) {
+        let Some(run) = self.runs.iter_mut().find(|run| run.id == run_id) else {
+            return;
+        };
+        run.steering_restarts += 1;
+        run.user_message_id = Some(message_id.to_owned());
+        run.status = "running".into();
+        run.finished_at = None;
+        run.error = None;
+        let provider = &mut self.provider;
+        if let Some(record) = provider.runs.remove(&run_id) {
+            let terminal = provider.terminals.remove(&run_id);
+            provider.superseded.entry(run_id).or_default().push(
+                crate::provider_state::SupersededAttempt {
+                    record,
+                    terminal,
+                    at,
+                },
+            );
+        }
+    }
+
     pub(crate) fn provider_run_ids(&self, run: &Run) -> Option<RunIds> {
         let record = self.provider.runs.get(&run.id)?;
+        self.attempt_run_ids(
+            run,
+            record,
+            self.provider.terminals.get(&run.id),
+            run.steering_restarts + 1,
+        )
+    }
+
+    /// The ids of the records of `run`'s attempt `ordinal`, whose provider
+    /// turn is `record`.
+    pub(crate) fn attempt_run_ids(
+        &self,
+        run: &Run,
+        record: &RunRecord,
+        terminal: Option<&Terminal>,
+        ordinal: u32,
+    ) -> Option<RunIds> {
         let run_id = run.wire_id();
-        let attempt = join("run-attempt:run", &[&run_id]) + ":attempt:1";
+        let (attempt, root_node) = attempt_ids(&run_id, ordinal);
         // A run that failed before the provider started a turn uses
         // `failed:<attempt>` as its provider turn id (`RunExecutionService`).
         let failed_before_start = !record.turn_started
             && record.native_turn_id.is_none()
-            && self
-                .provider
-                .terminals
-                .get(&run.id)
-                .is_some_and(|terminal| terminal.status == TurnStatus::Failed);
+            && terminal.is_some_and(|terminal| terminal.status == TurnStatus::Failed);
         let native_turn = record.native_turn_id.clone().unwrap_or_else(|| {
             if failed_before_start {
                 format!("failed:{attempt}")
@@ -400,7 +460,7 @@ impl Thread {
             }
         });
         Some(RunIds {
-            root_node: join("node:run", &[&run_id]) + ":root",
+            root_node,
             provider_thread: self
                 .provider_thread_id_for(run)
                 .or_else(|| self.provider_thread_id())
@@ -436,6 +496,56 @@ impl Thread {
         let mut other_turns: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for (index, run) in self.runs.iter().enumerate() {
+            // The attempts a steering restart replaced, each with its turn.
+            let superseded = self.provider.superseded.get(&run.id);
+            for (k, attempt) in superseded.into_iter().flatten().enumerate() {
+                let Some(ids) = self.attempt_run_ids(
+                    run,
+                    &attempt.record,
+                    attempt.terminal.as_ref(),
+                    k as u32 + 1,
+                ) else {
+                    continue;
+                };
+                let turn_ordinal = if active_thread
+                    .as_deref()
+                    .is_none_or(|id| id == ids.provider_thread)
+                {
+                    turn_ordinal += 1;
+                    first_ordinal.get_or_insert(index + 1);
+                    last_ordinal = index + 1;
+                    turn_ordinal
+                } else {
+                    let count = other_turns.entry(ids.provider_thread.clone()).or_default();
+                    *count += 1;
+                    *count
+                };
+                let (attempts, nodes) = (out.attempts.len(), out.nodes.len());
+                self.provider_run(
+                    &mut out,
+                    index,
+                    run,
+                    &attempt.record,
+                    attempt.terminal.as_ref(),
+                    &ids,
+                    &instance,
+                    turn_ordinal,
+                );
+                // Superseded when the restart came, its root node
+                // interrupted then (`interrupt_restart`).
+                let at = json!(iso(attempt.at));
+                if let Some(row) = out.attempts.get_mut(attempts) {
+                    row["status"] = json!("superseded");
+                    row["completedAt"] = at.clone();
+                    if k > 0 {
+                        row["reason"] = json!("steering_restart");
+                    }
+                }
+                if let Some(node) = out.nodes.get_mut(nodes) {
+                    node["status"] = json!("interrupted");
+                    node["completedAt"] = at;
+                }
+            }
             let (Some(record), Some(ids)) =
                 (self.provider.runs.get(&run.id), self.provider_run_ids(run))
             else {
@@ -486,15 +596,16 @@ impl Thread {
             if run.status != "queued" {
                 last_ordinal = last_ordinal.max(index + 1);
             }
+            let ordinal = attempt_ordinal(&ids.attempt);
             out.attempts.push(json!({
                 "id": ids.attempt,
                 "runId": ids.run,
-                "attemptOrdinal": 1,
+                "attemptOrdinal": ordinal,
                 "rootNodeId": ids.root_node,
                 "providerInstanceId": instance,
                 "providerThreadId": ids.provider_thread,
                 "providerTurnId": null,
-                "reason": "initial",
+                "reason": if ordinal > 1 { "steering_restart" } else { "initial" },
                 "status": "pending",
                 "startedAt": null,
                 "completedAt": null
@@ -1279,15 +1390,16 @@ impl Thread {
         } else {
             json!(started)
         };
+        let ordinal = attempt_ordinal(&ids.attempt);
         out.attempts.push(json!({
             "id": ids.attempt,
             "runId": ids.run,
-            "attemptOrdinal": 1,
+            "attemptOrdinal": ordinal,
             "rootNodeId": ids.root_node,
             "providerInstanceId": instance,
             "providerThreadId": ids.provider_thread,
             "providerTurnId": null,
-            "reason": "initial",
+            "reason": if ordinal > 1 { "steering_restart" } else { "initial" },
             "status": status,
             "startedAt": started_value,
             "completedAt": completed
@@ -2487,6 +2599,7 @@ mod tests {
             fresh_context: false,
             ordinal: None,
             cancelled_in_queue: false,
+            steering_restarts: 0,
         };
         let mut live = thread(run.clone());
         for event in [
@@ -2949,6 +3062,123 @@ mod tests {
         assert_eq!(projection["runs"][0]["status"], "completed");
         assert!(projection["runs"][0]["checkpointId"].is_string());
         assert_eq!(root(&projection)["status"], "completed");
+    }
+
+    #[test]
+    fn a_steering_restart_runs_the_run_again_as_its_next_attempt() {
+        let run_id = Uuid::new_v4();
+        let mut live = running_codex_thread(run_id);
+        live.runs[0].driver = Some("codex".into());
+        live.provider
+            .apply(run_id, &terminal(TurnStatus::Interrupted), 3);
+        live.restart_run(run_id, "message:restart", 4);
+        // Sent again: pending records for attempt 2 until its turn starts.
+        let pending = live.projection();
+        let run = &pending["runs"][0];
+        assert!(run["activeAttemptId"]
+            .as_str()
+            .unwrap()
+            .ends_with(":attempt:2"));
+        assert!(run["rootNodeId"]
+            .as_str()
+            .unwrap()
+            .ends_with(":attempt:2:root"));
+        assert_eq!(run["userMessageId"], "message:restart");
+        live.provider.apply(
+            run_id,
+            &ProviderEvent::ProviderTurn {
+                native_turn_id: Some("turn2".into()),
+                native_turn_ref: None,
+                conversation_head: None,
+                status: TurnStatus::Running,
+                model: None,
+                session: None,
+                history_injected: false,
+            },
+            5,
+        );
+        live.provider
+            .apply(run_id, &terminal(TurnStatus::Completed), 6);
+        live.runs[0].status = "completed".into();
+        live.runs[0].finished_at = Some(7);
+        let projection = live.projection();
+        assert_eq!(projection["runs"].as_array().unwrap().len(), 1);
+        let attempts: Vec<_> = projection["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["attemptOrdinal"].clone(),
+                    a["reason"].clone(),
+                    a["status"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            attempts,
+            [
+                (json!(1), json!("initial"), json!("superseded")),
+                (json!(2), json!("steering_restart"), json!("completed")),
+            ]
+        );
+        assert_eq!(
+            projection["attempts"][0]["completedAt"],
+            crate::thread_projection::iso(4)
+        );
+        let roots: Vec<_> = projection["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["kind"] == "root_turn")
+            .map(|node| {
+                (
+                    node["id"]
+                        .as_str()
+                        .unwrap()
+                        .rsplit_once(":run:")
+                        .unwrap()
+                        .1
+                        .split_once(':')
+                        .unwrap()
+                        .1
+                        .to_owned(),
+                    node["status"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            roots,
+            [
+                ("root".to_owned(), json!("interrupted")),
+                ("attempt:2:root".to_owned(), json!("completed")),
+            ]
+        );
+        let turns: Vec<_> = projection["providerTurns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                (
+                    t["ordinal"].clone(),
+                    t["status"].clone(),
+                    t["runAttemptId"].as_str().unwrap().ends_with(":attempt:2"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            turns,
+            [
+                (json!(1), json!("interrupted"), false),
+                (json!(2), json!("completed"), true)
+            ]
+        );
+        let run = &projection["runs"][0];
+        assert_eq!(run["status"], "completed");
+        assert!(run["activeAttemptId"]
+            .as_str()
+            .unwrap()
+            .ends_with(":attempt:2"));
     }
 
     #[test]

@@ -76,6 +76,18 @@ pub struct ProviderState {
     /// Why each of those runs was asked to end: the stop's reason, or
     /// "Stopped by user" (`USER_STOP_REASON`).
     pub interrupt_reasons: HashMap<Uuid, String>,
+    /// The attempts a steering restart replaced, by run, oldest first: each
+    /// one's provider turn record, how it ended and when it was replaced.
+    pub superseded: HashMap<Uuid, Vec<SupersededAttempt>>,
+}
+
+/// A run's attempt a steering restart replaced (`superseded`), with its
+/// provider turn.
+#[derive(Clone, Debug)]
+pub struct SupersededAttempt {
+    pub record: RunRecord,
+    pub terminal: Option<Terminal>,
+    pub at: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
