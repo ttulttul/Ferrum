@@ -1014,6 +1014,29 @@ impl Thread {
         self.projection_with(true)
     }
 
+    /// The thread's runs as its projection holds them, without reading a
+    /// stored thread's whole projection (`Stored::runs`).
+    pub(crate) fn run_records(&self) -> Vec<Value> {
+        match &self.stored {
+            Some(stored) => {
+                let runs = stored.runs().as_array().cloned().unwrap_or_default();
+                #[cfg(debug_assertions)]
+                if !stored.needs_read() {
+                    debug_assert_eq!(
+                        Some(&runs),
+                        self.projection()["runs"].as_array(),
+                        "a stored thread's runs are its projection's"
+                    );
+                }
+                runs
+            }
+            None => self.projection()["runs"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
     /// The projection a snapshot gives (`getThreadSnapshotWindow`): a
     /// delegated wake's or a provider continuation's message shows only
     /// while its run is live, since no turn item names it (its card is a

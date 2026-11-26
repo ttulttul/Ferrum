@@ -173,6 +173,7 @@ impl Stored {
         if lazy.whole.get().is_some() {
             return Ok(());
         }
+        crate::projection_eviction::note_read(&lazy.thread_id);
         let started = std::time::Instant::now();
         let projection = lazy.source.read(&lazy.thread_id)?.ok_or_else(|| {
             anyhow::anyhow!(
@@ -223,6 +224,18 @@ impl Stored {
         match &mut self.0 {
             Repr::Whole(projection) => Arc::make_mut(projection),
             Repr::Lazy(_) => unreachable!("made whole above"),
+        }
+    }
+
+    /// The thread's runs, without reading the whole projection: the slim
+    /// records hold every run, as the whole projection does.
+    pub(crate) fn runs(&self) -> &Value {
+        match &self.0 {
+            Repr::Lazy(lazy) => match lazy.whole.get() {
+                Some(whole) => &whole["runs"],
+                None => &lazy.slim.projection["runs"],
+            },
+            Repr::Whole(whole) => &whole["runs"],
         }
     }
 
