@@ -585,6 +585,38 @@ impl Store {
             }
         }
         self.apply_at(&record.event, record.at);
+        // Every event the reference writes on a thread moves its updatedAt to
+        // when it was committed (`applyToProjection`): the records that
+        // always change the thread's projection. A patch sets the row's
+        // updatedAt itself when it changes it; provider output is not in the
+        // projection; a command receipt, a detached session or a restart's
+        // reconciliation may write no event at all.
+        if matches!(
+            record.event,
+            Event::MessageAdded { .. }
+                | Event::MessageEdited { .. }
+                | Event::RunReordered { .. }
+                | Event::RunStarted(_)
+                | Event::RunUpdated(_)
+                | Event::RunQueued { .. }
+                | Event::RunProvider { .. }
+                | Event::RunFinished { .. }
+                | Event::CheckpointCaptured { .. }
+                | Event::LinkRequestRecorded { .. }
+                | Event::ContextHandoffUpdated { .. }
+        ) {
+            if let Some(thread) = record
+                .event
+                .thread_id()
+                .and_then(|id| self.threads.get_mut(id))
+            {
+                if !thread.row.is_object() {
+                    thread.row = serde_json::json!({});
+                }
+                thread.row["updatedAt"] =
+                    serde_json::json!(crate::thread_projection::iso(record.at));
+            }
+        }
         // Every commit to a thread moves its revision on (live subscribers
         // follow it, `thread_events::token`), except provider output, which
         // is not part of the projection and which they skip. A plane rebuilt
