@@ -247,6 +247,7 @@ pub(super) async fn steer_with<H: CommandHost>(
         // with `turnCompleted` and its EffectWorker dispatches it again.
         tracing::info!(run = %target.wire_id, "the steered turn had ended; sending its message again");
         let untaken = Event::RunProvider {
+            visible_text: None,
             run_id: target.run,
             thread_id: thread_id.to_owned(),
             event: crate::workspace::ProviderEvent::SteerUpdated {

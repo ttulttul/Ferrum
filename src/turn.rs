@@ -5,6 +5,7 @@
 //! machine only through [`Workspace::start_tracked_turn`], and its host
 //! starts it with [`crate::runtime::Runtime::spawn`], so it builds for every
 //! target.
+mod assistant_streaming;
 use crate::workspace::provider::ProviderEvent;
 use crate::workspace::provider::TurnStatus;
 use crate::{
@@ -27,6 +28,7 @@ pub(crate) trait TurnHost:
     std::ops::Deref<Target = ControlState> + crate::workspace::MaybeSendSync
 {
     fn workspace(&self) -> &dyn Workspace;
+    fn turn_settings(&self) -> anyhow::Result<Value>;
     /// A wait on the host's runtime (streamed text is held this long).
     fn turn_wait(&self, duration: Duration) -> crate::runtime::Wait;
     /// Running runs by id; resolving a sender stops its run.
@@ -373,7 +375,12 @@ enum Recorded {
     End(TurnExit),
 }
 
-fn recorded(run: &Run, event: TurnEvent, position: Option<StreamPosition>) -> Recorded {
+fn recorded(
+    run: &Run,
+    event: TurnEvent,
+    position: Option<StreamPosition>,
+    visible_text: Option<String>,
+) -> Recorded {
     let output = |stream: &str, text: String| {
         Recorded::Event(Box::new(Event::RunOutput {
             run_id: run.id,
@@ -402,6 +409,7 @@ fn recorded(run: &Run, event: TurnEvent, position: Option<StreamPosition>) -> Re
         }
         TurnEvent::Stderr(text) => output("stderr", text),
         TurnEvent::Provider(event) => Recorded::Event(Box::new(Event::RunProvider {
+            visible_text,
             run_id: run.id,
             thread_id: run.thread_id.clone(),
             event,
@@ -517,6 +525,7 @@ impl StreamedText {
             }
             let last = index + 1 == count;
             let event = Event::RunProvider {
+                visible_text: None,
                 run_id: run.id,
                 thread_id: run.thread_id.clone(),
                 event: ProviderEvent::TurnItemDelta {
@@ -820,6 +829,8 @@ async fn record<H: TurnHost>(
     };
     let mut exit = None;
     let mut text = StreamedText::default();
+    let mut assistant = assistant_streaming::AssistantText::for_run(host, run).await?;
+    let mut idle_timer: Option<(u64, crate::runtime::Wait)> = None;
     // The handoffs' history went to the native thread (Codex), not inline.
     let mut injected = false;
     let mut observed_native_thread: Option<String> = pending_handoff
@@ -833,35 +844,56 @@ async fn record<H: TurnHost>(
         ..Default::default()
     };
     loop {
-        use futures_util::future::{select, Either};
+        use futures_util::FutureExt;
         enum Woke {
             Next(Option<Box<TurnItem>>),
             Text,
             Snapshots,
+            Assistant(u64),
         }
-        let woke = {
-            let receive = std::pin::pin!(turn.recv());
-            match (text.flush_at.as_mut(), snapshots.flush_at.as_mut()) {
-                (None, None) => Woke::Next(receive.await.map(Box::new)),
-                (Some(flush), None) => match select(receive, flush).await {
-                    Either::Left((next, _)) => Woke::Next(next.map(Box::new)),
-                    Either::Right(_) => Woke::Text,
-                },
-                (None, Some(flush)) => match select(receive, flush).await {
-                    Either::Left((next, _)) => Woke::Next(next.map(Box::new)),
-                    Either::Right(_) => Woke::Snapshots,
-                },
-                (Some(text_flush), Some(flush)) => {
-                    match select(receive, select(flush, text_flush)).await {
-                        Either::Left((next, _)) => Woke::Next(next.map(Box::new)),
-                        Either::Right((Either::Left(_), _)) => Woke::Snapshots,
-                        Either::Right((Either::Right(_), _)) => Woke::Text,
-                    }
-                }
+        async fn wait(timer: Option<&mut crate::runtime::Wait>) {
+            match timer {
+                Some(timer) => timer.await,
+                None => std::future::pending().await,
             }
+        }
+        let deadline = assistant.deadline().filter(|_| !snapshots.terminal_seen);
+        match deadline {
+            Some(at) if idle_timer.as_ref().is_none_or(|(armed, _)| at < *armed) => {
+                idle_timer = Some((
+                    at,
+                    host.turn_wait(Duration::from_millis(at.saturating_sub(crate::now()))),
+                ));
+            }
+            None => idle_timer = None,
+            _ => {}
+        }
+        let woke = futures_util::select_biased! {
+            next = turn.recv().fuse() => Woke::Next(next.map(Box::new)),
+            () = wait(snapshots.flush_at.as_mut()).fuse() => Woke::Snapshots,
+            () = wait(text.flush_at.as_mut()).fuse() => Woke::Text,
+            () = wait(idle_timer.as_mut().map(|(_, timer)| timer)).fuse() => Woke::Assistant(idle_timer.take().unwrap().0),
         };
         let next = match woke {
             Woke::Next(next) => next.map(|item| *item),
+            Woke::Assistant(at) => {
+                let due = assistant.due(at.max(crate::now()));
+                if due.is_empty() {
+                    continue;
+                }
+                snapshots.flush(host, run).await;
+                for item in due {
+                    host.commit(Event::RunProvider {
+                        visible_text: item.fields["text"].as_str().map(str::to_owned),
+                        thread_id: run.thread_id.clone(),
+                        run_id: run.id,
+                        position: None,
+                        event: ProviderEvent::TurnItem { item },
+                    })
+                    .await?;
+                }
+                continue;
+            }
             Woke::Snapshots => {
                 snapshots.tick(host, run).await;
                 continue;
@@ -903,6 +935,11 @@ async fn record<H: TurnHost>(
             done(position);
             continue;
         }
+        if let TurnEvent::Provider(ProviderEvent::TurnItemDelta { item_id, delta, .. }) = &event {
+            if let Some(item) = assistant.append(item_id, delta) {
+                event = TurnEvent::Provider(ProviderEvent::TurnItem { item });
+            }
+        }
         let Some(event) = text.take(host, event, position) else {
             continue;
         };
@@ -916,6 +953,12 @@ async fn record<H: TurnHost>(
             )
             .await;
         }
+        let visible_text = match &event {
+            TurnEvent::Provider(ProviderEvent::TurnItem { item }) => {
+                assistant.filter(item, crate::now())
+            }
+            _ => None,
+        };
         let snapshot = snapshots.is_snapshot(&event);
         // While the worker is busy, an event that sends nothing live takes
         // no part in the batch: it is recorded at once.
@@ -946,6 +989,7 @@ async fn record<H: TurnHost>(
             if let TurnEvent::Provider(provider) = &event {
                 if !matches!(provider, ProviderEvent::TurnTerminal { .. }) {
                     let candidate = Event::RunProvider {
+                        visible_text: None,
                         run_id: run.id,
                         thread_id: run.thread_id.clone(),
                         event: provider.clone(),
@@ -1031,7 +1075,7 @@ async fn record<H: TurnHost>(
         ) {
             snapshots.terminal_seen = true;
         }
-        match recorded(run, event, position) {
+        match recorded(run, event, position, visible_text) {
             Recorded::Event(event) if snapshot => {
                 snapshots.push(host, run, *event, position).await;
             }
@@ -1111,6 +1155,7 @@ async fn record<H: TurnHost>(
                         closing: Vec::new(),
                     },
                     position: None,
+                    visible_text: None,
                 })
                 .await;
         }
@@ -1214,6 +1259,7 @@ mod snapshot_tests {
 
     fn snapshot(id: &str, kind: &str, status: &str) -> Event {
         Event::RunProvider {
+            visible_text: None,
             run_id: Uuid::nil(),
             thread_id: "t".into(),
             event: ProviderEvent::TurnItem {
