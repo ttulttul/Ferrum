@@ -2254,12 +2254,19 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
                 return Err(invalid_arguments());
             }
             let mut selection = selection.clone();
+            // The instance is the selection's own, else its (legacy) provider's; one that
+            // names neither does not decode (`ModelSelection`).
             if selection["instanceId"].is_null() {
                 selection["instanceId"] = selection
                     .get("provider")
                     .cloned()
                     .filter(Value::is_string)
-                    .unwrap_or(json!("codex"));
+                    .ok_or_else(|| {
+                        Refusal::Rpc(
+                            -32602,
+                            "Invalid parameters for tool 't3_thread_launch': Expected string\n  at [\"modelSelection\"][\"instanceId\"]".into(),
+                        )
+                    })?;
             }
             selection.as_object_mut().map(|s| s.remove("provider"));
             selection
