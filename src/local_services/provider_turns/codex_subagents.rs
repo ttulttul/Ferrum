@@ -25,6 +25,8 @@ struct Subagent {
     reasoning_effort: Option<String>,
     status: &'static str,
     result: Option<String>,
+    /// The line the child's running work shows on its parent (`reportSubagentProgress`).
+    progress: Option<String>,
 }
 
 /// The turn's subagents, by native child thread id.
@@ -92,6 +94,7 @@ impl Subagents {
                         reasoning_effort: text(&call["reasoningEffort"]),
                         status: "running",
                         result: None,
+                        progress: None,
                     },
                 );
                 changed.push(native.to_owned());
@@ -138,6 +141,7 @@ impl Subagents {
                     reasoning_effort: None,
                     status: "running",
                     result: None,
+                    progress: None,
                 };
                 let item = item(native, &subagent);
                 self.by_thread.insert(native.to_owned(), subagent);
@@ -158,6 +162,61 @@ impl Subagents {
             }
             _ => (None, None),
         }
+    }
+
+    /// Whether `native` is the thread of one of the turn's subagents.
+    pub(crate) fn follows(&self, native: &str) -> bool {
+        self.by_thread.contains_key(native)
+    }
+
+    /// The model the child runs, when Codex reported it.
+    pub(crate) fn model(&self, native: &str) -> Option<String> {
+        self.by_thread.get(native)?.model.clone()
+    }
+
+    /// A child's turn started: its subagent runs (`emitSubagentProviderTurnStarted`).
+    pub(crate) fn child_turn_started(&mut self, native: &str) -> Option<ProviderItem> {
+        let subagent = self.by_thread.get_mut(native)?;
+        if !active(subagent.status) {
+            return None;
+        }
+        subagent.status = "running";
+        Some(item(native, subagent))
+    }
+
+    /// A line of the child's running work: its subagent's progress while it runs.
+    pub(crate) fn child_progress(&mut self, native: &str, line: &str) -> Option<ProviderItem> {
+        let subagent = self.by_thread.get_mut(native)?;
+        let line = line.trim();
+        if line.is_empty() || !active(subagent.status) || subagent.progress.as_deref() == Some(line)
+        {
+            return None;
+        }
+        subagent.progress = Some(line.to_owned());
+        Some(item(native, subagent))
+    }
+
+    /// A child's final answer is its subagent's result.
+    pub(crate) fn child_answered(&mut self, native: &str, text: &str) -> Option<ProviderItem> {
+        let subagent = self.by_thread.get_mut(native)?;
+        if text.is_empty() || subagent.result.as_deref() == Some(text) {
+            return None;
+        }
+        subagent.result = Some(text.to_owned());
+        Some(item(native, subagent))
+    }
+
+    /// A child's turn ended: its subagent ends as the turn did.
+    pub(crate) fn child_turn_ended(&mut self, native: &str, status: &str) -> Option<ProviderItem> {
+        let subagent = self.by_thread.get_mut(native)?;
+        if active(subagent.status) {
+            subagent.status = match status {
+                "completed" => "completed",
+                "interrupted" => "interrupted",
+                _ => "failed",
+            };
+        }
+        Some(item(native, subagent))
     }
 
     /// The child's model and effort, once Codex reported them (`updateSubagentSelection`).
@@ -189,6 +248,9 @@ fn item(native: &str, subagent: &Subagent) -> ProviderItem {
         .with("model", json!(subagent.model));
     if let Some(effort) = &subagent.reasoning_effort {
         item = item.with("reasoningEffort", effort.as_str());
+    }
+    if let Some(progress) = &subagent.progress {
+        item = item.with("progress", progress.as_str());
     }
     item
 }
@@ -255,5 +317,32 @@ mod tests {
         );
         let done = json!({"kind": "completed", "agentThreadId": "c9"});
         assert_eq!(subagents.activity(&done).0.unwrap().status, "completed");
+    }
+
+    #[test]
+    fn a_childs_turn_runs_reports_progress_answers_and_ends_its_subagent() {
+        let mut subagents = Subagents::default();
+        subagents.activity(
+            &json!({"id": "call_9", "kind": "started", "agentThreadId": "c9",
+            "agentPath": "/root/read_line"}),
+        );
+        assert!(subagents.follows("c9") && !subagents.follows("other"));
+        assert_eq!(
+            subagents.child_turn_started("c9").unwrap().status,
+            "running"
+        );
+        let progress = subagents.child_progress("c9", "head -1 README.md").unwrap();
+        assert_eq!(progress.fields["progress"], "head -1 README.md");
+        assert!(subagents
+            .child_progress("c9", "head -1 README.md")
+            .is_none());
+        assert_eq!(
+            subagents.child_answered("c9", "# Title").unwrap().fields["result"],
+            "# Title"
+        );
+        let ended = subagents.child_turn_ended("c9", "completed").unwrap();
+        assert_eq!(ended.status, "completed");
+        // A settled subagent reports no more progress.
+        assert!(subagents.child_progress("c9", "ls").is_none());
     }
 }

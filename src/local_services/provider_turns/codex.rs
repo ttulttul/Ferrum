@@ -1055,6 +1055,84 @@ impl Session {
             .await;
     }
 
+    /// A subagent's own turn, as the reference's adapter follows it on the child's thread:
+    /// its start and end (a `subagent_turn` item) and its items, each tagged with the child's
+    /// native thread so they go to the child thread, not the parent's.
+    fn handle_child(&mut self, child: &str, method: &str, params: &Value) {
+        let tag = |mut item: ProviderItem, turn: &str| {
+            item.fields.insert("subagentThread".into(), json!(child));
+            item.fields.insert("nativeTurnId".into(), json!(turn));
+            item
+        };
+        match method {
+            "turn/started" | "turn/completed" => {
+                let turn = &params["turn"];
+                let Some(turn_id) = turn["id"].as_str() else {
+                    return;
+                };
+                let started = method == "turn/started";
+                let status = if started {
+                    "running"
+                } else {
+                    match turn["status"].as_str() {
+                        Some("completed") => "completed",
+                        Some("interrupted") => "interrupted",
+                        _ => "failed",
+                    }
+                };
+                let mut marker =
+                    ProviderItem::new(format!("{turn_id}:turn"), "subagent_turn", status);
+                if let Some(model) = self.subagents.model(child) {
+                    marker = marker.with("model", model);
+                }
+                self.sink.send(ProviderEvent::TurnItem {
+                    item: tag(marker, turn_id),
+                });
+                let parent = if started {
+                    self.subagents.child_turn_started(child)
+                } else {
+                    self.subagents.child_turn_ended(child, status)
+                };
+                if let Some(item) = parent {
+                    self.sink.send(ProviderEvent::TurnItem { item });
+                }
+            }
+            "item/started" | "item/completed" => {
+                let completed = method == "item/completed";
+                let native = &params["item"];
+                let turn = params["turnId"].as_str().unwrap_or_default();
+                if let Some(mut item) = map_item(native, completed) {
+                    // A child's command is no background work of the parent's.
+                    item.fields.remove("completionWake");
+                    self.sink.send(ProviderEvent::TurnItem {
+                        item: tag(item, turn),
+                    });
+                }
+                let progress = match native["type"].as_str() {
+                    Some("commandExecution") => native["command"].as_str(),
+                    Some("dynamicToolCall") => native["title"].as_str().or(native["tool"].as_str()),
+                    _ => None,
+                };
+                if let Some(item) =
+                    progress.and_then(|line| self.subagents.child_progress(child, line))
+                {
+                    self.sink.send(ProviderEvent::TurnItem { item });
+                }
+                let final_answer = matches!(
+                    native["phase"].as_str(),
+                    Some("final_answer" | "finalAnswer")
+                );
+                if completed && native["type"] == "agentMessage" && final_answer {
+                    let text = native["text"].as_str().unwrap_or_default();
+                    if let Some(item) = self.subagents.child_answered(child, text) {
+                        self.sink.send(ProviderEvent::TurnItem { item });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Asks Codex for a child's model without waiting on it: `thread/read`, or once that names
     /// none, `thread/resume` (`registerSubagentThread`).
     async fn read_child(&mut self, native: String, resume: bool) {
@@ -1168,6 +1246,15 @@ impl Session {
                 };
                 let _ = self.cli.write(&response).await;
             }
+            return;
+        }
+        // What Codex sends about a subagent's own thread is the child's.
+        if let Some(child) = params["threadId"]
+            .as_str()
+            .filter(|thread| self.subagents.follows(thread))
+        {
+            let child = child.to_owned();
+            self.handle_child(&child, method, params);
             return;
         }
         // Only our turn's notifications; the app-server runs only our thread,

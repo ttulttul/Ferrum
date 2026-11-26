@@ -48,6 +48,34 @@ struct Routes {
     /// Requests waiting for their reply: the turn that sent them, and the
     /// method.
     replies: HashMap<u64, (u64, String)>,
+    /// The native threads of the subagents a turn's agent started, and that turn: what Codex
+    /// sends about a child reaches its parent's turn.
+    children: HashMap<String, u64>,
+}
+
+/// The native child threads a frame starts: a `subAgentActivity` that starts, or a
+/// `spawnAgent` call's receivers.
+fn started_children(message: &Value) -> Vec<String> {
+    if !matches!(
+        message["method"].as_str(),
+        Some("item/started" | "item/completed")
+    ) {
+        return Vec::new();
+    }
+    let item = &message["params"]["item"];
+    match item["type"].as_str() {
+        Some("subAgentActivity") if item["kind"] == "started" => item["agentThreadId"]
+            .as_str()
+            .map(|id| vec![id.to_owned()])
+            .unwrap_or_default(),
+        Some("collabAgentToolCall") if item["tool"] == "spawnAgent" => item["receiverThreadIds"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// `makeCodexProtocolThreadRouter`: the T3 thread each frame belongs to, for
@@ -316,12 +344,20 @@ impl AppServer {
             .or(params["conversationId"].as_str());
         match thread {
             Some(thread) => {
-                if let Some((tx, _)) = routes
+                let session = routes
                     .sessions
-                    .values()
-                    .find(|(_, bound)| bound.as_deref() == Some(thread))
-                {
-                    let _ = tx.send(line);
+                    .iter()
+                    .find(|(_, (_, bound))| bound.as_deref() == Some(thread))
+                    .map(|(session, _)| *session)
+                    .or_else(|| routes.children.get(thread).copied());
+                if let Some(session) = session {
+                    // A child it starts is followed from the next frame on.
+                    for child in started_children(&message) {
+                        routes.children.insert(child, session);
+                    }
+                    if let Some((tx, _)) = routes.sessions.get(&session) {
+                        let _ = tx.send(line);
+                    }
                 }
             }
             // Account-wide news (rate limits) goes to every turn.
@@ -339,6 +375,7 @@ impl AppServer {
         let mut routes = self.lock_routes();
         routes.sessions.clear();
         routes.replies.clear();
+        routes.children.clear();
         drop(routes);
         for (_, timer) in self
             .timers
@@ -539,6 +576,9 @@ impl Drop for Conn {
                 .replies
                 .retain(|_, (session, _)| *session != self.session);
             let thread = routes.sessions.remove(&self.session).and_then(|(_, t)| t);
+            routes
+                .children
+                .retain(|_, session| *session != self.session);
             let idle = routes.sessions.is_empty();
             drop(routes);
             if idle && self.server.exited.borrow().is_none() {
@@ -588,5 +628,26 @@ pub(crate) async fn shutdown(registry: &Registry, grace: Duration) {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         server.kill();
+    }
+}
+
+#[cfg(test)]
+mod child_tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_that_starts_a_subagent_names_its_child_thread() {
+        let activity = json!({"method": "item/started", "params": {"item": {
+            "type": "subAgentActivity", "kind": "started", "agentThreadId": "c1"}}});
+        assert_eq!(started_children(&activity), vec!["c1".to_owned()]);
+        let spawn = json!({"method": "item/completed", "params": {"item": {
+            "type": "collabAgentToolCall", "tool": "spawnAgent", "receiverThreadIds": ["c2", "c3"]}}});
+        assert_eq!(
+            started_children(&spawn),
+            vec!["c2".to_owned(), "c3".to_owned()]
+        );
+        let ended = json!({"method": "item/started", "params": {"item": {
+            "type": "subAgentActivity", "kind": "completed", "agentThreadId": "c1"}}});
+        assert!(started_children(&ended).is_empty());
     }
 }
