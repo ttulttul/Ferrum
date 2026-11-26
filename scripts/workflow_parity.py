@@ -39,6 +39,10 @@ const fixture = T3.workflow(
       yield* T3.title(`Fixture ${payload.mode}`);
       const counted = yield* T3.step("count", { returns: Schema.Number }, Effect.succeed(2));
       if (payload.mode === "ask") {
+        yield* T3.subject({
+          projectId: "project:fixture", tracker: "github", host: "github.com",
+          scope: "fixture/example", key: "42", url: "https://example.invalid/tasks/42",
+        });
         const answer = yield* T3.ask("approve", { title: "Ship it?", choices: ["yes", "no"] });
         return Option.getOrNull(answer);
       }

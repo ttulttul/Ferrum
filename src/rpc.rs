@@ -453,6 +453,12 @@ async fn run_call(
         crate::workflows::stream(state, method == "workflows.counts", send).await;
         return Reply::Success(Value::Null);
     }
+    if method == "workflows.about" {
+        return match crate::workflows::about(state, params) {
+            Ok(result) => Reply::Success(result),
+            Err(error) => Reply::Failure(json!({"_tag":"Fail", "error":error})),
+        };
+    }
     if method == "workflows.get" {
         return match crate::workflows::get_run(state, params["runId"].as_str().unwrap_or_default())
         {

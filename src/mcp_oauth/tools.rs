@@ -821,7 +821,7 @@ fn thread_pull_requests(links: &Value) -> (Vec<Value>, usize, usize) {
 
 /// `normalizeThreadPullRequestKey`'s host: the link's own authority, taken from
 /// its URL when that URL names the same repository and number, lowercased.
-fn pull_request_host(link: &Value) -> String {
+pub(crate) fn pull_request_host(link: &Value) -> String {
     let host = link["host"].as_str().unwrap_or_default();
     let authority = link["authority"].as_str().or_else(|| {
         let url = link["url"].as_str()?;

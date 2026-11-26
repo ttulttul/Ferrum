@@ -21,6 +21,8 @@ pub use thread_credentials::ThreadScope;
 pub(crate) use tools::format_device_error;
 #[cfg(feature = "native")]
 pub(crate) use tools::is_served_tool;
+#[cfg(feature = "native")]
+pub(crate) use tools::pull_request_host;
 pub(crate) use tools::unserved_tool_names;
 pub(crate) use tools::{answer_matches, card_command, resume_remote_followers};
 mod transport;
