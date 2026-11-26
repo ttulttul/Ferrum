@@ -115,6 +115,30 @@ pub(crate) async fn counting_reads<F: std::future::Future>(call: F) -> (F::Outpu
 /// reads are released as soon as it returns, and the server warns.
 pub(crate) const CALL_READS_KEPT: usize = 64;
 
+/// Runs `call` (an MCP tool call, an RPC or an HTTP request), and if it read
+/// more than [`CALL_READS_KEPT`] threads whole, releases them as it returns
+/// and warns: no single request can hold the database in memory until the
+/// idle sweep.
+pub(crate) async fn bounded_reads<F: std::future::Future>(
+    control: &crate::control_state::ControlState,
+    name: &str,
+    call: F,
+) -> F::Output {
+    let (output, reads) = counting_reads(call).await;
+    if reads.len() > CALL_READS_KEPT {
+        let released = release_now(control, &reads).await;
+        #[cfg(feature = "native")]
+        return_freed_memory();
+        tracing::warn!(
+            call = name,
+            read = reads.len(),
+            released = released.read + released.planned,
+            "a request read many threads whole; released them as it returned"
+        );
+    }
+    output
+}
+
 /// Releases now each of `thread_ids` that may be released at all (no
 /// subscriber, no run going; `sweep`), whatever its idle time.
 pub(crate) async fn release_now(
