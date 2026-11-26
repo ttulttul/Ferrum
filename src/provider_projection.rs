@@ -2038,6 +2038,52 @@ impl Thread {
     ) {
         let driver = ids.driver.as_str();
         let instance = self.instance_id();
+        // A Claude task runs on no provider thread of its own; its child thread is named by
+        // the parent's provider thread and the task (`claudeSubagentIds`).
+        if let Some(task) = row
+            .remove("claudeTaskId")
+            .and_then(|v| v.as_str().map(str::to_owned))
+        {
+            row.remove("nodeNativeId");
+            let model = row.remove("model").unwrap_or(Value::Null);
+            let child = crate::native_subagents::driver_child_thread_id(
+                driver,
+                &format!("{}:{task}", ids.provider_thread),
+            );
+            row.insert("childThreadId".into(), json!(child));
+            row.insert("subagentId".into(), json!(node));
+            row.insert("driver".into(), json!(driver));
+            row.insert("providerInstanceId".into(), json!(instance));
+            let mut record = json!({
+                "id": node,
+                "threadId": self.id,
+                "runId": ids.run,
+                "parentNodeId": ids.root_node,
+                "origin": "provider_native",
+                "createdBy": "agent",
+                "driver": driver,
+                "providerInstanceId": instance,
+                "providerThreadId": null,
+                "childThreadId": child,
+                "nativeTaskRef": reference,
+                "prompt": row["prompt"],
+                "title": row["title"],
+                "model": model,
+                "status": row["status"],
+                "result": row["result"],
+                "startedAt": row["startedAt"],
+                "completedAt": row["completedAt"],
+                "updatedAt": row["updatedAt"],
+            });
+            if let Some(progress) = row.get("progress") {
+                record["progress"] = progress.clone();
+            }
+            if let Some(model) = model.as_str() {
+                record["modelSelection"] = json!({"instanceId": instance, "model": model});
+            }
+            out.subagents.push(record);
+            return;
+        }
         let native_thread = row
             .remove("nativeThreadId")
             .and_then(|v| v.as_str().map(str::to_owned))
@@ -2126,7 +2172,10 @@ impl Thread {
         let driver = ids.driver.as_str();
         let item = &record.item;
         // A native subagent's own turn goes to its child thread, not here.
-        if item.kind == "subagent_turn" || item.fields.contains_key("subagentThread") {
+        if item.kind == "subagent_turn"
+            || item.fields.contains_key("subagentThread")
+            || item.fields.contains_key("subagentChild")
+        {
             return;
         }
         // The reference shows no reasoning that has no text.
@@ -2170,7 +2219,15 @@ impl Thread {
             out.items.push((index, json!({ HIDDEN_ITEM: true })));
             return;
         }
-        let node = item_id("node", driver, native);
+        // A Claude task's node is named by the task.
+        let node = item_id(
+            "node",
+            driver,
+            item.fields
+                .get("nodeNativeId")
+                .and_then(Value::as_str)
+                .unwrap_or(native),
+        );
         let plan = item.kind == "proposed_plan";
         // An ACP item names its native ref itself: its session's tool call
         // (strong) or its turn's text segment (weak).

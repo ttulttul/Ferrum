@@ -285,6 +285,10 @@ PROVIDER_SCENARIOS = [
     # into that turn (turn/steer), which reads it.
     {"name": "codex delegate live", "instance": "codex", "model": "fixture",
      "scenario": "codex_delegate_live.json", "awaitStatus": True},
+    # A Claude agent runs a native subagent (the Agent tool) in the foreground: the subagent shows
+    # on the parent, on a child thread of its own with its prompt.
+    {"name": "claude native subagent", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_subagent.json", "children": True},
     # A Codex agent spawns a native subagent on a child thread of its own (collabAgentToolCall
     # spawnAgent), waits for it and reports its answer.
     {"name": "codex native subagent", "instance": "codex", "model": "fixture",
