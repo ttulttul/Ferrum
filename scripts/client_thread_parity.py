@@ -255,6 +255,11 @@ PROVIDER_SCENARIOS = [
     {"name": "claude delegate remote cancel", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_delegate_remote_cancel.json", "awaitStatus": True, "peer": {"finish_after": None},
      "settleRuns": 2},
+    # The user stops a parent whose task in a linked environment still runs: the task ends here
+    # as interrupted ("Stopped with its parent"), and its follower stops it there.
+    {"name": "claude delegate remote stop", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_delegate_remote_stop.json", "awaitStatus": True, "peer": {"finish_after": None},
+     "change": {"type": "thread.stop"}, "changeAfter": "subagent"},
     # A delegated task that runs on after the parent's turn: its result wakes the idle parent
     # with a delivery turn, which reads it with task_status.
     {"name": "claude delegate async", "instance": "claudeAgent", "model": "claude-opus-5-5",

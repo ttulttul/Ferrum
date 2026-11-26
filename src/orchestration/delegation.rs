@@ -2774,8 +2774,38 @@ pub(crate) fn stop_delegated_tasks<'a, H: CommandHost + 'a>(
             if task["origin"] != "app_owned" {
                 continue;
             }
-            // A task in a linked environment is not served here.
             let Some(child) = task["childThreadId"].as_str().map(str::to_owned) else {
+                // A task in a linked environment ends here; its follower then stops it there.
+                // One with its result keeps it, but its thread there may run follow-up work.
+                if !task["remoteChild"].is_object() {
+                    continue;
+                }
+                let task_id = task["id"].as_str().unwrap_or_default();
+                let command_id = format!("{command_id}:stop:{task_id}");
+                let command = if task["result"].is_null() {
+                    json!({
+                        "type": "delegated_task.remote.complete",
+                        "commandId": command_id,
+                        "parentThreadId": thread_id,
+                        "taskId": task_id,
+                        "status": "interrupted",
+                        "result": match &reason {
+                            None => "Stopped with its parent.".to_owned(),
+                            Some(reason) => format!("Stopped with its parent: {reason}"),
+                        },
+                    })
+                } else {
+                    json!({
+                        "type": "delegated_task.remote.stop",
+                        "commandId": command_id,
+                        "parentThreadId": thread_id,
+                        "taskId": task_id,
+                    })
+                };
+                if let Err(error) = dispatch_command(state.clone(), command, None).await {
+                    tracing::warn!(parent = %thread_id, task_id, "could not stop a delegated task");
+                    failure.get_or_insert(error);
+                }
                 continue;
             };
             // Follow-up tasks reuse a child thread; walk its subtree only once.
