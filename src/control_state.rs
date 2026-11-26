@@ -296,10 +296,18 @@ impl ControlState {
         let at = crate::now();
         events
             .iter()
-            .map(|event| {
+            .enumerate()
+            .map(|(index, event)| {
+                // Reports with native part times can refresh the text and
+                // turn item while leaving the node identical. Give those
+                // reports distinct commit times to predict the refreshed keys.
+                let native_part = matches!(event, Event::RunProvider {
+                    event: crate::workspace::ProviderEvent::TurnItem { item }, ..
+                } if matches!(item.kind.as_str(), "assistant_message" | "reasoning")
+                    && (item.fields.contains_key("startedAt") || item.fields.contains_key("completedAt")));
                 let record = ServerEvent {
                     id: 0,
-                    at,
+                    at: if native_part { at.saturating_add(index as u64) } else { at },
                     event: event.clone(),
                     receipt: None,
                     thread_events: None,

@@ -22,6 +22,7 @@ use crate::workspace::provider::{
     ThreadDisposition, TokenUsage, TurnStatus, OPENCODE,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
+use indexmap::IndexMap;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
@@ -939,10 +940,34 @@ struct Part {
     kind: &'static str,
     message: String,
     text: String,
-    ended: bool,
+    started_at: Option<i64>,
+    completed_at: Option<i64>,
     synthetic: bool,
-    /// Whether it was shown completed.
-    done: bool,
+}
+
+impl Part {
+    /// `emitTextPart`: a text or reasoning part's whole text.
+    fn emit(&self, sink: &Sink, id: &str, force_completed: bool) {
+        if self.text.is_empty() || self.synthetic {
+            return;
+        }
+        let completed = force_completed || self.completed_at.is_some();
+        let status = if completed { "completed" } else { "running" };
+        let mut item = ProviderItem::new(id, self.kind, status)
+            .with("text", self.text.clone())
+            .with("streaming", !completed);
+        for (key, milliseconds) in [
+            ("startedAt", self.started_at),
+            ("completedAt", self.completed_at),
+        ] {
+            if let Some(date) = milliseconds.and_then(|at| {
+                time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(at) * 1_000_000).ok()
+            }) {
+                item = item.with(key, crate::store::iso(date));
+            }
+        }
+        sink.send(ProviderEvent::TurnItem { item });
+    }
 }
 
 /// A step's tokens (`step-finish`).
@@ -1000,8 +1025,7 @@ struct Turn<'a> {
     roles: HashMap<String, String>,
     /// Assistant messages and whether they answer this turn's prompts.
     owned: HashMap<String, bool>,
-    parts: HashMap<String, Part>,
-    part_order: Vec<String>,
+    parts: IndexMap<String, Part>,
     tools: HashMap<String, String>,
     /// Step usage by part id, counted once, and steps waiting for their
     /// message's owner.
@@ -1061,8 +1085,7 @@ impl<'a> Turn<'a> {
             user_message: None,
             roles: HashMap::new(),
             owned: HashMap::new(),
-            parts: HashMap::new(),
-            part_order: Vec::new(),
+            parts: IndexMap::new(),
             tools: HashMap::new(),
             counted: HashSet::new(),
             parked: HashMap::new(),
@@ -1304,8 +1327,7 @@ impl<'a> Turn<'a> {
                     if let Some(part) = self.parts.get_mut(id) {
                         part.text
                             .push_str(properties["delta"].as_str().unwrap_or_default());
-                        let id = id.to_owned();
-                        self.emit_part(&id);
+                        part.emit(self.sink, id, false);
                     }
                 }
             }
@@ -1426,17 +1448,8 @@ impl<'a> Turn<'a> {
             if self.accepted {
                 self.observed = true;
             }
-            let ids: Vec<String> = self
-                .part_order
-                .iter()
-                .filter(|part| self.parts[*part].message == id)
-                .cloned()
-                .collect();
-            for part in ids {
-                if let Some(part) = self.parts.get_mut(&part) {
-                    part.ended = true;
-                }
-                self.emit_part(&part);
+            for (part_id, part) in self.parts.iter().filter(|(_, part)| part.message == id) {
+                part.emit(self.sink, part_id, true);
             }
         }
     }
@@ -1477,26 +1490,22 @@ impl<'a> Turn<'a> {
                 if user {
                     return;
                 }
-                let entry = self.parts.entry(id.to_owned()).or_insert_with(|| Part {
+                let millis = |value: &Value| value.as_f64().map(|ms| ms as i64);
+                let report = Part {
                     kind: if kind == "text" {
                         "assistant_message"
                     } else {
                         "reasoning"
                     },
                     message: message.to_owned(),
-                    text: String::new(),
-                    ended: false,
-                    synthetic: false,
-                    done: false,
-                });
-                entry.text = part["text"].as_str().unwrap_or_default().to_owned();
-                entry.ended = entry.ended || part["time"]["end"].is_number();
-                entry.synthetic = part["synthetic"] == true || part["ignored"] == true;
-                if !self.part_order.iter().any(|known| known == id) {
-                    self.part_order.push(id.to_owned());
-                }
-                let id = id.to_owned();
-                self.emit_part(&id);
+                    text: part["text"].as_str().unwrap_or_default().to_owned(),
+                    started_at: millis(&part["time"]["start"]),
+                    completed_at: millis(&part["time"]["end"]),
+                    synthetic: kind == "text"
+                        && (part["synthetic"] == true || part["ignored"] == true),
+                };
+                report.emit(self.sink, id, false);
+                self.parts.insert(id.to_owned(), report);
             }
             "tool" => {
                 let name = part["tool"].as_str().unwrap_or_default().to_owned();
@@ -1511,22 +1520,6 @@ impl<'a> Turn<'a> {
             }
             _ => {}
         }
-    }
-
-    /// `emitTextPart`: a text or reasoning part's whole text.
-    fn emit_part(&mut self, id: &str) {
-        let Some(part) = self.parts.get_mut(id) else {
-            return;
-        };
-        if part.text.is_empty() || part.synthetic || part.done {
-            return;
-        }
-        part.done = part.ended;
-        let status = if part.ended { "completed" } else { "running" };
-        let item = ProviderItem::new(id, part.kind, status)
-            .with("text", part.text.clone())
-            .with("streaming", !part.ended);
-        self.sink.send(ProviderEvent::TurnItem { item });
     }
 
     /// `permission.asked`: an approval the user answers.
@@ -1680,12 +1673,8 @@ impl<'a> Turn<'a> {
     /// `finalizeTurn`: open parts end, waiting requests are cancelled, then
     /// the turn's usage and end.
     async fn finalize(&mut self, oc: &mut OpenCode, status: TurnStatus) -> TurnEnd {
-        let ids = self.part_order.clone();
-        for id in ids {
-            if let Some(part) = self.parts.get_mut(&id) {
-                part.ended = true;
-            }
-            self.emit_part(&id);
+        for (id, part) in &self.parts {
+            part.emit(self.sink, id, true);
         }
         let mut waiting: Vec<String> = self.pending.drain().map(|(id, _)| id).collect();
         waiting.sort();
