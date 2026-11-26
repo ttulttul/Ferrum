@@ -295,5 +295,8 @@
   },
   "codex native subagent wake": {
     "live": "After the parent's turn ended, the shared app-server holds what Codex sends about the child until the wake run's turn takes it, so Rust streams the subagent's progress, result and completion as that run starts, where the reference streams them as they arrive, before the wake; the reference also streams every update of the subagent, including those that change nothing, and the wake message's message.updated. The subagent's records and item, the child thread with its turn, the wake run with its notification and the thread's messages match the reference."
+  },
+  "codex native subagent stop": {
+    "live": "The reference streams every update of the subagent, also those that change nothing (running again just before the interrupt's card), and the subagent node's interruption with the turn's end; Rust's stream is made of what changed in the thread, so it sends each change once and the node's status with the subagent's record. The parent's interrupted run and subagent, and the child thread with its interrupted command and turn, match the reference."
   }
 }

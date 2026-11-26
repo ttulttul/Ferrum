@@ -300,10 +300,11 @@ impl Sink {
         }
         let _ = self.events.send(TurnEvent::Provider(event));
     }
-    /// The turn's terminal event, then its exit. Items still running end
-    /// first: interrupted or failed with the turn, otherwise cancelled
-    /// (save a completed Codex turn's commands).
-    fn finish(&self, end: TurnEnd) {
+    /// The turn's terminal event, and the exit to report once its process is
+    /// done with. Items still running end first: interrupted or failed with
+    /// the turn, otherwise cancelled (save a completed Codex turn's commands
+    /// and subagents).
+    fn terminate(&self, end: TurnEnd) -> TurnExit {
         if !self.turn_id.is_empty() {
             requests::unregister(&self.turn_id);
         }
@@ -364,11 +365,22 @@ impl Sink {
             driver: Some(self.driver.clone()),
             closing,
         });
-        let _ = self.events.send(TurnEvent::Exited(TurnExit {
+        TurnExit {
             success,
             cancelled: end.cancelled,
             status: end.status.as_str().into(),
-        }));
+        }
+    }
+
+    /// The turn's end: its terminal event, then its exit.
+    fn finish(&self, end: TurnEnd) {
+        let exit = self.terminate(end);
+        self.exited(exit);
+    }
+
+    /// The turn's process is done with: nothing more comes from it.
+    fn exited(&self, exit: TurnExit) {
+        let _ = self.events.send(TurnEvent::Exited(exit));
     }
 }
 

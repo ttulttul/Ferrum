@@ -1,0 +1,415 @@
+{
+ "_comment": "A Codex 0.170 turn whose agent starts a native subagent; the user stops the parent while the child runs a command. Codex completes the parent's turn interrupted, then the child's command and turn, interrupted too (interrupting the root turn stops its descendants).",
+ "steps": [
+  {
+   "expect": "initialize"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "codexHome": "/tmp/codex-home",
+     "platformFamily": "unix",
+     "platformOs": "linux",
+     "userAgent": "codex_cli_rs/0.170.0"
+    }
+   }
+  },
+  {
+   "expect": "thread/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     },
+     "model": "gpt-6.1-sol",
+     "cwd": "/workspace",
+     "approvalPolicy": "never",
+     "sandbox": {
+      "type": "dangerFullAccess"
+     },
+     "approvalsReviewer": "user",
+     "modelProvider": "openai"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "thread/started",
+    "params": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d"
+     }
+    },
+    "emittedAtMs": 1795225883200
+   }
+  },
+  {
+   "expect": "turn/start"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": null,
+      "completedAt": null,
+      "durationMs": null
+     }
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": null,
+      "durationMs": null
+     }
+    },
+    "emittedAtMs": 1795225881428
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "01a1fbcd-0c79-7d90-b0b3-d0a56a423ddc",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "Ask a helper to read the README title, then tell me it.",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225881722,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225881722
+    },
+    "emittedAtMs": 1795225881722
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "userMessage",
+      "id": "01a1fbcd-0c79-7d90-b0b3-d0a56a423ddc",
+      "clientId": null,
+      "content": [
+       {
+        "type": "text",
+        "text": "Ask a helper to read the README title, then tell me it.",
+        "text_elements": []
+       }
+      ],
+      "startedAtMs": 1795225881722,
+      "completedAtMs": 1795225881722
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225881722
+    },
+    "emittedAtMs": 1795225881725
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "subAgentActivity",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "low",
+      "id": "call_spawn_1",
+      "kind": "started",
+      "agentThreadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+      "agentPath": "/root/read_line",
+      "startedAtMs": 1795225883100,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "startedAtMs": 1795225883100
+    },
+    "emittedAtMs": 1795225883201
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "subAgentActivity",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "low",
+      "id": "call_spawn_1",
+      "kind": "started",
+      "agentThreadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+      "agentPath": "/root/read_line",
+      "startedAtMs": 1795225883300,
+      "completedAtMs": 1795225883400
+     },
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225883400
+    },
+    "emittedAtMs": 1795225883401
+   }
+  },
+  {
+   "send": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turn": {
+      "id": "01a1fbcd-1b01-7000-8000-00000000c41e",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "notLoaded",
+      "status": "inProgress",
+      "error": null,
+      "startedAt": 1795225890,
+      "completedAt": null,
+      "durationMs": null
+     }
+    },
+    "emittedAtMs": 1795225890200
+   }
+  },
+  {
+   "expect": "thread/read"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-1b00-7000-8000-00000000c41d"
+     }
+    }
+   }
+  },
+  {
+   "expect": "thread/resume"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {
+     "thread": {
+      "cliVersion": "0.170.0",
+      "createdAt": 1795225880,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "",
+      "projectId": null,
+      "sessionId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+      "source": "appServer",
+      "status": {
+       "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 1795225880,
+      "id": "01a1fbcd-1b00-7000-8000-00000000c41d"
+     },
+     "model": "gpt-5.6-sol",
+     "cwd": "/workspace",
+     "approvalPolicy": "never",
+     "sandbox": {
+      "type": "dangerFullAccess"
+     },
+     "approvalsReviewer": "user",
+     "modelProvider": "openai",
+     "reasoningEffort": "low"
+    }
+   }
+  },
+  {
+   "send": {
+    "method": "item/started",
+    "params": {
+     "item": {
+      "type": "commandExecution",
+      "id": "exec-child-read-1",
+      "pluginId": null,
+      "scriptPath": null,
+      "command": "/bin/bash -lc \"head -1 README.md\"",
+      "cwd": "/workspace",
+      "processId": "29302",
+      "source": "unifiedExecStartup",
+      "status": "inProgress",
+      "commandActions": [
+       {
+        "type": "unknown",
+        "command": "echo hi && printf 'hello' > notes.txt"
+       }
+      ],
+      "aggregatedOutput": null,
+      "exitCode": null,
+      "durationMs": null,
+      "startedAtMs": 1795225887656,
+      "completedAtMs": null
+     },
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+     "startedAtMs": 1795225887656
+    },
+    "emittedAtMs": 1795225890401
+   }
+  },
+  {
+   "expect": "turn/interrupt"
+  },
+  {
+   "send": {
+    "id": "$id",
+    "result": {}
+   }
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-0a14-7073-bab3-5d40dfc2f65d",
+     "turn": {
+      "id": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "summary",
+      "status": "interrupted",
+      "error": null,
+      "startedAt": 1795225881,
+      "completedAt": 1795225895,
+      "durationMs": 12000
+     }
+    },
+    "emittedAtMs": 1795225895001
+   }
+  },
+  {
+   "send": {
+    "method": "item/completed",
+    "params": {
+     "item": {
+      "type": "commandExecution",
+      "id": "exec-child-read-1",
+      "pluginId": null,
+      "scriptPath": null,
+      "command": "/bin/bash -lc \"head -1 README.md\"",
+      "cwd": "/workspace",
+      "processId": "29302",
+      "source": "unifiedExecStartup",
+      "status": "failed",
+      "commandActions": [
+       {
+        "type": "unknown",
+        "command": "echo hi && printf 'hello' > notes.txt"
+       }
+      ],
+      "aggregatedOutput": "",
+      "exitCode": null,
+      "durationMs": null,
+      "startedAtMs": 1795225887656,
+      "completedAtMs": 1795225895100
+     },
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turnId": "01a1fbcd-1b01-7000-8000-00000000c41e",
+     "contentTokenCount": null,
+     "completedAtMs": 1795225895100
+    },
+    "emittedAtMs": 1795225890401
+   }
+  },
+  {
+   "send": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "01a1fbcd-1b00-7000-8000-00000000c41d",
+     "turn": {
+      "id": "01a1fbcd-1b01-7000-8000-00000000c41e",
+      "rootTurnId": "01a1fbcd-0a8c-71e2-94e9-1eb8e07ab835",
+      "items": [],
+      "itemsView": "summary",
+      "status": "interrupted",
+      "error": null,
+      "startedAt": 1795225890,
+      "completedAt": 1795225895,
+      "durationMs": 5000
+     }
+    },
+    "emittedAtMs": 1795225895201
+   }
+  }
+ ]
+}
