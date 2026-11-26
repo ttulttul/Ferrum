@@ -585,6 +585,10 @@ struct Snapshots {
     /// worker waits [`ACP_READ_WINDOW`] before committing, and snapshots
     /// read together share a batch.
     reads_first: bool,
+    /// The turn's provider thread was reported: an ACP agent's later
+    /// reports of it (its session's updates) are snapshots of the thread,
+    /// as the reference's adapter writes them into the commit batch.
+    thread_seen: bool,
 }
 
 /// The entity a snapshot replaces the state of: its turn item, or the
@@ -599,6 +603,10 @@ fn snapshot_entity(event: &Event) -> Option<String> {
             event: ProviderEvent::Plan { .. },
             ..
         } => Some("plan".into()),
+        Event::RunProvider {
+            event: ProviderEvent::ProviderThread { .. },
+            ..
+        } => Some("provider-thread".into()),
         _ => None,
     }
 }
@@ -615,10 +623,15 @@ fn sent_live(record: &crate::ServerEvent) -> bool {
 impl Snapshots {
     fn is_snapshot(&self, event: &TurnEvent) -> bool {
         !self.terminal_seen
-            && matches!(
+            && (matches!(
                 event,
                 TurnEvent::Provider(ProviderEvent::TurnItem { .. } | ProviderEvent::Plan { .. })
-            )
+            ) || (self.reads_first
+                && self.thread_seen
+                && matches!(
+                    event,
+                    TurnEvent::Provider(ProviderEvent::ProviderThread { .. })
+                )))
     }
 
     /// A snapshot arrived: an idle worker commits it at once and, if it sent
@@ -883,6 +896,9 @@ async fn record<H: TurnHost>(
             &event,
             TurnEvent::Provider(ProviderEvent::ProviderThread { .. })
         );
+        if provider_thread {
+            snapshots.thread_seen = true;
+        }
         if let TurnEvent::Provider(ProviderEvent::ProviderTurn {
             history_injected: true,
             ..

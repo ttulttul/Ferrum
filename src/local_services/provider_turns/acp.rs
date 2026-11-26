@@ -1888,6 +1888,10 @@ struct Segment {
     native: String,
     text: String,
     dirty: bool,
+    /// The agent's `messageId` for the text, when it names one: a named
+    /// segment stays open across tool calls, and a closed one reopens when
+    /// its message streams again (`closedNamedSegments`).
+    source: Option<String>,
 }
 
 /// A tool call as its updates merged it.
@@ -1940,6 +1944,8 @@ struct Turn<'a> {
     /// Its `t3-xai-prompt-<n>`.
     prompt_label: String,
     segments: HashMap<&'static str, Segment>,
+    /// Named segments that closed, by stream and message id.
+    closed_named: HashMap<(&'static str, String), Segment>,
     /// Segments opened per stream this turn.
     counters: HashMap<&'static str, u64>,
     flush_at: Option<Instant>,
@@ -2057,6 +2063,7 @@ impl<'a> Turn<'a> {
             prompt_rpc: 0,
             prompt_label: String::new(),
             segments: HashMap::new(),
+            closed_named: HashMap::new(),
             counters: HashMap::new(),
             flush_at: None,
             tools: indexmap::IndexMap::new(),
@@ -2729,8 +2736,12 @@ impl<'a> Turn<'a> {
             None
         };
         let fx = self.flavor == Flavor::Fx;
+        // The reference reports Kiro's provider thread again for each of its
+        // `session_info_update`s (`onSessionInfoUpdate` touches the thread).
+        let kiro = self.flavor == Flavor::Kiro;
         if (title.is_some() && title != self.native_title)
             || (fx && (title.is_some() || updated_at.is_some()))
+            || kiro
         {
             if title.is_some() {
                 self.native_title = title;
@@ -2791,8 +2802,16 @@ impl<'a> Turn<'a> {
     /// One `session/update`.
     fn update(&mut self, update: &Value) {
         match update["sessionUpdate"].as_str().unwrap_or_default() {
-            "agent_message_chunk" => self.append("assistant", &update["content"]),
-            "agent_thought_chunk" => self.append("reasoning", &update["content"]),
+            "agent_message_chunk" => self.append(
+                "assistant",
+                &update["content"],
+                update["messageId"].as_str(),
+            ),
+            "agent_thought_chunk" => self.append(
+                "reasoning",
+                &update["content"],
+                update["messageId"].as_str(),
+            ),
             "tool_call" | "tool_call_update" => self.tool(update),
             "plan" => self.plan(update),
             _ => {}
@@ -2800,7 +2819,7 @@ impl<'a> Turn<'a> {
     }
 
     /// Append a content block's text to a stream, closing the others.
-    fn append(&mut self, stream: &'static str, content: &Value) {
+    fn append(&mut self, stream: &'static str, content: &Value, message_id: Option<&str>) {
         let text = display_text(content);
         if text.is_empty() {
             return;
@@ -2810,7 +2829,18 @@ impl<'a> Turn<'a> {
                 self.close_stream(other);
             }
         }
+        let source = message_id.filter(|id| !id.is_empty()).map(str::to_owned);
+        // Another named message closes the one streaming.
+        if let (Some(current), Some(source)) = (self.segments.get(stream), source.as_ref()) {
+            if current.source.as_ref().is_some_and(|known| known != source) {
+                self.close_stream(stream);
+            }
+        }
         if let Some(segment) = self.segments.get_mut(stream) {
+            // Agents may leave out the first messageId.
+            if segment.source.is_none() {
+                segment.source = source;
+            }
             segment.text.push_str(&text);
             segment.dirty = true;
             if self.flush_at.is_none() {
@@ -2818,14 +2848,30 @@ impl<'a> Turn<'a> {
             }
             return;
         }
-        let counter = self.counters.entry(stream).or_insert(0);
-        let native = format!("{}:{stream}:{counter}", self.native_turn);
-        *counter += 1;
-        let segment = Segment {
-            id: self.scoped(&native),
-            native,
-            text,
-            dirty: false,
+        let reopened = source
+            .as_ref()
+            .and_then(|id| self.closed_named.remove(&(stream, id.clone())));
+        let segment = match reopened {
+            Some(mut segment) => {
+                segment.text.push_str(&text);
+                segment.dirty = false;
+                segment
+            }
+            None => {
+                let counter = self.counters.entry(stream).or_insert(0);
+                let native = match &source {
+                    Some(id) => format!("{}:{stream}:message:{id}", self.native_turn),
+                    None => format!("{}:{stream}:{counter}", self.native_turn),
+                };
+                *counter += 1;
+                Segment {
+                    id: self.scoped(&native),
+                    native,
+                    text,
+                    dirty: false,
+                    source,
+                }
+            }
         };
         self.emit_segment(stream, &segment, false);
         self.segments.insert(stream, segment);
@@ -2865,6 +2911,9 @@ impl<'a> Turn<'a> {
     fn close_stream(&mut self, stream: &'static str) {
         if let Some(segment) = self.segments.remove(stream) {
             self.emit_segment(stream, &segment, true);
+            if let Some(source) = segment.source.clone() {
+                self.closed_named.insert((stream, source), segment);
+            }
         }
     }
 
@@ -2886,7 +2935,17 @@ impl<'a> Turn<'a> {
             return;
         };
         let id = id.to_owned();
-        self.close_streams();
+        // A tool call closes only the text that names no message
+        // (`emitTool`); a named message stays open across it.
+        for stream in STREAMS {
+            if self
+                .segments
+                .get(stream)
+                .is_some_and(|s| s.source.is_none())
+            {
+                self.close_stream(stream);
+            }
+        }
         let first = !self.tools.contains_key(&id);
         let tool = self.tools.entry(id.clone()).or_default();
         if let Some(kind) = update["kind"]
