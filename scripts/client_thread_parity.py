@@ -305,6 +305,10 @@ PROVIDER_SCENARIOS = [
     # whose turn and the parent's subagent end interrupted (the child's after the parent's).
     {"name": "codex native subagent stop", "instance": "codex", "model": "fixture",
      "scenario": "codex_subagent_stop.json", "children": True, "interrupt": "subagent"},
+    # The user stops the parent before its subagent's turn starts: the child's turn, starting
+    # after the parent's turn ended, is interrupted at once and recorded nowhere.
+    {"name": "codex native subagent late stop", "instance": "codex", "model": "fixture",
+     "scenario": "codex_subagent_late_stop.json", "children": True, "interrupt": "subagent"},
     # Codex delegation counterparts: parent and child share the instance's app-server.
     {"name": "codex delegate", "instance": "codex", "model": "fixture",
      "scenario": "codex_delegate.json", "awaitStatus": True},
