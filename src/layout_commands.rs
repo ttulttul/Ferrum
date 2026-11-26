@@ -101,10 +101,9 @@ pub(super) async fn dispatch(state: &AppState, input: &Value, write: bool) -> Re
         };
         if values.iter().any(|v| {
             !v.command.is_null()
-                && !v
-                    .command
+                && v.command
                     .as_str()
-                    .is_some_and(|s| s.encode_utf16().count() <= 4096)
+                    .is_none_or(|s| s.encode_utf16().count() > 4096)
         }) {
             return Reply::defect(
                 "Invalid worktree layout command text\n  at [\"approvals\"]".into(),
