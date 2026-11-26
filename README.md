@@ -15,95 +15,28 @@
 
 ## Overview
 
-Ferrum reimplements the TypeScript T3 Code environment server and standalone relay in Rust. Compatibility work targets one pinned upstream commit, named under [Parity status](#parity-status). At that commit the server declares 235 WebSocket RPC methods, 86 typed HTTP operations (including 30 relay operations), and 58 orchestration dispatch command types.
+Ferrum reimplements the TypeScript T3 Code environment server and standalone relay in Rust. Compatibility work targets one pinned upstream commit, listed under [Parity status](#parity-status). At that commit the server declares 235 WebSocket RPC methods, 86 typed HTTP operations (including 30 relay operations), and 58 orchestration dispatch command types.
 
-## What works now
+## Quick start
 
-Based on `main` and the parity test suites:
+### Build and run from source
 
-- **Codex and Claude Code agent turns:** Launching Codex and Claude Code sessions, streaming responses, tool calls, approvals (allow, allow for session, decline, `approval-required`, `auto-accept-edits`), and user-input / question requests. Each thread keeps its Claude CLI running across turns, and an instance's Codex turns share one app-server, as in the original. You can steer a running Codex, Claude or Grok turn with a text message. When Claude Code starts a turn on its own between turns, the thread gets a continuation run that shows it, naming a background command that finished or a monitor's new output.
-- **Grok agent turns:** Grok turns run over ACP in the `grok agent stdio` process each thread keeps, streaming reasoning, replies and tool calls, with approvals in Grok's own runtime modes. Stop restarts the process, and the next turn loads the session again. Grok reaches T3's tools through a stdio MCP bridge (`acp-mcp-bridge`), and can run delegated tasks.
-- **ACP Registry agent turns:** An ACP Registry agent runs turns in the reference's generic ACP flavor, from a local command or from the registry: a downloaded binary, or an npx or uvx package, is installed (or its install reused) and launched with its distribution's arguments and environment. Each thread keeps its agent, which also gets T3's MCP endpoint for the terminal fallback; Stop cancels the prompt (`session/cancel`) and the agent runs on for the next turn.
-- **Pi agent turns:** Pi turns run over its RPC mode in the process each thread keeps, with the reference's extension (T3's tools, the runtime mode's approvals and the system prompt's instructions) written byte for byte and loaded with `--extension`. They stream thinking, replies and tool calls (a command's output as it runs), and settle once Pi is idle. Approvals go to the user, and a message can steer a running turn. Stop aborts the run and stops the process, and the next turn resumes Pi's session file.
-- **OpenCode agent turns:** OpenCode 1.x turns run on an `opencode serve` each thread's session starts (or the configured server), with T3's MCP server registered and the runtime mode enforced as OpenCode permission rules. Prompts carry T3's instructions as their system text; the event stream's reasoning, replies and tool calls become items, and a turn settles once OpenCode reports the session idle after taking its prompt. Approvals and questions go to the user, a message can steer a running turn, and Stop aborts the session's run. The OpenCode session is the native thread, resumed by later sessions. OpenCode 2 turns run on the one `opencode serve` an instance shares with its status checks (or the configured server), whose event stream one provider session follows for all of the instance's threads: T3's MCP server and instructions are written for each thread before its turn, the prompt carries T3's own message id, and the execution's end settles the turn. Approvals (a decline also steers a note to the model, an allow for the session becomes a session rule), question forms and steering go through OpenCode 2's own API, and Stop interrupts the execution.
-- **Antigravity agent turns:** Antigravity's `agy acp` runs turns over ACP in the reference's Antigravity flavor: launched as the driver launches it (the resolved executable, the instance's private profile and environment, a temporary folder per process), signed in eagerly, its session resumed with `session/resume`, and its mode kept to what agy accepts while T3 answers its requests from the thread's runtime mode. Its command calls show their command line, output and exit code; it reads files in the thread's folder through T3; its questions and approvals (with its labels) go to the user (except, on purpose, a plainly read-only command in Auto-accept edits: see Intentional differences); from agy 1.5 a message steers the running turn; Stop cancels the prompt and the agent runs on.
-- **Kiro agent turns:** Kiro's `kiro-cli acp --agent-engine=v3 --auth-method=cli` runs turns over ACP in the reference's Kiro flavor: it opts into Kiro's own hooks, sets the thread's agent, model (Kiro's default stays until Kiro advertises its model option; then the status check's default) and the effort Kiro advertises for that model, and turns Autopilot on only in Full access. Kiro's cloud-config call and its sub-agents' frames stay out of the turn, its tool outputs show, its approvals carry its labels (Allow once, Deny, Cancel), Stop waits for Kiro to start the prompt before it cancels and keeps the agent, a message steers the running turn with `_session/steer` (its steering note left out of the reply), a failed prompt says Kiro's own error, and the session's title names its provider thread.
-- **fx agent turns:** fx's `fx acp` runs turns over ACP in the reference's fx flavor: its sessions ask for the user's own fx MCP servers, a `backend:model` selection sets fx's backend and then its model (Default is the one `fx status --json` names in the thread's folder; a failed switch goes back), the effort starts at medium, and the session mode follows the runtime mode (`ask`, `auto` or fx 0.0.13's `code`, `full-access`; the first one always written, as fx enforces its saved mode until then). Auto lets fx ask the user about what its own review refused, Stop sends `session/cancel` and keeps the agent, a steer waits for the next turn, a failed prompt says the generic text, and the session's title, its `updatedAt` and its context usage show on its provider thread.
-- **Muse Code agent turns:** Muse Code turns run on a `muse serve` host each thread keeps, over Muse's own protocol (MSP, as the reference's SDK speaks it): `--trust-workspace`, plus `--disable-sandbox` in Full access, without an inherited `META_API_KEY`. T3 mints the session (started on the status check's default model for Default, with `allowAll` and `:unrestricted` only in Full access, and T3's MCP server as an optional streamable HTTP server) and each turn's id, which `turn/start` carries with the runtime notes and the model's effort (the selection's when the model lists it, else its default). Muse's items stream as replies, reasoning, commands, file changes, web searches and tools (its reminder children stay hidden), its usage shows on the turn and thread, and its approvals go to the user with Muse's own choices (an answer the card did not offer is refused). Stop sends `turn/interrupt` and keeps the host, a message steers the running turn with `turn/steer`, a failed turn says Muse's error (a 429 about a quota is a usage limit, with when it resets), and a host that exits or breaks the protocol fails its turn and is replaced.
-- **Delegated tasks:** An agent can start a child task, wait for it or get its result delivered later, check its progress, cancel it, send a finished child a follow-up, run it in its own worktree or on a linked machine, and create new threads. Tasks recover after a restart, and a result can be delivered into the parent's running turn.
-- **Thread titles:** Codex, Claude, Pi, Grok, OpenCode (1.x and 2) and Antigravity text generation models can title threads.
-- **Scheduled tasks:** Agents can manage schedules, and due tasks start on their own.
-- **Checkpoints, interrupts, and token usage:** Reference-compatible checkpoint naming, turn interrupts (including stopping spawned child processes), token usage reporting, model reporting, and usage-limit reset times.
-- **Restart recovery:** Resuming and continuing interrupted turns, retries, rewinds, and background work after a server restart.
-- **T3 Connect relay tunnel:** Provisioning, running, and releasing the T3 Connect managed tunnel, plus handing off an active tunnel cleanly across Rust/TypeScript switches.
-- **Environment links (incoming):** Accepting environment links and pairing tokens issued by the TypeScript server on the same home directory, plus pairing-link administration. Sessions the TypeScript server signed in on the same home are listed under Connections and can be revoked there.
-- **Environment links (outgoing):** Linking to another machine, listing and forgetting links (shared with the TypeScript server on the same home), forwarding MCP tool calls to a linked machine, and agents asking you to link one from inside a conversation (`t3_environment_link`), answered in a card.
-- **MCP server and agent tools:** Serving MCP sign-in and the agent tools over `/mcp`, with the original's agent instructions and capabilities. 88 of the original's 94 agent tools are served, including reading pull requests and CI, issues, attachments, worktrees, previews, HTML pages, feedback, secret requests, and simulators and emulators on this machine. The [agent tool checklist](docs/agent-tools.md#checklist) tracks each tool.
-- **Login-shell `PATH` discovery:** Reading the login shell's `PATH` at startup and again before source-control discovery, so provider CLIs and tools installed later are found; listing Codex models from its CLI.
-- **Provider status checks:** Every built-in provider (Claude Code, Codex, Cursor, OpenCode, Grok, Pi, fx, Kiro, Antigravity and Muse Code) has its status (installed version, sign-in state, usage and models) checked at startup, on settings changes, every 5 minutes while a client is watching, and on refresh, and pushed to clients. The checks include newer CLI releases and Claude's skills, and Rust can redeem the reset credits a Claude or Codex subscription banks.
-- **Configuration, auth, and desktop adoption:** Shared `userdata/` layout (`settings.json`, secrets, managed policy, `server-owner.sqlite` exclusive lock, `server-runtime.json`), browser session cookies, WebSocket tickets with DPoP checks, CORS, and desktop SSH launcher adoption.
-- **Git, GitHub, and workspace operations:** File operations, terminals (PTY), git workflows, GitHub/Linear provider RPCs, Bitbucket pull requests with the credential from Settings or the `T3CODE_BITBUCKET_*` environment variables (listing them; opening one with its checks, activity and reviewers; merging, declining, editing, commenting, reviewing and resolving; its diff over HTTP), Chromium preview support, and the preview tunnel that carries other devices' preview traffic to this machine's local servers (with its setting and managed policy switch).
-- **Split control/workspace architecture:** Out-of-process workspace execution via `t3-agentd` and an embeddable, `wasm32-unknown-unknown`-compatible control plane (`workers/`). Remote Codex and Claude turns can call the host's MCP endpoint as their thread. See [host configuration](docs/embedding.md#settings-and-provider-turns).
-- **Parity test suites:** Automated suites comparing HTTP, WebSocket RPC, client initial sync, live provider turns, settings, auth, MCP, git/GitHub, previews, and relay behavior directly against the pinned TypeScript reference.
+Requires the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 
-## What's still missing compared with the original
+```bash
+cargo build --locked
+target/debug/t3code-server --listen 127.0.0.1:3773 --data-dir .t3
+```
 
-Most suites match the original exactly; the few expected differences are listed under [Parity status](#parity-status). The biggest remaining gaps are agent turns for providers other than Codex, Claude, Grok, ACP Registry agents, Pi, OpenCode, Antigravity, Kiro, fx and Muse Code, a handful of agent tools, and features that need the desktop app.
+To run the standalone relay instead:
 
-### Threads and history
+```bash
+target/debug/t3code-server --relay --listen 127.0.0.1:3774 --data-dir .t3
+```
 
-- **Restarted Claude turns.** If a resumed Claude turn fails, its retry can be missing context from the failed attempt.
-- **Live updates of tool calls.** The original merges a tool call's queued updates into one; Rust sends each of them, so a client receives one extra update per tool call (upstream #39502). Most of the [live-turn expected failures](scripts/client_thread_parity_xfail.json) are this.
-- **Older databases.** Both servers can use the same current database. If a home has only the older TypeScript database, start the matching TypeScript server once to upgrade it. See the [shared database notes](docs/shared-store.md).
+### Switch an existing server with `./install`
 
-### Agents and tools
-
-- **Pull request changes.** Agents can read pull requests and CI, but can't open, update, review, respond to or merge one, or re-run CI (`pull_request_create`, `pull_request_update`, `pull_request_review`, `pull_request_respond`, `pull_request_merge`, `ci_rerun`).
-- **Devices.** Agents can use simulators and emulators on this machine, on SSH device hosts and from Simlock pools (alpha), and in Expo Simulators sessions (under the host's project, or the one the thread's app config names). Device detail and actions (settings, foreground app) work on this machine only.
-- **Delegated tasks.** On the embeddable control plane a child can't run in its own worktree (`isolation: "worktree"`).
-- **Secrets in schedules.** A scheduled task can't use a secret yet, and the embeddable control plane stores no secrets.
-- **Claude workflows.** Rust's Claude sessions run no workflow tasks.
-
-### AI providers
-
-- **Other providers' turns.** Only Codex, Claude Code, Grok, ACP Registry agents, Pi, OpenCode (1.x and 2), Antigravity, Kiro, fx and Muse Code run agent turns. Cursor gets status checks, but can't run a turn yet. Rust installs and removes ACP Registry agents.
-- **Grok extras.** Grok's questions (`ask_user_question`), plan-mode exit, background tasks and monitors, subagents, `$skill` mentions, context usage and session titles are not ported yet, and a Grok turn that a server restart cuts off mid-turn is not yet compared with the original.
-- **ACP Registry extras.** The per-agent quirks of the reference's registry adapter are not ported: Copilot's and Command Code's MCP over HTTP, Devin's client terminals, Claude ACP's subagents and work state, Kimi's prompt-outcome watch, GLM's per-turn usage, Mistral Vibe's extensions, Hermes's post-settle continuation, and the elicitation forms of Droid, omp and OpenCode. So are agents that speak ACP protocol version 2, sign-in through a URL, session modes for plan mode, custom models, and the status probes the reference runs for an agent before its turns. A registry agent's turn on a remote workspace (through the control plane) cannot install it yet.
-- **Pi extras.** Pi's extension questions (select, input and editor dialogs) are cancelled rather than asked, and its notices, extension errors, provider retries, `/compact`, service tier, `$skill` chips, subagents, steering status, rollback and workspace handoff are not ported yet. Neither is the path text a turn's non-image attachments add to its prompt.
-- **OpenCode extras.** OpenCode 2 turns lack subagents (child sessions), background shells, image generation jobs, native goals, todo lists, compaction (`/compact`), native slash commands and `$skill` mentions, provider retry items, rollback and fork, prompts from other clients and delivered background reports, and Code Mode pages; a lost event stream fails the session's running turns instead of reconnecting and reading back the missed history. For 1.x, subagents (the `task` tool and child sessions), wakes from background work, todo lists, `/compact` and context-overflow recovery, native slash commands, MCP tool presentation, rollback and fork, the server ledger that reaps orphaned servers, and agent feedback instructions are not ported yet.
-- **Antigravity extras.** agy's post-settle continuation (background commands, schedules and wakes that hold a turn open), its subagents and child work, the session-log check for upstream errors it reports as replies (quota, rate limits, invalid thinking signatures), the 15-minute inactivity watchdog, the read repair for its client file reads, edit diffs placed at their lines, payload bounds, refusing a runtime the manifest rates broken during a turn, native goals (`/goal`), and attachments other than images are not ported yet.
-- **Kiro extras.** Kiro's sub-agents as child threads (their calls show as tools), `/compact` with `_kiro/session/compact`, forking a thread or a turn with `session/fork`, native turn ids from Kiro's user message ids, T3's MCP tool names on Kiro's `@t3-code/<tool>` calls, Kiro's slash commands and pushed options as snapshots, waiting for a steer's `steering_injected` (and its follow-up when the turn ends first), refusing a steer with attachments, and a Stop that times out leaving the turn running (Rust stops the agent) are not ported yet.
-- **fx extras.** MCP over ACP for fx 0.0.13 and 0.0.14 (Rust gives every fx the stdio bridge), fx's `subagent` calls as child threads (they show as tools), steering by interrupting and restarting the turn (Rust queues the message), telling fx's cancelled tool calls from failed ones after a Stop (Rust shows every unfinished one interrupted), and form elicitation are not ported yet.
-- **Muse Code extras.** Muse's subagents and workflows as child threads and agents (they show as tools), its wake turns and their continuations, joined turns, `/compact`, reading a session's history, its account usage windows (`usage/changed`) and the usage-limit resets they give, todo lists, provider retry rows, user-input questions, workflow children's approvals, image steering, a session's extra workspace roots and agent feedback instructions are not ported yet. Neither is the path text a turn's non-image attachments add to its prompt.
-- **Codex native subagents.** A subagent a Codex agent starts gets its own child thread with its own turns, one that finishes after its parent's turn wakes the parent with its result, and stopping the parent ends the child's turn too, as in the original. The parent's live stream reports each change to the subagent once, where the original also repeats updates that change nothing, and a late child's updates arrive with the wake run.
-- **Claude wakes.** A Claude wake that a background subagent or workflow starts doesn't yet report what finished (background commands and Monitor events are reported), and a provider thread lists only a session's background commands and monitors (`pendingBackgroundTasks`), not its background subagents or scheduled wakeups.
-- **Steering extras.** A steering message that changes the model or carries attachments still behaves differently. Rust also lacks the original's "delivery not confirmed" notice, its handling of Claude's foreground subagents during a steer, and its follow-up turn when a provider refuses a steer.
-- **Titles.** Cursor and Muse Code can't title threads yet. Custom title generators, images in an OpenCode title prompt, and titles that draw on a forked thread's history are missing. Antigravity titles don't yet clean up old temporary folders or wait out a sign-in.
-- **Desktop power reports.** Rust doesn't receive the desktop app's power reports (battery, screen lock, heat), so it never pauses provider checks for them.
-
-## Parity status
-
-Parity is tested by running the original TypeScript server and the Rust server side by side and comparing what they answer. Each gets a fresh home directory, and both get the same fake provider CLIs that replay recorded Codex and Claude sessions and scripted ACP sessions (Grok, ACP Registry agents, Antigravity, Kiro and fx), Pi RPC sessions, Muse MSP hosts and OpenCode servers, and local stand-ins for every outside service. No test reaches the network or a real model.
-
-- **Pinned reference:** [upstream commit `fd0331ca`](https://github.com/pingdotgg/t3code/tree/fd0331ca9b1596ed7018c80f52b7e6730014f593) (`fd0331ca9b1596ed7018c80f52b7e6730014f593`). This is the only place the README names it.
-- **Suites:** 56 parity suites run in CI across 9 shards on every code change, and the whole set runs twice each night. 6 more run on their own.
-- **Client calls:** the [client RPC suite](scripts/client_rpc_cases.json) drives 242 recorded client steps through the original client. None is expected to fail.
-- **Live turns:** the client thread suite runs 233 provider scenarios. 108 checks are expected to fail, 19 of them races ([list](scripts/client_thread_parity_xfail.json)).
-- **Intentional differences:** in Auto-accept edits, Antigravity runs a plainly read-only command line without asking, where the reference asks about every command (user decision: read-only commands shouldn't block Antigravity in auto-accept-edits). The line must be one invocation of an allowlisted program (`ls`, `cat`, `head`, `tail`, `wc`, `pwd`, `grep`, `rg`, `find` without `-exec`/`-delete`/`-fprint`, `git status`/`log`/`diff`/`show` and similar), or a pipe of them, with no redirection, chaining, substitution, variables, environment assignments or write-capable flags; anything else asks, as does every other mode and provider. The `antigravity auto-accept-edits read-only command` scenario's expected failures record it; the other command scenarios check that the rest still asks.
-- **Shared home:** the server-switch suite has 1 expected failure ([list](scripts/shared_store_parity_xfail.json)).
-- **Provider status:** the [provider status suite](scripts/provider_status_parity.py) has no expected failures.
-- **Other suites:** none has a known difference.
-- **Agent tools:** 88 of 94 served ([checklist](docs/agent-tools.md#checklist)).
-
-A suite fails on any difference it doesn't list, and on any listed case that starts to match.
-
-## Performance
-
-Ferrum is compared with the pinned reference on the same machine, with the same fake provider CLIs: installed size, startup, memory, CPU, RPC latency and turn throughput. [docs/performance.md](docs/performance.md) has the current numbers, which CI refreshes at most once a day, and how they are measured. Every run is recorded on the [`perf-data`](https://github.com/ttulttul/Ferrum/tree/perf-data) branch.
-
-## Install and switching
-
-From the repository root, use `./install` to temporarily replace a running standalone TypeScript server with the Rust build and restore it later:
+From the repository root, `./install` temporarily replaces a running standalone TypeScript server with a Rust build and restores it later (Linux and macOS):
 
 ```bash
 ./install --status     # Show the discovered server and switch state
@@ -112,32 +45,43 @@ From the repository root, use `./install` to temporarily replace a running stand
 ```
 
 How `./install --rust` works:
-- Discovers the live server via `server-runtime.json`, verifies `GET /` answers 2xx, and saves the original command, environment, working directory, and T3 home under `${XDG_STATE_HOME:-~/.local/state}/ferrum-switch` (override the parent directory with `FERRUM_SWITCH_STATE`; a switch saved under the older `t3code-rust-switch` directory is still honored).
+- Discovers the live server via `server-runtime.json`, verifies `GET /` returns 2xx, and saves the original command, environment, working directory, and T3 home under `${XDG_STATE_HOME:-~/.local/state}/ferrum-switch` (override the parent directory with `FERRUM_SWITCH_STATE`; a switch saved under the older `t3code-rust-switch` directory is still honored).
 - Installs Rust via `rustup` if `cargo` is missing, builds a locked release binary, and starts `t3code-server` on the same host, port, and data directory.
 - On Linux, stops, disables, and runtime-masks a discovered user `systemd` service while Rust is running; `./install --original` unmasks and restores it.
-- Automatically restores the TypeScript server if the Rust server fails to start.
-- Uses the reference update-restart marker (`runtime/desktop-update-restart`) on each switch so the T3 Connect managed tunnel is handed over immediately instead of reprovisioning.
+- Restores the TypeScript server automatically if the Rust server fails to start.
+- Uses the reference update-restart marker (`runtime/desktop-update-restart`) on each switch so the T3 Connect managed tunnel hands over immediately instead of reprovisioning.
 - Logs at `info` by default (override with `RUST_LOG`) to `rust-server.log` in the switch state directory.
 
-Notes and safety checks:
-- Supports Linux and macOS.
+Safety notes:
 - Run `./install --status` first on an unfamiliar machine, and quit the T3 desktop app before switching its server.
 - Set `T3CODE_HOME` before running `./install` if your server uses a custom T3 home.
-- Refuses to act if it finds multiple live servers, a stale or incomplete runtime record, an unidentifiable background service, a desktop-managed server, or a missing original binary/working directory.
+- Refuses to act if it finds multiple live servers, a stale or incomplete runtime record, an unidentifiable background service, a desktop-managed server, or a missing original binary or working directory.
 
-## Build and run from source
+## Configuration
 
-```bash
-cargo build --locked
-target/debug/t3code-server --listen 127.0.0.1:3773 --data-dir .t3
-```
+### Directories and environment variables
 
-### Bootstrap and configuration
+`T3CODE_HOME` and `--base-dir` select the base directory, with mutable files under `userdata/` (`settings.json`, `keybindings.json`, `themes`, `attachments`, `browser-artifacts`, `logs`, `secrets`, `environment-id`, `anonymous-id`, `server-runtime.json`).
+
+Standard environment variables match the TypeScript server:
+- `T3CODE_HOST`, `T3CODE_PORT`, `T3CODE_MODE`, `T3CODE_NO_BROWSER`
+- `T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD`, `T3CODE_LOG_WS_EVENTS`, `T3CODE_DEV_ALLOWED_ORIGINS`
+- `T3CODE_TAILSCALE_SERVE`, `T3CODE_TAILSCALE_SERVE_PORT`
+- `T3CODE_STATIC_DIR` (or `--static-dir`): serves the built web client at `GET /` when set, or a placeholder page otherwise
+
+### Bootstrap and ownership
 
 - **Desktop bootstrap:** An environment launcher can pass the desktop bootstrap envelope on an inherited file descriptor with `--bootstrap-fd` (bind address, port, T3 home, and bootstrap credential). Exchange the credential at `POST /api/auth/browser-session` and send the resulting cookie to authenticated HTTP endpoints. For a standalone process, set `T3CODE_BOOTSTRAP_CREDENTIAL` to a high-entropy secret.
-- **Directory layout and environment variables:** `T3CODE_HOME` and `--base-dir` select the base directory, with mutable files under `userdata/` (`settings.json`, `keybindings.json`, `themes`, `attachments`, `browser-artifacts`, `logs`, `secrets`, `environment-id`, `anonymous-id`, `server-runtime.json`). Standard variables (`T3CODE_HOST`, `T3CODE_PORT`, `T3CODE_MODE`, `T3CODE_NO_BROWSER`, `T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD`, `T3CODE_LOG_WS_EVENTS`, `T3CODE_DEV_ALLOWED_ORIGINS`, `T3CODE_TAILSCALE_SERVE`, `T3CODE_TAILSCALE_SERVE_PORT`, `T3CODE_STATIC_DIR`) match the TypeScript server.
 - **Exclusive ownership:** At startup, the server acquires an exclusive SQLite lock on `userdata/server-owner.sqlite` (waiting up to 250 ms) and exits with status `78` if another Rust or TypeScript server already owns the home directory. Once listening, it atomically writes `userdata/server-runtime.json` and removes it on `SIGINT`/`SIGTERM`.
-- **Static client:** `GET /` serves the built web client from `--static-dir` / `T3CODE_STATIC_DIR` when set, or a placeholder page otherwise.
+
+### Standalone relay
+
+When running with `--relay`, configure:
+- `RELAY_ISSUER` (canonical public URL)
+- `CLERK_JWT_KEY` (RS256 public PEM), `CLERK_ISSUER`, `CLERK_JWT_AUDIENCE`
+- `CLOUD_MINT_PRIVATE_KEY` (Ed25519 PKCS#8 PEM), `CLOUD_MINT_PUBLIC_KEY` (SPKI PEM)
+
+Relay links, mobile registrations, and replay protection persist in SQLite.
 
 ### WebSocket RPC
 
@@ -151,19 +95,89 @@ Connect to `/ws?orchestrationProtocol=2` with a session cookie or WebSocket tick
 {"_tag":"Exit","requestId":"1","exit":{"_tag":"Success","value":{}}}
 ```
 
-### Standalone relay
+## Status
 
-Run the relay separately with `--relay`:
+### Parity status
 
-```bash
-target/debug/t3code-server --relay --listen 127.0.0.1:3774 --data-dir .t3
-```
+Parity is tested by running the original TypeScript server and the Rust server side by side and comparing their responses. Each server gets a fresh home directory, the same fake provider CLIs (replaying recorded Codex and Claude sessions, scripted ACP sessions for Grok, ACP Registry agents, Antigravity, Kiro and fx, Pi RPC sessions, Muse MSP hosts, and OpenCode servers), and local stand-ins for outside services. No test reaches the network or a real model.
 
-Configure `RELAY_ISSUER` (canonical public URL), `CLERK_JWT_KEY` (RS256 public PEM), `CLERK_ISSUER`, `CLERK_JWT_AUDIENCE`, `CLOUD_MINT_PRIVATE_KEY` (Ed25519 PKCS#8 PEM), and `CLOUD_MINT_PUBLIC_KEY` (SPKI PEM). Relay links, mobile registrations, and replay protection persist in SQLite.
+- **Pinned reference:** [upstream commit `fd0331ca`](https://github.com/pingdotgg/t3code/tree/fd0331ca9b1596ed7018c80f52b7e6730014f593) (`fd0331ca9b1596ed7018c80f52b7e6730014f593`). This is the only place the README names it.
+
+| Area | Current status |
+| --- | --- |
+| CI parity suites | 56 suites across 9 shards on every code change (plus twice nightly); 6 more run on their own |
+| Client RPC ([cases](scripts/client_rpc_cases.json)) | 242 recorded client steps; 0 expected failures ([xfail](scripts/client_rpc_parity_xfail.json)) |
+| Live provider turns | 233 provider scenarios; 108 checks expected to fail, 19 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
+| Shared home / server switch | 0 expected failures ([xfail](scripts/shared_store_parity_xfail.json)) |
+| Provider status ([suite](scripts/provider_status_parity.py)) | 0 expected failures |
+| Other suites | 0 known differences |
+| Agent tools ([checklist](docs/agent-tools.md#checklist)) | 94 of 94 served |
+
+A suite fails on any unlisted difference, and on any listed expected failure that starts to match.
+
+**Intentional differences:** In `auto-accept-edits`, Antigravity runs a plainly read-only command line without asking, whereas the reference asks about every command. The line must be a single invocation of an allowlisted program (`ls`, `cat`, `head`, `tail`, `wc`, `pwd`, `grep`, `rg`, `find` without `-exec`/`-delete`/`-fprint`, `git status`/`log`/`diff`/`show` and similar), or a pipe of them, with no redirection, chaining, substitution, variables, environment assignments, or write-capable flags; anything else asks, as does every other mode and provider. The `antigravity auto-accept-edits read-only command` scenario records this in `scripts/client_thread_parity_xfail.json`.
+
+### Performance
+
+Ferrum is benchmarked against the pinned reference on the same machine with the same fake provider CLIs (installed size, startup, memory, CPU, RPC latency, and turn throughput). See [`docs/performance.md`](docs/performance.md) for current numbers and methodology; every run is recorded on the [`perf-data`](https://github.com/ttulttul/Ferrum/tree/perf-data) branch.
+
+### What works now
+
+Based on `main` and the parity test suites:
+
+#### AI provider turns
+- **Codex & Claude Code:** Launching sessions, streaming responses, tool calls, approvals (`allow`, `allow for session`, `decline`, `approval-required`, `auto-accept-edits`), user-input questions, and text steering. Each thread keeps its Claude CLI running across turns, and an instance's Codex turns share one app-server. When Claude Code starts a turn on its own between turns, the thread gets a continuation run naming the finished background command or monitor output.
+- **Grok:** ACP turns in a per-thread `grok agent stdio` process with streaming reasoning, replies, tool calls, Grok's runtime modes, steering, delegated tasks, and T3 tools via `acp-mcp-bridge`. Stop restarts the process and the next turn reloads the session.
+- **ACP Registry agents:** Generic ACP turns from a local command or registry distribution (downloaded binary, `npx`, or `uvx`), keeping the agent per thread with T3's MCP endpoint for terminal fallback. Stop sends `session/cancel` and keeps the agent running.
+- **Pi:** RPC mode in a per-thread process with the reference's extension written byte for byte (`--extension`), streaming thinking, replies, and tool calls, with approvals and steering. Stop aborts and stops the process; the next turn resumes Pi's session file.
+- **OpenCode (1.x & 2):** OpenCode 1.x runs a per-thread `opencode serve` (or configured server) with T3's MCP server and permission rules. OpenCode 2 shares one `opencode serve` per instance with status checks, writing per-thread MCP/instructions before each turn and using OpenCode 2's approvals, question forms, steering, and interrupt APIs.
+- **Antigravity (`agy acp`):** Antigravity-flavor ACP with eager sign-in, `session/resume`, command output and exit codes, workspace file reads through T3, approvals and questions, steering (from agy 1.5), and `session/cancel` on Stop.
+- **Kiro (`kiro-cli acp --agent-engine=v3 --auth-method=cli`):** Kiro-flavor ACP with hooks, model/effort selection, Autopilot in Full access only, tool outputs, Kiro approval labels, `_session/steer`, and session titles.
+- **fx (`fx acp`):** fx-flavor ACP with user fx MCP servers, `backend:model` selection, runtime-mode mapping (`ask`, `auto`/`code`, `full-access`), `session/cancel` on Stop, and session metadata/context usage.
+- **Muse Code (`muse serve`):** MSP protocol with `--trust-workspace` (and `--disable-sandbox` in Full access), streaming items and usage, approvals, `turn/interrupt`, `turn/steer`, and quota reset reporting.
+
+#### Orchestration, tools, and platform
+- **Delegated & scheduled tasks:** Child tasks (wait or async delivery, progress checks, cancel, follow-ups, worktree isolation, linked machines, new threads), restart recovery, delivery into a parent's running turn, and scheduled task management and execution.
+- **Checkpoints, interrupts, usage & recovery:** Reference-compatible checkpoint naming, turn interrupts (stopping spawned child processes), token usage and model reporting, usage-limit reset times, and restart recovery for interrupted turns, retries, rewinds, and background work.
+- **Thread titles:** Text generation titling via Codex, Claude, Pi, Grok, OpenCode (1.x and 2), and Antigravity.
+- **MCP server & agent tools:** Serving MCP sign-in and all 94 agent tools over `/mcp` with the original's instructions and capabilities ([checklist](docs/agent-tools.md#checklist)).
+- **T3 Connect relay & environment links:** Provisioning, running, releasing, and handing off the T3 Connect managed tunnel; incoming and outgoing environment links shared with the TypeScript server on the same home, MCP forwarding to linked machines, and in-conversation link requests (`t3_environment_link`).
+- **Provider status checks & shell discovery:** Status checks (installed version, sign-in, usage, models, CLI releases, Claude skills, and Claude/Codex reset-credit redemption) for all built-in providers (Claude Code, Codex, Cursor, OpenCode, Grok, Pi, fx, Kiro, Antigravity, Muse Code) at startup, on settings changes, every 5 minutes while a client watches, and on refresh. Login-shell `PATH` discovery at startup and before source-control discovery.
+- **Git, forges, previews & auth:** File operations, PTY terminals, git workflows, GitHub/Linear/Bitbucket provider RPCs (Bitbucket credentials from Settings or `T3CODE_BITBUCKET_*`), Chromium previews and preview tunnel, shared `userdata/` layout, browser session cookies, WebSocket tickets with DPoP checks, CORS, and desktop SSH launcher adoption.
+- **Split control/workspace architecture:** Out-of-process workspace execution via `t3-agentd` and an embeddable, `wasm32-unknown-unknown`-compatible control plane (`workers/`). Remote Codex and Claude turns can call the host's MCP endpoint as their thread (see [`docs/embedding.md`](docs/embedding.md#settings-and-provider-turns)).
+
+### Known gaps
+
+#### Threads and history
+- **Restarted Claude turns:** If a resumed Claude turn fails, its retry can miss context from the failed attempt.
+- **Live tool-call updates:** The original merges a tool call's queued updates into one; Rust sends each update, so a client receives one extra update per tool call (upstream #39502). Most entries in [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json) are this.
+- **Older databases:** Both servers share the current database format. If a home has only the older TypeScript database, start the matching TypeScript server once to upgrade it (see [`docs/shared-store.md`](docs/shared-store.md)).
+
+#### Agents and tools
+- **Devices:** Simulators and emulators work locally, on SSH device hosts, from Simlock pools (alpha), and in Expo Simulators sessions; device detail and actions (settings, foreground app) work on this machine only.
+- **Delegated tasks (embeddable control plane):** A child cannot run in its own worktree (`isolation: "worktree"`).
+- **Secrets in schedules:** Scheduled tasks cannot use secrets yet, and the embeddable control plane stores no secrets.
+- **Claude workflows:** Rust's Claude sessions do not run workflow tasks.
+
+#### AI providers
+- **Cursor turns:** Cursor gets status checks, but cannot run agent turns yet.
+- **Grok extras:** `ask_user_question`, plan-mode exit, background tasks/monitors, subagents, `$skill` mentions, context usage, session titles, and mid-turn restart parity are not ported yet.
+- **ACP Registry extras:** Per-agent adapter quirks (Copilot/Command Code MCP over HTTP, Devin client terminals, Claude ACP subagents/work state, Kimi prompt-outcome watch, GLM per-turn usage, Mistral Vibe extensions, Hermes post-settle continuation, Droid/omp/OpenCode elicitation forms), ACP protocol v2, URL sign-in, plan-mode session modes, custom models, pre-turn status probes, and remote-workspace installation are not ported yet.
+- **Pi extras:** Extension dialogs (select/input/editor) are cancelled rather than asked; notices, extension errors, provider retries, `/compact`, service tier, `$skill` chips, subagents, steering status, rollback, workspace handoff, and non-image attachment path text are not ported yet.
+- **OpenCode extras:** OpenCode 2 lacks subagents, background shells, image generation jobs, native goals, todo lists, `/compact`, native slash commands, `$skill` mentions, provider retry items, rollback/fork, external client prompts, delivered background reports, Code Mode pages, and event-stream reconnect recovery. OpenCode 1.x lacks subagents, background wakes, todo lists, `/compact` and context-overflow recovery, native slash commands, MCP tool presentation, rollback/fork, orphaned-server ledger, and agent feedback instructions.
+- **Antigravity extras:** Post-settle continuation, subagents/child work, session-log error checks, 15-minute inactivity watchdog, client file-read repair, line-placed edit diffs, payload bounds, refusing broken manifest runtimes mid-turn, native `/goal`, and non-image attachments are not ported yet.
+- **Kiro extras:** Sub-agents as child threads, `/compact` (`_kiro/session/compact`), `session/fork`, native turn IDs, T3 MCP tool names on `@t3-code/<tool>` calls, slash commands and pushed options as snapshots, `steering_injected` wait/follow-up, refusing steers with attachments, and leaving the turn running on Stop timeout are not ported yet.
+- **fx extras:** MCP over ACP for fx 0.0.13/0.0.14 (Rust uses the stdio bridge), `subagent` calls as child threads, interrupt-and-restart steering (Rust queues), distinguishing cancelled vs. failed tool calls after Stop, and form elicitation are not ported yet.
+- **Muse Code extras:** Subagents/workflows as child threads, wake turns and continuations, joined turns, `/compact`, session history reads, account usage windows (`usage/changed`), todo lists, provider retry rows, user-input questions, workflow child approvals, image steering, extra workspace roots, agent feedback instructions, and non-image attachment path text are not ported yet.
+- **Codex native subagents:** Subagents get their own child threads, wake their parent on late completion, and stop when the parent is stopped, but the parent's live stream reports each change once (the original repeats no-op updates) and late child updates arrive with the wake run.
+- **Claude wakes:** Background subagent and workflow wakes do not yet report what finished (background commands and Monitor events do), and `pendingBackgroundTasks` lists only background commands and monitors.
+- **Steering extras:** Steering with model changes or attachments still differs; Rust also lacks the "delivery not confirmed" notice, foreground subagent handling during a Claude steer, and follow-up turns when a provider refuses a steer.
+- **Titles:** Cursor and Muse Code cannot title threads yet; custom title generators, images in OpenCode title prompts, forked-history titles, and Antigravity temp-folder cleanup / sign-in waits are missing.
+- **Desktop power reports:** Rust does not receive desktop power reports (battery, screen lock, heat), so it does not pause provider checks for them.
 
 ## Testing and parity suites
 
-Run the Rust unit and integration tests:
+### Rust tests
 
 ```bash
 cargo test --locked
@@ -196,40 +210,43 @@ python3 scripts/github_provider_parity.py --original-command "$original" --rust-
 python3 scripts/relay_parity.py --checkout /tmp/t3code-reference --rust "$rust"
 ```
 
-Parity runs stay off the network. `server_env()` in `scripts/parity_harness.py` turns the reference's telemetry off (`T3CODE_TELEMETRY_ENABLED=false`; the Rust server sends none), and turns off telemetry for the host's `gh` and `az` CLIs. It also sends every server's HTTP(S) through a loopback proxy that forwards nothing; `NO_PROXY` exempts loopback, for Node, reqwest, git, npm and Chromium alike. Each suite's output names any targets the proxy refused. Suites give both servers local stand-ins for what they would fetch:
+Additional parity suites under `scripts/` include `preview_provider_parity.py` (see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `peer_forwarding_parity.py`, `link_request_parity.py`, `client_sessions_parity.py`, `source_control_clone_parity.py`, `source_control_lookup_parity.py`, `project_clone_parity.py`, `project_favicon_parity.py`, `bitbucket_pull_requests_parity.py`, `bitbucket_settings_parity.py`, `bitbucket_pull_request_parity.py`, `acp_install_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
 
-- Bitbucket: a loopback API through `T3CODE_BITBUCKET_API_BASE_URL`.
-- npm releases: a loopback registry through `npm_config_registry`, read by the npm CLI.
-- The ACP Registry: a seeded `caches/acp-registry/registry.json`. Both servers fall back to it when the registry's fixed HTTPS URL is refused.
-- Provider release lookups in `provider_status_parity.py`: fake `npm`, `mise` and the like on `PATH`, and a loopback HTTPS proxy (`scripts/fake_https_proxy.py`) with a test CA both servers trust through `NODE_EXTRA_CA_CERTS`. It answers registry.npmjs.org and the Codex, Claude and Muse Code release channels, and forwards nothing.
-- The preview browser: both servers' pinned `chrome-headless-shell` folder, linked to the Playwright headless shell, so nothing is downloaded.
+### Offline isolation
 
-Some targets are still refused. Each has no setting that points it elsewhere, and both servers handle the failure the same way:
+Parity runs stay off the network. `server_env()` in `scripts/parity_harness.py` disables reference telemetry (`T3CODE_TELEMETRY_ENABLED=false`; Rust sends none) and host `gh`/`az` CLI telemetry, and routes HTTP(S) through a non-forwarding loopback proxy (`NO_PROXY` exempts loopback for Node, reqwest, git, npm, and Chromium). Each suite reports any targets the proxy refused.
 
-- The model-manifest refresh from raw.githubusercontent.com. Both servers then keep the bundled copy, which is the same file.
-- The reference's Codex, maintenance and Muse Code update checks: registry.npmjs.org and api.meta.ai.
-- Anything the host's `gh` and `az` CLIs try.
+Local stand-ins provided to both servers:
+- **Bitbucket:** Loopback API via `T3CODE_BITBUCKET_API_BASE_URL`.
+- **npm releases:** Loopback registry via `npm_config_registry`.
+- **ACP Registry:** Seeded `caches/acp-registry/registry.json`, used as fallback when the fixed HTTPS URL is refused.
+- **Provider release lookups (`provider_status_parity.py`):** Fake `npm`/`mise` on `PATH` and a loopback HTTPS proxy (`scripts/fake_https_proxy.py`) with a test CA trusted via `NODE_EXTRA_CA_CERTS`.
+- **Preview browser:** Pinned `chrome-headless-shell` linked to the Playwright headless shell so nothing downloads.
 
-Additional parity suites under `scripts/` include `preview_provider_parity.py` (Chromium preview frames and file transfers; see `--help`), `peer_link_parity.py`, `peer_link_outgoing_parity.py`, `peer_forwarding_parity.py`, `link_request_parity.py`, `client_sessions_parity.py`, `source_control_clone_parity.py`, `source_control_lookup_parity.py`, `project_clone_parity.py`, `project_favicon_parity.py`, `bitbucket_pull_requests_parity.py`, `bitbucket_settings_parity.py`, `bitbucket_pull_request_parity.py`, `acp_install_parity.py`, `linear_provider_parity.py`, `cors_parity.py`, `managed_policy_parity.py`, `settings_mutation_parity.py`, `settings_secrets_parity.py`, `relay_client_parity.py`, and `relay_provisioning_parity.py`. On Linux, pass `--faketime-lib /path/to/libfaketime.so.1` to `github_provider_parity.py` to include timestamped reads.
+Targets that remain refused (and are handled identically by both servers): model-manifest refresh from `raw.githubusercontent.com` (both keep the bundled copy), the reference's Codex/maintenance/Muse Code update checks (`registry.npmjs.org`, `api.meta.ai`), and any host `gh`/`az` CLI requests.
 
-Known gaps in `client_rpc_parity.py` and `client_thread_parity.py` are tracked in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) and [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json); both suites fail on any unlisted mismatch and on any listed case that starts passing.
+### Contract and client-call inventories
 
-Contract and client-call inventories:
 - [`contracts/`](contracts/) lists the pinned upstream RPC/HTTP surface (`python3 scripts/update_contract_inventory.py /tmp/t3code-reference`).
 - [`docs/client-call-inventory.md`](docs/client-call-inventory.md) lists every server call the client makes and its test coverage (`python3 scripts/update_client_call_inventory.py /tmp/t3code-reference`).
 
-## Architecture overview
+## Project layout and architecture
 
-The workspace consists of two crates and a WebAssembly host:
+The workspace contains two Rust crates and a WebAssembly host:
 
-- **`t3code-server` (root crate):** Implements the HTTP/WebSocket server, auth, settings/policy, orchestration event log (`events.jsonl`) and projections, provider turn execution, MCP endpoints, and standalone relay. Builds natively (`--features native`, default) and for `wasm32-unknown-unknown` (`--no-default-features --features workers`).
-- **`t3-agentd` ([`agentd/`](agentd/)):** Separate workspace process that executes local files, git, terminals, provider turns, previews, and device operations over a WebSocket, allowing the control plane to run without local filesystem or process access. See [`docs/agentd.md`](docs/agentd.md).
-- **Embeddable control plane ([`workers/`](workers/)):** `t3code_server::control::ControlPlane` separates control state from sockets, timers, and storage behind traits (`DocumentStore`, `EventLog`, `Runtime`, `workspace::Transport`). See [`docs/embedding.md`](docs/embedding.md).
+| Path | Description |
+| --- | --- |
+| [`src/`](src/) (`t3code-server`) | Root crate implementing the HTTP/WebSocket server, auth, settings/policy, orchestration event log (`events.jsonl`) and projections, provider turns, MCP endpoints, and standalone relay. Builds natively (`--features native`, default) and for `wasm32-unknown-unknown` (`--no-default-features --features workers`). |
+| [`agentd/`](agentd/) (`t3-agentd`) | Separate workspace process executing local files, git, terminals, provider turns, previews, and device operations over WebSocket so the control plane needs no local filesystem or process access. See [`docs/agentd.md`](docs/agentd.md). |
+| [`workers/`](workers/) | Embeddable control plane (`t3code_server::control::ControlPlane`) separating control state from sockets, timers, and storage behind traits (`DocumentStore`, `EventLog`, `Runtime`, `workspace::Transport`). See [`docs/embedding.md`](docs/embedding.md). |
+| [`contracts/`](contracts/) | Pinned upstream RPC, HTTP, command, and schema inventories. |
+| [`docs/`](docs/) | Design notes, [agent tool checklist](docs/agent-tools.md), [performance benchmarks](docs/performance.md), and [shared database notes](docs/shared-store.md). |
+| [`scripts/`](scripts/) | Parity test suites, xfail lists, and inventory generators. |
 
 ## Contributing
 
 1. Run `cargo test --locked` and the relevant parity scripts in `scripts/` against the pinned reference checkout.
-2. If your change fixes a gap listed in `scripts/client_rpc_parity_xfail.json` or `scripts/client_thread_parity_xfail.json`, remove that entry so the suite enforces it going forward.
+2. If your change fixes a gap listed in [`scripts/client_rpc_parity_xfail.json`](scripts/client_rpc_parity_xfail.json) or [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json), remove that entry so CI enforces it going forward.
 3. Keep changes focused and verify links and formatting before opening a pull request.
 
 ## About the name
