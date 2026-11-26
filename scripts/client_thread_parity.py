@@ -293,6 +293,9 @@ PROVIDER_SCENARIOS = [
     # and the child's end, with no turn running, wakes Claude with a run that names the subagent.
     {"name": "claude native subagent background", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_subagent_background.json", "children": True, "settleRuns": 2},
+    # The same with the child's own tool call: the child's command shows on its child thread.
+    {"name": "claude native subagent tools", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_subagent_tools.json", "children": True},
     # A Codex agent spawns a native subagent on a child thread of its own (collabAgentToolCall
     # spawnAgent), waits for it and reports its answer.
     {"name": "codex native subagent", "instance": "codex", "model": "fixture",

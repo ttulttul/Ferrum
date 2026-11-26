@@ -463,44 +463,85 @@ async fn record_claude(
                         .as_array()
                         .cloned()
                         .unwrap_or_default();
-                    let mut messages = row["nativeMessages"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
                     let native = item.id.as_str();
-                    let message_id = item_id("message", driver, native);
+                    let turn_item = item_id("turn-item", driver, native);
+                    let reference =
+                        json!({"driver": driver, "nativeId": native, "strength": "strong"});
+                    let message = item.kind == "assistant_message";
+                    let settled = item.status != "running";
+                    // A tool call hangs from a node of its own under the root
+                    // (`tool_call`), which runs and ends with it.
+                    let node = if message {
+                        root.clone()
+                    } else {
+                        let node_id = item_id("node", driver, native);
+                        let existing = nodes.iter_mut().find(|n| n["id"] == node_id);
+                        match existing {
+                            Some(node) => {
+                                node["status"] = json!(item.status);
+                                node["completedAt"] = if settled { json!(at) } else { Value::Null };
+                            }
+                            None => nodes.push(json!({
+                                "id": node_id, "threadId": child_id, "runId": null,
+                                "parentNodeId": root, "rootNodeId": root, "kind": "tool_call",
+                                "status": item.status, "countsForRun": false,
+                                "providerThreadId": null, "providerTurnId": null,
+                                "nativeItemRef": reference, "runtimeRequestId": null,
+                                "checkpointScopeId": null, "startedAt": at,
+                                "completedAt": if settled { json!(at) } else { Value::Null },
+                            })),
+                        }
+                        patch["nodes"] = json!(nodes);
+                        json!(node_id)
+                    };
+                    // A running tool call ends in place: it keeps its start and ordinal.
+                    let index = items.iter().position(|record| record["id"] == turn_item);
+                    let (ordinal, started) = match index.map(|at| &items[at]) {
+                        Some(record) => (record["ordinal"].clone(), record["startedAt"].clone()),
+                        None => (json!(items.len() + 1), json!(at)),
+                    };
                     let mut record = json!({
-                        "id": item_id("turn-item", driver, native),
+                        "id": turn_item,
                         "threadId": child_id,
                         "runId": null,
-                        "nodeId": root,
+                        "nodeId": node,
                         "providerThreadId": null,
                         "providerTurnId": null,
-                        "nativeItemRef": {"driver": driver, "nativeId": native, "strength": "strong"},
+                        "nativeItemRef": reference,
                         "parentItemId": null,
-                        "ordinal": items.len() + 1,
+                        "ordinal": ordinal,
                         "status": item.status,
                         "title": item.title,
-                        "startedAt": at,
-                        "completedAt": at,
+                        "startedAt": started,
+                        "completedAt": if settled { json!(at) } else { Value::Null },
                         "updatedAt": at,
                         "type": item.kind,
-                        "messageId": message_id,
                     });
                     for (key, value) in &item.fields {
                         if key != "subagentChild" {
                             record[key] = value.clone();
                         }
                     }
-                    messages.push(json!({
-                        "createdBy": "agent", "creationSource": "provider", "id": message_id,
-                        "threadId": child_id, "runId": null, "nodeId": root, "role": "assistant",
-                        "text": record["text"], "attachments": [], "streaming": false,
-                        "createdAt": at, "updatedAt": at,
-                    }));
-                    items.push(record);
+                    if message {
+                        let message_id = item_id("message", driver, native);
+                        record["messageId"] = json!(message_id);
+                        let mut messages = row["nativeMessages"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        messages.push(json!({
+                            "createdBy": "agent", "creationSource": "provider", "id": message_id,
+                            "threadId": child_id, "runId": null, "nodeId": root, "role": "assistant",
+                            "text": record["text"], "attachments": [], "streaming": false,
+                            "createdAt": at, "updatedAt": at,
+                        }));
+                        patch["nativeMessages"] = json!(messages);
+                    }
+                    match index {
+                        Some(at) => items[at] = record,
+                        None => items.push(record),
+                    }
                     patch["nativeTurnItems"] = json!(items);
-                    patch["nativeMessages"] = json!(messages);
                 }
                 Event::ThreadPatched {
                     thread_id: child_id.clone(),

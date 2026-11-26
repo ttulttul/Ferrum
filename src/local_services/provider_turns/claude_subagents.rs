@@ -4,8 +4,8 @@
 //! as their `parent_tool_use_id`, and the task ends (`task_notification`). The subagent shows as
 //! a `subagent` item on its parent (`task:<id>:subagent`); its child thread, made by the control
 //! plane, gets the prompt, the child's messages and the task's summary as its result message.
-//! The child's records are items tagged with their task (`subagentChild`), which the parent's
-//! projection skips.
+//! The child's records, its messages and its own tool calls, are items tagged with their task
+//! (`subagentChild`), which the parent's projection skips.
 use crate::workspace::provider::ProviderItem;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -20,6 +20,8 @@ pub(crate) struct ClaudeSubagents {
     by_call: HashMap<String, String>,
     /// The tasks the current turn started.
     this_turn: std::collections::HashSet<String>,
+    /// The children's running tool calls, by tool call: their items on the child thread.
+    tools: HashMap<String, ProviderItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +65,21 @@ impl ClaudeSubagents {
     /// Whether the turn started a subagent (its usage says so).
     pub(crate) fn ran_any(&self) -> bool {
         !self.this_turn.is_empty()
+    }
+
+    /// A child's tool call starts: its item on the child thread, once.
+    pub(crate) fn child_tool(&mut self, task_id: &str, item: ProviderItem) -> Option<ProviderItem> {
+        if self.tools.contains_key(&item.id) {
+            return None;
+        }
+        let item = child(task_id, item);
+        self.tools.insert(item.id.clone(), item.clone());
+        Some(item)
+    }
+
+    /// The child's tool call a `tool_result` ends.
+    pub(crate) fn child_tool_result(&mut self, call: &str) -> Option<ProviderItem> {
+        self.tools.remove(call)
     }
 
     /// The task a child's message belongs to, by its `parent_tool_use_id`.
@@ -224,6 +241,16 @@ mod tests {
             &json!({"type": "assistant", "uuid": "u1", "message": {"content": [{"type": "text", "text": "# Title"}]}}),
         );
         assert_eq!(answer[0].fields["subagentChild"], "t1");
+        // The child's own tool call shows once on its child thread until its result ends it.
+        let bash = ProviderItem::new("toolu_2", "command_execution", "running");
+        let started = subagents.child_tool("t1", bash.clone()).unwrap();
+        assert_eq!(started.fields["subagentChild"], "t1");
+        assert!(subagents.child_tool("t1", bash).is_none());
+        assert_eq!(
+            subagents.child_tool_result("toolu_2").unwrap().id,
+            "toolu_2"
+        );
+        assert!(subagents.child_tool_result("toolu_2").is_none());
         let ended = subagents.frame(
             &json!({"subtype": "task_notification", "task_id": "t1", "status": "completed", "summary": "Read it"}),
             None,

@@ -268,6 +268,9 @@
   "claude native subagent": {
     "live": "The reference streams every update of the subagent, also those that change nothing (running again as the child answers, completed again with the Agent call's result), and the subagent node's completion apart; Rust's stream is made of what changed in the thread, so it sends each change once and the node's status with the subagent's record. The subagent's record, item and node, the turn's usage and the child thread with its prompt, answer and result match."
   },
+  "claude native subagent tools": {
+    "live": "As in claude native subagent: the reference streams every update of the subagent, also those that change nothing (running again as the child works and answers, completed again with the Agent call's result), and the subagent node's completion apart; Rust's stream is made of what changed in the thread, so it sends each change once. The subagent's record, item and node, the turn's usage and the child thread with its prompt, its command (item, node and omitted output), answer and result match."
+  },
   "codex native subagent late stop": {
     "live": "The reference streams every update of the subagent, also those that change nothing (running again just before the interrupt's card), and the subagent node's interruption with the turn's end; Rust's stream is made of what changed in the thread, so it sends each change once and the node's status with the subagent's record. The child's late turn, interrupted at once and recorded nowhere, the child thread and the parent's records match the reference."
   },
