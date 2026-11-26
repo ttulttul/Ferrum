@@ -966,6 +966,9 @@ impl<'a> Attempt<'a> {
             .as_str()
             .and_then(|call| self.cli.subagents.task_of(call))
         {
+            if let Some(item) = self.cli.subagents.child_frame(&task, &message) {
+                self.sink.send(ProviderEvent::TurnItem { item });
+            }
             for item in self.cli.subagents.child_message(&task, &message) {
                 self.sink.send(ProviderEvent::TurnItem { item });
             }
@@ -1315,6 +1318,11 @@ impl<'a> Attempt<'a> {
     }
 
     fn tool_results(&mut self, message: &Value) {
+        let results = message["message"]["content"]
+            .as_array()
+            .map_or(0, |blocks| {
+                blocks.iter().filter(|b| b["type"] == "tool_result").count()
+            });
         for block in message["message"]["content"]
             .as_array()
             .into_iter()
@@ -1322,6 +1330,20 @@ impl<'a> Attempt<'a> {
         {
             if block["type"] != "tool_result" {
                 continue;
+            }
+            // An Agent call's result settles its subagent, which is not a tool call.
+            let structured = if results == 1 {
+                &message["tool_use_result"]
+            } else {
+                &Value::Null
+            };
+            if let Some(call) = block["tool_use_id"].as_str() {
+                if self.cli.subagents.task_of(call).is_some() {
+                    if let Some(item) = self.cli.subagents.call_result(call, block, structured) {
+                        self.sink.send(ProviderEvent::TurnItem { item });
+                    }
+                    continue;
+                }
             }
             let Some(item) = block["tool_use_id"]
                 .as_str()

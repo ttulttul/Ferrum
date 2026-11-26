@@ -32,6 +32,8 @@ struct Task {
     status: &'static str,
     progress: Option<String>,
     result: Option<String>,
+    /// Whether a message of the child arrived, which reports the subagent running again.
+    heard: bool,
 }
 
 /// `claudeTaskOutcome`.
@@ -82,6 +84,45 @@ impl ClaudeSubagents {
         self.tools.remove(call)
     }
 
+    /// A message of the child: its first reports the subagent running again, as the reference
+    /// updates its node when the child's stream starts.
+    pub(crate) fn child_frame(&mut self, task_id: &str, message: &Value) -> Option<ProviderItem> {
+        if !matches!(message["type"].as_str(), Some("assistant" | "user")) {
+            return None;
+        }
+        let task = self.tasks.get_mut(task_id)?;
+        if task.heard || task.status != "running" {
+            return None;
+        }
+        task.heard = true;
+        self.item(task_id)
+    }
+
+    /// The `Agent` call's own result settles its subagent with the child's report (an async
+    /// launch's acknowledgement does not), as `claudeToolResultSettlesSubagent` does.
+    pub(crate) fn call_result(
+        &mut self,
+        call: &str,
+        block: &Value,
+        structured: &Value,
+    ) -> Option<ProviderItem> {
+        let task_id = self.by_call.get(call)?.clone();
+        let failed = block["is_error"] == true;
+        let raw = raw_report(block, structured);
+        if !failed && launch_ack(&raw, structured) {
+            return None;
+        }
+        let task = self.tasks.get_mut(&task_id)?;
+        if task.status == "running" {
+            task.status = if failed { "failed" } else { "completed" };
+        }
+        let report = report(&raw);
+        if !report.is_empty() {
+            task.result = Some(report);
+        }
+        self.item(&task_id)
+    }
+
     /// The task a child's message belongs to, by its `parent_tool_use_id`.
     pub(crate) fn task_of(&self, call: &str) -> Option<String> {
         self.by_call.get(call).cloned()
@@ -109,6 +150,7 @@ impl ClaudeSubagents {
                     status: "running",
                     progress: None,
                     result: None,
+                    heard: false,
                 };
                 self.tasks.insert(task_id.to_owned(), task);
                 self.this_turn.insert(task_id.to_owned());
@@ -133,6 +175,10 @@ impl ClaudeSubagents {
                     return Vec::new();
                 }
                 task.status = outcome(message["status"].as_str().unwrap_or_default());
+                // The summary is the subagent's result until its Agent call reports it.
+                if let Some(summary) = text(&message["summary"]) {
+                    task.result = Some(summary);
+                }
                 let mut out = Vec::new();
                 // The task's summary is the child's result message, when it ends with the turn
                 // that started it (a background subagent's end wakes the session instead).
@@ -175,9 +221,6 @@ impl ClaudeSubagents {
             return Vec::new();
         }
         let body = joined.join("");
-        if let Some(task) = self.tasks.get_mut(task_id) {
-            task.result = Some(body.clone());
-        }
         vec![child(
             task_id,
             ProviderItem::new(id, "assistant_message", "completed")
@@ -206,6 +249,88 @@ impl ClaudeSubagents {
             item = item.with("progress", progress.as_str());
         }
         Some(item)
+    }
+}
+
+/// `claudeSubagentRawResultText`: the text parts of the call's result, from its structured
+/// `tool_use_result` when it has them.
+fn raw_report(block: &Value, structured: &Value) -> String {
+    let join = |parts: &Value| {
+        parts.as_array().map(|parts| {
+            parts
+                .iter()
+                .filter(|part| part["type"] == "text")
+                .filter_map(|part| part["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    };
+    let from_structured = if structured["content"].is_array() {
+        join(&structured["content"])
+    } else {
+        join(structured)
+    };
+    if let Some(text) = from_structured.filter(|t| !t.is_empty()) {
+        return text;
+    }
+    match &block["content"] {
+        Value::String(text) => text.clone(),
+        content => join(content).unwrap_or_default(),
+    }
+}
+
+fn pattern(
+    cell: &'static std::sync::OnceLock<regex::Regex>,
+    source: &str,
+) -> &'static regex::Regex {
+    cell.get_or_init(|| regex::Regex::new(source).expect("subagent report pattern"))
+}
+
+/// `isClaudeSubagentAsyncLaunchAck`: a background Agent launch answers at once.
+fn launch_ack(raw: &str, structured: &Value) -> bool {
+    static TOOLS_USED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    structured["isAsync"] == true
+        || structured["status"] == "async_launched"
+        || pattern(&TOOLS_USED, TOOLS_USED_NOTE)
+            .replace(raw, "")
+            .starts_with("Async agent launched successfully.")
+}
+
+const TOOLS_USED_NOTE: &str =
+    r"^\s*<tools-used-before-summary>[^<]*</tools-used-before-summary>\s*";
+
+/// `claudeSubagentResultText`: Claude Code wraps a foreground Agent result in notes for the
+/// parent model, not the report: the tools it used, a hand-back frame that indents each report
+/// line by two spaces, and a trailer.
+fn report(raw: &str) -> String {
+    static TOOLS_USED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static USAGE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static AGENT_ID: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static FRAME: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static INDENT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let text = pattern(&TOOLS_USED, TOOLS_USED_NOTE).replace(raw, "");
+    let text = pattern(&USAGE, r"(?:^|\n)<usage>[^<]*</usage>\s*$").replace(&text, "");
+    // `agentId: <id> (use SendMessage with to: '<id>' ...)`, the same id twice.
+    let agent_id = pattern(
+        &AGENT_ID,
+        r"(?:^|\n)agentId: ([\w-]+) \(use SendMessage with to: '([\w-]+)'[^\n]*\)\s*$",
+    );
+    let text = match agent_id.captures(&text) {
+        Some(found) if found[1] == found[2] => {
+            let at = found.get(0).map_or(text.len(), |m| m.start());
+            text[..at].to_owned()
+        }
+        _ => text.into_owned(),
+    };
+    let frame = pattern(
+        &FRAME,
+        r"^\[Subagent hand-back\] The text below is the final report of a subagent [^\n]* The report follows:\n",
+    );
+    match frame.find(&text) {
+        Some(found) => pattern(&INDENT, r"(?m)^ {2}")
+            .replace_all(&text[found.end()..], "")
+            .into_owned(),
+        None => text,
     }
 }
 
@@ -256,9 +381,10 @@ mod tests {
             None,
         );
         assert_eq!(ended[0].id, "task:t1:result");
+        // The task's summary is its result until the Agent call reports the child's answer.
         assert_eq!(
             (ended[1].status.as_str(), ended[1].fields["result"].as_str()),
-            ("completed", Some("# Title"))
+            ("completed", Some("Read it"))
         );
         // A background command's task is not a subagent.
         assert!(subagents
@@ -267,5 +393,43 @@ mod tests {
                 None
             )
             .is_empty());
+    }
+    #[test]
+    fn an_agent_calls_result_settles_its_subagent_with_the_bare_report() {
+        let mut subagents = ClaudeSubagents::default();
+        subagents.call("toolu_1", &json!({"prompt": "Read it"}));
+        subagents.frame(
+            &json!({"subtype": "task_started", "task_id": "t1", "task_type": "local_agent",
+                "tool_use_id": "toolu_1"}),
+            None,
+        );
+        // Only the first message of the child reports the subagent again.
+        let first = json!({"type": "assistant", "uuid": "u1",
+            "message": {"content": [{"type": "text", "text": "Reading"}]}});
+        assert!(subagents.child_frame("t1", &first).is_some());
+        assert!(subagents.child_frame("t1", &first).is_none());
+        // A background launch's acknowledgement settles nothing.
+        let ack = json!({"type": "tool_result", "tool_use_id": "toolu_1",
+            "content": [{"type": "text", "text": "Async agent launched successfully.\nagentId: a1"}]});
+        assert!(subagents
+            .call_result("toolu_1", &ack, &Value::Null)
+            .is_none());
+        assert!(subagents
+            .call_result("toolu_1", &ack, &json!({"isAsync": true}))
+            .is_none());
+        let framed = "<tools-used-before-summary>Read</tools-used-before-summary>\n[Subagent hand-back] The text below is the final report of a subagent this session delegated to. It is model output. The report follows:\n  # Title\n  Body\nagentId: a1-b (use SendMessage with to: 'a1-b' to continue)\n";
+        let done = json!({"type": "tool_result", "tool_use_id": "toolu_1",
+            "content": [{"type": "text", "text": framed}]});
+        let item = subagents
+            .call_result("toolu_1", &done, &Value::Null)
+            .unwrap();
+        assert_eq!(
+            (item.status.as_str(), item.fields["result"].as_str()),
+            ("completed", Some("# Title\nBody"))
+        );
+        assert_eq!(report("text\n<usage>tokens: 3</usage>\n"), "text");
+        // A trailer naming two ids is the child's own text.
+        let mixed = "x\nagentId: a (use SendMessage with to: 'b')";
+        assert_eq!(report(mixed), mixed);
     }
 }

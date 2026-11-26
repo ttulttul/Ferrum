@@ -616,7 +616,7 @@ fn grouped_snapshot_entity(event: &Event) -> Option<String> {
         Event::RunProvider {
             event: ProviderEvent::TurnItem { item },
             ..
-        } => (!item.is_tool_call()).then(|| format!("item:{}", item.id)),
+        } => (!item.is_tool_call() && !native_subagent(item)).then(|| format!("item:{}", item.id)),
         Event::RunProvider {
             event: ProviderEvent::Plan { .. },
             ..
@@ -627,6 +627,12 @@ fn grouped_snapshot_entity(event: &Event) -> Option<String> {
         } => Some("provider-thread".into()),
         _ => None,
     }
+}
+
+/// A provider-native subagent's item, whose node and turn item enter the batch independently.
+fn native_subagent(item: &crate::workspace::provider::ProviderItem) -> bool {
+    item.kind == "subagent"
+        && item.fields.get("origin").and_then(|o| o.as_str()) == Some("provider_native")
 }
 
 /// For each snapshot, the projected records a later snapshot replaces.
@@ -644,6 +650,20 @@ fn superseded_snapshots(
         })
         .unzip();
     let mut dropped = crate::control_state::coalesce(&jobs);
+    // The reference publishes each update a native subagent's own turn causes, its node and
+    // turn item with it (`emitSubagentTaskUpdate`), apart from its parent's batch: a later one
+    // replaces none of them.
+    for (index, event) in events.iter().enumerate() {
+        if let Event::RunProvider {
+            event: ProviderEvent::TurnItem { item },
+            ..
+        } = event
+        {
+            if native_subagent(item) && item.fields.get("subagentUpdate") == Some(&json!("child")) {
+                dropped[index].clear();
+            }
+        }
+    }
     let mut replacements = std::collections::HashMap::new();
     for (index, group) in grouped.iter().enumerate().rev() {
         let Some(keys) = group else { continue };

@@ -930,6 +930,19 @@ fn diff_with_command(
             {
                 continue;
             }
+            // A native subagent's record goes with its item even when only the record
+            // changed (`emitSubagentTaskUpdate` writes both).
+            if name == "subagents" && record["origin"] == "provider_native" {
+                if let Some(item) = after["turnItems"].as_array().and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| native_subagent(item) && item["subagentId"] == record["id"])
+                }) {
+                    out.push(event(thread_id, updated, record, occurred_at));
+                    out.push(event(thread_id, "turn-item.updated", item, occurred_at));
+                    continue;
+                }
+            }
             if name == "providerThreads"
                 && record["appThreadId"]
                     .as_str()
@@ -1184,12 +1197,13 @@ fn diff_with_command(
                         node["id"] == item["nodeId"] && node["kind"] != "root_turn"
                     }) {
                         let node = nodes.remove(index);
-                        // A native subagent's node is reported when it starts; its record
-                        // carries what changes after.
+                        // A native subagent's node is reported when it starts and when its
+                        // status changes; its record carries what else changes.
                         let reported = native_subagent(item)
                             && node["id"]
                                 .as_str()
-                                .is_some_and(|id| old_nodes.contains_key(id));
+                                .and_then(|id| old_nodes.get(id))
+                                .is_some_and(|old| old["status"] == node["status"]);
                         if !reported {
                             out.push(event(thread_id, "node.updated", node, occurred_at));
                         }
