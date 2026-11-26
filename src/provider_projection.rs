@@ -1145,6 +1145,19 @@ impl Thread {
                 last.filter(|t| pi && t.status == TurnStatus::Interrupted)
                     .map(|_| thread.updated_at)
             });
+        // Pi and OpenCode 2 report their session `running` while a turn
+        // runs, and `ready` again when it ends (`updateProviderSession`).
+        let turn_running = (pi || opencode2.is_some())
+            && self
+                .runs
+                .iter()
+                .rev()
+                .find_map(|run| self.provider.runs.get(&run.id).map(|record| (run, record)))
+                .is_some_and(|(run, record)| {
+                    record.native_turn_id.is_some()
+                        && run.restart_cut.is_none()
+                        && !self.provider.terminals.contains_key(&run.id)
+                });
         let capabilities: Value =
             serde_json::from_str(include_str!("provider_capabilities.json")).unwrap_or_default();
         let capabilities = match opencode2 {
@@ -1183,7 +1196,15 @@ impl Thread {
                 .and_then(|run| run.model_selection.as_deref())
                 .map_or(&row["modelSelection"]["model"], |selection| &selection["model"]),
             "providerInstanceId": instance,
-            "status": if crashed { "error" } else if stopped.is_some() { "stopped" } else { "ready" },
+            "status": if crashed {
+                "error"
+            } else if stopped.is_some() {
+                "stopped"
+            } else if turn_running {
+                "running"
+            } else {
+                "ready"
+            },
             "updatedAt": iso(if crashed { thread.updated_at } else { stopped.unwrap_or(thread.created_at) })
         }))
     }

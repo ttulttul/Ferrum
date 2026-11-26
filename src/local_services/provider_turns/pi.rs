@@ -954,7 +954,7 @@ impl<'a> Turn<'a> {
         } else {
             TurnStatus::Completed
         };
-        self.sink.send(ProviderEvent::ProviderTurn {
+        self.sink.report_turn_at_end(ProviderEvent::ProviderTurn {
             native_turn_id: None,
             native_turn_ref: reference,
             conversation_head: pi.leaf.clone(),
@@ -1041,7 +1041,7 @@ impl<'a> Turn<'a> {
         self.close_tools("interrupted");
         let reference = self.entries(pi, PROBE_TIMEOUT).await;
         self.complete_blocks();
-        self.sink.send(ProviderEvent::ProviderTurn {
+        self.sink.report_turn_at_end(ProviderEvent::ProviderTurn {
             native_turn_id: None,
             native_turn_ref: reference,
             conversation_head: pi.leaf.clone(),
@@ -1283,7 +1283,8 @@ impl<'a> Turn<'a> {
         let mut usage = self.last_usage.clone().unwrap_or_default();
         usage.used_tokens = tokens;
         usage.max_tokens = Some(window);
-        self.sink.send(ProviderEvent::Usage { usage });
+        self.sink
+            .report_usage_at_end(ProviderEvent::Usage { usage });
     }
 }
 

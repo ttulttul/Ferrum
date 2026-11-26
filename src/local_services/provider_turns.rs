@@ -218,6 +218,9 @@ pub(crate) struct Sink {
     /// The background tasks the turn's end reports (Claude's completed
     /// provider thread lists them).
     tasks_report: std::sync::Arc<std::sync::Mutex<Option<ProviderEvent>>>,
+    /// The provider turn the turn's end reports (Pi's model and
+    /// conversation head), held to go with the end.
+    turn_report: std::sync::Arc<std::sync::Mutex<Option<ProviderEvent>>>,
     /// The provider event logs the turn's protocol frames go to.
     log: ProviderEventLog,
 }
@@ -238,6 +241,7 @@ impl Sink {
             usage: std::sync::Arc::default(),
             thread_report: std::sync::Arc::default(),
             tasks_report: std::sync::Arc::default(),
+            turn_report: std::sync::Arc::default(),
         }
     }
     /// The recorder for a provider process this turn starts, speaking
@@ -249,6 +253,21 @@ impl Sink {
     fn report_thread_at_end(&self, event: ProviderEvent) {
         if let Ok(mut report) = self.thread_report.lock() {
             *report = Some(event);
+        }
+    }
+    /// Report `event` (a `provider_turn.updated`) with the turn's end, as
+    /// the reference writes the ended turn in one update.
+    fn report_turn_at_end(&self, event: ProviderEvent) {
+        if let Ok(mut report) = self.turn_report.lock() {
+            *report = Some(event);
+        }
+    }
+    /// Report `event` (the turn's last usage) with the turn's end, as the
+    /// reference writes it in the ended turn's update (Pi's final session
+    /// statistics).
+    fn report_usage_at_end(&self, event: ProviderEvent) {
+        if let Ok(mut usage) = self.usage.lock() {
+            *usage = Some(event);
         }
     }
     /// Report `event` (a `background_tasks.updated`) with the turn's end.
@@ -300,11 +319,15 @@ impl Sink {
         };
         // A Codex turn's end goes with what it closes: its usage and its
         // open items, as the reference writes them together.
-        let mut closing: Vec<ProviderEvent> =
-            [&self.thread_report, &self.tasks_report, &self.usage]
-                .into_iter()
-                .filter_map(|held| held.lock().ok().and_then(|mut held| held.take()))
-                .collect();
+        let mut closing: Vec<ProviderEvent> = [
+            &self.turn_report,
+            &self.thread_report,
+            &self.tasks_report,
+            &self.usage,
+        ]
+        .into_iter()
+        .filter_map(|held| held.lock().ok().and_then(|mut held| held.take()))
+        .collect();
         for mut item in open {
             // A Codex command can outlive a completed turn, as background
             // work; the reference ends only an interrupted or failed turn's.

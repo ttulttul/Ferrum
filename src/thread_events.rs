@@ -1087,6 +1087,16 @@ fn diff_with_command(
                     Phase::Reported => !finalized(item),
                     Phase::Finalized => finalized(item),
                 }) {
+                    // Each adapter writes an item's records in its own order:
+                    // Pi's projection writes the turn item before its message,
+                    // Muse's the message before the node; the others the
+                    // node, the message, then the item.
+                    let driver = item["nativeItemRef"]["driver"].as_str();
+                    if driver == Some(crate::workspace::provider::MUSE) {
+                        if let Some(message) = take_message(&mut messages, &item["messageId"]) {
+                            out.push(event(thread_id, "message.updated", message, occurred_at));
+                        }
+                    }
                     if let Some(index) = nodes.iter().position(|node| {
                         node["id"] == item["nodeId"] && node["kind"] != "root_turn"
                     }) {
@@ -1109,14 +1119,15 @@ fn diff_with_command(
                             out.push(event(thread_id, "subagent.updated", record, occurred_at));
                         }
                     }
-                    if let Some(index) = messages.iter().position(|m| m["id"] == item["messageId"])
-                    {
-                        out.push(event(
-                            thread_id,
-                            "message.updated",
-                            messages.remove(index),
-                            occurred_at,
-                        ));
+                    if driver == Some(crate::workspace::provider::PI) {
+                        out.push(event(thread_id, "turn-item.updated", item, occurred_at));
+                        if let Some(message) = take_message(&mut messages, &item["messageId"]) {
+                            out.push(event(thread_id, "message.updated", message, occurred_at));
+                        }
+                        continue;
+                    }
+                    if let Some(message) = take_message(&mut messages, &item["messageId"]) {
+                        out.push(event(thread_id, "message.updated", message, occurred_at));
                     }
                     out.push(event(thread_id, "turn-item.updated", item, occurred_at));
                 }
@@ -1124,6 +1135,12 @@ fn diff_with_command(
         }
     }
     Some(out)
+}
+
+/// The message `id` names, taken out of `messages`.
+fn take_message<'a>(messages: &mut Vec<&'a Value>, id: &Value) -> Option<&'a Value> {
+    let index = messages.iter().position(|m| &m["id"] == id)?;
+    Some(messages.remove(index))
 }
 
 /// The stream items for `events`, numbered so the last one is `last`.
@@ -1166,6 +1183,41 @@ mod tests {
         // Anything else keeps the thread first.
         assert!(
             position(Order::Default, "providerThreads") < position(Order::Default, "providerTurns")
+        );
+    }
+
+    #[test]
+    fn each_adapter_writes_an_items_records_in_its_own_order() {
+        let types = |driver: &str| {
+            let before = json!({
+                "thread": {"id": "t"},
+                "runs": [], "attempts": [], "nodes": [], "messages": [], "turnItems": []
+            });
+            let after = json!({
+                "thread": {"id": "t"},
+                "runs": [], "attempts": [],
+                "nodes": [{"id": "n:1", "runId": "r"}],
+                "messages": [{"id": "m", "runId": "r", "nodeId": "n:1"}],
+                "turnItems": [{"id": "i", "runId": "r", "nodeId": "n:1", "messageId": "m",
+                    "type": "assistant_message", "nativeItemRef": {"driver": driver}}]
+            });
+            diff("t", &before, &after, "x", Order::Default)
+                .unwrap()
+                .iter()
+                .map(|e| e["type"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            types("grok"),
+            ["node.updated", "message.updated", "turn-item.updated"]
+        );
+        assert_eq!(
+            types("pi"),
+            ["node.updated", "turn-item.updated", "message.updated"]
+        );
+        assert_eq!(
+            types("muse"),
+            ["message.updated", "node.updated", "turn-item.updated"]
         );
     }
 
