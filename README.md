@@ -107,7 +107,7 @@ Parity is tested by running the original TypeScript server and the Rust server s
 | --- | --- |
 | CI parity suites | 56 suites across 9 shards on every code change (plus twice nightly); 6 more run on their own |
 | Client RPC ([cases](scripts/client_rpc_cases.json)) | 242 recorded client steps; 0 expected failures ([xfail](scripts/client_rpc_parity_xfail.json)) |
-| Live provider turns | 234 provider scenarios; 117 checks expected to fail, 22 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
+| Live provider turns | 234 provider scenarios; 102 checks expected to fail, 23 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
 | Shared home / server switch | 0 expected failures ([xfail](scripts/shared_store_parity_xfail.json)) |
 | Provider status ([suite](scripts/provider_status_parity.py)) | 0 expected failures |
 | Other suites | 0 known differences |
@@ -150,7 +150,7 @@ Based on `main` and the parity test suites:
 
 #### Threads and history
 - **Restarted Claude turns:** If a resumed Claude turn fails, its retry can miss context from the failed attempt.
-- **Live tool-call updates:** The original merges a tool call's queued updates into one; Rust sends each update, so a client receives one extra update per tool call (upstream #39502). Most entries in [`scripts/client_thread_parity_xfail.json`](scripts/client_thread_parity_xfail.json) are this.
+- **Live provider updates:** A tool's node and turn item coalesce independently in the provider commit batch (upstream #39502). Batch boundaries can still hide intermediate command updates, including during automatic approvals. Short streaming replies, session status and request ordering account for other [live differences](scripts/client_thread_parity_xfail.json).
 - **Older databases:** Both servers share the current database format. If a home has only the older TypeScript database, start the matching TypeScript server once to upgrade it (see [`docs/shared-store.md`](docs/shared-store.md)).
 
 #### Agents and tools

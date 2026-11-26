@@ -591,14 +591,15 @@ struct Snapshots {
     thread_seen: bool,
 }
 
-/// The entity a snapshot replaces the state of: its turn item, or the
-/// turn's plan.
-fn snapshot_entity(event: &Event) -> Option<String> {
+/// Jobs represented by a single entity in the workspace stream. A tool
+/// reports its node and turn item independently to the reference batch, so
+/// use its projected snapshot keys instead.
+fn grouped_snapshot_entity(event: &Event) -> Option<String> {
     match event {
         Event::RunProvider {
             event: ProviderEvent::TurnItem { item },
             ..
-        } => Some(format!("item:{}", item.id)),
+        } => (!item.is_tool_call()).then(|| format!("item:{}", item.id)),
         Event::RunProvider {
             event: ProviderEvent::Plan { .. },
             ..
@@ -609,6 +610,34 @@ fn snapshot_entity(event: &Event) -> Option<String> {
         } => Some("provider-thread".into()),
         _ => None,
     }
+}
+
+/// Expand a superseded workspace item to all of its projected updates. A
+/// tool node and its turn item are separate jobs, so either can survive
+/// the other's replacement.
+fn superseded_snapshots(
+    events: &[Event],
+    projected: Vec<(Vec<String>, usize)>,
+) -> Vec<Vec<String>> {
+    let (jobs, grouped): (Vec<_>, Vec<_>) = events
+        .iter()
+        .zip(projected)
+        .map(|(event, (keys, _))| match grouped_snapshot_entity(event) {
+            Some(entity) => (vec![entity], Some(keys)),
+            None => (keys, None),
+        })
+        .unzip();
+    crate::control_state::coalesce(&jobs)
+        .into_iter()
+        .zip(grouped)
+        .map(|(dropped, group)| {
+            if dropped.is_empty() {
+                dropped
+            } else {
+                group.unwrap_or(dropped)
+            }
+        })
+        .collect()
 }
 
 /// Whether a commit sent any live events.
@@ -689,28 +718,8 @@ impl Snapshots {
             return false;
         }
         let events: Vec<Event> = queued.iter().map(|(event, _)| event.clone()).collect();
-        // As the reference's `coalesce`: each snapshot is one job keyed by
-        // its entity (the turn item, or the turn's plan), and a job a later
-        // one of its entity replaces sends none of its live events.
         let suppress = if events.len() > 1 {
-            let keys: Vec<Vec<String>> = host
-                .dry_run(&events)
-                .await
-                .into_iter()
-                .map(|(keys, _)| keys)
-                .collect();
-            let entities: Vec<Vec<String>> = events
-                .iter()
-                .enumerate()
-                .map(|(index, event)| {
-                    vec![snapshot_entity(event).unwrap_or_else(|| format!("#{index}"))]
-                })
-                .collect();
-            crate::control_state::coalesce(&entities)
-                .into_iter()
-                .zip(keys)
-                .map(|(dropped, keys)| if dropped.is_empty() { Vec::new() } else { keys })
-                .collect()
+            superseded_snapshots(&events, host.dry_run(&events).await)
         } else {
             vec![Vec::new()]
         };
@@ -1142,37 +1151,52 @@ async fn record<H: TurnHost>(
 mod snapshot_tests {
     use super::*;
 
-    fn snapshot(id: &str, status: &str) -> Event {
+    fn snapshot(id: &str, kind: &str, status: &str) -> Event {
         Event::RunProvider {
             run_id: Uuid::nil(),
             thread_id: "t".into(),
             event: ProviderEvent::TurnItem {
-                item: crate::workspace::provider::ProviderItem::new(
-                    id,
-                    "assistant_message",
-                    status,
-                ),
+                item: crate::workspace::provider::ProviderItem::new(id, kind, status),
             },
             position: None,
         }
     }
 
     #[test]
-    fn a_snapshot_is_one_job_of_its_item() {
-        // The reference coalesces whole snapshots by entity: a running reply
-        // followed by its completion is dropped, whatever records each one
-        // touches.
+    fn a_text_snapshot_is_one_job_of_its_item() {
+        // The workspace represents a reply as a single text snapshot.
+        // Its completion replaces the preceding running snapshot.
         let events = [
-            snapshot("a", "running"),
-            snapshot("a", "completed"),
-            snapshot("b", "running"),
+            snapshot("a", "assistant_message", "running"),
+            snapshot("a", "assistant_message", "completed"),
+            snapshot("b", "assistant_message", "running"),
         ];
         let entities: Vec<Vec<String>> = events
             .iter()
-            .map(|event| vec![snapshot_entity(event).unwrap()])
+            .map(|event| vec![grouped_snapshot_entity(event).unwrap()])
             .collect();
         let dropped = crate::control_state::coalesce(&entities);
         assert_eq!(dropped[0], vec!["item:a".to_owned()]);
         assert!(dropped[1].is_empty() && dropped[2].is_empty());
+    }
+
+    #[test]
+    fn command_node_and_item_can_be_superseded_independently() {
+        let events = [
+            snapshot("call", "command_execution", "running"),
+            snapshot("call", "command_execution", "completed"),
+        ];
+        let node = "node.updated:call".to_owned();
+        let item = "turn-item.updated:call".to_owned();
+        let both = vec![node, item.clone()];
+        // If the running update opens the node, that node survives the
+        // completion. The intervening node is already known to the batch.
+        let dropped = superseded_snapshots(&events, vec![(both.clone(), 2), (both.clone(), 2)]);
+        assert_eq!(dropped, [vec![item.clone()], vec![]]);
+        // After approval, the pending tool's node is already running, so
+        // only the item changes. Its completion introduces the node to
+        // this batch and both item updates must survive.
+        let dropped = superseded_snapshots(&events, vec![(vec![item], 1), (both, 2)]);
+        assert!(dropped.iter().all(Vec::is_empty));
     }
 }

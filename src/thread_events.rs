@@ -150,6 +150,18 @@ fn by_id(projection: &Value, collection: &str) -> HashMap<String, Value> {
         .collect()
 }
 
+/// The adapter that opened a runtime request.
+fn request_driver(request: &Value) -> Option<&str> {
+    if let Some(driver) = request["nativeRequestRef"]["driver"].as_str() {
+        return Some(driver);
+    }
+    // Older projections may identify the provider only in the request id.
+    let id = request["id"]
+        .as_str()?
+        .strip_prefix("runtime-request:provider:")?;
+    id.split_once(':').map(|(driver, _)| driver)
+}
+
 /// A domain event for `payload`, without its id.
 fn event(thread_id: &str, kind: &str, payload: &Value, occurred_at: &str) -> Value {
     let mut event = json!({"threadId": thread_id, "type": kind, "payload": payload});
@@ -953,18 +965,6 @@ fn diff_with_command(
                 .as_str()
                 .is_some_and(|id| id.ends_with(":signal:provider-session-open-failure"))
         });
-    let claude_request = order == Order::RequestOpen
-        && collections["runtimeRequests"].iter().any(|(_, request)| {
-            request["id"]
-                .as_str()
-                .is_some_and(|id| id.contains(":provider:claudeAgent:"))
-        });
-    let acp_request = order == Order::RequestOpen
-        && collections["runtimeRequests"].iter().any(|(_, request)| {
-            request["id"].as_str().is_some_and(|id| {
-                id.contains(":provider:grok:") || id.contains(":provider:acpRegistry:")
-            })
-        });
     let subagent_start =
         order == Order::Subagent && collections["subagents"].iter().any(|(created, _)| *created);
     // A queued run leaving the queue: its provider thread, the input it
@@ -986,10 +986,15 @@ fn diff_with_command(
         Order::DRAIN
     } else if subagent_start {
         Order::SUBAGENT_START
-    } else if claude_request {
-        Order::CLAUDE_REQUEST_OPEN
-    } else if acp_request {
-        Order::ACP_REQUEST_OPEN
+    } else if order == Order::RequestOpen {
+        match collections["runtimeRequests"]
+            .iter()
+            .find_map(|(_, request)| request_driver(request))
+        {
+            Some(crate::workspace::provider::CLAUDE_AGENT) => Order::CLAUDE_REQUEST_OPEN,
+            Some(driver) if crate::workspace::provider::is_acp(driver) => Order::ACP_REQUEST_OPEN,
+            _ => order.steps(),
+        }
     } else {
         order.steps()
     };
@@ -1008,12 +1013,18 @@ fn diff_with_command(
                         // Claude's and ACP adapters report their thread with
                         // the turn's end; Codex's shared session does not.
                         if record["driver"] != crate::workspace::provider::CODEX {
-                            out.push(event(
-                                thread_id,
-                                "provider-thread.updated",
-                                record,
-                                occurred_at,
-                            ));
+                            let mut reported =
+                                event(thread_id, "provider-thread.updated", record, occurred_at);
+                            // ACP reports the active thread with the turn's end. The
+                            // orchestrator publishes the idle thread after the run.
+                            if record["status"] == "idle"
+                                && record["driver"]
+                                    .as_str()
+                                    .is_some_and(crate::workspace::provider::is_acp)
+                            {
+                                reported["payload"]["status"] = json!("active");
+                            }
+                            out.push(reported);
                         }
                     }
                 }
@@ -1542,7 +1553,7 @@ mod tests {
                 "type": "approval_request", "status": "waiting", "nodeId": "n:card", "ordinal": 3,
                 "nativeItemRef": {"nativeId": "toolu_1"}}));
             after["runtimeRequests"] = json!([{"id": format!("runtime-request:provider:{driver}:x"),
-                "status": "pending", "kind": kind, "nativeRequestRef": {"nativeId": "toolu_1"}}]);
+                "status": "pending", "kind": kind, "nativeRequestRef": {"driver": driver, "nativeId": "toolu_1"}}]);
             after
         };
         // Codex: the card's node and card, then the request.
@@ -1573,6 +1584,22 @@ mod tests {
                 "runtime-request.updated",
                 "turn-item.updated approval_request",
                 "turn-item.updated command_execution"
+            ]
+        );
+        let acp = diff(
+            "t",
+            &before,
+            &opened("antigravity", "command"),
+            "x",
+            Order::RequestOpen,
+        )
+        .unwrap();
+        assert_eq!(
+            types(&acp),
+            [
+                "node.updated",
+                "runtime-request.updated",
+                "turn-item.updated approval_request"
             ]
         );
         // A Claude question's tool call is not reported again.
