@@ -11,7 +11,12 @@ use crate::{
 };
 use indexmap::IndexMap;
 use serde_json::Value;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex as StdMutex},
+    time::Instant,
+};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 pub struct ControlState {
@@ -19,6 +24,9 @@ pub struct ControlState {
     pub store: RwLock<Store>,
     /// Serializes desktop launches while they provision a folder and record its thread.
     pub(crate) thread_launch: Mutex<()>,
+    /// Child results become visible before their checkpoint is captured. The next
+    /// message to that child queues behind the checkpoint, as on the reference.
+    pub(crate) checkpoint_pending: StdMutex<HashMap<String, Instant>>,
     #[cfg(feature = "native")]
     pub(crate) thread_deleted: tokio::sync::Notify,
     /// The threads open `subscribeThread` streams watch, whose whole
@@ -67,6 +75,7 @@ impl ControlState {
             auth,
             store: RwLock::new(store),
             thread_launch: Mutex::new(()),
+            checkpoint_pending: StdMutex::new(HashMap::new()),
             #[cfg(feature = "native")]
             thread_deleted: Default::default(),
             thread_watchers: Default::default(),

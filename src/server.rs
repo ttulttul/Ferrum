@@ -881,6 +881,13 @@ impl crate::turn::TurnHost for AppState {
             }
         });
     }
+    fn provider_run_completed(self: Arc<Self>, run: &Run) -> Option<crate::runtime::Wait> {
+        let thread_id = run.thread_id.clone();
+        Some(Box::pin(async move {
+            crate::orchestration::delegation::mark_checkpoint_pending(&self, &thread_id).await;
+            crate::orchestration::delegation::settle_child_run(&self, &thread_id).await;
+        }))
+    }
     fn turn_stopped(
         self: Arc<Self>,
         run: &Run,

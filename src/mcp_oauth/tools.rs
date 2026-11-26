@@ -2645,6 +2645,14 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
             row["modelSelection"].clone(),
         )
     };
+    let checkpoint_pending = host
+        .control_state()
+        .checkpoint_pending
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&id)
+        .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2));
+    let busy = busy || checkpoint_pending;
     // The reference's stable ids (`stableOperationMessageId`, `stableCommandId`).
     let key = arg_str(a, "clientRequestId")?
         .map(str::to_owned)
@@ -2750,6 +2758,18 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
                 format!("Unable to send to thread {id}."),
             )
         })?;
+    let reported_status = if checkpoint_pending {
+        json!("queued")
+    } else if run["status"] == "running" && run["activeAttemptId"].is_null() {
+        json!("starting")
+    } else {
+        run["status"].clone()
+    };
+    let reported_delivery = if checkpoint_pending {
+        "queued"
+    } else {
+        delivery(mode, own.is_none(), &run)
+    };
     let mut answer = json!({
         "threadId": id,
         "link": thread_link(&**host, caller, &id, &title),
@@ -2757,12 +2777,8 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
         "runId": run["id"],
         // Rust records a run as running from its start; the reference's run is
         // starting until its provider turn has an attempt.
-        "status": if run["status"] == "running" && run["activeAttemptId"].is_null() {
-            json!("starting")
-        } else {
-            run["status"].clone()
-        },
-        "delivery": delivery(mode, own.is_none(), &run),
+        "status": reported_status,
+        "delivery": reported_delivery,
     });
     // A send that started follow-up work names the task it became.
     let task_id = thread.full_projection()["runs"]
