@@ -249,7 +249,9 @@ async fn bitbucket_read(
         state_dir: &state.paths.state_dir,
     };
     let activity = async {
-        let load = bitbucket_pr::run(repository, "activity", input, number);
+        // The activity cache and commit lookup both hold the loader across awaits.
+        // Keep the forge request off their inline futures on a default-size worker.
+        let load = Box::pin(bitbucket_pr::run(repository, "activity", input, number));
         let Ok(credential) = crate::bitbucket_credential::current().await else {
             return load.await;
         };
