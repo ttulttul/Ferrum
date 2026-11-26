@@ -1912,6 +1912,9 @@ impl mcp_oauth::McpHost for AppState {
             async move { crate::delegated_worktree::check_base(&root, &title, &strategy).await },
         )
     }
+    fn checkout_branch(self: &Arc<Self>, root: String) -> mcp_oauth::HostFuture<Option<String>> {
+        Box::pin(async move { crate::local_services::vcs::branch(&root).await })
+    }
     fn clone_repository(
         self: &Arc<Self>,
         input: serde_json::Value,

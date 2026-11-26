@@ -2397,10 +2397,16 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
                 None
             };
             // A worktree's path and branch are recorded once it is made; a
-            // thread in the project's own checkout has none (`launchThread`).
+            // thread in the project's own checkout has no path, and the branch
+            // the launch names, else the checkout's (`launchBranch`).
             let worktree_path = match folder {
                 Some(path) => json!(path),
                 None => Value::Null,
+            };
+            let branch = match (&worktree, strategy.and_then(|s| s.get("branch"))) {
+                (Some(_), _) => Value::Null,
+                (None, Some(branch)) => branch.clone(),
+                (None, None) => json!(host.checkout_branch(root.clone()).await),
             };
             let mut create = json!({
                 "type": "thread.create",
@@ -2411,7 +2417,7 @@ async fn thread_launch<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) ->
                 "modelSelection": selection,
                 "runtimeMode": runtime_mode,
                 "interactionMode": interaction,
-                "branch": null,
+                "branch": branch,
                 "worktreePath": worktree_path,
                 "createdBy": "agent",
                 "creationSource": "mcp",
