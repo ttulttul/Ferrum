@@ -2437,7 +2437,7 @@ def queued_child_followup(original, rust):
     if mcp_record_tool(a) != "t3_thread_send" or mcp_record_tool(b) != "t3_thread_send":
         return False
     first, second = json.loads(a), json.loads(b)
-    if first.get("request", {}).get("as") != "followup":
+    if first.get("request", {}).get("arguments") != {"threadId": "$mcp.task.childThreadId", "message": "Say more."}:
         return False
     ref = first.get("answer", {}).get("content")
     native = second.get("answer", {}).get("content")
@@ -2465,6 +2465,16 @@ def compare_turn(original, rust):
     if inputs[0] != inputs[1]:
         problems["turn input"] = [f"original {line}" for line in inputs[0]] + [f"rust     {line}" for line in inputs[1]]
     mcp = comparable_mcp(original.get("mcp", []), rust.get("mcp", []))
+    reference_records, native_records = mcp
+    # A timed-out delivery can omit its final status read independently of how the
+    # preceding send was delivered. Keep checking every record both sides returned.
+    if (len(native_records) == len(reference_records) + 1
+            and mcp_record_tool(native_records[-1]) == "task_status"
+            and json.loads(native_records[-1])["request"].get("arguments") == {
+                "taskId": "$match:Delegated task (\\S+)"
+            }):
+        problems["missing delivery task status"] = mcp_diff_lines([], native_records[-1:])
+        mcp = reference_records, native_records[:-1]
     if mcp[0] != mcp[1]:
         key = "agent mcp"
         if queued_child_followup(*mcp):
