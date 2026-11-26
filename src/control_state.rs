@@ -387,7 +387,10 @@ impl ControlState {
         }
         let id = thread_id.to_owned();
         let read = tokio::task::spawn_blocking(move || {
+            let phase = crate::commit_timing::phase("detached: database read");
             let stored = stored.read_detached().ok().flatten()?;
+            drop(phase);
+            let _phase = crate::commit_timing::phase("detached: wire projection");
             Some(crate::thread_projection::wire_projection_of(&id, stored))
         })
         .await

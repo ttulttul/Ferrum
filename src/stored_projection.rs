@@ -88,13 +88,16 @@ impl Slim {
 
 struct Lazy {
     thread_id: String,
-    /// Of the slim records, only the runs (`Stored::runs`); the rest went
-    /// into `shell`.
-    slim: Slim,
-    /// The shell row the slim records give (`Thread::shell`), worked out once:
-    /// it changes only with a commit, and a commit reads the thread whole
-    /// first, after which the shell row comes from the whole projection.
-    shell: Value,
+    /// Of the slim records, only the runs (`Stored::runs`), as compact JSON;
+    /// the rest went into `shell`.
+    runs: Box<str>,
+    /// The shell row the slim records give (`Thread::shell`), worked out once,
+    /// as compact JSON: it changes only with a commit, and a commit reads the
+    /// thread whole first, after which the shell row comes from the whole
+    /// projection. Kept as text, parsed when read: as parsed JSON values these
+    /// took several times their text's size, most of what a server on a large
+    /// database held while idle.
+    shell: Box<str>,
     whole: OnceLock<Box<Value>>,
     /// Held while the whole projection is read, so callers that need it at
     /// the same time wait for the one read instead of each reading it.
@@ -154,15 +157,18 @@ impl Stored {
                 unloaded_items: &slim.unloaded_items,
             },
         );
-        let slim = Slim {
-            projection: serde_json::json!({"runs": slim.projection["runs"]}),
-            message_ordinals: HashMap::new(),
-            unloaded_items: Vec::new(),
-        };
+        // serde_json's own text, which reads back as the same value.
+        let runs = serde_json::to_string(&slim.projection["runs"])
+            .expect("JSON value")
+            .into_boxed_str();
+        let shell = serde_json::to_string(&shell)
+            .expect("JSON value")
+            .into_boxed_str();
+        drop(slim);
         Stored(
             Repr::Lazy(Arc::new(Lazy {
                 thread_id,
-                slim,
+                runs,
                 shell,
                 whole: OnceLock::new(),
                 reading: std::sync::Mutex::new(()),
@@ -270,13 +276,13 @@ impl Stored {
 
     /// The thread's runs, without reading the whole projection: the slim
     /// records hold every run, as the whole projection does.
-    pub(crate) fn runs(&self) -> &Value {
+    pub(crate) fn runs(&self) -> Value {
         match &self.0 {
             Repr::Lazy(lazy) => match lazy.whole.get() {
-                Some(whole) => &whole["runs"],
-                None => &lazy.slim.projection["runs"],
+                Some(whole) => whole["runs"].clone(),
+                None => serde_json::from_str(&lazy.runs).expect("runs kept as JSON"),
             },
-            Repr::Whole(whole) => &whole["runs"],
+            Repr::Whole(whole) => whole["runs"].clone(),
         }
     }
 
@@ -310,9 +316,11 @@ impl Stored {
 
     /// While only the slim records are loaded: the shell row they give
     /// (`Thread::shell`).
-    pub(crate) fn slim_shell(&self) -> Option<&Value> {
+    pub(crate) fn slim_shell(&self) -> Option<Value> {
         match &self.0 {
-            Repr::Lazy(lazy) if lazy.whole.get().is_none() => Some(&lazy.shell),
+            Repr::Lazy(lazy) if lazy.whole.get().is_none() => {
+                Some(serde_json::from_str(&lazy.shell).expect("shell row kept as JSON"))
+            }
             _ => None,
         }
     }

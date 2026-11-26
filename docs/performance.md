@@ -153,6 +153,19 @@ The reference (T3 0.1.12, the version that runs that database live) and Ferrum (
   - What remains is mostly each thread's typed state, kept for every one of the 7,175 threads: its user messages, checkpoints, context transfers and provider state. Loading that lazily, as the projections already are, is the next step.
 - **Opening is slower:** 36 against 18 seconds, because each snapshot now reads its thread from the database instead of memory. That's about 0.12 s a thread, for the largest threads of the database.
 
+**Idle state as text, and the open time (#364).** A slim thread's shell row and runs, the only parts read from its slim records, are now kept as compact JSON text and parsed when read: as parsed values they took several times their text's size. On the copy, loading every thread's state went from 582 MB to 362 MB. The same test then ran on another fresh copy, with the copy dropped from the page cache before each server started, so both read it cold:
+
+| RSS of the server process | Reference | Ferrum |
+| --- | ---: | ---: |
+| after start-up | 690 MiB | **497 MiB** |
+| peak while opening the 300 threads | 1,018 MiB | **716 MiB** |
+| idle, 12 minutes after the last close | 582 MiB | **425 MiB** |
+| time to open and close the 300 threads | 51 s | 54 s |
+
+- **Ferrum now uses less memory than the reference at every point:** 27% less at idle and 30% less at the peak.
+- **Open time:** the 36 s against 18 s in the table above was a cache effect. Each detached snapshot's read took 130 ms from a cold page cache and 6.6 ms from a warm one, and the reference had run first on that copy, warming it. From the same cold start the two are within 6% (54 against 51 s). A short-lived cache of detached snapshots would only help the second open of the same thread, so it is not added.
+- **Where the time goes:** the read is the cost (6.6 ms warm), then the window (6.3 ms) and the wire projection (2.3 ms). `open_cost_on_a_real_database` and `resident_cost_by_field`, ignored tests in this change, measure the two on any copy.
+
 ## What is measured
 
 Each server runs alone, on a free loopback port, in its own temporary home. Both get the environment the parity suites use (`parity_harness.server_env`): no real provider CLI on `PATH` (and never `~/.local/bin` or an nvm directory), a login shell that reads only the temporary home's profile, no telemetry, and all HTTP(S) sent to the harness's refusing proxy. The script fails if any server ran without that proxy. Provider turns use the fake `codex` and `claude` CLIs from `tests/fixtures/providers`, so no model is called and nothing leaves the machine.
