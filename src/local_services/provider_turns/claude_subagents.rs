@@ -18,6 +18,8 @@ pub(crate) struct ClaudeSubagents {
     tasks: HashMap<String, Task>,
     /// The task each `Agent` call started, by tool call.
     by_call: HashMap<String, String>,
+    /// The tasks the current turn started.
+    this_turn: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,9 +55,14 @@ impl ClaudeSubagents {
         self.calls.insert(id.to_owned(), input.clone());
     }
 
-    /// Whether the turn ran a subagent (its usage says so).
+    /// A turn starts: the tasks it starts are its own.
+    pub(crate) fn begin_turn(&mut self) {
+        self.this_turn.clear();
+    }
+
+    /// Whether the turn started a subagent (its usage says so).
     pub(crate) fn ran_any(&self) -> bool {
-        !self.tasks.is_empty()
+        !self.this_turn.is_empty()
     }
 
     /// The task a child's message belongs to, by its `parent_tool_use_id`.
@@ -87,6 +94,7 @@ impl ClaudeSubagents {
                     result: None,
                 };
                 self.tasks.insert(task_id.to_owned(), task);
+                self.this_turn.insert(task_id.to_owned());
                 self.item(task_id).into_iter().collect()
             }
             Some("task_progress") => {
@@ -109,8 +117,10 @@ impl ClaudeSubagents {
                 }
                 task.status = outcome(message["status"].as_str().unwrap_or_default());
                 let mut out = Vec::new();
-                // The task's summary is the child's result message.
-                if let Some(summary) = text(&message["summary"]) {
+                // The task's summary is the child's result message, when it ends with the turn
+                // that started it (a background subagent's end wakes the session instead).
+                let own = self.this_turn.contains(task_id);
+                if let Some(summary) = text(&message["summary"]).filter(|_| own) {
                     out.push(child(
                         task_id,
                         ProviderItem::new(

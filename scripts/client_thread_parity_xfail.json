@@ -270,5 +270,8 @@
   },
   "codex native subagent late stop": {
     "live": "The reference streams every update of the subagent, also those that change nothing (running again just before the interrupt's card), and the subagent node's interruption with the turn's end; Rust's stream is made of what changed in the thread, so it sends each change once and the node's status with the subagent's record. The child's late turn, interrupted at once and recorded nowhere, the child thread and the parent's records match the reference."
+  },
+  "claude native subagent background": {
+    "live": "While no turn runs, the reference records the background child's answer and streams its subagent's updates as they arrive, also those that change nothing; Rust's idle CLI holds those frames for the wake run, so it streams the child's records and the subagent's completion as that run starts, each change once, and commits the wake turn's usage apart from its completion. The subagent's records and item, the wake run with its subagent notification (and the child thread it names), the usage of both turns and the child thread with its prompt and answer match the reference."
   }
 }

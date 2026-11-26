@@ -97,13 +97,43 @@ async fn dispatch<H: CommandHost>(state: Arc<H>, wake: ProviderWake) {
             &uuid::Uuid::new_v4().to_string(),
         ],
     );
+    // A Claude subagent's child thread, named by the thread's provider thread and the task.
+    let mut notification = wake
+        .notification
+        .clone()
+        .unwrap_or_else(default_notification);
+    if let Some(task) = notification["source"]["childThreadId"]
+        .as_str()
+        .and_then(|id| id.strip_prefix("claude-task:"))
+        .map(str::to_owned)
+    {
+        let store = state.store.read().await;
+        let child = store
+            .threads
+            .get(&wake.app_thread_id)
+            .and_then(|thread| thread.provider_thread_id())
+            .map(|provider| {
+                crate::native_subagents::driver_child_thread_id(
+                    &wake.driver,
+                    &format!("{provider}:{task}"),
+                )
+            });
+        match child {
+            Some(child) => notification["source"]["childThreadId"] = json!(child),
+            None => {
+                if let Some(source) = notification["source"].as_object_mut() {
+                    source.remove("childThreadId");
+                }
+            }
+        }
+    }
     let command = json!({
         "type": "message.dispatch",
         "commandId": format!("provider-continuation:{message_id}"),
         "threadId": wake.app_thread_id,
         "messageId": message_id,
         "text": wake.detail.as_deref().unwrap_or(CONTINUATION_MESSAGE_TEXT),
-        "notification": wake.notification.clone().unwrap_or_else(default_notification),
+        "notification": notification,
         "attachments": [],
         "dispatchMode": {"type": "queue_after_active"},
         "createdBy": "agent",
