@@ -400,11 +400,7 @@ impl Thread {
                     out["contextHandoffId"] = handoff["id"].clone();
                 }
                 let turn_count = index as u64 + 1;
-                // A completed turn's checkpoint shows on its run once the run
-                // completes, as the reference's capture completes it.
-                if status != "waiting"
-                    && self.checkpoints.iter().any(|c| c.turn_count == turn_count)
-                {
+                if self.checkpoints.iter().any(|c| c.turn_count == turn_count) {
                     out["checkpointId"] = json!(checkpoint_id(&self.id, turn_count));
                 }
                 if let Some(ids) = self.provider_run_ids(run) {
@@ -454,11 +450,7 @@ impl Thread {
             .collect()
     }
 
-    /// `run`'s status and end time as the reference records them. A
-    /// provider turn that completed leaves its run `waiting` until the
-    /// turn's checkpoint completes it (here, until the run's end is
-    /// recorded, after the checkpoint); one interrupted or failed ends its
-    /// run at once, at the turn's end.
+    /// A provider turn settles its run and root node before its checkpoint is captured.
     pub(crate) fn projected_run_status(&self, run: &crate::Run) -> (&'static str, Option<u64>) {
         use crate::workspace::provider::TurnStatus;
         let status = run_status(&run.status);
@@ -475,10 +467,11 @@ impl Thread {
         };
         match (status, turn) {
             ("running", None) if self.starting(run) => ("starting", None),
-            ("running", Some(TurnStatus::Completed)) => ("waiting", None),
+            ("running", Some(TurnStatus::Completed)) => ("completed", turn_end()),
             ("running", Some(TurnStatus::Interrupted)) => ("interrupted", turn_end()),
             ("running", Some(TurnStatus::Failed)) => ("failed", turn_end()),
-            ("interrupted", Some(TurnStatus::Interrupted))
+            ("completed", Some(TurnStatus::Completed))
+            | ("interrupted", Some(TurnStatus::Interrupted))
             | ("failed", Some(TurnStatus::Failed)) => (status, turn_end().or(run.finished_at)),
             _ => (status, run.finished_at),
         }

@@ -819,6 +819,15 @@ impl Store {
                 }
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.provider.apply(*run_id, event, at);
+                    // Startup may fail before the provider accepts the attempt.
+                    if let Some(attempt) = thread.provider.runs.get_mut(run_id).filter(|attempt| {
+                        attempt.native_thread_id.is_some() || attempt.turn_started
+                    }) {
+                        attempt.started_modes.get_or_insert_with(|| serde_json::json!({
+                            "runtimeMode": thread.row["runtimeMode"].as_str().unwrap_or("full-access"),
+                            "interactionMode": thread.row["interactionMode"].as_str().unwrap_or("default"),
+                        }));
+                    }
                     // A steer's status, on its message (its turn item).
                     if let crate::workspace::ProviderEvent::SteerUpdated {
                         message_id,

@@ -85,6 +85,9 @@ def exercise_cli_pairing(url, cli, root):
                                    headers={"authorization": "Bearer " + access, "traceparent": harness.TRACE})
     state = json.loads(body)
     assert state.pop("expiresAt")
+    # The two servers issue independent sessions. Check each against the id in its bearer token.
+    claims = json.loads(base64.urlsafe_b64decode(access.split(".")[0] + "==="))
+    assert state.pop("sessionId") == claims["sid"]
     state["auth"].pop("sessionCookieName")  # derived from each server's port
     observations["CLI pairing bearer session"] = status, state
     status, _, body = harness.http(url, "POST", "/api/auth/websocket-ticket/rpc",

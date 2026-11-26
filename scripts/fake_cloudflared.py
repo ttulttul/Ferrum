@@ -9,7 +9,7 @@ from the environment, so the recorded environment is exactly what the server pas
 
 - `argv`: the arguments after the executable;
 - `envAdded` / `envRemoved` / `envChanged`: names that differ from the environment
-  the parent process was started with (`/proc/<ppid>/environ`), and `tunnelToken`,
+  the server under test was started with (`/proc/<server-pid>/environ`), and `tunnelToken`,
   the `TUNNEL_TOKEN` value;
 - `stdin`, `stdinOpen`, `stdout`, `stderr`: what each descriptor is (pipes and
   socket pairs both count as `pipe`) and whether stdin is still open;
@@ -22,6 +22,7 @@ restart tests.
 import datetime
 import json
 import os
+from pathlib import Path
 import select
 import signal
 import socket
@@ -64,7 +65,11 @@ def stdin_open():
 
 def parent_environment():
     try:
-        with open(f"/proc/{os.getppid()}/environ", "rb") as handle:
+        pid = int(Path(HERE, "fixture-server.pid").read_text())
+    except FileNotFoundError:
+        pid = os.getppid()  # Native unit tests start the connector directly.
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as handle:
             raw = handle.read()
     except OSError:
         return None

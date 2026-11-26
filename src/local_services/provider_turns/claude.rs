@@ -247,6 +247,9 @@ struct Attempt<'a> {
     /// The turn's model, which a subagent runs unless its call names another.
     model: Option<String>,
     next_control: u64,
+    report_startup: bool,
+    startup_phase: Option<&'static str>,
+    mcp_registration: Option<String>,
     /// Whether the CLI was given the SubagentStart hook that adds the device
     /// text (the thread may use devices), which also numbers its Stop hook.
     device_hook: bool,
@@ -513,6 +516,13 @@ impl<'a> Attempt<'a> {
                 // The reference's SDK starts Claude Code through a shell, which
                 // reports a missing one as exit 127 (upstream #39299).
                 tracing::warn!(%binary, "Claude Code could not be started");
+                // The SDK still enters and leaves MCP registration after a rejected initialization.
+                if provider.report_startup_phase && provider.mcp.is_some() {
+                    sink.send(ProviderEvent::SessionStartup {
+                        phase: Some("mcp".into()),
+                    });
+                    sink.send(ProviderEvent::SessionStartup { phase: None });
+                }
                 let failure = ProviderFailure::new(
                     "transport_error",
                     "Claude Code process exited with code 127 before it started. Check the server logs for the provider's output, then retry the turn.",
@@ -537,6 +547,9 @@ impl<'a> Attempt<'a> {
             tools: IndexMap::new(),
             model: Some(provider.model.clone()).filter(|model| !model.trim().is_empty()),
             next_control: 1,
+            report_startup: provider.report_startup_phase,
+            startup_phase: None,
+            mcp_registration: None,
             device_hook: provider.mcp.as_ref().is_some_and(|mcp| mcp.device_tools),
             runtime_mode: provider.runtime_mode().to_owned(),
             responses,
@@ -552,6 +565,7 @@ impl<'a> Attempt<'a> {
             usage_reported: false,
         };
         let outcome = attempt.drive(spec, cancel).await;
+        attempt.report_phase(None);
         // A prompt the CLI took without starting a turn still counts; one it
         // refused with the session it could not resume does not, as the
         // reference commits no budget for a turn that never opened.
@@ -650,6 +664,7 @@ impl<'a> Attempt<'a> {
             .filter(|_| !self.reused)
         {
             let request_id = format!("t3-mcp-{}", self.next_control);
+            self.mcp_registration = Some(request_id.clone());
             self.next_control += 1;
             let request = json!({"type": "control_request", "request_id": request_id,
             "request": {"subtype": "mcp_set_servers", "servers": {"t3-code": {
@@ -887,6 +902,15 @@ impl<'a> Attempt<'a> {
         }
     }
 
+    fn report_phase(&mut self, phase: Option<&'static str>) {
+        if self.report_startup && self.startup_phase != phase {
+            self.startup_phase = phase;
+            self.sink.send(ProviderEvent::SessionStartup {
+                phase: phase.map(str::to_owned),
+            });
+        }
+    }
+
     async fn handle(&mut self, message: Value) -> Option<Outcome> {
         let before = self.cli.background.published();
         self.cli.background.observe_turn(&message);
@@ -901,6 +925,36 @@ impl<'a> Attempt<'a> {
             }
         }
         let kind = message["type"].as_str().unwrap_or_default();
+        if kind == "control_response" {
+            let request = message["response"]["request_id"].as_str();
+            if request.is_some_and(|id| id.starts_with("t3-initialize-"))
+                && self.mcp_registration.is_some()
+            {
+                self.report_phase(Some("mcp"));
+            } else if self.mcp_registration.is_some() && request == self.mcp_registration.as_deref()
+            {
+                self.mcp_registration = None;
+                self.report_phase(None);
+            }
+        } else if kind == "system"
+            && message["subtype"] == "status"
+            && message["status"] == "requesting"
+        {
+            if !self.cli.claude_requested {
+                self.cli.claude_requested = true;
+                self.report_phase(Some("connecting"));
+            }
+        } else if self.startup_phase == Some("connecting")
+            && message["parent_tool_use_id"].is_null()
+        {
+            let subtype = message["subtype"].as_str().unwrap_or("");
+            if kind != "system"
+                || !subtype.starts_with("task_")
+                || (subtype == "task_started" && message["spawn_depth"].as_u64().unwrap_or(1) <= 1)
+            {
+                self.report_phase(None);
+            }
+        }
         if kind != "control_response" {
             self.answered = true;
         }

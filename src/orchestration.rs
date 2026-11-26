@@ -1400,7 +1400,13 @@ async fn apply_command<H: CommandHost>(
                     .await
                     .threads
                     .get(thread_id)
-                    .is_some_and(|thread| thread.runs.iter().any(|run| is_live(&run.status)));
+                    .is_some_and(|thread| {
+                        // A run can finish after the check above and before this read.
+                        // Its queued successors still precede this message.
+                        thread.runs.iter().any(|run| {
+                            is_live(&run.status) || (run.status == "queued" && !run.queue_held)
+                        })
+                    });
             let title_effect = state
                 .store
                 .read()

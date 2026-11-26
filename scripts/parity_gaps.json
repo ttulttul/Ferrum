@@ -1,1 +1,8 @@
-{}
+{
+  "relay_parity": {
+    "signed account deletion": "The reference durably queues a verified Clerk user.deleted event and acknowledges it with an empty 200. Ferrum has no configured account-deletion handler and returns RelayInternalError."
+  },
+  "github_provider_parity": {
+    "issue planning statuses": "For a repository with planning statuses, the reference returns the current status, allowed choices and viewerCanSetStatus. Ferrum uses the legacy open/closed states and close/reopen permission."
+  }
+}

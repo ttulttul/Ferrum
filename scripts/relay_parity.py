@@ -5,6 +5,7 @@ import base64
 import contextlib
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -17,6 +18,7 @@ from urllib.parse import urlencode
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa, utils
 
+from parity_gaps import Gaps
 from parity_harness import ROOT, TRACE, encode, free_port, http, server_env
 
 ISSUER = "https://relay.example.test"
@@ -73,7 +75,7 @@ def serve(cmd, port, env):
 def run(args, directory):
     clerk = rsa.generate_private_key(65537, 2048)
     mint = ed25519.Ed25519PrivateKey.generate()
-    env = server_env(directory, dict(RELAY_ISSUER=ISSUER, CLERK_ISSUER="https://clerk.example.test",
+    env = server_env(directory, dict(RELAY_ISSUER=ISSUER, CLERK_WEBHOOK_SIGNING_SECRET="  ", CLERK_ISSUER="https://clerk.example.test",
                CLERK_JWT_KEY=pem(clerk), CLERK_JWT_AUDIENCE="fixture", CLOUD_MINT_PUBLIC_KEY=pem(mint),
                CLOUD_MINT_PRIVATE_KEY=mint.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                                        serialization.NoEncryption()).decode()))
@@ -97,6 +99,10 @@ def run(args, directory):
     port, reference = free_port(), free_port()
     cmd = [args.rust, "--relay", "--listen", f"127.0.0.1:{port}", "--data-dir", directory]
     with serve([args.node, ROOT/"scripts/relay_reference.mjs", args.checkout, str(reference)], reference, env) as original, serve(cmd, port, env) as rust:
+        # The real Clerk webhook handler disables the endpoint without a signing secret.
+        for url in (original, rust):
+            status, _, body = http(url, "POST", "/v1/webhooks/clerk", b"{}")
+            assert (status, body) == (404, b""), (status, body)
         paths = ["/health", "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource",
                  "/v1/environments", "/v1/client/devices", "/v2/client/devices", "/v1/client/t3chat-link"]
         for path in paths:
@@ -187,6 +193,25 @@ def run(args, directory):
         assert call("DELETE", "/v1/client/environment-links/env", bearer("other")) == (200, {"ok":False})
         assert call("DELETE", "/v1/client/environment-links/env", user) == (200, {"ok":True})
         assert call("POST", pref, env_headers, encode({"holdWebhooksWhileOffline": True}))[0] == 401
+    # A signed deletion must be acknowledged only after the relay owns the request.
+    signing_key = os.urandom(32)
+    env["CLERK_WEBHOOK_SIGNING_SECRET"] = "whsec_" + base64.b64encode(signing_key).decode()
+    body = encode({"type": "user.deleted", "data": {"id": "fixture"}})
+    stamp = str(int(time.time()))
+    signature = hmac.digest(signing_key, b"evt." + stamp.encode() + b"." + body, "sha256")
+    headers = {"svix-id": "evt", "svix-timestamp": stamp, "traceparent": TRACE,
+               "svix-signature": "v1," + base64.b64encode(signature).decode()}
+    with serve([args.node, ROOT/"scripts/relay_reference.mjs", args.checkout, str(reference)], reference, env) as original, serve(cmd, port, env) as rust:
+        expected, _, ref_body = http(original, "POST", "/v1/webhooks/clerk", body, headers)
+        actual, _, rust_body = http(rust, "POST", "/v1/webhooks/clerk", body, headers)
+        assert (expected, ref_body) == (200, b""), (expected, ref_body)
+        gaps = Gaps("relay_parity")
+        if (actual, rust_body) != (expected, ref_body):
+            assert actual == 500 and json.loads(rust_body) == {
+                "_tag": "RelayInternalError", "code": "internal_error", "reason": "internal_error",
+                "traceId": TRACE.split("-")[1]}, (actual, rust_body)
+            assert not gaps.differs("signed account deletion")
+        assert not gaps.finish()
     print("Rust signed token exchange, replay rejection, mobile registration, account isolation, environment linking, revocation and restart checks passed")
 
 

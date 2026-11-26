@@ -45,6 +45,8 @@ pub struct ProviderState {
     /// When a server restart stopped the provider session, until a turn
     /// starts it again.
     pub session_stopped_at: Option<u64>,
+    /// The latest startup update of this provider session (phase and timestamp).
+    pub session_startup: Option<(Option<String>, u64)>,
     /// Items a restart cancelled while they ran after their turn (run,
     /// native item id), with when.
     pub cancelled_items: HashMap<(Uuid, String), u64>,
@@ -141,6 +143,8 @@ pub struct SessionRecord {
 /// One run's provider turn.
 #[derive(Clone, Debug)]
 pub struct RunRecord {
+    /// Thread modes when this provider attempt started, retained across later thread edits.
+    pub started_modes: Option<Value>,
     pub driver: String,
     /// The native turn the provider named at the turn's end (Pi): a ref, or
     /// `null` when the turn wrote no entry.
@@ -217,6 +221,10 @@ pub struct PlanRecord {
 impl ProviderState {
     /// Apply `run`'s provider `event`, recorded at `at` (milliseconds).
     pub(crate) fn apply(&mut self, run: Uuid, event: &ProviderEvent, at: u64) {
+        if let ProviderEvent::SessionStartup { phase } = event {
+            self.session_startup = Some((phase.clone(), at));
+            return;
+        }
         if let ProviderEvent::TurnTerminal { closing, .. } = event {
             for event in closing {
                 self.apply(run, event, at);
@@ -275,6 +283,7 @@ impl ProviderState {
             }
         }
         let record = self.runs.entry(run).or_insert_with(|| RunRecord {
+            started_modes: None,
             driver: driver.clone(),
             native_turn_ref: None,
             started_at: at,
@@ -662,13 +671,16 @@ impl ProviderState {
                     request.resolved_at = Some(at);
                 }
             }
-            ProviderEvent::CommandOutputDelta { .. } | ProviderEvent::RuntimeRequest { .. } => {}
+            ProviderEvent::CommandOutputDelta { .. }
+            | ProviderEvent::RuntimeRequest { .. }
+            | ProviderEvent::SessionStartup { .. } => {}
         }
     }
 
     /// A server restart stopped the provider session at `at`: no CLI
     /// survives the server, so an active provider thread is idle.
     pub(crate) fn stop_session(&mut self, at: u64) {
+        self.session_startup = None;
         self.session_stopped_at = Some(at);
         if let Some(thread) = self.thread.as_mut().filter(|t| t.status == "active") {
             thread.status = "idle";
@@ -678,6 +690,7 @@ impl ProviderState {
 
     /// A thread change detached the provider session, stopping `runs`.
     pub(crate) fn detach_session(&mut self, at: u64, runs: &[Uuid], fresh: bool) {
+        self.session_startup = None;
         self.session_detached_at = Some(at);
         if fresh {
             self.fresh_session = true;
@@ -889,6 +902,7 @@ pub(crate) fn provider_turn(
     };
     let turn = ProviderTurn {
         driver: driver.to_owned(),
+        report_startup_phase: driver == provider::CLAUDE_AGENT,
         instance_id: instance_id.to_owned(),
         binary_path: text("binaryPath"),
         launch_args: split_args(&text("launchArgs")),

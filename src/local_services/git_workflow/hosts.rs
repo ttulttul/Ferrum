@@ -1,4 +1,5 @@
 use super::{provider_error, resolved, Reply};
+use crate::source_control_lookup::{gt_account, ForgejoAccount};
 use serde_json::{json, Value};
 use std::{process::Stdio, time::Duration};
 use tokio::io::AsyncWriteExt;
@@ -7,6 +8,7 @@ use url::Url;
 pub(super) struct Remote {
     pub kind: &'static str,
     host: String,
+    url: Url,
     pub(super) repo: String,
 }
 fn safe_path(s: &str) -> bool {
@@ -46,7 +48,12 @@ impl Remote {
             h if h.ends_with(".visualstudio.com") => "azure-devops",
             _ => return None,
         };
-        Some(Self { kind, host, repo })
+        Some(Self {
+            kind,
+            host,
+            repo,
+            url,
+        })
     }
     fn error(&self, cwd: &str, op: &str, reference: &str, detail: &str) -> Value {
         if self.kind == "gitcafe" || self.kind == "forgejo" {
@@ -115,7 +122,7 @@ impl Remote {
         .and_then(Result::ok)
         .filter(|o| o.status.success())
         .ok_or_else(err)?;
-        if bin == "tea" && args.first() == Some(&"api") {
+        if bin == "gt" && args.first() == Some(&"api") {
             let headers = String::from_utf8_lossy(&out.stderr);
             let code = headers
                 .lines()
@@ -158,38 +165,24 @@ impl Remote {
         };
         (n > 0 && safe_path(&repo)).then_some((repo, n))
     }
-    async fn tea_login(&self, cwd: &str, reference: &str) -> Result<(String, String), Value> {
-        let list = self
-            .command(
-                cwd,
-                "getChangeRequest",
-                reference,
-                "tea",
-                &["login", "list", "--output", "json"],
-                None,
-            )
-            .await?;
-        let logins: Value = serde_json::from_str(&list).unwrap_or(Value::Null);
-        let rows: Vec<_> = logins
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|v| {
-                v["url"]
-                    .as_str()
-                    .and_then(|s| Url::parse(s).ok())
-                    .is_some_and(|url| {
-                        url.host_str() == Some(&self.host) || v["ssh_host"] == self.host
-                    })
-            })
-            .collect();
-        let row = rows
-            .iter()
-            .find(|v| v["default"] == "true")
-            .copied()
-            .or_else(|| (rows.len() == 1).then(|| rows[0]));
-        row.and_then(|v|Some((v["name"].as_str()?.into(),v["url"].as_str()?.trim_end_matches('/').into())))
-            .ok_or_else(||self.error(cwd,"getChangeRequest",reference,"No matching Forgejo login. Use `fj auth login`, `fj auth add-token`, or `tea login add` for this server. For a server under a URL subpath, use `tea login add`. Choose a default when multiple tea accounts match."))
+    async fn forgejo_account(&self, cwd: &str, reference: &str) -> Result<ForgejoAccount, Value> {
+        gt_account(cwd, Some(&self.url))
+            .await
+            .map_err(|detail| self.error(cwd, "getChangeRequest", reference, detail))
+    }
+    async fn forgejo_get(
+        &self,
+        cwd: &str,
+        op: &str,
+        reference: &str,
+        account: &ForgejoAccount,
+        path: &str,
+    ) -> Result<String, Value> {
+        let endpoint = format!("{}/api/v1/{path}", account.host.trim_end_matches('/'));
+        let mut args = vec!["api", "--include"];
+        args.extend(account.args());
+        args.extend(["--method", "GET", &endpoint]);
+        self.command(cwd, op, reference, "gt", &args, None).await
     }
     async fn http(
         &self,
@@ -366,24 +359,13 @@ impl Remote {
                 let number = number.as_deref().ok_or_else(|| {
                     self.error(cwd, op, reference, "Specify a pull request number or URL.")
                 })?;
-                let (login, base) = self.tea_login(cwd, reference).await?;
-                self.command(
+                let account = self.forgejo_account(cwd, reference).await?;
+                self.forgejo_get(
                     cwd,
                     op,
                     reference,
-                    "tea",
-                    &[
-                        "api",
-                        "--include",
-                        "--login",
-                        &login,
-                        "--repo",
-                        target,
-                        "--method",
-                        "GET",
-                        &format!("{base}/api/v1/repos/{target}/pulls/{number}"),
-                    ],
-                    None,
+                    &account,
+                    &format!("repos/{target}/pulls/{number}"),
                 )
                 .await?
             }
@@ -439,6 +421,7 @@ impl Remote {
         let branch: String = url::form_urlencoded::byte_serialize(head.as_bytes()).collect();
         let rows = match self.kind {
             "gitlab" | "azure-devops" => {
+                let azure_branch;
                 let (bin, mut args) = if self.kind == "gitlab" {
                     let mut args = vec!["mr", "list", "--source-branch", head];
                     if !open_only {
@@ -447,6 +430,13 @@ impl Remote {
                     args.extend(["--per-page", "100", "--output", "json"]);
                     ("glab", args)
                 } else {
+                    // az recognizes literal ref prefixes before building its request URL.
+                    let prefix = ["refs/heads/", "refs/pull/", "refs/tags/"]
+                        .into_iter()
+                        .find(|prefix| head.starts_with(prefix))
+                        .unwrap_or("");
+                    let name = crate::thread_projection::uri_component(&head[prefix.len()..]);
+                    azure_branch = format!("--source-branch={prefix}{name}");
                     (
                         "az",
                         vec![
@@ -455,8 +445,7 @@ impl Remote {
                             "list",
                             "--detect",
                             "true",
-                            "--source-branch",
-                            &branch,
+                            azure_branch.as_str(),
                             "--status",
                             if open_only { "active" } else { "all" },
                             "--top",
@@ -505,30 +494,11 @@ impl Remote {
                 serde_json::from_str::<Vec<Value>>(&raw).map_err(|_| invalid())?
             }
             "forgejo" => {
-                let (login, base) = self.tea_login(cwd, head).await?;
+                let account = self.forgejo_account(cwd, head).await?;
                 let mut found = vec![];
                 for page in 1.. {
-                    let endpoint = format!("{base}/api/v1/repos/{}/pulls?state={state}&head={branch}&sort=recentupdate&limit=50&page={page}",self.repo);
-                    let raw = self
-                        .command(
-                            cwd,
-                            op,
-                            head,
-                            "tea",
-                            &[
-                                "api",
-                                "--include",
-                                "--login",
-                                &login,
-                                "--repo",
-                                &self.repo,
-                                "--method",
-                                "GET",
-                                &endpoint,
-                            ],
-                            None,
-                        )
-                        .await?;
+                    let endpoint = format!("repos/{}/pulls?state={state}&head={branch}&sort=recentupdate&limit=50&page={page}",self.repo);
+                    let raw = self.forgejo_get(cwd, op, head, &account, &endpoint).await?;
                     let rows: Vec<Value> = serde_json::from_str(&raw).map_err(|_| invalid())?;
                     let last = rows.len() < 50;
                     found.extend(
@@ -791,19 +761,11 @@ impl Remote {
                 .await?;
             }
             "forgejo" => {
-                let (login, _) = self.tea_login(cwd, reference).await?;
-                self.command(
-                    cwd,
-                    op,
-                    reference,
-                    "tea",
-                    &[
-                        "pulls", "checkout", "--login", &login, "--repo", &self.repo, "--branch",
-                        &n,
-                    ],
-                    None,
-                )
-                .await?;
+                let account = self.forgejo_account(cwd, reference).await?;
+                let mut args = vec!["pr", "checkout", &n];
+                args.extend(account.args());
+                args.extend(["--repo", &self.repo]);
+                self.command(cwd, op, reference, "gt", &args, None).await?;
             }
             _ => return Ok(false),
         }

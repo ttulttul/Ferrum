@@ -168,6 +168,9 @@ impl crate::mcp_oauth::McpHost for ControlPlane {
     fn descriptor(&self) -> Value {
         ControlPlane::descriptor(self)
     }
+    fn runtime_mode_ceiling(&self) -> Option<&str> {
+        self.settings.policy.summary()?["limits"]["maxRuntimeMode"].as_str()
+    }
     fn settings(&self) -> Value {
         ControlPlane::settings(self)
     }

@@ -750,5 +750,12 @@
     "method": "POST",
     "path": "/v1/mobile/observe/:projectId/v1/:signal",
     "auth": []
+  },
+  {
+    "source": "packages/contracts/src/relay.ts",
+    "name": "clerk",
+    "method": "POST",
+    "path": "/v1/webhooks/clerk",
+    "auth": []
   }
 ]

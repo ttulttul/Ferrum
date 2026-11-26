@@ -7,7 +7,7 @@
 {"remoteUrl":"https://user:token@github.com/example/repo.git","canonicalKey":"github.com/example/repo","provider":"github","displayName":"example/repo"}
 {"remoteUrl":"git@github.example.com:team/tool.git","canonicalKey":"github.example.com/team/tool","provider":"github","displayName":"team/tool"}
 {"remoteUrl":"https://octo.ghe.com/team/tool.git","canonicalKey":"octo.ghe.com/team/tool","provider":"github","displayName":"team/tool"}
-{"remoteUrl":"git@ssh.bitbucket.org:example-org/example-repo.git","canonicalKey":"ssh.bitbucket.org/example-org/example-repo","provider":"bitbucket","displayName":"example-org/example-repo"}
+{"remoteUrl":"git@ssh.bitbucket.org:example-org/example-repo.git","canonicalKey":"bitbucket.org/example-org/example-repo","provider":"bitbucket","displayName":"example-org/example-repo"}
 {"remoteUrl":"git@bitbucket.org:example-org/example-repo.git","canonicalKey":"bitbucket.org/example-org/example-repo","provider":"bitbucket","displayName":"example-org/example-repo"}
 {"remoteUrl":"https://someone@bitbucket.org/example-org/example-repo.git","canonicalKey":"bitbucket.org/example-org/example-repo","provider":"bitbucket","displayName":"example-org/example-repo"}
 {"remoteUrl":"ssh://git@bitbucket.internal.example:7999/proj/repo.git","canonicalKey":"bitbucket.internal.example/proj/repo","provider":"bitbucket","displayName":"proj/repo"}

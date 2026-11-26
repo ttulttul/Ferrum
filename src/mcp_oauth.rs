@@ -19,6 +19,8 @@ mod tools;
 pub use thread_credentials::ThreadScope;
 #[allow(unused_imports)]
 pub(crate) use tools::format_device_error;
+#[cfg(feature = "native")]
+pub(crate) use tools::is_served_tool;
 pub(crate) use tools::unserved_tool_names;
 pub(crate) use tools::{answer_matches, card_command, resume_remote_followers};
 mod transport;
@@ -108,6 +110,10 @@ pub trait McpHost: AuthHost {
     }
     /// The environment descriptor (`/.well-known/t3/environment`).
     fn descriptor(&self) -> Value;
+    /// The broadest runtime mode allowed by the environment's managed policy.
+    fn runtime_mode_ceiling(&self) -> Option<&str> {
+        None
+    }
     /// The effective settings.
     fn settings(&self) -> Value;
     /// Whether a committed `thread.pull-request.link` already reads the new
@@ -351,6 +357,7 @@ pub trait McpHost: AuthHost {
     fn workflow_tool(
         self: &Arc<Self>,
         _input: Value,
+        _client_label: String,
     ) -> HostFuture<Result<Value, (&'static str, String)>> {
         Box::pin(async {
             Err((

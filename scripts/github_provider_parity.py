@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from websockets.sync.client import connect
 import parity_harness as harness
+from parity_gaps import Gaps
 
 
 REPO = "example/parity"
@@ -25,11 +26,11 @@ AUTHOR = {"__typename":"User","id":"U1","login": "tester", "name": "Test User", 
 LABEL = {"name": "bug", "color": "fff", "description": "Something needs fixing"}
 ISSUE = {"id": "I_12", "__typename": "Issue", "number": 12, "title": "Regression", "body": "Read me",
          "author": AUTHOR, "url": "https://github.com/example/parity/issues/12", "state": "OPEN",
-         "stateReason": None, "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+         "stateReason": None, "status": None, "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
          "closedAt": None, "comments": {"totalCount": 0,"pageInfo":{"hasPreviousPage":False,"startCursor":None},"nodes":[]},
          "assignees": {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes":[]},
          "labels": {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes": [{"name": "bug", "color": "fff"}]},
-         "viewerCanUpdate": True, "viewerCanClose": True, "viewerCanReopen": True,
+         "viewerCanUpdate": True, "viewerCanClose": True, "viewerCanReopen": True, "viewerCanSetStatus": False,
          "reactionGroups": [], "closedByPullRequestsReferences": {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes":[]},
          "timelineItems": {"nodes":[]}}
 PR = {"viewerCanUpdate":True,"viewerDidAuthor":False,"headRepository":{"viewerPermission":"WRITE"},"id": "PR_3", "__typename": "PullRequest", "number": 3, "title": "Work", "url": "https://github.com/example/parity/pull/3",
@@ -68,6 +69,13 @@ THREAD_COMMENT = {"id":"C42","author":{"__typename":"User","login":"reader","ava
 ACTION_METHODS = ["closePullRequest","reopenPullRequest","markPullRequestReadyForReview",
                   "convertPullRequestToDraft","mergePullRequest","revertPullRequest","disablePullRequestAutoMerge",
                   "enablePullRequestAutoMerge","updatePullRequestBranch"]
+
+def head_connection(request, pr):
+    rows = [pr] if request["variables"].get("head") == pr["headRefName"] else []
+    return {"repository": {"pullRequests": {
+        "nodes": rows, "pageInfo": {"hasNextPage": False, "endCursor": None},
+    }}}
+
 
 class Provider(BaseHTTPRequestHandler):
     def log_message(self, *_args):
@@ -261,14 +269,28 @@ class Provider(BaseHTTPRequestHandler):
                                 "comments":{"pageInfo":{"hasNextPage":more,"endCursor":"second" if more else None},
                                             "nodes":[THREAD_COMMENT,{**THREAD_COMMENT,"isMinimized":True}] if more else []}}}
             elif "issue(number:" in query:
-                result = {"viewer": {"login": "tester"}, "repository": {"viewerPermission": "WRITE", "issue": ISSUE}}
-            elif "pullRequests(" in query and hasattr(self.server, "status_rows"):
+                item = ISSUE
+                statuses = []
+                if data["variables"].get("number") == 13:
+                    item = {**ISSUE, "id": "I_13", "number": 13, "url": ISSUE["url"].replace("/12", "/13")}
+                    if "planningStatuses(" in query:
+                        status = {"id": "P_1", "name": "In progress",
+                                  "category": {"key": "started", "state": "OPEN", "stateReason": None}}
+                        statuses = [status]
+                        item["status"] = status
+                result = {"viewer": {"login": "tester"}, "repository": {"viewerPermission": "WRITE",
+                          "planningStatuses": {"nodes": statuses}, "issue": item}}
+            elif ("pullRequests(" in query and hasattr(self.server, "status_rows")
+                  and data.get("operationName") != "PullRequestHeads" and "query PullRequestHeads(" not in query):
                 alias = re.search(r"(\w+)\s*:\s*repository\(", query)
                 head_variable = re.search(r"headRefName:\s*\$(\w+)",query)
                 head = data["variables"][head_variable.group(1)]
                 rows = [row for row in self.server.status_rows if row["headRefName"] == head]
                 self.server.status_reads.append(head)
                 result = {(alias.group(1) if alias else "repository"): {"pullRequests": {"nodes": rows}}}
+            elif "pullRequests(" in query and "headRefName:" in query:
+                pr = self.server.repository["pullRequest"]
+                result = head_connection(data, pr)
             elif "pullRequest(number:" in query:
                 alias = re.search(r"(\w+)\s*:\s*repository\(", query)
                 result = {(alias.group(1) if alias else "repository"): self.server.repository}
@@ -363,6 +385,8 @@ def main():
             rpc("issues.create", {**issue, **create, "scope": "other/repo"}),
             rpc("issues.list", {"projectId": "test-project", "state": "open"}),
             rpc("issues.candidates", issue),
+            rpc("issues.detail", {**issue, "key": "12"}),
+            rpc("issues.detail", {**issue, "key": "13"}),
             rpc("pullRequests.preview", ref),
             rpc("pullRequests.stack", ref),
             rpc("pullRequests.stack", {**ref,"number":99}),
@@ -403,17 +427,37 @@ def main():
                        "expectedStackHeads": [{"number": 3, "headSha": head}]})
             case["name"] += " " + label
             cases.append(case)
+        cancel_stack = rpc("pullRequests.runAction", {**ref, "action": "disable-auto-merge",
+                                                      "stackNumber": STACK["number"]})
+        cancel_stack["name"] += " cancel stack auto-merge"
+        cases.append(cancel_stack)
         failures = 0
+        gaps = Gaps("github_provider_parity")
+        default_detail = None
         for case in cases:
             if "frame" in case:
                 for ws in sockets:
                     ws.send(harness.encode(case["frame"]).decode())
                 packets = [harness.recv_frame(ws, timeout=15) for ws in sockets]
                 payload = case["frame"]["payload"]
-                expected_failure = payload.get("scope") == "other/repo" or payload.get("expectedHeadSha") == "abc1234" or ("stackNumber" in payload and not case["name"].endswith("pinned stack")) or payload.get("threadId")=="Other"
+                expected_failure = payload.get("scope") == "other/repo" or payload.get("expectedHeadSha") == "abc1234" or ("stackNumber" in payload and not case["name"].endswith(("pinned stack", "cancel stack auto-merge"))) or payload.get("threadId")=="Other"
                 exits = [json.loads(p)["exit"] for p in packets]
                 ok = packets[0] == packets[1] and all(
                     e["_tag"] == ("Failure" if expected_failure else "Success") for e in exits)
+                if case["frame"]["tag"] == "issues.detail" and ok and payload["key"] == "12":
+                    default_detail = exits[0]["value"]
+                if case["frame"]["tag"] == "issues.detail" and payload["key"] == "13":
+                    # Only the state, choices and set-state permission differ on the preview.
+                    if not ok and default_detail and all(e["_tag"] == "Success" for e in exits):
+                        original, rust = [e["value"] for e in exits]
+                        planned = {"category": "open", "name": "In progress"}
+                        expected = {**rust, "state": planned, "states": [planned],
+                                    "viewerPermissions": {**rust["viewerPermissions"], "setState": False}}
+                        if (original == expected and rust["state"] == default_detail["state"]
+                                and rust["states"] == default_detail["states"]
+                                and rust["viewerPermissions"]["setState"] is True):
+                            failures += gaps.differs("issue planning statuses")
+                            continue
                 values = [repr(v)[:5000] for v in packets]
             else:
                 ok, values = harness.check(case, projects, sockets)
@@ -426,6 +470,7 @@ def main():
             expected_actions = [(m,None,None) for m in ("convertPullRequestToDraft","markPullRequestReadyForReview",
                 "closePullRequest","reopenPullRequest","disablePullRequestAutoMerge","revertPullRequest")]
             expected_actions.extend([("mergePullRequest","SQUASH",None)] * 2)
+            expected_actions.append(("disablePullRequestAutoMerge", None, None))
             stack_endpoint = f"/repos/{REPO}/pulls/3/merge-async"
             if provider.stack_merges != [
                 ("PUT", stack_endpoint, {"merge_method": "squash", "merge_action": "default", "sha": PR["headRefOid"]}),
@@ -454,6 +499,7 @@ def main():
             if provider.reviews != [{"event":"COMMENT","body":"Reviewed","comments":[{"path":"lib.rs","side":"RIGHT","line":1,"body":"Inline remark"}]}]:
                 failures += 1
                 print("FAIL unexpected submitted review",provider.reviews)
+        failures += gaps.finish()
         harness.assert_nothing_escaped()
         print(f"{len(cases)} client comparisons and two provider write logs checked")
         return 1 if failures else 0

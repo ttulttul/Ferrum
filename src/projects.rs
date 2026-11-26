@@ -253,6 +253,12 @@ pub(crate) async fn mutate_checked(
         })
         .await
         .map_err(|_| error("Failed to mutate project."))?;
+    if state.settings.save_project_defaults(id, input).is_err() {
+        if kind != "project.delete" {
+            return Err(error("Failed to mutate project."));
+        }
+        tracing::warn!("Failed to clear settings overrides for a deleted project.");
+    }
     drop(guard);
     // A deleted project's clone is no longer followed; an unfinished checkout is emptied.
     if kind == "project.delete" {

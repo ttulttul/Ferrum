@@ -15,6 +15,7 @@ import time
 
 import bitbucket_pull_request_parity as bb
 import github_provider_parity as gh
+from forge_write_parity import github_requests
 import parity_harness as harness
 from client_thread_parity import FIXTURES, rpc, scenario_env, seed_turn
 from peer_forwarding_parity import McpClient
@@ -48,6 +49,8 @@ class Actions(gh.Provider):
             data = self.read_json()
             self.server.calls.append(("POST", self.path, data))
             repository = deepcopy(gh.REPOSITORY)
+            if "PullRequestHeads" in data["query"]:
+                return self.reply(200, {"data": gh.head_connection(data, repository["pullRequest"])})
             checks = repository["pullRequest"]["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]
             sample = checks["nodes"][0]
             checks["nodes"] = [
@@ -140,12 +143,8 @@ def run(command, root, github):
 def comparable(requests):
     # Job lookups may complete in either order. Keep every read and all write boundaries.
     result, reads = [], []
-    for method, path, data in requests:
-        if path == "/graphql":
-            query = re.sub(r"#[^\n]*", "", data["query"])
-            tokens = re.findall(r"\w+|[^\s,]", query)
-            data = {**data, "query":tokens, "operationName":data.get("operationName", tokens[1])}
-        request = (method, path, data)
+    for request in github_requests(requests):
+        method, path, _ = request
         if method == "GET" and re.fullmatch(ROOT + r"/jobs/\d+", path):
             reads.append(request)
         else:

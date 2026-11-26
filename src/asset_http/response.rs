@@ -268,7 +268,7 @@ fn mcp_html(bytes: &[u8]) -> String {
     static THEME_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r#"(?i)^\u{feff}?\s*<!doctype[^>]*>\s*(?:<meta\s+http-equiv="Content-Security-Policy"[^>]*>)?"#).unwrap()
     });
-    static COOKIE_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    static BOOTSTRAP_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r#"(?i)^(?:\u{feff}?\s*<!doctype[^>]*>\s*)?(?:<meta http-equiv="Content-Security-Policy" content="[^"]*">)?"#).unwrap()
     });
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
@@ -281,7 +281,9 @@ fn mcp_html(bytes: &[u8]) -> String {
         }
     };
     html.insert_str(index, include_str!("mcp_theme.html"));
-    let index = COOKIE_PREFIX.find(&html).unwrap().end();
+    let index = BOOTSTRAP_PREFIX.find(&html).unwrap().end();
     html.insert_str(index, include_str!("mcp_cookie.html"));
+    // Bind the host's private port to this document before application scripts execute.
+    html.insert_str(index, r#"<script>(function(){var host=window.parent,port=new MessageChannel(),own=port.port1;own.onmessage=function(event){var data=event.data;if(!data)return;if("alive" in data)own.postMessage({alive:data.alive});else window.dispatchEvent(new MessageEvent("message",{data:data.message,origin:data.origin,source:host}));};host.postMessage({t3:"t3-mcp-app-document"},"*",[port.port2]);})();</script>"#);
     html
 }

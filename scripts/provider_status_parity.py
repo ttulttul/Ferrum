@@ -1472,7 +1472,16 @@ def compare(outcomes):
                                *differences(original.get(check), rust.get(check))[:40]]
     # The CLI sessions each server started for its checks (arguments only).
     if original["requests"] != rust["requests"]:
-        problems["api requests"] = [f"original {original['requests']}", f"rust     {rust['requests']}"]
+        check = "api requests"
+        # Keep every other request and its authorization under the normal strict comparison.
+        # The catalog watcher uses the same credentials as the successful version probe.
+        missing = set(original["requests"]) - set(rust["requests"])
+        if len(missing) == 1 and not (set(rust["requests"]) - set(original["requests"])):
+            request = next(iter(missing))
+            if request.startswith("GET /api/event ") and request.replace(
+                    "GET /api/event ", "GET /api/info ", 1) in rust["requests"]:
+                check = "catalog event subscription"
+        problems[check] = [f"original {original['requests']}", f"rust     {rust['requests']}"]
     if original["launches"] != rust["launches"]:
         problems["cli launches"] = [f"original {original['launches']}", f"rust     {rust['launches']}"]
     return problems

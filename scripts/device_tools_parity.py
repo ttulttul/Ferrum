@@ -105,6 +105,10 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ ok: true }));
     return;
   }
+  if (req.headers.authorization !== "Bearer fixture-hub-session") {
+    res.writeHead(401).end();
+    return;
+  }
   if (req.method === "GET" && url.pathname === "/api/devices") {
     log({ kind: "hub.http", method: "GET", path: "/api/devices" });
     const modeFile = process.env.T3_FAKE_HUB_MODE;
@@ -178,7 +182,9 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: "not_found" }));
 });
 
-server.listen(port, host);
+server.listen(port, host, () => {
+  if (args.includes("--require-token")) console.log("Local: http://localhost/?token=fixture-hub-session");
+});
 process.on("SIGTERM", () => server.close(() => process.exit(0)));
 """
 

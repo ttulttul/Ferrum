@@ -224,6 +224,10 @@ impl Settings {
                 let mut safe = self.defaults.clone();
                 safe["continueThreadsAfterServerUpdate"] = json!(false);
                 safe["usageHistoryRetentionDays"] = json!("unlimited");
+                safe["requireConnectDeviceApproval"] = json!(true);
+                safe["enablePreviewTunnel"] = json!(false);
+                safe["enableAgentBrowserAccess"] = json!(false);
+                safe["defaultRuntimeMode"] = json!("approval-required");
                 mutations::normalize(&mut safe);
                 return Ok(Loaded {
                     raw: Value::Null,
@@ -309,6 +313,60 @@ impl Settings {
         self.changes.subscribe()
     }
     pub(crate) fn update(&self, payload: &Value, references: bool) -> Result<Value, Value> {
+        self.update_with(references, |_| std::borrow::Cow::Borrowed(payload))
+    }
+
+    #[cfg(feature = "native")]
+    pub(crate) fn save_project_defaults(&self, id: &str, input: &Value) -> Result<(), Value> {
+        let create = input["type"] == "project.create";
+        let delete = input["type"] == "project.delete";
+        let fields = [
+            ("scripts", "defaultProjectScripts"),
+            ("defaultModelSelection", "defaultModelSelection"),
+            ("defaultThreadEnvMode", "defaultThreadEnvMode"),
+            ("autoPull", "defaultAutoPull"),
+        ];
+        if !delete
+            && !fields
+                .iter()
+                .any(|(key, _)| (!create || *key == "scripts") && input.get(key).is_some())
+        {
+            return Ok(());
+        }
+        self.update_with(true, |settings| {
+            let saved = &settings["projectSettingsOverrides"][id];
+            let entry = if delete {
+                saved.get("worktreeCleanup").map_or(Value::Null, |cleanup| {
+                    json!({
+                        "worktreeCleanup":cleanup, "providerInstances":{}
+                    })
+                })
+            } else {
+                let mut entry = saved.as_object().cloned().unwrap_or_default();
+                for (key, field) in fields {
+                    if create && key != "scripts" {
+                        continue;
+                    }
+                    if let Some(value) = input.get(key) {
+                        if value.is_null() {
+                            entry.shift_remove(field);
+                        } else {
+                            entry.insert(field.into(), value.clone());
+                        }
+                    }
+                }
+                Value::Object(entry)
+            };
+            std::borrow::Cow::Owned(json!({"patch":{"projectSettingsOverrides":{id:entry}}}))
+        })
+        .map(|_| ())
+    }
+
+    fn update_with<'a>(
+        &self,
+        references: bool,
+        make_payload: impl FnOnce(&Value) -> std::borrow::Cow<'a, Value>,
+    ) -> Result<Value, Value> {
         let mut guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         *guard = None;
         let loaded = self.load().map_err(|e| self.io_failure(&e, "read-file"))?;
@@ -317,6 +375,8 @@ impl Settings {
             error["cause"] = json!({"name":"SchemaError","message":message});
             return Err(error);
         }
+        let payload = make_payload(&loaded.settings);
+        let payload = payload.as_ref();
         for (id, entry) in payload["patch"]["secretProviders"]
             .as_object()
             .into_iter()

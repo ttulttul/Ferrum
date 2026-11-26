@@ -16,6 +16,7 @@
 //! snapshot at most every 50 ms), and each tool call is one item whose type
 //! follows its ACP kind. A `session/request_permission` the runtime mode does
 //! not answer goes to the user as a runtime request.
+mod changed_paths;
 use super::{
     cancelled, next_response, program, requests, Cli, Launch, Protocol, ProtocolLog, Sink, TurnEnd,
 };
@@ -25,6 +26,7 @@ use crate::workspace::provider::{
     ACP_REGISTRY, ANTIGRAVITY, FX, GROK, KIRO,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
+use changed_paths::ChangedPaths;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
@@ -300,8 +302,6 @@ struct Agent {
     /// Antigravity: the process's own temporary folder (`run-XXXXXX`),
     /// removed with the agent.
     _run_temp: Option<tempfile::TempDir>,
-    /// The installed CLI's version, which names the client to it.
-    installed_version: Option<String>,
     /// The version the agent reports (`agentInfo.version`).
     agent_version: Option<String>,
     /// The agent takes T3's pull request instructions in the session's
@@ -410,11 +410,6 @@ impl Agent {
             current_mode: None,
             modes: Vec::new(),
             _run_temp: run_temp,
-            installed_version: provider
-                .antigravity
-                .as_ref()
-                .map(|launch| launch.version.clone())
-                .filter(|version| !version.is_empty()),
             agent_version: None,
             system_prompt_append: false,
             mcp_http: false,
@@ -550,15 +545,8 @@ impl Agent {
             params["capabilities"]["_meta"] = hooks;
         }
         if self.flavor == Flavor::Antigravity {
-            // agy reads files through T3 (`clientFileReads`), and from 1.5.1
-            // on is told it runs in T3 Code (`antigravityClientInfo`).
             params["clientCapabilities"]["fs"]["readTextFile"] = json!(true);
-            let client = if version_at_least(self.installed_version.as_deref(), (1, 5, 1)) {
-                json!({"name": "t3-code", "title": "T3 Code",
-                    "version": crate::server_runtime::SERVER_VERSION})
-            } else {
-                json!({"name": "zed", "version": "0.0.0"})
-            };
+            let client = crate::provider_status::antigravity_text::client_info();
             params["clientInfo"] = client.clone();
             params["info"] = client;
         }
@@ -1580,6 +1568,19 @@ async fn start(
         meta = Some(json!({"fx": {"profileMcpServers": true}}));
     }
     if agent.flavor == Flavor::Antigravity {
+        if let Some(refusal) = agent.agent_version.as_deref().and_then(|version| {
+            crate::provider_status::antigravity_text::runtime_refusal(
+                &crate::model_manifest::BUNDLED,
+                version,
+                provider
+                    .antigravity
+                    .as_ref()
+                    .is_some_and(|launch| !launch.version.is_empty()),
+                std::path::Path::new(&provider.binary_path),
+            )
+        }) {
+            return Err(AcpError::Startup(refusal));
+        }
         // Eagerly, with the configured method: agy takes ones it does not list.
         let method = if agent.auth_method.is_empty() {
             "oauth-personal".to_owned()
@@ -1673,6 +1674,7 @@ async fn start(
         agent.session_started = Some(json!({
             "initialize": {"agentInfo": {"version": agent.agent_version}},
             "setup": setup,
+            "resumed": resumed,
             "cwd": spec.cwd,
         }));
     }
@@ -1755,27 +1757,6 @@ fn kiro_prompt_failure(error: &AcpError) -> ProviderFailure {
     }
 }
 
-/// Whether `version` (`1.5.1`, `1.6.2-beta`) is at least `at`.
-fn version_at_least(version: Option<&str>, at: (u64, u64, u64)) -> bool {
-    let Some(version) = version else {
-        return false;
-    };
-    let parts: Vec<u64> = version
-        .trim()
-        .trim_start_matches('v')
-        .split('.')
-        .take(3)
-        .filter_map(|part| {
-            part.chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse()
-                .ok()
-        })
-        .collect();
-    parts.len() == 3 && (parts[0], parts[1], parts[2]) >= at
-}
-
 /// A failed Antigravity prompt (no `promptFailure` of its own): the
 /// curated sign-in text, else the generic one.
 fn antigravity_prompt_failure(error: &AcpError) -> ProviderFailure {
@@ -1800,13 +1781,22 @@ fn resolve_existing(path: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut missing = Vec::new();
     let mut at = path.to_path_buf();
     loop {
-        if let Ok(real) = std::fs::canonicalize(&at) {
-            return Some(
-                missing
-                    .into_iter()
-                    .rev()
-                    .fold(real, |path, part| path.join(part)),
-            );
+        match std::fs::canonicalize(&at) {
+            Ok(real) => {
+                return Some(
+                    missing
+                        .into_iter()
+                        .rev()
+                        .fold(real, |path, part| path.join(part)),
+                )
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+        // Only a genuinely missing component may be appended to the resolved ancestor.
+        if !matches!(std::fs::symlink_metadata(&at), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        {
+            return None;
         }
         let name = at.file_name()?.to_owned();
         missing.push(name);
@@ -1897,6 +1887,7 @@ struct Segment {
 /// A tool call as its updates merged it.
 #[derive(Default, Clone)]
 struct Tool {
+    changed_paths: ChangedPaths,
     kind: Option<String>,
     title: Option<String>,
     /// `pending`, `inProgress`, `completed` or `failed`.
@@ -2080,7 +2071,11 @@ impl<'a> Turn<'a> {
                 .collect(),
             system_prompt_append: agent.system_prompt_append,
             prompt_steering: agent.flavor == Flavor::Antigravity
-                && version_at_least(agent.agent_version.as_deref(), (1, 5, 0)),
+                && agent
+                    .agent_version
+                    .as_deref()
+                    .and_then(crate::provider_status::antigravity_text::runtime_version)
+                    .is_some_and(|v| v >= (1, 5, 0)),
             prompt_usage: None,
             questions: HashMap::new(),
             prompt_at: Instant::now(),
@@ -2814,6 +2809,18 @@ impl<'a> Turn<'a> {
                 update["messageId"].as_str(),
             ),
             "tool_call" | "tool_call_update" => self.tool(update),
+            "tool_call_content_chunk" => {
+                if let Some(id) = update["toolCallId"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    self.tools
+                        .entry(id.trim().to_owned())
+                        .or_default()
+                        .changed_paths
+                        .observe_content(&update["content"]);
+                }
+            }
             "plan" => self.plan(update),
             _ => {}
         }
@@ -2949,6 +2956,7 @@ impl<'a> Turn<'a> {
         }
         let first = !self.tools.contains_key(&id);
         let tool = self.tools.entry(id.clone()).or_default();
+        tool.changed_paths.observe(update);
         if let Some(kind) = update["kind"]
             .as_str()
             .map(str::trim)
@@ -3164,10 +3172,7 @@ impl<'a> Turn<'a> {
         // A call to T3's own tools runs in agy's auto modes.
         let t3_tool = self.flavor == Flavor::Antigravity
             && matches!(self.runtime_mode.as_str(), "auto" | "auto-accept-edits")
-            && (call["rawInput"]["ServerName"] == "t3-code"
-                || call["title"]
-                    .as_str()
-                    .is_some_and(|title| title.starts_with("Run mcp_t3-code_")));
+            && is_antigravity_t3_tool(call);
         let option = |wanted: &str| {
             options
                 .iter()
@@ -3189,8 +3194,24 @@ impl<'a> Turn<'a> {
             && kind == "execute"
             && requested_command(call, tracked.as_ref())
                 .is_some_and(|command| super::read_only_command::is_read_only(&command));
+        let mutation_in_workspace = || {
+            let mut paths = tracked
+                .as_ref()
+                .map(|tool| tool.changed_paths.clone())
+                .unwrap_or_default();
+            paths.observe(call);
+            // Attachments are additional read roots. Only the working directory grants edits.
+            self.read_roots.first().is_some_and(|cwd| paths.inside(cwd))
+        };
         let disposed = match disposition(self.flavor, &self.runtime_mode, &kind) {
             _ if t3_tool || read_only_command => Disposition::Allow,
+            Disposition::Allow
+                if self.runtime_mode == "auto-accept-edits"
+                    && matches!(kind.as_str(), "edit" | "delete" | "move")
+                    && !mutation_in_workspace() =>
+            {
+                Disposition::Ask
+            }
             // A policy approval may only use Kiro's `allow_once`: its
             // `allow_always` saves a consent rule for the whole workspace
             // (`kiroPermissionDisposition`).
@@ -3506,6 +3527,22 @@ impl<'a> Turn<'a> {
             });
         }
     }
+}
+
+/// Metadata of a request made to the built-in MCP server, in either agy wire format.
+fn is_antigravity_t3_tool(call: &Value) -> bool {
+    let title = call["title"].as_str().unwrap_or("").trim();
+    let title = title.strip_suffix('?').unwrap_or(title);
+    let input = &call["rawInput"];
+    if let Some(name) = title.strip_prefix("MCP Tool ") {
+        return input["ServerName"] == "t3-code"
+            && input["ToolName"] == name
+            && crate::mcp_oauth::is_served_tool(name);
+    }
+    !input["CommandLine"].is_string()
+        && title
+            .strip_prefix("Run mcp_t3-code_")
+            .is_some_and(crate::mcp_oauth::is_served_tool)
 }
 
 /// How the runtime mode answers a permission request

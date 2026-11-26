@@ -39,7 +39,7 @@ with open(os.environ["FAKE_HOST_LOG"], "a") as out:
     out.write(command + "\\n")
 answers = json.loads(pathlib.Path(os.environ["FAKE_HOST_SCRIPT"]).read_text())
 answer = answers.get(command)
-if answer is None:
+if answer is None or ("stdin" in answer and sys.stdin.read() != answer["stdin"]):
     print("fixture: not scripted", file=sys.stderr)
     sys.exit(1)
 sys.stdout.write(answer.get("stdout", ""))
@@ -142,24 +142,29 @@ def main():
             "glab api projects/org%2Frepo": {"stdout": json.dumps({
                 "path_with_namespace": "org/repo", "web_url": remote, "http_url_to_repo": remote, "ssh_url_to_repo": remote})},
             "glab api projects/org%2Fmissing": {"stderr": "glab: 404 Project Not Found (HTTP 404)\n", "code": 1},
-            "az repos show --detect true --repository repo --project project --only-show-errors --output json": {"stdout": json.dumps({
+            "az repos show --detect true --repository=repo --project=project --only-show-errors --output json": {"stdout": json.dumps({
                 "name": "repo", "remoteUrl": remote, "sshUrl": remote, "webUrl": remote, "project": {"name": "project"}})},
-            "tea login list --output json": {"stdout": json.dumps([
-                {"name": "forge", "url": "https://codeberg.org", "user": "fixture", "default": "true"}])},
+            "az devops project show --detect true --project=@- --only-show-errors --output json": {
+                "stdin": "@fixture-project", "stdout": json.dumps({"id": "12345678-1234-4234-8234-123456789abc"})},
+            "az repos show --detect true --repository=@- --project=12345678-1234-4234-8234-123456789abc --only-show-errors --output json": {
+                "stdin": "@fixture-repo", "stdout": json.dumps({"name": "@fixture-repo", "remoteUrl": remote,
+                    "sshUrl": remote, "webUrl": remote, "project": {"name": "@fixture-project"}})},
+            "gt auth status --json host,user,active": {"stdout": json.dumps([
+                {"host": "https://codeberg.org", "user": "fixture", "active": True}])},
             # Signed out: Cursor Origin's API is a fixed real host, so no case may reach it.
             "origin auth token": {"stdout": ""},
-            "tea api --include --login forge --repo org/repo --method GET https://codeberg.org/api/v1/repos/org/repo": {
+            "gt api --include --host https://codeberg.org --user fixture --method GET https://codeberg.org/api/v1/repos/org/repo": {
                 "stderr": "HTTP/1.1 200 OK\n", "stdout": json.dumps({
                     "full_name": "org/repo", "html_url": remote, "clone_url": remote, "ssh_url": remote})},
-            "tea api --include --login forge --repo org/missing --method GET https://codeberg.org/api/v1/repos/org/missing": {
-                "stderr": "HTTP/1.1 404 Not Found\n", "stdout": json.dumps({"message": "The target couldn't be found."})},
+            "gt api --include --host https://codeberg.org --user fixture --method GET https://codeberg.org/api/v1/repos/org/missing": {
+                "code": 1, "stderr": "HTTP/1.1 404 Not Found\n", "stdout": json.dumps({"message": "The target couldn't be found."})},
         }
         for side, command in (("original", args.original_command), ("rust", args.rust_command)):
             with ExitStack() as stack:
                 home = tmp / side
                 fake_bin = tmp / f"{side}-bin"
                 fake_bin.mkdir()
-                for name in ("glab", "az", "tea", "fj", "cafe", "origin"):
+                for name in ("glab", "az", "gt", "fj", "cafe", "origin"):
                     (fake_bin / name).write_text(FAKE_CLI)
                     (fake_bin / name).chmod(0o755)
                 log = tmp / f"{side}-hosts.log"
@@ -204,6 +209,9 @@ def main():
                 lookup("bitbucket", "bitbucket", "org/repo")
                 lookup("bitbucket missing", "bitbucket", "org/missing")
                 lookup("azure devops", "azure-devops", "org/project/repo")
+                lookup("azure literal names", "azure-devops", "@fixture-project/@fixture-repo")
+                for case in ("azure devops", "azure literal names"):
+                    assert record[case]["_tag"] == "Success", (case, record[case])
                 lookup("forgejo", "forgejo", "org/repo")
                 lookup("forgejo missing", "forgejo", "org/missing")
                 lookup("gitcafe not signed in", "gitcafe", "org/repo")

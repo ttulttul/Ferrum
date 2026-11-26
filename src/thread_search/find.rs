@@ -97,7 +97,7 @@ fn timeline(
     db: &Connection,
     id: &str,
     seen: &mut HashSet<String>,
-    cutoff: Option<(&Value, &Value)>,
+    inherited_run_ids: Option<&HashSet<String>>,
     out: &mut Vec<Value>,
 ) -> anyhow::Result<()> {
     if !seen.insert(id.to_owned()) {
@@ -115,25 +115,8 @@ fn timeline(
         "SELECT payload_json FROM orchestration_v2_projection_run_attempts WHERE thread_id=?1",
         id,
     )?;
-    let mut allowed = HashSet::new();
-    if let Some((run, at)) = cutoff {
-        let Some(ordinal) = runs
-            .iter()
-            .find(|r| r["id"] == *run)
-            .and_then(|r| r["ordinal"].as_i64())
-        else {
-            return Ok(());
-        };
+    if inherited_run_ids.is_some() {
         for r in &mut runs {
-            if r["ordinal"].as_i64().is_some_and(|n| n <= ordinal)
-                && !(r["status"] == "rolled_back"
-                    && r["completedAt"]
-                        .as_str()
-                        .zip(at.as_str())
-                        .is_some_and(|(a, b)| a < b))
-            {
-                allowed.insert(r["id"].as_str().unwrap_or_default().to_owned());
-            }
             if r["status"] == "rolled_back" {
                 r["status"] = if attempts
                     .iter()
@@ -149,13 +132,8 @@ fn timeline(
     let fork = &t["forkedFrom"];
     if fork["type"] == "run" && t["lineage"]["sideChat"] != true {
         if let Some(source) = fork["threadId"].as_str() {
-            timeline(
-                db,
-                source,
-                seen,
-                Some((&fork["runId"], &t["createdAt"])),
-                out,
-            )?;
+            let ids = crate::statev2::read::fork_source_run_ids(db, id)?;
+            timeline(db, source, seen, Some(&ids), out)?;
         }
     }
     let items = payloads(db, "SELECT payload_json FROM orchestration_v2_projection_turn_items
@@ -169,10 +147,11 @@ fn timeline(
         crate::projection_shell::visible_turn_items(&p)
             .into_iter()
             .filter(|i| {
-                cutoff.is_none()
-                    || i["runId"]
+                inherited_run_ids.is_none_or(|ids| {
+                    i["runId"]
                         .as_str()
-                        .map_or(t["historyOrigin"] == "v1_import", |id| allowed.contains(id))
+                        .map_or(t["historyOrigin"] == "v1_import", |id| ids.contains(id))
+                })
             })
             .filter(|i| {
                 matches!(

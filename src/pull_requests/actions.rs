@@ -76,6 +76,7 @@ fn action_summary(project: &str, repo: &str, pr: &Value, at: u128) -> Reply {
 }
 
 pub(super) async fn run(
+    service: &super::PullRequestService,
     gh: &mut Github<'_>,
     project: &str,
     repo: &str,
@@ -86,7 +87,9 @@ pub(super) async fn run(
     let vars = json!({"owner":owner, "name":name, "number":number});
     let action = required(input, "action")?;
     if !input["stackNumber"].is_null()
-        && (action != "merge" || !input["expectedStackHeads"].is_array())
+        && action != "disable-auto-merge"
+        && (!matches!(action, "merge" | "enable-auto-merge")
+            || !input["expectedStackHeads"].is_array())
     {
         return Err(error(
             OP,
@@ -132,26 +135,21 @@ pub(super) async fn run(
         return Err(refused("update-branch"));
     }
     let pinned = if let Some(expected) = input["expectedHeadSha"].as_str() {
-        let (current, _) = super::detail::read_core(gh, OP, repo, number).await?;
+        let (current, contexts) = super::detail::read_core(gh, OP, repo, number).await?;
         let pr = &current["repository"]["pullRequest"];
         let head = pr["headRefOid"].as_str();
-        // The reference reads unfinished checks with the reviewed head. A rate limit
-        // stops the write just as it does on the core GraphQL read.
-        if let Some(sha) = head.filter(|_| pr["state"] == "OPEN") {
-            let path = format!(
-                "repos/{repo}/actions/runs?head_sha={}&per_page=100",
-                crate::asset_grant::encode_component(sha)
-            );
-            if let Err(Failure::RateLimit) = gh.json("GET", &path, None).await {
-                return Err(provider_error(Failure::RateLimit));
-            }
-        }
+        super::rerun::workflow_checks(gh, repo, number, pr, contexts, OP).await?;
         Some(super::pinned_head(head, expected)?.to_owned())
     } else {
         None
     };
     if let Some(stack) = input["stackNumber"].as_u64() {
-        return stack_merge::run(gh, repo, number, stack, input).await;
+        let changed = stack_merge::run(service, gh, repo, number, stack, input).await?;
+        return if input["replyWithSummary"] == true && changed.is_object() {
+            action_summary(project, repo, &changed, crate::platform::now_ms() as u128)
+        } else {
+            Ok(Value::Null)
+        };
     }
     if action == "delete-branch" {
         return delete_branch(gh, &vars, number).await;
@@ -330,4 +328,4 @@ async fn delete_branch(gh: &Github<'_>, vars: &Value, number: u64) -> Reply {
 
 mod stack_merge;
 mod workflows;
-pub(super) use workflows::fork_runs;
+pub(super) use workflows::approval_runs;

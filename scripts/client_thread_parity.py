@@ -2400,6 +2400,57 @@ def provider_status(url, cookie, instance, root):
         time.sleep(0.5)
 
 
+def before_link_sync(line):
+    """Remove the three fields filled in by the first sync of the fixture pull request."""
+    if mcp_record_tool(line) != "list_thread_pull_requests":
+        return line
+    record = json.loads(line)
+    answer = record.get("answer")
+    if not isinstance(answer, dict) or answer.get("isError") is not False:
+        return line
+    content = answer.get("content")
+    if not isinstance(content, dict) or not isinstance(content.get("pullRequests"), list):
+        return line
+    fields = ("headBranch", "baseBranch", "isDraft")
+    for row in content["pullRequests"]:
+        if not isinstance(row, dict) or (row.get("host"), row.get("repository"), row.get("number")) != (
+                "github.com", "example/parity", 3):
+            continue
+        if not all(field in row for field in fields):
+            continue
+        pending = all(row[field] is None for field in fields)
+        synced = row["headBranch"] == "feature" and row["baseBranch"] == "main" and row["isDraft"] is False
+        if pending or synced:
+            for field in fields:
+                del row[field]
+    return json.dumps(record, sort_keys=True)
+
+
+def queued_child_followup(original, rust):
+    """Only the delivery of an automatic follow-up sent at the child's first checkpoint."""
+    if len(original) != len(rust):
+        return False
+    differing = [(a, b) for a, b in zip(original, rust) if a != b]
+    if len(differing) != 1:
+        return False
+    a, b = differing[0]
+    if mcp_record_tool(a) != "t3_thread_send" or mcp_record_tool(b) != "t3_thread_send":
+        return False
+    first, second = json.loads(a), json.loads(b)
+    if first.get("request", {}).get("arguments") != {"threadId": "$mcp.task.childThreadId", "message": "Say more."}:
+        return False
+    ref = first.get("answer", {}).get("content")
+    native = second.get("answer", {}).get("content")
+    if not isinstance(ref, dict) or not isinstance(native, dict):
+        return False
+    if (ref.get("status"), ref.get("delivery")) != ("queued", "queued"):
+        return False
+    if (native.get("status"), native.get("delivery")) != ("starting", "started"):
+        return False
+    native.update(status="queued", delivery="queued")
+    return first == second
+
+
 def compare_turn(original, rust):
     """Problems with Rust's provider turn as the reference client sees it, by check name."""
     problems = {}
@@ -2414,8 +2465,23 @@ def compare_turn(original, rust):
     if inputs[0] != inputs[1]:
         problems["turn input"] = [f"original {line}" for line in inputs[0]] + [f"rust     {line}" for line in inputs[1]]
     mcp = comparable_mcp(original.get("mcp", []), rust.get("mcp", []))
+    reference_records, native_records = mcp
+    # A timed-out delivery can omit its final status read independently of how the
+    # preceding send was delivered. Keep checking every record both sides returned.
+    if (len(native_records) == len(reference_records) + 1
+            and mcp_record_tool(native_records[-1]) == "task_status"
+            and json.loads(native_records[-1])["request"].get("arguments") == {
+                "taskId": "$match:Delegated task (\\S+)"
+            }):
+        problems["missing delivery task status"] = mcp_diff_lines([], native_records[-1:])
+        mcp = reference_records, native_records[:-1]
     if mcp[0] != mcp[1]:
-        problems["agent mcp"] = mcp_diff_lines(mcp[0], mcp[1])
+        key = "agent mcp"
+        if queued_child_followup(*mcp):
+            key = "child follow-up during checkpoint"
+        elif [before_link_sync(r) for r in mcp[0]] == [before_link_sync(r) for r in mcp[1]]:
+            key = "linked pull request sync"
+        problems[key] = mcp_diff_lines(mcp[0], mcp[1])
     cli = [original.get("cli", []), rust.get("cli", [])]
     if cli[0] != cli[1]:
         problems["cli approvals"] = [f"original {line}" for line in cli[0]] + [f"rust     {line}" for line in cli[1]]
