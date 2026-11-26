@@ -358,6 +358,9 @@ impl Sink {
                 self.send(ProviderEvent::TurnItem { item });
             }
         }
+        if let Some(item) = end.failure_item {
+            closing.push(ProviderEvent::TurnItem { item: *item });
+        }
         let success = end.status == TurnStatus::Completed;
         self.send(ProviderEvent::TurnTerminal {
             status: end.status,
@@ -389,6 +392,7 @@ impl Sink {
 pub(crate) struct TurnEnd {
     status: TurnStatus,
     failure: Option<ProviderFailure>,
+    failure_item: Option<Box<ProviderItem>>,
     disposition: ThreadDisposition,
     cancelled: bool,
 }
@@ -398,6 +402,7 @@ impl TurnEnd {
         Self {
             status: TurnStatus::Completed,
             failure: None,
+            failure_item: None,
             disposition: ThreadDisposition::Reusable,
             cancelled: false,
         }
@@ -406,6 +411,7 @@ impl TurnEnd {
         Self {
             status: TurnStatus::Interrupted,
             failure: None,
+            failure_item: None,
             disposition: ThreadDisposition::Reusable,
             cancelled,
         }
@@ -414,6 +420,7 @@ impl TurnEnd {
         Self {
             status: TurnStatus::Failed,
             failure: Some(failure),
+            failure_item: None,
             disposition,
             cancelled: false,
         }

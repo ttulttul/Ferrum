@@ -961,6 +961,7 @@ impl<'a> Attempt<'a> {
                     conversation_head: None,
                     status: TurnStatus::Running,
                     model: None,
+                    session: None,
                     history_injected: false,
                 });
                 self.report_delivery();
@@ -1114,6 +1115,7 @@ impl<'a> Attempt<'a> {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: Some(model.to_owned()),
+                session: None,
                 history_injected: false,
             });
             // An assistant snapshot of a call that did not stream fills in

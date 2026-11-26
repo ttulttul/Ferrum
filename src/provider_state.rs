@@ -118,6 +118,14 @@ pub struct ThreadRecord {
     pub context_usage: Option<provider::ContextUsage>,
 }
 
+/// The adapter's latest report of the session and turn it belongs to.
+#[derive(Clone, Debug)]
+pub struct SessionRecord {
+    pub report: provider::SessionReport,
+    pub turn_status: TurnStatus,
+    pub updated_at: u64,
+}
+
 /// One run's provider turn.
 #[derive(Clone, Debug)]
 pub struct RunRecord {
@@ -129,6 +137,7 @@ pub struct RunRecord {
     /// The CLI started the turn (`provider_turn.updated`), so the run has a
     /// provider turn record.
     pub turn_started: bool,
+    pub session: Option<SessionRecord>,
     pub native_turn_id: Option<String>,
     /// The native thread the turn ran on.
     pub native_thread_id: Option<String>,
@@ -258,6 +267,7 @@ impl ProviderState {
             native_turn_ref: None,
             started_at: at,
             turn_started: false,
+            session: None,
             native_turn_id: None,
             native_thread_id: None,
             resumed: false,
@@ -359,12 +369,39 @@ impl ProviderState {
                 native_turn_id,
                 native_turn_ref,
                 conversation_head,
+                session,
+                status,
                 model,
                 ..
             } => {
-                // Pi's adapter touches the provider thread as its turn
-                // starts (`updateThread` after `turn.started`).
-                if !record.turn_started && record.driver == provider::PI {
+                if let Some(report) = session {
+                    let mut update = (**report).clone();
+                    if update.model.is_none() {
+                        update.model = record
+                            .session
+                            .as_mut()
+                            .and_then(|prev| prev.report.model.take());
+                    }
+                    if *status != TurnStatus::Running {
+                        if let Some(thread) = self.thread.as_mut() {
+                            thread.status = if update.status == provider::SessionStatus::Error {
+                                "error"
+                            } else {
+                                "idle"
+                            };
+                            thread.updated_at = at;
+                        }
+                    }
+                    record.session = Some(SessionRecord {
+                        report: update,
+                        turn_status: *status,
+                        updated_at: at,
+                    });
+                }
+                // These adapters report the active thread with turn admission.
+                if !record.turn_started
+                    && (record.driver == provider::PI || record.driver == provider::MUSE)
+                {
                     if let Some(thread) = self.thread.as_mut() {
                         thread.updated_at = at;
                     }

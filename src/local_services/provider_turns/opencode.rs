@@ -1178,6 +1178,7 @@ impl<'a> Turn<'a> {
             conversation_head: None,
             status: TurnStatus::Running,
             model: None,
+            session: None,
             history_injected: false,
         });
         let sent = tokio::select! {
@@ -1396,6 +1397,7 @@ impl<'a> Turn<'a> {
                     conversation_head: None,
                     status: TurnStatus::Running,
                     model: None,
+                    session: None,
                     history_injected: false,
                 });
             }
@@ -1735,6 +1737,7 @@ impl<'a> Turn<'a> {
             conversation_head: self.user_message.clone(),
             status,
             model: None,
+            session: None,
             history_injected: false,
         });
         let broken = oc.dead.is_some();

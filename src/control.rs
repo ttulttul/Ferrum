@@ -4306,6 +4306,7 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
             conversation_head: None,
             status: TurnStatus::Running,
             model: None,
+            session: None,
             history_injected: false,
         });
         emit(ProviderEvent::TurnItem {

@@ -2494,6 +2494,7 @@ mod tests {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                session: None,
                 history_injected: false,
             },
             10,

@@ -688,6 +688,7 @@ impl<'a> Turn<'a> {
             conversation_head: None,
             status: TurnStatus::Running,
             model: None,
+            session: None,
             history_injected: false,
         });
         loop {
@@ -960,6 +961,7 @@ impl<'a> Turn<'a> {
             conversation_head: pi.leaf.clone(),
             status,
             model: self.model.clone(),
+            session: None,
             history_injected: false,
         });
         let end = match status {
@@ -1047,6 +1049,7 @@ impl<'a> Turn<'a> {
             conversation_head: pi.leaf.clone(),
             status: TurnStatus::Interrupted,
             model: self.model.clone(),
+            session: None,
             history_injected: false,
         });
         Ended::Stopped(TurnEnd::interrupted(true))

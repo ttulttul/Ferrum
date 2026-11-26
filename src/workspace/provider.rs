@@ -391,6 +391,25 @@ pub fn stream_closed(message: &str) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Running,
+    Ready,
+    Error,
+}
+
+/// A provider's own session update accompanying its turn report.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReport {
+    pub status: SessionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ProviderEvent {
     /// The native thread or session the turn runs in. Store
@@ -454,6 +473,9 @@ pub enum ProviderEvent {
         /// The model the turn ran on, once the CLI reports it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Session state reported by the adapter at this point in the turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<Box<SessionReport>>,
         /// The turn's context handoff went to the native thread as history
         /// (Codex `thread/inject_items`), not inline with the prompt.
         /// Optional and omitted when false: a reader that predates it skips

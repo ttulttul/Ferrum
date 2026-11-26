@@ -16,8 +16,8 @@
 //! and the thread's next turn launches another.
 use super::{cancelled, next_response, program, Cli, Launch, Protocol, ProtocolLog, Sink, TurnEnd};
 use crate::workspace::provider::{
-    ContextUsage, ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition,
-    TokenUsage, TurnStatus, MUSE,
+    ContextUsage, ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, SessionReport,
+    SessionStatus, ThreadDisposition, TokenUsage, TurnStatus, MUSE,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Map, Value};
@@ -865,6 +865,11 @@ impl<'a> Turn<'a> {
             conversation_head: None,
             status: TurnStatus::Running,
             model: None,
+            session: Some(Box::new(SessionReport {
+                status: SessionStatus::Running,
+                model: host.model.clone(),
+                last_error: None,
+            })),
             history_injected: false,
         });
         let mut params = json!({
@@ -1399,6 +1404,17 @@ impl<'a> Turn<'a> {
             conversation_head: (status == TurnStatus::Completed).then(|| self.native.clone()),
             status,
             model: None,
+            session: Some(Box::new(SessionReport {
+                status: if broken {
+                    SessionStatus::Error
+                } else {
+                    SessionStatus::Ready
+                },
+                model: None,
+                last_error: detail
+                    .as_ref()
+                    .map(|text| failure("provider_error", text).message),
+            })),
             history_injected: false,
         });
         match status {
@@ -1434,15 +1450,17 @@ impl<'a> Turn<'a> {
                 if limited {
                     row.title = Some("Usage limit reached".into());
                 }
-                self.sink.send(ProviderEvent::TurnItem { item: row });
-                TurnEnd::failed(
-                    failure,
-                    if broken {
-                        ThreadDisposition::Broken
-                    } else {
-                        ThreadDisposition::Reusable
-                    },
-                )
+                TurnEnd {
+                    failure_item: Some(Box::new(row)),
+                    ..TurnEnd::failed(
+                        failure,
+                        if broken {
+                            ThreadDisposition::Broken
+                        } else {
+                            ThreadDisposition::Reusable
+                        },
+                    )
+                }
             }
         }
     }

@@ -2137,6 +2137,7 @@ impl<'a> Turn<'a> {
             conversation_head: None,
             status: TurnStatus::Running,
             model: None,
+            session: None,
             history_injected: false,
         });
         let (prompt, state, notes) = self.prompt(agent);

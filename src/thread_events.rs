@@ -949,10 +949,15 @@ fn diff_with_command(
     // provider reports it, and with the run's end otherwise: when no turn
     // end was reported, or the provider's event stream closed.
     let turn_reported = !collections["providerTurns"].is_empty();
+    // An adapter can also include its own failure item with the terminal
+    // after already reporting the provider turn's end.
+    let reported_failure = items
+        .iter()
+        .any(|item| item["type"] == "error" && !item["nativeItemRef"].is_null());
     let finalized = |item: &Value| {
         item["type"] == "run_interrupt_result"
             || (item["type"] == "error"
-                && (!turn_reported
+                && ((!turn_reported && !reported_failure)
                     || item["failure"]["message"]
                         .as_str()
                         .is_some_and(crate::workspace::provider::stream_closed)))
