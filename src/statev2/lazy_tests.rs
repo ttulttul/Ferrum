@@ -900,3 +900,98 @@ fn event_times_cross_the_shared_store_with_their_milliseconds() {
     assert_eq!(sent.created_at, 1_800_000_000_789);
     assert!(fresh.threads.contains_key(&id));
 }
+
+/// What each part of a lazily read thread costs in memory, on a copy of a
+/// real database: `T3CODE_MEMORY_DIR=<state dir> cargo test --release --lib
+/// resident_cost_by_field -- --ignored --nocapture`. Loads every thread as
+/// start-up does, then clears one part of every thread at a time and prints
+/// how much the process's RSS fell (after handing freed memory back).
+#[test]
+#[ignore]
+fn resident_cost_by_field() {
+    let Ok(dir) = std::env::var("T3CODE_MEMORY_DIR") else {
+        return;
+    };
+    fn rss_mb() -> i64 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find(|l| l.starts_with("VmRSS"))
+            .and_then(|l| l.split_whitespace().nth(1)?.parse::<i64>().ok())
+            .unwrap()
+            / 1024
+    }
+    fn trim() {
+        unsafe { libc::malloc_trim(0) };
+    }
+    let dir = std::path::Path::new(&dir);
+    let conn = open(dir).unwrap();
+    trim();
+    let base = rss_mb();
+    let mut control = control_with(dir);
+    load_into(&conn, control.store.get_mut()).unwrap();
+    drop(conn);
+    trim();
+    let loaded = rss_mb();
+    eprintln!(
+        "loaded {} threads: {} MB",
+        control.store.get_mut().threads.len(),
+        loaded - base
+    );
+    let store = control.store.get_mut();
+    let mut last = rss_mb();
+    let mut step = |name: &str, f: &mut dyn FnMut(&mut crate::Thread), store: &mut crate::Store| {
+        for thread in store.threads.values_mut() {
+            f(thread);
+        }
+        trim();
+        let now = rss_mb();
+        eprintln!("  {name:24} {:>6} MB", last - now);
+        last = now;
+    };
+    step("messages", &mut |t| t.messages = Vec::new(), store);
+    step("checkpoints", &mut |t| t.checkpoints = Vec::new(), store);
+    step(
+        "context transfers",
+        &mut |t| t.context_transfers = Vec::new(),
+        store,
+    );
+    step(
+        "context handoffs",
+        &mut |t| t.context_handoffs = Vec::new(),
+        store,
+    );
+    step(
+        "handoff/inherited items",
+        &mut |t| {
+            t.handoff_items = Vec::new();
+            t.inherited_items = Vec::new();
+        },
+        store,
+    );
+    step(
+        "link requests",
+        &mut |t| t.link_requests = Vec::new(),
+        store,
+    );
+    step(
+        "provider state",
+        &mut |t| *t.provider = Default::default(),
+        store,
+    );
+    step("runs", &mut |t| t.runs = Vec::new(), store);
+    step("row", &mut |t| t.row = serde_json::Value::Null, store);
+    step(
+        "stored (shell + runs, as text)",
+        &mut |t| t.stored = None,
+        store,
+    );
+    let threads = std::mem::take(&mut store.threads);
+    drop(threads);
+    trim();
+    eprintln!(
+        "  {:24} {:>6} MB",
+        "the rest of each thread",
+        last - rss_mb()
+    );
+}

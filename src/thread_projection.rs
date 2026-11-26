@@ -1019,7 +1019,10 @@ impl Thread {
     pub(crate) fn run_records(&self) -> Vec<Value> {
         match &self.stored {
             Some(stored) => {
-                let runs = stored.runs().as_array().cloned().unwrap_or_default();
+                let runs = match stored.runs() {
+                    Value::Array(runs) => runs,
+                    _ => Vec::new(),
+                };
                 #[cfg(debug_assertions)]
                 if !stored.needs_read() {
                     debug_assert_eq!(
@@ -1404,7 +1407,7 @@ impl Thread {
     /// so a thread lists the same on both servers.
     pub(crate) fn shell(&self) -> Value {
         if let Some(shell) = self.stored.as_ref().and_then(|s| s.slim_shell()) {
-            return shell.clone();
+            return shell;
         }
         crate::projection_shell::shell(&self.projection(), SHELL_FIELDS)
     }

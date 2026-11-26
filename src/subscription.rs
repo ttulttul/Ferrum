@@ -333,6 +333,7 @@ async fn thread_snapshot(control: &ControlState, params: &Value) -> Option<(Valu
             Some((projection, _)) => projection,
             None => thread.projection(),
         };
+        let _phase = crate::commit_timing::phase("snapshot: window and free");
         thread.stream_snapshot_of(projection, sequence, params)
     });
     // What the subscriber has seen: the thread's revision, which every commit
@@ -721,6 +722,52 @@ mod detached_snapshot_tests {
                 thread.snapshot_projection_of(read),
                 thread.snapshot_projection(),
                 "{id}"
+            );
+        }
+    }
+}
+
+/// Where opening long threads spends its time, on a copy of a real
+/// database: `T3CODE_MEMORY_DIR=<state dir> T3CODE_OPEN_THREADS=<file of ids>
+/// cargo test --release --lib open_cost_on_a_real_database -- --ignored --nocapture`.
+#[cfg(test)]
+mod open_cost {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn open_cost_on_a_real_database() {
+        let (Ok(dir), Ok(list)) = (
+            std::env::var("T3CODE_MEMORY_DIR"),
+            std::env::var("T3CODE_OPEN_THREADS"),
+        ) else {
+            return;
+        };
+        let dir = std::path::Path::new(&dir);
+        let data = tempfile::tempdir().unwrap();
+        let state = crate::AppState::new(data.path(), Vec::new()).await.unwrap();
+        let conn = crate::statev2::open(dir).unwrap();
+        crate::statev2::load_into(&conn, &mut *state.control.store.write().await).unwrap();
+        let ids = std::fs::read_to_string(list).unwrap();
+        let options = json!({"requestCompletionMarker": true, "acceptBoundedSnapshot": true,
+            "acceptDeferredWork": true, "acceptCompactTurnItems": true, "acceptCompactIds": true,
+            "acceptDedupedBodies": true});
+        crate::commit_timing::enable();
+        let started = std::time::Instant::now();
+        for id in ids.split_whitespace() {
+            let mut params = options.clone();
+            params["threadId"] = json!(id);
+            let _ = thread_snapshot(&state.control, &params).await;
+        }
+        eprintln!(
+            "{} snapshots in {:.1} s",
+            ids.split_whitespace().count(),
+            started.elapsed().as_secs_f64()
+        );
+        for (phase, (count, total)) in crate::commit_timing::totals() {
+            eprintln!(
+                "  {phase:32} {count:4} x  {:.1} ms",
+                total.as_secs_f64() * 1000.0 / count as f64
             );
         }
     }
