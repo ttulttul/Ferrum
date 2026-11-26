@@ -1403,8 +1403,8 @@ impl Thread {
     /// projection as the reference's `threadShellFromProjection` derives it,
     /// so a thread lists the same on both servers.
     pub(crate) fn shell(&self) -> Value {
-        if let Some(slim) = self.stored.as_ref().and_then(|s| s.slim_for_shell()) {
-            return slim_shell(&self.id, &slim);
+        if let Some(shell) = self.stored.as_ref().and_then(|s| s.slim_shell()) {
+            return shell.clone();
         }
         crate::projection_shell::shell(&self.projection(), SHELL_FIELDS)
     }
@@ -1687,7 +1687,7 @@ fn stored_projection_owned(
 /// item counts adding the turn items they leave out. Those are never hidden
 /// by the visibility rule except as a rolled-back run's (the slim records
 /// hold every queued input and stop result).
-fn slim_shell(thread_id: &str, slim: &crate::stored_projection::SlimView<'_>) -> Value {
+pub(crate) fn slim_shell(thread_id: &str, slim: &crate::stored_projection::SlimView<'_>) -> Value {
     let projection = stored_projection(
         thread_id,
         slim.projection,

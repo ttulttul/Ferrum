@@ -88,7 +88,13 @@ impl Slim {
 
 struct Lazy {
     thread_id: String,
+    /// Of the slim records, only the runs (`Stored::runs`); the rest went
+    /// into `shell`.
     slim: Slim,
+    /// The shell row the slim records give (`Thread::shell`), worked out once:
+    /// it changes only with a commit, and a commit reads the thread whole
+    /// first, after which the shell row comes from the whole projection.
+    shell: Value,
     whole: OnceLock<Box<Value>>,
     /// Held while the whole projection is read, so callers that need it at
     /// the same time wait for the one read instead of each reading it.
@@ -137,10 +143,27 @@ impl Stored {
 
     /// A thread's slim records, read whole from `source` when first needed.
     pub(crate) fn lazy(thread_id: String, slim: Slim, source: Arc<dyn Hydrate>) -> Self {
+        // Only the shell row and the runs are read from the slim records: keep
+        // those, not the records (on a large database, most of the memory a
+        // server holds while idle).
+        let shell = crate::thread_projection::slim_shell(
+            &thread_id,
+            &SlimView {
+                projection: &slim.projection,
+                message_ordinals: &slim.message_ordinals,
+                unloaded_items: &slim.unloaded_items,
+            },
+        );
+        let slim = Slim {
+            projection: serde_json::json!({"runs": slim.projection["runs"]}),
+            message_ordinals: HashMap::new(),
+            unloaded_items: Vec::new(),
+        };
         Stored(
             Repr::Lazy(Arc::new(Lazy {
                 thread_id,
                 slim,
+                shell,
                 whole: OnceLock::new(),
                 reading: std::sync::Mutex::new(()),
                 source,
@@ -285,22 +308,17 @@ impl Stored {
         matches!(self.0, Repr::Whole(_))
     }
 
-    /// While only the slim records are loaded: those records, the message
-    /// order, and how many turn items they leave out by run id, for the
-    /// shell row alone (`Thread::shell`).
-    pub(crate) fn slim_for_shell(&self) -> Option<SlimView<'_>> {
+    /// While only the slim records are loaded: the shell row they give
+    /// (`Thread::shell`).
+    pub(crate) fn slim_shell(&self) -> Option<&Value> {
         match &self.0 {
-            Repr::Lazy(lazy) if lazy.whole.get().is_none() => Some(SlimView {
-                projection: &lazy.slim.projection,
-                message_ordinals: &lazy.slim.message_ordinals,
-                unloaded_items: &lazy.slim.unloaded_items,
-            }),
+            Repr::Lazy(lazy) if lazy.whole.get().is_none() => Some(&lazy.shell),
             _ => None,
         }
     }
 }
 
-/// See [`Stored::slim_for_shell`].
+/// The slim records a shell row is worked out from (`Stored::lazy`).
 pub(crate) struct SlimView<'a> {
     pub projection: &'a Value,
     pub message_ordinals: &'a HashMap<String, i64>,

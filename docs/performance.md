@@ -129,7 +129,29 @@ The reference (T3 0.1.12, the version that runs that database live) and Ferrum (
 - **Opening:** Ferrum reads each thread it opens whole and keeps it until nothing has used it for 10 minutes (#316). Opening 300 of the largest threads therefore held about 4.3 GB more than the reference, which serves a thread's snapshot window from the database and keeps none of it.
 - **Idle:** once the window passes, Ferrum returns to about the reference's footprint (663 against 559 MiB).
 - **The live trial:** this is the 1.22 GB peak the fifth trial saw at a smaller scale.
-- **Follow-up options:** serve the bounded snapshot from the database without reading the thread whole, or release a thread soon after its last subscriber leaves. Either would bring Ferrum's peak down to the reference's.
+- **Follow-up options (done below):** serve the bounded snapshot from the database without reading the thread whole, or release a thread soon after its last subscriber leaves. Either would bring Ferrum's peak down to the reference's.
+
+**After the fixes.** The same test ran again on a fresh copy (in a fresh home), with the same isolation, the same 300 threads chosen the same way, and the same 12-minute idle. The reference ran once more on this copy, for a like-for-like comparison. One server ran at a time.
+
+| RSS of the server process | Reference | Ferrum before | + snapshots not kept, start-up trim (#362) | + shell rows kept, not slim records (#363) |
+| --- | ---: | ---: | ---: | ---: |
+| after start-up | 660 MiB | 694 MiB | 707 MiB | **638 MiB** |
+| peak while opening the 300 threads | 1,123 MiB | 5,004 MiB | 1,010 MiB | **938 MiB** |
+| idle, 12 minutes after the last close | 536 MiB | 663 MiB | 645 MiB | **609 MiB** |
+| time to open and close the 300 threads | 18 s | 18 s | 36 s | 36 s |
+
+(The "before" column is the first comparison's, on the earlier copy.)
+
+- **Opening:**
+  - A thread's snapshot is now built from a read of the thread that is not kept, so the thread stays slim.
+  - With the release of a thread soon after its last subscriber leaves (#361), a thread read whole for another reason no longer stays for 10 minutes either.
+  - Ferrum's peak is now 16% below the reference's.
+- **Idle:**
+  - A slim thread keeps its shell row, worked out once, and its runs, instead of every slim record.
+  - The allocator hands back what the start-up load freed.
+  - Ferrum idles at 609 MiB, still 73 MiB (14%) above the reference.
+  - What remains is mostly each thread's typed state, kept for every one of the 7,175 threads: its user messages, checkpoints, context transfers and provider state. Loading that lazily, as the projections already are, is the next step.
+- **Opening is slower:** 36 against 18 seconds, because each snapshot now reads its thread from the database instead of memory. That's about 0.12 s a thread, for the largest threads of the database.
 
 ## What is measured
 
