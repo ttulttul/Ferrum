@@ -744,6 +744,11 @@ PROVIDER_SCENARIOS = [
      "steer": {"text": "Also print the date", "ack": "<no answer: Claude never takes it>"}},
     {"name": "codex steer then stop", "instance": "codex", "model": "fixture", "scenario": "codex_steer.json",
      "steer": {"text": "Also print the date", "ack": "Steered: printing the date too"}, "interrupt": "steer"},
+    # A restart of the running Codex turn (restart_active): Codex restarts a turn with new input
+    # (supportsSteeringByInterruptRestart), so the turn is interrupted and the message runs in the
+    # same run, as its next attempt.
+    {"name": "codex restart running", "instance": "codex", "model": "fixture", "scenario": "codex_restart_running.json",
+     "steer": {"text": "Also print the date", "ack": "Restarted: printing the date", "mode": "restart"}},
     # A seeded first message titles the thread with the text generation model (Codex), and a
     # regenerate request titles it again from the whole conversation.
     {"name": "codex title", "instance": "codex", "model": "fixture", "scenario": "codex_title.json",
