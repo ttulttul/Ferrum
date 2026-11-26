@@ -915,6 +915,9 @@ impl<'a> Attempt<'a> {
             for item in self.cli.subagents.child_message(&task, &message) {
                 self.sink.send(ProviderEvent::TurnItem { item });
             }
+            for item in self.child_tools(&task, &message) {
+                self.sink.send(ProviderEvent::TurnItem { item });
+            }
         }
         if kind == "system"
             && matches!(
@@ -1223,6 +1226,38 @@ impl<'a> Attempt<'a> {
         self.tools.insert(id.into(), item);
     }
 
+    /// A subagent's own tool calls and their results, for its child thread.
+    fn child_tools(&mut self, task: &str, message: &Value) -> Vec<ProviderItem> {
+        let blocks = message["message"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten();
+        match message["type"].as_str() {
+            Some("assistant") => blocks
+                .filter(|block| block["type"] == "tool_use")
+                .filter(|block| !matches!(block["name"].as_str(), Some("Agent" | "TodoWrite")))
+                .filter_map(|block| {
+                    let id = block["id"].as_str()?;
+                    let name = block["name"].as_str().unwrap_or_default();
+                    self.cli
+                        .subagents
+                        .child_tool(task, tool_item(id, name, &block["input"]))
+                })
+                .collect(),
+            Some("user") => blocks
+                .filter(|block| block["type"] == "tool_result")
+                .filter_map(|block| {
+                    let item = self
+                        .cli
+                        .subagents
+                        .child_tool_result(block["tool_use_id"].as_str()?)?;
+                    Some(settle_tool(item, block, message))
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     fn tool_results(&mut self, message: &Value) {
         for block in message["message"]["content"]
             .as_array()
@@ -1232,58 +1267,13 @@ impl<'a> Attempt<'a> {
             if block["type"] != "tool_result" {
                 continue;
             }
-            let Some(mut item) = block["tool_use_id"]
+            let Some(item) = block["tool_use_id"]
                 .as_str()
                 .and_then(|id| self.tools.shift_remove(id))
             else {
                 continue;
             };
-            let failed = block["is_error"] == true;
-            let text = result_text(&block["content"]);
-            item.status = if failed { "failed" } else { "completed" }.into();
-            match item.kind.as_str() {
-                "command_execution" => {
-                    let structured = &message["tool_use_result"];
-                    let output =
-                        match (structured["stdout"].as_str(), structured["stderr"].as_str()) {
-                            (Some(out), Some(err)) if !err.is_empty() => format!("{out}\n{err}"),
-                            (Some(out), _) if !out.is_empty() => out.to_owned(),
-                            // Nothing printed, or the command went to the background.
-                            _ => text,
-                        };
-                    item.fields.insert("output".into(), output.into());
-                    if failed {
-                        item.fields
-                            .insert("outputIndicatesFailure".into(), true.into());
-                    }
-                }
-                "file_change" => {}
-                _ => {
-                    // The reference keeps a lone result's structured
-                    // `tool_use_result` (a Read's file, ...), else the raw
-                    // result content.
-                    let results = message["message"]["content"]
-                        .as_array()
-                        .map_or(0, |blocks| {
-                            blocks.iter().filter(|b| b["type"] == "tool_result").count()
-                        });
-                    let structured = &message["tool_use_result"];
-                    let present = match structured {
-                        Value::Object(map) => !map.is_empty(),
-                        Value::Array(items) => !items.is_empty(),
-                        Value::Null => false,
-                        _ => true,
-                    };
-                    let output = if results == 1 && present {
-                        structured.clone()
-                    } else if block["content"].is_null() {
-                        Value::from(text)
-                    } else {
-                        block["content"].clone()
-                    };
-                    item.fields.insert("output".into(), output);
-                }
-            }
+            let item = settle_tool(item, block, message);
             self.sink.send(ProviderEvent::TurnItem { item });
         }
     }
@@ -1643,6 +1633,56 @@ impl<'a> Attempt<'a> {
 }
 
 /// A Claude Code tool call as a turn item.
+/// A tool call as its `tool_result` ends it: its status and output.
+fn settle_tool(mut item: ProviderItem, block: &Value, message: &Value) -> ProviderItem {
+    let failed = block["is_error"] == true;
+    let text = result_text(&block["content"]);
+    item.status = if failed { "failed" } else { "completed" }.into();
+    match item.kind.as_str() {
+        "command_execution" => {
+            let structured = &message["tool_use_result"];
+            let output = match (structured["stdout"].as_str(), structured["stderr"].as_str()) {
+                (Some(out), Some(err)) if !err.is_empty() => format!("{out}\n{err}"),
+                (Some(out), _) if !out.is_empty() => out.to_owned(),
+                // Nothing printed, or the command went to the background.
+                _ => text,
+            };
+            item.fields.insert("output".into(), output.into());
+            if failed {
+                item.fields
+                    .insert("outputIndicatesFailure".into(), true.into());
+            }
+        }
+        "file_change" => {}
+        _ => {
+            // The reference keeps a lone result's structured
+            // `tool_use_result` (a Read's file, ...), else the raw
+            // result content.
+            let results = message["message"]["content"]
+                .as_array()
+                .map_or(0, |blocks| {
+                    blocks.iter().filter(|b| b["type"] == "tool_result").count()
+                });
+            let structured = &message["tool_use_result"];
+            let present = match structured {
+                Value::Object(map) => !map.is_empty(),
+                Value::Array(items) => !items.is_empty(),
+                Value::Null => false,
+                _ => true,
+            };
+            let output = if results == 1 && present {
+                structured.clone()
+            } else if block["content"].is_null() {
+                Value::from(text)
+            } else {
+                block["content"].clone()
+            };
+            item.fields.insert("output".into(), output);
+        }
+    }
+    item
+}
+
 fn tool_item(id: &str, name: &str, input: &Value) -> ProviderItem {
     match name {
         "Bash" => ProviderItem::new(id, "command_execution", "running")
