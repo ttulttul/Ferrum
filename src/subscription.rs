@@ -317,16 +317,23 @@ async fn thread_snapshot(control: &ControlState, params: &Value) -> Option<(Valu
     // hold one for every thread and window together.
     static BUILDING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
     let _building = BUILDING.acquire().await.ok()?;
-    control.load_whole([thread_id.to_owned()]).await;
+    // A thread only its slim records hold is read for this snapshot alone,
+    // outside the store lock, and not kept (`detached_projection`).
+    let detached = control.detached_projection(thread_id).await;
     // The store first: a commit holds it while it numbers itself, so the
     // sequence read under it is the snapshot's.
     let store = control.store.read().await;
     let sequence = *control.next_event_id.lock().await;
     let thread = store.threads.get(thread_id)?;
+    let projection = detached.filter(|(_, revision)| *revision == thread.revision);
     // A long thread's snapshot takes a while to build, so on a runtime worker
     // its other tasks move to another worker meanwhile.
     let snapshot = crate::stored_projection::blocking(|| {
-        thread.stream_snapshot_of(thread.projection(), sequence, params)
+        let projection = match projection {
+            Some((projection, _)) => projection,
+            None => thread.projection(),
+        };
+        thread.stream_snapshot_of(projection, sequence, params)
     });
     // What the subscriber has seen: the thread's revision, which every commit
     // that changes its projection moves on (`thread_events::token`).
@@ -648,5 +655,73 @@ mod release_after_last_watch_tests {
         assert!(slim(&state, left));
         assert!(!slim(&state, kept), "still watched");
         drop(open);
+    }
+}
+
+#[cfg(test)]
+mod detached_snapshot_tests {
+    use super::*;
+    use crate::stored_projection::HYDRATIONS;
+
+    async fn lazy_state(
+        count: usize,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        std::sync::Arc<crate::AppState>,
+    ) {
+        let (db, conn) = crate::statev2::seeded_for_tests(count);
+        let data = tempfile::tempdir().unwrap();
+        let state = crate::AppState::new(data.path(), Vec::new()).await.unwrap();
+        crate::statev2::load_into(&conn, &mut *state.control.store.write().await).unwrap();
+        (db, data, state)
+    }
+
+    fn slim(state: &crate::AppState, id: &str) -> bool {
+        state.control.store.try_read().unwrap().threads[id]
+            .stored
+            .as_ref()
+            .unwrap()
+            .needs_read()
+    }
+
+    /// A snapshot of a thread only its slim records hold is read for that
+    /// answer alone: the thread stays slim, and the snapshot (and its cursor)
+    /// is the one the whole thread gives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_snapshot_of_a_slim_thread_leaves_it_slim_and_matches_the_whole_one() {
+        let (_db, _data, state) = lazy_state(12).await;
+        let options = json!({"requestCompletionMarker": true, "acceptBoundedSnapshot": true,
+            "acceptDeferredWork": true, "acceptCompactTurnItems": true, "acceptCompactIds": true,
+            "acceptDedupedBodies": true});
+        let ids: Vec<String> = {
+            let store = state.control.store.read().await;
+            let mut ids: Vec<String> = store.threads.keys().cloned().collect();
+            ids.sort();
+            ids
+        };
+        for id in &ids {
+            let mut params = options.clone();
+            params["threadId"] = json!(id);
+            HYDRATIONS.with(|count| count.set(0));
+            let (detached, cursor) = thread_snapshot(&state.control, &params).await.unwrap();
+            assert!(slim(&state, id), "{id} stays slim");
+            assert_eq!(HYDRATIONS.with(|count| count.get()), 0);
+            // The same snapshot from the whole thread.
+            let _ = state.control.store.read().await.threads[id].projection();
+            assert!(!slim(&state, id));
+            let (whole, whole_cursor) = thread_snapshot(&state.control, &params).await.unwrap();
+            assert_eq!(detached, whole, "{id}");
+            assert_eq!(cursor, whole_cursor, "{id}");
+            // getThreadProjection's body, likewise.
+            let store = state.control.store.read().await;
+            let thread = &store.threads[id];
+            let (read, _) = (thread.projection(), ());
+            assert_eq!(
+                thread.snapshot_projection_of(read),
+                thread.snapshot_projection(),
+                "{id}"
+            );
+        }
     }
 }

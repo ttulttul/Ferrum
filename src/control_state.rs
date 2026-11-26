@@ -369,6 +369,34 @@ impl ControlState {
         }
     }
 
+    /// A thread's projection as subscribers get it, read from the database for
+    /// one answer and not kept, when only its slim records are in memory: a
+    /// snapshot of a thread nobody writes to does not hold the whole thread
+    /// (#305 reads it whole for writes only). With the thread's revision when
+    /// it was read: a caller uses it only if the revision is still the same
+    /// under the store lock it answers from, since a commit in between may
+    /// have written rows the read saw before the store applied it.
+    pub(crate) async fn detached_projection(&self, thread_id: &str) -> Option<(Value, u64)> {
+        let (stored, revision) = {
+            let store = self.store.read().await;
+            let thread = store.threads.get(thread_id)?;
+            (thread.stored.clone()?, thread.revision)
+        };
+        if !stored.needs_read() {
+            return None;
+        }
+        let id = thread_id.to_owned();
+        let read = tokio::task::spawn_blocking(move || {
+            let stored = stored.read_detached().ok().flatten()?;
+            Some(crate::thread_projection::wire_projection_of(&id, stored))
+        })
+        .await
+        .ok()
+        .flatten()?;
+        crate::projection_eviction::freed_some();
+        Some((read, revision))
+    }
+
     async fn commit_with(
         &self,
         event: Event,

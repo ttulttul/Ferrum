@@ -341,6 +341,14 @@ fn idle() -> Duration {
     IDLE
 }
 
+static FREED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Notes that a large value (a detached snapshot's projection) was freed, so
+/// the next look hands free memory back to the system.
+pub(crate) fn freed_some() {
+    FREED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Releases the threads whose last stream closed [`AFTER_LAST_WATCH`] ago,
 /// whose own last use was that long ago too, and that nothing else holds.
 pub(crate) async fn release_left(control: &crate::control_state::ControlState) -> Released {
@@ -376,6 +384,10 @@ pub(crate) async fn run(state: Arc<crate::AppState>) {
             let swept = sweep(&state.control, idle).await;
             released.read += swept.read;
             released.planned += swept.planned;
+        }
+        let freed = FREED.swap(false, std::sync::atomic::Ordering::Relaxed);
+        if released == Released::default() && freed {
+            return_freed_memory();
         }
         if released != Released::default() {
             let trimmed = return_freed_memory();

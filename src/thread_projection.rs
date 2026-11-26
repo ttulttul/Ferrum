@@ -1042,7 +1042,13 @@ impl Thread {
     /// while its run is live, since no turn item names it (its card is a
     /// notification).
     pub(crate) fn snapshot_projection(&self) -> Value {
-        let mut projection = self.projection();
+        self.snapshot_projection_of(self.projection())
+    }
+
+    /// [`Thread::snapshot_projection`] from `projection`, this thread's
+    /// [`Thread::projection`], which the caller already built.
+    pub(crate) fn snapshot_projection_of(&self, projection: Value) -> Value {
+        let mut projection = projection;
         window_messages(&mut projection);
         // A run cancelled in the queue has nothing in the window: no prompt
         // reached the timeline.
@@ -1611,16 +1617,32 @@ pub(crate) fn wire_projection(thread_id: &str, stored: &Value) -> Value {
     stored_projection(thread_id, stored, true, None)
 }
 
+/// [`wire_projection`] of stored records the caller no longer needs: they
+/// become the projection, not copied into it.
+pub(crate) fn wire_projection_of(thread_id: &str, stored: Value) -> Value {
+    stored_projection_owned(thread_id, stored, true, None)
+}
+
 fn stored_projection(
     thread_id: &str,
     stored: &Value,
     wire: bool,
     message_ordinals: Option<&std::collections::HashMap<String, i64>>,
 ) -> Value {
-    let mut projection = stored.clone();
+    stored_projection_owned(thread_id, stored.clone(), wire, message_ordinals)
+}
+
+fn stored_projection_owned(
+    thread_id: &str,
+    stored: Value,
+    wire: bool,
+    message_ordinals: Option<&std::collections::HashMap<String, i64>>,
+) -> Value {
+    let mut projection = stored;
     // The thread's fields in the contract's order, as the reference encodes
     // it; a change made here adds its fields at the end of the stored record.
-    projection["thread"] = ordered(APP_FIELDS, &stored["thread"]);
+    let thread = ordered(APP_FIELDS, &projection["thread"]);
+    projection["thread"] = thread;
     sort_messages_by_turn_item_order(&mut projection, message_ordinals);
     if wire {
         // As the reference's snapshot window reads them: without a rolled

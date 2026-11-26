@@ -122,7 +122,7 @@ jobs:
             --rust-command "$GITHUB_WORKSPACE/target/release/t3code-server" \
             --reference-root "$GITHUB_WORKSPACE/reference" \
             --max-large-idle-cpu 3 \
-            --max-open-get-p99-ms 300 --max-open-rss-ratio 1.5 \
+            --max-open-get-p99-ms 300 --max-open-rss-ratio 1.0 \
             --json "$RUNNER_TEMP/perf.json" --markdown "$RUNNER_TEMP/perf.md" || gate=$?
           test -s "$RUNNER_TEMP/perf.json"
           echo "gate=$gate" >> "$GITHUB_OUTPUT"
@@ -235,5 +235,5 @@ jobs:
         env:
           GATE: ${{ steps.compare.outputs.gate }}
         run: |
-          echo "::error title=Performance::perf_compare.py exited with $GATE: a gate failed (idle CPU on a large database over 3% of one core, GET / p99 over 300 ms or peak RSS over 1.5x the reference's while clients open long threads), or the comparison failed after writing its results. See the Compare both servers step."
+          echo "::error title=Performance::perf_compare.py exited with $GATE: a gate failed (idle CPU on a large database over 3% of one core, GET / p99 over 300 ms or peak RSS above the reference's while clients open long threads), or the comparison failed after writing its results. See the Compare both servers step."
           exit 1
