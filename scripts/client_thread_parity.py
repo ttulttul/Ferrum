@@ -743,6 +743,10 @@ PROVIDER_SCENARIOS = [
     # (task_notification) and wakes; the continuation run names the command and how it ended.
     {"name": "claude background wake", "instance": "claudeAgent", "model": "claude-opus-5-5",
      "scenario": "claude_background_wake.json", "settleRuns": 2},
+    # Claude runs a sleep timer in the background (`sleep 30 && echo checked`) and the turn ends
+    # while it runs: the provider thread lists it as awaited work, as a monitor.
+    {"name": "claude sleep timer", "instance": "claudeAgent", "model": "claude-opus-5-5",
+     "scenario": "claude_sleep_timer.json"},
     # A Monitor event wakes Claude with a bare turn while its monitor runs: the continuation run
     # shows the monitor reporting new output.
     {"name": "claude monitor wake", "instance": "claudeAgent", "model": "claude-opus-5-5",
