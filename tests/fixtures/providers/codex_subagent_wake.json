@@ -1,5 +1,5 @@
 {
- "_comment": "A Codex 0.170 turn whose agent starts a native subagent and ends its turn while the child still runs (no wait): after the parent's turn/completed, the child's own turn goes on (a command, its answer, turn/completed) and wakes the idle parent, whose next turn takes the subagent's result as its message.",
+ "_comment": "A Codex 0.170 turn whose agent starts a native subagent and ends its turn while the child still runs (no wait): after the parent's turn/completed, the child's own turn goes on (a command, its answer, turn/completed) and wakes the idle parent, whose next turn takes the subagent's result as its message. The wake turn's agent reads the notification that woke it, then that item by its id.",
  "steps": [
   {
    "expect": "initialize"
@@ -563,6 +563,27 @@
      }
     },
     "emittedAtMs": 1795225898900
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_read",
+    "as": "wake",
+    "arguments": {
+     "threadId": "thread:client-thread",
+     "view": "activity",
+     "afterPosition": 3,
+     "limit": 1
+    }
+   }
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_read",
+    "arguments": {
+     "threadId": "thread:client-thread",
+     "itemId": "$mcp.wake.items.0.itemId"
+    }
    }
   },
   {

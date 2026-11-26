@@ -1929,7 +1929,18 @@ fn read_item(
                 .find_map(|key| item[*key].as_str().map(str::to_owned))
         })
         .flatten();
+    // A notification reads as its summary and detail, a line each.
+    let notification_text = (item["type"] == "notification")
+        .then(|| {
+            let parts: Vec<&str> = ["summary", "detail"]
+                .iter()
+                .filter_map(|key| item[*key].as_str())
+                .collect();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        })
+        .flatten();
     let full = subagent_text
+        .or(notification_text)
         .or_else(|| item["text"].as_str().map(str::to_owned))
         .or_else(|| message_id.and_then(|id| texts.get(id).cloned()))
         .or_else(|| item["failure"]["message"].as_str().map(str::to_owned));
@@ -2034,9 +2045,9 @@ async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
     // agents expect; other clients page forward from the start.
     let newest_first = before.is_some() || (after.is_none() && caller.granted.peer_link);
     let (page, has_more, has_earlier, offset) = if let Some(item_id) = item_id {
-        let found = timeline
+        // An item named by id is read whatever the view shows.
+        let found = visible
             .iter()
-            .copied()
             .filter(|e| e["item"]["id"] == item_id)
             .collect::<Vec<_>>();
         if found.is_empty() {
@@ -2110,6 +2121,17 @@ async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
     // Optional, and omitted when absent: the reference's result schema rejects null.
     if let Some(from) = row.get("delegatedFrom").filter(|v| v.is_object()) {
         detail["delegatedFrom"] = from.clone();
+    }
+    // Only the first page lists the thread's pull requests; a later one, or an item read by
+    // its id, counts them (`threadPullRequests(..., firstPage)`).
+    let first_page = after.is_none()
+        && item_id.is_none()
+        && before.is_none_or(|before| before as usize >= timeline.len());
+    if !first_page {
+        if let Some(fields) = detail.as_object_mut() {
+            fields.remove("pullRequests");
+            fields.remove("openPullRequestCount");
+        }
     }
     Ok(json!({
         "thread": detail,
