@@ -819,6 +819,7 @@ async fn start_run<H: CommandHost>(
         fresh_context: fresh,
         ordinal: None,
         cancelled_in_queue: false,
+        steering_restarts: 0,
     };
     let message = ConversationMessage {
         id: message_id.as_str().unwrap_or_default().to_owned(),

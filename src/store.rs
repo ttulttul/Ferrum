@@ -165,6 +165,10 @@ pub struct Run {
     /// (`cancelledBeforeStart`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancelled_in_queue: bool,
+    /// How many times a steering restart started the run over as a new
+    /// attempt (`steering_restart`): its attempt ordinal is one more.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub steering_restarts: u32,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -387,6 +391,14 @@ pub enum Event {
         status: String,
         error: Option<String>,
     },
+    /// A steering restart started the running run over with `message_id`
+    /// as its next attempt, on a provider that restarts a turn with new
+    /// input (`interrupt_restart`): the attempt that ran is superseded.
+    RunRestarted {
+        run_id: Uuid,
+        thread_id: String,
+        message_id: String,
+    },
     CheckpointCaptured {
         thread_id: String,
         checkpoint: CheckpointRecord,
@@ -476,6 +488,7 @@ impl Event {
             | Event::RunReordered { thread_id, .. }
             | Event::RunProvider { thread_id, .. }
             | Event::RunFinished { thread_id, .. }
+            | Event::RunRestarted { thread_id, .. }
             | Event::CheckpointCaptured { thread_id, .. }
             | Event::ThreadPatched { thread_id, .. }
             | Event::LinkRequestRecorded { thread_id, .. }
@@ -601,6 +614,7 @@ impl Store {
                 | Event::RunQueued { .. }
                 | Event::RunProvider { .. }
                 | Event::RunFinished { .. }
+                | Event::RunRestarted { .. }
                 | Event::CheckpointCaptured { .. }
                 | Event::LinkRequestRecorded { .. }
                 | Event::ContextHandoffUpdated { .. }
@@ -783,6 +797,15 @@ impl Store {
             } => {
                 if let Some(position) = position {
                     self.turn_positions.insert(*run_id, *position);
+                }
+            }
+            Event::RunRestarted {
+                run_id,
+                thread_id,
+                message_id,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.restart_run(*run_id, message_id, at);
                 }
             }
             Event::RunProvider {

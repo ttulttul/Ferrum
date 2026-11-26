@@ -1901,6 +1901,7 @@ fn stored_runs(thread_id: &str, projection: &Value) -> Vec<crate::Run> {
                         run["id"].as_str().and_then(crate::Run::id_ordinal) != Some(*ordinal)
                     }),
                 cancelled_in_queue: run["status"] == "cancelled" && run["startedAt"].is_null(),
+                steering_restarts: 0,
             })
         })
         .collect()
