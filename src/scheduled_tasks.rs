@@ -148,7 +148,7 @@ pub(crate) async fn run_due_at(state: Arc<AppState>, now_ms: i64) {
         claimed
     };
     for task in due {
-        dispatch_claimed(state.clone(), task, now_ms, "scheduled").await;
+        let _ = dispatch_claimed(state.clone(), task, now_ms, "scheduled").await;
     }
 }
 
@@ -184,7 +184,7 @@ pub(crate) async fn run_now(state: Arc<AppState>, id: &str) -> Result<Value, Val
             .map_err(|_| json!({"message":"Could not run scheduled task."}))?
             .ok_or_else(|| json!({"message":"Schedule task is already running."}))?
     };
-    dispatch_claimed(state.clone(), task, now_ms, "manual").await;
+    let ran_on = dispatch_claimed(state.clone(), task, now_ms, "manual").await;
     let task = state
         .scheduled_database
         .lock()
@@ -192,7 +192,13 @@ pub(crate) async fn run_now(state: Arc<AppState>, id: &str) -> Result<Value, Val
         .get(id)
         .map_err(|_| json!({"message":"Could not read schedule task."}))?
         .ok_or_else(|| json!({"message":"Schedule task not found."}))?;
-    Ok(crate::subscription::scheduled_public_task(&task))
+    let mut public = crate::subscription::scheduled_public_task(&task);
+    // The thread the run went to: a task with no bound thread starts a new
+    // one each run, which the answer names as the reference's does.
+    if let Some(thread_id) = ran_on {
+        public["threadId"] = json!(thread_id);
+    }
+    Ok(public)
 }
 
 /// Accepts a webhook delivery and starts the task asynchronously. The HTTP
@@ -211,11 +217,18 @@ pub(crate) async fn run_webhook(state: Arc<AppState>, id: &str) {
         }
     };
     if let Some(task) = task {
-        dispatch_claimed(state, task, now_ms, "webhook").await;
+        let _ = dispatch_claimed(state, task, now_ms, "webhook").await;
     }
 }
 
-async fn dispatch_claimed(state: Arc<AppState>, task: Value, started_ms: i64, trigger: &str) {
+/// Runs a claimed task; the thread it ran on, when it ran (`runTask`'s
+/// `threadId`).
+async fn dispatch_claimed(
+    state: Arc<AppState>,
+    task: Value,
+    started_ms: i64,
+    trigger: &str,
+) -> Option<String> {
     let id = task["id"].as_str().unwrap_or_default().to_owned();
     let started_at = task["lastRunAt"]
         .as_str()
@@ -238,7 +251,7 @@ async fn dispatch_claimed(state: Arc<AppState>, task: Value, started_ms: i64, tr
             tracing::warn!(%error, task_id = %id, "could not record missed scheduled task");
         }
         let _ = state.scheduled_task_events.send(());
-        return;
+        return None;
     }
 
     if trigger == "scheduled"
@@ -259,7 +272,7 @@ async fn dispatch_claimed(state: Arc<AppState>, task: Value, started_ms: i64, tr
             tracing::warn!(%error, task_id = %id, "could not release queued scheduled task");
         }
         let _ = state.scheduled_task_events.send(());
-        return;
+        return None;
     }
 
     let outcome = dispatch_to_thread(state.clone(), &task, &started_at).await;
@@ -286,12 +299,13 @@ async fn dispatch_claimed(state: Arc<AppState>, task: Value, started_ms: i64, tr
         result.unwrap_or(false)
     };
     if recorded {
-        if let (Some(thread_id), Some(message_id)) = (thread_id, message_id) {
+        if let (Some(thread_id), Some(message_id)) = (thread_id.clone(), message_id) {
             tokio::spawn(record_provider_outcome(
                 state, id, started_at, thread_id, message_id,
             ));
         }
     }
+    thread_id
 }
 
 async fn dispatch_to_thread(
@@ -323,7 +337,13 @@ async fn dispatch_to_thread(
     let thread_id = if let Some(thread_id) = active_thread.as_ref() {
         thread_id.clone()
     } else {
-        let thread_id = format!("thread:{command_id}");
+        // A new thread of the task's project, named as the reference's id
+        // allocator names one (`thread:project:<project>:<uuid>`).
+        let thread_id = format!(
+            "thread:project:{}:{}",
+            crate::thread_projection::uri_component(task["projectId"].as_str().unwrap_or_default()),
+            platform::uuid_v4()
+        );
         let create = json!({
             "type":"thread.create", "commandId":command_id, "threadId":thread_id,
             "projectId":project_id, "title":task["title"],
