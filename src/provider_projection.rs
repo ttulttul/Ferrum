@@ -2183,7 +2183,8 @@ impl Thread {
         // An item a restart cancelled changed then.
         let cancelled_at = cut.filter(|_| status == "cancelled" && item.status != "cancelled");
         let updated = iso(cancelled_at.unwrap_or(record.updated_at));
-        let completed = (!running).then(|| updated.clone());
+        let open_tool = item.is_tool_call() && matches!(status.as_str(), "pending" | "waiting");
+        let completed = (!running && !open_tool).then(|| updated.clone());
         let mut row = Map::new();
         for (key, value) in [
             ("id", json!(item_id("turn-item", driver, native))),

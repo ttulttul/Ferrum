@@ -717,6 +717,14 @@ pub struct ProviderItem {
 }
 
 impl ProviderItem {
+    /// Tool calls whose node and turn item are independent provider snapshots.
+    pub(crate) fn is_tool_call(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            "command_execution" | "file_change" | "file_search" | "web_search" | "dynamic_tool"
+        )
+    }
+
     pub fn new(id: impl Into<String>, kind: &str, status: &str) -> Self {
         Self {
             id: id.into(),
