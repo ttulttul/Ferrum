@@ -298,5 +298,8 @@
   },
   "antigravity approval read-only command": {
     "live": "Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in Antigravity's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes Antigravity's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the reasoning and assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates. During an approval it also sends the permission's runtime-request.updated before its turn item, and Rust sends the requested command's node update after the request's records."
+  },
+  "codex native subagent wake": {
+    "live": "After the parent's turn ended, the shared app-server holds what Codex sends about the child until the wake run's turn takes it, so Rust streams the subagent's progress, result and completion as that run starts, where the reference streams them as they arrive, before the wake; the reference also streams every update of the subagent, including those that change nothing, and the wake message's message.updated. The subagent's records and item, the child thread with its turn, the wake run with its notification and the thread's messages match the reference."
   }
 }

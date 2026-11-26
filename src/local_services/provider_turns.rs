@@ -131,6 +131,8 @@ pub(crate) fn start(
     }
     let responses = requests::register(&spec.turn_id);
     if provider.driver == CODEX {
+        // A subagent that ends after its parent's turn wakes the parent.
+        processes.codex.share_wakes(processes.claude.wake_sender());
         tokio::spawn(codex::run(
             spec,
             provider,
@@ -333,8 +335,9 @@ impl Sink {
             // work; the reference ends only an interrupted or failed turn's.
             if self.driver == CODEX
                 && end.status == TurnStatus::Completed
-                && item.kind == "command_execution"
+                && matches!(item.kind.as_str(), "command_execution" | "subagent")
             {
+                // (A native subagent's child runs on, and reports when it ends.)
                 continue;
             }
             item.status = closed.into();

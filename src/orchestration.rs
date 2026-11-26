@@ -679,8 +679,14 @@ fn cli_driver<H: CommandHost>(state: &H, row: &Value) -> Option<String> {
 /// agent's message from the provider, which shows what the provider's CLI
 /// did on its own rather than sending it a prompt.
 pub(crate) fn is_provider_continuation(command: &Value) -> bool {
+    // A continuation whose text is its message (`message_text`, a Codex subagent's result)
+    // is the server's, with the notification naming what woke it.
+    // (A restart's continuation is the server's too, with its own handling.)
+    let server_wake = command["creationSource"] == "server"
+        && command["notification"].is_object()
+        && command["restartContinuationOfRunId"].is_null();
     command["createdBy"] == "agent"
-        && command["creationSource"] == "provider"
+        && (command["creationSource"] == "provider" || server_wake)
         && command["delegatedCompletion"].is_null()
 }
 

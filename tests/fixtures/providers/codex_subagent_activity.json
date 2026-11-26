@@ -1,5 +1,5 @@
 {
- "_comment": "A Codex turn whose agent starts a native subagent as Codex 0.170 reports it: a subAgentActivity item (kind started, with the child thread, its path, model and effort), a wait call that names no agents, then subAgentActivity completed; the child's own turn comes on the same connection on its own thread (turn/started naming the parent's turn as its root, its items, turn/completed), with no thread/started. The server reads the child thread's model: thread/read names none, so it resumes the thread, whose answer names it.",
+ "_comment": "A Codex turn whose agent starts a native subagent as Codex 0.170 reports it: a subAgentActivity item (kind started, with the child thread, its path, model and effort), a wait call that names no agents, then subAgentActivity completed; the child's own turn comes on the same connection on its own thread (turn/started naming the parent's turn as its root, its items, turn/completed), with no thread/started. The server reads the child thread's model: thread/read names none, so it resumes the thread, whose answer names it. Once the child answered, the agent reads its own thread's activity, where the subagent's text is the child's answer.",
  "steps": [
   {
    "expect": "initialize"
@@ -510,6 +510,19 @@
      "completedAtMs": 1795225884000
     },
     "emittedAtMs": 1795225884001
+   }
+  },
+  {
+   "sleep": 1
+  },
+  {
+   "mcp": {
+    "tool": "t3_thread_read",
+    "arguments": {
+     "threadId": "thread:client-thread",
+     "view": "activity",
+     "limit": 20
+    }
    }
   },
   {

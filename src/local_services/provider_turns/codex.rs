@@ -99,6 +99,16 @@ pub(super) async fn run(
             session.cli.server.mark_loaded(thread, None);
         }
     }
+    // Subagents still running after a completed turn report to the thread's
+    // next turn, and one that ends wakes it.
+    if end.status == TurnStatus::Completed {
+        if let Some(thread) = session.thread_id.clone() {
+            let subagents = std::mem::take(&mut session.subagents);
+            session
+                .cli
+                .carry(&provider.app_thread_id, &thread, subagents);
+        }
+    }
     // The app-server stays for the instance's next turns.
     drop(session);
     sink.finish(end);
@@ -591,7 +601,9 @@ impl Session {
             .as_deref()
             .filter(|id| !id.is_empty() && self.cli.server.holds(id, &load_key))
         {
-            self.cli.bind(loaded);
+            if let Some(carried) = self.cli.bind(loaded) {
+                self.subagents = carried;
+            }
             resumed = true;
             thread = Some(json!({"thread": {"id": loaded}}));
         } else if let Some(resume) = provider.resume.as_deref().filter(|id| !id.is_empty()) {
@@ -633,7 +645,9 @@ impl Session {
             ));
         };
         self.thread_id = Some(thread_id.clone());
-        self.cli.bind(&thread_id);
+        if let Some(carried) = self.cli.bind(&thread_id) {
+            self.subagents = carried;
+        }
         self.cli.server.mark_loaded(&thread_id, Some(load_key));
         self.sink.send(ProviderEvent::ProviderThread {
             driver: CODEX.into(),
