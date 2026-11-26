@@ -101,16 +101,16 @@ Connect to `/ws?orchestrationProtocol=2` with a session cookie or WebSocket tick
 
 Parity is tested by running the original TypeScript server and the Rust server side by side and comparing their responses. Each server gets a fresh home directory, the same fake provider CLIs (replaying recorded Codex and Claude sessions, scripted ACP sessions for Grok, ACP Registry agents, Antigravity, Kiro and fx, Pi RPC sessions, Muse MSP hosts, and OpenCode servers), and local stand-ins for outside services. No test reaches the network or a real model.
 
-- **Pinned reference:** [upstream commit `ae945dd4`](https://github.com/pingdotgg/t3code/tree/ae945dd42a9879104991280df99182a0f0cec3bf) (`ae945dd42a9879104991280df99182a0f0cec3bf`). This is the only place the README names it.
+- **Pinned reference:** [upstream commit `44a53337`](https://github.com/pingdotgg/t3code/tree/44a533378653164dea96435e23c8ea27efaffedb) (`44a533378653164dea96435e23c8ea27efaffedb`). This is the only place the README names it.
 
 | Area | Current status |
 | --- | --- |
 | CI parity suites | 64 suites across 13 shards on every code change (plus twice nightly); 6 more run on their own |
-| Client RPC ([cases](scripts/client_rpc_cases.json)) | 242 recorded client steps; 0 expected failures ([xfail](scripts/client_rpc_parity_xfail.json)) |
+| Client RPC ([cases](scripts/client_rpc_cases.json)) | 260 client steps and 18 raw RPC comparisons; 0 expected failures ([xfail](scripts/client_rpc_parity_xfail.json)) |
 | Live provider turns | 238 provider scenarios; 104 checks expected to fail, 24 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
 | Shared home / server switch | 0 expected failures ([xfail](scripts/shared_store_parity_xfail.json)) |
 | Provider status ([suite](scripts/provider_status_parity.py)) | 11 scenarios lack the OpenCode 2 model catalog event subscription ([xfail](scripts/provider_status_parity_xfail.json)) |
-| Other suites | The standalone relay lacks configured account deletion ([expected failure](scripts/parity_gaps.json)) |
+| Other suites | Issue detail lacks repository planning statuses, and the standalone relay lacks configured account deletion ([expected failures](scripts/parity_gaps.json)) |
 | Agent tools ([checklist](docs/agent-tools.md#checklist)) | 94 of 94 served |
 
 A suite fails on any unlisted difference, and on any listed expected failure that starts to match.

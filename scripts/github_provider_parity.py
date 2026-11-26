@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from websockets.sync.client import connect
 import parity_harness as harness
+from parity_gaps import Gaps
 
 
 REPO = "example/parity"
@@ -29,7 +30,7 @@ ISSUE = {"id": "I_12", "__typename": "Issue", "number": 12, "title": "Regression
          "closedAt": None, "comments": {"totalCount": 0,"pageInfo":{"hasPreviousPage":False,"startCursor":None},"nodes":[]},
          "assignees": {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes":[]},
          "labels": {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes": [{"name": "bug", "color": "fff"}]},
-         "viewerCanUpdate": True, "viewerCanClose": True, "viewerCanReopen": True,
+         "viewerCanUpdate": True, "viewerCanClose": True, "viewerCanReopen": True, "viewerCanSetStatus": False,
          "reactionGroups": [], "closedByPullRequestsReferences": {"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes":[]},
          "timelineItems": {"nodes":[]}}
 PR = {"viewerCanUpdate":True,"viewerDidAuthor":False,"headRepository":{"viewerPermission":"WRITE"},"id": "PR_3", "__typename": "PullRequest", "number": 3, "title": "Work", "url": "https://github.com/example/parity/pull/3",
@@ -268,7 +269,17 @@ class Provider(BaseHTTPRequestHandler):
                                 "comments":{"pageInfo":{"hasNextPage":more,"endCursor":"second" if more else None},
                                             "nodes":[THREAD_COMMENT,{**THREAD_COMMENT,"isMinimized":True}] if more else []}}}
             elif "issue(number:" in query:
-                result = {"viewer": {"login": "tester"}, "repository": {"viewerPermission": "WRITE", "issue": ISSUE}}
+                item = ISSUE
+                statuses = []
+                if data["variables"].get("number") == 13:
+                    item = {**ISSUE, "id": "I_13", "number": 13, "url": ISSUE["url"].replace("/12", "/13")}
+                    if "planningStatuses(" in query:
+                        status = {"id": "P_1", "name": "In progress",
+                                  "category": {"key": "started", "state": "OPEN", "stateReason": None}}
+                        statuses = [status]
+                        item["status"] = status
+                result = {"viewer": {"login": "tester"}, "repository": {"viewerPermission": "WRITE",
+                          "planningStatuses": {"nodes": statuses}, "issue": item}}
             elif ("pullRequests(" in query and hasattr(self.server, "status_rows")
                   and data.get("operationName") != "PullRequestHeads" and "query PullRequestHeads(" not in query):
                 alias = re.search(r"(\w+)\s*:\s*repository\(", query)
@@ -374,6 +385,8 @@ def main():
             rpc("issues.create", {**issue, **create, "scope": "other/repo"}),
             rpc("issues.list", {"projectId": "test-project", "state": "open"}),
             rpc("issues.candidates", issue),
+            rpc("issues.detail", {**issue, "key": "12"}),
+            rpc("issues.detail", {**issue, "key": "13"}),
             rpc("pullRequests.preview", ref),
             rpc("pullRequests.stack", ref),
             rpc("pullRequests.stack", {**ref,"number":99}),
@@ -419,6 +432,8 @@ def main():
         cancel_stack["name"] += " cancel stack auto-merge"
         cases.append(cancel_stack)
         failures = 0
+        gaps = Gaps("github_provider_parity")
+        default_detail = None
         for case in cases:
             if "frame" in case:
                 for ws in sockets:
@@ -429,6 +444,20 @@ def main():
                 exits = [json.loads(p)["exit"] for p in packets]
                 ok = packets[0] == packets[1] and all(
                     e["_tag"] == ("Failure" if expected_failure else "Success") for e in exits)
+                if case["frame"]["tag"] == "issues.detail" and ok and payload["key"] == "12":
+                    default_detail = exits[0]["value"]
+                if case["frame"]["tag"] == "issues.detail" and payload["key"] == "13":
+                    # Only the state, choices and set-state permission differ on the preview.
+                    if not ok and default_detail and all(e["_tag"] == "Success" for e in exits):
+                        original, rust = [e["value"] for e in exits]
+                        planned = {"category": "open", "name": "In progress"}
+                        expected = {**rust, "state": planned, "states": [planned],
+                                    "viewerPermissions": {**rust["viewerPermissions"], "setState": False}}
+                        if (original == expected and rust["state"] == default_detail["state"]
+                                and rust["states"] == default_detail["states"]
+                                and rust["viewerPermissions"]["setState"] is True):
+                            failures += gaps.differs("issue planning statuses")
+                            continue
                 values = [repr(v)[:5000] for v in packets]
             else:
                 ok, values = harness.check(case, projects, sockets)
@@ -470,6 +499,7 @@ def main():
             if provider.reviews != [{"event":"COMMENT","body":"Reviewed","comments":[{"path":"lib.rs","side":"RIGHT","line":1,"body":"Inline remark"}]}]:
                 failures += 1
                 print("FAIL unexpected submitted review",provider.reviews)
+        failures += gaps.finish()
         harness.assert_nothing_escaped()
         print(f"{len(cases)} client comparisons and two provider write logs checked")
         return 1 if failures else 0

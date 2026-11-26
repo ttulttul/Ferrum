@@ -2400,6 +2400,32 @@ def provider_status(url, cookie, instance, root):
         time.sleep(0.5)
 
 
+def before_link_sync(line):
+    """Remove the three fields filled in by the first sync of the fixture pull request."""
+    if mcp_record_tool(line) != "list_thread_pull_requests":
+        return line
+    record = json.loads(line)
+    answer = record.get("answer")
+    if not isinstance(answer, dict) or answer.get("isError") is not False:
+        return line
+    content = answer.get("content")
+    if not isinstance(content, dict) or not isinstance(content.get("pullRequests"), list):
+        return line
+    fields = ("headBranch", "baseBranch", "isDraft")
+    for row in content["pullRequests"]:
+        if not isinstance(row, dict) or (row.get("host"), row.get("repository"), row.get("number")) != (
+                "github.com", "example/parity", 3):
+            continue
+        if not all(field in row for field in fields):
+            continue
+        pending = all(row[field] is None for field in fields)
+        synced = row["headBranch"] == "feature" and row["baseBranch"] == "main" and row["isDraft"] is False
+        if pending or synced:
+            for field in fields:
+                del row[field]
+    return json.dumps(record, sort_keys=True)
+
+
 def compare_turn(original, rust):
     """Problems with Rust's provider turn as the reference client sees it, by check name."""
     problems = {}
@@ -2415,7 +2441,10 @@ def compare_turn(original, rust):
         problems["turn input"] = [f"original {line}" for line in inputs[0]] + [f"rust     {line}" for line in inputs[1]]
     mcp = comparable_mcp(original.get("mcp", []), rust.get("mcp", []))
     if mcp[0] != mcp[1]:
-        problems["agent mcp"] = mcp_diff_lines(mcp[0], mcp[1])
+        key = ("linked pull request sync"
+               if [before_link_sync(r) for r in mcp[0]] == [before_link_sync(r) for r in mcp[1]]
+               else "agent mcp")
+        problems[key] = mcp_diff_lines(mcp[0], mcp[1])
     cli = [original.get("cli", []), rust.get("cli", [])]
     if cli[0] != cli[1]:
         problems["cli approvals"] = [f"original {line}" for line in cli[0]] + [f"rust     {line}" for line in cli[1]]

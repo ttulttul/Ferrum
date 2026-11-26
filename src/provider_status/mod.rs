@@ -1308,6 +1308,7 @@ fn draft_row(pending: &Value, draft: &Draft) -> Value {
         .unwrap_or(false);
     for key in [
         "message",
+        "modelsIncomplete",
         "updateRequiredModels",
         "usageLimits",
         "versionAdvisory",
@@ -1382,7 +1383,8 @@ fn retain_missing_models(row: &Value) -> bool {
         "acpRegistry" => {
             return !(installed && status == "ready" && row.get("nativeSessions").is_some())
         }
-        "kiro" | "claudeAgent" => return true,
+        "kiro" => return true,
+        "claudeAgent" => return status != "ready" || row["modelsIncomplete"] == true,
         "antigravity" | "codex" | "opencode" => {}
         _ => return !(installed && status == "ready"),
     }
@@ -2385,14 +2387,20 @@ mod tests {
     }
 
     #[test]
-    fn claude_keeps_models_a_probe_drops() {
+    fn claude_keeps_missing_models_only_when_the_catalog_is_incomplete() {
         let previous = json!({"models": [
             {"slug": "a", "isCustom": false}, {"slug": "b", "isCustom": false, "isLegacy": true},
             {"slug": "c", "isCustom": true}, {"slug": "d", "isCustom": false}]});
         let next = json!({"driver": "claudeAgent", "enabled": true, "installed": true, "status": "ready",
             "auth": {"status": "authenticated"}, "models": [{"slug": "a", "isCustom": false}],
             "updateRequiredModels": [{"slug": "d"}]});
-        let merged = merge_snapshot(&previous, next);
+        assert_eq!(
+            merge_snapshot(&previous, next.clone())["models"],
+            next["models"]
+        );
+        let mut incomplete = next;
+        incomplete["modelsIncomplete"] = json!(true);
+        let merged = merge_snapshot(&previous, incomplete);
         let slugs: Vec<_> = merged["models"]
             .as_array()
             .unwrap()

@@ -37,7 +37,7 @@ pub const EXIT_CODE_STATE_DIR_OWNED: i32 = 78;
 
 /// `packageJson.version` of `apps/server` in the TypeScript reference this
 /// port is checked against: pingdotgg/t3code at
-/// ae945dd42a9879104991280df99182a0f0cec3bf (`.github/workflows/parity.yml`),
+/// 44a533378653164dea96435e23c8ea27efaffedb (`.github/workflows/parity.yml`),
 /// kept in step with the environment
 /// descriptor's `serverVersion`; change both when the pin moves.
 pub const SERVER_VERSION: &str = "0.1.12";

@@ -103,7 +103,7 @@ jobs:
       - name: Fetch the pinned public reference
         run: |
           git init --quiet reference
-          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git ae945dd42a9879104991280df99182a0f0cec3bf
+          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git 44a533378653164dea96435e23c8ea27efaffedb
           git -C reference checkout --quiet --detach FETCH_HEAD
       - uses: actions/setup-node@v4
         with:
@@ -170,7 +170,7 @@ jobs:
       - name: Fetch the pinned public reference
         run: |
           git init --quiet reference
-          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git ae945dd42a9879104991280df99182a0f0cec3bf
+          git -C reference fetch --depth=1 --no-recurse-submodules https://github.com/pingdotgg/t3code.git 44a533378653164dea96435e23c8ea27efaffedb
           git -C reference checkout --quiet --detach FETCH_HEAD
       - uses: actions/setup-node@v4
         with:

@@ -1,5 +1,5 @@
 {
-  "reference": "pingdotgg/t3code@ae945dd42a9879104991280df99182a0f0cec3bf",
+  "reference": "pingdotgg/t3code@44a533378653164dea96435e23c8ea27efaffedb",
   "generatedBy": "scripts/update_client_call_inventory.py",
   "calls": [
     {
@@ -465,7 +465,7 @@
       "kind": "rpc",
       "call": "filesystem.browse",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:219"
+        "packages/client-runtime/src/state/filesystem.ts:239"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -488,7 +488,7 @@
       "call": "filesystem.getMetadata",
       "callers": [
         "packages/client-runtime/src/state/fileMetadata.ts:145",
-        "packages/client-runtime/src/state/filesystem.ts:215"
+        "packages/client-runtime/src/state/filesystem.ts:235"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -785,6 +785,7 @@
       "usage": "client",
       "existingCoverage": [
         "github-voice-parity.json",
+        "github_provider_parity.py",
         "linear_provider_parity.py"
       ],
       "validationOnly": false,
@@ -6036,7 +6037,7 @@
       "kind": "rpc",
       "call": "workspace.addTaskFolderRepository",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:245"
+        "packages/client-runtime/src/state/filesystem.ts:265"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -6056,7 +6057,7 @@
       "kind": "rpc",
       "call": "workspace.approveLayoutCommands",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:260"
+        "packages/client-runtime/src/state/filesystem.ts:280"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -6076,8 +6077,8 @@
       "kind": "rpc",
       "call": "workspace.layoutCommands",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:250",
-        "packages/client-runtime/src/state/filesystem.ts:256"
+        "packages/client-runtime/src/state/filesystem.ts:270",
+        "packages/client-runtime/src/state/filesystem.ts:276"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -6097,7 +6098,7 @@
       "kind": "rpc",
       "call": "workspace.listFolders",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:234"
+        "packages/client-runtime/src/state/filesystem.ts:254"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -6117,7 +6118,7 @@
       "kind": "rpc",
       "call": "workspace.scanFolders",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:228"
+        "packages/client-runtime/src/state/filesystem.ts:248"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -6137,7 +6138,7 @@
       "kind": "rpc",
       "call": "workspace.taskFolder",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:240"
+        "packages/client-runtime/src/state/filesystem.ts:260"
       ],
       "callerCount": 1,
       "mobileCallers": [],

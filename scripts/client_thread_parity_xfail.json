@@ -40,7 +40,7 @@
   },
   "codex thread tools": {
     "live": "Racy: the reference's pull-request sync reactor reads a newly linked request on its own schedule, so in 1 of 10 pinned local runs its first link's synced and link-updated events landed a tool call earlier than Rust's. Matched in the other runs.",
-    "agent mcp": "Racy: since #197 Rust reads a newly linked pull request right after the link commits, apart from the tool call, so the agent's next list_thread_pull_requests can come before that read and show the link without its branches and draft state (seen both matching and differing)."
+    "linked pull request sync": "Racy: since #197 Rust reads a newly linked pull request right after the link commits, apart from the tool call, so the agent's next list_thread_pull_requests can come before that read and show the link without its branches and draft state (seen both matching and differing)."
   },
   "grok approval interrupted": {
     "cli approvals": "Racy: on Stop the reference's cancelPendingRuntimeRequests only resolves the approval's decision to cancel; the permission handler writes the `cancelled` reply on its own fiber, which the process-group kill that follows does not wait for, so the reference's reply reaches the CLI on some runs and not others. Rust writes it before the kill (seen both matching and differing)."
