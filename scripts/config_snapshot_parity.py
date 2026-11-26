@@ -3,12 +3,13 @@
 import argparse
 from contextlib import ExitStack
 import json
+import os
 from pathlib import Path
 import secrets
 import shlex
 import subprocess
 from tempfile import TemporaryDirectory
-from time import monotonic
+from time import monotonic, sleep
 
 from config_parity import frame, identical, socket
 from parity_harness import encode, managed_server, recv_frame
@@ -158,15 +159,47 @@ def main():
         for ws in clients:
             for tag in responses:
                 responses[tag].append(frame(ws,tag,"server.updateSettings",{"patch":{"hiddenThreadTags":[tag]}}))
+                # PARITY_SETTINGS_GAP_S spaces the two saves apart, as a loaded machine can, to check
+                # the watcher's separate publication of the first one is accepted.
+                if tag == "work" and os.environ.get("PARITY_SETTINGS_GAP_S"):
+                    sleep(float(os.environ["PARITY_SETTINGS_GAP_S"]))
         for tag,pair in responses.items():
             identical(tag+" RPC response",pair)
-        # Each RPC emits immediately. Both atomic saves also wake the debounced file watcher.
-        for label in ("work","personal","personal"):
-            packets=[receive(ws,"settingsUpdated") for ws in streams]
-            identical(label+" full event",packets)
-            event=json.loads(packets[1])["values"][0]
+        # Each RPC emits immediately, in order: `work`, then `personal`. Both atomic saves also wake
+        # the file watcher, which debounces for 100 ms: when both saves land inside that window it
+        # publishes once, with `personal`, but when a loaded machine spaces them further apart it
+        # also publishes the first save's `work` on its own, possibly between the two RPC events.
+        # So each server's stream must read `work` first, then possibly more `work` (its watcher),
+        # then `personal` (the RPC), and then only `personal` until a second one (its watcher's)
+        # arrives. Any other settings, `work` after `personal`, or no watcher publication at all
+        # fails.
+        def settings_events(ws):
+            seen, personal = [], 0
+            while personal < 2:
+                packet = receive(ws, "settingsUpdated")
+                tags = json.loads(packet)["values"][0]["payload"]["settings"]["hiddenThreadTags"]
+                if tags not in (["work"], ["personal"]):
+                    raise AssertionError(f"unexpected settings published: {tags}")
+                if not seen and tags != ["work"]:
+                    raise AssertionError(f"the first settings event is {tags}, not the work patch's")
+                if personal and tags != ["personal"]:
+                    raise AssertionError(f"{tags} published after the personal patch")
+                personal += tags == ["personal"]
+                seen.append(packet)
+            # The work RPC's event, the personal RPC's (the first personal), and the watcher's final one.
+            first_personal = next(i for i, p in enumerate(seen)
+                                  if json.loads(p)["values"][0]["payload"]["settings"]["hiddenThreadTags"] == ["personal"])
+            return [seen[0], seen[first_personal], seen[-1]], len(seen) - 3
+        read = [settings_events(ws) for ws in streams]
+        for index, label in enumerate(("work", "personal", "personal")):
+            packets = [events[index] for events, _ in read]
+            identical(label + " full event", packets)
+            event = json.loads(packets[1])["values"][0]
             assert event["payload"]["settings"]["hiddenThreadTags"] == [label]
-            samples.append(["ServerConfigStreamEvent",event])
+            samples.append(["ServerConfigStreamEvent", event])
+        for side, (_, extra) in zip(("reference", "rust"), read):
+            if extra:
+                print(f"note: the {side} watcher also published the work save on its own ({extra} event)")
         # A repeated patch and the ensuing file change each publish even when the public view stays equal.
         identical("no-op response",[frame(ws,"again","server.updateSettings",{"patch":{"hiddenThreadTags":["personal"]}}) for ws in clients])
         for _ in range(2):
