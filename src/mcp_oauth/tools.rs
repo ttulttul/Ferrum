@@ -963,6 +963,33 @@ pub(super) async fn call<S: McpHost>(
     name: &str,
     args: &Value,
 ) -> Outcome {
+    // No call keeps more than a bounded number of threads it read whole: one
+    // that reads more (a bug: a tool should read what it answers about) has
+    // them released as it returns, so a single call cannot hold the whole
+    // database in memory until the idle sweep.
+    let (outcome, reads) =
+        crate::projection_eviction::counting_reads(Box::pin(call_tool(host, caller, name, args)))
+            .await;
+    if reads.len() > crate::projection_eviction::CALL_READS_KEPT {
+        let released = crate::projection_eviction::release_now(host.control_state(), &reads).await;
+        #[cfg(feature = "native")]
+        crate::projection_eviction::return_freed_memory();
+        tracing::warn!(
+            tool = name,
+            read = reads.len(),
+            released = released.read + released.planned,
+            "an MCP call read many threads whole; released them as it returned"
+        );
+    }
+    outcome
+}
+
+async fn call_tool<S: McpHost>(
+    host: &Arc<S>,
+    caller: &Caller,
+    name: &str,
+    args: &Value,
+) -> Outcome {
     if !args.is_object() && !args.is_null() {
         return Err(invalid_arguments());
     }
@@ -1834,6 +1861,10 @@ async fn thread_list<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
             return Err(failure("invalid_request", "The project was not found."));
         }
     }
+    // Filtered, ordered and paged from what each thread holds without its
+    // whole projection (its row and its runs); only the page's threads are
+    // summarized. Summarizing every thread first read each one whole from the
+    // database: on a large one, minutes and many gigabytes, holding the store.
     let mut threads = store
         .threads
         .values()
@@ -1846,25 +1877,27 @@ async fn thread_list<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
                 .as_deref()
                 .is_none_or(|q| t.title.to_lowercase().contains(q))
         })
-        .map(|t| thread_summary(host, caller, t))
-        .filter(|row| {
-            statuses
-                .as_ref()
-                .is_none_or(|s| s.iter().any(|status| row["status"] == status.as_str()))
+        .filter(|t| {
+            statuses.as_ref().is_none_or(|s| {
+                let status = thread_status(&t.run_records());
+                s.iter().any(|wanted| status == wanted.as_str())
+            })
         })
-        .filter(|row| snoozed_only.is_none_or(|s| row["snoozed"] == s))
+        .map(|t| (t, t.shell()))
+        .filter(|(_, row)| snoozed_only.is_none_or(|s| snoozed(row) == s))
         .collect::<Vec<_>>();
-    threads.sort_by(|a, b| {
-        b["createdAt"]
+    threads.sort_by(|(a, a_row), (b, b_row)| {
+        b_row["createdAt"]
             .as_str()
-            .cmp(&a["createdAt"].as_str())
-            .then_with(|| b["threadId"].as_str().cmp(&a["threadId"].as_str()))
+            .cmp(&a_row["createdAt"].as_str())
+            .then_with(|| b.id.cmp(&a.id))
     });
     let total = threads.len();
     let page = threads
         .into_iter()
         .skip(cursor)
         .take(limit)
+        .map(|(thread, _)| thread_summary(host, caller, thread))
         .collect::<Vec<_>>();
     Ok(json!({
         "projectId": if all { None } else { project },
@@ -3650,5 +3683,141 @@ mod send_mode_tests {
         assert_eq!(delivery("restart", false, &queued), "restarted");
         assert_eq!(delivery("queue", false, &queued), "queued");
         assert_eq!(delivery("auto", false, &running), "started");
+    }
+}
+
+#[cfg(test)]
+mod lazy_list_tests {
+    use super::*;
+    use crate::stored_projection::HYDRATIONS;
+
+    /// A server whose store holds `count` threads read lazily from a
+    /// `statev2.sqlite`, as on a large shared database.
+    async fn lazy_server(
+        count: usize,
+    ) -> (tempfile::TempDir, tempfile::TempDir, Arc<crate::AppState>) {
+        let (db_home, conn) = crate::statev2::seeded_for_tests(count);
+        let data = tempfile::tempdir().unwrap();
+        let state = crate::AppState::new(data.path(), Vec::new()).await.unwrap();
+        crate::statev2::load_into(&conn, &mut *state.control.store.write().await).unwrap();
+        (db_home, data, state)
+    }
+
+    fn client() -> Caller {
+        Caller {
+            granted: crate::mcp_oauth::McpAccess {
+                access: "full-access".into(),
+                peer_link: false,
+                session_id: "test".into(),
+                label: "test".into(),
+                thread: None,
+                link_expires_ms: None,
+            },
+            runtime_limit: None,
+            plan_only: false,
+            thread: None,
+            origin: None,
+        }
+    }
+
+    fn partial_threads(state: &crate::AppState) -> usize {
+        state
+            .control
+            .store
+            .try_read()
+            .unwrap()
+            .threads
+            .values()
+            .filter(|t| t.stored.as_ref().is_some_and(|s| s.needs_read()))
+            .count()
+    }
+
+    /// Listing every project's threads reads whole only the page it answers
+    /// with, not every thread. It once summarized each thread before paging:
+    /// on a 33 GB database, five minutes and 20 GB, holding the store.
+    #[tokio::test(flavor = "current_thread")]
+    async fn listing_all_threads_reads_only_the_page_whole() {
+        let (_db, _data, state) = lazy_server(60).await;
+        let total = partial_threads(&state);
+        assert_eq!(total, 60);
+        HYDRATIONS.with(|count| count.set(0));
+        let listed = call(
+            &state,
+            &client(),
+            "t3_thread_list",
+            &json!({"allProjects": true, "includeSubagents": true, "limit": 5}),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("t3_thread_list failed"));
+        assert_eq!(listed["threads"].as_array().unwrap().len(), 5);
+        assert!(listed["total"].as_u64().unwrap() >= 5);
+        assert!(
+            HYDRATIONS.with(|count| count.get()) <= 5,
+            "read {} threads whole for a page of 5",
+            HYDRATIONS.with(|count| count.get())
+        );
+        // Newest first, as before: by creation time, then id.
+        let created: Vec<&str> = listed["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["createdAt"].as_str().unwrap())
+            .collect();
+        assert!(
+            created.windows(2).all(|pair| pair[0] >= pair[1]),
+            "{created:?}"
+        );
+        // A status filter is answered from the threads' runs, still without
+        // reading the threads whole.
+        HYDRATIONS.with(|count| count.set(0));
+        let completed = call(
+            &state,
+            &client(),
+            "t3_thread_list",
+            &json!({"allProjects": true, "statuses": ["completed"], "limit": 3}),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("t3_thread_list failed"));
+        assert!(HYDRATIONS.with(|count| count.get()) <= 3);
+        for thread in completed["threads"].as_array().unwrap() {
+            assert_eq!(thread["status"], "completed");
+        }
+    }
+
+    /// A call that reads many threads whole does not keep them: past
+    /// `CALL_READS_KEPT`, they are released as it returns.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_call_that_reads_many_threads_whole_does_not_keep_them() {
+        let (_db, _data, state) = lazy_server(80).await;
+        let listed = call(
+            &state,
+            &client(),
+            "t3_thread_list",
+            &json!({"allProjects": true, "includeSubagents": true, "limit": 80}),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("t3_thread_list failed"));
+        assert!(
+            listed["threads"].as_array().unwrap().len()
+                > crate::projection_eviction::CALL_READS_KEPT
+        );
+        // Every thread without a run going is slim again.
+        let busy = state
+            .control
+            .store
+            .read()
+            .await
+            .threads
+            .values()
+            .filter(|t| {
+                t.runs.iter().any(|run| {
+                    !matches!(
+                        run.status.as_str(),
+                        "completed" | "failed" | "cancelled" | "interrupted" | "rolled_back"
+                    )
+                })
+            })
+            .count();
+        assert_eq!(partial_threads(&state), 80 - busy);
     }
 }

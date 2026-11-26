@@ -516,6 +516,13 @@ pub fn missing_from_database(
 
 #[cfg(test)]
 mod lazy_tests;
+
+/// [`lazy_tests::seeded`]'s database of `count` synthetic threads, for other
+/// modules' tests.
+#[cfg(test)]
+pub(crate) fn seeded_for_tests(count: usize) -> (tempfile::TempDir, Connection) {
+    lazy_tests::seeded(count)
+}
 #[cfg(test)]
 mod write_back_tests;
 

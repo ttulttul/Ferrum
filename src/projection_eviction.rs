@@ -89,6 +89,42 @@ fn releasable(
         && !control.thread_watchers.is_watched(&thread.id)
 }
 
+tokio::task_local! {
+    /// The threads read whole from the database while a counted call runs
+    /// (`counting_reads`).
+    static READS: std::cell::RefCell<Vec<String>>;
+}
+
+/// Records that `thread_id` was read whole, for the call counting reads.
+pub(crate) fn note_read(thread_id: &str) {
+    let _ = READS.try_with(|reads| reads.borrow_mut().push(thread_id.to_owned()));
+}
+
+/// Runs `call`, and gives the threads it read whole from the database.
+pub(crate) async fn counting_reads<F: std::future::Future>(call: F) -> (F::Output, Vec<String>) {
+    READS
+        .scope(std::cell::RefCell::new(Vec::new()), async {
+            let output = call.await;
+            let reads = READS.with(|reads| reads.take());
+            (output, reads)
+        })
+        .await
+}
+
+/// The most threads one call may read whole and keep: past it, the call's
+/// reads are released as soon as it returns, and the server warns.
+pub(crate) const CALL_READS_KEPT: usize = 64;
+
+/// Releases now each of `thread_ids` that may be released at all (no
+/// subscriber, no run going; `sweep`), whatever its idle time.
+pub(crate) async fn release_now(
+    control: &crate::control_state::ControlState,
+    thread_ids: &[String],
+) -> Released {
+    let ids: std::collections::HashSet<&str> = thread_ids.iter().map(String::as_str).collect();
+    sweep_where(control, Duration::ZERO, |id| ids.contains(id)).await
+}
+
 /// What one sweep released.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Released {
@@ -101,13 +137,21 @@ pub(crate) async fn sweep(
     control: &crate::control_state::ControlState,
     idle: Duration,
 ) -> Released {
+    sweep_where(control, idle, |_| true).await
+}
+
+async fn sweep_where(
+    control: &crate::control_state::ControlState,
+    idle: Duration,
+    only: impl Fn(&str) -> bool,
+) -> Released {
     // Under the read lock, only cheap checks: which threads qualify.
     let (read, planned, source) = {
         let store = control.store.read().await;
         let mut read = Vec::new();
         let mut planned = Vec::new();
         for (id, thread) in &store.threads {
-            if !releasable(control, thread, idle) {
+            if !only(id) || !releasable(control, thread, idle) {
                 continue;
             }
             if thread.stored.as_ref().is_some_and(|s| s.is_planned()) {
@@ -267,7 +311,7 @@ pub(crate) async fn run(state: Arc<crate::AppState>) {
 /// what a thread frees in that thread's arena, so the projections a sweep
 /// releases would otherwise stay in the server's resident memory.
 #[cfg(feature = "native")]
-fn return_freed_memory() -> bool {
+pub(crate) fn return_freed_memory() -> bool {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         // SAFETY: malloc_trim only returns free pages to the system.
