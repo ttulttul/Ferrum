@@ -136,7 +136,7 @@ Idle CPU used to be counted with the processes the server reaps while idle, whic
 
 [`.github/workflows/perf.yml`](../.github/workflows/perf.yml) runs on pushes to `main` that change more than `README.md` or `docs/`, and on demand. It never runs on pull requests, and it is a separate workflow, so it cannot slow or block the parity shards.
 
-It measures at most once a day. Its first step reads when `docs/performance.md` last changed on `main` (`git log -1 --format=%ct -- docs/performance.md`). If that was less than 24 hours ago, the job ends there, successfully, and says why. Because it uses the document's own commit time, a hand edit also restarts the clock. A manual run can pass `force` to measure anyway. Otherwise it:
+It measures at most once a day. Its first step (`scripts/perf_gate.sh`) reads when this workflow's bot last refreshed the numbers in `docs/performance.md` on `main`: the last commit by `github-actions[bot]` whose message starts with "Refresh the performance numbers". If that was less than 24 hours ago, the job ends there, successfully, and says why. If there has never been one, or it was 24 hours ago or more, it measures. A hand edit of this file does not restart the clock, so a pull request that documents a performance change in it is still measured once it merges. A manual run can pass `force` to measure anyway. `scripts/perf_gate_test.sh` checks the decision both ways on a throwaway repository, and the parity workflow runs it on every pull request. Otherwise it:
 
 1. fetches the reference at the commit `parity.yml` pins, installs it as the parity jobs do, and builds its production bundle;
 2. builds the Rust server in release mode;

@@ -98,6 +98,8 @@ jobs:
           persist-credentials: false
       - name: Check every parity suite runs in one shard
         run: python3 scripts/check_parity_shards.py
+      - name: Check the Performance workflow's daily gate
+        run: scripts/perf_gate_test.sh
       - name: Fetch the pinned public reference
         run: |
           git init --quiet reference

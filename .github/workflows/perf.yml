@@ -27,8 +27,9 @@ permissions:
   contents: read
 
 jobs:
-  # Measures only when docs/performance.md on main is at least 24 hours old. The document's own
-  # commit time is the clock, so the refresh this workflow merges, or a hand edit, restarts it.
+  # Measures only when the numbers in docs/performance.md were last refreshed by this workflow's
+  # bot at least 24 hours ago (scripts/perf_gate.sh). A hand edit of the document does not
+  # restart the clock, so a pull request that documents a performance change is still measured.
   gate:
     name: gate
     runs-on: ubuntu-24.04
@@ -40,24 +41,14 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Check when docs/performance.md last changed on main
+      - name: Check when the numbers in docs/performance.md were last refreshed
         id: age
         env:
           FORCE: ${{ inputs.force }}
         run: |
           git fetch --quiet origin main
-          changed=$(git log -1 --format=%ct origin/main -- docs/performance.md)
-          age=$(( $(date +%s) - ${changed:-0} ))
-          if [ "$FORCE" = true ]; then
-            echo "Measuring: asked to (force)."
-            echo "measure=true" >> "$GITHUB_OUTPUT"
-          elif [ "$age" -ge 86400 ]; then
-            echo "Measuring: docs/performance.md last changed on main $((age / 3600)) hours ago."
-            echo "measure=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice title=Performance::Not measuring: docs/performance.md changed on main $((age / 3600)) h $((age % 3600 / 60)) min ago, less than 24 hours."
-            echo "measure=false" >> "$GITHUB_OUTPUT"
-          fi
+          scripts/perf_gate.sh . origin/main "$(date +%s)" "${FORCE:-false}" | tee "$RUNNER_TEMP/gate"
+          tail -n 1 "$RUNNER_TEMP/gate" >> "$GITHUB_OUTPUT"
 
   compare:
     name: compare
