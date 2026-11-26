@@ -104,6 +104,33 @@ What each fix changed, as measured in its pull request:
 - #340: a streamed delta to a 4.5 MB thread went from 87 ms to 1.9 ms.
 - #347 and #349: listing 2,000 lazily read threads went from 1.9 s and 472 MB to 111 ms and 1 MB.
 
+### Side by side on a copy of a real database
+
+The reference (T3 0.1.12, the version that runs that database live) and Ferrum (`main` at 624501f, which includes #316, #337, #340, #347 and #349) were run one after the other on the same read-only online backup of a 33 GB production database with about 7,000 threads (7,173). Each server opened and closed the same 300 threads, then sat idle.
+
+| RSS of the server process | Reference | Ferrum |
+| --- | ---: | ---: |
+| after start-up | 721 MiB | 694 MiB |
+| peak while opening the 300 threads | **1,131 MiB** | **5,004 MiB** |
+| idle, 1 minute after the last close | 609 MiB | 5,004 MiB |
+| idle, 12 minutes after the last close | 559 MiB | 663 MiB |
+| time to open and close the 300 threads | 31 s | 18 s |
+
+**Method.**
+- **Data:** the 300 threads with the most turn-item bytes, chosen once by SQL and given to both servers in the same order (largest first). They hold 3.65 GB of turn items, 89 MB of nodes and 10 MB of messages.
+- **Setup:** each server ran in a fresh home holding only the copy and `settings.json`: no cloud link, environment credentials, secrets or relay state. It was started through `perf_compare.py`'s `Server` (desktop bootstrap, loopback only, provider CLIs hidden, every off-loopback request refused). Only one server ran at a time.
+- **Steps:**
+  1. 10 seconds after start-up, one client opened each thread in turn (`orchestration.subscribeThread` with the desktop's options, read to `synchronized`) and closed it, as #316 measured.
+  2. Each server then idled for 12 minutes: Ferrum's 10-minute release window plus 2.
+  3. RSS was sampled every 2 seconds throughout. The process tree's RSS matched the server's own within 3 MiB.
+- **The copy:** the reference applied no migration (110 before and after), but it did write to the copy during its run. Ferrum ran on the copy as the reference left it, with the identical thread list (checked).
+
+**What it shows.**
+- **Opening:** Ferrum reads each thread it opens whole and keeps it until nothing has used it for 10 minutes (#316). Opening 300 of the largest threads therefore held about 4.3 GB more than the reference, which serves a thread's snapshot window from the database and keeps none of it.
+- **Idle:** once the window passes, Ferrum returns to about the reference's footprint (663 against 559 MiB).
+- **The live trial:** this is the 1.22 GB peak the fifth trial saw at a smaller scale.
+- **Follow-up options:** serve the bounded snapshot from the database without reading the thread whole, or release a thread soon after its last subscriber leaves. Either would bring Ferrum's peak down to the reference's.
+
 ## What is measured
 
 Each server runs alone, on a free loopback port, in its own temporary home. Both get the environment the parity suites use (`parity_harness.server_env`): no real provider CLI on `PATH` (and never `~/.local/bin` or an nvm directory), a login shell that reads only the temporary home's profile, no telemetry, and all HTTP(S) sent to the harness's refusing proxy. The script fails if any server ran without that proxy. Provider turns use the fake `codex` and `claude` CLIs from `tests/fixtures/providers`, so no model is called and nothing leaves the machine.
