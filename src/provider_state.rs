@@ -216,6 +216,40 @@ impl ProviderState {
                 .or_else(|| self.thread.as_ref().map(|thread| thread.driver.clone()))
                 .unwrap_or_else(|| provider::CODEX.into()),
         };
+        // A native subagent's own turn is its child thread's (recorded there), nothing of the
+        // run that reports it.
+        if let ProviderEvent::TurnItem { item } = event {
+            if item.kind == "subagent_turn" || item.fields.contains_key("subagentThread") {
+                return;
+            }
+        }
+        // A native subagent an earlier run started, which a later run reports (it ended after
+        // that run's turn), is that run's item (`subagent.updated` names its run).
+        if let ProviderEvent::TurnItem { item } = event {
+            if item.kind == "subagent" {
+                let holder = self
+                    .runs
+                    .iter()
+                    .find(|(id, record)| {
+                        **id != run && record.items.iter().any(|known| known.item.id == item.id)
+                    })
+                    .map(|(id, _)| *id);
+                let own = self.runs.get(&run).is_some_and(|record| {
+                    record.items.iter().any(|known| known.item.id == item.id)
+                });
+                if let (Some(holder), false) = (holder, own) {
+                    if let Some(known) = self
+                        .runs
+                        .get_mut(&holder)
+                        .and_then(|record| record.items.iter_mut().find(|k| k.item.id == item.id))
+                    {
+                        known.item = item.clone();
+                        known.updated_at = at;
+                    }
+                    return;
+                }
+            }
+        }
         let record = self.runs.entry(run).or_insert_with(|| RunRecord {
             driver: driver.clone(),
             native_turn_ref: None,

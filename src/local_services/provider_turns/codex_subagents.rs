@@ -164,6 +164,57 @@ impl Subagents {
         }
     }
 
+    /// The children still running, when the turn that started them ends.
+    pub(crate) fn running(&self) -> Vec<String> {
+        self.by_thread
+            .iter()
+            .filter(|(_, subagent)| active(subagent.status))
+            .map(|(native, _)| native.clone())
+            .collect()
+    }
+
+    /// The continuation a child that ended with `status` after its parent's turn starts on the
+    /// parent (`codexNativeSubagentDetail`, `backgroundWorkNotification`): its text, and the
+    /// notification naming the subagent. Only a child that completed or failed wakes it.
+    pub(crate) fn wake(
+        &self,
+        native: &str,
+        status: &str,
+        answer: Option<&str>,
+    ) -> Option<(String, Value)> {
+        let subagent = self.by_thread.get(native)?;
+        let outcome = match status {
+            "completed" => "completed",
+            "failed" => "failed",
+            _ => return None,
+        };
+        let label = subagent
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .or_else(|| Some(subagent.prompt.trim()).filter(|p| !p.is_empty()))
+            .map(str::to_owned);
+        let id = crate::provider_projection::item_id("node", "codex", &subagent.item_id);
+        let header = format!("Subagent {outcome}: {}", label.as_deref().unwrap_or(&id));
+        let result = answer
+            .map(str::to_owned)
+            .or_else(|| subagent.result.clone());
+        let detail = match result.filter(|r| !r.is_empty()) {
+            Some(result) => format!("{header}\n\nResult:\n{result}"),
+            None => header,
+        };
+        let notification =
+            crate::background_work::notification(&[crate::background_work::Report {
+                kind: crate::background_work::Kind::Subagent,
+                label,
+                outcome,
+                child_thread_id: Some(child_thread_id(native)),
+                exit_code: None,
+            }])?;
+        Some((detail, notification))
+    }
+
     /// Whether `native` is the thread of one of the turn's subagents.
     pub(crate) fn follows(&self, native: &str) -> bool {
         self.by_thread.contains_key(native)
@@ -344,5 +395,31 @@ mod tests {
         assert_eq!(ended.status, "completed");
         // A settled subagent reports no more progress.
         assert!(subagents.child_progress("c9", "ls").is_none());
+    }
+
+    #[test]
+    fn a_child_that_ends_after_its_parent_wakes_it_with_its_result() {
+        let mut subagents = Subagents::default();
+        subagents.activity(
+            &json!({"id": "call_9", "kind": "started", "agentThreadId": "c9",
+            "agentPath": "/root/read_line"}),
+        );
+        assert_eq!(subagents.running(), vec!["c9".to_owned()]);
+        let (detail, notification) = subagents.wake("c9", "completed", Some("# Title")).unwrap();
+        assert_eq!(
+            detail,
+            "Subagent completed: /root/read_line\n\nResult:\n# Title"
+        );
+        assert_eq!(notification["source"]["kind"], "subagent");
+        assert_eq!(
+            notification["source"]["childThreadId"],
+            child_thread_id("c9")
+        );
+        // Only a child that completed or failed wakes its parent.
+        assert!(subagents.wake("c9", "interrupted", None).is_none());
+        assert_eq!(
+            subagents.wake("c9", "failed", None).unwrap().0,
+            "Subagent failed: /root/read_line"
+        );
     }
 }

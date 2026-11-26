@@ -107,7 +107,9 @@ async fn dispatch<H: CommandHost>(state: Arc<H>, wake: ProviderWake) {
         "attachments": [],
         "dispatchMode": {"type": "queue_after_active"},
         "createdBy": "agent",
-        "creationSource": "provider",
+        // Only a buffered wake comes from the provider; one whose text is its
+        // message (`message_text`) is the server's.
+        "creationSource": if wake.delivery.as_deref() == Some("message_text") { "server" } else { "provider" },
     });
     lock_open().insert(message_id.clone(), wake.clone());
     if let Err(error) =

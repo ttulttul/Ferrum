@@ -232,6 +232,11 @@ pub struct ProviderWake {
     /// ended (`backgroundWorkNotification`), if any did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification: Option<serde_json::Value>,
+    /// How the continuation reaches the provider: `message_text` sends its
+    /// text as the run's message (a Codex subagent's result), where a wake
+    /// without it shows what the CLI buffered. Additive and optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
 }
 
 /// What an OpenCode turn needs beyond the common launch: the configured

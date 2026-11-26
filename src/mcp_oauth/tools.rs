@@ -1897,9 +1897,16 @@ fn read_item(
 ) -> Value {
     let item = &visible["item"];
     let message_id = item["messageId"].as_str();
-    let full = item["text"]
-        .as_str()
-        .map(str::to_owned)
+    // A subagent reads as its result, else its progress, else its prompt (`turnItemText`).
+    let subagent_text = (item["type"] == "subagent")
+        .then(|| {
+            ["result", "progress", "prompt"]
+                .iter()
+                .find_map(|key| item[*key].as_str().map(str::to_owned))
+        })
+        .flatten();
+    let full = subagent_text
+        .or_else(|| item["text"].as_str().map(str::to_owned))
         .or_else(|| message_id.and_then(|id| texts.get(id).cloned()))
         .or_else(|| item["failure"]["message"].as_str().map(str::to_owned));
     let (text, truncated, next) = match full {
@@ -1938,6 +1945,9 @@ fn read_item(
         "nextTextOffset": next,
         "updatedAt": item["updatedAt"],
     });
+    if item["type"] == "subagent" {
+        out["subagentId"] = item["subagentId"].clone();
+    }
     // An agent's message names the thread (or link) it came from.
     if item["type"] == "user_message" {
         for key in ["senderThreadId", "linkedSender"] {

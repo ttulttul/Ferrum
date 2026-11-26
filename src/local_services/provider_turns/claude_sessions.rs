@@ -83,6 +83,11 @@ impl Sessions {
         self.live.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Where wakes go, for other providers' idle work (a Codex subagent).
+    pub(crate) fn wake_sender(&self) -> mpsc::UnboundedSender<ProviderWake> {
+        self.wakes.clone()
+    }
+
     /// The wakes idle CLIs report; taken once, by the host that opens
     /// their continuation runs.
     pub(crate) fn take_wakes(&self) -> Option<mpsc::UnboundedReceiver<ProviderWake>> {
@@ -249,6 +254,7 @@ impl Reporter {
                 token,
                 detail,
                 notification,
+                delivery: None,
             })
             .ok()?;
         Some(token)

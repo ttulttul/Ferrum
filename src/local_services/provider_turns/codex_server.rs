@@ -33,9 +33,21 @@ const UNLOAD_WAIT: Duration = Duration::from_secs(15);
 /// A host's shared app-servers, by provider instance: one per workspace,
 /// as the reference's provider sessions belong to its server.
 #[derive(Default)]
-pub(crate) struct Registry(Mutex<HashMap<String, Arc<AppServer>>>);
+pub(crate) struct Registry(
+    Mutex<HashMap<String, Arc<AppServer>>>,
+    /// Where a subagent that ends after its parent's turn sends its wake.
+    std::sync::OnceLock<mpsc::UnboundedSender<crate::workspace::provider::ProviderWake>>,
+);
 
 impl Registry {
+    /// The channel wakes go to (the workspace's provider wakes).
+    pub(crate) fn share_wakes(
+        &self,
+        wakes: mpsc::UnboundedSender<crate::workspace::provider::ProviderWake>,
+    ) {
+        let _ = self.1.set(wakes);
+    }
+
     fn with<T>(&self, f: impl FnOnce(&mut HashMap<String, Arc<AppServer>>) -> T) -> T {
         f(&mut self.0.lock().unwrap_or_else(|e| e.into_inner()))
     }
@@ -51,7 +63,26 @@ struct Routes {
     /// The native threads of the subagents a turn's agent started, and that turn: what Codex
     /// sends about a child reaches its parent's turn.
     children: HashMap<String, u64>,
+    /// Children still running after their parent's turn ended, by native thread: what Codex
+    /// sends about them, held for the parent's next turn.
+    orphans: HashMap<String, Orphan>,
+    /// The subagents of an ended turn whose children still run, by the parent's native
+    /// thread, for its next turn.
+    carried: HashMap<String, super::codex_subagents::Subagents>,
 }
+
+/// A child still running after its parent's turn ended.
+struct Orphan {
+    /// The parent's app thread and native thread.
+    app_thread: String,
+    parent: String,
+    /// What Codex sent about the child since, in order.
+    buffered: Vec<String>,
+    /// The child's last final answer.
+    answer: Option<String>,
+}
+
+static CODEX_WAKE_TOKENS: AtomicU64 = AtomicU64::new(1);
 
 /// The native child threads a frame starts: a `subAgentActivity` that starts, or a
 /// `spawnAgent` call's receivers.
@@ -350,6 +381,13 @@ impl AppServer {
                     .find(|(_, (_, bound))| bound.as_deref() == Some(thread))
                     .map(|(session, _)| *session)
                     .or_else(|| routes.children.get(thread).copied());
+                if session.is_none() && routes.orphans.contains_key(thread) {
+                    let thread = thread.to_owned();
+                    let wake = self.hold_orphan_line(&mut routes, &thread, line, &message);
+                    drop(routes);
+                    self.send_wake(wake);
+                    return;
+                }
                 if let Some(session) = session {
                     // A child it starts is followed from the next frame on.
                     for child in started_children(&message) {
@@ -369,6 +407,68 @@ impl AppServer {
         }
     }
 
+    /// Holds a frame about a child whose parent's turn ended; the child's turn ending
+    /// (completed or failed) is the wake it starts on the parent.
+    fn hold_orphan_line(
+        &self,
+        routes: &mut Routes,
+        thread: &str,
+        line: String,
+        message: &Value,
+    ) -> Option<crate::workspace::provider::ProviderWake> {
+        let orphan = routes.orphans.get_mut(thread)?;
+        orphan.buffered.push(line);
+        let params = &message["params"];
+        match message["method"].as_str() {
+            Some("item/completed")
+                if params["item"]["type"] == "agentMessage"
+                    && matches!(
+                        params["item"]["phase"].as_str(),
+                        Some("final_answer" | "finalAnswer")
+                    ) =>
+            {
+                orphan.answer = params["item"]["text"].as_str().map(str::to_owned);
+                None
+            }
+            Some("turn/completed") => {
+                let status = match params["turn"]["status"].as_str() {
+                    Some("completed") => "completed",
+                    Some("interrupted") => "interrupted",
+                    _ => "failed",
+                };
+                let (app_thread, parent, answer) = (
+                    orphan.app_thread.clone(),
+                    orphan.parent.clone(),
+                    orphan.answer.clone(),
+                );
+                let (detail, notification) =
+                    routes
+                        .carried
+                        .get(&parent)?
+                        .wake(thread, status, answer.as_deref())?;
+                Some(crate::workspace::provider::ProviderWake {
+                    driver: crate::workspace::provider::CODEX.into(),
+                    app_thread_id: app_thread,
+                    native_thread_id: parent,
+                    token: CODEX_WAKE_TOKENS.fetch_add(1, Ordering::Relaxed),
+                    detail: Some(detail),
+                    notification: Some(notification),
+                    delivery: Some("message_text".into()),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn send_wake(&self, wake: Option<crate::workspace::provider::ProviderWake>) {
+        let (Some(wake), Some(registry)) = (wake, self.registry.upgrade()) else {
+            return;
+        };
+        if let Some(wakes) = registry.1.get() {
+            let _ = wakes.send(wake);
+        }
+    }
+
     /// The process ended: every open turn's channel closes, and the next
     /// turn starts a new process.
     fn closed(&self) {
@@ -376,6 +476,8 @@ impl AppServer {
         routes.sessions.clear();
         routes.replies.clear();
         routes.children.clear();
+        routes.orphans.clear();
+        routes.carried.clear();
         drop(routes);
         for (_, timer) in self
             .timers
@@ -549,10 +651,79 @@ impl Conn {
         self.server.write_line(message).await
     }
 
-    /// Bind the turn to `thread` (a thread it uses without resuming it).
-    pub(super) fn bind(&self, thread: &str) {
-        if let Some(entry) = self.server.lock_routes().sessions.get_mut(&self.session) {
-            entry.1 = Some(thread.to_owned());
+    /// Bind the turn to `thread` (a thread it uses without resuming it). The subagents an
+    /// earlier turn of the thread left running come with it: what Codex sent about them since
+    /// reaches this turn first, and their tracker is returned.
+    pub(super) fn bind(&self, thread: &str) -> Option<super::codex_subagents::Subagents> {
+        let mut routes = self.server.lock_routes();
+        let entry = routes.sessions.get_mut(&self.session)?;
+        entry.1 = Some(thread.to_owned());
+        let tx = entry.0.clone();
+        let carried = routes.carried.remove(thread)?;
+        let adopted: Vec<String> = routes
+            .orphans
+            .iter()
+            .filter(|(_, orphan)| orphan.parent == thread)
+            .map(|(child, _)| child.clone())
+            .collect();
+        for child in adopted {
+            if let Some(orphan) = routes.orphans.remove(&child) {
+                for line in orphan.buffered {
+                    let _ = tx.send(line);
+                }
+            }
+            routes.children.insert(child, self.session);
+        }
+        Some(carried)
+    }
+
+    /// The turn of `parent` (app thread `app_thread`) ended with `subagents` still running:
+    /// what Codex sends about them, and what it already sent this turn, is held for the
+    /// thread's next turn, and a child that ends wakes the parent.
+    pub(super) fn carry(
+        &mut self,
+        app_thread: &str,
+        parent: &str,
+        subagents: super::codex_subagents::Subagents,
+    ) {
+        let running = subagents.running();
+        if running.is_empty() {
+            return;
+        }
+        let mut wakes = Vec::new();
+        {
+            let mut routes = self.server.lock_routes();
+            for child in &running {
+                routes.children.remove(child);
+                routes.orphans.insert(
+                    child.clone(),
+                    Orphan {
+                        app_thread: app_thread.to_owned(),
+                        parent: parent.to_owned(),
+                        buffered: Vec::new(),
+                        answer: None,
+                    },
+                );
+            }
+            routes.carried.insert(parent.to_owned(), subagents);
+            // Frames about a child that reached this turn after it ended.
+            while let Ok(line) = self.lines.try_recv() {
+                let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let Some(thread) = message["params"]["threadId"].as_str().map(str::to_owned) else {
+                    continue;
+                };
+                if routes.orphans.contains_key(&thread) {
+                    wakes.push(
+                        self.server
+                            .hold_orphan_line(&mut routes, &thread, line, &message),
+                    );
+                }
+            }
+        }
+        for wake in wakes {
+            self.server.send_wake(wake);
         }
     }
 

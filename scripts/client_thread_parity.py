@@ -293,6 +293,10 @@ PROVIDER_SCENARIOS = [
     # that names no agents, the child's own notifications going to its thread only.
     {"name": "codex native subagent activity", "instance": "codex", "model": "fixture",
      "scenario": "codex_subagent_activity.json", "children": True},
+    # A subagent that finishes after its parent's turn ended wakes the idle parent: its next run
+    # takes the subagent's result as its message (a subagent notification).
+    {"name": "codex native subagent wake", "instance": "codex", "model": "fixture",
+     "scenario": "codex_subagent_wake.json", "children": True, "settleRuns": 2},
     # Codex delegation counterparts: parent and child share the instance's app-server.
     {"name": "codex delegate", "instance": "codex", "model": "fixture",
      "scenario": "codex_delegate.json", "awaitStatus": True},
