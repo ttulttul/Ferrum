@@ -220,7 +220,8 @@ const QUIET_MS = 750;
  * `seed.change` (a command without its ids), that command is sent once the provider turn runs;
  * with `seed.changeAfter === "quiet"`, once the turn's stream has then been quiet for
  * QUIET_MS, where its CLI waits (so the change lands after the same items on both servers).
- * With `seed.steer` ({text, ack}), a message steers the run once a command it runs is running,
+ * With `seed.steer` ({text, ack, mode?}), a message steers the run once a command it runs is
+ * running (with `mode: "restart"`, restarts it: `restart_active`),
  * and `seed.interrupt === "steer"` interrupts it once an item carrying `ack` (what the provider
  * answered the steer with) arrived.
  */
@@ -293,7 +294,10 @@ const liveTurn = (client, seed) =>
         attachments: [],
         createdBy: "user",
         creationSource: "web",
-        dispatchMode: { type: "steer_active", targetRunId: runId },
+        dispatchMode: {
+          type: seed.steer.mode === "restart" ? "restart_active" : "steer_active",
+          targetRunId: runId,
+        },
       }).pipe(
         Effect.map(plain),
         Effect.catch((error) => Effect.succeed({ error: String(error?._tag ?? error) })),
