@@ -444,6 +444,68 @@ pub(super) fn seeded_large(
     (home, conn, id)
 }
 
+/// [`seeded`]'s database with every thread grown by `items` command items of
+/// `size` bytes of output each: a large database of long threads.
+pub(super) fn seeded_wide(
+    count: usize,
+    items: usize,
+    size: usize,
+) -> (tempfile::TempDir, Connection) {
+    let (home, conn) = seeded(count);
+    let output = "x".repeat(size);
+    let mut writer = write::Writer::new(open(home.path()).unwrap());
+    for chunk in (0..count).collect::<Vec<_>>().chunks(100) {
+        let threads = chunk
+            .iter()
+            .map(|&index| {
+                let before = synthetic_thread(index);
+                let mut after = before.clone();
+                let template = after["turnItems"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["type"] == "command_execution")
+                    .cloned()
+                    .unwrap();
+                let ordinal = after["turnItems"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|item| item["ordinal"].as_i64())
+                    .max()
+                    .unwrap();
+                for n in 0..items {
+                    let mut item = template.clone();
+                    item["id"] = json!(format!("item:wide:{index}:{n}"));
+                    item["ordinal"] = json!(ordinal + 1 + n as i64);
+                    item["output"] = json!(output);
+                    after["turnItems"].as_array_mut().unwrap().push(item);
+                }
+                crate::shared_store::ThreadWrite {
+                    thread_id: before["thread"]["id"].as_str().unwrap().to_owned(),
+                    before: Some(before),
+                    after,
+                    deleted: false,
+                }
+            })
+            .collect();
+        crate::shared_store::SharedStore::write(
+            &mut writer,
+            &crate::shared_store::SharedCommit {
+                threads,
+                projects: Vec::new(),
+                events: Vec::new(),
+                receipt: None,
+                effects: Vec::new(),
+                sequence: 1,
+                occurred_at: at(1),
+            },
+        )
+        .unwrap();
+    }
+    (home, conn)
+}
+
 /// Each thread as start-up read it before: whole.
 fn eager_threads(conn: &Connection, store: &crate::Store) -> Vec<crate::Thread> {
     read::thread_ids(conn)

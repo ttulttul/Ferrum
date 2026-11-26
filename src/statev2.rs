@@ -523,6 +523,16 @@ mod lazy_tests;
 pub(crate) fn seeded_for_tests(count: usize) -> (tempfile::TempDir, Connection) {
     lazy_tests::seeded(count)
 }
+
+/// [`lazy_tests::seeded_wide`]'s large database, for other modules' tests.
+#[cfg(test)]
+pub(crate) fn seeded_wide_for_tests(
+    count: usize,
+    items: usize,
+    size: usize,
+) -> (tempfile::TempDir, Connection) {
+    lazy_tests::seeded_wide(count, items, size)
+}
 #[cfg(test)]
 mod write_back_tests;
 

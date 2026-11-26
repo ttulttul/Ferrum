@@ -704,7 +704,12 @@ async fn run_call(
 }
 
 async fn dispatch(state: &Arc<AppState>, method: &str, params: &Value) -> Reply {
-    let reply = dispatch_method(state, method, params).await;
+    // As an MCP call: no request keeps more than a bounded number of threads
+    // it read whole (`projection_eviction::bounded_reads`).
+    let reply = crate::projection_eviction::bounded_reads(&state.control, method, async {
+        Box::pin(dispatch_method(state, method, params)).await
+    })
+    .await;
     refresh_vcs_after(state, method, params);
     reply
 }

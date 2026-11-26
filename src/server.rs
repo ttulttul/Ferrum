@@ -993,6 +993,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/ws", get(websocket))
         .fallback(any(contract_fallback))
+        // No HTTP request keeps more than a bounded number of threads it read
+        // whole (`projection_eviction::bounded_reads`), as an RPC or an MCP call.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            bounded_reads,
+        ))
         .layer(axum::middleware::from_fn(access_http::contextualize))
         // Outermost, like the reference's global CORS middleware: preflights
         // never reach a route and every response, errors included, is tagged.
@@ -1357,6 +1363,15 @@ pub(crate) async fn contract_fallback(
         .body(body.to_string().into())
         .expect("valid response")
 }
+async fn bounded_reads(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = request.uri().path().to_owned();
+    crate::projection_eviction::bounded_reads(&state.control, &path, next.run(request)).await
+}
+
 pub(crate) async fn require_session(
     State(state): State<Arc<AppState>>,
     request: Request,

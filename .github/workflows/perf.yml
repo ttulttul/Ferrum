@@ -228,6 +228,11 @@ jobs:
       # A streamed delta to a long thread is planned, written and sent to live subscribers from the
       # records it changes (shared_store::Partial): its commit must stay under 6 ms (median of 200,
       # on a thread of about 4.5 MB of turn items). It cost 87 ms when commits copied whole threads.
+      # Listing every thread of a large database (2,000 threads read lazily, about 300 MB of turn
+      # items) through t3_thread_list must answer within a second and grow memory by under 200 MB.
+      # Reading every thread whole to list them once took a real database's server to 21 GB.
+      - name: Check listing the threads of a large database
+        run: cargo test --locked --release --lib thread_list_on_a_large_database -- --ignored --nocapture
       - name: Check the commit cost of a delta to a long thread
         env:
           T3CODE_COMMIT_COST_MAX_MS: "6"

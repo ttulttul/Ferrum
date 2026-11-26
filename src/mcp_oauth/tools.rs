@@ -967,21 +967,12 @@ pub(super) async fn call<S: McpHost>(
     // that reads more (a bug: a tool should read what it answers about) has
     // them released as it returns, so a single call cannot hold the whole
     // database in memory until the idle sweep.
-    let (outcome, reads) =
-        crate::projection_eviction::counting_reads(Box::pin(call_tool(host, caller, name, args)))
-            .await;
-    if reads.len() > crate::projection_eviction::CALL_READS_KEPT {
-        let released = crate::projection_eviction::release_now(host.control_state(), &reads).await;
-        #[cfg(feature = "native")]
-        crate::projection_eviction::return_freed_memory();
-        tracing::warn!(
-            tool = name,
-            read = reads.len(),
-            released = released.read + released.planned,
-            "an MCP call read many threads whole; released them as it returned"
-        );
-    }
-    outcome
+    crate::projection_eviction::bounded_reads(
+        host.control_state(),
+        name,
+        Box::pin(call_tool(host, caller, name, args)),
+    )
+    .await
 }
 
 async fn call_tool<S: McpHost>(
@@ -3819,5 +3810,84 @@ mod lazy_list_tests {
             })
             .count();
         assert_eq!(partial_threads(&state), 80 - busy);
+    }
+}
+
+/// Listing every thread of a large database end to end:
+/// `cargo test --release --lib thread_list_on_a_large_database -- --ignored --nocapture`.
+/// 2,000 threads read lazily from a `statev2.sqlite`, each with 32 command
+/// items of 4 KB of output (about 300 MB of turn items), then `t3_thread_list`
+/// across all projects with no limit, through the MCP tool call. It must
+/// answer within a second and keep the server's memory within 200 MB of what
+/// it was. Reading every thread whole, as the list once did, takes the whole
+/// database into memory (21 GB on a real one).
+#[cfg(test)]
+mod large_list_check {
+    use super::*;
+
+    fn rss_kb() -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("VmRSS"))
+                    .and_then(|line| line.split_whitespace().nth(1)?.parse().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn thread_list_on_a_large_database() {
+        let threads = std::env::var("T3CODE_LARGE_LIST_THREADS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(2000);
+        let seeding = std::time::Instant::now();
+        let (_db, conn) = crate::statev2::seeded_wide_for_tests(threads, 32, 4096);
+        let data = tempfile::tempdir().unwrap();
+        let state = crate::AppState::new(data.path(), Vec::new()).await.unwrap();
+        crate::statev2::load_into(&conn, &mut *state.control.store.write().await).unwrap();
+        drop(conn);
+        eprintln!(
+            "{threads} threads seeded and loaded in {:.1} s",
+            seeding.elapsed().as_secs_f64()
+        );
+        let caller = Caller {
+            granted: crate::mcp_oauth::McpAccess {
+                access: "full-access".into(),
+                peer_link: false,
+                session_id: "large-list".into(),
+                label: "large-list".into(),
+                thread: None,
+                link_expires_ms: None,
+            },
+            runtime_limit: None,
+            plan_only: false,
+            thread: None,
+            origin: None,
+        };
+        let before = rss_kb();
+        let started = std::time::Instant::now();
+        let listed = call(
+            &state,
+            &caller,
+            "t3_thread_list",
+            &json!({"allProjects": true, "includeSubagents": true}),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("t3_thread_list failed"));
+        let took = started.elapsed();
+        let grew_mb = rss_kb().saturating_sub(before) / 1024;
+        eprintln!(
+            "t3_thread_list over {} threads: {} listed in {:.0} ms, RSS grew {grew_mb} MB",
+            listed["total"],
+            listed["threads"].as_array().map_or(0, Vec::len),
+            took.as_secs_f64() * 1000.0
+        );
+        assert_eq!(listed["total"].as_u64(), Some(threads as u64));
+        assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
+        assert!(grew_mb < 200, "RSS grew {grew_mb} MB");
     }
 }
