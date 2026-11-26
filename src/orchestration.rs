@@ -2001,9 +2001,8 @@ async fn apply_command<H: CommandHost>(
                                 thread.runs.iter().filter_map(|run| run.finished_at).max()
                             })
                         {
-                            row["lastVisitedAt"] = json!(crate::auth_service::iso(
-                                (completed as i64).saturating_mul(1000).saturating_sub(1)
-                            ));
+                            row["lastVisitedAt"] =
+                                json!(crate::thread_projection::iso(completed.saturating_sub(1)));
                         }
                     }
                     "thread.snooze" => {

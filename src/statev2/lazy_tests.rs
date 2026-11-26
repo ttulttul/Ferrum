@@ -612,7 +612,7 @@ fn a_commit_on_a_lazily_read_thread_plans_and_writes_from_its_whole_projection()
     let reconciled = crate::runtime_recovery::reconcile(
         control.store.get_mut(),
         "startup",
-        1_800_000_000,
+        1_800_000_000_000,
         "2027-01-15T08:00:00.000Z",
         &Value::Null,
     );
@@ -624,7 +624,7 @@ fn a_commit_on_a_lazily_read_thread_plans_and_writes_from_its_whole_projection()
     for event in &events {
         let record = crate::ServerEvent {
             id: 1,
-            at: 1_800_000_000,
+            at: 1_800_000_000_000,
             event: event.clone(),
             receipt: None,
             thread_events: None,
@@ -743,4 +743,98 @@ fn slim_shell_rows_equal_whole_ones_on_a_real_database() {
         started.elapsed()
     );
     assert!(differing.is_empty(), "{differing:?}");
+}
+
+/// Event times cross the shared database with their milliseconds, both
+/// ways: a thread the reference wrote (its times carry milliseconds, as
+/// `DateTime.formatIso` writes them) reads in this server with them intact,
+/// and what this server commits carries the clock's milliseconds and reads
+/// back.
+#[test]
+fn event_times_cross_the_shared_store_with_their_milliseconds() {
+    use crate::platform::{ManualClock, Platform, SystemRandom};
+    use crate::thread_projection::iso;
+    let (home, conn) = seeded(12);
+    let projection = |id: &str| read::thread_projection(&conn, id).unwrap().unwrap();
+    // Read: a reference-written row with milliseconds.
+    let id = (0..12)
+        .map(|index| format!("thread:{index}"))
+        .find(|id| {
+            !projection(id)["thread"]["createdAt"]
+                .as_str()
+                .unwrap()
+                .ends_with(".000Z")
+        })
+        .expect("a thread created at a time with milliseconds");
+    let stored = projection(&id);
+    let thread = crate::Thread::from_stored(stored.clone(), None);
+    assert_eq!(
+        json!(iso(thread.created_at)),
+        stored["thread"]["createdAt"],
+        "{id}"
+    );
+    for message in &thread.messages {
+        let row = stored["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == message.id.as_str())
+            .unwrap();
+        assert_eq!(json!(iso(message.created_at)), row["createdAt"]);
+    }
+    // Write: a commit at a time with milliseconds.
+    let mut control = control_with(home.path());
+    load_into(&conn, control.store.get_mut()).unwrap();
+    let platform = Platform {
+        clock: std::sync::Arc::new(ManualClock::at(1_800_000_000_789)),
+        random: std::sync::Arc::new(SystemRandom),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let record = crate::platform::scoped(platform, || {
+        runtime.block_on(control.commit(crate::Event::MessageAdded {
+            thread_id: id.clone(),
+            message: crate::ConversationMessage {
+                id: "message:ms".into(),
+                role: "user".into(),
+                content: "hi".into(),
+                created_at: crate::now(),
+                ..Default::default()
+            },
+        }))
+    })
+    .unwrap();
+    assert_eq!(record.at, 1_800_000_000_789);
+    let at = "2027-01-15T08:00:00.789Z";
+    let (created, occurred): (String, String) = conn
+        .query_row(
+            "SELECT created_at,
+                    (SELECT occurred_at FROM orchestration_events ORDER BY sequence DESC LIMIT 1)
+               FROM orchestration_v2_projection_messages WHERE message_id = 'message:ms'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((created.as_str(), occurred.as_str()), (at, at));
+    // Read back, by a fresh start-up as by the reference: the same time.
+    let back = projection(&id);
+    let row = back["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "message:ms")
+        .unwrap();
+    assert_eq!(row["createdAt"], at);
+    let mut fresh = crate::Store::default();
+    load_into(&conn, &mut fresh).unwrap();
+    let reread = crate::Thread::from_stored(back, None);
+    assert_eq!(iso(reread.created_at), iso(thread.created_at));
+    let sent = reread
+        .messages
+        .iter()
+        .find(|m| m.id == "message:ms")
+        .unwrap();
+    assert_eq!(sent.created_at, 1_800_000_000_789);
+    assert!(fresh.threads.contains_key(&id));
 }

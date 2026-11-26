@@ -9,6 +9,7 @@ Checks:
 - projects and threads created on either server are seen identically by the
   other (shell, thread projection), and so is a thread the Rust server
   renamed after reading it from the reference;
+- both write event, message and thread times as ISO 8601 with milliseconds;
 - a Rust home from before the shared store is imported once, keeping its log,
   and the reference reads its threads as the Rust server does;
 - a database at a migration head the Rust server does not support is refused,
@@ -31,6 +32,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shlex
 import shutil
@@ -167,6 +169,29 @@ def search_views(args, root, url, credential):
     assert found["next"]["totalMatches"] == 2 and found["next"]["match"]["occurrence"] == 1
     assert found["rendered"]["totalMatches"] == 1
     return {name: found[name] for name, *_ in plan}
+
+
+ISO_MS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
+
+
+def written_times(home, thread):
+    """How a server wrote a thread's event, message and thread times: ISO 8601 with three
+    digits of milliseconds and `Z` (Effect's `DateTime.formatIso`), and its events' times
+    not whole seconds."""
+    with sqlite3.connect(f"file:{database(home)}?mode=ro", uri=True) as conn:
+        occurred = [row[0] for row in conn.execute(
+            "SELECT occurred_at FROM orchestration_events WHERE stream_id = ?1", (thread,))]
+        others = [row[0] for row in conn.execute(
+            "SELECT created_at FROM orchestration_v2_projection_messages WHERE thread_id = ?1 "
+            "UNION ALL SELECT created_at FROM orchestration_v2_projection_threads WHERE thread_id = ?1 "
+            "UNION ALL SELECT updated_at FROM orchestration_v2_projection_threads WHERE thread_id = ?1",
+            (thread,))]
+    assert len(occurred) > 3 and others, (thread, occurred, others)
+    # One in a thousand times falls on a whole second; a server keeping whole seconds writes most.
+    distinct = set(occurred)
+    whole = {t for t in distinct if t.endswith(".000Z")}
+    return {"not ISO with milliseconds": [t for t in occurred + others if not ISO_MS.fullmatch(t or "")],
+            "event times mostly with milliseconds": 2 * len(whole) < len(distinct)}
 
 
 def comparable(view):
@@ -388,6 +413,7 @@ def main():
             seed(url, cookie, root)
             settle(url, cookie)
             reference_view = views(url, cookie)
+        reference_times = written_times(home, THREAD)
         with running(rust, home, credentials) as (url, cookie):
             rust_view = views(url, cookie)
         assert reference_view["threads"], "the reference's shell lists the seeded thread"
@@ -412,6 +438,7 @@ def main():
             rust_renamed = views(url, cookie)
             rust_search = search_views(args, root, url, credentials[0])
         assert rust_made["threads"], "the Rust server's shell lists its thread"
+        same("event times written with milliseconds", reference_times, written_times(home, RUST_THREAD))
         assert rust_renamed["projection"]["thread"]["title"] == "Renamed on the Rust server", rust_renamed["projection"]["thread"]
         with running(reference, home, credentials) as (url, cookie):
             reference_made = views(url, cookie, RUST_PROJECT, RUST_THREAD)
