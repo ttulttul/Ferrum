@@ -1877,10 +1877,11 @@ async fn thread_list<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
         .map(|t| (t, t.shell()))
         .filter(|(_, row)| snoozed_only.is_none_or(|s| snoozed(row) == s))
         .collect::<Vec<_>>();
+    // Newest activity first (`listProjectThreads`).
     threads.sort_by(|(a, a_row), (b, b_row)| {
-        b_row["createdAt"]
+        b_row["updatedAt"]
             .as_str()
-            .cmp(&a_row["createdAt"].as_str())
+            .cmp(&a_row["updatedAt"].as_str())
             .then_with(|| b.id.cmp(&a.id))
     });
     let total = threads.len();
@@ -1897,6 +1898,19 @@ async fn thread_list<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
         "nextCursor": (cursor + limit < total).then_some(cursor + limit),
         "total": total
     }))
+}
+
+/// The model a run's latest provider turn ran on (`runExecutedModel`).
+fn executed_model(turns: &Value, run: &Value) -> Value {
+    turns
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|turn| {
+            !run["activeAttemptId"].is_null() && turn["runAttemptId"] == run["activeAttemptId"]
+        })
+        .max_by_key(|turn| turn["ordinal"].as_u64())
+        .map_or(Value::Null, |turn| turn["model"].clone())
 }
 
 fn item_status(status: &str) -> &'static str {
@@ -2041,9 +2055,9 @@ async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
     };
     let timeline = visible.iter().filter(shown).collect::<Vec<_>>();
     let position = |entry: &Value| entry["position"].as_i64().unwrap_or(0);
-    // Cursorless reads by a linked environment get the newest items, as its
-    // agents expect; other clients page forward from the start.
-    let newest_first = before.is_some() || (after.is_none() && caller.granted.peer_link);
+    // A read without afterPosition gets the newest items, whoever asks; one
+    // with afterPosition pages forward from there (`newestFirst`).
+    let newest_first = before.is_some() || after.is_none();
     let (page, has_more, has_earlier, offset) = if let Some(item_id) = item_id {
         // An item named by id is read whatever the view shows.
         let found = visible
@@ -2085,6 +2099,7 @@ async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
         .collect::<Vec<_>>();
     let mut sorted = all_runs.clone();
     sorted.sort_by_key(|run| std::cmp::Reverse(run["ordinal"].as_u64()));
+    let turns = thread.full_projection()["providerTurns"].clone();
     let recent = sorted
         .iter()
         .take(run_limit)
@@ -2095,7 +2110,7 @@ async fn thread_read<S: McpHost>(host: &S, caller: &Caller, a: &Value) -> Outcom
                 "status": run["status"],
                 "providerInstanceId": run["providerInstanceId"],
                 "model": run["modelSelection"]["model"].as_str().unwrap_or("default"),
-                "executedModel": run["executedModel"],
+                "executedModel": executed_model(&turns, run),
                 "requestedAt": run["requestedAt"],
                 "startedAt": run["startedAt"],
                 "completedAt": run["completedAt"],

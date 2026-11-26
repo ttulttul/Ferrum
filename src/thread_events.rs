@@ -718,7 +718,18 @@ fn diff_with_command(
     command_type: Option<&str>,
 ) -> Option<Vec<Value>> {
     let mut out = Vec::new();
-    if before["thread"] != after["thread"] && after["thread"].is_object() {
+    // Every event moves its thread's updatedAt on; the reference emits no thread event for that
+    // alone (the run's own events carry it).
+    let without_updated_at = |thread: &Value| {
+        let mut thread = thread.clone();
+        if let Some(fields) = thread.as_object_mut() {
+            fields.remove("updatedAt");
+        }
+        thread
+    };
+    if after["thread"].is_object()
+        && without_updated_at(&before["thread"]) != without_updated_at(&after["thread"])
+    {
         let special = command_type.and_then(|kind| match kind {
             "thread.pull-request.link"
             | "thread.pull-request.unlink"

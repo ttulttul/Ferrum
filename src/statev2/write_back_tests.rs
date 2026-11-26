@@ -444,7 +444,8 @@ async fn writing_back_lazily_read_threads_never_deletes_or_rewrites_other_rows()
     step(
         "message added",
         "thread:4",
-        &[],
+        // Its updatedAt moves on with the message, as the reference's does.
+        &["thread:4"],
         &["messages", "turn_items", "turn_item_counts"],
         &["thread_item_counts", "turn_item_counts"],
     );
@@ -462,7 +463,8 @@ async fn writing_back_lazily_read_threads_never_deletes_or_rewrites_other_rows()
     step(
         "new turn",
         "thread:12",
-        &[],
+        // Its updatedAt moves on with its runs, as the reference's does.
+        &["thread:12"],
         &[
             "runs",
             "run_attempts",
@@ -495,7 +497,8 @@ async fn writing_back_lazily_read_threads_never_deletes_or_rewrites_other_rows()
     step(
         "run finished",
         "thread:12",
-        &[],
+        // Its updatedAt moves on with its runs, as the reference's does.
+        &["thread:12"],
         &[],
         &[
             "runs",
@@ -518,7 +521,8 @@ async fn writing_back_lazily_read_threads_never_deletes_or_rewrites_other_rows()
     step(
         "queued turn",
         "thread:1",
-        &[],
+        // Its updatedAt moves on with its runs, as the reference's does.
+        &["thread:1"],
         &[
             "runs",
             "run_attempts",
