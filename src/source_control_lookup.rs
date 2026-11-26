@@ -514,21 +514,17 @@ async fn bitbucket(repository: &str) -> Result<Value, LookupFailure> {
 
 // --- Azure DevOps -----------------------------------------------------------
 
-async fn azure(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
-    // `parseRepositorySpecifier`: the project is the segment before the name.
-    let parts: Vec<&str> = repository
-        .split('/')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
-    let name = parts.last().copied().unwrap_or(repository.trim());
-    let project = (parts.len() > 1).then(|| parts[parts.len() - 2]);
-    let mut args = vec!["repos", "show", "--detect", "true", "--repository", name];
-    if let Some(project) = project {
-        args.extend(["--project", project]);
-    }
-    args.extend(["--only-show-errors", "--output", "json"]);
-    let output = run(cwd, "az", &args, None, &[]).await.map_err(|_| {
+fn invalid_azure_repository() -> LookupFailure {
+    LookupFailure::provider(
+        "Azure DevOps CLI returned invalid repository JSON.",
+        Some(
+            json!({"name": "AzureDevOpsRepositoryDecodeError", "message": "Azure DevOps CLI failed in getRepositoryCloneUrls: Azure DevOps CLI returned invalid repository JSON."}),
+        ),
+    )
+}
+
+async fn azure_json(cwd: &str, args: &[&str], stdin: Option<&str>) -> Result<Value, LookupFailure> {
+    let output = run(cwd, "az", args, stdin, &[]).await.map_err(|_| {
         let detail = "Azure DevOps CLI (`az`) is required but not available on PATH.";
         LookupFailure::provider(detail, Some(json!({"name": "AzureDevOpsCliUnavailableError", "message": format!("Azure DevOps CLI failed in execute: {detail}")})))
     })?;
@@ -541,7 +537,63 @@ async fn azure(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
             ),
         ));
     }
-    let raw: Value = serde_json::from_str(output.stdout.trim()).unwrap_or(Value::Null);
+    serde_json::from_str(output.stdout.trim()).map_err(|_| invalid_azure_repository())
+}
+
+/// The CLI accepts a literal leading @ via stdin. Only one option can use stdin per call.
+fn azure_text_option<'a>(key: &str, value: &'a str) -> (String, Option<&'a str>) {
+    if value.starts_with('@') {
+        (format!("{key}=@-"), Some(value))
+    } else {
+        (format!("{key}={value}"), None)
+    }
+}
+
+async fn azure(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
+    // `parseRepositorySpecifier`: the project is the segment before the name.
+    let parts: Vec<&str> = repository
+        .split('/')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let name = parts.last().copied().unwrap_or(repository.trim());
+    let project = (parts.len() > 1).then(|| parts[parts.len() - 2]);
+    let (name_arg, name_input) = azure_text_option("--repository", name);
+    let mut args = vec!["repos", "show", "--detect", "true", &name_arg];
+    let mut stdin = name_input;
+    let project_arg;
+    if let Some(project) = project {
+        let (arg, project_input) = azure_text_option("--project", project);
+        project_arg = if name_input.is_some() && project_input.is_some() {
+            let raw = azure_json(
+                cwd,
+                &[
+                    "devops",
+                    "project",
+                    "show",
+                    "--detect",
+                    "true",
+                    &arg,
+                    "--only-show-errors",
+                    "--output",
+                    "json",
+                ],
+                project_input,
+            )
+            .await?;
+            let id = raw["id"]
+                .as_str()
+                .filter(|id| id.len() == 36 && uuid::Uuid::try_parse(id).is_ok())
+                .ok_or_else(invalid_azure_repository)?;
+            format!("--project={id}")
+        } else {
+            stdin = stdin.or(project_input);
+            arg
+        };
+        args.push(&project_arg);
+    }
+    args.extend(["--only-show-errors", "--output", "json"]);
+    let raw = azure_json(cwd, &args, stdin).await?;
     let text = |v: &Value| {
         v.as_str()
             .map(str::trim)
@@ -561,12 +613,7 @@ async fn azure(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
             };
             Ok(info("azure-devops", &owner, &remote, &ssh))
         }
-        _ => Err(LookupFailure::provider(
-            "Azure DevOps CLI returned invalid repository JSON.",
-            Some(
-                json!({"name": "AzureDevOpsRepositoryDecodeError", "message": "Azure DevOps CLI failed in getRepositoryCloneUrls: Azure DevOps CLI returned invalid repository JSON."}),
-            ),
-        )),
+        _ => Err(invalid_azure_repository()),
     }
 }
 

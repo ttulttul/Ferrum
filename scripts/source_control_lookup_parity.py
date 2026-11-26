@@ -39,7 +39,7 @@ with open(os.environ["FAKE_HOST_LOG"], "a") as out:
     out.write(command + "\\n")
 answers = json.loads(pathlib.Path(os.environ["FAKE_HOST_SCRIPT"]).read_text())
 answer = answers.get(command)
-if answer is None:
+if answer is None or ("stdin" in answer and sys.stdin.read() != answer["stdin"]):
     print("fixture: not scripted", file=sys.stderr)
     sys.exit(1)
 sys.stdout.write(answer.get("stdout", ""))
@@ -142,8 +142,13 @@ def main():
             "glab api projects/org%2Frepo": {"stdout": json.dumps({
                 "path_with_namespace": "org/repo", "web_url": remote, "http_url_to_repo": remote, "ssh_url_to_repo": remote})},
             "glab api projects/org%2Fmissing": {"stderr": "glab: 404 Project Not Found (HTTP 404)\n", "code": 1},
-            "az repos show --detect true --repository repo --project project --only-show-errors --output json": {"stdout": json.dumps({
+            "az repos show --detect true --repository=repo --project=project --only-show-errors --output json": {"stdout": json.dumps({
                 "name": "repo", "remoteUrl": remote, "sshUrl": remote, "webUrl": remote, "project": {"name": "project"}})},
+            "az devops project show --detect true --project=@- --only-show-errors --output json": {
+                "stdin": "@fixture-project", "stdout": json.dumps({"id": "12345678-1234-4234-8234-123456789abc"})},
+            "az repos show --detect true --repository=@- --project=12345678-1234-4234-8234-123456789abc --only-show-errors --output json": {
+                "stdin": "@fixture-repo", "stdout": json.dumps({"name": "@fixture-repo", "remoteUrl": remote,
+                    "sshUrl": remote, "webUrl": remote, "project": {"name": "@fixture-project"}})},
             "gt auth status --json host,user,active": {"stdout": json.dumps([
                 {"host": "https://codeberg.org", "user": "fixture", "active": True}])},
             # Signed out: Cursor Origin's API is a fixed real host, so no case may reach it.
@@ -204,6 +209,9 @@ def main():
                 lookup("bitbucket", "bitbucket", "org/repo")
                 lookup("bitbucket missing", "bitbucket", "org/missing")
                 lookup("azure devops", "azure-devops", "org/project/repo")
+                lookup("azure literal names", "azure-devops", "@fixture-project/@fixture-repo")
+                for case in ("azure devops", "azure literal names"):
+                    assert record[case]["_tag"] == "Success", (case, record[case])
                 lookup("forgejo", "forgejo", "org/repo")
                 lookup("forgejo missing", "forgejo", "org/missing")
                 lookup("gitcafe not signed in", "gitcafe", "org/repo")
