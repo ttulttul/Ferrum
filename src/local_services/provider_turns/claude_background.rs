@@ -300,18 +300,25 @@ impl Roster {
                 } else {
                     kind
                 };
-                // A monitor that starts is one Claude resumes after
-                // (`upsertPendingBackgroundTask`).
-                if kind == Kind::Monitor
-                    && self.pending.get(task_id).map(|t| t.kind) != Some(Kind::Monitor)
-                {
-                    self.awaited.insert(task_id.to_owned());
-                }
                 let description = message["description"]
                     .as_str()
                     .filter(|d| !d.trim().is_empty())
                     .map(str::to_owned);
                 let command = self.launch_command(tool_use_id.as_deref());
+                // A monitor that starts, or a sleep timer, is one Claude resumes after
+                // (`upsertPendingBackgroundTask`).
+                let previous = self.pending.get(task_id);
+                let started_wait = match kind {
+                    Kind::Monitor => previous.map(|t| t.kind) != Some(Kind::Monitor),
+                    Kind::Command => {
+                        previous.and_then(|t| t.command.as_ref()).is_none()
+                            && command.as_deref().is_some_and(is_sleep_timer)
+                    }
+                    _ => false,
+                };
+                if started_wait {
+                    self.awaited.insert(task_id.to_owned());
+                }
                 self.upsert(
                     task_id,
                     Task {
@@ -393,6 +400,94 @@ impl Roster {
         }
         (self.detail.take(), background_work::notification(&reports))
     }
+}
+
+/// `CLAUDE_SLEEP_DURATION`: a number, arithmetic, or a variable.
+const SLEEP_DURATION: &str = r"(?:[0-9][0-9A-Za-z_.]*|\$\(\([0-9\s+*/%-]+\)\)|\$\{[0-9A-Za-z_]+(?::?[-=][0-9][0-9A-Za-z_.]*)?\}|\$[0-9A-Za-z_]+)";
+
+/// `isClaudeSleepTimer`: a background command that only sleeps for a finite time, then at most
+/// prints the time or a note, is a timer the agent set to check back, which Claude wakes it for
+/// when it ends. Any other step (`sleep 5 && npm run dev`) may never end.
+fn is_sleep_timer(command: &str) -> bool {
+    static START: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static REPORT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let start = START.get_or_init(|| {
+        regex::Regex::new(&format!(
+            r#"^[ \t\n]*sleep[ \t]+(?:{SLEEP_DURATION}|"{SLEEP_DURATION}"|'[0-9][0-9A-Za-z_.]*')[ \t]*(?:$|;|&&|\n)"#
+        ))
+        .expect("sleep timer pattern")
+    });
+    // Bash separates words only with spaces and tabs.
+    let report = REPORT.get_or_init(|| {
+        regex::Regex::new(r"^[ \t]*(?:$|(?:date|echo|printf|true|:)(?:[ \t]|$))")
+            .expect("sleep timer report pattern")
+    });
+    let Some(found) = start.find(command) else {
+        return false;
+    };
+    split_sleep_timer_steps(&command[found.end()..])
+        .is_some_and(|steps| steps.iter().all(|step| report.is_match(step)))
+}
+
+/// `splitClaudeSleepTimerSteps`: the steps after the sleep, split at unquoted `;`, `&&` and
+/// newlines. Gives up on anything a report never needs that could run or hide another command:
+/// pipes, `||`, a lone `&`, subshells, heredocs, substitutions, `${…}`, `$'…'`, comments, and
+/// unbalanced quotes or escapes.
+fn split_sleep_timer_steps(tail: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = tail.chars().collect();
+    let mut steps = Vec::new();
+    let mut step = String::new();
+    let mut quote: Option<char> = None;
+    let mut index = 0;
+    while index < chars.len() {
+        let char = chars[index];
+        let next = chars.get(index + 1).copied();
+        if quote == Some('\'') {
+            if char == '\'' {
+                quote = None;
+            }
+            step.push(char);
+            index += 1;
+            continue;
+        }
+        if char == '\\' {
+            step.push(char);
+            step.push(next?);
+            index += 2;
+            continue;
+        }
+        if char == '`' || (char == '$' && next.is_some_and(|n| "({'\"".contains(n))) {
+            return None;
+        }
+        if quote == Some('"') {
+            if char == '"' {
+                quote = None;
+            }
+            step.push(char);
+            index += 1;
+            continue;
+        }
+        if char == '\'' || char == '"' {
+            quote = Some(char);
+        } else if char == ';' || char == '\n' || (char == '&' && next == Some('&')) {
+            steps.push(std::mem::take(&mut step));
+            index += if char == '&' { 2 } else { 1 };
+            continue;
+        } else if if char == '&' {
+            next != Some('>') && (index == 0 || chars[index - 1] != '>')
+        } else {
+            "|()<#".contains(char)
+        } {
+            return None;
+        }
+        step.push(char);
+        index += 1;
+    }
+    if quote.is_some() {
+        return None;
+    }
+    steps.push(step);
+    Some(steps)
 }
 
 #[cfg(test)]
@@ -566,5 +661,35 @@ mod tests {
         roster.observe_idle(&json!({"type": "system", "subtype": "task_notification",
             "task_id": "a2", "status": "completed"}));
         assert_eq!(roster.take_wake(), (None, None));
+    }
+    #[test]
+    fn a_background_command_that_only_sleeps_then_reports_is_a_timer() {
+        for timer in [
+            "sleep 30",
+            "sleep 30 && echo checked",
+            "sleep 5m; date",
+            "sleep \"$DELAY\"\necho 'done; really'",
+            "sleep $((2 * 60)) && printf '%s\\n' ok && true",
+            "sleep ${WAIT:-10} && :",
+            "sleep 1 && echo hi > /dev/null 2>&1",
+        ] {
+            assert!(is_sleep_timer(timer), "{timer}");
+        }
+        for other in [
+            "sleep 5 && npm run dev",
+            "sleep infinity && echo",
+            "echo hi && sleep 5",
+            "sleep 5 | cat",
+            "sleep 5 || echo late",
+            "sleep 5 & echo now",
+            "sleep 5 && echo $(whoami)",
+            "sleep 5 && echo `id`",
+            "sleep 5 && echo 'open",
+            "sleep 5 && echo hi # note",
+            "sleep 5 && (echo hi)",
+            "sleep 5 && echo ${HOME}",
+        ] {
+            assert!(!is_sleep_timer(other), "{other}");
+        }
     }
 }
