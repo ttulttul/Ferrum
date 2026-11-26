@@ -54,6 +54,8 @@ mod html_render;
 #[cfg(feature = "native")]
 pub mod issues;
 #[cfg(feature = "native")]
+mod layout_commands;
+#[cfg(feature = "native")]
 pub mod local_services;
 #[cfg(feature = "native")]
 pub mod login_shell;

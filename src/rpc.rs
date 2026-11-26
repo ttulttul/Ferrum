@@ -1676,6 +1676,17 @@ async fn dispatch_method(state: &Arc<AppState>, method: &str, params: &Value) ->
         });
         return Reply::Success(json!({"parentPath":parent,"entries":entries}));
     }
+    if matches!(
+        method,
+        "workspace.layoutCommands" | "workspace.approveLayoutCommands"
+    ) {
+        return crate::layout_commands::dispatch(
+            state,
+            params,
+            method == "workspace.approveLayoutCommands",
+        )
+        .await;
+    }
     if method == "filesystem.getMetadata" {
         if params["paths"]
             .as_array()
