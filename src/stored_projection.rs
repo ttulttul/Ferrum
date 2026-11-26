@@ -192,6 +192,24 @@ impl Stored {
         Ok(())
     }
 
+    /// The whole projection, read from the database for one use and not
+    /// kept, when only the slim records are loaded; `None` when it is held in
+    /// memory already (then read it with [`Stored::get`]).
+    pub(crate) fn read_detached(&self) -> anyhow::Result<Option<Value>> {
+        let Repr::Lazy(lazy) = &self.0 else {
+            return Ok(None);
+        };
+        if lazy.whole.get().is_some() {
+            return Ok(None);
+        }
+        lazy.source.read(&lazy.thread_id)?.map(Some).ok_or_else(|| {
+            anyhow::anyhow!(
+                "the shared orchestration database has no row for thread {}",
+                lazy.thread_id
+            )
+        })
+    }
+
     /// Whether the whole projection is still to be read from the database.
     pub(crate) fn needs_read(&self) -> bool {
         matches!(&self.0, Repr::Lazy(lazy) if lazy.whole.get().is_none())

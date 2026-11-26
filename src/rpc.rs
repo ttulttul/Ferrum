@@ -2533,10 +2533,13 @@ async fn dispatch_method(state: &Arc<AppState>, method: &str, params: &Value) ->
         return reply;
     }
 
-    if matches!(
-        method,
-        "orchestration.getThreadProjection" | "orchestration.getTurnDiff"
-    ) {
+    let mut detached = None;
+    if method == "orchestration.getThreadProjection" {
+        if let Some(thread_id) = params["threadId"].as_str() {
+            detached = state.detached_projection(thread_id).await;
+        }
+    }
+    if method == "orchestration.getTurnDiff" {
         if let Some(thread_id) = params["threadId"].as_str() {
             state.load_whole([thread_id.to_owned()]).await;
         }
@@ -2628,7 +2631,10 @@ async fn dispatch_method(state: &Arc<AppState>, method: &str, params: &Value) ->
                     json!({"_tag":"Fail","error":thread_projection_error(&params["threadId"])}),
                 );
             };
-            thread.snapshot_projection()
+            match detached.filter(|(_, revision)| *revision == thread.revision) {
+                Some((projection, _)) => thread.snapshot_projection_of(projection),
+                None => thread.snapshot_projection(),
+            }
         }
         "orchestration.getTurnDiff" => {
             let thread_id = params["threadId"].as_str().unwrap_or_default();

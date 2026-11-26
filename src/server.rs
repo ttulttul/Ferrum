@@ -326,6 +326,9 @@ impl AppState {
                 );
             }
             drop(store);
+            // Reading every thread's slim records leaves the parsed rows'
+            // garbage in the allocator's arenas: hand it back.
+            crate::projection_eviction::return_freed_memory();
             // What the previous process (either server) left in the outbox.
             let (requeued, cancelled) =
                 crate::statev2::outbox::reconcile_after_process_loss(&shared_store)
