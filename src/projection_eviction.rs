@@ -30,24 +30,37 @@ const SETTLED: [&str; 5] = [
     "rolled_back",
 ];
 
-/// How many open `subscribeThread` streams watch each thread.
+/// How long after its last `subscribeThread` stream closes a thread nothing
+/// else uses is released (the sweep's other rules apply too).
+pub(crate) const AFTER_LAST_WATCH: Duration = Duration::from_secs(30);
+/// How often threads whose last stream closed are looked at.
+pub(crate) const LEFT_SWEEP: Duration = Duration::from_secs(15);
+
 #[derive(Default)]
-pub struct Watchers(Arc<Mutex<HashMap<String, usize>>>);
+struct WatchState {
+    /// Open streams by thread.
+    open: HashMap<String, usize>,
+    /// When each thread's last stream closed, until it is looked at.
+    left: HashMap<String, std::time::Instant>,
+}
+
+/// How many open `subscribeThread` streams watch each thread, and which
+/// threads' last stream closed lately.
+#[derive(Default)]
+pub struct Watchers(Arc<Mutex<WatchState>>);
 
 /// One open stream's hold on its thread; dropping it lets the thread go.
 pub struct Watch {
-    watchers: Arc<Mutex<HashMap<String, usize>>>,
+    watchers: Arc<Mutex<WatchState>>,
     thread_id: String,
 }
 
 impl Watchers {
     pub(crate) fn watch(&self, thread_id: &str) -> Watch {
-        *self
-            .0
-            .lock()
-            .unwrap()
-            .entry(thread_id.to_owned())
-            .or_default() += 1;
+        let mut state = self.0.lock().unwrap();
+        *state.open.entry(thread_id.to_owned()).or_default() += 1;
+        state.left.remove(thread_id);
+        drop(state);
         Watch {
             watchers: self.0.clone(),
             thread_id: thread_id.to_owned(),
@@ -55,17 +68,37 @@ impl Watchers {
     }
 
     pub(crate) fn is_watched(&self, thread_id: &str) -> bool {
-        self.0.lock().unwrap().contains_key(thread_id)
+        self.0.lock().unwrap().open.contains_key(thread_id)
+    }
+
+    /// The threads whose last stream closed at least `after` ago, which are
+    /// no longer tracked as such.
+    fn take_left(&self, after: Duration) -> Vec<String> {
+        let mut state = self.0.lock().unwrap();
+        let now = std::time::Instant::now();
+        let due: Vec<String> = state
+            .left
+            .iter()
+            .filter(|(_, at)| now.duration_since(**at) >= after)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &due {
+            state.left.remove(id);
+        }
+        due
     }
 }
 
 impl Drop for Watch {
     fn drop(&mut self) {
-        let mut watchers = self.watchers.lock().unwrap();
-        if let Some(count) = watchers.get_mut(&self.thread_id) {
+        let mut state = self.watchers.lock().unwrap();
+        if let Some(count) = state.open.get_mut(&self.thread_id) {
             *count -= 1;
             if *count == 0 {
-                watchers.remove(&self.thread_id);
+                state.open.remove(&self.thread_id);
+                state
+                    .left
+                    .insert(self.thread_id.clone(), std::time::Instant::now());
             }
         }
     }
@@ -308,17 +341,42 @@ fn idle() -> Duration {
     IDLE
 }
 
+/// Releases the threads whose last stream closed [`AFTER_LAST_WATCH`] ago,
+/// whose own last use was that long ago too, and that nothing else holds.
+pub(crate) async fn release_left(control: &crate::control_state::ControlState) -> Released {
+    release_left_after(control, AFTER_LAST_WATCH).await
+}
+
+pub(crate) async fn release_left_after(
+    control: &crate::control_state::ControlState,
+    after: Duration,
+) -> Released {
+    let left = control.thread_watchers.take_left(after);
+    if left.is_empty() {
+        return Released::default();
+    }
+    let ids: std::collections::HashSet<&str> = left.iter().map(String::as_str).collect();
+    sweep_where(control, after, |id| ids.contains(id)).await
+}
+
 /// Sweeps every [`SWEEP`] until the server stops.
 #[cfg(feature = "native")]
 pub(crate) async fn run(state: Arc<crate::AppState>) {
     let idle = idle();
     let period = SWEEP.min(idle.max(Duration::from_secs(1)));
-    let mut ticker = tokio::time::interval(period);
+    let mut ticker = tokio::time::interval(LEFT_SWEEP);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;
+    let mut last_full = tokio::time::Instant::now();
     loop {
         ticker.tick().await;
-        let released = sweep(&state.control, idle).await;
+        let mut released = release_left(&state.control).await;
+        if last_full.elapsed() >= period {
+            last_full = tokio::time::Instant::now();
+            let swept = sweep(&state.control, idle).await;
+            released.read += swept.read;
+            released.planned += swept.planned;
+        }
         if released != Released::default() {
             let trimmed = return_freed_memory();
             tracing::info!(
