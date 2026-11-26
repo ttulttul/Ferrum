@@ -64,6 +64,13 @@ pub(crate) async fn launch<H: McpHost>(host: &Arc<H>, params: &Value) -> Reply {
     let source = params["creationSource"].as_str().unwrap_or("web");
     if !resumed {
         let strategy = &params["workspaceStrategy"];
+        // A root launch that names no branch records the project checkout's
+        // (`launchBranch`).
+        let branch = if strategy["type"] == "root" && strategy.get("branch").is_none() {
+            json!(host.checkout_branch(root.clone()).await)
+        } else {
+            strategy["branch"].clone()
+        };
         let path = match strategy["type"].as_str() {
             Some("root") if host.is_scratch_project(project_id).await => {
                 let seed = params["initialMessage"]["text"]
@@ -88,7 +95,7 @@ pub(crate) async fn launch<H: McpHost>(host: &Arc<H>, params: &Value) -> Reply {
             "type":"thread.create","commandId":command_id,"threadId":thread_id,
             "projectId":project_id,"title":params["title"],"modelSelection":params["modelSelection"],
             "runtimeMode":params["runtimeMode"],"interactionMode":params["interactionMode"],
-            "createdBy":"user","creationSource":source,"branch":strategy["branch"],"worktreePath":path
+            "createdBy":"user","creationSource":source,"branch":branch,"worktreePath":path
         });
         if let Err(error) = host.dispatch(create).await {
             return failure(params, error);

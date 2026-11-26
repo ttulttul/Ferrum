@@ -215,7 +215,7 @@ fn numstat(text: &str) -> BTreeMap<String, (u64, u64)> {
 fn totals(map: &BTreeMap<String, (u64, u64)>) -> (u64, u64) {
     map.values().fold((0, 0), |(i, d), (a, b)| (i + a, d + b))
 }
-pub(super) async fn branch(cwd: &str) -> Option<String> {
+pub(crate) async fn branch(cwd: &str) -> Option<String> {
     read(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await
 }
 /// The branch `refs/remotes/<remote>/HEAD` names, as `resolveDefaultBranchName` reads it. Unlike

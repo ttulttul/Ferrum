@@ -13,7 +13,8 @@ launches a Claude thread with a message. The launched thread's first turn, while
 Then the scheduled run runs there. The task's result wakes nobody, as the turn that delegated it was
 stopped. Compared: every MCP
 answer (without retry counts), the launched thread's runs in order (status and message), and the
-prompts each of its CLIs was given. All data is fake: temporary homes, loopback addresses,
+prompts each of its CLIs was given, and the launched thread's branch (a root launch that names
+none records the project checkout's) and worktree path. All data is fake: temporary homes, loopback addresses,
 generated keys and fake CLIs.
 """
 import argparse
@@ -123,6 +124,8 @@ def main():
                     # In order; their ordinals themselves are compared elsewhere.
                     "launched runs": [{k: v for k, v in run.items() if k != "ordinal"} for run in runs(view)],
                     "launched cli": cli_prompts(log, launched),
+                    # A root launch naming no branch records the project checkout's.
+                    "launched thread": {key: (view.get("thread") or {}).get(key) for key in ("branch", "worktreePath")},
                 }
                 results[side] = mask(record, server, tmp)
     if args.dump:

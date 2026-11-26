@@ -271,6 +271,11 @@ pub trait McpHost: AuthHost {
     ) -> HostFuture<Result<(), (String, String)>> {
         Box::pin(async { Ok(()) })
     }
+    /// `GitWorkflowService.currentBranch`: the branch the checkout at `root`
+    /// has out, if it is a Git checkout on a branch.
+    fn checkout_branch(self: &Arc<Self>, _root: String) -> HostFuture<Option<String>> {
+        Box::pin(async { None })
+    }
     /// `sourceControl.cloneRepository`, or the failure's `detail`.
     fn clone_repository(self: &Arc<Self>, _input: Value) -> HostFuture<Result<Value, String>> {
         Box::pin(async { Err("The source control operation could not be completed.".to_owned()) })
