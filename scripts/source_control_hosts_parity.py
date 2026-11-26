@@ -30,7 +30,7 @@ if cmd=="glab" and args==["mr","checkout","--","3"] or cmd=="gt" and args==["pr"
     subprocess.run(["git","switch","--quiet","--","topic"],check=True)
 elif cmd=="glab" and args==["mr","view","--output","json","--","3"] or cmd=="az" and args==["repos","pr","show","--detect","false","--id","3","--only-show-errors","--output","json","--organization","https://dev.azure.com/org"]:
     print(json.dumps(data))
-elif cmd=="glab" and args==["mr","list","--source-branch","topic","--all","--per-page","100","--output","json"] or cmd=="az" and args==["repos","pr","list","--detect","false","--source-branch","topic","--status","all","--top","100","--only-show-errors","--output","json","--organization","https://dev.azure.com/org","--project=project","--repository=repo"]:
+elif cmd=="glab" and args==["mr","list","--source-branch","topic","--all","--per-page","100","--output","json"] or cmd=="az" and args==["repos","pr","list","--detect","false","--source-branch=topic%2Fissue%233","--status","all","--top","100","--only-show-errors","--output","json","--organization","https://dev.azure.com/org","--project=project","--repository=repo"]:
     print(json.dumps([data]))
 elif cmd=="gt" and args[:7]==["api","--include","--host","https://codeberg.org","--user","fixture","--method"] and "/pulls?state=all&head=topic" in args[-1]:
     print("HTTP/1.1 200 OK",file=sys.stderr)
@@ -99,7 +99,8 @@ def observe(server, root, api):
                 call(host,"missing credential","resolvePullRequest",dict(cwd=str(repo),reference="3"),False)
                 shutil.rmtree(repo)
                 continue
-            git(repo, "switch", "-qc", "topic")
+            topic = "topic/issue#3" if host == "Azure" else "topic"
+            git(repo, "switch", "-qc", topic)
             git(repo, "commit", "--allow-empty", "-qm", "Change")
             sha = git(repo,"rev-parse","HEAD").decode().strip()
             git(repo, "switch", "-q", "main")
@@ -109,7 +110,7 @@ def observe(server, root, api):
             branch = lambda name: dict(repository={"full_name":"org/repo"},branch={"name":name},commit={"hash":sha})
             pull = dict(number=3, title="Example", iid=3, web_url="https://gitlab.com/org/repo/-/merge_requests/3",
                         source_branch="topic",target_branch="main",sha=sha,state="opened",
-                        pullRequestId=3,sourceRefName="refs/heads/topic",targetRefName="refs/heads/main",status="active",
+                        pullRequestId=3,sourceRefName=f"refs/heads/{topic}",targetRefName="refs/heads/main",status="active",
                         lastMergeSourceCommit={"commitId":sha},_links={"web":{"href":"https://dev.azure.com/org/project/_git/repo/pullrequest/3"}})
             if host=="Forgejo":
                 ref = lambda name: dict(ref=name,sha=sha,repo={"full_name":"org/repo","owner":{"login":"org"}})

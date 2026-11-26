@@ -421,6 +421,7 @@ impl Remote {
         let branch: String = url::form_urlencoded::byte_serialize(head.as_bytes()).collect();
         let rows = match self.kind {
             "gitlab" | "azure-devops" => {
+                let azure_branch;
                 let (bin, mut args) = if self.kind == "gitlab" {
                     let mut args = vec!["mr", "list", "--source-branch", head];
                     if !open_only {
@@ -429,6 +430,13 @@ impl Remote {
                     args.extend(["--per-page", "100", "--output", "json"]);
                     ("glab", args)
                 } else {
+                    // az recognizes literal ref prefixes before building its request URL.
+                    let prefix = ["refs/heads/", "refs/pull/", "refs/tags/"]
+                        .into_iter()
+                        .find(|prefix| head.starts_with(prefix))
+                        .unwrap_or("");
+                    let name = crate::thread_projection::uri_component(&head[prefix.len()..]);
+                    azure_branch = format!("--source-branch={prefix}{name}");
                     (
                         "az",
                         vec![
@@ -437,8 +445,7 @@ impl Remote {
                             "list",
                             "--detect",
                             "true",
-                            "--source-branch",
-                            &branch,
+                            azure_branch.as_str(),
                             "--status",
                             if open_only { "active" } else { "all" },
                             "--top",
