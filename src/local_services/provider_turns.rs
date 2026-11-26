@@ -93,7 +93,7 @@ pub(crate) use requests::respond;
 
 use super::provider_event_log::{Direction, Protocol, ProtocolLog, ProviderEventLog};
 use crate::workspace::provider::{
-    ProviderFailure, ProviderItem, ThreadDisposition, TurnStatus, CODEX,
+    ProviderFailure, ProviderItem, ThreadDisposition, TokenUsage, TurnStatus, CODEX,
 };
 use crate::workspace::{ProviderEvent, TurnEvent, TurnExit, TurnSpec};
 use std::process::Stdio;
@@ -332,6 +332,7 @@ impl Sink {
         .into_iter()
         .filter_map(|held| held.lock().ok().and_then(|mut held| held.take()))
         .collect();
+        closing.extend(end.closing);
         for mut item in open {
             // A Codex command can outlive a completed turn, as background
             // work; the reference ends only an interrupted or failed turn's.
@@ -393,16 +394,28 @@ pub(crate) struct TurnEnd {
     status: TurnStatus,
     failure: Option<ProviderFailure>,
     failure_item: Option<Box<ProviderItem>>,
+    closing: Vec<ProviderEvent>,
     disposition: ThreadDisposition,
     cancelled: bool,
 }
 
 impl TurnEnd {
+    /// OpenCode reports the last model call and whole-turn totals in the
+    /// ended provider turn, even when no model call completed.
+    fn with_usage(mut self, last_call: Option<TokenUsage>, turn: serde_json::Value) -> Self {
+        if let Some(usage) = last_call {
+            self.closing.push(ProviderEvent::Usage { usage });
+        }
+        self.closing.push(ProviderEvent::TurnUsage { usage: turn });
+        self
+    }
+
     fn completed() -> Self {
         Self {
             status: TurnStatus::Completed,
             failure: None,
             failure_item: None,
+            closing: Vec::new(),
             disposition: ThreadDisposition::Reusable,
             cancelled: false,
         }
@@ -412,6 +425,7 @@ impl TurnEnd {
             status: TurnStatus::Interrupted,
             failure: None,
             failure_item: None,
+            closing: Vec::new(),
             disposition: ThreadDisposition::Reusable,
             cancelled,
         }
@@ -421,6 +435,7 @@ impl TurnEnd {
             status: TurnStatus::Failed,
             failure: Some(failure),
             failure_item: None,
+            closing: Vec::new(),
             disposition,
             cancelled: false,
         }

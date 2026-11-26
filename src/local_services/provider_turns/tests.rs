@@ -1467,6 +1467,24 @@ fn opencode_requests(log: &Path) -> Vec<Value> {
         .collect()
 }
 
+fn assert_opencode_final_usage(events: &[ProviderEvent]) {
+    let Some(ProviderEvent::TurnTerminal { closing, .. }) = events.last() else {
+        panic!("missing turn end");
+    };
+    assert!(closing
+        .iter()
+        .any(|e| matches!(e, ProviderEvent::Usage { usage }
+        if usage.used_tokens == 4380 && usage.max_tokens == Some(180_000))));
+    assert!(closing
+        .iter()
+        .any(|e| matches!(e, ProviderEvent::TurnUsage { usage }
+        if usage["usageStatus"] == "complete")));
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::Usage { .. } | ProviderEvent::TurnUsage { .. }
+    )));
+}
+
 #[tokio::test]
 async fn opencode_turn_streams_reasoning_tools_and_the_reply() {
     let dir = tempfile::tempdir().unwrap();
@@ -1489,10 +1507,7 @@ async fn opencode_turn_streams_reasoning_tools_and_the_reply() {
     assert_eq!(edit.last().unwrap().fields["fileName"], "/w/notes.txt");
     assert_eq!(final_text(&events), "Ran echo hi and wrote notes.txt.");
     // The last step's tokens, with the catalog's input limit as the window.
-    assert!(events.iter().any(|e| matches!(
-        e,
-        ProviderEvent::Usage { usage } if usage.used_tokens == 4380 && usage.max_tokens == Some(180_000)
-    )));
+    assert_opencode_final_usage(&events);
     // The turn is named by its session and attempt, then by its user message.
     assert!(events.iter().any(|e| matches!(
         e,
@@ -1793,10 +1808,7 @@ async fn opencode2_turn_prompts_its_session_and_ends_with_the_execution() {
         ("completed", &json!("echo hi"), &json!("hi\n"))
     );
     assert_eq!(final_text(&events), "Ran echo hi.");
-    assert!(events.iter().any(|e| matches!(
-        e,
-        ProviderEvent::Usage { usage } if usage.used_tokens == 4380 && usage.max_tokens == Some(180_000)
-    )));
+    assert_opencode_final_usage(&events);
     let requests = opencode_requests(&log);
     let paths: Vec<String> = requests
         .iter()
