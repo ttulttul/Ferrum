@@ -22,20 +22,20 @@ CLI = """#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys
 cmd=pathlib.Path(sys.argv[0]).name
 args=sys.argv[1:]
-if cmd=="tea" and args==["login","list","--output","json"]:
-    print(json.dumps([dict(name="forge",url="https://codeberg.org",user="fixture",default="true")]))
+if cmd=="gt" and args==["auth","status","--json","host,user,active"]:
+    print(json.dumps([dict(host="https://codeberg.org",user="fixture",active=True)]))
     sys.exit(0)
 data=json.loads(pathlib.Path(".git/provider-fixture").read_text())
-if cmd=="glab" and args==["mr","checkout","--","3"] or cmd=="tea" and args==["pulls","checkout","--login","forge","--repo","org/repo","--branch","3"]:
+if cmd=="glab" and args==["mr","checkout","--","3"] or cmd=="gt" and args==["pr","checkout","3","--host","https://codeberg.org","--user","fixture","--repo","org/repo"]:
     subprocess.run(["git","switch","--quiet","--","topic"],check=True)
 elif cmd=="glab" and args==["mr","view","--output","json","--","3"] or cmd=="az" and args==["repos","pr","show","--detect","false","--id","3","--only-show-errors","--output","json","--organization","https://dev.azure.com/org"]:
     print(json.dumps(data))
 elif cmd=="glab" and args==["mr","list","--source-branch","topic","--all","--per-page","100","--output","json"] or cmd=="az" and args==["repos","pr","list","--detect","false","--source-branch","topic","--status","all","--top","100","--only-show-errors","--output","json","--organization","https://dev.azure.com/org","--project=project","--repository=repo"]:
     print(json.dumps([data]))
-elif cmd=="tea" and args[:7]==["api","--include","--login","forge","--repo","org/repo","--method"] and "/pulls?state=all&head=topic" in args[-1]:
+elif cmd=="gt" and args[:7]==["api","--include","--host","https://codeberg.org","--user","fixture","--method"] and "/pulls?state=all&head=topic" in args[-1]:
     print("HTTP/1.1 200 OK",file=sys.stderr)
     print(json.dumps([data] if args[-1].endswith("page=1") else []))
-elif cmd=="tea" and args==["api","--include","--login","forge","--repo","org/repo","--method","GET","https://codeberg.org/api/v1/repos/org/repo/pulls/3"]:
+elif cmd=="gt" and args==["api","--include","--host","https://codeberg.org","--user","fixture","--method","GET","https://codeberg.org/api/v1/repos/org/repo/pulls/3"]:
     print("HTTP/1.1 200 OK",file=sys.stderr)
     print(json.dumps(data))
 else:
@@ -151,7 +151,7 @@ def main():
             executable=shutil.which(name)
             if executable:
                 (bin/name).symlink_to(executable)
-        for name in ("glab","az","tea"):
+        for name in ("glab","az","gt"):
             tool=bin/name
             tool.write_text(CLI)
             tool.chmod(0o700)

@@ -47,6 +47,30 @@ pub fn projects(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     rows.collect()
 }
 
+/// Migration 116 snapshots the source runs at fork creation. A historical
+/// fork has no snapshot and inherits a run rolled back at or after its creation.
+pub(crate) fn fork_source_run_ids(
+    conn: &Connection,
+    fork_id: &str,
+) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let ids: Option<String> = conn.query_row(
+        "SELECT COALESCE(fork.fork_run_ids_json, (
+           SELECT json_group_array(run.run_id)
+           FROM orchestration_v2_projection_runs AS run
+           WHERE run.thread_id = json_extract(fork.payload_json, '$.forkedFrom.threadId')
+             AND run.ordinal <= (SELECT ordinal FROM orchestration_v2_projection_runs
+                                 WHERE run_id = json_extract(fork.payload_json, '$.forkedFrom.runId'))
+             AND NOT COALESCE(run.status = 'rolled_back' AND
+                              julianday(run.completed_at) < julianday(fork.created_at), 0)
+         )) FROM orchestration_v2_projection_threads AS fork WHERE fork.thread_id = ?1",
+        [fork_id],
+        |row| row.get(0),
+    ).optional()?;
+    serde_json::from_str(ids.as_deref().unwrap_or("[]")).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })
+}
+
 /// The ids of threads that are not deleted, oldest first.
 pub fn thread_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut statement = conn.prepare(

@@ -141,12 +141,13 @@ const TERMINAL_RUN = new Set(["completed", "failed", "interrupted", "cancelled"]
 
 /** A stopped run is terminal before its rollback checkpoint is attached. In
  * stop scenarios keep reading until the capture updates that same run. */
-const settledRunIds = (item, awaitStoppedCheckpoint) => {
+const settledRunIds = (item, awaitStoppedCheckpoint, awaitCompletedCheckpoint) => {
   const runs = item.kind === "snapshot" ? (item.projection?.runs ?? [])
     : item.kind === "event" && item.event.type === "run.updated" ? [item.event.payload] : [];
   return runs.filter((run) =>
     TERMINAL_RUN.has(run.status) &&
-    (!awaitStoppedCheckpoint || !["interrupted", "cancelled"].includes(run.status) || run.checkpointId != null)
+    (!awaitStoppedCheckpoint || !["interrupted", "cancelled"].includes(run.status) || run.checkpointId != null) &&
+    (!awaitCompletedCheckpoint || run.status !== "completed" || run.checkpointId != null)
   ).map((run) => run.id);
 };
 
@@ -251,9 +252,9 @@ const liveTurn = (client, seed) =>
           // With `seed.settleRuns`, the turn settles once that many runs have ended (a
           // delegated task's delivery is a run of its own).
           if (dispatched) {
-            for (const id of settledRunIds(item, awaitStoppedCheckpoint)) ended.add(id);
+            for (const id of settledRunIds(item, awaitStoppedCheckpoint, Boolean(seed.settledFile))) ended.add(id);
             if (ended.size >= (seed.settleRuns ?? 1)) {
-              // A title held until the turn settled (`seed.settledFile`) may now come.
+              // Release the title after the checkpoint is visible on this subscription.
               if (seed.settledFile) NodeFs.writeFileSync(seed.settledFile, "");
               yield* Deferred.succeed(settled, undefined);
             }

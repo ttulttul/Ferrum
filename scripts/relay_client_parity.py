@@ -93,6 +93,8 @@ def server(prefix, root, port, secret, signing_key, env):
             env=server_env(root, {**env, "HOME": str(root), "T3CODE_HOME": str(root)}),
         )
         try:
+            # The reference can spawn the connector through an intermediate Node launcher.
+            (root / "tools-bin" / "fixture-server.pid").write_text(str(process.pid))
             ready(url, process)
             yield process, url
         finally:

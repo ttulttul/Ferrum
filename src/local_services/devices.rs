@@ -44,8 +44,14 @@ const UNCERTAIN_CREATE_MS: f64 = 5.0 * 60_000.0;
 type Tool = (&'static str, &'static str, &'static str);
 type HubEnv = (Vec<(OsString, OsString)>, Option<String>);
 
-struct HubRuntime {
+#[derive(Clone)]
+struct HubEndpoint {
     origin: String,
+    token: String,
+}
+
+struct HubRuntime {
+    endpoint: HubEndpoint,
     child: Child,
     emulator_extra_args: Option<String>,
     emulator_stamp: Option<String>,
@@ -706,28 +712,45 @@ async fn query(request: reqwest::RequestBuilder, op: &str) -> Reply {
     res.json().await.map_err(|_| op_err(op, "request_failed"))
 }
 
-fn running_origin(runtime: &mut Option<HubRuntime>) -> Option<String> {
+fn running_hub(runtime: &mut Option<HubRuntime>) -> Option<HubEndpoint> {
     let hub = runtime.as_mut()?;
     if hub.child.try_wait().ok() == Some(None) {
-        Some(hub.origin.clone())
+        Some(hub.endpoint.clone())
     } else {
         None
     }
 }
 
-async fn ensure_hub(runtime: &mut Option<HubRuntime>, dir: &Path) -> Result<String, Value> {
+/// Read both output streams throughout the hub's lifetime. Its startup link
+/// contains the session token and must stay out of server and client logs.
+async fn read_hub_output(
+    output: impl tokio::io::AsyncRead + Unpin,
+    tokens: tokio::sync::mpsc::Sender<String>,
+) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    static TOKEN: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\btoken=([a-zA-Z0-9_.~-]+)").unwrap());
+    let mut lines = BufReader::new(output).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(found) = TOKEN.captures(&line) {
+            let _ = tokens.try_send(found[1].to_owned());
+        }
+    }
+}
+
+async fn ensure_hub(runtime: &mut Option<HubRuntime>, dir: &Path) -> Result<HubEndpoint, Value> {
     let sdk = sdk_root();
     let stamp = emulator_stamp(sdk.as_deref());
     let mut computed_env: Option<HubEnv> = None;
     if let Some(hub) = runtime.as_mut() {
         if hub.child.try_wait().ok() == Some(None) {
             if hub.emulator_stamp == stamp {
-                return Ok(hub.origin.clone());
+                return Ok(hub.endpoint.clone());
             }
             let (vars, extra) = hub_environment(sdk.as_deref()).await;
             if extra == hub.emulator_extra_args {
                 hub.emulator_stamp = stamp;
-                return Ok(hub.origin.clone());
+                return Ok(hub.endpoint.clone());
             }
             computed_env = Some((vars, extra));
             runtime.take();
@@ -762,6 +785,7 @@ async fn ensure_hub(runtime: &mut Option<HubRuntime>, dir: &Path) -> Result<Stri
         &port.to_string(),
         "--host",
         "127.0.0.1",
+        "--require-token",
         "--hide-sidebar",
         "--hide-boot-device",
     ]);
@@ -771,13 +795,28 @@ async fn ensure_hub(runtime: &mut Option<HubRuntime>, dir: &Path) -> Result<Stri
     for (k, v) in vars {
         cmd.env(k, v);
     }
+    let hub_dir = dir.join("device/hub");
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder
+        .create(&hub_dir)
+        .map_err(|_| host_err("starting the device hub", None))?;
+    cmd.env("EXPO_DEVICE_HUB_STATE_DIR", hub_dir);
     let mut child = cmd
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| host_err("starting the device hub", None))?;
+    let (tokens, mut announced) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(read_hub_output(
+        child.stdout.take().unwrap(),
+        tokens.clone(),
+    ));
+    tokio::spawn(read_hub_output(child.stderr.take().unwrap(), tokens));
     let origin = format!("http://127.0.0.1:{port}");
     let readyz = format!("{origin}/readyz");
     let probe_client = hub_client(Duration::from_secs(2));
@@ -788,17 +827,23 @@ async fn ensure_hub(runtime: &mut Option<HubRuntime>, dir: &Path) -> Result<Stri
         }
         if let Ok(res) = probe_client.get(&readyz).send().await {
             if res.status().is_success() {
+                let token = tokio::time::timeout(HUB_READY_TIMEOUT, announced.recv())
+                    .await
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| host_err("reading the device hub's session token", None))?;
+                let endpoint = HubEndpoint { origin, token };
                 if let Some(pid) = child.id() {
                     record_hub_state(dir, pid, port, &entry).await;
                 }
                 *runtime = Some(HubRuntime {
-                    origin: origin.clone(),
+                    endpoint: endpoint.clone(),
                     child,
                     emulator_extra_args: extra_args,
                     emulator_stamp: stamp,
                     state_file,
                 });
-                return Ok(origin);
+                return Ok(endpoint);
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -874,7 +919,7 @@ pub(super) enum HostRun {
 #[derive(Clone)]
 pub(super) struct HostCtx {
     pub id: String,
-    pub origin: String,
+    hub: HubEndpoint,
     pub run: HostRun,
     pub node_path: String,
     pub ios: bool,
@@ -882,10 +927,10 @@ pub(super) struct HostCtx {
 }
 
 impl HostCtx {
-    fn local(origin: &str) -> Self {
+    fn local(hub: HubEndpoint) -> Self {
         Self {
             id: LOCAL_HOST_ID.into(),
-            origin: origin.to_owned(),
+            hub,
             run: HostRun::Local,
             node_path: agent_device::node_executable()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -1034,10 +1079,12 @@ async fn list_adb_devices(ctx: &HostCtx) -> Option<Vec<Value>> {
 }
 
 async fn list_hub(ctx: &HostCtx) -> Result<HubListResult, Value> {
-    let origin = &ctx.origin;
+    let origin = &ctx.hub.origin;
     let android_available = ctx.android;
     let ios_available = ctx.ios;
-    let request = hub_client(LIST_TIMEOUT).get(format!("{origin}/api/devices"));
+    let request = hub_client(LIST_TIMEOUT)
+        .get(format!("{origin}/api/devices"))
+        .bearer_auth(&ctx.hub.token);
     let result: Value = match tokio::time::timeout(LIST_TIMEOUT, request.send()).await {
         Err(_) => {
             let mut incomplete = Vec::new();
@@ -1272,11 +1319,12 @@ fn classify_boot_reason(diagnostics: Option<&str>) -> &'static str {
 }
 
 async fn shutdown(ctx: &HostCtx, platform: &str, id: &str) -> Reply {
-    let origin = ctx.origin.as_str();
+    let origin = ctx.hub.origin.as_str();
     let post_shutdown = |path: String, body: Value| async move {
         let res = query(
             hub_client(Duration::from_secs(15))
                 .post(format!("{origin}{path}"))
+                .bearer_auth(&ctx.hub.token)
                 .json(&body),
             "shutdown",
         )
@@ -1734,7 +1782,7 @@ impl DeviceService {
                     self.publish(&mut state);
                 }
             }
-            let fresh_host = host(dir, running_origin(&mut runtime).is_some());
+            let fresh_host = host(dir, running_hub(&mut runtime).is_some());
             if input["inspectOnly"] == true || input.get("updateTool").is_some() {
                 state["hosts"] = json!([fresh_host.clone()]);
                 self.publish(&mut state);
@@ -1753,7 +1801,7 @@ impl DeviceService {
                     .any(|p| p["available"] == true)
             {
                 match ensure_hub(&mut runtime, dir).await {
-                    Ok(origin) => match list_hub(&HostCtx::local(&origin)).await {
+                    Ok(origin) => match list_hub(&HostCtx::local(origin)).await {
                         Ok(listed) => {
                             apply_list_result(&mut state, dir, LOCAL_HOST_ID, listed);
                             self.publish(&mut state);
@@ -1946,7 +1994,7 @@ impl DeviceService {
                         continue;
                     }
                     let current = if session_host == LOCAL_HOST_ID {
-                        running_origin(&mut runtime).map(|origin| HostCtx::local(&origin))
+                        running_hub(&mut runtime).map(HostCtx::local)
                     } else {
                         self.ssh_current(session_host).await
                     };
@@ -1987,7 +2035,7 @@ impl DeviceService {
                         continue;
                     }
                     let current = if session_host == LOCAL_HOST_ID {
-                        running_origin(&mut runtime).map(|origin| HostCtx::local(&origin))
+                        running_hub(&mut runtime).map(HostCtx::local)
                     } else {
                         self.ssh_current(session_host).await
                     };
@@ -2020,14 +2068,14 @@ impl DeviceService {
             return Err(self.disabled_for(host_id));
         }
         let ctx = if host_id == LOCAL_HOST_ID {
-            HostCtx::local(&ensure_hub(&mut runtime, dir).await?)
+            HostCtx::local(ensure_hub(&mut runtime, dir).await?)
         } else {
             let ctx = self.ssh_readiness(host_id, dir).await?;
             // Readiness published the host's status.
             state = self.current();
             ctx
         };
-        let origin = ctx.origin.clone();
+        let origin = ctx.hub.origin.clone();
         if name == "shutdown" {
             let result = shutdown(&ctx, string(input, "platform")?, id).await?;
             state["sessions"]
@@ -2075,6 +2123,7 @@ impl DeviceService {
                 let boot_res = query(
                     hub_client(BOOT_TIMEOUT)
                         .post(format!("{origin}/api/devices/boot"))
+                        .bearer_auth(&ctx.hub.token)
                         .json(&json!({
                             "platform": device["platform"],
                             "id": id,
@@ -2112,6 +2161,7 @@ impl DeviceService {
                     query(
                         hub_client(BOOT_TIMEOUT)
                             .post(format!("{origin}/vendor/serve-sim/grid/api/start"))
+                            .bearer_auth(&ctx.hub.token)
                             .json(&json!({"udid": id})),
                         "attach stream",
                     )
@@ -2149,6 +2199,7 @@ impl DeviceService {
                 query(
                     hub_client(BOOT_TIMEOUT)
                         .post(format!("{origin}/vendor/serve-sim/grid/api/start"))
+                        .bearer_auth(&ctx.hub.token)
                         .json(&json!({"udid": id})),
                     "attach stream",
                 )
@@ -2410,7 +2461,7 @@ fn runs_on_xcode26_runtime(version: &str) -> bool {
 
 /// `DeviceHubOperations.screenshot`.
 async fn hub_screenshot(ctx: &HostCtx, device: &Value) -> Result<Vec<u8>, Value> {
-    let origin = &ctx.origin;
+    let origin = &ctx.hub.origin;
     let platform = device["platform"].as_str().unwrap_or("");
     let id = device["id"].as_str().unwrap_or("");
     let url = format!(
@@ -2418,7 +2469,12 @@ async fn hub_screenshot(ctx: &HostCtx, device: &Value) -> Result<Vec<u8>, Value>
         vendor_prefix(platform),
         agent_device::encode_uri_component(id)
     );
-    let reason = match hub_client(SCREENSHOT_TIMEOUT).post(url).send().await {
+    let reason = match hub_client(SCREENSHOT_TIMEOUT)
+        .post(url)
+        .bearer_auth(&ctx.hub.token)
+        .send()
+        .await
+    {
         Ok(response) if response.status().is_success() => match response.bytes().await {
             Ok(bytes) => return Ok(bytes.to_vec()),
             Err(_) => "request_failed",
@@ -2945,7 +3001,7 @@ impl DeviceService {
         let mut runtime = self.runtime.lock().await;
         let ctx = if target_host == LOCAL_HOST_ID {
             match ensure_hub(&mut runtime, dir).await {
-                Ok(origin) => HostCtx::local(&origin),
+                Ok(origin) => HostCtx::local(origin),
                 Err(error) => {
                     drop(runtime);
                     self.set_host_status("failed", Some(error_detail(&error)));
@@ -3284,7 +3340,10 @@ impl DeviceService {
                     };
                     let ctx = HostCtx {
                         id: config.id.clone(),
-                        origin: format!("http://127.0.0.1:{hub_port}"),
+                        hub: HubEndpoint {
+                            origin: format!("http://127.0.0.1:{hub_port}"),
+                            token: started.hub_token.clone(),
+                        },
                         run: HostRun::Ssh {
                             config: config.clone(),
                             owner: owner.clone(),
@@ -5672,7 +5731,7 @@ impl DeviceService {
                 } else if probe {
                     endpoints.push((
                         id.clone(),
-                        entry.ctx.origin.clone(),
+                        entry.ctx.hub.origin.clone(),
                         entry.agent.as_ref().map(|agent| agent.base_url.clone()),
                     ));
                 }
@@ -6044,26 +6103,42 @@ impl DeviceService {
     }
 
     /// `currentReadiness`'s hub: this machine's, or an SSH host's through its tunnel.
-    pub async fn hub_origin(&self, host: Option<&str>) -> Option<String> {
-        match host.filter(|h| *h != LOCAL_HOST_ID) {
+    pub async fn hub_route(&self, host: Option<&str>) -> Option<HubRoute> {
+        let endpoint = match host.filter(|h| *h != LOCAL_HOST_ID) {
             // An Expo host's sessions route themselves (`hub_upstream`).
-            Some(host) if self.eas_config(host).is_some() => self
-                .with_eas(host, |state| {
-                    state.ready.then(|| "https://api.expo.dev".to_owned())
-                })
-                .flatten(),
+            Some(host) if self.eas_config(host).is_some() => {
+                return self
+                    .with_eas(host, |state| {
+                        state
+                            .ready
+                            .then(|| ("https://api.expo.dev".to_owned(), vec![]))
+                    })
+                    .flatten()
+            }
             // A Simlock host is ready once its CLI is; its leases route themselves (`hub_upstream`).
-            Some(host) if self.simlock_config(host).is_some() => self
-                .with_simlock(host, |state| {
-                    state.cli.is_some().then(|| state.config.gateway())
-                })
-                .flatten(),
-            Some(host) => self.ssh_current(host).await.map(|ctx| ctx.origin),
+            Some(host) if self.simlock_config(host).is_some() => {
+                return self
+                    .with_simlock(host, |state| {
+                        state
+                            .cli
+                            .is_some()
+                            .then(|| (state.config.gateway(), vec![]))
+                    })
+                    .flatten()
+            }
+            Some(host) => self.ssh_current(host).await.map(|ctx| ctx.hub),
             None => {
                 let mut runtime = self.runtime.lock().await;
-                running_origin(&mut runtime)
+                running_hub(&mut runtime)
             }
-        }
+        }?;
+        Some((
+            endpoint.origin,
+            vec![(
+                "authorization".to_owned(),
+                format!("Bearer {}", endpoint.token),
+            )],
+        ))
     }
 }
 

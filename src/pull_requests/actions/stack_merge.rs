@@ -30,13 +30,13 @@ fn unsupported() -> Value {
     )
 }
 
-pub(super) async fn run(
+async fn pinned_stack_head(
     gh: &Github<'_>,
     repo: &str,
     number: u64,
     stack_number: u64,
     input: &Value,
-) -> Reply {
+) -> Result<String, Value> {
     let stacks = gh
         .json(
             "GET",
@@ -89,6 +89,42 @@ pub(super) async fn run(
     {
         return Err(unsupported());
     }
+    target["headSha"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(changed)
+}
+
+async fn stack_node_id(
+    service: &super::super::PullRequestService,
+    gh: &Github<'_>,
+    repo: &str,
+    number: u64,
+) -> Result<String, Value> {
+    let (owner, name) = repo.split_once('/').ok_or_else(invalid)?;
+    let vars = json!({"owner":owner,"name":name,"number":number});
+    super::super::review::node_id(service, gh, repo, number, &vars, OP).await
+}
+
+pub(super) async fn run(
+    service: &super::super::PullRequestService,
+    gh: &Github<'_>,
+    repo: &str,
+    number: u64,
+    stack_number: u64,
+    input: &Value,
+) -> Reply {
+    if input["action"] == "disable-auto-merge" {
+        // Cancelling applies to the layer on which auto-merge was armed; it needs no head pins.
+        let id = stack_node_id(service, gh, repo, number).await?;
+        let query = format!("mutation DisableStackAutoMerge($pullRequestId:ID!){{disablePullRequestAutoMerge(input:{{pullRequestId:$pullRequestId,includeStack:true}}){{pullRequest{{...PullRequestActionSummary}}}}}}\n{}", super::SUMMARY);
+        let data = gh
+            .graphql(&query, json!({"pullRequestId":id}))
+            .await
+            .map_err(provider_error)?;
+        return Ok(data["disablePullRequestAutoMerge"]["pullRequest"].clone());
+    }
+    let mut head = pinned_stack_head(gh, repo, number, stack_number, input).await?;
     let method = input["mergeMethod"].as_str().unwrap_or("merge");
     if !matches!(method, "merge" | "squash" | "rebase") {
         return Err(error(
@@ -96,8 +132,30 @@ pub(super) async fn run(
             &format!("This host cannot merge with the {method} strategy."),
         ));
     }
+    if input["action"] == "enable-auto-merge" {
+        let node_id = stack_node_id(service, gh, repo, number).await?;
+        let query = format!("mutation EnablePullRequestAutoMerge($input:EnablePullRequestAutoMergeInput!){{enablePullRequestAutoMerge(input:$input){{pullRequest{{...PullRequestActionSummary}}}}}}\n{}", super::SUMMARY);
+        let mutation = json!({"operationName":"EnablePullRequestAutoMerge","query":query,"variables":{"input":{"pullRequestId":node_id,"expectedHeadOid":head,"includeStack":true,"mergeMethod":method.to_ascii_uppercase()}}});
+        let result = gh
+            .json("POST", "graphql", Some(mutation))
+            .await
+            .map_err(provider_error)?;
+        if let Some(errors) = result["errors"].as_array() {
+            if !errors.iter().any(|e| {
+                e["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("already mergeable"))
+            }) {
+                return Err(provider_error(super::Failure::Refused));
+            }
+            // The layers may have moved since auto-merge was requested.
+            head = pinned_stack_head(gh, repo, number, stack_number, input).await?;
+        } else {
+            return Ok(result["data"]["enablePullRequestAutoMerge"]["pullRequest"].clone());
+        }
+    }
     let endpoint = format!("repos/{repo}/pulls/{number}/merge-async");
-    let body = json!({"merge_method":method, "merge_action":"default", "sha":target["headSha"]});
+    let body = json!({"merge_method":method, "merge_action":"default", "sha":head});
     let mut result = gh
         .json("PUT", &endpoint, Some(body))
         .await

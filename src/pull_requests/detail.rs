@@ -21,7 +21,7 @@ pub(super) const ACTIONS: [&str; 11] = [
     "approve-workflows",
 ];
 fn capabilities() -> Value {
-    json!({"diff":true,"comment":true,"actions":ACTIONS,"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["merge","rebase"],"search":true,"reactions":true,"viewedFiles":"host","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true},"stacks":true,"stackActions":true,"labels":true,"mentions":true,"referenceSigils":["#"],"checksAlwaysReport":true,"withheldFileDiff":true})
+    json!({"diff":true,"comment":true,"actions":ACTIONS,"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["merge","rebase"],"search":true,"reactions":true,"viewedFiles":"host","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true},"stacks":true,"stackActions":true,"stackAutoMerge":true,"labels":true,"mentions":true,"referenceSigils":["#"],"checksAlwaysReport":true,"withheldFileDiff":true})
 }
 fn trim(v: &Value) -> Option<&str> {
     v.as_str().map(str::trim).filter(|s| !s.is_empty())
@@ -224,9 +224,14 @@ pub(super) async fn read(
         Some("OPEN") => "open",
         _ => return Err(failure(op, Failure::Invalid)),
     };
-    let checks = check_rows(contexts);
+    let (checks, approvals) =
+        super::rerun::workflow_checks(gh, named, number, pr, contexts, op).await?;
     if op == "checks" {
-        return Ok(json!({"observedAt":now,"state":state,"checks":checks}));
+        let mut result = json!({"observedAt":now,"state":state,"checks":checks});
+        if let Some(count) = approvals {
+            result["workflowApprovalsRequired"] = json!(count);
+        }
+        return Ok(result);
     }
     let a = &pr["author"];
     let author = trim(&a["login"]).map(|l| {
@@ -287,8 +292,8 @@ pub(super) async fn read(
             result["autoMergeMethod"] = json!(method.to_lowercase())
         }
     }
-    if state != "open" || pr["isCrossRepository"] != true {
-        result["workflowApprovalsRequired"] = json!(0)
+    if let Some(count) = approvals {
+        result["workflowApprovalsRequired"] = json!(count)
     }
     if let Some(rem) = nodes(&pr["mergeQueueRemovals"])
         .last()

@@ -980,6 +980,12 @@ const NOT_SWEPT: &[&str] = &[
 /// shrink. A method that starts answering must come off it, and a method that
 /// stops answering fails the sweep.
 const NOT_YET_IN_THE_CONTROL_PLANE: &[&str] = &[
+    // The project layout approval store and queries, provider mode discovery and workflow
+    // subject lookup added since fd0331ca. Keep the sweep strict when a handler lands.
+    "workspace.layoutCommands",
+    "workspace.approveLayoutCommands",
+    "server.getProviderRuntimeModeLimits",
+    "workflows.about",
     // Added upstream after 052ca497 (pin moved to fd0331ca); not served anywhere yet.
     "agentFeedback.answerRequest",
     "peerLinks.names",

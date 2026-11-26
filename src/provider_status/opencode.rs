@@ -744,12 +744,20 @@ fn free_port() -> Result<u16, String> {
 /// `verify` reads its version.
 async fn start_server(
     binary: &str,
-    env: ProcessEnv,
+    mut env: ProcessEnv,
     password: Option<String>,
     timeout: Duration,
     generation: Generation,
     directory: &str,
 ) -> Result<(Server, tokio::process::Child), StartError> {
+    let password = if generation == Generation::V1 && password.as_deref().unwrap_or("").is_empty() {
+        let password =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+        env.insert("OPENCODE_SERVER_PASSWORD".into(), password.clone());
+        Some(password)
+    } else {
+        password
+    };
     let port = free_port().map_err(|detail| StartError {
         detail,
         database_locked: false,

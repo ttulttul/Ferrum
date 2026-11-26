@@ -239,6 +239,11 @@ const SERVED: &[&str] = &[
     "device_close",
 ];
 
+#[cfg(feature = "native")]
+pub(crate) fn is_served_tool(name: &str) -> bool {
+    SERVED.contains(&name)
+}
+
 /// The tools only the Linked environments beta lists (`hiddenWhileLinksOff`).
 /// Their `environmentId` names a machine; it is never a target to act in.
 const LINKS_ONLY: &str = "hiddenWhileLinksOff";
@@ -1200,8 +1205,7 @@ fn scheduled_task_next_run(schedule: &Value, now_ms: i64) -> Option<String> {
 }
 
 /// `t3_workflow` (`McpToolAccess.either`): its reads check nothing, its
-/// changes (and `hooks`, whose paths hold their secrets) the writer, as
-/// `writes` does. The workflow service answers (`src/workflows.rs`).
+/// changes and hook paths require the broadest modes the environment allows.
 async fn workflow<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> Outcome {
     const READS: [&str; 4] = ["list", "read", "questions", "store"];
     if !args["action"]
@@ -1209,9 +1213,17 @@ async fn workflow<S: McpHost>(host: &Arc<S>, caller: &Caller, args: &Value) -> O
         .is_some_and(|action| READS.contains(&action))
     {
         threads::writing_caller(&**host, caller).await?;
-        assert_not_linked(caller, "change this environment's scheduled tasks")?;
+        let action = "start or change workflow runs, or read hook paths";
+        assert_not_linked(caller, action)?;
+        let broadest = host.runtime_mode_ceiling().unwrap_or("full-access");
+        let (runtime, interaction) = caller.limits();
+        if rank(runtime) < rank(broadest) || interaction != "default" {
+            return Err(failure("capability_denied", format!(
+                "Only a caller with {broadest}/default access can {action}, because that work picks its own modes. This caller is limited to {runtime}/{interaction}."
+            )));
+        }
     }
-    host.workflow_tool(args.clone())
+    host.workflow_tool(args.clone(), caller.granted.label.clone())
         .await
         .map_err(|(code, message)| match code {
             "invalid_arguments" => Refusal::Rpc(
@@ -2622,7 +2634,11 @@ async fn thread_send<S: McpHost>(host: &Arc<S>, caller: &Caller, a: &Value) -> O
         let projection = thread.full_projection();
         let sender = caller.granted.thread.as_ref().map(|t| t.thread_id.as_str());
         (
-            active(&runs(&projection)).is_some(),
+            active(&runs(&projection)).is_some()
+                || thread.runs.iter().any(|run| {
+                    // The run has settled on the wire, but commands queue behind its checkpoint.
+                    run.status == "running" && thread.projected_run_status(run).0 == "completed"
+                }),
             steerable_run(&projection),
             own_queued_message(&projection, sender),
             thread.title.clone(),
@@ -2772,6 +2788,7 @@ async fn thread_wait<S: McpHost>(host: &S, a: &Value) -> Outcome {
     }
     .clamp(1, MAX_WAIT_TIMEOUT_MS);
     let deadline = crate::platform::now_ms() + timeout;
+    let mut events = host.control_state().events.subscribe();
     loop {
         let run = {
             let store = host.control_state().store.read().await;
@@ -2817,7 +2834,17 @@ async fn thread_wait<S: McpHost>(host: &S, a: &Value) -> Outcome {
             return Ok(answer);
         }
         let pause = (deadline - now).clamp(1, WAIT_POLL_MS as i64) as u64;
-        host.sleep(std::time::Duration::from_millis(pause)).await;
+        let timer = host.sleep(std::time::Duration::from_millis(pause));
+        tokio::pin!(timer);
+        loop {
+            tokio::select! {
+                _ = &mut timer => break,
+                event = events.recv() => match event {
+                    Ok(event) if event.event.thread_id() != Some(id.as_str()) => continue,
+                    _ => break,
+                }
+            }
+        }
     }
 }
 

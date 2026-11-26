@@ -17,6 +17,6 @@ fn every_inventory_entry_is_queryable() {
 
 #[test]
 fn inventory_counts_are_pinned_to_upstream_snapshot() {
-    assert_eq!(HTTP_CONTRACTS.len(), 90);
-    assert_eq!(RPC_CONTRACTS.len(), 257);
+    assert_eq!(HTTP_CONTRACTS.len(), 91);
+    assert_eq!(RPC_CONTRACTS.len(), 261);
 }

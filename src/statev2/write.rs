@@ -118,6 +118,27 @@ impl SharedStore for Writer {
         for thread in &commit.threads {
             write_thread(&transaction, thread)?;
         }
+        // Capture fork membership once, after this transaction's run rows are in place.
+        for event in &commit.events {
+            let fork = &event.payload["forkedFrom"];
+            if event.event_type == "thread.created" && fork["type"] == "run" {
+                transaction.execute(
+                    "UPDATE orchestration_v2_projection_threads
+                     SET fork_run_ids_json = (
+                         SELECT json_group_array(run_id) FROM orchestration_v2_projection_runs
+                         WHERE thread_id = ?1 AND ordinal <= (
+                             SELECT ordinal FROM orchestration_v2_projection_runs
+                             WHERE thread_id = ?1 AND run_id = ?2
+                         ) AND status <> 'rolled_back'
+                     ) WHERE thread_id = ?3 AND fork_run_ids_json IS NULL",
+                    params![
+                        column(&fork["threadId"]),
+                        column(&fork["runId"]),
+                        event.stream_id
+                    ],
+                )?;
+            }
+        }
         for project in &commit.projects {
             write_project(&transaction, project)?;
         }
@@ -889,6 +910,78 @@ mod tests {
             "runtimeMode": "full-access", "interactionMode": "default", "activeProviderThreadId": null,
             "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-01T00:00:00.000Z",
             "archivedAt": null, "deletedAt": null})
+    }
+
+    #[test]
+    fn a_fork_keeps_its_source_runs_across_rollbacks_and_thread_edits() {
+        let home = tempfile::tempdir().unwrap();
+        let mut writer = Writer::new(crate::statev2::open(home.path()).unwrap());
+        let mut source = crate::shared_store::empty_projection(&thread("source"));
+        let at = "2026-01-01T00:00:00.000Z";
+        source["runs"] = json!([
+            {"id":"a","ordinal":1,"threadId":"thread:w","providerInstanceId":"codex",
+             "status":"rolled_back","requestedAt":at,"completedAt":at},
+            {"id":"b","ordinal":2,"threadId":"thread:w","providerInstanceId":"codex",
+             "status":"completed","requestedAt":at,"completedAt":at}
+        ]);
+        let mut fork = thread("fork");
+        fork["id"] = json!("thread:f");
+        fork["forkedFrom"] = json!({"type":"run","threadId":"thread:w","runId":"b"});
+        let write = |after: Value| ThreadWrite {
+            thread_id: after["thread"]["id"].as_str().unwrap().to_owned(),
+            before: None,
+            after,
+            deleted: false,
+        };
+        writer
+            .write(&commit(
+                vec![
+                    write(source),
+                    write(crate::shared_store::empty_projection(&fork)),
+                ],
+                vec![StoredEvent {
+                    sequence: 1,
+                    aggregate: "thread",
+                    stream_id: "thread:f".into(),
+                    event_type: "thread.created".into(),
+                    occurred_at: at.into(),
+                    command_id: None,
+                    payload: fork.clone(),
+                    metadata: json!({}),
+                }],
+            ))
+            .unwrap();
+
+        writer
+            .conn
+            .execute(
+                "UPDATE orchestration_v2_projection_runs SET status='rolled_back'",
+                [],
+            )
+            .unwrap();
+        fork["title"] = json!("renamed");
+        writer
+            .write(&commit(
+                vec![write(crate::shared_store::empty_projection(&fork))],
+                vec![],
+            ))
+            .unwrap();
+        let inherited =
+            || crate::statev2::read::fork_source_run_ids(&writer.conn, "thread:f").unwrap();
+        assert_eq!(inherited(), ["b".to_owned()].into());
+
+        // Before migration 116, equal timestamps are ambiguous and both runs
+        // are visible. A rollback strictly before the fork is excluded.
+        writer
+            .conn
+            .execute(
+                "UPDATE orchestration_v2_projection_threads SET fork_run_ids_json=NULL",
+                [],
+            )
+            .unwrap();
+        assert_eq!(inherited(), ["a".to_owned(), "b".to_owned()].into());
+        writer.conn.execute("UPDATE orchestration_v2_projection_runs SET completed_at='2025-12-31T23:59:59Z' WHERE run_id='a'", []).unwrap();
+        assert_eq!(inherited(), ["b".to_owned()].into());
     }
 
     #[test]

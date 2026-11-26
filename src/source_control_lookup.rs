@@ -5,7 +5,7 @@
 //! GitHub answers through its REST API via `gh api` (which honours the
 //! CLI's `http_unix_socket`), GitLab through `glab api`, Bitbucket through its
 //! REST API (`T3CODE_BITBUCKET_API_BASE_URL`, with the credential `bitbucket_credential` reads),
-//! Azure DevOps through `az repos show`, Forgejo/Gitea through `tea api`,
+//! Azure DevOps through `az repos show`, Forgejo/Gitea through `gt api`,
 //! GitCafe through its API with the `cafe` credential helper's token, and
 //! Cursor Origin through its API with `origin auth token`'s. Every answer is
 //! `{provider, nameWithOwner, url, sshUrl}` (`SourceControlRepositoryInfo`).
@@ -572,110 +572,172 @@ async fn azure(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
 
 // --- Forgejo / Gitea --------------------------------------------------------
 
-fn forgejo_cli_failed(cwd: &str, code: i32) -> LookupFailure {
-    LookupFailure::provider(
-        "Forgejo CLI command failed.",
-        Some(json!({"name": "ForgejoCliError", "message": "",
-            "cause": process_exit("ForgejoCli.execute", "tea", cwd, code, "Process exited with a non-zero status.")})),
+const NO_GT_LOGIN: &str = "No matching Forgejo login. Use `fj auth login`, `fj auth add-token`, or `gt auth login` for this server. For a server under a URL subpath, use `gt auth login`. When several servers match, specify the repository's full server URL.";
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ForgejoAccount {
+    pub host: String,
+    pub user: String,
+    active: bool,
+}
+
+impl ForgejoAccount {
+    pub fn args(&self) -> Vec<&str> {
+        let mut args = vec!["--host", self.host.trim_end_matches('/')];
+        if !self.user.is_empty() {
+            args.extend(["--user", &self.user]);
+        }
+        args
+    }
+}
+
+pub(crate) async fn gt_account(
+    cwd: &str,
+    remote: Option<&url::Url>,
+) -> Result<ForgejoAccount, &'static str> {
+    const INSTALL: &str =
+        "Install Forgejo CLI (`fj` 0.6 or later) or Gitea CLI (`gt` 2.0 or later) and retry.";
+    let reply = run(
+        cwd,
+        "gt",
+        &["auth", "status", "--json", "host,user,active"],
+        None,
+        &[],
     )
+    .await
+    .map_err(|_| INSTALL)?;
+    if reply.code != 0 {
+        return match run(cwd, "gt", &["version"], None, &[]).await {
+            Ok(version) if version.code == 0 => Err("`gt auth status` failed. Run it on the T3 Code server to see what gt reports."),
+            Ok(_) => Err("The `gt` on this server's PATH is not the Gitea CLI. Install Forgejo CLI (`fj` 0.6 or later) or Gitea CLI (`gt` 2.0 or later) and retry."),
+            Err(_) => Err(INSTALL),
+        };
+    }
+    let mut accounts: Vec<ForgejoAccount> = serde_json::from_str(&reply.stdout).unwrap_or_default();
+    if let Some(remote) = remote {
+        let mut matched = Vec::new();
+        for account in accounts {
+            let Ok(base) = url::Url::parse(&account.host) else {
+                continue;
+            };
+            let path = base.path().trim_end_matches('/');
+            if remote.scheme() == "ssh" {
+                if remote.host_str() != base.host_str() {
+                    let alias = run(
+                        cwd,
+                        "gt",
+                        &["config", "get", "ssh_host", "--host", &account.host],
+                        None,
+                        &[],
+                    )
+                    .await;
+                    if !alias.is_ok_and(|r| {
+                        r.code == 0
+                            && remote
+                                .host_str()
+                                .is_some_and(|h| h.eq_ignore_ascii_case(r.stdout.trim()))
+                    }) {
+                        continue;
+                    }
+                }
+            } else if base.host_str() != remote.host_str()
+                || base.port() != remote.port()
+                || !(remote.path() == path
+                    || remote
+                        .path()
+                        .strip_prefix(path)
+                        .is_some_and(|rest| rest.starts_with('/')))
+            {
+                continue;
+            }
+            matched.push((
+                if remote.scheme() == "ssh" {
+                    0
+                } else {
+                    path.len()
+                },
+                account,
+            ));
+        }
+        let deepest = matched.iter().map(|(depth, _)| *depth).max();
+        accounts = matched
+            .into_iter()
+            .filter(|(depth, _)| Some(*depth) == deepest)
+            .map(|(_, account)| account)
+            .collect();
+    }
+    let servers = accounts
+        .iter()
+        .map(|a| a.host.trim_end_matches('/').to_ascii_lowercase())
+        .collect::<std::collections::HashSet<_>>();
+    if servers.len() > 1 {
+        if remote.is_some() {
+            return Err(NO_GT_LOGIN);
+        }
+        let default = run(cwd, "gt", &["config", "get", "default_host"], None, &[])
+            .await
+            .map_err(|_| INSTALL)?;
+        accounts.retain(|a| {
+            default.code == 0
+                && a.host
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case(default.stdout.trim().trim_end_matches('/'))
+        });
+        if accounts.is_empty() {
+            return Err("Several gt servers are signed in and gt's default server has no account. Choose one with `gt config set default_host <server-url>`.");
+        }
+    }
+    let active = accounts.iter().position(|a| a.active);
+    if remote.is_some() && accounts.len() > 1 && active.is_none() {
+        return Err(NO_GT_LOGIN);
+    }
+    accounts
+        .into_iter()
+        .nth(active.unwrap_or(0))
+        .ok_or(NO_GT_LOGIN)
 }
 
 async fn forgejo(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
-    let unavailable = || {
+    let failure = |detail: &str| {
         LookupFailure::provider(
-            "Forgejo CLI (`tea` or `fj`) is required but not available on PATH.",
+            detail,
             Some(json!({"name": "ForgejoCliError", "message": ""})),
         )
     };
-    let logins = run(
-        cwd,
-        "tea",
-        &["login", "list", "--output", "json"],
-        None,
-        &[],
-    )
-    .await
-    .map_err(|_| unavailable())?;
-    if logins.code != 0 {
-        return Err(forgejo_cli_failed(cwd, logins.code));
-    }
-    let logins: Vec<Value> = serde_json::from_str(logins.stdout.trim()).unwrap_or_default();
-    // A URL names its host; otherwise the default login (or the only one).
-    let (host, path) = match url::Url::parse(repository) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") => (
-            url.host_str().map(str::to_lowercase),
-            url.path()
-                .trim_matches('/')
-                .trim_end_matches(".git")
-                .to_owned(),
-        ),
-        _ => (
-            None,
-            repository
-                .trim_matches('/')
-                .trim_end_matches(".git")
-                .to_owned(),
-        ),
+    let remote = url::Url::parse(repository)
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https" | "ssh"));
+    let account = gt_account(cwd, remote.as_ref()).await.map_err(failure)?;
+    let base = account.host.trim_end_matches('/');
+    let path = remote
+        .as_ref()
+        .map_or(repository, |u| u.path())
+        .trim_matches('/')
+        .trim_end_matches(".git");
+    let mount = url::Url::parse(base).ok();
+    let mount = mount.as_ref().map_or("", |u| u.path().trim_matches('/'));
+    let path = if path.split('/').count() > 2 {
+        path.strip_prefix(mount)
+            .and_then(|s| s.strip_prefix('/'))
+            .unwrap_or(path)
+    } else {
+        path
     };
-    let login = logins
-        .iter()
-        .find(|l| {
-            host.as_deref().is_some_and(|h| {
-                l["url"]
-                    .as_str()
-                    .and_then(|u| url::Url::parse(u).ok())
-                    .and_then(|u| u.host_str().map(str::to_lowercase))
-                    .as_deref()
-                    == Some(h)
-            })
-        })
-        .or_else(|| {
-            host.is_none()
-                .then(|| {
-                    logins
-                        .iter()
-                        .find(|l| l["default"] == "true" || l["default"] == true)
-                })
-                .flatten()
-        })
-        .or_else(|| (host.is_none() && logins.len() == 1).then(|| &logins[0]))
-        .ok_or_else(|| {
-            LookupFailure::provider(
-                "No Forgejo login matches this repository. Run `tea login add`.",
-                Some(json!({"name": "ForgejoCliError", "message": ""})),
-            )
-        })?;
-    let name = login["name"].as_str().unwrap_or_default();
-    let base = login["url"]
-        .as_str()
-        .unwrap_or_default()
-        .trim_end_matches('/');
+    let full = if path.contains('/') {
+        path.to_owned()
+    } else {
+        format!("{}/{path}", account.user)
+    };
     let endpoint = format!(
         "{base}/api/v1/repos/{}",
-        path.split('/').map(component).collect::<Vec<_>>().join("/")
+        full.split('/').map(component).collect::<Vec<_>>().join("/")
     );
-    let output = run(
-        cwd,
-        "tea",
-        &[
-            "api",
-            "--include",
-            "--login",
-            name,
-            "--repo",
-            &path,
-            "--method",
-            "GET",
-            &endpoint,
-        ],
-        None,
-        &[],
-    )
-    .await
-    .map_err(|_| unavailable())?;
-    if output.code != 0 {
-        return Err(forgejo_cli_failed(cwd, output.code));
-    }
+    let mut args = vec!["api", "--include"];
+    args.extend(account.args());
+    args.extend(["--method", "GET", &endpoint]);
+    let output = run(cwd, "gt", &args, None, &[])
+        .await
+        .map_err(|_| failure("Forgejo CLI command failed."))?;
     let status = output
         .stderr
         .lines()
@@ -683,19 +745,17 @@ async fn forgejo(repository: &str, cwd: &str) -> Result<Value, LookupFailure> {
         .and_then(|s| s.split_whitespace().nth(1))
         .and_then(|s| s.parse::<u16>().ok());
     match status {
-        Some(200..=299) => {}
-        Some(404) => {
-            return Err(LookupFailure::provider(
-                "Forgejo repository or pull request was not found.",
-                Some(json!({"name": "ForgejoCliError", "message": ""})),
-            )
-            .user_facing(repository_not_found(&path)))
-        }
-        _ => {
-            return Err(LookupFailure::provider(
-                "Forgejo API request failed.",
-                Some(json!({"name": "ForgejoCliError", "message": ""})),
-            ))
+        Some(200..=299) if output.code == 0 => {}
+        Some(404) => return Err(failure("Forgejo repository or pull request was not found.").user_facing(repository_not_found(&full))),
+        Some(401 | 403) => return Err(failure("Forgejo denied access. Check this server's `gt auth status` credentials and permissions.")),
+        None if output.code == 4 => return Err(failure("Forgejo denied access. Check this server's `gt auth status` credentials and permissions.")),
+        Some(429) => return Err(failure("Forgejo API rate limit exceeded.")),
+        None => return Err(failure("Forgejo API request failed without an HTTP status.")),
+        Some(code @ 200..=299) => return Err(failure(&format!("Forgejo CLI failed after the server answered (HTTP {code})."))),
+        Some(code) => {
+            let body = output.stdout.trim();
+            let detail = if body.is_empty() {format!("Forgejo API request failed (HTTP {code}).")} else {format!("Forgejo API request failed (HTTP {code}): {body}")};
+            return Err(failure(&detail))
         }
     }
     let raw: Value = serde_json::from_str(output.stdout.trim()).unwrap_or(Value::Null);

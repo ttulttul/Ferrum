@@ -144,9 +144,6 @@ impl<S: McpHost> Pr<'_, S> {
             op["mergeMethod"] = method.clone()
         }
         if args["stack"] == true {
-            if args["auto"] == true {
-                return Err("A stack merge cannot wait with auto.".into());
-            }
             let stack = self.rpc("stack", json!({"bypassCache":true})).await?;
             let layers = rows(&stack["layers"]);
             let number = &self.identity["number"];

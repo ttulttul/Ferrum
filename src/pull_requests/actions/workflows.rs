@@ -7,31 +7,30 @@ const PR_HEAD: &str = "query($owner:String!,$name:String!,$number:Int!){reposito
 
 #[derive(PartialEq, Eq)]
 struct Head {
+    cross_repository: bool,
     sha: String,
     branch: String,
     owner: String,
 }
 
-async fn head(gh: &Github<'_>, vars: &Value, number: u64) -> Result<Option<Head>, Value> {
+async fn head(gh: &Github<'_>, vars: &Value, number: u64) -> Result<Head, Value> {
     let pr = query_pr(gh, PR_HEAD, vars).await?;
-    match pr["isCrossRepository"].as_bool() {
-        Some(false) => return Ok(None),
-        Some(true) => (),
-        None => return Err(provider_error(Failure::Invalid)),
-    }
     let missing = |_| {
         error(
             OP,
             &format!("GitHub did not report a complete head revision for #{number}."),
         )
     };
-    Ok(Some(Head {
+    Ok(Head {
+        cross_repository: pr["isCrossRepository"]
+            .as_bool()
+            .ok_or_else(|| provider_error(Failure::Invalid))?,
         sha: required(&pr, "headRefOid").map_err(missing)?.to_owned(),
         branch: required(&pr, "headRefName").map_err(missing)?.to_owned(),
         owner: required(&pr["headRepositoryOwner"], "login")
             .map_err(missing)?
             .to_ascii_lowercase(),
-    }))
+    })
 }
 
 async fn verify_head(gh: &Github<'_>, repo: &str, number: u64, head: &Head) -> Result<(), Value> {
@@ -58,7 +57,7 @@ async fn verify_head(gh: &Github<'_>, repo: &str, number: u64, head: &Head) -> R
         }
         for pr in nodes {
             if pr["headRefOid"] == head.sha
-                && pr["isCrossRepository"] == true
+                && pr["isCrossRepository"].as_bool() == Some(head.cross_repository)
                 && pr["headRepositoryOwner"]["login"]
                     .as_str()
                     .is_some_and(|v| v.eq_ignore_ascii_case(&head.owner))
@@ -104,7 +103,14 @@ async fn runs(gh: &Github<'_>, repo: &str, head: &Head) -> Result<Vec<Value>, Va
             .as_array()
             .ok_or_else(|| provider_error(Failure::Invalid))?;
         for run in runs {
-            if !run["id"].is_u64() {
+            if !run["id"].is_u64()
+                || run.get("pull_requests").is_some_and(|refs| {
+                    !refs.is_null()
+                        && !refs
+                            .as_array()
+                            .is_some_and(|rows| rows.iter().all(|pr| pr["number"].is_u64()))
+                })
+            {
                 return Err(provider_error(Failure::Invalid));
             }
             found.push(run.clone());
@@ -122,40 +128,63 @@ async fn runs(gh: &Github<'_>, repo: &str, head: &Head) -> Result<Vec<Value>, Va
     Ok(found)
 }
 
-async fn pending(gh: &Github<'_>, repo: &str, number: u64, head: &Head) -> Result<Vec<u64>, Value> {
-    verify_head(gh, repo, number, head).await?;
-    Ok(runs(gh, repo, head)
-        .await?
-        .iter()
-        .filter_map(|r| r["id"].as_u64())
-        .collect())
+async fn matched_runs(
+    gh: &Github<'_>,
+    repo: &str,
+    number: u64,
+    head: &Head,
+) -> Result<Vec<Value>, Value> {
+    let (_, mut rows) =
+        tokio::try_join!(verify_head(gh, repo, number, head), runs(gh, repo, head))?;
+    if !head.cross_repository
+        && rows
+            .iter()
+            .any(|run| run["pull_requests"].as_array().is_none_or(Vec::is_empty))
+    {
+        return Err(error(
+            OP,
+            "GitHub omitted workflow run pull-request associations.",
+        ));
+    }
+    rows.retain(|row| match row["pull_requests"].as_array() {
+        Some(prs) if !prs.is_empty() => prs.iter().any(|pr| pr["number"] == number),
+        _ => head.cross_repository,
+    });
+    Ok(rows)
 }
 
 /// The check reader needs both the fork identity and the names of approval-gated runs.
-pub(in crate::pull_requests) async fn fork_runs(
+pub(in crate::pull_requests) async fn approval_runs(
     gh: &Github<'_>,
     repo: &str,
     number: u64,
     pr: &Value,
 ) -> Result<Vec<Value>, Value> {
     let head = Head {
+        cross_repository: pr["isCrossRepository"]
+            .as_bool()
+            .ok_or_else(|| provider_error(Failure::Invalid))?,
         sha: required(pr, "headRefOid")?.into(),
         branch: required(pr, "headRefName")?.into(),
         owner: required(&pr["headRepositoryOwner"], "login")?.into(),
     };
-    let (_, runs) = tokio::try_join!(verify_head(gh, repo, number, &head), runs(gh, repo, &head))?;
-    Ok(runs)
+    matched_runs(gh, repo, number, &head).await
 }
 
 pub(super) async fn approve(gh: &Github<'_>, repo: &str, vars: &Value, number: u64) -> Reply {
-    let Some(initial) = head(gh, vars, number).await? else {
-        return Ok(Value::Null);
-    };
-    for id in pending(gh, repo, number, &initial).await? {
-        if head(gh, vars, number).await?.as_ref() != Some(&initial) {
+    let initial = head(gh, vars, number).await?;
+    for run in matched_runs(gh, repo, number, &initial).await? {
+        let id = run["id"]
+            .as_u64()
+            .ok_or_else(|| provider_error(Failure::Invalid))?;
+        if head(gh, vars, number).await? != initial {
             return Err(error(OP,&format!("The head revision of #{number} changed before its workflows could be approved.")));
         }
-        if pending(gh, repo, number, &initial).await?.contains(&id) {
+        if matched_runs(gh, repo, number, &initial)
+            .await?
+            .iter()
+            .any(|run| run["id"] == id)
+        {
             gh.request(
                 "POST",
                 &format!("repos/{repo}/actions/runs/{id}/approve"),

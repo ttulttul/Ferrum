@@ -79,12 +79,15 @@ def settled(projection, runs):
                                          for s in statuses)
 
 
-def wait_runs(server, runs, seconds=60):
+def wait_runs(server, runs, seconds=60, *, checkpoint=False):
     deadline = time.monotonic() + seconds
     while True:
         projection = server.projection()
-        if settled(projection, runs) or time.monotonic() > deadline:
+        if settled(projection, runs) and (not checkpoint or all(
+                run.get("checkpointId") is not None for run in projection["runs"])):
             return projection
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"Expected {runs} settled runs (checkpoint={checkpoint})")
         time.sleep(0.25)
 
 
@@ -160,7 +163,8 @@ def main():
                 peer.take_log()
                 dispatched = server.rpc("orchestration.dispatchCommand", seeded["dispatch"])
                 assert dispatched["_tag"] == "Success", dispatched
-                after_turn = wait_runs(server, 1)
+                # The timeline includes the checkpoint, which is attached after the run ends.
+                after_turn = wait_runs(server, 1, checkpoint=True)
                 record["agent mcp"] = agent_mcp(log, tmp)
                 record["what the peer received"] = [
                     {k: e[k] for k in ("method", "modeLimit", "sender", "params")} for e in peer.take_log()

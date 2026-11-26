@@ -255,14 +255,6 @@ async fn diff(State(s): State<Arc<AppState>>, Json(input): Json<Value>) -> Respo
     let cli = s.issues.lock().await.gh.clone();
     match pull_requests::read(&s, &cli, "diff", &input).await {
         Ok(v) => Json(v).into_response(),
-        Err(e) => (
-            if e["_tag"] == "PullRequestUnavailableError" {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::BAD_GATEWAY
-            },
-            Json(e),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, Json(e)).into_response(),
     }
 }

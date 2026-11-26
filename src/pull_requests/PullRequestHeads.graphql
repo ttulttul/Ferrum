@@ -10,6 +10,7 @@ query PullRequestHeads($owner: String!, $name: String!, $head: String!, $after: 
         headRefOid
         isCrossRepository
         headRepositoryOwner {
+          __typename
           login
         }
       }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 /// kind is unknown; `desktop_managed` marks a desktop-owned server.
 /// The reference's migration head, as its descriptor reports it. The native
 /// build checks it against the pinned ledger (`statev2::supported_head`).
-pub const DATABASE_MIGRATION: i64 = 110;
+pub const DATABASE_MIGRATION: i64 = 119;
 
 pub fn descriptor(
     environment_id: &str,
@@ -141,7 +141,7 @@ pub fn descriptor_with_link_routes(
     if link_routes {
         capability!("issueTrackerAccounts", true);
     }
-    json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.11","orchestrationProtocolVersion":2,"databaseMigration":DATABASE_MIGRATION,"capabilities":capabilities})
+    json!({"environmentId":environment_id,"label":label,"platform":platform,"serverVersion":"0.1.12","orchestrationProtocolVersion":2,"databaseMigration":DATABASE_MIGRATION,"capabilities":capabilities})
 }
 
 pub(crate) fn project_shell(row: &Value) -> Value {

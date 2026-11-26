@@ -1474,14 +1474,8 @@ async fn settle_next<H: CommandHost>(
     let mut tasks = records(&parent_row, "subagents");
     let mut source_point =
         context_source_point(&child, result_run["id"].as_str().unwrap_or_default());
-    // The result describes the child at its terminal run update. A stopped
-    // run gets its rollback checkpoint in a later update.
-    if matches!(
-        result_run["status"].as_str(),
-        Some("interrupted" | "cancelled")
-    ) {
-        source_point.as_object_mut().unwrap().remove("checkpointId");
-    }
+    // The terminal run update that delivers this result precedes checkpoint capture.
+    source_point.as_object_mut().unwrap().remove("checkpointId");
     // A cancelled task's completed run ends it interrupted.
     let cancelled = task["cancelledRunId"] == result_run["id"];
     let terminal = if cancelled && terminal == "completed" {

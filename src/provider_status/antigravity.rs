@@ -5,20 +5,15 @@
 //! (`AntigravityInstallation.resolve`), a custom executable, the managed
 //! install under `<home>/tools/antigravity-acp/<platform>-<arch>`, or
 //! the managed Antigravity CLI or `agy` on PATH.
-//! A healthy runtime then has its Google quota read from the profile's
-//! stored sign-in, when there is one.
-use super::{maintenance, now_iso, unavailable_usage, Draft, ProcessEnv};
+use super::{maintenance, now_iso, Draft, ProcessEnv};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const RECORD_MAX_BYTES: u64 = 8 * 1024;
 const SIGN_IN_MESSAGE: &str = "Sign in with Google to use Antigravity.";
 const AUTH_UNCHECKED_MESSAGE: &str =
     "Antigravity is installed. Google account access is not checked yet.";
-const DAILY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
-const PROD_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 
 /// The instance's sign-in settings (`AntigravityAuthConfig`).
 pub(super) struct Auth {
@@ -338,336 +333,6 @@ pub(super) fn text_generation_available(profile: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Usage
-
-fn quota_window(
-    id: &str,
-    label: &str,
-    quota: &Value,
-    kind: &str,
-    minutes: Option<i64>,
-) -> Option<Value> {
-    let remaining = quota["remainingFraction"]
-        .as_f64()
-        .filter(|r| r.is_finite())?;
-    let mut window = json!({"id": id, "label": label, "kind": kind,
-        "usedPercent": super::js_number((1.0 - remaining.clamp(0.0, 1.0)) * 100.0)});
-    if let Some(reset) = quota["resetTime"].as_str().and_then(parse_ms) {
-        window["resetsAt"] = json!(crate::auth_service::iso(reset));
-    }
-    if let Some(minutes) = minutes {
-        window["windowDurationMins"] = json!(minutes);
-    }
-    Some(window)
-}
-
-fn parse_ms(text: &str) -> Option<i64> {
-    time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
-        .ok()
-        .map(|d| (d.unix_timestamp_nanos() / 1_000_000) as i64)
-}
-
-/// `summaryWindows`.
-fn summary_windows(summary: &Value, requested_at: i64) -> Vec<Value> {
-    let has_group_buckets = summary["groups"].as_array().is_some_and(|g| {
-        g.iter()
-            .any(|g| g["buckets"].as_array().is_some_and(|b| !b.is_empty()))
-    });
-    let groups: Vec<Value> = if has_group_buckets {
-        summary["groups"].as_array().cloned().unwrap_or_default()
-    } else {
-        vec![json!({"buckets": summary["buckets"]})]
-    };
-    let mut windows: Vec<Value> = Vec::new();
-    for group in &groups {
-        let group_name = group["displayName"]
-            .as_str()
-            .map(str::trim)
-            .filter(|n| !n.is_empty());
-        for bucket in group["buckets"].as_array().into_iter().flatten() {
-            if bucket["disabled"] == true {
-                continue;
-            }
-            let id = bucket["bucketId"].as_str().unwrap_or("");
-            let family = if id.starts_with("gemini-argon-") {
-                group_name.unwrap_or("Gemini Argon").to_owned()
-            } else if id.starts_with("gemini-carbon-") {
-                group_name.unwrap_or("Gemini Carbon").to_owned()
-            } else if id.starts_with("gemini-") {
-                "Gemini".into()
-            } else if id.starts_with("3p-") {
-                "Claude & GPT (shared)".into()
-            } else {
-                group_name.unwrap_or(id).to_owned()
-            };
-            let window = bucket["window"].as_str();
-            let weekly = window == Some("weekly");
-            let session = window == Some("5h");
-            let minutes = match window {
-                Some("5h") => Some(300),
-                Some("weekly") => Some(10080),
-                _ => None,
-            };
-            let untouched = bucket["remainingFraction"] == 1
-                && bucket.get("description").is_none()
-                && minutes.is_some_and(|m| {
-                    bucket["resetTime"]
-                        .as_str()
-                        .and_then(parse_ms)
-                        .is_some_and(|reset| (reset - requested_at - m * 60_000).abs() <= 60_000)
-                });
-            let mut quota = bucket.clone();
-            if untouched {
-                quota.as_object_mut().map(|o| o.remove("resetTime"));
-            }
-            let label = format!(
-                "{family} · {}",
-                if weekly {
-                    "Weekly".to_owned()
-                } else if session {
-                    "5-hour".to_owned()
-                } else {
-                    bucket["displayName"]
-                        .as_str()
-                        .map(str::trim)
-                        .filter(|n| !n.is_empty())
-                        .unwrap_or("Quota")
-                        .to_owned()
-                }
-            );
-            let kind = if weekly {
-                "weekly"
-            } else if session {
-                "session"
-            } else {
-                "other"
-            };
-            if let Some(window) = quota_window(id, &label, &quota, kind, minutes) {
-                match windows.iter_mut().find(|w| w["id"] == id) {
-                    Some(existing) => *existing = window,
-                    None => windows.push(window),
-                }
-            }
-        }
-    }
-    windows
-}
-
-/// `modelWindows`.
-fn model_windows(models: &Value) -> Vec<Value> {
-    let mut windows: Vec<Value> = Vec::new();
-    for (model_id, model) in models["models"].as_object().into_iter().flatten() {
-        let provider = model["modelProvider"].as_str();
-        let family = if provider == Some("MODEL_PROVIDER_GOOGLE") || model_id.starts_with("gemini-")
-        {
-            "Gemini"
-        } else if provider == Some("MODEL_PROVIDER_ANTHROPIC") || model_id.starts_with("claude-") {
-            "Claude"
-        } else if provider == Some("MODEL_PROVIDER_OPENAI") || model_id.starts_with("gpt-") {
-            "GPT"
-        } else {
-            continue;
-        };
-        for (suffix, quota) in [
-            ("quota", &model["quotaInfo"]),
-            ("weekly", &model["weeklyQuotaInfo"]),
-        ] {
-            if !quota.is_object() {
-                continue;
-            }
-            let weekly = suffix == "weekly";
-            let Some(window) = quota_window(
-                &format!("{}-{suffix}", family.to_lowercase()),
-                &format!(
-                    "{family} · {}",
-                    if weekly { "Weekly" } else { "Reported quota" }
-                ),
-                quota,
-                if weekly { "weekly" } else { "other" },
-                weekly.then_some(10080),
-            ) else {
-                continue;
-            };
-            match windows.iter_mut().find(|w| w["id"] == window["id"]) {
-                Some(existing) => {
-                    if window["usedPercent"].as_f64() > existing["usedPercent"].as_f64() {
-                        *existing = window;
-                    }
-                }
-                None => windows.push(window),
-            }
-        }
-    }
-    windows
-}
-
-/// `makeAntigravityUsageProbe(...).probe`.
-async fn read_usage(profile: &Path, method: &str) -> Value {
-    let checked_at = now_iso();
-    if method != "oauth-personal" && method != "oauth-business" {
-        return unavailable_usage(&checked_at, "unsupported", None);
-    }
-    let token_path = profile.join("antigravity-acp").join("acp_token.json");
-    if !token_path.exists() {
-        return unavailable_usage(
-            &checked_at,
-            "unsupported",
-            Some("Sign in with Google to see Antigravity limits."),
-        );
-    }
-    let failed = || {
-        unavailable_usage(
-            &checked_at,
-            "probeFailed",
-            Some("Could not read Antigravity limits. Refresh provider status to retry."),
-        )
-    };
-    let read = async {
-        let token: Value =
-            serde_json::from_str(&std::fs::read_to_string(&token_path).ok()?).ok()?;
-        let field = |k: &str| {
-            token[k]
-                .as_str()
-                .filter(|v| !v.is_empty())
-                .map(str::to_owned)
-        };
-        let (client_id, client_secret, refresh) = (
-            field("client_id")?,
-            field("client_secret")?,
-            field("refresh_token")?,
-        );
-        let project = token["project_id"].as_str().map(str::to_owned);
-        let client = super::http_builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
-            .build()
-            .ok()?;
-        let refreshed: Value = client
-            .post("https://oauth2.googleapis.com/token")
-            .form(&[
-                ("client_id", client_id.as_str()),
-                ("client_secret", client_secret.as_str()),
-                ("refresh_token", refresh.as_str()),
-                ("grant_type", "refresh_token"),
-            ])
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
-            .await
-            .ok()?;
-        let access = refreshed["access_token"]
-            .as_str()
-            .filter(|t| !t.is_empty())?
-            .to_owned();
-        refreshed["expires_in"].as_f64().filter(|e| *e > 0.0)?;
-        let fingerprint = hex::encode(Sha256::digest(
-            format!(
-                "{client_id}\0{refresh}\0{}",
-                project.as_deref().unwrap_or("")
-            )
-            .as_bytes(),
-        ));
-        let account = match client
-            .get("https://www.googleapis.com/oauth2/v2/userinfo")
-            .bearer_auth(&access)
-            .send()
-            .await
-        {
-            Ok(response) => match response.error_for_status() {
-                Ok(response) => response
-                    .json::<Value>()
-                    .await
-                    .ok()
-                    .and_then(|info| {
-                        info["id"]
-                            .as_str()
-                            .filter(|i| !i.is_empty())
-                            .map(str::to_owned)
-                    })
-                    .map(|id| {
-                        hex::encode(Sha256::digest(format!("google-account\0{id}").as_bytes()))
-                    })
-                    .unwrap_or_else(|| fingerprint.clone()),
-                Err(_) => fingerprint.clone(),
-            },
-            Err(_) => fingerprint.clone(),
-        };
-        let endpoints = if method == "oauth-business" {
-            [PROD_ENDPOINT, DAILY_ENDPOINT]
-        } else {
-            [DAILY_ENDPOINT, PROD_ENDPOINT]
-        };
-        let (platform, arch) = target();
-        let agent = format!(
-            "antigravity/hub/2.24.0 (aidev_client; os_type={platform}; arch={arch}; cl=963137146)"
-        );
-        let body = match &project {
-            Some(project) => json!({"project": project}),
-            None => json!({}),
-        };
-        let fetch = |operation: &'static str| {
-            let client = client.clone();
-            let access = access.clone();
-            let agent = agent.clone();
-            let body = body.clone();
-            async move {
-                let mut all = Vec::new();
-                for endpoint in endpoints {
-                    let requested_at = crate::platform::now_ms();
-                    let response = client
-                        .post(format!("{endpoint}/v1internal:{operation}"))
-                        .bearer_auth(&access)
-                        .header("User-Agent", &agent)
-                        .json(&body)
-                        .send()
-                        .await
-                        .ok()
-                        .and_then(|r| r.error_for_status().ok());
-                    let Some(response) = response else { continue };
-                    let Ok(value) = response.json::<Value>().await else {
-                        continue;
-                    };
-                    all.extend(if operation == "retrieveUserQuotaSummary" {
-                        summary_windows(&value, requested_at)
-                    } else {
-                        model_windows(&value)
-                    });
-                }
-                let mut windows: Vec<Value> = Vec::new();
-                for window in all {
-                    if !windows.iter().any(|w| w["id"] == window["id"]) {
-                        windows.push(window);
-                    }
-                }
-                windows
-            }
-        };
-        let mut windows = fetch("retrieveUserQuotaSummary").await;
-        if windows.is_empty() {
-            windows = fetch("fetchAvailableModels").await;
-        }
-        if windows.is_empty() {
-            return Some(unavailable_usage(
-                &checked_at,
-                "probeFailed",
-                Some("Antigravity did not return usable quota information."),
-            ));
-        }
-        let mut limits = super::usage_limits(&checked_at, windows);
-        limits["credentialFingerprint"] = json!(account);
-        Some(limits)
-    };
-    tokio::time::timeout(Duration::from_secs(30), read)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(failed)
-}
-
-// ---------------------------------------------------------------------------
 // Models
 
 /// `ANTIGRAVITY_DEFAULT_MODEL`: the alias of the session's current model.
@@ -700,14 +365,20 @@ pub(super) struct Session {
     /// The thinking options each model reported when selected; `None`
     /// means it has none.
     pub(super) thinking_levels: ThinkingLevels,
+    pub(super) default_model: Option<String>,
 }
 
 impl Session {
     /// `onSessionStarted`: the session's account, version, runtime modes and
     /// models.
-    pub(super) fn started(&mut self, initialized: &Value, setup: &Value) {
+    pub(super) fn started(&mut self, initialized: &Value, setup: &Value, resumed: bool) {
         let options = setup["configOptions"].as_array().map(Vec::as_slice);
-        observe_thinking_levels(&mut self.thinking_levels, options);
+        if !resumed {
+            if let Some(slug) = selected_model(setup, options).filter(|v| !v.is_empty()) {
+                self.default_model = Some(slug.to_owned());
+            }
+        }
+        observe_thinking_levels(&mut self.thinking_levels, options, !resumed);
         self.signed_in = true;
         if let Some(version) = initialized["agentInfo"]["version"]
             .as_str()
@@ -716,15 +387,25 @@ impl Session {
             self.version = Some(version.to_owned());
         }
         self.runtime_modes = runtime_modes(setup);
-        self.models = build_models(setup, &self.thinking_levels);
+        self.models = build_models(
+            setup,
+            &self.thinking_levels,
+            self.default_model.as_deref(),
+            !resumed,
+        );
     }
 
     /// `onConfigOptionsUpdated`: the models as the session's new options
     /// list them, for a signed-in account.
     pub(super) fn config_options_updated(&mut self, options: &[Value]) {
-        observe_thinking_levels(&mut self.thinking_levels, Some(options));
+        observe_thinking_levels(&mut self.thinking_levels, Some(options), true);
         if self.signed_in {
-            self.models = build_models(&json!({ "configOptions": options }), &self.thinking_levels);
+            self.models = build_models(
+                &json!({ "configOptions": options }),
+                &self.thinking_levels,
+                self.default_model.as_deref(),
+                true,
+            );
         }
     }
 
@@ -734,6 +415,7 @@ impl Session {
         self.models.clear();
         self.runtime_modes = RUNTIME_MODES_WITHOUT_AUTO.to_vec();
         self.thinking_levels.clear();
+        self.default_model = None;
     }
 }
 
@@ -766,12 +448,33 @@ pub(super) fn flatten_choices(option: &Value) -> Vec<&Value> {
 }
 
 /// `observeThinkingLevels`: the selected model's thinking options.
-fn observe_thinking_levels(levels: &mut ThinkingLevels, options: Option<&[Value]>) {
+fn observe_thinking_levels(
+    levels: &mut ThinkingLevels,
+    options: Option<&[Value]>,
+    authoritative: bool,
+) {
     let Some(model) = model_config(options).filter(|m| m["type"] == "select") else {
         return;
     };
     if let Some(current) = model["currentValue"].as_str().filter(|c| !c.is_empty()) {
-        levels.insert(current.to_owned(), thinking_config(options).cloned());
+        let next = thinking_config(options);
+        if authoritative {
+            levels.insert(current.to_owned(), next.cloned());
+        } else if let Some(known) = levels.get_mut(current) {
+            match (known.as_ref(), next) {
+                (_, None) => *known = None,
+                (Some(old), Some(new))
+                    if flatten_choices(new)
+                        .iter()
+                        .any(|v| v["value"] == old["currentValue"]) =>
+                {
+                    let mut merged = new.clone();
+                    merged["currentValue"] = old["currentValue"].clone();
+                    *known = Some(merged);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -868,31 +571,26 @@ fn thinking_descriptor(option: &Value) -> Option<Value> {
     Some(Value::Object(descriptor))
 }
 
-/// `thinkingCapabilities`: a model's thinking levels, with the selected
-/// level only where this model reported it.
-fn thinking_capabilities(config: Option<&Value>, observed: bool) -> Value {
-    let Some(mut descriptor) = config.and_then(thinking_descriptor) else {
-        return json!({"optionDescriptors": []});
-    };
-    if !observed {
-        if let Some(object) = descriptor.as_object_mut() {
-            object.shift_remove("currentValue");
-        }
+fn selected_model<'a>(setup: &'a Value, options: Option<&'a [Value]>) -> Option<&'a str> {
+    match model_config(options).filter(|c| c["type"] == "select") {
+        Some(config) => config["currentValue"].as_str(),
+        None => setup["models"]["currentModelId"].as_str(),
     }
-    json!({ "optionDescriptors": [descriptor] })
 }
 
 /// `buildAntigravityModelsFromSession`: the session's models (its `model`
 /// option, else `models.availableModels`), each once, a later model of the
 /// same name labelled with its id, with its thinking levels.
-pub(super) fn build_models(setup: &Value, thinking_levels: &ThinkingLevels) -> Vec<Value> {
+fn build_models(
+    setup: &Value,
+    thinking_levels: &ThinkingLevels,
+    default_model: Option<&str>,
+    authoritative: bool,
+) -> Vec<Value> {
     let options = setup["configOptions"].as_array().map(Vec::as_slice);
     let config = model_config(options);
     let select = config.filter(|c| c["type"] == "select");
-    let current = match select {
-        Some(config) => config["currentValue"].as_str(),
-        None => setup["models"]["currentModelId"].as_str(),
-    };
+    let current = selected_model(setup, options);
     let entries: Vec<(String, String)> = match (config, select) {
         (_, Some(select)) => flatten_choices(select)
             .into_iter()
@@ -916,7 +614,12 @@ pub(super) fn build_models(setup: &Value, thinking_levels: &ThinkingLevels) -> V
             .collect(),
         (Some(_), None) => Vec::new(),
     };
-    let current_thinking = thinking_config(options);
+    let default_model = match default_model {
+        Some(slug) if entries.iter().any(|(value, _)| value == slug) => Some(slug),
+        Some(_) => current,
+        None if authoritative => current,
+        None => None,
+    };
     let mut seen = std::collections::HashSet::new();
     let mut names = std::collections::HashSet::new();
     let mut models = Vec::new();
@@ -935,26 +638,22 @@ pub(super) fn build_models(setup: &Value, thinking_levels: &ThinkingLevels) -> V
             base_name.clone()
         };
         names.insert(base_name);
-        let is_current = Some(value.as_str()) == current;
-        let observed: Option<Option<&Value>> = if is_current {
-            Some(current_thinking)
+        let observed = if authoritative && Some(value.as_str()) == current {
+            thinking_config(options)
         } else {
-            thinking_levels.get(&value).map(Option::as_ref)
+            thinking_levels.get(&value).and_then(Option::as_ref)
         };
         let mut model = serde_json::Map::new();
         model.insert("slug".into(), json!(value));
         model.insert("name".into(), json!(label));
         model.insert("isCustom".into(), json!(false));
-        if is_current {
+        if Some(value.as_str()) == default_model {
             model.insert("isDefault".into(), json!(true));
             model.insert("aliases".into(), json!([DEFAULT_MODEL_ALIAS]));
         }
         model.insert(
             "capabilities".into(),
-            match observed {
-                None => thinking_capabilities(current_thinking, false),
-                Some(observed) => thinking_capabilities(observed, true),
-            },
+            json!({"optionDescriptors": observed.and_then(thinking_descriptor).into_iter().collect::<Vec<_>>() }),
         );
         models.push(Value::Object(model));
     }
@@ -1080,7 +779,7 @@ fn apply_catalog(models: &mut [Value], manifest: &Value) {
 /// sessions reported (`session`), as the reference's `applyCheck` updates
 /// its provider's draft.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn check(
+pub(super) fn check(
     config: &Value,
     env: &ProcessEnv,
     instance_id: &str,
@@ -1145,7 +844,6 @@ pub(super) async fn check(
                 detail.trim().to_owned()
             };
             let mut extra = vec![
-                ("usageLimits", Value::Null),
                 ("supportsTextGeneration", json!(false)),
                 ("workspaceSnapshots", json!([])),
             ];
@@ -1174,7 +872,6 @@ pub(super) async fn check(
             }
         }
         Ok(executable) => {
-            let usage = read_usage(&profile, &auth.method).await;
             let supports_text = text_generation_available(&profile);
             let Some((session, auth_value, models)) = account else {
                 return Draft {
@@ -1184,7 +881,6 @@ pub(super) async fn check(
                     auth: base_auth,
                     checked_at,
                     message: Some(unchecked),
-                    usage_limits: Some(usage),
                     extra: vec![
                         ("supportsTextGeneration", json!(supports_text)),
                         ("workspaceSnapshots", json!([])),
@@ -1211,7 +907,6 @@ pub(super) async fn check(
                 } else {
                     Vec::new()
                 },
-                usage_limits: Some(usage),
                 extra: vec![
                     (
                         "supportsTextGeneration",
@@ -1255,16 +950,16 @@ mod tests {
             json!({"models": legacy["models"], "configOptions": [model_config_with("a", options)]});
         let none = ThinkingLevels::new();
         assert_eq!(
-            build_models(&legacy, &none),
-            build_models(&with_option, &none)
+            build_models(&legacy, &none, None, true),
+            build_models(&with_option, &none, None, true)
         );
         assert_eq!(
-            build_models(&legacy, &none)[0],
+            build_models(&legacy, &none, None, true)[0],
             json!({"slug": "a", "name": "A", "isCustom": false,
             "isDefault": true, "aliases": ["antigravity-default"], "capabilities": {"optionDescriptors": []}})
         );
         let empty = json!({"models": legacy["models"], "configOptions": [model_config_with("a", json!([]))]});
-        assert!(build_models(&empty, &none).is_empty());
+        assert!(build_models(&empty, &none, None, true).is_empty());
     }
 
     #[test]
@@ -1272,7 +967,7 @@ mod tests {
         let setup = json!({"configOptions": [model_config_with("pro", json!([
             {"group": "Flash", "name": "Flash", "options": [{"value": "f1", "name": "Flash"}, {"value": "f2", "name": "Flash"}]},
             {"group": "Pro", "name": "Pro", "options": [{"value": "pro", "name": "Pro"}, {"value": "f1", "name": "Flash"}]}]))]});
-        let models = build_models(&setup, &ThinkingLevels::new());
+        let models = build_models(&setup, &ThinkingLevels::new(), None, true);
         let slugs: Vec<&str> = models.iter().map(|m| m["slug"].as_str().unwrap()).collect();
         assert_eq!(slugs, ["f1", "f2", "pro"]);
         assert_eq!(models[1]["name"], "Flash (f2)");
@@ -1293,7 +988,7 @@ mod tests {
         let mut levels = ThinkingLevels::new();
         levels.insert("claude".into(), Some(thinking("low")));
         levels.insert("plain".into(), None);
-        let models = build_models(&setup, &levels);
+        let models = build_models(&setup, &levels, None, true);
         let of = |slug: &str| {
             models.iter().find(|m| m["slug"] == slug).unwrap()["capabilities"]["optionDescriptors"]
                 [0]
@@ -1303,8 +998,7 @@ mod tests {
         assert_eq!(of("gemini")["role"], "reasoning");
         assert_eq!(of("claude")["currentValue"], "low");
         assert!(of("plain").is_null());
-        assert_eq!(of("unseen")["id"], "thinking_level");
-        assert!(of("unseen").get("currentValue").is_none());
+        assert!(of("unseen").is_null());
     }
 
     #[test]
@@ -1319,20 +1013,5 @@ mod tests {
             RUNTIME_MODES_WITHOUT_AUTO
         );
         assert_eq!(runtime_modes(&json!({})), RUNTIME_MODES_WITHOUT_AUTO);
-    }
-
-    #[test]
-    fn summary_buckets_become_windows() {
-        let windows = summary_windows(
-            &json!({"buckets": [
-                {"bucketId": "gemini-pro", "window": "weekly", "remainingFraction": 0.25, "resetTime": "2026-12-01T00:00:00Z"},
-                {"bucketId": "3p-shared", "window": "5h", "remainingFraction": 1},
-                {"bucketId": "off", "disabled": true, "remainingFraction": 0.5}]}),
-            0,
-        );
-        assert_eq!(windows.len(), 2);
-        assert_eq!(windows[0]["label"], "Gemini · Weekly");
-        assert_eq!(windows[0]["usedPercent"], 75);
-        assert_eq!(windows[1]["label"], "Claude & GPT (shared) · 5-hour");
     }
 }

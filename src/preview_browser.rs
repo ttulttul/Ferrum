@@ -18,37 +18,37 @@ use tokio::sync::watch;
 // Update the version, sizes and hashes from the reference's PreviewBrowser.ts
 // (each chrome-headless-shell zip of
 // https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json).
-pub(crate) const VERSION: &str = "158.0.8127.36";
+pub(crate) const VERSION: &str = "158.0.8127.88";
 const ARCHIVES: [(&str, u64, &str); 6] = [
     (
         "linux64",
-        132_087_165,
-        "2d3a23017323c54fd457a678e4351f895c4076d8050e39d5aa6247f93448b73a",
+        132_091_593,
+        "63401333cc587645bfaeea7f0c90958b327d249251e23954a47f30112ca23d5b",
     ),
     (
         "linux-arm64",
-        129_938_239,
-        "176ee5c55486c22de43128871189061365ea28e881fc96016fd18e7cb59437c8",
+        129_942_265,
+        "9f89b7ef6574e4bbf6ddda9f17f1fab5626e93d6f7d852653232d0d3554df975",
     ),
     (
         "mac-arm64",
-        105_057_133,
-        "c24d40a3786322ff3a5e3ac6eed162226cbaf07ebe468715407827226b0f8897",
+        105_060_087,
+        "69320f6869c4defbbdac8b8fa83aef65dc63975e83bbd06899b75dbea5c464b3",
     ),
     (
         "mac-x64",
-        112_306_247,
-        "e0c5d07d8f5bcc5bdd5ef370e7daf3770856b585fcc9eecf441c7e3bb2e3d1cf",
+        112_314_759,
+        "dc1ac31965cb2ec7794aed8c66127aceea304ae15353cd56fc4b8bde44091548",
     ),
     (
         "win32",
-        122_509_290,
-        "c1fc009622363bccbc1e5f60be654b90fa7b70ad83e642875da1fcb147ae430d",
+        122_509_314,
+        "936ad5e7f530bdd66b7261d0a2ceed76b057d429cf31b770a95fd903a7969856",
     ),
     (
         "win64",
-        127_876_264,
-        "9655950dfeddf565561cd64cfe8ee716ccd6482fa3798503b632219efc65a71e",
+        127_879_225,
+        "e935ea2d4633495b5e9ab7bc66bcd982806329c0ee9ecbafc1ac9596a3b34cdb",
     ),
 ];
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -722,8 +722,8 @@ mod tests {
         assert_eq!(chrome_platform("win32", "arm64"), Some("win64"));
         assert_eq!(chrome_platform("freebsd", "x64"), None);
         let linux = release_for("linux", "x64").unwrap();
-        assert_eq!(linux.url, "https://storage.googleapis.com/chrome-for-testing-public/158.0.8127.36/linux64/chrome-headless-shell-linux64.zip");
-        assert_eq!(linux.bytes, 132_087_165);
+        assert_eq!(linux.url, "https://storage.googleapis.com/chrome-for-testing-public/158.0.8127.88/linux64/chrome-headless-shell-linux64.zip");
+        assert_eq!(linux.bytes, 132_091_593);
         assert!(numeric_compare("158.0.10.1", "158.0.9.1").is_gt());
     }
 

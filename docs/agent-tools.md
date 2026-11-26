@@ -775,7 +775,7 @@ still answer "Invalid tool arguments".
 | [x] | `t3_thread_organize` | thread | every caller | `writesThreads` |
 | [x] | `t3_thread_search` | thread | every caller | `reads` |
 | [x] | `t3_thread_transfer` | thread | every caller | `either(reads, writesThreads)` |
-| [x] | `t3_workflow` | workflow | outside clients only | `either(reads, writes)` |
+| [x] | `t3_workflow` | workflow | outside clients only | `either(reads, writesOwnerWork)` |
 | [x] | `t3_worktree_handoff` | worktree | threads only | `actsAsCaller` |
 | [x] | `t3_worktree_list` | worktree | every caller | `reads` |
 | [x] | `t3_worktree_status` | worktree | threads only | `readsAsCaller` |

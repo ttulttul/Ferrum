@@ -160,6 +160,13 @@ pub fn repository_key_from_remote(remote_url: &str) -> String {
     let Some((host, path)) = parse_git_remote_repository(remote_url, true) else {
         return key;
     };
+    if matches!(host.as_str(), "ssh.bitbucket.org" | "altssh.bitbucket.org") {
+        if let Some((owner, repo)) = path.split_once('/') {
+            if !owner.is_empty() && !repo.is_empty() && !repo.contains('/') {
+                return format!("bitbucket.org/{owner}/{}", strip_git_suffix(repo));
+            }
+        }
+    }
     let written = format!("{host}/{path}");
     if let Some(captures) = AZURE_SSH.captures(&written) {
         let (organization, project, repository) = (&captures[2], &captures[3], &captures[4]);
@@ -684,7 +691,7 @@ mod tests {
         let identity = resolve_uncached(&nested).unwrap();
         assert_eq!(
             identity["canonicalKey"],
-            "ssh.bitbucket.org/example-org/example-repo"
+            "bitbucket.org/example-org/example-repo"
         );
         assert_eq!(identity["provider"], "bitbucket");
         assert_eq!(identity["rootPath"], root.to_str().unwrap());

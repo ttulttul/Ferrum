@@ -151,7 +151,7 @@ fn field(row: &Map<String, Value>, column: &str) -> Value {
 /// `toRun`, with nothing registered: a run that has not ended is `retired`,
 /// and none resumes by itself.
 fn to_run(row: &Map<String, Value>) -> Value {
-    json!({
+    let mut run = json!({
         "runId": field(row, "run_id"),
         "workflow": field(row, "workflow"),
         "version": field(row, "version"),
@@ -167,7 +167,18 @@ fn to_run(row: &Map<String, Value>) -> Value {
         "startedAt": field(row, "started_at"),
         "updatedAt": field(row, "updated_at"),
         "endedAt": field(row, "ended_at"),
-    })
+    });
+    if row
+        .get("tags_json")
+        .and_then(Value::as_str)
+        .is_some_and(|tags| tags != "[]")
+    {
+        run["tags"] = json_column(row, "tags_json");
+    }
+    if row.get("subject_json").is_some_and(Value::is_string) {
+        run["subject"] = json_column(row, "subject_json");
+    }
+    run
 }
 
 fn run_row(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<Map<String, Value>>> {
@@ -194,20 +205,24 @@ fn runs(conn: &Connection, status: Option<&str>) -> rusqlite::Result<Vec<Value>>
             "SELECT * FROM (
                SELECT * FROM workflow_runs
                WHERE NOT (status = 'skipped' AND parent_run_id IS NULL)
-               ORDER BY started_at DESC LIMIT 500
+               ORDER BY started_at DESC, rowid DESC LIMIT 500
              )
              UNION ALL
              SELECT * FROM (
                SELECT * FROM workflow_runs
                WHERE status = 'skipped' AND parent_run_id IS NULL
-               ORDER BY started_at DESC LIMIT 500
+               ORDER BY started_at DESC, rowid DESC LIMIT 500
+             )
+             UNION
+             SELECT * FROM workflow_runs WHERE status = 'paused' OR run_id IN (
+                 SELECT run_id FROM workflow_waits WHERE request_json IS NOT NULL AND signalled_at IS NULL
              )
              ORDER BY started_at DESC",
             [],
         )?,
         Some(status) => select(
             conn,
-            "SELECT * FROM workflow_runs WHERE status = ?1 ORDER BY started_at DESC LIMIT 500",
+            "SELECT * FROM workflow_runs WHERE status = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 500",
             [status],
         )?,
     };
@@ -284,13 +299,18 @@ fn questions(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
             .map_or(Value::Null, |row| {
                 json!({"threadId": field(row, "thread_id"), "environmentId": field(row, "environment_id")})
             });
-            Ok(json!({
+            let request = json_column(wait, "request_json");
+            let mut question = json!({
                 "runId": run_id,
                 "name": field(wait, "name"),
-                "request": json_column(wait, "request_json"),
+                "request": request,
                 "askedAt": field(wait, "opened_at"),
                 "thread": thread,
-            }))
+            });
+            if let Some(kind) = request["kind"].as_str() {
+                question["kind"] = json!(kind);
+            }
+            Ok(question)
         })
         .collect()
 }
@@ -396,6 +416,9 @@ fn wait_signalled(
         }
     }
     transaction.commit()?;
+    if taken {
+        changed();
+    }
     Ok(taken)
 }
 
@@ -406,12 +429,19 @@ fn mail_put(
     address: &Address,
     value_json: &str,
     expires_at: &str,
+    sender: &Value,
 ) -> rusqlite::Result<()> {
     let transaction = conn.transaction()?;
     transaction.execute(
-        "INSERT INTO workflow_mail (signal_id, address, value_json, expires_at)
-         VALUES (?1, ?2, ?3, ?4) ON CONFLICT (signal_id) DO NOTHING",
-        params![signal_id, address.mail(), value_json, expires_at],
+        "INSERT INTO workflow_mail (signal_id, address, value_json, expires_at, sender_json)
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (signal_id) DO NOTHING",
+        params![
+            signal_id,
+            address.mail(),
+            value_json,
+            expires_at,
+            sender.to_string()
+        ],
     )?;
     transaction.execute(
         "UPDATE workflow_signals SET kept_until = ?2 WHERE signal_id = ?1 AND kept_until < ?2",
@@ -482,6 +512,7 @@ fn mail_deliver(
         return Ok(MailOutcome::Gone);
     }
     transaction.commit()?;
+    changed();
     Ok(MailOutcome::Delivered)
 }
 
@@ -493,17 +524,56 @@ fn signal(
     address: &Address,
     value: &Value,
     signal_id: &str,
+    label: Option<&str>,
+    session: Option<&str>,
 ) -> Result<&'static str, Refused> {
     if signal_seen(conn, signal_id).map_err(unavailable)? {
         return Ok("delivered");
     }
     let value_json = value.to_string();
-    let woke = json!({"expired": false, "value": value});
+    let mut sender = json!({});
+    if let Some(label) = label {
+        sender["answeredBy"] = json!(label);
+    }
+    if let Some(session) = session {
+        sender["answeredBySession"] = json!(session);
+    }
+    sender["answeredAt"] = json!(now());
+    let kept_sender = |conn: &Connection| -> rusqlite::Result<Option<Value>> {
+        let kept: Option<String> = conn.query_row(
+            "SELECT sender_json FROM workflow_mail WHERE signal_id = ?1 AND sender_json IS NOT NULL",
+            [signal_id], |row| row.get(0),
+        ).optional()?;
+        Ok(kept.and_then(|text| serde_json::from_str(&text).ok()))
+    };
+    let wake = |wait: &Map<String, Value>, sender: &Value| {
+        let mut answer = value.clone();
+        let schema = wait["schema_json"].as_str().unwrap_or_default();
+        if let Some(fields) = answer
+            .as_object_mut()
+            .filter(|_| !wait["request_json"].is_null() && schema.contains("\"answeredAt\""))
+        {
+            for key in ["answeredBy", "answeredBySession", "answeredAt"] {
+                fields.shift_remove(key);
+                if let Some(field) = sender.get(key).filter(|_| {
+                    key != "answeredBySession" || schema.contains("\"answeredBySession\"")
+                }) {
+                    fields.insert(key.to_owned(), field.clone());
+                }
+            }
+        }
+        json!({"expired": false, "value": answer})
+    };
+    if let Some(first) = kept_sender(conn).map_err(unavailable)? {
+        sender = first;
+    }
     while let Some(wait) = wait_at(conn, address).map_err(unavailable)? {
         let name = text(&wait, "name");
-        if let Err(rejection) =
-            crate::run_output::check_output(&json_column(&wait, "schema_json"), &value_json)
-        {
+        let woke = wake(&wait, &sender);
+        if let Err(rejection) = crate::run_output::check_output(
+            &json_column(&wait, "schema_json"),
+            &woke["value"].to_string(),
+        ) {
             return Err(invalid(format!(
                 "The value does not fit what {name} waits for. {rejection}"
             )));
@@ -520,12 +590,20 @@ fn signal(
     if signal_seen(conn, signal_id).map_err(unavailable)? {
         return Ok("delivered");
     }
-    mail_put(conn, signal_id, address, &value_json, &expires_at).map_err(unavailable)?;
+    mail_put(conn, signal_id, address, &value_json, &expires_at, &sender).map_err(unavailable)?;
+    if let Some(first) = kept_sender(conn).map_err(unavailable)? {
+        sender = first;
+    }
     loop {
         let Some(late) = wait_at(conn, address).map_err(unavailable)? else {
             return Ok("buffered");
         };
-        if crate::run_output::check_output(&json_column(&late, "schema_json"), &value_json).is_err()
+        let woke = wake(&late, &sender);
+        if crate::run_output::check_output(
+            &json_column(&late, "schema_json"),
+            &woke["value"].to_string(),
+        )
+        .is_err()
         {
             return Ok("buffered");
         }
@@ -594,7 +672,14 @@ fn ended(conn: &mut Connection, run_id: &str) {
         run_id: parent.to_owned(),
         wait: wait.to_owned(),
     };
-    let _ = signal(conn, &address, &value, &format!("{run_id}/ended"));
+    let _ = signal(
+        conn,
+        &address,
+        &value,
+        &format!("{run_id}/ended"),
+        None,
+        None,
+    );
 }
 
 /// A step's thread still working for the run (`runningThreads`).
@@ -764,7 +849,11 @@ fn refusal(mode: Mode) -> Refused {
 
 /// `t3_workflow`, after its caller check: the handler's answer for `input`.
 /// `Err(("invalid_arguments", problem))` is an argument its schema turns down.
-pub(crate) async fn tool(state: &Arc<AppState>, input: &Value) -> Result<Value, Refused> {
+pub(crate) async fn tool(
+    state: &Arc<AppState>,
+    input: &Value,
+    client_label: &str,
+) -> Result<Value, Refused> {
     let action = input["action"].as_str().unwrap_or_default();
     let workflow = trimmed(input, "workflow")?;
     let idempotency_key = trimmed(input, "idempotencyKey")?;
@@ -783,7 +872,13 @@ pub(crate) async fn tool(state: &Arc<AppState>, input: &Value) -> Result<Value, 
             "questions" => match mode {
                 Mode::Off => Err(off()),
                 Mode::Disabled => Ok(json!({"questions": []})),
-                Mode::History => Ok(json!({"questions": questions(&conn).map_err(unavailable)?})),
+                Mode::History => {
+                    let mut open = questions(&conn).map_err(unavailable)?;
+                    if let Some(kind) = input["kind"].as_str() {
+                        open.retain(|question| question["kind"] == kind);
+                    }
+                    Ok(json!({"questions": open}))
+                }
             },
             "store" => match mode {
                 Mode::Off => Err(off()),
@@ -795,6 +890,17 @@ pub(crate) async fn tool(state: &Arc<AppState>, input: &Value) -> Result<Value, 
             "list" => match mode {
                 Mode::Off => Err(off()),
                 Mode::Disabled => Ok(json!({"runs": []})),
+                Mode::History if input["tag"].is_string() || input["subject"].is_string() => {
+                    let rows = select(&conn,
+                        "SELECT * FROM workflow_runs AS r
+                         WHERE (?1 IS NULL OR status = ?1)
+                           AND (?2 IS NULL OR EXISTS (SELECT 1 FROM json_each(r.tags_json) WHERE value = ?2))
+                           AND (?3 IS NULL OR subject_key = ?3 OR subject_url = ?3)
+                         ORDER BY started_at DESC, rowid DESC LIMIT 500",
+                        params![status, input["tag"].as_str(), input["subject"].as_str()],
+                    ).map_err(unavailable)?;
+                    Ok(json!({"runs": rows.iter().map(to_run).collect::<Vec<_>>()}))
+                }
                 Mode::History => Ok(json!({"runs": runs(&conn, status).map_err(unavailable)?})),
             },
             _ => {
@@ -841,7 +947,7 @@ pub(crate) async fn tool(state: &Arc<AppState>, input: &Value) -> Result<Value, 
             if mode != Mode::History {
                 return Err(refusal(mode));
             }
-            let delivery = signal(&mut conn, &address, value, &id)?;
+            let delivery = signal(&mut conn, &address, value, &id, Some(client_label), None)?;
             Ok(json!({"delivery": delivery}))
         }
         "store_set" | "store_delete" => {
@@ -1005,7 +1111,11 @@ pub(crate) fn get_run(state: &AppState, run_id: &str) -> Result<Value, Value> {
 /// `workflows.answer` (`Workflows.answer`): a person's answer to the question
 /// a run asks, as one signal per asking. A question answered already, or never
 /// asked, takes nothing.
-pub(crate) fn answer(state: &AppState, params: &Value) -> Result<(), Value> {
+pub(crate) fn answer(
+    state: &AppState,
+    params: &Value,
+    principal: &crate::auth_service::Session,
+) -> Result<(), Value> {
     let mut conn = open(state).map_err(|e| request_error(unavailable(e)))?;
     let mode = mode(state, &conn);
     if mode != Mode::History {
@@ -1026,9 +1136,18 @@ pub(crate) fn answer(state: &AppState, params: &Value) -> Result<(), Value> {
         value["reason"] = reason.clone();
     }
     let id = format!("answer:{}", text(&wait, "token"));
-    signal(&mut conn, &address, &value, &id)
-        .map(|_| ())
-        .map_err(request_error)
+    signal(
+        &mut conn,
+        &address,
+        &value,
+        &id,
+        Some(&crate::peer_thread_relay::client_label(
+            principal.client_metadata(),
+        )),
+        Some(&principal.id),
+    )
+    .map(|_| ())
+    .map_err(request_error)
 }
 
 /// `workflows.resume` (`Workflows.resume`): with nothing registered, a run

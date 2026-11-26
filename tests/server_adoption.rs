@@ -118,7 +118,7 @@ async fn publishes_bound_port_serves_root_and_clears_record_on_shutdown() {
     assert_eq!(record["port"], port);
     assert_eq!(record["origin"], format!("http://127.0.0.1:{port}"));
     assert_eq!(record["ownerId"], owner_id.as_str());
-    assert_eq!(record["serverVersion"], "0.1.11");
+    assert_eq!(record["serverVersion"], "0.1.12");
     assert!(
         record["managedPolicy"].is_null() || record["managedPolicy"]["fingerprint"].is_string(),
         "{record}"

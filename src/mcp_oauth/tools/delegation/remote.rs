@@ -561,7 +561,8 @@ async fn last_reply<S: McpHost>(
     let thread = remote["threadId"].as_str().unwrap_or_default();
     let mut reply: Option<Value> = None;
     let mut error: Option<Value> = None;
-    let mut after: i64 = -1;
+    // Position zero holds the opening message. Older linked peers reject negative cursors.
+    let mut after: i64 = 0;
     let mut run: Option<Value> = None;
     let matches_run = |item: &Value| run_id.is_none_or(|id| item["runId"] == id);
     loop {

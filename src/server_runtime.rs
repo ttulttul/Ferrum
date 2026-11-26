@@ -37,10 +37,10 @@ pub const EXIT_CODE_STATE_DIR_OWNED: i32 = 78;
 
 /// `packageJson.version` of `apps/server` in the TypeScript reference this
 /// port is checked against: pingdotgg/t3code at
-/// fd0331ca9b1596ed7018c80f52b7e6730014f593 (`.github/workflows/parity.yml`),
-/// which is after 0.1.11 and before 0.1.12. Kept in step with the environment
+/// ae945dd42a9879104991280df99182a0f0cec3bf (`.github/workflows/parity.yml`),
+/// kept in step with the environment
 /// descriptor's `serverVersion`; change both when the pin moves.
-pub const SERVER_VERSION: &str = "0.1.11";
+pub const SERVER_VERSION: &str = "0.1.12";
 
 pub const OWNER_LOCK_FILE: &str = "server-owner.sqlite";
 pub const RUNTIME_STATE_FILE: &str = "server-runtime.json";
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(value["host"], "0.0.0.0");
         assert_eq!(value["port"], 3773);
         assert_eq!(value["origin"], "http://127.0.0.1:3773");
-        assert_eq!(value["serverVersion"], "0.1.11");
+        assert_eq!(value["serverVersion"], "0.1.12");
         assert_eq!(value["managedPolicy"], policy);
         let started = value["startedAt"].as_str().unwrap();
         assert_eq!(started.len(), "2026-11-20T00:15:37.888Z".len());

@@ -1228,6 +1228,14 @@ impl Thread {
                 }
             }
         }
+        if claude && stopped.is_none() && !crashed {
+            if let Some((phase, at)) = &self.provider.session_startup {
+                session["updatedAt"] = json!(iso((*at).max(thread.created_at)));
+                if let Some(phase) = phase {
+                    session["startupPhase"] = json!(phase);
+                }
+            }
+        }
         Some(session)
     }
 
@@ -1284,6 +1292,9 @@ impl Thread {
             "startedAt": started_value,
             "completedAt": completed
         }));
+        if let (Some(modes), Some(attempt)) = (&record.started_modes, out.attempts.last_mut()) {
+            attempt["startedModes"] = modes.clone();
+        }
         // `nativeThreadId` is optional in the contract: absent, never null.
         if let Some(native) = self
             .provider
@@ -1295,8 +1306,7 @@ impl Thread {
                 attempt["nativeThreadId"] = json!(native);
             }
         }
-        // Once its turn ends, the root node goes with the run (`waiting`
-        // until a completed turn's checkpoint completes both).
+        // The root node settles with the run at the end of its provider turn.
         let (root_status, root_completed) = match terminal {
             Some(_) if !requeued => {
                 let (status, end) = self.projected_run_status(run);
@@ -2906,18 +2916,11 @@ mod tests {
     }
 
     #[test]
-    fn a_completed_turn_leaves_its_run_waiting_for_its_checkpoint() {
+    fn a_completed_turn_settles_before_its_checkpoint() {
         let run_id = Uuid::new_v4();
         let mut live = running_codex_thread(run_id);
         live.provider
             .apply(run_id, &terminal(TurnStatus::Completed), 3);
-        live.checkpoints.push(crate::CheckpointRecord {
-            turn_count: 1,
-            tree: "tree".into(),
-            cwd: "/w".into(),
-            captured_at: 4,
-            ready: true,
-        });
         let projection = live.projection();
         let root = |projection: &Value| {
             projection["nodes"]
@@ -2928,12 +2931,18 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        assert_eq!(projection["runs"][0]["status"], "waiting");
-        assert_eq!(projection["runs"][0]["completedAt"], Value::Null);
+        assert_eq!(projection["runs"][0]["status"], "completed");
+        assert_eq!(projection["runs"][0]["completedAt"], super::iso(3));
         assert_eq!(projection["runs"][0]["checkpointId"], Value::Null);
-        assert_eq!(root(&projection)["status"], "waiting");
+        assert_eq!(root(&projection)["status"], "completed");
         assert_eq!(projection["attempts"][0]["status"], "completed");
-        // The run's end, recorded after its checkpoint, completes both.
+        live.checkpoints.push(crate::CheckpointRecord {
+            turn_count: 1,
+            tree: "tree".into(),
+            cwd: "/w".into(),
+            captured_at: 4,
+            ready: true,
+        });
         live.runs[0].status = "completed".into();
         live.runs[0].finished_at = Some(5);
         let projection = live.projection();

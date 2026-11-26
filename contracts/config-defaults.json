@@ -74,6 +74,16 @@
       "when": "terminalFocus"
     },
     {
+      "key": "ctrl+alt+[",
+      "command": "terminal.previous",
+      "when": "terminalFocus && !isMac"
+    },
+    {
+      "key": "ctrl+alt+]",
+      "command": "terminal.next",
+      "when": "terminalFocus && !isMac"
+    },
+    {
       "key": "mod+w",
       "command": "rightPanel.close",
       "when": "!terminalFocus"
@@ -283,6 +293,16 @@
       "command": "thread.next"
     },
     {
+      "key": "cmd+shift+[",
+      "command": "terminal.previous",
+      "when": "terminalFocus && isMac"
+    },
+    {
+      "key": "cmd+shift+]",
+      "command": "terminal.next",
+      "when": "terminalFocus && isMac"
+    },
+    {
       "key": "mod+shift+c",
       "command": "thread.copyReference",
       "when": "!terminalFocus"
@@ -439,6 +459,8 @@
     "terminal.splitVertical",
     "terminal.new",
     "terminal.close",
+    "terminal.previous",
+    "terminal.next",
     "rightPanel.toggle",
     "rightPanel.new",
     "threadPanel.toggle",

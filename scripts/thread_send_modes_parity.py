@@ -92,7 +92,11 @@ def main():
                 fake_bin = tmp / f"{side}-bin"
                 write_fake_clis(fake_bin, {"claude"})
                 log = tmp / f"{side}-provider.log"
-                env = {**GIT_ISOLATION, "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"), "FAKE_PROVIDER_LOG": str(log),
+                # Run completion now precedes checkpoint capture. Observe an idle target
+                # at the same boundary on both servers before reading it or starting a new turn.
+                markers = tmp / f"{side}-checkpoints"
+                markers.mkdir()
+                env = {**GIT_ISOLATION, "FAKE_CHECKPOINT_MARKERS": str(markers), "FAKE_PROVIDER_CLI": str(FIXTURES / "fake_cli.py"), "FAKE_PROVIDER_LOG": str(log),
                        "FAKE_PROVIDER_SCENARIO": str(FIXTURES / FIXTURE),
                        "PATH": os.pathsep.join([str(fake_bin), path_without(PROVIDER_CLIS | RELAY_TOOLS, tmp / f"{side}-hidden")])}
                 server = Server(stack, command, root, secrets.token_urlsafe(32), secrets.token_bytes(32), env)
@@ -105,7 +109,7 @@ def main():
                     "worktreePath": None, "createdBy": "user", "creationSource": "web"})
                 dispatched = server.rpc("orchestration.dispatchCommand", seeded["dispatch"])
                 assert dispatched["_tag"] == "Success", dispatched
-                views = wait_settled(server, {THREAD: 1, TARGET: 6}, seconds=90)
+                views = wait_settled(server, {THREAD: 1, TARGET: 6}, seconds=90, checkpoint_markers=markers)
                 record = {
                     "mcp answers": sorted(without_retries(agent_mcp(log, tmp))),
                     "target runs": runs(views[TARGET]),

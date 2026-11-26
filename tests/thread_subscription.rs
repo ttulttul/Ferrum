@@ -565,12 +565,24 @@ async fn worktree_setup_starts_empty_and_has_nothing_to_cancel() {
 
 #[tokio::test]
 async fn projects_carry_their_repository_identity() {
+    // The canonical SSH alias routes through the public host's REST adapter.
+    // Give its anonymous viewer probe the same 401 as the parity fixture.
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    std::env::set_var(
+        "T3CODE_BITBUCKET_API_BASE_URL",
+        format!("http://{}/2.0", api.local_addr().unwrap()),
+    );
+    let api_task = tokio::spawn(async move {
+        let router =
+            axum::Router::new().fallback(|| async { axum::http::StatusCode::UNAUTHORIZED });
+        axum::serve(api, router).await.unwrap();
+    });
     let server = Server::start().await;
     let mut socket = server.socket().await;
     let checkout = seeded(&server, &mut socket).await;
     let root = std::fs::canonicalize(checkout.path()).unwrap();
     let expected = json!({
-        "canonicalKey":"ssh.bitbucket.org/example-org/example-repo",
+        "canonicalKey":"bitbucket.org/example-org/example-repo",
         "locator":{"source":"git-remote","remoteName":"origin","remoteUrl":REMOTE},
         "rootPath":root,
         "displayName":"example-org/example-repo",
@@ -604,13 +616,11 @@ async fn projects_carry_their_repository_identity() {
     assert_eq!(error["_tag"], "PullRequestUnavailableError", "{listed}");
     assert_eq!(error["reason"], "cli-unauthenticated");
     assert_eq!(error["provider"], "bitbucket");
-    assert_eq!(
-        error["listResult"]["providers"][0]["host"],
-        "ssh.bitbucket.org"
-    );
+    assert_eq!(error["listResult"]["providers"][0]["host"], "bitbucket.org");
     assert_eq!(
         error["listResult"]["errors"][0]["message"],
         "example-org/example-repo could not be read."
     );
     server.stop().await;
+    api_task.abort();
 }

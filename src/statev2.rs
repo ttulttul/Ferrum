@@ -551,11 +551,11 @@ mod tests {
     }
 
     #[test]
-    fn the_pinned_ledger_ends_at_110() {
+    fn the_pinned_ledger_ends_at_119() {
         let migrations = supported_migrations();
-        assert_eq!(migrations.len(), 110);
+        assert_eq!(migrations.len(), 119);
         assert_eq!(migrations[0], (1, "OrchestrationEvents".to_string()));
-        assert_eq!(supported_head(), 110);
+        assert_eq!(supported_head(), 119);
     }
 
     #[test]
@@ -609,11 +609,11 @@ mod tests {
     fn refuses_other_migration_heads_without_writing() {
         for (statement, expected) in [
             (
-                "DELETE FROM effect_sql_migrations WHERE migration_id = 110",
+                "DELETE FROM effect_sql_migrations WHERE migration_id = 119",
                 "older",
             ),
             (
-                "INSERT INTO effect_sql_migrations (migration_id, name) VALUES (111, 'Future')",
+                "INSERT INTO effect_sql_migrations (migration_id, name) VALUES (120, 'Future')",
                 "newer",
             ),
             (

@@ -7,6 +7,7 @@ use std::path::Path;
 
 mod actions;
 mod activity;
+mod activity_cache;
 pub(crate) mod bitbucket;
 mod bitbucket_pr;
 pub(crate) use bitbucket_pr::repository_json as bitbucket_repository_json;
@@ -52,11 +53,13 @@ type HeldSummaries = indexmap::IndexMap<SummaryKey, (std::time::Instant, Value)>
 pub struct PullRequestService {
     summaries: tokio::sync::Mutex<HeldSummaries>,
     diffs: diff_cache::DiffCache,
+    activity: activity_cache::ActivityCache,
     node_ids: tokio::sync::Mutex<indexmap::IndexMap<(String, u64), String>>,
 }
 impl PullRequestService {
     async fn clear(&self, project: &str, repository: &str, number: u64) {
         self.diffs.clear(project, repository, number).await;
+        self.activity.clear(project, repository, number).await;
         self.summaries.lock().await.retain(|(p, r, n, _), _| {
             p != project || !r.eq_ignore_ascii_case(repository) || *n != number
         });
@@ -176,6 +179,39 @@ fn pinned_head<'a>(current: Option<&'a str>, expected: &str) -> Result<&'a str, 
         })
 }
 
+/// Resolve a commit prefix only against this pull request's activity, before the diff cache.
+async fn listed_commit(
+    op: &str,
+    input: &Value,
+    activity: impl std::future::Future<Output = Reply>,
+) -> Result<Option<Value>, Value> {
+    let Some(prefix) = input["commit"]
+        .as_str()
+        .filter(|_| matches!(op, "diff" | "diffFileContents"))
+    else {
+        return Ok(None);
+    };
+    let missing = || json!({"_tag":"PullRequestOperationError","operation":op,"detail":"This commit is not part of the change request.","reason":"not-found"});
+    let history = activity.await?;
+    if !valid_sha(prefix) {
+        return Err(missing());
+    }
+    let prefix = prefix.to_ascii_lowercase();
+    let mut matching = history["commits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["oid"].as_str())
+        .filter(|oid| valid_sha(oid) && oid.to_ascii_lowercase().starts_with(&prefix));
+    let oid = matching.next().ok_or_else(missing)?;
+    if matching.next().is_some() {
+        return Err(missing());
+    }
+    let mut resolved = input.clone();
+    resolved["commit"] = json!(oid);
+    Ok(Some(resolved))
+}
+
 /// One pull request of a Bitbucket project (`bitbucket_pr`), its cached summaries cleared
 /// after a write.
 async fn bitbucket_read(
@@ -212,6 +248,28 @@ async fn bitbucket_read(
         project: p,
         state_dir: &state.paths.state_dir,
     };
+    let activity = async {
+        let load = bitbucket_pr::run(repository, "activity", input, number);
+        let Ok(credential) = crate::bitbucket_credential::current().await else {
+            return load.await;
+        };
+        let scope = state.pull_requests.diffs.scope(&(
+            bitbucket::base_url(),
+            host,
+            credential,
+            input["expectedAccountId"].as_str(),
+        ));
+        state
+            .pull_requests
+            .activity
+            .read(&p.id, named, number, scope, load)
+            .await
+    };
+    if op == "activity" {
+        return activity.await;
+    }
+    let resolved = listed_commit(op, input, activity).await?;
+    let input = resolved.as_ref().unwrap_or(input);
     if op == "diff" {
         if let Ok(credential) = crate::bitbucket_credential::current().await {
             let scope = state
@@ -348,7 +406,7 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
         }
     }
     let commit = input["commit"].as_str();
-    if commit.is_some_and(|sha| !valid_sha(sha)) {
+    if !matches!(op, "diff" | "diffFileContents") && commit.is_some_and(|sha| !valid_sha(sha)) {
         return Err(error(op, "The named commit was not a commit sha."));
     }
     let number = input["number"]
@@ -397,15 +455,12 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
     }
     if op == "runAction" {
         state.pull_requests.clear(&p.id, named, number).await;
-        let result = actions::run(&mut gh, &p.id, named, number, input).await;
+        let result = actions::run(&state.pull_requests, &mut gh, &p.id, named, number, input).await;
         state.pull_requests.clear(&p.id, named, number).await;
         return result;
     }
     if op == "checks" {
         return detail::read(&gh, &p, op, named, number).await;
-    }
-    if op == "activity" {
-        return activity::read(&gh, named, number).await;
     }
     if op == "rerunChecks" {
         return rerun::run(&state.pull_requests, &gh, &p, named, number, input).await;
@@ -423,7 +478,29 @@ pub(crate) async fn read(state: &AppState, cli: &Path, op: &str, input: &Value) 
     if op == "preview" {
         return metadata(&gh, op, named, &p.id.to_string(), number).await;
     }
-    if op == "diff" && gh.pin_credential().await.is_ok() {
+    let activity = async {
+        let pinned = gh.pinned_token().is_some() || gh.pin_credential().await.is_ok();
+        let load = activity::read(&gh, named, number);
+        if !pinned {
+            return load.await;
+        }
+        let scope = state.pull_requests.diffs.scope(&(
+            gh.pinned_token(),
+            input["host"].as_str(),
+            input["expectedAccountId"].as_str(),
+        ));
+        state
+            .pull_requests
+            .activity
+            .read(&p.id, named, number, scope, load)
+            .await
+    };
+    if op == "activity" {
+        return activity.await;
+    }
+    let resolved = listed_commit(op, input, activity).await?;
+    let input = resolved.as_ref().unwrap_or(input);
+    if op == "diff" && (gh.pinned_token().is_some() || gh.pin_credential().await.is_ok()) {
         let scope = state.pull_requests.diffs.scope(&gh.pinned_token());
         return state
             .pull_requests
