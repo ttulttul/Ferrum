@@ -63,6 +63,18 @@
   },
   {
    "mcp": {
+    "tool": "t3_thread_launch",
+    "arguments": {
+     "title": "Model only",
+     "message": "Help",
+     "modelSelection": {
+      "model": "claude-haiku-5-5"
+     }
+    }
+   }
+  },
+  {
+   "mcp": {
     "tool": "t3_thread_read",
     "arguments": {
      "threadId": "thread-missing"
@@ -1286,7 +1298,7 @@
       {
        "tool_use_id": "toolu_017v6M62RNaeoCuQopYV4Teu",
        "type": "tool_result",
-       "content": "The file /workspace/notes.txt has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+       "content": "The file /workspace/notes.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
       }
      ]
     },
