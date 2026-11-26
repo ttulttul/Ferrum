@@ -63,6 +63,10 @@ pub(crate) trait TurnHost:
     /// (Antigravity's `onSessionStarted`): a host that keeps provider status
     /// takes its models from it.
     fn provider_session_started(self: Arc<Self>, _run: &Run, _started: Value) {}
+    /// A steering restart's run: its interrupted turn has ended, so its next
+    /// attempt starts, in `cwd` with `text`. A host that runs turns starts
+    /// it as it starts a run's turn.
+    fn restart_turn(self: Arc<Self>, _run: Run, _cwd: String, _text: String) {}
     /// Attach local file paths to `attachments` for a provider turn, when this
     /// host stores uploads locally.
     fn resolve_attachments(&self, attachments: Vec<Value>) -> Vec<Value> {
@@ -1076,6 +1080,44 @@ async fn record<H: TurnHost>(
         anyhow::bail!("the provider process could not be waited for");
     };
     if host.stopping() {
+        return Ok(());
+    }
+    // A steering restart's turn ends into the run's next attempt: no
+    // checkpoint and no run end (`interrupt_restart`).
+    let restart = host.steering_restarts.lock().await.remove(&run.id);
+    if let Some(restart) = restart {
+        let (open, run_now) = {
+            let store = host.store.read().await;
+            let thread = store.threads.get(&run.thread_id);
+            (
+                thread
+                    .and_then(|thread| thread.provider.superseded.get(&run.id))
+                    .and_then(|attempts| attempts.last())
+                    .is_some_and(|attempt| attempt.open),
+                thread.and_then(|thread| thread.runs.iter().find(|r| r.id == run.id).cloned()),
+            )
+        };
+        // A turn that ended without saying how ends interrupted.
+        if open {
+            let _ = host
+                .commit(Event::RunProvider {
+                    run_id: run.id,
+                    thread_id: run.thread_id.clone(),
+                    event: ProviderEvent::TurnTerminal {
+                        status: TurnStatus::Interrupted,
+                        failure: None,
+                        thread_disposition: crate::workspace::provider::ThreadDisposition::Reusable,
+                        driver: None,
+                        closing: Vec::new(),
+                    },
+                    position: None,
+                })
+                .await;
+        }
+        done(exit_position);
+        if let Some(next) = run_now {
+            owner.clone().restart_turn(next, restart.cwd, restart.text);
+        }
         return Ok(());
     }
     let thread_id = run.thread_id.clone();

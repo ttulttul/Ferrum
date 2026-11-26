@@ -409,18 +409,20 @@ impl Thread {
             return;
         };
         run.steering_restarts += 1;
-        run.user_message_id = Some(message_id.to_owned());
         run.status = "running".into();
         run.finished_at = None;
         run.error = None;
         let provider = &mut self.provider;
         if let Some(record) = provider.runs.remove(&run_id) {
             let terminal = provider.terminals.remove(&run_id);
+            let open = terminal.is_none();
             provider.superseded.entry(run_id).or_default().push(
                 crate::provider_state::SupersededAttempt {
                     record,
                     terminal,
                     at,
+                    next_message_id: message_id.to_owned(),
+                    open,
                 },
             );
         }
@@ -520,7 +522,8 @@ impl Thread {
                     *count += 1;
                     *count
                 };
-                let (attempts, nodes) = (out.attempts.len(), out.nodes.len());
+                let (attempts, nodes, items) =
+                    (out.attempts.len(), out.nodes.len(), out.items.len());
                 self.provider_run(
                     &mut out,
                     index,
@@ -531,6 +534,19 @@ impl Thread {
                     &instance,
                     turn_ordinal,
                 );
+                // The restart interrupted its turn: no interrupt was asked
+                // for, and the run goes on (no interrupt cards).
+                let mut index_item = items;
+                while index_item < out.items.len() {
+                    if matches!(
+                        out.items[index_item].1["type"].as_str(),
+                        Some("run_interrupt_request" | "run_interrupt_result")
+                    ) {
+                        out.items.remove(index_item);
+                    } else {
+                        index_item += 1;
+                    }
+                }
                 // Superseded when the restart came, its root node
                 // interrupted then (`interrupt_restart`).
                 let at = json!(iso(attempt.at));
@@ -1022,9 +1038,17 @@ impl Thread {
         // A Claude turn continues the session unless it started a new one.
         let claude_resumed = current.driver == provider::CLAUDE_AGENT
             && (current.resumed || current.native_thread_id.is_none());
+        // Earlier runs' turns, and the turns of attempts a steering restart
+        // replaced (the current run's among them).
+        let superseded = self.runs[..=last]
+            .iter()
+            .filter_map(|run| self.provider.superseded.get(&run.id))
+            .flatten()
+            .map(|attempt| &attempt.record);
         self.runs[..last]
             .iter()
             .filter_map(|run| self.provider.runs.get(&run.id))
+            .chain(superseded)
             .filter(|record| {
                 claude_resumed || (native.is_some() && record.native_thread_id.as_ref() == native)
             })
@@ -3179,6 +3203,47 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with(":attempt:2"));
+    }
+
+    #[test]
+    fn a_restarted_turns_last_events_stay_on_its_superseded_attempt() {
+        let run_id = Uuid::new_v4();
+        let mut live = running_codex_thread(run_id);
+        live.runs[0].driver = Some("codex".into());
+        // Restarted while its turn still runs: its end comes after.
+        live.restart_run(run_id, "message:restart", 3);
+        live.provider.apply(
+            run_id,
+            &item("cmd", "command_execution", "interrupted", None),
+            4,
+        );
+        live.provider
+            .apply(run_id, &terminal(TurnStatus::Interrupted), 5);
+        let attempt = &live.provider.superseded[&run_id][0];
+        assert!(!attempt.open);
+        assert_eq!(
+            attempt.terminal.as_ref().unwrap().status,
+            TurnStatus::Interrupted
+        );
+        assert_eq!(attempt.record.items.len(), 1);
+        // The next attempt starts with nothing of it.
+        assert!(!live.provider.runs.contains_key(&run_id));
+        assert!(!live.provider.terminals.contains_key(&run_id));
+        // Starting again until the next attempt's turn starts.
+        let projection = live.projection();
+        assert_eq!(projection["runs"][0]["status"], "starting");
+        let interrupts = projection["turnItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item["type"].as_str(),
+                    Some("run_interrupt_request" | "run_interrupt_result")
+                )
+            })
+            .count();
+        assert_eq!(interrupts, 0);
     }
 
     #[test]

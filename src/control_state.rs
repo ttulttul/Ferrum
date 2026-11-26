@@ -19,6 +19,14 @@ use std::{
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 
+/// What a run a steering restart starts over runs next: its workspace and
+/// the prompt the provider reads.
+#[derive(Clone, Debug)]
+pub(crate) struct SteeringRestart {
+    pub cwd: String,
+    pub text: String,
+}
+
 pub struct ControlState {
     pub auth: AuthService,
     pub store: RwLock<Store>,
@@ -27,6 +35,10 @@ pub struct ControlState {
     /// Child results become visible before their checkpoint is captured. The next
     /// message to that child queues behind the checkpoint, as on the reference.
     pub(crate) checkpoint_pending: StdMutex<HashMap<String, Instant>>,
+    /// Runs a steering restart is starting over in place, with what their
+    /// next attempt runs: their turn's end starts it instead of ending the
+    /// run.
+    pub(crate) steering_restarts: Mutex<HashMap<uuid::Uuid, SteeringRestart>>,
     #[cfg(feature = "native")]
     pub(crate) thread_deleted: tokio::sync::Notify,
     /// The threads open `subscribeThread` streams watch, whose whole
@@ -76,6 +88,7 @@ impl ControlState {
             store: RwLock::new(store),
             thread_launch: Mutex::new(()),
             checkpoint_pending: StdMutex::new(HashMap::new()),
+            steering_restarts: Mutex::new(HashMap::new()),
             #[cfg(feature = "native")]
             thread_deleted: Default::default(),
             thread_watchers: Default::default(),

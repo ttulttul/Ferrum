@@ -1286,6 +1286,11 @@ async fn apply_command<H: CommandHost>(
                                 .any(|run| run.wire_id() == target && run.status == "running")
                         });
                 if running {
+                    if let Some(sequence) =
+                        steer::restart_in_place(&state, receipt, thread_id, command).await?
+                    {
+                        return Ok(sequence);
+                    }
                     restart_target = Some(target.to_owned());
                     queue_steer = true;
                 }
