@@ -16,8 +16,7 @@
   "claude delegate followup": {
     "live": "Racy: the provider commit batch (#39502) decides by timing whether the first task's queued subagent updates commit together, and both sides vary: main's CI run 45294158798 saw the reference send one more subagent.updated after the task's context-transfer.created, and one of 8 pinned local rounds saw Rust send one more there. Matched in the other runs.",
     "orchestration.subscribeThread (live turn)": "Racy: the reference's live turn sometimes does not settle before the harness stops waiting (the reference goes silent; Rust answers), seen both matching and differing, on main too.",
-    "missing delivery task status": "Racy: in 1 of 8 pinned local rounds the reference's delivery turn did not settle before the harness stopped waiting (as its live turn sometimes does not, see the orchestration.subscribeThread entry), so its answer list lacks the turn's task_status. Matched in the other rounds.",
-    "child follow-up during checkpoint": "The pinned reference returns the delegated child's result before its checkpoint settles. An immediate send to that child reports queued delivery. Ferrum reports that the same message started a turn."
+    "missing delivery task status": "Racy: in 1 of 8 pinned local rounds the reference's delivery turn did not settle before the harness stopped waiting (as its live turn sometimes does not, see the orchestration.subscribeThread entry), so its answer list lacks the turn's task_status. Matched in the other rounds."
   },
   "claude delegate live": {
     "live": "Racy: matched in 4 of 12 pinned local runs. Otherwise the reference steers the delegated result into the parent's running Claude turn (#39528) and queues the follow-up run while that turn still runs, sending the delivery's card once with its message and the queued run before the turn ends, where Rust also sends the card's pending and completed steer updates and creates the follow-up run after the turn ends. Which way it goes depends on whether the result arrives before the turn's last item.",
@@ -31,8 +30,7 @@
     "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
   },
   "codex delegate followup": {
-    "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after the first task's context-transfer.created when its provider commit batch (#39502) coalesces the task's updates.",
-    "child follow-up during checkpoint": "The pinned reference returns the delegated child's result before its checkpoint settles. An immediate send to that child reports queued delivery. Ferrum reports that the same message started a turn."
+    "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after the first task's context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
   },
   "codex then claude": {
     "cli launch": "The reference's Claude Agent SDK sets CLAUDE_AGENT_SDK_VERSION in the server's own process environment whenever it starts a query (`process.env.CLAUDE_AGENT_SDK_VERSION = ...`), so with Claude Code installed beside Codex the Codex app-server it starts afterwards inherits it; Rust sets it only for the Claude Code CLI it starts."

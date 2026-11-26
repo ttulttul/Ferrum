@@ -1090,7 +1090,29 @@ async fn let_waiters_read(child_thread_id: &str) -> Vec<tokio::sync::oneshot::Se
     releases
 }
 
-pub(crate) async fn after_run<H: CommandHost>(state: Arc<H>, thread_id: &str) {
+pub(crate) async fn mark_checkpoint_pending<H: CommandHost>(
+    state: &Arc<H>,
+    thread_id: &str,
+) -> bool {
+    let is_child = {
+        let store = state.store.read().await;
+        let Some(thread) = store.threads.get(thread_id) else {
+            return false;
+        };
+        let row = thread.stored_row();
+        row["lineage"]["relationshipToParent"] == "subagent" && row["forkedFrom"]["type"] == "node"
+    };
+    if is_child {
+        state
+            .checkpoint_pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(thread_id.to_owned(), std::time::Instant::now());
+    }
+    is_child
+}
+
+pub(crate) async fn settle_child_run<H: CommandHost>(state: &Arc<H>, thread_id: &str) {
     let (parent_id, is_child) = {
         let store = state.store.read().await;
         let Some(thread) = store.threads.get(thread_id) else {
@@ -1114,6 +1136,10 @@ pub(crate) async fn after_run<H: CommandHost>(state: Arc<H>, thread_id: &str) {
             offer_delivery(state.clone(), parent).await;
         }
     }
+}
+
+pub(crate) async fn after_run<H: CommandHost>(state: Arc<H>, thread_id: &str) {
+    settle_child_run(&state, thread_id).await;
     if let Err(error) = finalize_delivery(&*state, thread_id).await {
         tracing::warn!(%error, thread_id, "could not settle a delegated delivery");
     }
