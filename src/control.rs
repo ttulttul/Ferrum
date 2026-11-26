@@ -3969,9 +3969,9 @@ xjwIHRE7S5fx9m9ZBJY9QKqAVZwYEwuHZpcikkHGCc4GH6/rRFHJN7BQ
 
     fn clone_start(id: &str, project: &str, destination: &str) -> Value {
         json!({"_tag":"Request","id":id,"tag":"projectClone.start","payload":{
-            "projectId": project, "title": "visibility-grinding-driver",
+            "projectId": project, "title": "example-repo",
             "createdAt": "2026-11-23T00:00:00.000Z",
-            "remoteUrl": "git@ssh.bitbucket.org:mailchannels/visibility-grinding-driver.git",
+            "remoteUrl": "git@ssh.bitbucket.org:example-org/example-repo.git",
             "destinationPath": destination},"headers":[]})
     }
 
