@@ -582,3 +582,71 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod release_after_last_watch_tests {
+
+    async fn lazy_state(
+        count: usize,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        std::sync::Arc<crate::AppState>,
+    ) {
+        let (db, conn) = crate::statev2::seeded_for_tests(count);
+        let data = tempfile::tempdir().unwrap();
+        let state = crate::AppState::new(data.path(), Vec::new()).await.unwrap();
+        crate::statev2::load_into(&conn, &mut *state.control.store.write().await).unwrap();
+        (db, data, state)
+    }
+
+    fn slim(state: &crate::AppState, id: &str) -> bool {
+        state.control.store.try_read().unwrap().threads[id]
+            .stored
+            .as_ref()
+            .unwrap()
+            .needs_read()
+    }
+
+    /// A thread whose last stream closed goes back to its slim records once
+    /// nothing has used it for `AFTER_LAST_WATCH`, without waiting for the
+    /// 10-minute sweep; one still watched stays whole.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_thread_is_released_soon_after_its_last_stream_closes() {
+        let (_db, _data, state) = lazy_state(24).await;
+        let settled: Vec<String> = {
+            let store = state.control.store.read().await;
+            let mut ids: Vec<String> = store
+                .threads
+                .values()
+                .filter(|t| {
+                    t.runs.iter().all(|run| {
+                        matches!(
+                            run.status.as_str(),
+                            "completed" | "failed" | "cancelled" | "interrupted" | "rolled_back"
+                        )
+                    })
+                })
+                .map(|t| t.id.clone())
+                .collect();
+            ids.sort();
+            ids
+        };
+        let (left, kept) = (&settled[0], &settled[1]);
+        for id in [left, kept] {
+            let _ = state.control.store.read().await.threads[id].projection();
+        }
+        let closed = state.control.thread_watchers.watch(left);
+        let open = state.control.thread_watchers.watch(kept);
+        drop(closed);
+        let released = crate::projection_eviction::release_left_after(
+            &state.control,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        assert_eq!(released.read, 1);
+        assert!(slim(&state, left));
+        assert!(!slim(&state, kept), "still watched");
+        drop(open);
+    }
+}
