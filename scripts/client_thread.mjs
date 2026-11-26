@@ -213,7 +213,8 @@ const QUIET_MS = 750;
  * `seed.interrupt`, the run is interrupted once its provider turn is running; with
  * `seed.interrupt === "command"`, once a command it runs is (so the command's item comes before
  * the interrupt's on both servers, however fast each takes the CLI's frames); with
- * `seed.interrupt === "request"`, once a runtime request is pending. With `seed.respond`
+ * `seed.interrupt === "request"`, once a runtime request is pending; with
+ * `seed.interrupt === "subagent"`, once a native subagent shows on the thread. With `seed.respond`
  * ({decision} or {answers}), the first pending runtime request is answered with it (a run that
  * settles without one answers nothing: `respondReply` is `{noRequest: true}`). With
  * `seed.change` (a command without its ids), that command is sent once the provider turn runs;
@@ -361,7 +362,13 @@ const liveTurn = (client, seed) =>
       );
     } else if (seed.interrupt) {
       if (seed.interrupt !== "steer") {
-        yield* Deferred.await(seed.interrupt === "command" ? commandRunning : turnRunning);
+        yield* Deferred.await(
+          seed.interrupt === "command"
+            ? commandRunning
+            : seed.interrupt === "subagent"
+              ? subagentShown
+              : turnRunning,
+        );
       }
       interruptReply = plain(
         yield* client["orchestration.dispatchCommand"]({

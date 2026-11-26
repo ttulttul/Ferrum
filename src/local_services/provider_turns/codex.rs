@@ -45,6 +45,9 @@ fn retry_budget(spec: &TurnSpec) -> Duration {
     PROVIDER_RETRY_BUDGET
 }
 
+/// How long a stopped turn goes on recording its subagents' ends.
+const CHILDREN_AFTER_STOP: Duration = Duration::from_secs(5);
+
 pub(super) async fn run(
     spec: TurnSpec,
     provider: ProviderTurn,
@@ -108,6 +111,15 @@ pub(super) async fn run(
                 .cli
                 .carry(&provider.app_thread_id, &thread, subagents);
         }
+    } else if !session.subagents.running().is_empty() {
+        // A stopped (or failed) parent stops its subagents too: its run ends now, and what
+        // Codex then reports of the children (their turns ending) is still theirs, for a
+        // moment, as the reference goes on recording them. No wake follows.
+        let exit = sink.terminate(end);
+        session.follow_children(CHILDREN_AFTER_STOP).await;
+        drop(session);
+        sink.exited(exit);
+        return;
     }
     // The app-server stays for the instance's next turns.
     drop(session);
@@ -1069,10 +1081,36 @@ impl Session {
             .await;
     }
 
+    /// Reads what Codex reports of the turn's subagents after the turn ended, until none runs
+    /// or `limit` passes.
+    async fn follow_children(&mut self, limit: Duration) {
+        let deadline = tokio::time::Instant::now() + limit;
+        while !self.subagents.running().is_empty() {
+            let Ok(Some(line)) = tokio::time::timeout_at(deadline, self.cli.next_line()).await
+            else {
+                return;
+            };
+            if let Ok(message) = serde_json::from_str::<Value>(&line) {
+                let child = message["params"]["threadId"]
+                    .as_str()
+                    .filter(|thread| self.subagents.follows(thread))
+                    .map(str::to_owned);
+                if let (Some(child), Some(method)) = (child, message["method"].as_str()) {
+                    let params = message["params"].clone();
+                    // The parent's subagent already ended with its turn; the child's own
+                    // records still come.
+                    let parent = self.handle_child(&child, method, &params);
+                    drop(parent);
+                }
+            }
+        }
+    }
+
     /// A subagent's own turn, as the reference's adapter follows it on the child's thread:
     /// its start and end (a `subagent_turn` item) and its items, each tagged with the child's
     /// native thread so they go to the child thread, not the parent's.
-    fn handle_child(&mut self, child: &str, method: &str, params: &Value) {
+    fn handle_child(&mut self, child: &str, method: &str, params: &Value) -> Vec<ProviderItem> {
+        let mut parent = Vec::new();
         let tag = |mut item: ProviderItem, turn: &str| {
             item.fields.insert("subagentThread".into(), json!(child));
             item.fields.insert("nativeTurnId".into(), json!(turn));
@@ -1082,7 +1120,7 @@ impl Session {
             "turn/started" | "turn/completed" => {
                 let turn = &params["turn"];
                 let Some(turn_id) = turn["id"].as_str() else {
-                    return;
+                    return parent;
                 };
                 let started = method == "turn/started";
                 let status = if started {
@@ -1102,14 +1140,12 @@ impl Session {
                 self.sink.send(ProviderEvent::TurnItem {
                     item: tag(marker, turn_id),
                 });
-                let parent = if started {
+                let changed = if started {
                     self.subagents.child_turn_started(child)
                 } else {
                     self.subagents.child_turn_ended(child, status)
                 };
-                if let Some(item) = parent {
-                    self.sink.send(ProviderEvent::TurnItem { item });
-                }
+                parent.extend(changed);
             }
             "item/started" | "item/completed" => {
                 let completed = method == "item/completed";
@@ -1127,24 +1163,19 @@ impl Session {
                     Some("dynamicToolCall") => native["title"].as_str().or(native["tool"].as_str()),
                     _ => None,
                 };
-                if let Some(item) =
-                    progress.and_then(|line| self.subagents.child_progress(child, line))
-                {
-                    self.sink.send(ProviderEvent::TurnItem { item });
-                }
+                parent.extend(progress.and_then(|line| self.subagents.child_progress(child, line)));
                 let final_answer = matches!(
                     native["phase"].as_str(),
                     Some("final_answer" | "finalAnswer")
                 );
                 if completed && native["type"] == "agentMessage" && final_answer {
                     let text = native["text"].as_str().unwrap_or_default();
-                    if let Some(item) = self.subagents.child_answered(child, text) {
-                        self.sink.send(ProviderEvent::TurnItem { item });
-                    }
+                    parent.extend(self.subagents.child_answered(child, text));
                 }
             }
             _ => {}
         }
+        parent
     }
 
     /// Asks Codex for a child's model without waiting on it: `thread/read`, or once that names
@@ -1268,7 +1299,9 @@ impl Session {
             .filter(|thread| self.subagents.follows(thread))
         {
             let child = child.to_owned();
-            self.handle_child(&child, method, params);
+            for item in self.handle_child(&child, method, params) {
+                self.sink.send(ProviderEvent::TurnItem { item });
+            }
             return;
         }
         // Only our turn's notifications; the app-server runs only our thread,

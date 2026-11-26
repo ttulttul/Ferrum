@@ -297,6 +297,10 @@ PROVIDER_SCENARIOS = [
     # takes the subagent's result as its message (a subagent notification).
     {"name": "codex native subagent wake", "instance": "codex", "model": "fixture",
      "scenario": "codex_subagent_wake.json", "children": True, "settleRuns": 2},
+    # The user stops a parent whose native subagent still runs: Codex interrupts the child too,
+    # whose turn and the parent's subagent end interrupted (the child's after the parent's).
+    {"name": "codex native subagent stop", "instance": "codex", "model": "fixture",
+     "scenario": "codex_subagent_stop.json", "children": True, "interrupt": "subagent"},
     # Codex delegation counterparts: parent and child share the instance's app-server.
     {"name": "codex delegate", "instance": "codex", "model": "fixture",
      "scenario": "codex_delegate.json", "awaitStatus": True},
