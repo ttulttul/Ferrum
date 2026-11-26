@@ -16,6 +16,10 @@ use indexmap::IndexMap;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
+/// What a wake report's child thread starts with when the workspace knows only the Claude
+/// task: the control plane names the child thread from it and the thread's provider thread.
+pub(crate) const CLAUDE_TASK_CHILD: &str = "claude-task:";
+
 /// `CLAUDE_OPAQUE_BACKGROUND_TASK_KINDS`: the task types that report their own end.
 fn opaque_kind(task_type: Option<&str>) -> Option<Kind> {
     match task_type? {
@@ -83,6 +87,9 @@ pub(crate) struct Roster {
     monitors: HashSet<String>,
     /// The session started a turn on its own while a monitor ran: a monitor event.
     monitor_wake: bool,
+    /// Background subagents running now (`backgroundedSubagentTaskIds`), by task id: their
+    /// description, which labels the wake their end starts.
+    subagents: HashMap<String, Option<String>>,
     /// The tasks last sent to the provider thread.
     sent: Vec<Value>,
 }
@@ -139,6 +146,13 @@ impl Roster {
     /// A frame of a running turn: tasks it starts become eligible; one it sees end does
     /// not wake the session.
     pub(crate) fn observe_turn(&mut self, message: &Value) {
+        self.observe_subagent_start(message);
+        // A background subagent that ends during a turn wakes nothing.
+        if message["type"] == "system" && message["subtype"] == "task_notification" {
+            if let Some(task_id) = message["task_id"].as_str() {
+                self.subagents.remove(task_id);
+            }
+        }
         // A turn's tool calls are its own (`activeContext.toolCalls`).
         if message["type"] == "system" && message["subtype"] == "init" {
             self.tool_commands.clear();
@@ -150,6 +164,23 @@ impl Roster {
                 self.remove(task_id);
                 self.eligible.remove(task_id);
                 self.monitors.remove(task_id);
+            }
+        }
+    }
+
+    /// A subagent that runs in the background (`task_started`, `local_agent`, backgrounded).
+    fn observe_subagent_start(&mut self, message: &Value) {
+        if message["type"] == "system"
+            && message["subtype"] == "task_started"
+            && message["task_type"] == "local_agent"
+            && message["is_backgrounded"] == true
+        {
+            if let Some(task_id) = message["task_id"].as_str() {
+                let label = message["description"]
+                    .as_str()
+                    .filter(|d| !d.trim().is_empty())
+                    .map(str::to_owned);
+                self.subagents.insert(task_id.to_owned(), label);
             }
         }
     }
@@ -197,6 +228,22 @@ impl Roster {
             let Some(task_id) = message["task_id"].as_str() else {
                 return;
             };
+            // A background subagent that ends while no turn runs is reported with its wake;
+            // the control plane names its child thread (by the session's provider thread).
+            if let Some(label) = self.subagents.remove(task_id) {
+                let status = message["status"].as_str().unwrap_or_default();
+                self.reports.push(Report {
+                    kind: Kind::Subagent,
+                    label,
+                    outcome: background_work::claude_task_outcome(status),
+                    child_thread_id: Some(format!("{CLAUDE_TASK_CHILD}{task_id}")),
+                    exit_code: None,
+                });
+                if let Some(summary) = message["summary"].as_str().filter(|s| !s.is_empty()) {
+                    self.detail = Some(summary.to_owned());
+                }
+                return;
+            }
             self.monitors.remove(task_id);
             let pending = self.pending.get(task_id).cloned();
             self.remove(task_id);
@@ -477,10 +524,47 @@ mod tests {
         let mut foreground = started("b1");
         foreground["is_backgrounded"] = json!(false);
         roster.observe_turn(&foreground);
+        // A subagent in the foreground, and a task of another type.
         roster.observe_turn(&json!({"type": "system", "subtype": "task_started",
-            "task_id": "a1", "task_type": "local_agent", "is_backgrounded": true}));
+            "task_id": "a1", "task_type": "local_agent", "is_backgrounded": false}));
+        roster.observe_turn(&json!({"type": "system", "subtype": "task_started",
+            "task_id": "w1", "task_type": "local_workflow", "is_backgrounded": true}));
         roster.observe_idle(&task_notification("b1", "completed"));
         roster.observe_idle(&task_notification("a1", "completed"));
+        roster.observe_idle(&task_notification("w1", "completed"));
+        assert_eq!(roster.take_wake(), (None, None));
+    }
+
+    #[test]
+    fn a_background_subagent_that_ends_while_idle_is_reported_with_the_wake() {
+        let mut roster = Roster::default();
+        roster.observe_turn(
+            &json!({"type": "system", "subtype": "task_started", "task_id": "a1",
+            "task_type": "local_agent", "is_backgrounded": true, "description": "Read the README"}),
+        );
+        roster.observe_idle(&json!({"type": "system", "subtype": "task_notification",
+            "task_id": "a1", "status": "completed", "summary": "Read the README"}));
+        let (detail, notification) = roster.take_wake();
+        assert_eq!(detail.as_deref(), Some("Read the README"));
+        let notification = notification.unwrap();
+        assert_eq!(notification["source"]["kind"], "subagent");
+        assert_eq!(
+            notification["source"]["childThreadId"],
+            format!("{CLAUDE_TASK_CHILD}a1")
+        );
+        assert_eq!(
+            notification["summary"],
+            "Subagent \"Read the README\" finished"
+        );
+        // One that ends during a turn wakes nothing.
+        roster.observe_turn(
+            &json!({"type": "system", "subtype": "task_started", "task_id": "a2",
+            "task_type": "local_agent", "is_backgrounded": true}),
+        );
+        roster.observe_turn(&json!({"type": "system", "subtype": "task_notification",
+            "task_id": "a2", "status": "completed"}));
+        roster.observe_idle(&json!({"type": "system", "subtype": "task_notification",
+            "task_id": "a2", "status": "completed"}));
         assert_eq!(roster.take_wake(), (None, None));
     }
 }

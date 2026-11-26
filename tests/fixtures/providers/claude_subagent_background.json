@@ -1,0 +1,621 @@
+{
+ "_comment": "A Claude turn whose agent runs a native subagent in the background (the Agent tool, is_backgrounded): the call returns at once and the turn ends while the child runs; with no turn running the child answers (parent_tool_use_id), its task ends (task_notification), and Claude wakes with a turn of its own.",
+ "steps": [
+  {
+   "expect": "user"
+  },
+  {
+   "send": {
+    "type": "system",
+    "subtype": "init",
+    "session_id": "$session",
+    "model": "claude-opus-5-5",
+    "cwd": "/workspace",
+    "permissionMode": "bypassPermissions",
+    "uuid": "e8e2820b-f799-46f9-8b58-53a4265d5318",
+    "tools": [
+     "Bash",
+     "Edit",
+     "Read",
+     "Write",
+     "TodoWrite"
+    ]
+   }
+  },
+  {
+   "send": {
+    "type": "assistant",
+    "message": {
+     "model": "claude-opus-5-5",
+     "id": "msg_agent_call",
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "toolu_01AgentFixture00000001",
+       "name": "Agent",
+       "input": {
+        "description": "Read the README title",
+        "prompt": "Read README.md and report its title.",
+        "subagent_type": "general-purpose"
+       },
+       "caller": {
+        "type": "direct"
+       }
+      }
+     ],
+     "container": null,
+     "stop_reason": null,
+     "stop_sequence": null,
+     "stop_details": null,
+     "usage": {
+      "input_tokens": 4,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 3,
+      "service_tier": "standard"
+     }
+    },
+    "parent_tool_use_id": null,
+    "session_id": "$session",
+    "uuid": "a0000000-0000-4000-8000-000000000001"
+   }
+  },
+  {
+   "send": {
+    "type": "system",
+    "subtype": "task_started",
+    "task_id": "a1b2c3d4e5f607182",
+    "run_id": "0fixture-0000001",
+    "tool_use_id": "toolu_01AgentFixture00000001",
+    "description": "Read the README title",
+    "subagent_type": "general-purpose",
+    "is_backgrounded": true,
+    "spawn_depth": 1,
+    "task_type": "local_agent",
+    "prompt": "Read README.md and report its title.",
+    "uuid": "a0000000-0000-4000-8000-000000000002",
+    "session_id": "$session"
+   }
+  },
+  {
+   "send": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "tool_use_id": "toolu_01AgentFixture00000001",
+       "type": "tool_result",
+       "content": [
+        {
+         "type": "text",
+         "text": "Async agent launched successfully.\nagentId: a1b2c3d4e5f607182 (internal ID - do not mention to user.)\nThe agent is working in the background. You will be notified automatically when it completes."
+        }
+       ]
+      }
+     ]
+    },
+    "parent_tool_use_id": null,
+    "session_id": "$session",
+    "uuid": "a0000000-0000-4000-8000-000000000006",
+    "tool_use_result": {
+     "isAsync": true,
+     "status": "async_launched",
+     "agentId": "a1b2c3d4e5f607182",
+     "description": "Read the README title",
+     "prompt": "Read README.md and report its title."
+    }
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_start",
+     "message": {
+      "model": "claude-opus-5-5",
+      "id": "msg_011ChFEghw5FpbXN4qScgXHm",
+      "type": "message",
+      "role": "assistant",
+      "content": [],
+      "container": null,
+      "stop_reason": null,
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+       "input_tokens": 2,
+       "cache_creation_input_tokens": 170,
+       "cache_read_input_tokens": 30463,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 170
+       },
+       "output_tokens": 64,
+       "service_tier": "standard",
+       "inference_geo": "global",
+       "speed": "standard"
+      },
+      "input_transformations": [],
+      "diagnostics": null,
+      "context_management": null
+     }
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "8db21e9d-68bb-4d44-b531-fbe5d4d14e7a",
+    "ttft_ms": 1543,
+    "thinking_display": "updates",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_start",
+     "index": 0,
+     "content_block": {
+      "type": "text",
+      "text": ""
+     }
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "6162b7b5-ddba-414a-969b-4e0e42d03261",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_delta",
+     "index": 0,
+     "delta": {
+      "type": "text_delta",
+      "text": "`echo hi` printed hi, and notes.txt now says there."
+     }
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "c7f8a9d7-77e8-45c4-8330-0e872482db02",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "assistant",
+    "message": {
+     "model": "claude-opus-5-5",
+     "id": "msg_011ChFEghw5FpbXN4qScgXHm",
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "`echo hi` printed hi, and notes.txt now says there."
+      }
+     ],
+     "container": null,
+     "stop_reason": null,
+     "stop_sequence": null,
+     "stop_details": null,
+     "usage": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 170,
+      "cache_read_input_tokens": 30463,
+      "cache_creation": {
+       "ephemeral_5m_input_tokens": 0,
+       "ephemeral_1h_input_tokens": 170
+      },
+      "output_tokens": 64,
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+     },
+     "input_transformations": [],
+     "diagnostics": null,
+     "context_management": null
+    },
+    "parent_tool_use_id": null,
+    "session_id": "$session",
+    "uuid": "3c80fc8e-9566-4dd5-b100-626ecf498b1b"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_stop",
+     "index": 0
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "266a9a46-2c98-45eb-90ca-8f8a20aa4acf",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_delta",
+     "delta": {
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "container": null
+     },
+     "usage": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 170,
+      "cache_read_input_tokens": 30463,
+      "output_tokens": 64,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 64,
+        "cache_read_input_tokens": 30463,
+        "cache_creation_input_tokens": 170,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 170
+        },
+        "type": "message"
+       }
+      ]
+     },
+     "context_management": {
+      "applied_edits": []
+     }
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "c4198b32-0c39-4c24-b9f0-f2c3b88ebd5b",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_stop"
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "4e161250-0be0-45ac-813b-203dd3ce7aff",
+    "api_message_id": "msg_011ChFEghw5FpbXN4qScgXHm"
+   }
+  },
+  {
+   "send": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "duration_ms": 9621,
+    "num_turns": 4,
+    "result": "`echo hi` printed hi, and notes.txt now says there.",
+    "stop_reason": "end_turn",
+    "session_id": "$session",
+    "usage": {
+     "input_tokens": 6,
+     "cache_creation_input_tokens": 30633,
+     "cache_read_input_tokens": 60484,
+     "output_tokens": 536
+    },
+    "modelUsage": {
+     "claude-opus-5-5": {
+      "inputTokens": 8,
+      "outputTokens": 728,
+      "contextWindow": 1000000
+     }
+    },
+    "uuid": "91b67c58-116d-4ed8-b82c-4df34db2990c"
+   }
+  },
+  {
+   "sleep": 1
+  },
+  {
+   "send": {
+    "type": "assistant",
+    "message": {
+     "model": "claude-opus-5-5",
+     "id": "msg_child_answer",
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "# Ferrum acceptance sandbox"
+      }
+     ],
+     "container": null,
+     "stop_reason": null,
+     "stop_sequence": null,
+     "stop_details": null,
+     "usage": {
+      "input_tokens": 4,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "output_tokens": 3,
+      "service_tier": "standard"
+     }
+    },
+    "parent_tool_use_id": "toolu_01AgentFixture00000001",
+    "session_id": "$session",
+    "uuid": "a0000000-0000-4000-8000-000000000003"
+   }
+  },
+  {
+   "send": {
+    "type": "system",
+    "subtype": "task_progress",
+    "task_id": "a1b2c3d4e5f607182",
+    "run_id": "0fixture-0000001",
+    "tool_use_id": "toolu_01AgentFixture00000001",
+    "description": "Read the README title",
+    "subagent_type": "general-purpose",
+    "usage": {
+     "total_tokens": 120,
+     "tool_uses": 0,
+     "duration_ms": 900
+    },
+    "last_tool_name": null,
+    "uuid": "a0000000-0000-4000-8000-000000000004",
+    "session_id": "$session"
+   }
+  },
+  {
+   "send": {
+    "type": "system",
+    "subtype": "task_notification",
+    "task_id": "a1b2c3d4e5f607182",
+    "run_id": "0fixture-0000001",
+    "description": "Read the README title",
+    "tool_use_id": "toolu_01AgentFixture00000001",
+    "status": "completed",
+    "summary": "Read the README title",
+    "usage": {
+     "total_tokens": 140,
+     "tool_uses": 0,
+     "duration_ms": 1100
+    },
+    "uuid": "a0000000-0000-4000-8000-000000000005",
+    "session_id": "$session"
+   }
+  },
+  {
+   "send": {
+    "type": "system",
+    "subtype": "init",
+    "session_id": "$session",
+    "model": "claude-opus-5-5",
+    "cwd": "/workspace",
+    "permissionMode": "bypassPermissions",
+    "uuid": "a11e0000-0000-0000-0000-000000000001",
+    "tools": [
+     "Bash",
+     "Edit",
+     "Read",
+     "Write",
+     "TodoWrite"
+    ]
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_start",
+     "message": {
+      "model": "claude-opus-5-5",
+      "id": "msg_011ChFEwakeContinuation01",
+      "type": "message",
+      "role": "assistant",
+      "content": [],
+      "container": null,
+      "stop_reason": null,
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+       "input_tokens": 2,
+       "cache_creation_input_tokens": 170,
+       "cache_read_input_tokens": 30463,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 170
+       },
+       "output_tokens": 64,
+       "service_tier": "standard",
+       "inference_geo": "global",
+       "speed": "standard"
+      },
+      "input_transformations": [],
+      "diagnostics": null,
+      "context_management": null
+     }
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "a11e0000-0000-0000-0000-000000000002",
+    "ttft_ms": 1543,
+    "thinking_display": "updates",
+    "api_message_id": "msg_011ChFEwakeContinuation01"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_start",
+     "index": 0,
+     "content_block": {
+      "type": "text",
+      "text": ""
+     }
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "a11e0000-0000-0000-0000-000000000003",
+    "api_message_id": "msg_011ChFEwakeContinuation01"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_delta",
+     "index": 0,
+     "delta": {
+      "type": "text_delta",
+      "text": "The build I left running finished; it passed."
+     }
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "a11e0000-0000-0000-0000-000000000004",
+    "api_message_id": "msg_011ChFEwakeContinuation01"
+   }
+  },
+  {
+   "send": {
+    "type": "assistant",
+    "message": {
+     "model": "claude-opus-5-5",
+     "id": "msg_011ChFEwakeContinuation01",
+     "type": "message",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "The build I left running finished; it passed."
+      }
+     ],
+     "container": null,
+     "stop_reason": null,
+     "stop_sequence": null,
+     "stop_details": null,
+     "usage": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 170,
+      "cache_read_input_tokens": 30463,
+      "cache_creation": {
+       "ephemeral_5m_input_tokens": 0,
+       "ephemeral_1h_input_tokens": 170
+      },
+      "output_tokens": 64,
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+     },
+     "input_transformations": [],
+     "diagnostics": null,
+     "context_management": null
+    },
+    "parent_tool_use_id": null,
+    "session_id": "$session",
+    "uuid": "a11e0000-0000-0000-0000-000000000005"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "content_block_stop",
+     "index": 0
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "a11e0000-0000-0000-0000-000000000006",
+    "api_message_id": "msg_011ChFEwakeContinuation01"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_delta",
+     "delta": {
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "container": null
+     },
+     "usage": {
+      "input_tokens": 2,
+      "cache_creation_input_tokens": 170,
+      "cache_read_input_tokens": 30463,
+      "output_tokens": 64,
+      "output_tokens_details": {
+       "thinking_tokens": 0
+      },
+      "iterations": [
+       {
+        "input_tokens": 2,
+        "output_tokens": 64,
+        "cache_read_input_tokens": 30463,
+        "cache_creation_input_tokens": 170,
+        "cache_creation": {
+         "ephemeral_5m_input_tokens": 0,
+         "ephemeral_1h_input_tokens": 170
+        },
+        "type": "message"
+       }
+      ]
+     },
+     "context_management": {
+      "applied_edits": []
+     }
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "a11e0000-0000-0000-0000-000000000007",
+    "api_message_id": "msg_011ChFEwakeContinuation01"
+   }
+  },
+  {
+   "send": {
+    "type": "stream_event",
+    "event": {
+     "type": "message_stop"
+    },
+    "session_id": "$session",
+    "parent_tool_use_id": null,
+    "uuid": "a11e0000-0000-0000-0000-000000000008",
+    "api_message_id": "msg_011ChFEwakeContinuation01"
+   }
+  },
+  {
+   "send": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "duration_ms": 2100,
+    "num_turns": 1,
+    "result": "The build I left running finished; it passed.",
+    "stop_reason": "end_turn",
+    "session_id": "$session",
+    "usage": {
+     "input_tokens": 6,
+     "cache_creation_input_tokens": 30633,
+     "cache_read_input_tokens": 60484,
+     "output_tokens": 536
+    },
+    "modelUsage": {
+     "claude-opus-5-5": {
+      "inputTokens": 8,
+      "outputTokens": 728,
+      "contextWindow": 1000000
+     }
+    },
+    "uuid": "a11e0000-0000-0000-0000-000000000009"
+   }
+  }
+ ]
+}

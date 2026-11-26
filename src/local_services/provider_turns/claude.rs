@@ -244,8 +244,6 @@ struct Attempt<'a> {
     block_counts: HashMap<(String, &'static str, bool), u64>,
     /// Tool calls still waiting for a result, in the order they started.
     tools: IndexMap<String, ProviderItem>,
-    /// The native subagents its `Agent` calls run.
-    subagents: super::claude_subagents::ClaudeSubagents,
     /// The turn's model, which a subagent runs unless its call names another.
     model: Option<String>,
     next_control: u64,
@@ -509,7 +507,7 @@ impl<'a> Attempt<'a> {
                 log.decoded(Direction::Outgoing, open);
             }
         }
-        let cli = match cli {
+        let mut cli = match cli {
             Ok(cli) => cli,
             Err(_) => {
                 // The reference's SDK starts Claude Code through a shell, which
@@ -522,6 +520,7 @@ impl<'a> Attempt<'a> {
                 return Outcome::Ended(TurnEnd::failed(failure, ThreadDisposition::Reusable));
             }
         };
+        cli.subagents.begin_turn();
         let mut attempt = Attempt {
             sink,
             cli,
@@ -536,7 +535,6 @@ impl<'a> Attempt<'a> {
             open_items: vec![],
             block_counts: HashMap::new(),
             tools: IndexMap::new(),
-            subagents: Default::default(),
             model: Some(provider.model.clone()).filter(|model| !model.trim().is_empty()),
             next_control: 1,
             device_hook: provider.mcp.as_ref().is_some_and(|mcp| mcp.device_tools),
@@ -576,7 +574,7 @@ impl<'a> Attempt<'a> {
                     attempt.result.as_ref(),
                     end.status,
                     &attempt.root_models,
-                    attempt.subagents.ran_any(),
+                    attempt.cli.subagents.ran_any(),
                 ),
             });
         }
@@ -912,9 +910,9 @@ impl<'a> Attempt<'a> {
         let nested = !message["parent_tool_use_id"].is_null();
         if let Some(task) = message["parent_tool_use_id"]
             .as_str()
-            .and_then(|call| self.subagents.task_of(call))
+            .and_then(|call| self.cli.subagents.task_of(call))
         {
-            for item in self.subagents.child_message(&task, &message) {
+            for item in self.cli.subagents.child_message(&task, &message) {
                 self.sink.send(ProviderEvent::TurnItem { item });
             }
         }
@@ -924,7 +922,7 @@ impl<'a> Attempt<'a> {
                 Some("task_started" | "task_progress" | "task_notification")
             )
         {
-            for item in self.subagents.frame(&message, self.model.as_deref()) {
+            for item in self.cli.subagents.frame(&message, self.model.as_deref()) {
                 self.sink.send(ProviderEvent::TurnItem { item });
             }
         }
@@ -1193,7 +1191,7 @@ impl<'a> Attempt<'a> {
         let input = &block["input"];
         // A native subagent shows as its subagent, not as a tool call.
         if name == "Agent" {
-            self.subagents.call(id, input);
+            self.cli.subagents.call(id, input);
             return;
         }
         if name == "TodoWrite" {
@@ -1617,7 +1615,7 @@ impl<'a> Attempt<'a> {
                         Some(message),
                         TurnStatus::Completed,
                         &self.root_models,
-                        self.subagents.ran_any(),
+                        self.cli.subagents.ran_any(),
                     ),
                 });
                 self.usage_reported = true;

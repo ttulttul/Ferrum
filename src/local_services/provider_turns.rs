@@ -335,9 +335,9 @@ impl Sink {
         for mut item in open {
             // A Codex command can outlive a completed turn, as background
             // work; the reference ends only an interrupted or failed turn's.
-            if self.driver == CODEX
-                && end.status == TurnStatus::Completed
-                && matches!(item.kind.as_str(), "command_execution" | "subagent")
+            if end.status == TurnStatus::Completed
+                && (item.kind == "subagent"
+                    || (self.driver == CODEX && item.kind == "command_execution"))
             {
                 // (A native subagent's child runs on, and reports when it ends.)
                 continue;
@@ -457,6 +457,9 @@ pub(crate) struct Cli {
     /// The background tasks a Claude session runs (`local_bash` commands), whose end
     /// while no turn runs is reported with the wake it starts.
     pub(crate) background: claude_background::Roster,
+    /// The native subagents a Claude session runs, which outlive the turn that started them
+    /// (a background subagent reports to the turn its end wakes).
+    pub(crate) subagents: claude_subagents::ClaudeSubagents,
     /// The end of the CLI's standard error, for recognizing known refusals.
     stderr_tail: std::sync::Arc<std::sync::Mutex<String>>,
     /// The task reading standard error, until it has read all of it.
@@ -527,6 +530,7 @@ impl Cli {
             lines: BufReader::new(stdout).lines(),
             buffered: Default::default(),
             background: Default::default(),
+            subagents: Default::default(),
             stderr_tail,
             stderr_reader,
             log: launch.log,
