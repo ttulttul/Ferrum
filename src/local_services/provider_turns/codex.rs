@@ -80,6 +80,9 @@ pub(super) async fn run(
         pending: HashMap::new(),
         file_changes: HashMap::new(),
         subagents: Default::default(),
+        stopped: false,
+        stopped_child_turns: Default::default(),
+        child_interrupts: Vec::new(),
         child_reads: HashMap::new(),
         usage_baseline: None,
         rate_limits: None,
@@ -116,6 +119,7 @@ pub(super) async fn run(
         // Codex then reports of the children (their turns ending) is still theirs, for a
         // moment, as the reference goes on recording them. No wake follows.
         let exit = sink.terminate(end);
+        session.stopped = true;
         session.follow_children(CHILDREN_AFTER_STOP).await;
         drop(session);
         sink.exited(exit);
@@ -221,6 +225,12 @@ struct Session {
     file_changes: HashMap<String, Value>,
     /// The native subagents the turn spawned, by their child thread.
     subagents: super::codex_subagents::Subagents,
+    /// The turn ended interrupted or failed: a child turn that starts now is stopped at once.
+    stopped: bool,
+    /// Child turns stopped as they started, recorded nowhere.
+    stopped_child_turns: std::collections::HashSet<String>,
+    /// Child turns to ask Codex to stop.
+    child_interrupts: Vec<(String, String)>,
     /// Requests reading a child's model (`thread/read`, then `thread/resume`), by request id:
     /// the child and whether this is the resume.
     child_reads: HashMap<u64, (String, bool)>,
@@ -1081,6 +1091,13 @@ impl Session {
             .await;
     }
 
+    /// Asks Codex to stop a child's turn (written by the loop reading the children); its
+    /// answer does not matter.
+    fn interrupt_child(&mut self, child: &str, turn: &str) {
+        self.child_interrupts
+            .push((child.to_owned(), turn.to_owned()));
+    }
+
     /// Reads what Codex reports of the turn's subagents after the turn ended, until none runs
     /// or `limit` passes.
     async fn follow_children(&mut self, limit: Duration) {
@@ -1101,6 +1118,14 @@ impl Session {
                     // records still come.
                     let parent = self.handle_child(&child, method, &params);
                     drop(parent);
+                    for (child, turn) in std::mem::take(&mut self.child_interrupts) {
+                        let id = self.cli.next_id();
+                        let _ = self
+                            .cli
+                            .write(&json!({"id": id, "method": "turn/interrupt",
+                                "params": {"threadId": child, "turnId": turn}}))
+                            .await;
+                    }
                 }
             }
         }
@@ -1123,6 +1148,17 @@ impl Session {
                     return parent;
                 };
                 let started = method == "turn/started";
+                // A child turn that starts after its parent was stopped is stopped at once,
+                // and nothing of it is recorded (`emitSubagentProviderTurnStarted`).
+                if started && self.stopped {
+                    self.stopped_child_turns.insert(turn_id.to_owned());
+                    self.interrupt_child(child, turn_id);
+                    return parent;
+                }
+                if self.stopped_child_turns.remove(turn_id) {
+                    self.subagents.child_turn_ended(child, "interrupted");
+                    return parent;
+                }
                 let status = if started {
                     "running"
                 } else {
@@ -1151,6 +1187,9 @@ impl Session {
                 let completed = method == "item/completed";
                 let native = &params["item"];
                 let turn = params["turnId"].as_str().unwrap_or_default();
+                if self.stopped_child_turns.contains(turn) {
+                    return parent;
+                }
                 if let Some(mut item) = map_item(native, completed) {
                     // A child's command is no background work of the parent's.
                     item.fields.remove("completionWake");
