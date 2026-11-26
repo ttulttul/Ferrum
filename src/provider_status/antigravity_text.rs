@@ -646,10 +646,57 @@ enum OpenError {
     Broken(String),
 }
 
-/// A disposable ACP session (`makeDisposableRuntime(...).start()`):
-/// initialize with the version-gated client info, refuse a broken runtime,
-/// authenticate eagerly and open a session in `cwd`. Its `initialize`
-/// result and setup.
+pub(crate) fn client_info() -> Value {
+    json!({"name":"t3-code","title":"T3 Code","version":crate::server_runtime::SERVER_VERSION})
+}
+
+pub(crate) fn runtime_version(version: &str) -> Option<(u64, u64, u64)> {
+    static VERSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^(?:v|agy_acp_server_)?([0-9]+)\.([0-9]+)\.([0-9]+)").unwrap()
+    });
+    let parts = VERSION.captures(version.trim())?;
+    Some((
+        parts[1].parse().ok()?,
+        parts[2].parse().ok()?,
+        parts[3].parse().ok()?,
+    ))
+}
+
+pub(crate) fn runtime_refusal(
+    manifest: &Value,
+    version: &str,
+    managed: bool,
+    path: &Path,
+) -> Option<String> {
+    let advisory = super::provider_compatibility(manifest, "antigravity", version);
+    let (reason, target) =
+        if let Some(advisory) = advisory.as_ref().filter(|a| a["status"] == "broken") {
+            (
+                "does not work with this T3 Code release",
+                advisory["recommendedVersion"]
+                    .as_str()
+                    .or(advisory["recommendedRange"].as_str())
+                    .unwrap_or("a newer version"),
+            )
+        } else if runtime_version(version).is_some_and(|v| v < (1, 5, 1)) {
+            (
+                "only serves allowlisted editors, not T3 Code",
+                "1.5.1 or newer",
+            )
+        } else {
+            return None;
+        };
+    let action = if managed {
+        "Update it in Antigravity setup".to_owned()
+    } else {
+        format!("Update the Antigravity executable at {}", path.display())
+    };
+    Some(format!(
+        "Antigravity {version} {reason}. {action} to {target}, then retry."
+    ))
+}
+
+/// Initialize and check the negotiated version before authenticating and opening the session.
 async fn open_session(
     manifest: &Value,
     executable: &Executable,
@@ -657,25 +704,7 @@ async fn open_session(
     cwd: &Path,
     auth: &Auth,
 ) -> Result<(Value, Value), OpenError> {
-    // `antigravityClientInfo`: a runtime from 1.5.1 on names T3 Code.
-    let named = executable.version.as_deref().is_some_and(|version| {
-        let parts: Vec<u64> = version
-            .split('.')
-            .take(3)
-            .map(|part| {
-                part.chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect::<String>()
-            })
-            .filter_map(|digits| digits.parse().ok())
-            .collect();
-        parts.len() == 3 && (parts[0], parts[1], parts[2]) >= (1, 5, 1)
-    });
-    let client = if named {
-        json!({"name": "t3-code", "title": "T3 Code", "version": crate::server_runtime::SERVER_VERSION})
-    } else {
-        json!({"name": "zed", "version": "0.0.0"})
-    };
+    let client = client_info();
     let initialized = session
         .request(
             "initialize",
@@ -693,32 +722,18 @@ async fn open_session(
         )
         .await
         .map_err(OpenError::Acp)?;
-    // `startCompatible` (#38970): a runtime the manifest rates broken (anything
-    // before 1.5) is refused once it names its version, before anything
-    // else.
-    if let Some(version) = initialized["agentInfo"]["version"]
+    if let Some(refusal) = initialized["agentInfo"]["version"]
         .as_str()
-        .filter(|v| !v.is_empty())
+        .and_then(|version| {
+            runtime_refusal(
+                manifest,
+                version,
+                executable.version.is_some(),
+                &executable.path,
+            )
+        })
     {
-        let advisory = super::provider_compatibility(manifest, "antigravity", version);
-        if let Some(advisory) = advisory.filter(|a| a["status"] == "broken") {
-            let target = advisory["recommendedVersion"]
-                .as_str()
-                .or(advisory["recommendedRange"].as_str())
-                .unwrap_or("a newer version");
-            // A managed runtime names its version before it starts.
-            let action = if executable.version.is_some() {
-                "Update it in Antigravity setup".to_owned()
-            } else {
-                format!(
-                    "Update the Antigravity executable at {}",
-                    executable.path.display()
-                )
-            };
-            return Err(OpenError::Broken(format!(
-                "Antigravity {version} does not work with this T3 Code release. {action} to {target}, then retry."
-            )));
-        }
+        return Err(OpenError::Broken(refusal));
     }
     // Eagerly, with the configured method: Antigravity takes ones it does not list.
     session

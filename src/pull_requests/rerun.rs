@@ -200,30 +200,30 @@ fn add_workflow(checks: &mut Vec<Value>, run: &Value, status: &str) {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map_or_else(|| format!("Workflow run {id}"), str::to_owned);
-        checks.push(json!({"name":name,"url":run["html_url"],"status":status}));
+        let description = if status == "pending" {
+            "This workflow run has not finished."
+        } else {
+            "A maintainer must approve this workflow before it can run."
+        };
+        checks.push(
+            json!({"name":name,"url":run["html_url"],"status":status,"description":description}),
+        );
     }
 }
 
-pub(super) async fn run(
-    service: &PullRequestService,
+pub(super) async fn workflow_checks(
     gh: &Github<'_>,
-    project: &crate::Project,
     repo: &str,
     number: u64,
-    input: &Value,
-) -> Reply {
+    pr: &Value,
+    contexts: Vec<Value>,
+    op: &str,
+) -> Result<(Vec<Value>, Option<usize>), Value> {
     let root = format!("repos/{repo}/actions");
-    let (data, contexts) = detail::read_core(gh, OP, repo, number).await?;
-    let pr = &data["repository"]["pullRequest"];
     let mut checks = detail::check_rows(contexts);
+    let mut required = Some(0);
     if pr["state"] == "OPEN" {
-        let approvals = async {
-            if pr["isCrossRepository"] == true {
-                super::actions::fork_runs(gh, repo, number, pr).await
-            } else {
-                Ok(Vec::new())
-            }
-        };
+        let approvals = super::actions::approval_runs(gh, repo, number, pr);
         let unfinished = async {
             let Some(sha) = pr["headRefOid"].as_str() else {
                 return Ok(Value::Null);
@@ -233,7 +233,7 @@ pub(super) async fn run(
                 crate::asset_grant::encode_component(sha)
             );
             match gh.json("GET", &path, None).await {
-                Err(Failure::RateLimit) => Err(failure(OP, Failure::RateLimit)),
+                Err(Failure::RateLimit) => Err(failure(op, Failure::RateLimit)),
                 result => Ok(result.unwrap_or(Value::Null)),
             }
         };
@@ -254,18 +254,42 @@ pub(super) async fn run(
         }
         match approvals {
             Ok(runs) => {
+                required = Some(runs.len());
                 for run in runs {
                     add_workflow(&mut checks, &run, "action-required");
                 }
             }
             Err(e) if e["detail"] == "GitHub API rate limit exceeded." => {
-                return Err(failure(OP, Failure::RateLimit))
+                return Err(failure(op, Failure::RateLimit))
             }
-            Err(_) => checks.push(
-                json!({"name":"Workflow approval status","url":null,"status":"action-required"}),
-            ),
+            Err(_) => {
+                required = None;
+                checks.push(json!({"name":"Workflow approval status","url":null,"status":"action-required","description":"GitHub could not determine whether workflows are awaiting approval.","placeholder":true}));
+            }
         }
     }
+    Ok((checks, required))
+}
+
+pub(super) async fn run(
+    service: &PullRequestService,
+    gh: &Github<'_>,
+    project: &crate::Project,
+    repo: &str,
+    number: u64,
+    input: &Value,
+) -> Reply {
+    let root = format!("repos/{repo}/actions");
+    let (data, contexts) = detail::read_core(gh, OP, repo, number).await?;
+    let (checks, _) = workflow_checks(
+        gh,
+        repo,
+        number,
+        &data["repository"]["pullRequest"],
+        contexts,
+        OP,
+    )
+    .await?;
     let selected = detail::select(&checks, input, OP)?;
     if selected.is_empty() {
         return Ok(json!([]));

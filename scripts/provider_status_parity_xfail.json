@@ -1,0 +1,35 @@
+{
+  "opencode 2.x configured server": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  },
+  "opencode 2.x model list fails": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  },
+  "opencode 2.x no console workspace": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  },
+  "opencode 2.x no models": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  },
+  "opencode 2.x partial catalog settles": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  },
+  "opencode 2.x plugins activating": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  },
+  "opencode 2.x signed in": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  },
+  "opencode 2.x unreadable 503": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  },
+  "opencode 2.x usage unreadable": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  },
+  "opencode 2.x without provider names": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  },
+  "opencode 2.x workspace usage": {
+    "catalog event subscription": "The reference follows the OpenCode 2 event stream when it loads the model catalog so later model updates can refresh it. Ferrum only watches events during a turn or folder scan."
+  }
+}

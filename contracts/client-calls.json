@@ -1,12 +1,12 @@
 {
-  "reference": "pingdotgg/t3code@fd0331ca9b1596ed7018c80f52b7e6730014f593",
+  "reference": "pingdotgg/t3code@44a533378653164dea96435e23c8ea27efaffedb",
   "generatedBy": "scripts/update_client_call_inventory.py",
   "calls": [
     {
       "kind": "rpc",
       "call": "agentFeedback.answerRequest",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:2006"
+        "packages/client-runtime/src/state/server.ts:2047"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -104,7 +104,7 @@
       "kind": "rpc",
       "call": "assets.persistChatAttachments",
       "callers": [
-        "packages/client-runtime/src/operations/commands.ts:391"
+        "packages/client-runtime/src/operations/commands.ts:392"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -260,6 +260,7 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "device_eas_parity.py",
         "device_ssh_parity.py",
         "host-parity.json"
       ],
@@ -283,6 +284,7 @@
       "auth": "session (settings:write)",
       "usage": "client",
       "existingCoverage": [
+        "device_eas_parity.py",
         "device_ssh_parity.py",
         "device_tools_parity.py",
         "host-parity.json"
@@ -332,6 +334,7 @@
       "auth": "session (settings:write)",
       "usage": "client",
       "existingCoverage": [
+        "device_eas_parity.py",
         "host-parity.json",
         "settings_secrets_parity.py"
       ],
@@ -355,6 +358,7 @@
       "auth": "session (orchestration:read)",
       "usage": "client",
       "existingCoverage": [
+        "device_eas_parity.py",
         "device_ssh_parity.py",
         "device_tools_parity.py",
         "host-parity.json",
@@ -382,6 +386,7 @@
       "auth": "session (orchestration:operate)",
       "usage": "client",
       "existingCoverage": [
+        "device_eas_parity.py",
         "device_ssh_parity.py",
         "device_tools_parity.py",
         "host-parity.json"
@@ -460,7 +465,7 @@
       "kind": "rpc",
       "call": "filesystem.browse",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:219"
+        "packages/client-runtime/src/state/filesystem.ts:239"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -483,7 +488,7 @@
       "call": "filesystem.getMetadata",
       "callers": [
         "packages/client-runtime/src/state/fileMetadata.ts:145",
-        "packages/client-runtime/src/state/filesystem.ts:215"
+        "packages/client-runtime/src/state/filesystem.ts:235"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -576,7 +581,7 @@
       "kind": "rpc",
       "call": "guestShare.create",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1991"
+        "packages/client-runtime/src/state/server.ts:2032"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -672,7 +677,7 @@
       "kind": "rpc",
       "call": "issues.candidates",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:286"
+        "packages/client-runtime/src/state/issues.ts:309"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -696,7 +701,7 @@
       "kind": "rpc",
       "call": "issues.comment",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:297"
+        "packages/client-runtime/src/state/issues.ts:320"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -720,7 +725,7 @@
       "kind": "rpc",
       "call": "issues.comments",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:269"
+        "packages/client-runtime/src/state/issues.ts:292"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -743,7 +748,7 @@
       "kind": "rpc",
       "call": "issues.create",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:291"
+        "packages/client-runtime/src/state/issues.ts:314"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -767,12 +772,12 @@
       "kind": "rpc",
       "call": "issues.detail",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:175"
+        "packages/client-runtime/src/state/issues.ts:217"
       ],
       "callerCount": 1,
       "mobileCallers": [],
       "trigger": "user action",
-      "request": "IssueRef",
+      "request": "IssueDetailInput",
       "response": "IssueDetail",
       "error": "IssueRpcError",
       "stream": false,
@@ -780,6 +785,7 @@
       "usage": "client",
       "existingCoverage": [
         "github-voice-parity.json",
+        "github_provider_parity.py",
         "linear_provider_parity.py"
       ],
       "validationOnly": false,
@@ -790,7 +796,7 @@
       "kind": "rpc",
       "call": "issues.linkedThreads",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:231"
+        "packages/client-runtime/src/state/issues.ts:259"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -814,12 +820,10 @@
       "kind": "rpc",
       "call": "issues.list",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:213",
-        "packages/client-runtime/src/state/issues.ts:216",
-        "packages/client-runtime/src/state/issues.ts:217",
-        "packages/client-runtime/src/state/issues.ts:258"
+        "packages/client-runtime/src/state/issues.ts:251",
+        "packages/client-runtime/src/state/issues.ts:279"
       ],
-      "callerCount": 4,
+      "callerCount": 2,
       "mobileCallers": [],
       "trigger": "user action",
       "request": "IssueListInput",
@@ -841,7 +845,7 @@
       "kind": "rpc",
       "call": "issues.react",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:318"
+        "packages/client-runtime/src/state/issues.ts:341"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -864,7 +868,7 @@
       "kind": "rpc",
       "call": "issues.setState",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:311"
+        "packages/client-runtime/src/state/issues.ts:334"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -887,7 +891,7 @@
       "kind": "rpc",
       "call": "issues.templates",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:280"
+        "packages/client-runtime/src/state/issues.ts:303"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -910,7 +914,7 @@
       "kind": "rpc",
       "call": "issues.update",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:304"
+        "packages/client-runtime/src/state/issues.ts:327"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -1020,7 +1024,7 @@
       "kind": "rpc",
       "call": "orchestration.dispatchCommand",
       "callers": [
-        "packages/client-runtime/src/operations/commands.ts:306",
+        "packages/client-runtime/src/operations/commands.ts:307",
         "packages/client-runtime/src/state/orchestration.ts:151"
       ],
       "callerCount": 2,
@@ -1044,15 +1048,25 @@
         "html_render_parity.py",
         "link_request_parity.py",
         "managed_policy_parity.py",
+        "mcp_parity.py",
         "orchestration_parity.py",
         "parity-fixtures.json",
+        "peer_forwarding_parity.py",
         "peer_link_routes_parity.py",
         "preview_provider_parity.py",
         "preview_session_parity.py",
         "run_output_parity.py",
+        "scheduled_run_now_parity.py",
         "secret_request_parity.py",
         "shared_store_parity.py",
         "storage_cleanup_parity.py",
+        "thread_activity_parity.py",
+        "thread_blocked_wait_parity.py",
+        "thread_launch_parity.py",
+        "thread_launch_shutdown_parity.py",
+        "thread_queue_ops_parity.py",
+        "thread_queue_parity.py",
+        "thread_send_modes_parity.py",
         "workers_initial_sync_parity.py"
       ],
       "validationOnly": false,
@@ -1252,7 +1266,7 @@
       "kind": "rpc",
       "call": "orchestration.getThreadProjection",
       "callers": [
-        "packages/client-runtime/src/operations/commands.ts:377"
+        "packages/client-runtime/src/operations/commands.ts:378"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -1273,7 +1287,8 @@
         "orchestration_parity.py",
         "peer_link_history_parity.py",
         "run_output_parity.py",
-        "shared_store_parity.py"
+        "shared_store_parity.py",
+        "thread_queue_parity.py"
       ],
       "validationOnly": false,
       "clientHarness": [
@@ -1414,7 +1429,7 @@
       "kind": "rpc",
       "call": "orchestration.launchThread",
       "callers": [
-        "packages/client-runtime/src/operations/commands.ts:827"
+        "packages/client-runtime/src/operations/commands.ts:828"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -1647,7 +1662,7 @@
       "kind": "rpc",
       "call": "peerLinks.answerRequest",
       "callers": [
-        "packages/client-runtime/src/state/peerLinks.ts:144"
+        "packages/client-runtime/src/state/peerLinks.ts:161"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -1669,8 +1684,8 @@
       "kind": "rpc",
       "call": "peerLinks.link",
       "callers": [
-        "packages/client-runtime/src/state/peerLinks.ts:106",
-        "packages/client-runtime/src/state/peerLinks.ts:112"
+        "packages/client-runtime/src/state/peerLinks.ts:123",
+        "packages/client-runtime/src/state/peerLinks.ts:129"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -1747,7 +1762,7 @@
       "kind": "rpc",
       "call": "peerLinks.pairClient",
       "callers": [
-        "packages/client-runtime/src/state/peerLinks.ts:130"
+        "packages/client-runtime/src/state/peerLinks.ts:147"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -1769,7 +1784,7 @@
       "kind": "rpc",
       "call": "peerLinks.pairLink",
       "callers": [
-        "packages/client-runtime/src/state/peerLinks.ts:139"
+        "packages/client-runtime/src/state/peerLinks.ts:156"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -1836,7 +1851,7 @@
       "kind": "rpc",
       "call": "peerLinks.threadItem",
       "callers": [
-        "packages/client-runtime/src/state/peerLinks.ts:124"
+        "packages/client-runtime/src/state/peerLinks.ts:141"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -1858,7 +1873,7 @@
       "kind": "rpc",
       "call": "peerLinks.unlink",
       "callers": [
-        "packages/client-runtime/src/state/peerLinks.ts:116"
+        "packages/client-runtime/src/state/peerLinks.ts:133"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2282,7 +2297,7 @@
       "kind": "rpc",
       "call": "projects.mutate",
       "callers": [
-        "packages/client-runtime/src/operations/commands.ts:439"
+        "packages/client-runtime/src/operations/commands.ts:440"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2316,7 +2331,7 @@
       "call": "projects.readFile",
       "callers": [
         "packages/client-runtime/src/state/projectCommands.ts:105",
-        "packages/client-runtime/src/state/projectCommands.ts:119"
+        "packages/client-runtime/src/state/projectCommands.ts:120"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -2419,7 +2434,7 @@
       "kind": "rpc",
       "call": "provider.auth.cancel",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1574"
+        "packages/client-runtime/src/state/server.ts:1592"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2441,7 +2456,7 @@
       "kind": "rpc",
       "call": "provider.auth.complete",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1554"
+        "packages/client-runtime/src/state/server.ts:1572"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2461,7 +2476,7 @@
       "kind": "rpc",
       "call": "provider.auth.logout",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1582"
+        "packages/client-runtime/src/state/server.ts:1600"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2481,7 +2496,7 @@
       "kind": "rpc",
       "call": "provider.auth.removeMethod",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1578"
+        "packages/client-runtime/src/state/server.ts:1596"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2501,7 +2516,7 @@
       "kind": "rpc",
       "call": "provider.auth.respond",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1550"
+        "packages/client-runtime/src/state/server.ts:1568"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2521,7 +2536,7 @@
       "kind": "rpc",
       "call": "provider.auth.start",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1542"
+        "packages/client-runtime/src/state/server.ts:1560"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2543,7 +2558,7 @@
       "kind": "rpc-stream",
       "call": "provider.auth.subscribe",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1537"
+        "packages/client-runtime/src/state/server.ts:1555"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2563,7 +2578,7 @@
       "kind": "rpc-stream",
       "call": "provider.chatgpt.handoff.subscribe",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1569"
+        "packages/client-runtime/src/state/server.ts:1587"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2583,7 +2598,7 @@
       "kind": "rpc",
       "call": "provider.chatgpt.import-profile",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1562"
+        "packages/client-runtime/src/state/server.ts:1580"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2603,7 +2618,7 @@
       "kind": "rpc",
       "call": "provider.chatgpt.reconnect-profile",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1558"
+        "packages/client-runtime/src/state/server.ts:1576"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2623,7 +2638,7 @@
       "kind": "rpc",
       "call": "provider.consumeResetCredit",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1738"
+        "packages/client-runtime/src/state/server.ts:1779"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2645,7 +2660,7 @@
       "kind": "rpc",
       "call": "provider.install.cancel",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1599"
+        "packages/client-runtime/src/state/server.ts:1617"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2665,7 +2680,7 @@
       "kind": "rpc",
       "call": "provider.install.remove",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1603"
+        "packages/client-runtime/src/state/server.ts:1621"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2685,7 +2700,7 @@
       "kind": "rpc",
       "call": "provider.install.start",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1591"
+        "packages/client-runtime/src/state/server.ts:1609"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2707,7 +2722,7 @@
       "kind": "rpc-stream",
       "call": "provider.install.subscribe",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1586"
+        "packages/client-runtime/src/state/server.ts:1604"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2729,7 +2744,7 @@
       "kind": "rpc",
       "call": "provider.mcpSignIn.complete",
       "callers": [
-        "packages/client-runtime/src/state/threadCommands.ts:482"
+        "packages/client-runtime/src/state/threadCommands.ts:529"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2749,7 +2764,7 @@
       "kind": "rpc",
       "call": "provider.mcpSignIn.start",
       "callers": [
-        "packages/client-runtime/src/state/threadCommands.ts:472"
+        "packages/client-runtime/src/state/threadCommands.ts:519"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2769,7 +2784,7 @@
       "kind": "rpc",
       "call": "provider.uploadFeedback",
       "callers": [
-        "packages/client-runtime/src/state/threadCommands.ts:465"
+        "packages/client-runtime/src/state/threadCommands.ts:512"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2792,8 +2807,8 @@
       "call": "pullRequests.activity",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:42",
-        "packages/client-runtime/src/state/pullRequests.ts:864",
-        "packages/client-runtime/src/state/pullRequests.ts:865"
+        "packages/client-runtime/src/state/pullRequests.ts:865",
+        "packages/client-runtime/src/state/pullRequests.ts:866"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -2816,8 +2831,8 @@
       "call": "pullRequests.changeBreakdown",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:46",
-        "packages/client-runtime/src/state/pullRequests.ts:1340",
-        "packages/client-runtime/src/state/pullRequests.ts:1341"
+        "packages/client-runtime/src/state/pullRequests.ts:1348",
+        "packages/client-runtime/src/state/pullRequests.ts:1349"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -2841,8 +2856,8 @@
       "call": "pullRequests.checks",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:41",
-        "packages/client-runtime/src/state/pullRequests.ts:1173",
-        "packages/client-runtime/src/state/pullRequests.ts:1174"
+        "packages/client-runtime/src/state/pullRequests.ts:1181",
+        "packages/client-runtime/src/state/pullRequests.ts:1182"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -2865,8 +2880,8 @@
       "call": "pullRequests.comment",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:56",
-        "packages/client-runtime/src/state/pullRequests.ts:1403",
-        "packages/client-runtime/src/state/pullRequests.ts:1404"
+        "packages/client-runtime/src/state/pullRequests.ts:1424",
+        "packages/client-runtime/src/state/pullRequests.ts:1425"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -2891,9 +2906,9 @@
       "call": "pullRequests.detail",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:39",
-        "packages/client-runtime/src/state/pullRequests.ts:885",
         "packages/client-runtime/src/state/pullRequests.ts:886",
-        "packages/client-runtime/src/state/pullRequests.ts:1106"
+        "packages/client-runtime/src/state/pullRequests.ts:887",
+        "packages/client-runtime/src/state/pullRequests.ts:1107"
       ],
       "callerCount": 4,
       "mobileCallers": [],
@@ -2916,8 +2931,8 @@
       "call": "pullRequests.diffFileContents",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:44",
-        "packages/client-runtime/src/state/pullRequests.ts:1310",
-        "packages/client-runtime/src/state/pullRequests.ts:1311"
+        "packages/client-runtime/src/state/pullRequests.ts:1318",
+        "packages/client-runtime/src/state/pullRequests.ts:1319"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -2941,8 +2956,8 @@
       "call": "pullRequests.filesViewed",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:45",
-        "packages/client-runtime/src/state/pullRequests.ts:1333",
-        "packages/client-runtime/src/state/pullRequests.ts:1334"
+        "packages/client-runtime/src/state/pullRequests.ts:1341",
+        "packages/client-runtime/src/state/pullRequests.ts:1342"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -2965,7 +2980,7 @@
       "kind": "rpc",
       "call": "pullRequests.filterOptions",
       "callers": [
-        "packages/client-runtime/src/state/pullRequests.ts:1276"
+        "packages/client-runtime/src/state/pullRequests.ts:1284"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -2985,8 +3000,8 @@
       "kind": "rpc",
       "call": "pullRequests.generateReviewGuide",
       "callers": [
-        "packages/client-runtime/src/state/pullRequests.ts:1528",
-        "packages/client-runtime/src/state/pullRequests.ts:1529"
+        "packages/client-runtime/src/state/pullRequests.ts:1549",
+        "packages/client-runtime/src/state/pullRequests.ts:1550"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -3007,8 +3022,8 @@
       "call": "pullRequests.invalidate",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:216",
-        "packages/client-runtime/src/state/pullRequests.ts:1568",
-        "packages/client-runtime/src/state/pullRequests.ts:1569"
+        "packages/client-runtime/src/state/pullRequests.ts:1589",
+        "packages/client-runtime/src/state/pullRequests.ts:1590"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3031,8 +3046,8 @@
       "call": "pullRequests.labelCandidates",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:48",
-        "packages/client-runtime/src/state/pullRequests.ts:1022",
-        "packages/client-runtime/src/state/pullRequests.ts:1023"
+        "packages/client-runtime/src/state/pullRequests.ts:1023",
+        "packages/client-runtime/src/state/pullRequests.ts:1024"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3054,8 +3069,8 @@
       "kind": "rpc",
       "call": "pullRequests.linkedThreads",
       "callers": [
-        "packages/client-runtime/src/state/pullRequests.ts:1219",
-        "packages/client-runtime/src/state/pullRequests.ts:1227"
+        "packages/client-runtime/src/state/pullRequests.ts:1227",
+        "packages/client-runtime/src/state/pullRequests.ts:1235"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -3079,7 +3094,7 @@
       "kind": "rpc",
       "call": "pullRequests.list",
       "callers": [
-        "packages/client-runtime/src/state/pullRequests.ts:1235"
+        "packages/client-runtime/src/state/pullRequests.ts:1243"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3104,7 +3119,7 @@
       "kind": "rpc",
       "call": "pullRequests.listStats",
       "callers": [
-        "packages/client-runtime/src/state/pullRequests.ts:1269"
+        "packages/client-runtime/src/state/pullRequests.ts:1277"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3130,8 +3145,8 @@
       "call": "pullRequests.preview",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:40",
-        "packages/client-runtime/src/state/pullRequests.ts:979",
-        "packages/client-runtime/src/state/pullRequests.ts:980"
+        "packages/client-runtime/src/state/pullRequests.ts:980",
+        "packages/client-runtime/src/state/pullRequests.ts:981"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3156,8 +3171,8 @@
       "call": "pullRequests.replyToThread",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:59",
-        "packages/client-runtime/src/state/pullRequests.ts:1433",
-        "packages/client-runtime/src/state/pullRequests.ts:1434"
+        "packages/client-runtime/src/state/pullRequests.ts:1454",
+        "packages/client-runtime/src/state/pullRequests.ts:1455"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3201,8 +3216,8 @@
       "call": "pullRequests.requestReviewers",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:62",
-        "packages/client-runtime/src/state/pullRequests.ts:1443",
-        "packages/client-runtime/src/state/pullRequests.ts:1444"
+        "packages/client-runtime/src/state/pullRequests.ts:1464",
+        "packages/client-runtime/src/state/pullRequests.ts:1465"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3226,8 +3241,8 @@
       "kind": "rpc",
       "call": "pullRequests.reviewGuide",
       "callers": [
-        "packages/client-runtime/src/state/pullRequests.ts:1062",
-        "packages/client-runtime/src/state/pullRequests.ts:1063"
+        "packages/client-runtime/src/state/pullRequests.ts:1063",
+        "packages/client-runtime/src/state/pullRequests.ts:1064"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -3248,9 +3263,9 @@
       "call": "pullRequests.reviewerCandidates",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:47",
-        "packages/client-runtime/src/state/pullRequests.ts:1072",
         "packages/client-runtime/src/state/pullRequests.ts:1073",
-        "packages/client-runtime/src/state/pullRequests.ts:1080"
+        "packages/client-runtime/src/state/pullRequests.ts:1074",
+        "packages/client-runtime/src/state/pullRequests.ts:1081"
       ],
       "callerCount": 5,
       "mobileCallers": [],
@@ -3319,8 +3334,8 @@
       "call": "pullRequests.runAction",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:54",
-        "packages/client-runtime/src/state/pullRequests.ts:1137",
-        "packages/client-runtime/src/state/pullRequests.ts:1362"
+        "packages/client-runtime/src/state/pullRequests.ts:1145",
+        "packages/client-runtime/src/state/pullRequests.ts:1370"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3344,8 +3359,8 @@
       "call": "pullRequests.setFilesViewed",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:53",
-        "packages/client-runtime/src/state/pullRequests.ts:1351",
-        "packages/client-runtime/src/state/pullRequests.ts:1352"
+        "packages/client-runtime/src/state/pullRequests.ts:1359",
+        "packages/client-runtime/src/state/pullRequests.ts:1360"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3369,8 +3384,8 @@
       "call": "pullRequests.setLabels",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:63",
-        "packages/client-runtime/src/state/pullRequests.ts:1539",
-        "packages/client-runtime/src/state/pullRequests.ts:1540"
+        "packages/client-runtime/src/state/pullRequests.ts:1560",
+        "packages/client-runtime/src/state/pullRequests.ts:1561"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3393,8 +3408,8 @@
       "call": "pullRequests.setReaction",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:60",
-        "packages/client-runtime/src/state/pullRequests.ts:1557",
-        "packages/client-runtime/src/state/pullRequests.ts:1558"
+        "packages/client-runtime/src/state/pullRequests.ts:1578",
+        "packages/client-runtime/src/state/pullRequests.ts:1579"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3418,8 +3433,8 @@
       "call": "pullRequests.setThreadResolution",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:61",
-        "packages/client-runtime/src/state/pullRequests.ts:1550",
-        "packages/client-runtime/src/state/pullRequests.ts:1551"
+        "packages/client-runtime/src/state/pullRequests.ts:1571",
+        "packages/client-runtime/src/state/pullRequests.ts:1572"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3443,9 +3458,9 @@
       "call": "pullRequests.stack",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:38",
-        "packages/client-runtime/src/state/pullRequests.ts:796",
         "packages/client-runtime/src/state/pullRequests.ts:797",
-        "packages/client-runtime/src/state/pullRequests.ts:1119"
+        "packages/client-runtime/src/state/pullRequests.ts:798",
+        "packages/client-runtime/src/state/pullRequests.ts:1120"
       ],
       "callerCount": 4,
       "mobileCallers": [],
@@ -3468,8 +3483,8 @@
       "call": "pullRequests.submitReview",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:58",
-        "packages/client-runtime/src/state/pullRequests.ts:1426",
-        "packages/client-runtime/src/state/pullRequests.ts:1427"
+        "packages/client-runtime/src/state/pullRequests.ts:1447",
+        "packages/client-runtime/src/state/pullRequests.ts:1448"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3493,8 +3508,8 @@
       "kind": "rpc-stream",
       "call": "pullRequests.subscribeLinkedThreadRefreshes",
       "callers": [
-        "packages/client-runtime/src/state/issues.ts:191",
-        "packages/client-runtime/src/state/pullRequests.ts:838"
+        "packages/client-runtime/src/state/issues.ts:234",
+        "packages/client-runtime/src/state/pullRequests.ts:839"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -3516,7 +3531,7 @@
       "kind": "rpc-stream",
       "call": "pullRequests.subscribeRefreshes",
       "callers": [
-        "packages/client-runtime/src/state/pullRequests.ts:699"
+        "packages/client-runtime/src/state/pullRequests.ts:700"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3541,8 +3556,8 @@
       "call": "pullRequests.summary",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:37",
-        "packages/client-runtime/src/state/pullRequests.ts:730",
-        "packages/client-runtime/src/state/pullRequests.ts:731"
+        "packages/client-runtime/src/state/pullRequests.ts:731",
+        "packages/client-runtime/src/state/pullRequests.ts:732"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3567,8 +3582,8 @@
       "call": "pullRequests.threadComments",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:43",
-        "packages/client-runtime/src/state/pullRequests.ts:1287",
-        "packages/client-runtime/src/state/pullRequests.ts:1288"
+        "packages/client-runtime/src/state/pullRequests.ts:1295",
+        "packages/client-runtime/src/state/pullRequests.ts:1296"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3591,8 +3606,8 @@
       "call": "pullRequests.update",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:55",
-        "packages/client-runtime/src/state/pullRequests.ts:1392",
-        "packages/client-runtime/src/state/pullRequests.ts:1393"
+        "packages/client-runtime/src/state/pullRequests.ts:1413",
+        "packages/client-runtime/src/state/pullRequests.ts:1414"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3617,8 +3632,8 @@
       "call": "pullRequests.updateComment",
       "callers": [
         "packages/client-runtime/src/state/pullRequestRouting.ts:57",
-        "packages/client-runtime/src/state/pullRequests.ts:1410",
-        "packages/client-runtime/src/state/pullRequests.ts:1411"
+        "packages/client-runtime/src/state/pullRequests.ts:1431",
+        "packages/client-runtime/src/state/pullRequests.ts:1432"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -3716,7 +3731,7 @@
       "kind": "rpc",
       "call": "scheduledTasks.delete",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1941"
+        "packages/client-runtime/src/state/server.ts:1982"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3740,7 +3755,7 @@
       "kind": "rpc",
       "call": "scheduledTasks.getWebhookDelivery",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1639"
+        "packages/client-runtime/src/state/server.ts:1663"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3760,7 +3775,7 @@
       "kind": "rpc",
       "call": "scheduledTasks.listWebhookDeliveries",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1635"
+        "packages/client-runtime/src/state/server.ts:1659"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3782,7 +3797,7 @@
       "kind": "rpc",
       "call": "scheduledTasks.rotateWebhookToken",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1954"
+        "packages/client-runtime/src/state/server.ts:1995"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3802,7 +3817,7 @@
       "kind": "rpc",
       "call": "scheduledTasks.runNow",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1950"
+        "packages/client-runtime/src/state/server.ts:1991"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3824,7 +3839,7 @@
       "kind": "rpc",
       "call": "scheduledTasks.setEnabled",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1935"
+        "packages/client-runtime/src/state/server.ts:1976"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3847,7 +3862,7 @@
       "kind": "rpc-stream",
       "call": "scheduledTasks.subscribe",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1663"
+        "packages/client-runtime/src/state/server.ts:1692"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3871,7 +3886,7 @@
       "kind": "rpc",
       "call": "scheduledTasks.upsert",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1929"
+        "packages/client-runtime/src/state/server.ts:1970"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3895,7 +3910,7 @@
       "kind": "rpc",
       "call": "secrets.answerRequest",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1997"
+        "packages/client-runtime/src/state/server.ts:2038"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3918,7 +3933,7 @@
       "kind": "rpc",
       "call": "server.acceptAcpRegistryUrlAuth",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1854"
+        "packages/client-runtime/src/state/server.ts:1895"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3938,7 +3953,7 @@
       "kind": "rpc",
       "call": "server.checkOtlpEndpoint",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:2023"
+        "packages/client-runtime/src/state/server.ts:2064"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3958,7 +3973,7 @@
       "kind": "rpc",
       "call": "server.checkSecretSource",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:2027"
+        "packages/client-runtime/src/state/server.ts:2068"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -3981,8 +3996,8 @@
       "call": "server.commitDesktopUpdate",
       "callers": [
         "packages/client-runtime/src/connection/outdatedHostUpdate.ts:202",
-        "packages/client-runtime/src/state/server.ts:1236",
-        "packages/client-runtime/src/state/server.ts:1316"
+        "packages/client-runtime/src/state/server.ts:1243",
+        "packages/client-runtime/src/state/server.ts:1324"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -4002,7 +4017,7 @@
       "kind": "rpc",
       "call": "server.deleteAcpRegistrySession",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1881"
+        "packages/client-runtime/src/state/server.ts:1922"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4022,7 +4037,7 @@
       "kind": "rpc",
       "call": "server.disableAcpRegistryProvider",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1908"
+        "packages/client-runtime/src/state/server.ts:1949"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4092,7 +4107,7 @@
       "kind": "rpc-stream",
       "call": "server.getDatabaseStorage",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1439"
+        "packages/client-runtime/src/state/server.ts:1447"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4114,7 +4129,7 @@
       "kind": "rpc",
       "call": "server.getHostResources",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1624"
+        "packages/client-runtime/src/state/server.ts:1648"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4134,7 +4149,7 @@
       "kind": "rpc",
       "call": "server.getNpmRelease",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1611"
+        "packages/client-runtime/src/state/server.ts:1635"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4156,7 +4171,7 @@
       "kind": "rpc",
       "call": "server.getProcessDiagnostics",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1617"
+        "packages/client-runtime/src/state/server.ts:1641"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4176,7 +4191,7 @@
       "kind": "rpc",
       "call": "server.getProcessResourceHistory",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1628"
+        "packages/client-runtime/src/state/server.ts:1652"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4196,9 +4211,29 @@
     },
     {
       "kind": "rpc",
+      "call": "server.getProviderRuntimeModeLimits",
+      "callers": [
+        "packages/client-runtime/src/state/server.ts:1626"
+      ],
+      "callerCount": 1,
+      "mobileCallers": [],
+      "trigger": "user action",
+      "request": "ProviderRuntimeModeLimitsInput",
+      "response": "ProviderRuntimeModeLimitsResult",
+      "error": "EnvironmentAuthorizationError",
+      "stream": false,
+      "auth": "session (orchestration:read)",
+      "usage": "client",
+      "existingCoverage": [],
+      "validationOnly": true,
+      "clientHarness": [],
+      "knownGaps": []
+    },
+    {
+      "kind": "rpc",
       "call": "server.getResourceTelemetryHistory",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1710"
+        "packages/client-runtime/src/state/server.ts:1739"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4245,7 +4280,7 @@
       "kind": "rpc-stream",
       "call": "server.getStorageCleanupReport",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1527"
+        "packages/client-runtime/src/state/server.ts:1545"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4272,7 +4307,7 @@
       "kind": "rpc",
       "call": "server.getTraceDiagnostics",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1607"
+        "packages/client-runtime/src/state/server.ts:1631"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4295,9 +4330,9 @@
       "call": "server.getUsageSummary",
       "callers": [
         "apps/web/src/rpc/requestLatencyState.ts:33",
-        "packages/client-runtime/src/state/server.ts:1671",
-        "packages/client-runtime/src/state/server.ts:1677",
-        "packages/client-runtime/src/state/server.ts:1681"
+        "packages/client-runtime/src/state/server.ts:1700",
+        "packages/client-runtime/src/state/server.ts:1706",
+        "packages/client-runtime/src/state/server.ts:1710"
       ],
       "callerCount": 5,
       "mobileCallers": [],
@@ -4319,7 +4354,7 @@
       "kind": "rpc",
       "call": "server.importAcpRegistrySession",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1872"
+        "packages/client-runtime/src/state/server.ts:1913"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4339,7 +4374,7 @@
       "kind": "rpc",
       "call": "server.listAcpRegistryProviders",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1890"
+        "packages/client-runtime/src/state/server.ts:1931"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4359,7 +4394,7 @@
       "kind": "rpc",
       "call": "server.listAcpRegistrySessions",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1863"
+        "packages/client-runtime/src/state/server.ts:1904"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4379,7 +4414,7 @@
       "kind": "rpc",
       "call": "server.listTextGeneratorModels",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:2031"
+        "packages/client-runtime/src/state/server.ts:2072"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4399,7 +4434,7 @@
       "kind": "rpc",
       "call": "server.logoutAcpRegistry",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1917"
+        "packages/client-runtime/src/state/server.ts:1958"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4419,7 +4454,7 @@
       "kind": "rpc",
       "call": "server.prepareAcpRegistryAgent",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1838"
+        "packages/client-runtime/src/state/server.ts:1879"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4442,7 +4477,7 @@
       "kind": "rpc",
       "call": "server.prepareTriage",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1515"
+        "packages/client-runtime/src/state/server.ts:1533"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4490,7 +4525,7 @@
       "kind": "rpc",
       "call": "server.reclaimDatabaseSpace",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1522"
+        "packages/client-runtime/src/state/server.ts:1540"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4511,8 +4546,8 @@
       "call": "server.refreshProviders",
       "callers": [
         "apps/web/src/rpc/requestLatencyState.ts:39",
-        "packages/client-runtime/src/state/server.ts:1747",
-        "packages/client-runtime/src/state/server.ts:1761"
+        "packages/client-runtime/src/state/server.ts:1788",
+        "packages/client-runtime/src/state/server.ts:1802"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -4538,7 +4573,7 @@
       "kind": "rpc",
       "call": "server.refreshUsageRates",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:2015"
+        "packages/client-runtime/src/state/server.ts:2056"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4558,7 +4593,7 @@
       "kind": "rpc",
       "call": "server.removeKeybinding",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1830"
+        "packages/client-runtime/src/state/server.ts:1871"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4609,7 +4644,7 @@
       "kind": "rpc",
       "call": "server.retryResourceTelemetry",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:2035"
+        "packages/client-runtime/src/state/server.ts:2076"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4629,7 +4664,7 @@
       "kind": "rpc",
       "call": "server.runStorageCleanup",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1510"
+        "packages/client-runtime/src/state/server.ts:1528"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4653,7 +4688,7 @@
       "kind": "rpc",
       "call": "server.searchAcpRegistry",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1717"
+        "packages/client-runtime/src/state/server.ts:1746"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4675,7 +4710,7 @@
       "kind": "rpc",
       "call": "server.setAcpRegistryProvider",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1899"
+        "packages/client-runtime/src/state/server.ts:1940"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4695,7 +4730,7 @@
       "kind": "rpc",
       "call": "server.signalProcess",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1925"
+        "packages/client-runtime/src/state/server.ts:1966"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4715,7 +4750,7 @@
       "kind": "rpc",
       "call": "server.uninstallAcpRegistryManagedBinary",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1846"
+        "packages/client-runtime/src/state/server.ts:1887"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4738,7 +4773,7 @@
       "call": "server.updateProvider",
       "callers": [
         "apps/web/src/rpc/requestLatencyState.ts:38",
-        "packages/client-runtime/src/state/server.ts:1815"
+        "packages/client-runtime/src/state/server.ts:1856"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -4760,8 +4795,8 @@
       "callers": [
         "apps/web/src/rpc/requestLatencyState.ts:40",
         "packages/client-runtime/src/connection/outdatedHostUpdate.ts:182",
-        "packages/client-runtime/src/state/server.ts:1207",
-        "packages/client-runtime/src/state/server.ts:1820"
+        "packages/client-runtime/src/state/server.ts:1214",
+        "packages/client-runtime/src/state/server.ts:1861"
       ],
       "callerCount": 4,
       "mobileCallers": [],
@@ -4782,7 +4817,7 @@
       "call": "server.updateServerWithProgress",
       "callers": [
         "packages/client-runtime/src/connection/outdatedHostUpdate.ts:156",
-        "packages/client-runtime/src/state/server.ts:1158"
+        "packages/client-runtime/src/state/server.ts:1165"
       ],
       "callerCount": 2,
       "mobileCallers": [],
@@ -4802,7 +4837,7 @@
       "kind": "rpc",
       "call": "server.updateSettings",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1501"
+        "packages/client-runtime/src/state/server.ts:1519"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -4818,6 +4853,7 @@
         "client_thread_parity.py",
         "config_parity.py",
         "config_snapshot_parity.py",
+        "device_eas_parity.py",
         "device_ssh_parity.py",
         "device_tools_parity.py",
         "feedback_parity.py",
@@ -4846,7 +4882,7 @@
       "kind": "rpc",
       "call": "server.upsertKeybinding",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1824"
+        "packages/client-runtime/src/state/server.ts:1865"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5198,7 +5234,7 @@
       "kind": "rpc-stream",
       "call": "subscribeResourceTelemetry",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1705"
+        "packages/client-runtime/src/state/server.ts:1734"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5220,7 +5256,7 @@
       "callers": [
         "packages/client-runtime/src/rpc/session.ts:322",
         "packages/client-runtime/src/rpc/session.ts:512",
-        "packages/client-runtime/src/state/server.ts:651"
+        "packages/client-runtime/src/state/server.ts:658"
       ],
       "callerCount": 3,
       "mobileCallers": [],
@@ -5249,12 +5285,12 @@
       "kind": "rpc-stream",
       "call": "subscribeServerLifecycle",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:790",
-        "packages/client-runtime/src/state/server.ts:1125",
-        "packages/client-runtime/src/state/server.ts:1283",
-        "packages/client-runtime/src/state/server.ts:1726"
+        "packages/client-runtime/src/state/server.ts:797",
+        "packages/client-runtime/src/state/server.ts:1132",
+        "packages/client-runtime/src/state/server.ts:1291",
+        "packages/client-runtime/src/state/server.ts:1755"
       ],
-      "callerCount": 4,
+      "callerCount": 5,
       "mobileCallers": [],
       "trigger": "connect",
       "request": "Struct{}",
@@ -5384,7 +5420,7 @@
       "kind": "rpc-stream",
       "call": "terminal.attach",
       "callers": [
-        "packages/client-runtime/src/state/terminal.ts:96"
+        "packages/client-runtime/src/state/terminal.ts:97"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5407,7 +5443,7 @@
       "kind": "rpc",
       "call": "terminal.clear",
       "callers": [
-        "packages/client-runtime/src/state/terminal.ts:133"
+        "packages/client-runtime/src/state/terminal.ts:135"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5431,7 +5467,7 @@
       "kind": "rpc",
       "call": "terminal.close",
       "callers": [
-        "packages/client-runtime/src/state/terminal.ts:139"
+        "packages/client-runtime/src/state/terminal.ts:141"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5479,7 +5515,7 @@
       "kind": "rpc",
       "call": "terminal.open",
       "callers": [
-        "packages/client-runtime/src/state/terminal.ts:117"
+        "packages/client-runtime/src/state/terminal.ts:119"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5505,7 +5541,7 @@
       "kind": "rpc",
       "call": "terminal.resize",
       "callers": [
-        "packages/client-runtime/src/state/terminal.ts:127"
+        "packages/client-runtime/src/state/terminal.ts:129"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5530,7 +5566,7 @@
       "kind": "rpc",
       "call": "terminal.write",
       "callers": [
-        "packages/client-runtime/src/state/terminal.ts:123"
+        "packages/client-runtime/src/state/terminal.ts:125"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5789,9 +5825,29 @@
     },
     {
       "kind": "rpc",
+      "call": "workflows.about",
+      "callers": [
+        "packages/client-runtime/src/state/server.ts:1679"
+      ],
+      "callerCount": 1,
+      "mobileCallers": [],
+      "trigger": "user action",
+      "request": "WorkflowRunsAboutInput",
+      "response": "WorkflowRunsAbout",
+      "error": "Schema.Union([WorkflowRequestError, EnvironmentAuthorizationError])",
+      "stream": false,
+      "auth": "session (orchestration:read)",
+      "usage": "client",
+      "existingCoverage": [],
+      "validationOnly": true,
+      "clientHarness": [],
+      "knownGaps": []
+    },
+    {
+      "kind": "rpc",
       "call": "workflows.answer",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1960"
+        "packages/client-runtime/src/state/server.ts:2001"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5813,7 +5869,7 @@
       "kind": "rpc",
       "call": "workflows.cancel",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1973"
+        "packages/client-runtime/src/state/server.ts:2014"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5855,7 +5911,7 @@
       "kind": "rpc",
       "call": "workflows.deleteDefinition",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1985"
+        "packages/client-runtime/src/state/server.ts:2026"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5875,7 +5931,7 @@
       "kind": "rpc",
       "call": "workflows.get",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1645"
+        "packages/client-runtime/src/state/server.ts:1669"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5897,7 +5953,7 @@
       "kind": "rpc",
       "call": "workflows.getDefinition",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1655"
+        "packages/client-runtime/src/state/server.ts:1684"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5917,7 +5973,7 @@
       "kind": "rpc",
       "call": "workflows.resume",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1968"
+        "packages/client-runtime/src/state/server.ts:2009"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5939,7 +5995,7 @@
       "kind": "rpc",
       "call": "workflows.saveDefinition",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1979"
+        "packages/client-runtime/src/state/server.ts:2020"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5959,13 +6015,13 @@
       "kind": "rpc-stream",
       "call": "workflows.subscribe",
       "callers": [
-        "packages/client-runtime/src/state/server.ts:1467"
+        "packages/client-runtime/src/state/server.ts:1477"
       ],
       "callerCount": 1,
       "mobileCallers": [],
       "trigger": "user action",
       "request": "WorkflowRunsSubscribeInput",
-      "response": "WorkflowRunsSnapshot",
+      "response": "WorkflowRunsUpdate",
       "error": "EnvironmentAuthorizationError",
       "stream": true,
       "auth": "session (orchestration:read)",
@@ -5981,7 +6037,7 @@
       "kind": "rpc",
       "call": "workspace.addTaskFolderRepository",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:245"
+        "packages/client-runtime/src/state/filesystem.ts:265"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -5999,9 +6055,50 @@
     },
     {
       "kind": "rpc",
+      "call": "workspace.approveLayoutCommands",
+      "callers": [
+        "packages/client-runtime/src/state/filesystem.ts:280"
+      ],
+      "callerCount": 1,
+      "mobileCallers": [],
+      "trigger": "open project/thread",
+      "request": "WorkspaceApproveLayoutCommandsInput",
+      "response": "WorkspaceLayoutCommandsResult",
+      "error": "Schema.Union([TaskFolderError, EnvironmentAuthorizationError])",
+      "stream": false,
+      "auth": "session (terminal:operate)",
+      "usage": "client",
+      "existingCoverage": [],
+      "validationOnly": true,
+      "clientHarness": [],
+      "knownGaps": []
+    },
+    {
+      "kind": "rpc",
+      "call": "workspace.layoutCommands",
+      "callers": [
+        "packages/client-runtime/src/state/filesystem.ts:270",
+        "packages/client-runtime/src/state/filesystem.ts:276"
+      ],
+      "callerCount": 2,
+      "mobileCallers": [],
+      "trigger": "open project/thread",
+      "request": "WorkspaceLayoutCommandsInput",
+      "response": "WorkspaceLayoutCommandsResult",
+      "error": "Schema.Union([TaskFolderError, EnvironmentAuthorizationError])",
+      "stream": false,
+      "auth": "session (filesystem:read)",
+      "usage": "client",
+      "existingCoverage": [],
+      "validationOnly": true,
+      "clientHarness": [],
+      "knownGaps": []
+    },
+    {
+      "kind": "rpc",
       "call": "workspace.listFolders",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:234"
+        "packages/client-runtime/src/state/filesystem.ts:254"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -6021,7 +6118,7 @@
       "kind": "rpc",
       "call": "workspace.scanFolders",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:228"
+        "packages/client-runtime/src/state/filesystem.ts:248"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -6041,7 +6138,7 @@
       "kind": "rpc",
       "call": "workspace.taskFolder",
       "callers": [
-        "packages/client-runtime/src/state/filesystem.ts:240"
+        "packages/client-runtime/src/state/filesystem.ts:260"
       ],
       "callerCount": 1,
       "mobileCallers": [],
@@ -6085,7 +6182,7 @@
       "kind": "http",
       "call": "GET /.well-known/t3/environment",
       "callers": [
-        "apps/desktop/src/backend/DesktopBackendManager.ts:53",
+        "apps/desktop/src/backend/DesktopBackendManager.ts:57",
         "apps/desktop/src/backend/tailscaleEndpointProvider.ts:81",
         "packages/client-runtime/src/environment/descriptor.ts:13",
         "packages/client-runtime/src/environment/descriptor.ts:15"
@@ -6753,6 +6850,8 @@
         "cors_parity.py",
         "github_provider_parity.py",
         "linear_provider_parity.py",
+        "mcp_parity.py",
+        "peer_forwarding_parity.py",
         "peer_link_history_parity.py",
         "peer_link_routes_parity.py",
         "project_clone_parity.py",
@@ -6790,6 +6889,8 @@
         "client_thread_parity.py",
         "github_provider_parity.py",
         "linear_provider_parity.py",
+        "mcp_parity.py",
+        "peer_forwarding_parity.py",
         "peer_link_history_parity.py",
         "peer_link_routes_parity.py",
         "project_favicon_parity.py",
@@ -7572,6 +7673,9 @@
       "usage": "client",
       "existingCoverage": [
         "auth_parity.py",
+        "device_eas_parity.py",
+        "device_ssh_parity.py",
+        "device_tools_parity.py",
         "host-parity.json"
       ],
       "validationOnly": false,

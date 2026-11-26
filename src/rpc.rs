@@ -461,7 +461,7 @@ async fn run_call(
         };
     }
     if method == "workflows.answer" {
-        return match crate::workflows::answer(state, params) {
+        return match crate::workflows::answer(state, params, principal) {
             Ok(()) => Reply::Success(Value::Null),
             Err(error) => Reply::Failure(json!({"_tag": "Fail", "error": error})),
         };
@@ -1987,20 +1987,31 @@ async fn dispatch_method(state: &Arc<AppState>, method: &str, params: &Value) ->
         // serves every discovery within ten seconds.
         crate::login_shell::refresh_for_source_control_discovery().await;
         let cwd = std::env::current_dir().unwrap_or_default();
-        let probe = |executable: &str| -> Option<String> {
-            crate::login_shell::command(executable)
-                .arg("--version")
-                .current_dir(&cwd)
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.lines().next().unwrap_or_default().trim().to_owned())
+        let path = crate::login_shell::path()
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default();
+        let probe = |executable: &str| {
+            let found = std::env::split_paths(&path)
+                .any(|dir| crate::npm_release::is_executable(&dir.join(executable)));
+            let mut detail = json!({"_tag":"None"});
+            let version = found.then(|| crate::login_shell::command(executable)
+                .arg(if executable == "gt" {"version"} else {"--version"}).current_dir(&cwd).output()).and_then(|result| match result {
+                Ok(output) if output.status.success() => {
+                    Some([output.stdout, output.stderr].iter().find_map(|bytes| {
+                        std::str::from_utf8(bytes).ok()?.lines().map(str::trim)
+                            .find(|line| !line.is_empty()).map(str::to_owned)
+                    }).unwrap_or_default())
+                }
+                _ => {
+                    detail = json!({"_tag":"Some","value":format!("VCS process failed to spawn in source-control.discovery.probe: {executable} ({})",cwd.display())});
+                    None
+                }
+            });
+            (version, detail)
         };
-        let git = probe("git");
         let command_row = |kind: &str, label: &str, executable: &str, install: &str| {
-            let version = probe(executable);
-            json!({"kind":kind,"implemented":kind == "git","label":label,"executable":executable,"status":if version.is_some(){"available"}else{"missing"},"version":version.as_ref().map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":if version.is_some(){json!({"_tag":"None"})}else{json!({"_tag":"Some","value":format!("VCS process failed to spawn in source-control.discovery.probe: {executable} ({})",cwd.display())})}})
+            let (version, detail) = probe(executable);
+            json!({"kind":kind,"implemented":kind == "git","label":label,"executable":executable,"status":if version.is_some(){"available"}else{"missing"},"version":version.filter(|v| !v.is_empty()).map_or(json!({"_tag":"None"}),|v|json!({"_tag":"Some","value":v})),"installHint":install,"detail":detail})
         };
         let mut vcs = vec![command_row(
             "git",
@@ -2024,13 +2035,8 @@ async fn dispatch_method(state: &Arc<AppState>, method: &str, params: &Value) ->
                         install: &str,
                         auth_detail: &str,
                         host: Option<&str>| {
-            let version = executable.and_then(probe);
-            let detail = match (executable, version.is_some()) {
-                (None, _) | (Some(_), true) => json!({"_tag":"None"}),
-                (Some(executable), false) => {
-                    json!({"_tag":"Some","value":format!("VCS process failed to spawn in source-control.discovery.probe: {executable} ({})",cwd.display())})
-                }
-            };
+            let (version, detail) =
+                executable.map_or_else(|| (None, json!({"_tag":"None"})), probe);
             let status = if executable.is_none() || version.is_some() {
                 "available"
             } else {
@@ -2065,11 +2071,10 @@ async fn dispatch_method(state: &Arc<AppState>, method: &str, params: &Value) ->
             provider("cursor-origin", "Cursor Origin", Some("origin"), "Install the Origin CLI with `curl -fsSL https://downloads.cursor.com/origin/install.sh | sh`, then run `origin auth login`.", "Install the Origin CLI with `curl -fsSL https://downloads.cursor.com/origin/install.sh | sh`, then run `origin auth login`.", None),
             provider("gitlab", "GitLab", Some("glab"), "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager (for example `brew install glab`).", "Install the GitLab command-line tool (`glab`) from https://gitlab.com/gitlab-org/cli or your package manager (for example `brew install glab`).", None),
             provider("gitcafe", "GitCafe", Some("cafe"), "Install the GitCafe CLI with `bun install -g @gitcafe/cli`, then run `cafe auth login --host https://git.cafe/api`, save a token in Settings, or set CAFE_TOKEN on the server.", "Install the GitCafe CLI with `bun install -g @gitcafe/cli`, then run `cafe auth login --host https://git.cafe/api`, save a token in Settings, or set CAFE_TOKEN on the server.", None),
-            provider("forgejo", "Forgejo / Gitea", Some("tea"), "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.", "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `tea` 0.16 or later from https://gitea.com/gitea/tea and run `tea login add` for each Forgejo or Gitea server.", None),
+            provider("forgejo", "Forgejo / Gitea", Some("gt"), "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `gt` 2.0 or later from https://gitea.com/gitea/cli and run `gt auth login --host <server-url>` for each Forgejo or Gitea server.", "Install `fj` 0.6 or later from https://codeberg.org/forgejo-contrib/forgejo-cli and run `fj --host <server-url> auth add-token`, or install `gt` 2.0 or later from https://gitea.com/gitea/cli and run `gt auth login --host <server-url>` for each Forgejo or Gitea server.", None),
             provider("bitbucket", "Bitbucket", None, "Add a Bitbucket token in Settings → Source control & issues.", "Add a Bitbucket token in Settings → Source control & issues, or set the T3CODE_BITBUCKET_* environment variables on the server.", Some("bitbucket.org")),
             provider("azure-devops", "Azure DevOps", Some("az"), "Install the Azure command-line tools (`az`), then enable Azure DevOps support with `az extension add --name azure-devops`.", "Install the Azure command-line tools (`az`), then enable Azure DevOps support with `az extension add --name azure-devops`.", None),
         ];
-        let _ = git;
         return Reply::Success(
             json!({"versionControlSystems":vcs,"sourceControlProviders":providers}),
         );

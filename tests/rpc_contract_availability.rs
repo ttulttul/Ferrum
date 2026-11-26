@@ -43,10 +43,15 @@ const NOT_SWEPT: &[&str] = &[
     "device.shutdown",
 ];
 
-/// Methods the reference added after 052ca497 (the pin moved to fd0331ca) that
-/// this server does not serve yet: they answer "registered but unavailable".
+/// Methods in the pinned reference that this server does not serve yet: they answer "registered but unavailable".
 /// One that starts answering must come off this list.
 const NOT_YET_SERVED: &[&str] = &[
+    // The project layout approval store and queries, provider mode discovery and workflow
+    // subject lookup added since fd0331ca. Keep the sweep strict when a handler lands.
+    "workspace.layoutCommands",
+    "workspace.approveLayoutCommands",
+    "server.getProviderRuntimeModeLimits",
+    "workflows.about",
     "workspace.listFolders",
     "workspace.scanFolders",
     "workspace.taskFolder",

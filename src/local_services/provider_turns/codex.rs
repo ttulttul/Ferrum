@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 /// The server version the reference reports to Codex.
-const SERVER_VERSION: &str = "0.1.11";
+const SERVER_VERSION: &str = "0.1.12";
 
 /// How long an interrupted turn may take to report that it stopped.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);

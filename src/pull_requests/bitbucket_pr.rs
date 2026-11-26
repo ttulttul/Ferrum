@@ -322,6 +322,7 @@ fn reviews(pr: &PullRequest) -> Vec<Value> {
 }
 
 /// A client for one repository's pull requests.
+#[derive(Clone, Copy)]
 pub(super) struct Repository<'a> {
     pub repository: &'a str,
     pub host: &'a str,

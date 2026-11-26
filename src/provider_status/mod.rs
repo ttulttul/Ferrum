@@ -35,7 +35,7 @@
 //!   ([`opencode`]). OpenCode is rechecked on the interval only while it is
 //!   not ready.
 //! - Antigravity: never started for a check; its sign-in settings and the
-//!   installed runtime are read from disk, then its Google quota
+//!   installed runtime are read from disk
 //!   ([`antigravity`]).
 //! - Muse Code: `muse --version` (4s), then a read-only `muse serve` that
 //!   lists its models over MSP ([`muse`]).
@@ -511,7 +511,6 @@ async fn check_instance(
                 &manifest,
                 session.as_ref(),
             )
-            .await
         }
         "muse" => {
             let env = muse::environment(&base_env(&[]), &instance.environment);
@@ -694,7 +693,7 @@ pub(crate) async fn refresh_models(
             });
         let failure = match refreshed {
             Ok(catalog) => {
-                session.started(&catalog.initialized, &catalog.setup);
+                session.started(&catalog.initialized, &catalog.setup, false);
                 for options in &catalog.updates {
                     session.config_options_updated(options);
                 }
@@ -754,16 +753,43 @@ pub(crate) async fn session_started(state: &Arc<AppState>, instance_id: &str, st
             fingerprint: instance.fingerprint.clone(),
             ..Default::default()
         });
-    session.started(&started["initialize"], &started["setup"]);
+    session.started(
+        &started["initialize"],
+        &started["setup"],
+        started["resumed"] == true,
+    );
     service
         .antigravity
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(instance.id.clone(), session);
     check_instance(state, &instance, Reason::Apply).await;
-    // The session's folder gets its snapshot (skills and commands).
+    // A turn publishes its folder before the registry's first skills scan.
     if let Some(cwd) = started["cwd"].as_str().filter(|cwd| !cwd.is_empty()) {
-        refresh_workspace_snapshot(state, &instance.id, cwd, false).await;
+        let mut current = service.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(published) = current
+            .published
+            .get_mut(&instance.id)
+            .filter(|p| p.fingerprint == instance.fingerprint)
+        {
+            let previous = published.row["workspaceSnapshots"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|row| row["cwd"] == cwd));
+            let scan = FolderScan {
+                slash_commands: previous
+                    .and_then(|row| row["slashCommands"].as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+                skills: previous
+                    .and_then(|row| row["skills"].as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+                slash_pending: Some(previous.is_none_or(|row| row["slashCommandsPending"] == true)),
+                models: WorkspaceModels::Same,
+            };
+            upsert_workspace_snapshot(&mut published.row, cwd, &now_iso(), scan);
+            let _ = service.changes.send(());
+        }
     }
 }
 
@@ -1282,6 +1308,7 @@ fn draft_row(pending: &Value, draft: &Draft) -> Value {
         .unwrap_or(false);
     for key in [
         "message",
+        "modelsIncomplete",
         "updateRequiredModels",
         "usageLimits",
         "versionAdvisory",
@@ -1356,7 +1383,8 @@ fn retain_missing_models(row: &Value) -> bool {
         "acpRegistry" => {
             return !(installed && status == "ready" && row.get("nativeSessions").is_some())
         }
-        "kiro" | "claudeAgent" => return true,
+        "kiro" => return true,
+        "claudeAgent" => return status != "ready" || row["modelsIncomplete"] == true,
         "antigravity" | "codex" | "opencode" => {}
         _ => return !(installed && status == "ready"),
     }
@@ -2359,14 +2387,20 @@ mod tests {
     }
 
     #[test]
-    fn claude_keeps_models_a_probe_drops() {
+    fn claude_keeps_missing_models_only_when_the_catalog_is_incomplete() {
         let previous = json!({"models": [
             {"slug": "a", "isCustom": false}, {"slug": "b", "isCustom": false, "isLegacy": true},
             {"slug": "c", "isCustom": true}, {"slug": "d", "isCustom": false}]});
         let next = json!({"driver": "claudeAgent", "enabled": true, "installed": true, "status": "ready",
             "auth": {"status": "authenticated"}, "models": [{"slug": "a", "isCustom": false}],
             "updateRequiredModels": [{"slug": "d"}]});
-        let merged = merge_snapshot(&previous, next);
+        assert_eq!(
+            merge_snapshot(&previous, next.clone())["models"],
+            next["models"]
+        );
+        let mut incomplete = next;
+        incomplete["modelsIncomplete"] = json!(true);
+        let merged = merge_snapshot(&previous, incomplete);
         let slugs: Vec<_> = merged["models"]
             .as_array()
             .unwrap()

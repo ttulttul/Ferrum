@@ -16,7 +16,8 @@
   "claude delegate followup": {
     "live": "Racy: the provider commit batch (#39502) decides by timing whether the first task's queued subagent updates commit together, and both sides vary: main's CI run 45294158798 saw the reference send one more subagent.updated after the task's context-transfer.created, and one of 8 pinned local rounds saw Rust send one more there. Matched in the other runs.",
     "orchestration.subscribeThread (live turn)": "Racy: the reference's live turn sometimes does not settle before the harness stops waiting (the reference goes silent; Rust answers), seen both matching and differing, on main too.",
-    "agent mcp": "Racy: in 1 of 8 pinned local rounds the reference's delivery turn did not settle before the harness stopped waiting (as its live turn sometimes does not, see the orchestration.subscribeThread entry), so its answer list lacks the turn's task_status. Matched in the other rounds."
+    "missing delivery task status": "Racy: in 1 of 8 pinned local rounds the reference's delivery turn did not settle before the harness stopped waiting (as its live turn sometimes does not, see the orchestration.subscribeThread entry), so its answer list lacks the turn's task_status. Matched in the other rounds.",
+    "child follow-up during checkpoint": "The pinned reference returns the delegated child's result before its checkpoint settles. An immediate send to that child reports queued delivery. Ferrum reports that the same message started a turn."
   },
   "claude delegate live": {
     "live": "Racy: matched in 4 of 12 pinned local runs. Otherwise the reference steers the delegated result into the parent's running Claude turn (#39528) and queues the follow-up run while that turn still runs, sending the delivery's card once with its message and the queued run before the turn ends, where Rust also sends the card's pending and completed steer updates and creates the follow-up run after the turn ends. Which way it goes depends on whether the result arrives before the turn's last item.",
@@ -30,7 +31,8 @@
     "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
   },
   "codex delegate followup": {
-    "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after the first task's context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
+    "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after the first task's context-transfer.created when its provider commit batch (#39502) coalesces the task's updates.",
+    "child follow-up during checkpoint": "The pinned reference returns the delegated child's result before its checkpoint settles. An immediate send to that child reports queued delivery. Ferrum reports that the same message started a turn."
   },
   "codex then claude": {
     "cli launch": "The reference's Claude Agent SDK sets CLAUDE_AGENT_SDK_VERSION in the server's own process environment whenever it starts a query (`process.env.CLAUDE_AGENT_SDK_VERSION = ...`), so with Claude Code installed beside Codex the Codex app-server it starts afterwards inherits it; Rust sets it only for the Claude Code CLI it starts."
@@ -40,7 +42,7 @@
   },
   "codex thread tools": {
     "live": "Racy: the reference's pull-request sync reactor reads a newly linked request on its own schedule, so in 1 of 10 pinned local runs its first link's synced and link-updated events landed a tool call earlier than Rust's. Matched in the other runs.",
-    "agent mcp": "Racy: since #197 Rust reads a newly linked pull request right after the link commits, apart from the tool call, so the agent's next list_thread_pull_requests can come before that read and show the link without its branches and draft state (seen both matching and differing)."
+    "linked pull request sync": "Racy: since #197 Rust reads a newly linked pull request right after the link commits, apart from the tool call, so the agent's next list_thread_pull_requests can come before that read and show the link without its branches and draft state (seen both matching and differing)."
   },
   "grok approval interrupted": {
     "cli approvals": "Racy: on Stop the reference's cancelPendingRuntimeRequests only resolves the approval's decision to cancel; the permission handler writes the `cancelled` reply on its own fiber, which the process-group kill that follows does not wait for, so the reference's reply reaches the CLI on some runs and not others. Rust writes it before the kill (seen both matching and differing)."
@@ -139,9 +141,6 @@
   },
   "opencode2 failed turn": {
     "live": "The reference's OpenCode 2 adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, waiting while a permission or form waits and back to running once it is answered, ready at the end), which Rust's session record does not keep, and reports the provider thread active only after the provider turn's start, where Rust's thread update comes first (its turn records hang from the thread record); its provider commit batch takes a text or reasoning block whose events arrive together (started, deltas, ended) as one completed snapshot, where Rust also sends the running ones; and it reports a turn that fails at once starting and ending apart, where Rust commits the two together."
-  },
-  "antigravity auto-accept-edits": {
-    "live": "The reference publishes the file-change item's pending and running states across the automatic edit approval. Ferrum coalesces those snapshots before the completed file change."
   },
   "kiro turn": {
     "live": "Racy: matched in 4 of 34 CI runs of this scenario (3 of 16 on main, before #362), and in none of 39 pinned local runs. Otherwise: Rust reports the provider thread's update just before the provider turn's start, where the reference's ACP adapter (in Kiro's flavor) reports it just after (Rust's turn records hang from the thread record, which the thread's update creates). And the reference's provider commit batch (#39502) takes Kiro's first snapshots together (its worker runs only once the ACP stream has handed over what it read), so it sends the assistant message items once, completed, where Rust, whose batch commits the first snapshot at once, also sends their running updates. The reference also reports the provider thread again for each of Kiro's `session_info_update`s (the user message id, the turn's start, completion and end, a permission's interaction), each with a new `updatedAt`, where Rust reports it again only when Kiro retitles its session."

@@ -302,7 +302,8 @@ def scenario(url, cookie, seen, port, home):
                                "requests": [json.loads(r) for r in requests]}, port, home)
 
     diff("diff, through Bitbucket's redirect", pr)
-    diff("diff of one commit", {**pr, "commit": "abcdef1"})
+    diff("diff of a listed commit by prefix", {**pr, "commit": "C2C2C2C"})
+    diff("diff of an unlisted commit", {**pr, "commit": "abcdef1"})
     diff("diff larger than the cap", {**pr, "number": 15})
     diff("diff redirected to another host", {**pr, "number": 16})
     diff("diff of a missing pull request", {**pr, "number": 99})

@@ -282,7 +282,7 @@ fn find_event_end(buffer: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// What this environment's Connections calls the client that asked.
-fn client_label(client: &Value) -> String {
+pub(crate) fn client_label(client: &Value) -> String {
     if let Some(label) = client["label"].as_str() {
         return label.to_owned();
     }

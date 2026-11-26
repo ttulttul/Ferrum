@@ -89,6 +89,10 @@ pub struct ProviderTurn {
     /// The reasoning effort option of the model selection, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// The caller understands session startup updates on the turn stream.
+    /// Older control planes omit this, so their agents emit only the original events.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub report_startup_phase: bool,
     /// The native thread (Codex) or session (Claude) to continue, from the
     /// last [`ProviderEvent::ProviderThread`] of the thread's previous turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,7 +288,7 @@ pub struct MuseLaunch {
 }
 
 /// An Antigravity launch's installed `agy` version (empty when unknown),
-/// which decides the client info it is sent, and the folder each `agy acp`
+/// and the folder each `agy acp`
 /// process gets its own `run-XXXXXX` temporary folder in.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -455,6 +459,13 @@ pub enum ProviderEvent {
         /// turns, and a reader that predates it ignores it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_started: Option<Box<Value>>,
+    },
+    /// Sent only when the turn requested startup reports. A missing phase
+    /// clears the previous indicator without changing the session's status.
+    #[serde(rename = "provider_session.startup")]
+    SessionStartup {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
     },
     /// The turn started running in the CLI.
     #[serde(rename = "provider_turn.updated", rename_all = "camelCase")]

@@ -21,6 +21,7 @@ const [Effect, Layer, HttpApi, Builder, Router, Server, contracts, api, config, 
 const Redacted = await pkg("effect/Redacted");
 const settings = Layer.succeed(config.RelayConfiguration, {
   cloudMintPrivateKey: Redacted.make(process.env.CLOUD_MINT_PRIVATE_KEY),
+  clerkWebhookSigningSecret: process.env.CLERK_WEBHOOK_SIGNING_SECRET?.trim() ? Redacted.make(process.env.CLERK_WEBHOOK_SIGNING_SECRET) : undefined,
   relayIssuer: process.env.RELAY_ISSUER, cloudMintPublicKey: process.env.CLOUD_MINT_PUBLIC_KEY,
 });
 const localDb = Layer.mock(db.RelayDb, { execute: () => Effect.succeed([]) });
@@ -56,14 +57,20 @@ const mobile = api.layerMobileApi.pipe(Layer.provide(Layer.mergeAll(
   Layer.mock(registrations.MobileRegistrations, {getAgentActivitySnapshot: () => Effect.succeed({aggregate:null})}),
   dpop.layer.pipe(Layer.provide(replayStore)),
 )), Layer.provideMerge(api.layerDpopClientAuth.pipe(Layer.provide(tokenVerifier))));
+const deletion = await source("accounts/AccountDeletion");
+const accountWebhooks = deletion.layerApi.pipe(Layer.provide(Layer.mergeAll(settings, nodeCrypto.layer,
+  Layer.mock(deletion.AccountDeletion, {request: () => Effect.void}))));
 const groups = contracts.RelayApi.groups;
-const app = Router.toWebHandler(Builder.layer(HttpApi.make("RelayFixture").add(groups.health, groups.metadata, groups.client, groups.mobile)).pipe(
-  Layer.provide(Layer.mergeAll(client, mobile, api.layerHealthApi.pipe(Layer.provide(localDb)),
+const app = Router.toWebHandler(Builder.layer(HttpApi.make("RelayFixture").add(groups.health, groups.metadata, groups.client, groups.mobile, groups.accountWebhooks)).pipe(
+  Layer.provide(Layer.mergeAll(accountWebhooks, client, mobile, api.layerHealthApi.pipe(Layer.provide(localDb)),
     api.layerMetadataApi.pipe(Layer.provide(settings)))), Layer.provide(nodeCrypto.layer), Layer.provide(Server.layerServices),
 ), {disableLogger: true, middleware: effect => api.traceRelayHttpRequestWith(effect, Layer.empty)});
 const server = createServer(async (req, res) => {
   try {
-    const response = await app.handler(new Request(process.env.RELAY_ISSUER + req.url, {headers: req.headers,method:req.method}));
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const response = await app.handler(new Request(process.env.RELAY_ISSUER + req.url, {headers: req.headers,method:req.method,
+      ...(req.method === "POST" ? {body: Buffer.concat(chunks)} : {})}));
     res.writeHead(response.status, Object.fromEntries(response.headers));
     res.end(Buffer.from(await response.arrayBuffer()));
   } catch (error) { console.error(error); res.writeHead(500).end(); }

@@ -152,6 +152,25 @@
   },
   {
     "group": "general",
+    "name": "workspaceLayoutCommands",
+    "tag": "workspace.layoutCommands",
+    "required": [
+      "projectId"
+    ],
+    "scope": "filesystem:read"
+  },
+  {
+    "group": "general",
+    "name": "workspaceApproveLayoutCommands",
+    "tag": "workspace.approveLayoutCommands",
+    "required": [
+      "projectId",
+      "approvals"
+    ],
+    "scope": "terminal:operate"
+  },
+  {
+    "group": "general",
     "name": "filesystemGetMetadata",
     "tag": "filesystem.getMetadata",
     "required": [
@@ -854,6 +873,16 @@
   },
   {
     "group": "general",
+    "name": "serverGetProviderRuntimeModeLimits",
+    "tag": "server.getProviderRuntimeModeLimits",
+    "required": [
+      "instanceId",
+      "cwd"
+    ],
+    "scope": "orchestration:read"
+  },
+  {
+    "group": "general",
     "name": "serverUpdateProvider",
     "tag": "server.updateProvider",
     "required": [
@@ -1316,6 +1345,15 @@
     "tag": "workflows.get",
     "required": [
       "runId"
+    ],
+    "scope": "orchestration:read"
+  },
+  {
+    "group": "general",
+    "name": "workflowsAbout",
+    "tag": "workflows.about",
+    "required": [
+      "subject"
     ],
     "scope": "orchestration:read"
   },

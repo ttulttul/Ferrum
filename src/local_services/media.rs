@@ -131,7 +131,7 @@ async fn hub(State(state): State<Arc<AppState>>, req: Request) -> Response {
         }
         (host, query.finish())
     };
-    let Some(origin) = state.local.devices.hub_origin(host.as_deref()).await else {
+    let Some((origin, hub_headers)) = state.local.devices.hub_route(host.as_deref()).await else {
         return text(StatusCode::SERVICE_UNAVAILABLE, "Device hub is not running");
     };
     // A screenshot of one device comes from the device service, which reads the PNG out of what
@@ -182,7 +182,7 @@ async fn hub(State(state): State<Arc<AppState>>, req: Request) -> Response {
                 url.push('?');
                 url.push_str(&query);
             }
-            (url, Vec::new())
+            (url, hub_headers)
         }
     };
     if upgrade {

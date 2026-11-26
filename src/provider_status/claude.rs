@@ -1284,12 +1284,14 @@ pub(super) async fn check(
         .filter(|e| supports(e, version.as_deref()))
         .map(|e| e.model.clone())
         .collect();
-    let mut built_in = supported;
-    built_in.extend(reported_models(
+    let reported = reported_models(
         &catalog,
         custom,
         caps.map(|c| c.models.as_slice()).unwrap_or(&[]),
-    ));
+    );
+    let incomplete = reported.is_empty();
+    let mut built_in = supported;
+    built_in.extend(reported);
     let models = cap_effort(
         &catalog,
         provider_models(built_in, custom),
@@ -1299,7 +1301,7 @@ pub(super) async fn check(
     let mut commands = vec![compact_slash_command()];
     commands.extend(caps.map(|c| c.commands.clone()).unwrap_or_default());
     let slash_commands = dedupe_commands(commands);
-    let base = Draft {
+    let mut base = Draft {
         installed: true,
         version: version.clone(),
         checked_at: checked_at.clone(),
@@ -1381,6 +1383,9 @@ pub(super) async fn check(
         {
             usage["resetCredits"] = credits;
         }
+    }
+    if incomplete {
+        base.extra.push(("modelsIncomplete", json!(true)));
     }
     Draft {
         status: "ready",

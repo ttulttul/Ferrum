@@ -364,7 +364,7 @@ impl TerminalService {
         let killer = child.clone_killer();
         drop(pty.slave);
         let snapshot = Arc::new(Mutex::new(
-            json!({"threadId":thread,"terminalId":id,"cwd":cwd,"worktreePath":input["worktreePath"],"status":"running","pid":pid,"history":history,"exitCode":null,"exitSignal":null,"label":label(id),"updatedAt":timestamp(),"sequence":1,"cols":grid.cols,"rows":grid.rows}),
+            json!({"threadId":thread,"terminalId":id,"cwd":cwd,"worktreePath":input["worktreePath"],"status":"running","pid":pid,"supportsConditionalWrites":true,"history":history,"exitCode":null,"exitSignal":null,"label":label(id),"updatedAt":timestamp(),"sequence":1,"cols":grid.cols,"rows":grid.rows}),
         ));
         let meta = self.metadata.clone();
         let _ = meta.send(json!({"type":"upsert","terminal":summary(&snapshot.lock().unwrap())}));
@@ -502,10 +502,22 @@ impl TerminalService {
                 }
             }
         }
-        let session = sessions.get_mut(&key).ok_or_else(
-            || json!({"_tag":"TerminalSessionLookupError","threadId":thread,"terminalId":id}),
-        )?;
+        let expected_pid = (name == "write")
+            .then(|| input.get("expectedPid"))
+            .flatten();
+        let session = sessions.get_mut(&key).ok_or_else(|| {
+            if expected_pid.is_some() {
+                json!({"_tag":"TerminalProcessChangedError"})
+            } else {
+                json!({"_tag":"TerminalSessionLookupError","threadId":thread,"terminalId":id})
+            }
+        })?;
         let mut snapshot = session.snapshot.lock().unwrap();
+        if expected_pid
+            .is_some_and(|pid| &snapshot["pid"] != pid || snapshot["status"] != "running")
+        {
+            return Err(json!({"_tag":"TerminalProcessChangedError"}));
+        }
         match name {
             "open" => Ok(snapshot.clone()),
             "observe" | "attach" => {
@@ -525,6 +537,7 @@ impl TerminalService {
                 emit(&mut snapshot, &self.events, "cleared", Value::Null);
                 Ok(Value::Null)
             }
+            "write" if snapshot["status"] == "exited" => Ok(Value::Null),
             "write" | "resize" if snapshot["status"] != "running" => {
                 Err(json!({"_tag":"TerminalNotRunningError","threadId":thread,"terminalId":id}))
             }

@@ -92,14 +92,17 @@ def timeline(projection):
             .strip() for item in items]
 
 
-def wait_cards(server, keys, status, seconds=60):
+def wait_cards(server, keys, status, seconds=60, *, checkpoint=False):
     """The projection once each card in `keys` has `status`."""
     deadline = time.monotonic() + seconds
     while True:
         projection = server.projection()
         found = {card_key(item["id"]): item.get("secretStatus") for item in secret_cards(projection)}
-        if all(found.get(key) == status for key in keys) or time.monotonic() > deadline:
+        captured = any(item.get("type") == "checkpoint" for item in projection.get("turnItems", []))
+        if all(found.get(key) == status for key in keys) and (not checkpoint or captured):
             return projection
+        if time.monotonic() > deadline:
+            raise AssertionError(f"cards {keys} did not reach {status} with checkpoint={checkpoint}")
         time.sleep(0.1)
 
 
@@ -241,7 +244,8 @@ def main():
                 record["no such thread"] = server.rpc("secrets.answerRequest", dict(
                     threadId="thread:missing", turnItemId="turn-item:missing", answer={"type": "decline"}))
                 final = wait_runs(server, 1)
-                final = wait_cards(server, ("card-late",), "cancelled")
+                # The run and its last card settle before checkpoint capture. Compare the complete timeline.
+                final = wait_cards(server, ("card-late",), "cancelled", checkpoint=True)
                 by_key = {card_key(item["id"]): item["id"] for item in secret_cards(final)}
                 record["answer after the run"] = answer("card-late", {"type": "save", "secret": "late"})
                 # The late card's call answers once its run has ended.

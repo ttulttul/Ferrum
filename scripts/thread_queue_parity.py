@@ -50,11 +50,15 @@ def projection(server, thread):
     return exit["value"]
 
 
-def wait_settled(server, counts, seconds=60):
+def wait_settled(server, counts, seconds=60, checkpoint_markers=None):
     """Until each thread has its count of runs and none is live (or the time is up)."""
     deadline = time.monotonic() + seconds
     while True:
         views = {thread: projection(server, thread) for thread in counts}
+        if checkpoint_markers is not None:
+            for run in views[TARGET].get("runs", []):
+                if run.get("checkpointId") is not None:
+                    (checkpoint_markers / str(run["ordinal"])).touch()
         done = all(len(views[thread].get("runs", [])) >= count
                    and all(run.get("status") not in LIVE for run in views[thread].get("runs", []))
                    for thread, count in counts.items())

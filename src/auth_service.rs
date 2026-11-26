@@ -306,6 +306,7 @@ impl AuthService {
     pub async fn session_state(&self, token: Option<&str>) -> Value {
         let mut body = json!({"authenticated":false,"auth":self.descriptor()});
         if let Some(s) = token.and_then(|t| self.principal(t)) {
+            body["sessionId"] = json!(s.id);
             for (k, v) in s.metadata().as_object().unwrap() {
                 body[k] = v.clone()
             }

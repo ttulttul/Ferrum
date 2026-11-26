@@ -559,6 +559,7 @@ pub(super) fn probe_failure_message(error: &HostError) -> Option<String> {
 pub(super) struct Started {
     pub node_path: String,
     pub hub_port: u16,
+    pub hub_token: String,
     pub daemon_port: Option<u16>,
     pub token: Option<String>,
     pub entry_path: Option<String>,
@@ -593,6 +594,11 @@ pub(super) async fn start(
     Ok(Started {
         node_path: node_path.to_owned(),
         hub_port,
+        hub_token: value["hubToken"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(reading)?
+            .to_owned(),
         daemon_port: port("daemonPort"),
         token: value["token"].as_str().map(str::to_owned),
         entry_path: value["entryPath"].as_str().map(str::to_owned),

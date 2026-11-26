@@ -43,7 +43,7 @@ def cases(github):
     create = dict(title="Fixture change", body="Fixture body", base="main")
     return [
         ("respond no branch PR", "respond", dict(body="comment"), False),
-        ("stack auto", "merge", dict(number=num, expectedHeadSha=sha, stack=True, auto=True), False),
+        ("stack auto", "merge", dict(number=num, expectedHeadSha=sha, stack=True, auto=True), github),
         ("update empty", "update", {}, False),
         ("respond empty", "respond", {}, False),
         ("respond needs thread", "respond", dict(body="note", resolved=False), False),
@@ -153,6 +153,23 @@ def github_request(request):
     return (method, path, {**body, "query": tokens, "operationName": name, "variables": variables})
 
 
+def github_requests(requests):
+    # The head association and both workflow-run reads fan out from the same PR core.
+    # Keep every query, selection, variable and page, and their order around mutations.
+    result, concurrent = [], []
+    for raw in requests:
+        method, path, body = request = github_request(raw)
+        if ((path == "/graphql" and body["operationName"] == "PullRequestHeads"
+             and body["variables"].get("after") is None)
+                or (method == "GET" and re.fullmatch(r"/repos/[^/]+/[^/]+/actions/runs\?head_sha=[^&]+(?:&branch=[^&]+&event=pull_request&status=action_required)?&per_page=100(?:&page=1)?", path))):
+            concurrent.append(request)
+        else:
+            result.extend(sorted(concurrent, key=lambda r: json.dumps(r, sort_keys=True)))
+            concurrent.clear()
+            result.append(request)
+    return result + sorted(concurrent, key=lambda r: json.dumps(r, sort_keys=True))
+
+
 def bitbucket_requests(label, requests):
     # A change-request snapshot fans out five reads concurrently. Its second diffstat
     # page makes six requests in this fixture. Keep each snapshot and each write in order.
@@ -200,7 +217,7 @@ def main():
                 label, answer, requests, success = original
                 good = answer == rust[1] and answer.get("isError") == (not success)
                 if forge == "github":
-                    requests_ok = list(map(github_request, requests)) == list(map(github_request, rust[2]))
+                    requests_ok = github_requests(requests) == github_requests(rust[2])
                 else:
                     requests_ok = bitbucket_requests(label, requests) == bitbucket_requests(label, rust[2])
                 print(f"{'PASS' if good and requests_ok else 'FAIL'} {forge} {label}", flush=True)

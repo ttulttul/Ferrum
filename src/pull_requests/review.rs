@@ -112,6 +112,38 @@ fn encoded(s: &str) -> String {
     out
 }
 
+pub(super) async fn node_id(
+    service: &super::PullRequestService,
+    gh: &Github<'_>,
+    repo: &str,
+    number: u64,
+    vars: &Value,
+    op: &str,
+) -> Result<String, Value> {
+    let fail = |e| failure(op, e);
+    let key = (repo.to_ascii_lowercase(), number);
+    let cached = service.node_ids.lock().await.get(&key).cloned();
+    Ok(match cached {
+        Some(id) => id,
+        None => {
+            let data = gh
+                .graphql(include_str!("PullRequestNodeId.graphql"), vars.clone())
+                .await
+                .map_err(fail)?;
+            let id = data["repository"]["pullRequest"]["id"]
+                .as_str()
+                .ok_or_else(|| fail(Failure::NotFound))?
+                .to_owned();
+            let mut cache = service.node_ids.lock().await;
+            if cache.len() >= 128 {
+                cache.shift_remove_index(0);
+            }
+            cache.insert(key, id.clone());
+            id
+        }
+    })
+}
+
 pub(super) async fn run(
     service: &super::PullRequestService,
     gh: &Github<'_>,
@@ -140,27 +172,7 @@ pub(super) async fn run(
             | "setThreadResolution"
             | "updateComment"
     ) {
-        let key = (repo.to_ascii_lowercase(), number);
-        let cached = service.node_ids.lock().await.get(&key).cloned();
-        match cached {
-            Some(id) => id,
-            None => {
-                let data = gh
-                    .graphql(include_str!("PullRequestNodeId.graphql"), vars.clone())
-                    .await
-                    .map_err(fail)?;
-                let id = data["repository"]["pullRequest"]["id"]
-                    .as_str()
-                    .ok_or_else(|| fail(Failure::NotFound))?
-                    .to_owned();
-                let mut cache = service.node_ids.lock().await;
-                if cache.len() >= 128 {
-                    cache.shift_remove_index(0);
-                }
-                cache.insert(key, id.clone());
-                id
-            }
-        }
+        node_id(service, gh, repo, number, &vars, op).await?
     } else {
         String::new()
     };

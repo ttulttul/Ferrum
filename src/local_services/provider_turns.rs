@@ -464,6 +464,8 @@ pub(crate) struct Cli {
     /// The background tasks a Claude session runs (`local_bash` commands), whose end
     /// while no turn runs is reported with the wake it starts.
     pub(crate) background: claude_background::Roster,
+    /// Claude reports connection startup on the first request of this process.
+    claude_requested: bool,
     /// The native subagents a Claude session runs, which outlive the turn that started them
     /// (a background subagent reports to the turn its end wakes).
     pub(crate) subagents: claude_subagents::ClaudeSubagents,
@@ -537,6 +539,7 @@ impl Cli {
             lines: BufReader::new(stdout).lines(),
             buffered: Default::default(),
             background: Default::default(),
+            claude_requested: false,
             subagents: Default::default(),
             stderr_tail,
             stderr_reader,

@@ -618,6 +618,14 @@ while index < len(steps) or resumes:
     elif "stderr" in step:
         sys.stderr.write(step["stderr"] + "\n")
         sys.stderr.flush()
+    elif "waitForCheckpoint" in step:
+        ordinal = str(step["waitForCheckpoint"])
+        marker = os.path.join(os.environ["FAKE_CHECKPOINT_MARKERS"], ordinal)
+        deadline = time.monotonic() + 30
+        while not os.path.exists(marker):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Target checkpoint {ordinal} did not arrive")
+            time.sleep(0.05)
     elif "sleep" in step:
         time.sleep(step["sleep"])
     elif "exit" in step:

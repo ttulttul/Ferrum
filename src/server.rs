@@ -1822,9 +1822,10 @@ impl mcp_oauth::McpHost for AppState {
     fn workflow_tool(
         self: &Arc<Self>,
         input: serde_json::Value,
+        client_label: String,
     ) -> mcp_oauth::HostFuture<Result<serde_json::Value, (&'static str, String)>> {
         let state = self.clone();
-        Box::pin(async move { crate::workflows::tool(&state, &input).await })
+        Box::pin(async move { crate::workflows::tool(&state, &input, &client_label).await })
     }
     fn scheduled_task_save(
         self: &Arc<Self>,
@@ -2012,6 +2013,9 @@ impl mcp_oauth::McpHost for AppState {
     }
     fn descriptor(&self) -> serde_json::Value {
         environment_http::descriptor_value(self)
+    }
+    fn runtime_mode_ceiling(&self) -> Option<&str> {
+        self.settings.policy.summary()?["limits"]["maxRuntimeMode"].as_str()
     }
     fn settings(&self) -> serde_json::Value {
         self.settings.internal().unwrap_or_default()
