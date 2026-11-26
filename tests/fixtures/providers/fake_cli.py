@@ -58,7 +58,8 @@ Steps:
                              lists its tools. The request and the answer are
                              appended to FAKE_PROVIDER_LOG.mcp as JSON. With
                              "as": "name", the tool's answer is kept, and a
-                             later argument "$mcp.name.a.b" is its field a.b;
+                             later argument "$mcp.name.a.b" is its field a.b (a
+                             number indexes a list: "$mcp.name.items.0.itemId");
                              "$env.NAME" is an environment variable, and
                              "headers" are sent with that request only.
                              With "background": true the call runs while
@@ -479,7 +480,10 @@ def fill_mcp(value):
             name, *path = value[len("$mcp."):].split(".")
             found = mcp_answers.get(name)
             for key in path:
-                found = found.get(key) if isinstance(found, dict) else None
+                if isinstance(found, list) and key.isdigit():
+                    found = found[int(key)] if int(key) < len(found) else None
+                else:
+                    found = found.get(key) if isinstance(found, dict) else None
             return value if found is None else found
         return value
     if isinstance(value, list):
