@@ -1020,12 +1020,18 @@ fn diff_with_command(
                         if record["driver"] != crate::workspace::provider::CODEX {
                             let mut reported =
                                 event(thread_id, "provider-thread.updated", record, occurred_at);
-                            // ACP reports the active thread with the turn's end. The
-                            // orchestrator publishes the idle thread after the run.
-                            if record["status"] == "idle"
-                                && record["driver"]
+                            // ACP and OpenCode 1.x report the root thread active
+                            // before the orchestrator makes it idle. OpenCode 2
+                            // uses an instance-wide session and reports idle.
+                            let driver = record["driver"].as_str().unwrap_or_default();
+                            let opencode_thread_session = driver
+                                == crate::workspace::provider::OPENCODE
+                                && record["providerSessionId"]
                                     .as_str()
-                                    .is_some_and(crate::workspace::provider::is_acp)
+                                    .is_some_and(|id| id.contains(":thread:"));
+                            if record["status"] == "idle"
+                                && (crate::workspace::provider::is_acp(driver)
+                                    || opencode_thread_session)
                             {
                                 reported["payload"]["status"] = json!("active");
                             }

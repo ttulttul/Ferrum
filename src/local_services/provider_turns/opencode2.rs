@@ -1432,7 +1432,7 @@ impl Turn<'_> {
     }
 
     /// `beginTurn`: the provider turn, named by the prompt's id (weak).
-    fn begin(&mut self) {
+    fn begin(&mut self, resumed: bool) {
         self.sink.send(ProviderEvent::ProviderTurn {
             native_turn_id: Some(self.native_turn.clone()),
             native_turn_ref: Some(opencode::weak_ref(&self.prompt_id)),
@@ -1442,6 +1442,7 @@ impl Turn<'_> {
             session: None,
             history_injected: false,
         });
+        self.report_thread(resumed);
     }
 
     async fn run(
@@ -1492,7 +1493,7 @@ impl Turn<'_> {
                 let _ = self
                     .call(reqwest::Method::POST, "/interrupt", None, INTERRUPT_TIMEOUT)
                     .await;
-                self.begin();
+                self.begin(resumed);
                 return self
                     .finish(
                         TurnStatus::Failed,
@@ -1509,7 +1510,7 @@ impl Turn<'_> {
             provider.reasoning_effort.as_deref(),
             catalog.as_ref(),
         ) else {
-            self.begin();
+            self.begin(resumed);
             let message = format!(
                 "OpenCode model '{}' must use provider/model format",
                 provider.model
@@ -1581,7 +1582,7 @@ impl Turn<'_> {
         if let Err(error) = setup.await {
             return Self::fail(ProviderFailure::new("provider_error", error.message));
         }
-        self.begin();
+        self.begin(resumed);
         let text = match provider.recovery_prompt.as_deref() {
             Some(recovery) if !resumed && provider.resume.is_some() => recovery,
             _ => spec.prompt.as_str(),
@@ -1681,8 +1682,9 @@ impl Turn<'_> {
     }
 
     async fn finish_broken(&mut self, failure: ProviderFailure) -> TurnEnd {
-        let end = self.finish(TurnStatus::Failed, Some(failure.clone())).await;
-        TurnEnd::failed(end.failure.unwrap_or(failure), ThreadDisposition::Broken)
+        let mut end = self.finish(TurnStatus::Failed, Some(failure)).await;
+        end.disposition = ThreadDisposition::Broken;
+        end
     }
 
     /// One event of the turn's session (`route`, `onTurnEvent`).
@@ -2264,23 +2266,19 @@ impl Turn<'_> {
         if let Some(models) = models {
             turn_usage["models"] = models;
         }
-        if let Some(step) = self.last_step {
+        let last_call = self.last_step.as_ref().map(|step| {
             let input = step.input + step.read + step.write;
-            self.sink.send(ProviderEvent::Usage {
-                usage: TokenUsage {
-                    used_tokens: input + step.output,
-                    max_tokens: window,
-                    input_tokens: input,
-                    cached_input_tokens: step.read,
-                    output_tokens: step.output,
-                    reasoning_output_tokens: step.reasoning,
-                    ..TokenUsage::default()
-                },
-            });
-        }
-        self.sink
-            .send(ProviderEvent::TurnUsage { usage: turn_usage });
-        self.sink.send(ProviderEvent::ProviderTurn {
+            TokenUsage {
+                used_tokens: input + step.output,
+                max_tokens: window,
+                input_tokens: input,
+                cached_input_tokens: step.read,
+                output_tokens: step.output,
+                reasoning_output_tokens: step.reasoning,
+                ..TokenUsage::default()
+            }
+        });
+        self.sink.report_turn_at_end(ProviderEvent::ProviderTurn {
             native_turn_id: None,
             native_turn_ref: Some(opencode::weak_ref(&self.prompt_id)),
             conversation_head: None,
@@ -2306,6 +2304,7 @@ impl Turn<'_> {
             ),
             _ => TurnEnd::completed(),
         }
+        .with_usage(last_call, turn_usage)
     }
 }
 

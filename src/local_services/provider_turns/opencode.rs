@@ -18,8 +18,8 @@ use super::opencode2;
 use super::{cancelled, next_response, program, Sink, TurnEnd};
 use crate::provider_status::opencode as status;
 use crate::workspace::provider::{
-    ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, ThreadDisposition, TokenUsage,
-    TurnStatus, OPENCODE,
+    ProviderFailure, ProviderItem, ProviderTurn, RuntimeResponse, SessionReport, SessionStatus,
+    ThreadDisposition, TokenUsage, TurnStatus, OPENCODE,
 };
 use crate::workspace::{ProviderEvent, TurnSpec};
 use serde_json::{json, Value};
@@ -923,10 +923,8 @@ pub(super) async fn run(
         }
         Err(failure) => return sink.finish(TurnEnd::failed(failure, ThreadDisposition::Reusable)),
     };
-    let mut turn = Turn::new(&provider, &oc, &sink, &mut responses);
-    let end = turn
-        .run(&spec, &provider, &mut oc, &mut cancel, resumed)
-        .await;
+    let mut turn = Turn::new(&provider, &oc, resumed, &sink, &mut responses);
+    let end = turn.run(&spec, &provider, &mut oc, &mut cancel).await;
     let broken = end.disposition == ThreadDisposition::Broken;
     sink.finish(end);
     if broken {
@@ -980,6 +978,7 @@ struct Turn<'a> {
     sink: &'a Sink,
     responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
     session: String,
+    resumed: bool,
     /// The synthetic native turn (`<session>:attempt:<attempt>`).
     native_turn: String,
     model: String,
@@ -1021,6 +1020,7 @@ impl<'a> Turn<'a> {
     fn new(
         provider: &ProviderTurn,
         oc: &OpenCode,
+        resumed: bool,
         sink: &'a Sink,
         responses: &'a mut mpsc::UnboundedReceiver<RuntimeResponse>,
     ) -> Self {
@@ -1044,6 +1044,7 @@ impl<'a> Turn<'a> {
             sink,
             responses,
             session: oc.session.clone(),
+            resumed,
             native_turn: format!("{}:attempt:{attempt}", oc.session),
             system: crate::agent_instructions::opencode_system(oc.has_mcp, oc.device, &model),
             model,
@@ -1073,6 +1074,20 @@ impl<'a> Turn<'a> {
             stop_deadline: None,
             failure: None,
         }
+    }
+
+    fn report_thread(&self) {
+        self.sink.send(ProviderEvent::ProviderThread {
+            driver: OPENCODE.into(),
+            native_thread_id: self.session.clone(),
+            resumed: self.resumed,
+            model: None,
+            opencode2: None,
+            native_title: None,
+            native_updated_at: None,
+            context_usage: None,
+            session_started: None,
+        });
     }
 
     /// A prompt's body: its message id, the model, agent, variant and system
@@ -1113,7 +1128,6 @@ impl<'a> Turn<'a> {
         provider: &ProviderTurn,
         oc: &mut OpenCode,
         cancel: &mut Option<oneshot::Receiver<()>>,
-        resumed: bool,
     ) -> TurnEnd {
         if let Some(failure) = oc.dead.clone() {
             let mut failure = failure;
@@ -1132,18 +1146,7 @@ impl<'a> Turn<'a> {
                 ThreadDisposition::Reusable,
             );
         }
-        self.sink.send(ProviderEvent::ProviderThread {
-            driver: OPENCODE.into(),
-            native_thread_id: oc.session.clone(),
-            resumed,
-            model: None,
-
-            opencode2: None,
-            native_title: None,
-            native_updated_at: None,
-            context_usage: None,
-            session_started: None,
-        });
+        self.report_thread();
         let rules = permission_rules(provider.runtime_mode());
         if let Err(detail) = oc.apply_permission(&rules).await {
             return TurnEnd::failed(
@@ -1181,6 +1184,7 @@ impl<'a> Turn<'a> {
             session: None,
             history_injected: false,
         });
+        self.report_thread();
         let sent = tokio::select! {
             sent = self.send_prompt(oc, parts) => sent,
             _ = cancelled(cancel) => {
@@ -1305,6 +1309,7 @@ impl<'a> Turn<'a> {
                     }
                 }
             }
+            "session.status" if properties["status"]["type"] == "busy" => self.report_thread(),
             "session.status" if properties["status"]["type"] == "idle" => {
                 return self.on_idle(oc).await;
             }
@@ -1712,32 +1717,40 @@ impl<'a> Turn<'a> {
                 "hasSubagents": false,
             })
         };
-        if let Some(step) = &self.last_step {
+        let last_call = self.last_step.as_ref().map(|step| {
             let input = step.input + step.read + step.write;
-            self.sink.send(ProviderEvent::Usage {
-                usage: TokenUsage {
-                    used_tokens: input + step.output,
-                    max_tokens: oc
-                        .windows
-                        .get(&format!("{}/{}", self.provider_id, self.model_id))
-                        .copied(),
-                    input_tokens: input,
-                    cached_input_tokens: step.read,
-                    output_tokens: step.output,
-                    reasoning_output_tokens: step.reasoning,
-                    ..TokenUsage::default()
-                },
-            });
-        }
-        self.sink
-            .send(ProviderEvent::TurnUsage { usage: turn_usage });
-        self.sink.send(ProviderEvent::ProviderTurn {
+            TokenUsage {
+                used_tokens: input + step.output,
+                max_tokens: oc
+                    .windows
+                    .get(&format!("{}/{}", self.provider_id, self.model_id))
+                    .copied(),
+                input_tokens: input,
+                cached_input_tokens: step.read,
+                output_tokens: step.output,
+                reasoning_output_tokens: step.reasoning,
+                ..TokenUsage::default()
+            }
+        });
+        self.sink.report_turn_at_end(ProviderEvent::ProviderTurn {
             native_turn_id: None,
             native_turn_ref: self.user_message.as_deref().map(weak_ref),
             conversation_head: self.user_message.clone(),
             status,
             model: None,
-            session: None,
+            session: Some(Box::new(SessionReport {
+                status: if status == TurnStatus::Failed {
+                    SessionStatus::Error
+                } else {
+                    SessionStatus::Ready
+                },
+                model: None,
+                last_error: self
+                    .failure
+                    .as_ref()
+                    .filter(|_| status == TurnStatus::Failed)
+                    .map(|e| e.message.clone()),
+            })),
             history_injected: false,
         });
         let broken = oc.dead.is_some();
@@ -1755,6 +1768,7 @@ impl<'a> Turn<'a> {
             ),
             _ => TurnEnd::completed(),
         }
+        .with_usage(last_call, turn_usage)
     }
 }
 

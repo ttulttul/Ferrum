@@ -342,6 +342,24 @@ impl ProviderState {
                 if !self.detached_runs.contains(&run) {
                     self.fresh_session = false;
                 }
+                // OpenCode 1.x reports its session running with the active
+                // thread just after turn admission. Later busy notices only
+                // refresh the thread.
+                if driver == provider::OPENCODE
+                    && opencode2.is_none()
+                    && record.turn_started
+                    && record.session.is_none()
+                {
+                    record.session = Some(SessionRecord {
+                        report: provider::SessionReport {
+                            status: provider::SessionStatus::Running,
+                            model: None,
+                            last_error: None,
+                        },
+                        turn_status: TurnStatus::Running,
+                        updated_at: at,
+                    });
+                }
                 record.driver = driver.clone();
                 record.native_thread_id = Some(native_thread_id.clone());
                 record.resumed = *resumed;
