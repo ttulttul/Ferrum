@@ -2477,7 +2477,7 @@ impl Thread {
                 "text": row["text"],
                 "attachments": [],
                 "streaming": running,
-                "createdAt": started,
+                "createdAt": row["startedAt"],
                 "updatedAt": updated
             }));
         }
@@ -2509,8 +2509,8 @@ impl Thread {
             "nativeItemRef": reference,
             "runtimeRequestId": null,
             "checkpointScopeId": null,
-            "startedAt": started,
-            "completedAt": completed
+            "startedAt": row["startedAt"],
+            "completedAt": row["completedAt"]
         }));
         out.items.push((index, Value::Object(row)));
     }

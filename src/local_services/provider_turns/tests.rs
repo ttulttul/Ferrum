@@ -1506,6 +1506,17 @@ async fn opencode_turn_streams_reasoning_tools_and_the_reply() {
     let edit = items(&events, "file_change");
     assert_eq!(edit.last().unwrap().fields["fileName"], "/w/notes.txt");
     assert_eq!(final_text(&events), "Ran echo hi and wrote notes.txt.");
+    let parts = items(&events, "assistant_message");
+    let completed: Vec<_> = parts
+        .iter()
+        .filter(|item| item.id == "prt_t1" && item.status == "completed")
+        .collect();
+    // The part, assistant message and turn each reported completion.
+    assert_eq!(completed.len(), 3);
+    for part in completed {
+        assert_eq!(part.fields["startedAt"], "2026-01-01T00:00:00.007Z");
+        assert_eq!(part.fields["completedAt"], "2026-01-01T00:00:00.008Z");
+    }
     // The last step's tokens, with the catalog's input limit as the window.
     assert_opencode_final_usage(&events);
     // The turn is named by its session and attempt, then by its user message.

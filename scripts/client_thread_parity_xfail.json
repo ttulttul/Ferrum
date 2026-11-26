@@ -91,12 +91,6 @@
   "pi stop then resume": {
     "live": "The reference's Pi adapter reports its provider session's own transitions (provider-session.updated to running at a turn's start, and to ready, error or stopped at its end), which Rust's session record does not keep; it reports the provider turn, then its thread, at the start (Rust: the thread first); it sends an assistant message's turn item before its message.updated (Rust: the message first); and where its live usage updates (provider-turn.updated) land among the stream's other events depends on timing."
   },
-  "opencode turn": {
-    "live": "The reference can publish the completed reasoning item, assistant message and assistant item again at turn completion. Ferrum suppresses subsequent reports for a completed text part."
-  },
-  "opencode second turn": {
-    "live": "The reference can publish the completed reasoning item, assistant message and assistant item again at turn completion. Ferrum suppresses subsequent reports for a completed text part."
-  },
   "opencode approval": {
     "live": "The reference reports the session waiting for permission and running when OpenCode confirms the reply. It also publishes the resolved request and approval item on that confirmation."
   },
@@ -107,7 +101,7 @@
     "live": "The reference reports the session waiting for permission and running when OpenCode confirms the reply. It also publishes the resolved request and approval item on that confirmation."
   },
   "opencode steer": {
-    "live": "Racy: matched in 7 of 8 runs against the pinned reference. The reference sometimes publishes an additional completed assistant item before its final message."
+    "live": "Racy: matched in 14 of 16 runs against the pinned reference. The reference sometimes publishes an additional completed assistant item before its final message."
   },
   "opencode failed turn": {
     "live": "The reference publishes the session error as soon as OpenCode reports it and again when the turn ends. Ferrum publishes it at the end."

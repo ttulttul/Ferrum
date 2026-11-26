@@ -612,9 +612,8 @@ fn grouped_snapshot_entity(event: &Event) -> Option<String> {
     }
 }
 
-/// Expand a superseded workspace item to all of its projected updates. A
-/// tool node and its turn item are separate jobs, so either can survive
-/// the other's replacement.
+/// For each snapshot, the projected records a later snapshot replaces.
+/// Tool nodes and items enter the batch independently.
 fn superseded_snapshots(
     events: &[Event],
     projected: Vec<(Vec<String>, usize)>,
@@ -627,17 +626,28 @@ fn superseded_snapshots(
             None => (keys, None),
         })
         .unzip();
-    crate::control_state::coalesce(&jobs)
-        .into_iter()
-        .zip(grouped)
-        .map(|(dropped, group)| {
-            if dropped.is_empty() {
-                dropped
-            } else {
-                group.unwrap_or(dropped)
-            }
-        })
-        .collect()
+    let mut dropped = crate::control_state::coalesce(&jobs);
+    let mut replacements = std::collections::HashMap::new();
+    for (index, group) in grouped.iter().enumerate().rev() {
+        let Some(keys) = group else { continue };
+        let later = replacements
+            .entry(&jobs[index][0])
+            .or_insert_with(std::collections::HashSet::new);
+        if dropped[index].is_empty() {
+            later.clear();
+        } else {
+            // Keep a projected change unless a later member of this
+            // replacement chain will publish it. A completed text part can
+            // refresh its message and item without changing its node.
+            dropped[index] = keys
+                .iter()
+                .filter(|key| later.contains(key.as_str()))
+                .cloned()
+                .collect();
+        }
+        later.extend(keys.iter().map(String::as_str));
+    }
+    dropped
 }
 
 /// Whether a commit sent any live events.
@@ -1178,6 +1188,28 @@ mod snapshot_tests {
         let dropped = crate::control_state::coalesce(&entities);
         assert_eq!(dropped[0], vec!["item:a".to_owned()]);
         assert!(dropped[1].is_empty() && dropped[2].is_empty());
+    }
+
+    #[test]
+    fn a_text_batch_keeps_the_last_change_to_each_record() {
+        let events = ["running", "running", "completed", "completed"]
+            .map(|status| snapshot("a", "assistant_message", status));
+        let all = ["node.updated:a", "message.updated:a", "turn-item.updated:a"]
+            .map(str::to_owned)
+            .to_vec();
+        let text = all[1..].to_vec();
+        let projected = vec![
+            (all.clone(), 3),
+            (text.clone(), 2),
+            (all.clone(), 3),
+            (text.clone(), 2),
+        ];
+        // The last report refreshes the text but uses the same native
+        // completion time. Its predecessor must still deliver the completed node.
+        assert_eq!(
+            superseded_snapshots(&events, projected),
+            [all, text.clone(), text, vec![]]
+        );
     }
 
     #[test]
