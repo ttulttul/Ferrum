@@ -1145,19 +1145,18 @@ impl Thread {
                 last.filter(|t| pi && t.status == TurnStatus::Interrupted)
                     .map(|_| thread.updated_at)
             });
-        // Pi and OpenCode 2 report their session `running` while a turn
-        // runs, and `ready` again when it ends (`updateProviderSession`).
+        let latest = self
+            .runs
+            .iter()
+            .rev()
+            .find_map(|run| self.provider.runs.get(&run.id).map(|record| (run, record)));
+        // Pi and OpenCode 2 report their session running while a turn runs.
         let turn_running = (pi || opencode2.is_some())
-            && self
-                .runs
-                .iter()
-                .rev()
-                .find_map(|run| self.provider.runs.get(&run.id).map(|record| (run, record)))
-                .is_some_and(|(run, record)| {
-                    record.native_turn_id.is_some()
-                        && run.restart_cut.is_none()
-                        && !self.provider.terminals.contains_key(&run.id)
-                });
+            && latest.is_some_and(|(run, record)| {
+                record.native_turn_id.is_some()
+                    && run.restart_cut.is_none()
+                    && !self.provider.terminals.contains_key(&run.id)
+            });
         let capabilities: Value =
             serde_json::from_str(include_str!("provider_capabilities.json")).unwrap_or_default();
         let capabilities = match opencode2 {
@@ -1171,7 +1170,7 @@ impl Thread {
             None => session_capabilities(&capabilities, &thread.driver),
         };
         let row = self.stored_row();
-        Some(json!({
+        let mut session = json!({
             "capabilities": capabilities,
             "createdAt": iso(thread.created_at),
             "cwd": self.cwd,
@@ -1206,7 +1205,30 @@ impl Thread {
                 "ready"
             },
             "updatedAt": iso(if crashed { thread.updated_at } else { stopped.unwrap_or(thread.created_at) })
-        }))
+        });
+        // Use the session reported by this turn. A restart or a lost turn
+        // can end a session without a final report from the adapter.
+        if let Some((run, record)) = latest.filter(|(_, record)| {
+            record.driver == thread.driver && record.native_thread_id == thread.native_id
+        }) {
+            if let Some(reported) = &record.session {
+                let report = &reported.report;
+                let terminal = self.provider.terminals.get(&run.id);
+                if stopped.is_none()
+                    && run.restart_cut.is_none()
+                    && !(terminal.is_some()
+                        && (crashed || report.status == provider::SessionStatus::Running))
+                {
+                    if let Some(model) = &report.model {
+                        session["model"] = json!(model);
+                    }
+                    session["status"] = json!(report.status);
+                    session["lastError"] = json!(report.last_error);
+                    session["updatedAt"] = json!(iso(reported.updated_at));
+                }
+            }
+        }
+        Some(session)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1326,6 +1348,14 @@ impl Thread {
             "startedAt": started,
             "completedAt": if crashed { None } else { completed.clone() }
         });
+        if let Some(end) = record
+            .session
+            .as_ref()
+            .filter(|s| s.turn_status != TurnStatus::Running)
+        {
+            turn["status"] = json!(end.turn_status.as_str());
+            turn["completedAt"] = json!(iso(end.updated_at));
+        }
         // A turn a session detach stopped ends interrupted, whatever the
         // closed stream made of its run, as the reference closes it.
         let detached = self.provider.detached_runs.contains(&run.id);
@@ -2468,6 +2498,7 @@ mod tests {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                session: None,
                 history_injected: false,
             },
             opened("a", "command"),
@@ -2695,6 +2726,58 @@ mod tests {
         assert_eq!(thread_record(&live)["status"], "idle");
     }
 
+    #[test]
+    fn a_session_report_survives_turn_completion_and_yields_to_a_server_stop() {
+        let id = Uuid::new_v4();
+        let mut live = thread(
+            serde_json::from_value(json!({
+                "id": id, "thread_id": "t1", "provider": "muse", "status": "running",
+                "started_at": 1, "finished_at": null, "error": null, "user_message_id": null
+            }))
+            .unwrap(),
+        );
+        let apply = |live: &mut Thread, event: Value, at| {
+            live.provider
+                .apply(id, &serde_json::from_value(event).unwrap(), at);
+        };
+        apply(
+            &mut live,
+            json!({
+                "type": "provider_thread.updated", "driver": "muse", "nativeThreadId": "thread",
+                "resumed": false
+            }),
+            2,
+        );
+        let session = |live: &Thread| live.session_row("muse").unwrap();
+        assert_eq!(session(&live)["status"], "ready");
+        apply(
+            &mut live,
+            json!({
+                "type": "provider_turn.updated", "nativeTurnId": "turn", "status": "running",
+                "session": {"status": "running", "model": "resolved-model"}
+            }),
+            3,
+        );
+        assert_eq!(session(&live)["status"], "running");
+        assert_eq!(session(&live)["model"], "resolved-model");
+        apply(
+            &mut live,
+            json!({
+                "type": "provider_turn.updated", "status": "interrupted",
+                "session": {"status": "ready", "lastError": "interrupted"}
+            }),
+            4,
+        );
+        assert_eq!(session(&live)["status"], "ready");
+        assert_eq!(session(&live)["lastError"], "interrupted");
+        assert_eq!(session(&live)["model"], "resolved-model");
+        let records = live.provider_records();
+        assert_eq!(records.provider_turns[0]["status"], "interrupted");
+        assert_eq!(records.attempts[0]["status"], "running");
+        live.provider.stop_session(5);
+        assert_eq!(session(&live)["status"], "stopped");
+    }
+
     fn running_codex_thread(run_id: Uuid) -> Thread {
         let mut live = thread(
             serde_json::from_value(json!({
@@ -2722,6 +2805,7 @@ mod tests {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                session: None,
                 history_injected: false,
             },
         ] {
@@ -3032,6 +3116,7 @@ mod tests {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                session: None,
                 history_injected: false,
             },
             ProviderEvent::TurnTerminal {

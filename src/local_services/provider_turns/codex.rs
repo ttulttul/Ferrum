@@ -1054,6 +1054,7 @@ impl Session {
                 conversation_head: None,
                 status: TurnStatus::Running,
                 model: None,
+                session: None,
                 history_injected: self.history_injected,
             });
         }

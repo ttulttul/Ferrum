@@ -107,7 +107,7 @@ Parity is tested by running the original TypeScript server and the Rust server s
 | --- | --- |
 | CI parity suites | 56 suites across 9 shards on every code change (plus twice nightly); 6 more run on their own |
 | Client RPC ([cases](scripts/client_rpc_cases.json)) | 242 recorded client steps; 0 expected failures ([xfail](scripts/client_rpc_parity_xfail.json)) |
-| Live provider turns | 234 provider scenarios; 102 checks expected to fail, 23 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
+| Live provider turns | 237 provider scenarios; 104 checks expected to fail, 24 of them races ([xfail](scripts/client_thread_parity_xfail.json)) |
 | Shared home / server switch | 0 expected failures ([xfail](scripts/shared_store_parity_xfail.json)) |
 | Provider status ([suite](scripts/provider_status_parity.py)) | 0 expected failures |
 | Other suites | 0 known differences |
