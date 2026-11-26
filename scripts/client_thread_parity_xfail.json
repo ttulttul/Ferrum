@@ -30,7 +30,8 @@
     "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
   },
   "codex delegate followup": {
-    "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after the first task's context-transfer.created when its provider commit batch (#39502) coalesces the task's updates."
+    "live": "Racy: seen both matching (7/8) and differing (1/8) under load: the reference sometimes omits one subagent.updated right after the first task's context-transfer.created when its provider commit batch (#39502) coalesces the task's updates.",
+    "child follow-up during checkpoint": "Since upstream #41362 delegate_task can return the completed child result while its checkpoint is still being captured. Its immediate t3_thread_send follow-up queues behind that capture. Ferrum waits for checkpoint finalization before returning the task, so the same follow-up starts immediately."
   },
   "codex then claude": {
     "cli launch": "The reference's Claude Agent SDK sets CLAUDE_AGENT_SDK_VERSION in the server's own process environment whenever it starts a query (`process.env.CLAUDE_AGENT_SDK_VERSION = ...`), so with Claude Code installed beside Codex the Codex app-server it starts afterwards inherits it; Rust sets it only for the Claude Code CLI it starts."

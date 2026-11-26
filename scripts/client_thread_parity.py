@@ -2426,6 +2426,31 @@ def before_link_sync(line):
     return json.dumps(record, sort_keys=True)
 
 
+def queued_child_followup(original, rust):
+    """Only the delivery of an automatic follow-up sent at the child's first checkpoint."""
+    if len(original) != len(rust):
+        return False
+    differing = [(a, b) for a, b in zip(original, rust) if a != b]
+    if len(differing) != 1:
+        return False
+    a, b = differing[0]
+    if mcp_record_tool(a) != "t3_thread_send" or mcp_record_tool(b) != "t3_thread_send":
+        return False
+    first, second = json.loads(a), json.loads(b)
+    if first.get("request", {}).get("as") != "followup":
+        return False
+    ref = first.get("answer", {}).get("content")
+    native = second.get("answer", {}).get("content")
+    if not isinstance(ref, dict) or not isinstance(native, dict):
+        return False
+    if (ref.get("status"), ref.get("delivery")) != ("queued", "queued"):
+        return False
+    if (native.get("status"), native.get("delivery")) != ("starting", "started"):
+        return False
+    native.update(status="queued", delivery="queued")
+    return first == second
+
+
 def compare_turn(original, rust):
     """Problems with Rust's provider turn as the reference client sees it, by check name."""
     problems = {}
@@ -2441,9 +2466,11 @@ def compare_turn(original, rust):
         problems["turn input"] = [f"original {line}" for line in inputs[0]] + [f"rust     {line}" for line in inputs[1]]
     mcp = comparable_mcp(original.get("mcp", []), rust.get("mcp", []))
     if mcp[0] != mcp[1]:
-        key = ("linked pull request sync"
-               if [before_link_sync(r) for r in mcp[0]] == [before_link_sync(r) for r in mcp[1]]
-               else "agent mcp")
+        key = "agent mcp"
+        if queued_child_followup(*mcp):
+            key = "child follow-up during checkpoint"
+        elif [before_link_sync(r) for r in mcp[0]] == [before_link_sync(r) for r in mcp[1]]:
+            key = "linked pull request sync"
         problems[key] = mcp_diff_lines(mcp[0], mcp[1])
     cli = [original.get("cli", []), rust.get("cli", [])]
     if cli[0] != cli[1]:
