@@ -2217,6 +2217,8 @@ impl Thread {
     ) {
         let driver = ids.driver.as_str();
         let instance = self.instance_id();
+        // Where the update came from, for the live stream's batching only.
+        row.remove("subagentUpdate");
         // A Claude task runs on no provider thread of its own; its child thread is named by
         // the parent's provider thread and the task (`claudeSubagentIds`).
         if let Some(task) = row

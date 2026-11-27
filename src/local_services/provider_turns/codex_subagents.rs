@@ -72,9 +72,11 @@ fn text(value: &Value) -> Option<String> {
 }
 
 impl Subagents {
-    /// The subagent items a `collabAgentToolCall` changes.
+    /// The subagent items a `collabAgentToolCall` changes, each update in turn: a spawned
+    /// subagent starts running (`registerSubagentThreads`), then takes the states the call
+    /// reports (`updateSubagentStates`).
     pub(crate) fn observe(&mut self, call: &Value) -> Vec<ProviderItem> {
-        let mut changed: Vec<String> = Vec::new();
+        let mut out = Vec::new();
         if call["tool"] == "spawnAgent" {
             let call_id = call["id"].as_str().unwrap_or_default();
             for native in call["receiverThreadIds"].as_array().into_iter().flatten() {
@@ -84,42 +86,39 @@ impl Subagents {
                 if self.by_thread.contains_key(native) {
                     continue;
                 }
-                self.by_thread.insert(
-                    native.to_owned(),
-                    Subagent {
-                        item_id: format!("{call_id}:{native}"),
-                        title: None,
-                        prompt: call["prompt"].as_str().unwrap_or_default().to_owned(),
-                        model: text(&call["model"]),
-                        reasoning_effort: text(&call["reasoningEffort"]),
-                        status: "running",
-                        result: None,
-                        progress: None,
-                    },
-                );
-                changed.push(native.to_owned());
+                let subagent = Subagent {
+                    item_id: format!("{call_id}:{native}"),
+                    title: None,
+                    prompt: call["prompt"].as_str().unwrap_or_default().to_owned(),
+                    model: text(&call["model"]),
+                    reasoning_effort: text(&call["reasoningEffort"]),
+                    status: "running",
+                    result: None,
+                    progress: None,
+                };
+                out.push(item(native, &subagent));
+                self.by_thread.insert(native.to_owned(), subagent);
             }
         }
         for (native, state) in call["agentsStates"].as_object().into_iter().flatten() {
             let Some(subagent) = self.by_thread.get_mut(native) else {
                 continue;
             };
-            // A settled subagent is not reopened by a late state (`emitSubagentTaskUpdate`).
+            let status = status_of(state["status"].as_str().unwrap_or_default());
+            // A late state does not reopen a settled subagent, nor update it
+            // (`emitSubagentTaskUpdate`).
+            if !active(subagent.status) && active(status) {
+                continue;
+            }
             if active(subagent.status) {
-                subagent.status = status_of(state["status"].as_str().unwrap_or_default());
+                subagent.status = status;
             }
             if let Some(message) = state["message"].as_str() {
                 subagent.result = Some(message.to_owned());
             }
-            if !changed.contains(native) {
-                changed.push(native.clone());
-            }
+            out.push(item(native, subagent));
         }
-        changed
-            .iter()
-            .filter_map(|native| Some((native, self.by_thread.get(native)?)))
-            .map(|(native, subagent)| item(native, subagent))
-            .collect()
+        out
     }
 
     /// The subagent item a `subAgentActivity` changes, and the child whose model is still to
@@ -232,7 +231,7 @@ impl Subagents {
             return None;
         }
         subagent.status = "running";
-        Some(item(native, subagent))
+        Some(from_child(item(native, subagent)))
     }
 
     /// A line of the child's running work: its subagent's progress while it runs.
@@ -244,7 +243,7 @@ impl Subagents {
             return None;
         }
         subagent.progress = Some(line.to_owned());
-        Some(item(native, subagent))
+        Some(from_child(item(native, subagent)))
     }
 
     /// A child's final answer is its subagent's result.
@@ -254,7 +253,7 @@ impl Subagents {
             return None;
         }
         subagent.result = Some(text.to_owned());
-        Some(item(native, subagent))
+        Some(from_child(item(native, subagent)))
     }
 
     /// A child's turn ended: its subagent ends as the turn did.
@@ -267,7 +266,7 @@ impl Subagents {
                 _ => "failed",
             };
         }
-        Some(item(native, subagent))
+        Some(from_child(item(native, subagent)))
     }
 
     /// The child's model and effort, once Codex reported them (`updateSubagentSelection`).
@@ -285,6 +284,12 @@ impl Subagents {
         subagent.reasoning_effort = effort.filter(|e| !e.is_empty()).map(str::to_owned);
         Some(item(native, subagent))
     }
+}
+
+/// An update the child's own turn caused, which the live stream publishes as it comes
+/// (the reference follows the child's frames apart from its parent's batch).
+fn from_child(item: ProviderItem) -> ProviderItem {
+    item.with("subagentUpdate", "child")
 }
 
 fn item(native: &str, subagent: &Subagent) -> ProviderItem {
@@ -326,12 +331,11 @@ mod tests {
         assert!(subagents.observe(&spawn).is_empty());
         let spawned = json!({"id": "call_1", "tool": "spawnAgent", "receiverThreadIds": ["c1"],
             "prompt": "Read it", "model": "m", "agentsStates": {"c1": {"status": "pendingInit"}}});
+        // It starts running, then takes the state the call reports.
         let items = subagents.observe(&spawned);
-        assert_eq!(items.len(), 1);
-        assert_eq!(
-            (items[0].id.as_str(), items[0].status.as_str()),
-            ("call_1:c1", "pending")
-        );
+        let statuses: Vec<&str> = items.iter().map(|i| i.status.as_str()).collect();
+        assert_eq!(statuses, ["running", "pending"]);
+        assert_eq!(items[0].id, "call_1:c1");
         let waited = json!({"id": "call_2", "tool": "wait", "receiverThreadIds": ["c1"],
             "agentsStates": {"c1": {"status": "completed", "message": "Done"}}});
         let items = subagents.observe(&waited);
@@ -339,7 +343,8 @@ mod tests {
         assert_eq!(items[0].fields["result"], "Done");
         let late = json!({"id": "call_3", "tool": "wait",
             "agentsStates": {"c1": {"status": "running", "message": null}}});
-        assert_eq!(subagents.observe(&late)[0].status, "completed");
+        // A late active state neither reopens nor updates a settled subagent.
+        assert!(subagents.observe(&late).is_empty());
     }
 
     #[test]
