@@ -916,6 +916,7 @@ fn diff_with_command(
         .filter_map(|(_, item)| item["subagentId"].as_str().map(str::to_owned))
         .collect();
     let old_nodes = by_id(before, "nodes");
+    let old_subagents = by_id(before, "subagents");
     let push_collection = |out: &mut Vec<Value>, name: &str| {
         let (_, created, updated) = COLLECTIONS
             .iter()
@@ -931,8 +932,15 @@ fn diff_with_command(
                 continue;
             }
             // A native subagent's record goes with its item even when only the record
-            // changed (`emitSubagentTaskUpdate` writes both).
-            if name == "subagents" && record["origin"] == "provider_native" {
+            // changed (`emitSubagentTaskUpdate` writes both), except for the child's model,
+            // which the reference writes on the record alone (`updateSubagentSelection`).
+            if name == "subagents"
+                && record["origin"] == "provider_native"
+                && !model_only(
+                    old_subagents.get(record["id"].as_str().unwrap_or_default()),
+                    record,
+                )
+            {
                 if let Some(item) = after["turnItems"].as_array().and_then(|items| {
                     items
                         .iter()
@@ -1234,6 +1242,23 @@ fn diff_with_command(
     Some(out)
 }
 
+/// Whether a subagent's record changed only in its model (and when it was updated).
+fn model_only(before: Option<&Value>, after: &Value) -> bool {
+    let (Some(Value::Object(before)), Value::Object(after)) = (before, after) else {
+        return false;
+    };
+    let keys: std::collections::HashSet<&String> = before.keys().chain(after.keys()).collect();
+    let changed: Vec<&&String> = keys
+        .iter()
+        .filter(|key| before.get(key.as_str()) != after.get(key.as_str()))
+        .collect();
+    !changed.is_empty()
+        && changed
+            .iter()
+            .all(|key| matches!(key.as_str(), "model" | "modelSelection" | "updatedAt"))
+        && changed.iter().any(|key| key.as_str() != "updatedAt")
+}
+
 /// The message `id` names, taken out of `messages`.
 fn take_message<'a>(messages: &mut Vec<&'a Value>, id: &Value) -> Option<&'a Value> {
     let index = messages.iter().position(|m| &m["id"] == id)?;
@@ -1266,6 +1291,19 @@ pub fn sequence(thread_id: &str, events: Vec<Value>, last: u64) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_subagents_model_alone_changes_its_record_alone() {
+        let before = json!({"id": "s", "status": "completed", "model": null, "updatedAt": "1"});
+        let model = json!({"id": "s", "status": "completed", "model": "m", "updatedAt": "2"});
+        assert!(model_only(Some(&before), &model));
+        // An update that changes nothing but its time is not a model change.
+        let touched = json!({"id": "s", "status": "completed", "model": null, "updatedAt": "2"});
+        assert!(!model_only(Some(&before), &touched));
+        let result = json!({"id": "s", "status": "completed", "model": "m", "result": "r"});
+        assert!(!model_only(Some(&before), &result));
+        assert!(!model_only(None, &model));
+    }
 
     #[test]
     fn a_provider_turn_report_comes_before_the_thread_it_changed() {
